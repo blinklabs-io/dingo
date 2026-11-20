@@ -16752,6 +16752,15 @@ are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
 
+The historical replay reader has a one-block handoff buffer. It decodes the
+next canonical block and, for file-backed SQLite, reads that block's distinct
+consumed UTxO references across the metadata read pool while the replay loop
+writes the preceding block. Those read snapshots are advisory cache warming:
+their results never enter ledger state or the write transaction. Application,
+governance effects, checkpoints, flushes, and commits remain serial and ordered
+by the canonical iterator. A prefetch error stops replay before the affected
+block is applied, and cancellation joins the reader before `Run` returns.
+
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
 validates the complete from-origin replay. Setting it to `false` is an explicit

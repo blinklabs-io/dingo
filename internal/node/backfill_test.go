@@ -25,6 +25,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,86 @@ func addValidBackfillBlocksFrom(
 			Type:   uint(block.Type()),
 		}, nil))
 	}
+}
+
+func TestBackfillReadAheadPrefetchesNextBlockWhileFirstWaits(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 2)
+	require.NoError(t, err)
+	raw := make([]database.BlobBlockResult, len(blocks))
+	for i, block := range blocks {
+		raw[i] = database.BlobBlockResult{
+			Index:     uint64(i),
+			Slot:      block.SlotNumber(),
+			Hash:      block.Hash().Bytes(),
+			Cbor:      block.Cbor(),
+			BlockType: uint(block.Type()),
+		}
+	}
+
+	var nextIndex atomic.Int32
+	next := func() (*database.BlobBlockResult, error) {
+		idx := int(nextIndex.Add(1) - 1)
+		if idx >= len(raw) {
+			return nil, nil
+		}
+		return &raw[idx], nil
+	}
+	secondPrefetchStarted := make(chan struct{})
+	releaseSecondPrefetch := make(chan struct{})
+	var prefetchCount atomic.Int32
+	backfill := &Backfill{prefetchInputs: func(
+		ctx context.Context,
+		_ []models.UtxoId,
+	) error {
+		if prefetchCount.Add(1) != 2 {
+			return nil
+		}
+		close(secondPrefetchStarted)
+		select {
+		case <-releaseSecondPrefetch:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+
+	readAhead := backfill.startBackfillReadAhead(t.Context(), next)
+	defer readAhead.Close()
+	select {
+	case <-secondPrefetchStarted:
+	case <-t.Context().Done():
+		t.Fatal("second block prefetch did not overlap the buffered first block")
+	}
+	first := <-readAhead.results
+	require.NoError(t, first.err)
+	require.Equal(t, raw[0].Slot, first.raw.Slot)
+	close(releaseSecondPrefetch)
+	second := <-readAhead.results
+	require.NoError(t, second.err)
+	require.Equal(t, raw[1].Slot, second.raw.Slot)
+}
+
+func TestRunPrefetchesEachDecodedBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	backfill := NewBackfill(
+		db,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	backfill.DisableNonceComputation()
+	var calls atomic.Int32
+	backfill.prefetchInputs = func(context.Context, []models.UtxoId) error {
+		calls.Add(1)
+		return nil
+	}
+
+	require.NoError(t, backfill.Run(t.Context()))
+	require.Equal(t, int32(3), calls.Load())
 }
 
 func bindBackfillCheckpointIdentity(

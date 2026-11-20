@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -737,6 +738,20 @@ func (d *Database) UtxosByRefs(
 		}
 	}
 	return utxos, nil
+}
+
+// PrefetchBackfillInputs lets a metadata provider warm the rows an upcoming
+// historical block will consume. Providers without a prefetch path leave the
+// ordered writer unchanged.
+func (d *Database) PrefetchBackfillInputs(
+	ctx context.Context,
+	refs []models.UtxoId,
+) error {
+	prefetcher, ok := d.Metadata().(metadata.BackfillInputPrefetcher)
+	if !ok || len(refs) == 0 {
+		return nil
+	}
+	return prefetcher.PrefetchBackfillInputs(ctx, refs)
 }
 
 // ErrUtxoBytesExceeded is returned by UtxosByRefsBounded when the CBOR of the
