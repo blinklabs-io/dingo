@@ -615,7 +615,17 @@ func canonicalOutputCbor(raw []byte) []byte {
 	if len(items) < 2 || len(items) > 3 {
 		return raw
 	}
-	fields := map[uint64]cbor.RawMessage{0: items[0], 1: items[1]}
+	addr := items[0]
+	if len(addr) > 0 && addr[0]>>5 == 4 {
+		// A Byron-era output inlines its address as a CBOR array; the map
+		// form carries those same bytes inside a byte string.
+		wrapped, err := cbor.Encode([]byte(addr))
+		if err != nil {
+			return raw
+		}
+		addr = wrapped
+	}
+	fields := map[uint64]cbor.RawMessage{0: addr, 1: items[1]}
 	if len(items) == 3 {
 		var dh []byte
 		if _, err := cbor.Decode(items[2], &dh); err != nil {

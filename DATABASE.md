@@ -5110,7 +5110,10 @@ journal before it kept them). Then:
    anchor, streamed in pages in (transaction hash, output index) order, equals
    the digest of the ledger database's set (outputs added at or before the
    anchor and not spent at or before it). Each output's stored CBOR (assets,
-   inline datum, reference script) is part of the digest. The ledger's digest
+   inline datum, reference script) is part of the digest, an output stored in
+   the legacy array form (including a Byron output's inline address) hashed in
+   the map form a snapshot import stores, so block bytes and imported bytes
+   of one output agree. The ledger's digest
    is taken when the anchor is recorded and kept as `indexer_anchor_digest`,
    because the ledger's core-mode sweep deletes spent rows and the set at the
    anchor cannot be digested once its `consumed_utxo_prune_floor` is past it.

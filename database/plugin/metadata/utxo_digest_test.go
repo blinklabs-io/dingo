@@ -85,3 +85,22 @@ func TestUtxoDigesterDistinguishesOutputs(t *testing.T) {
 	require.NotEqual(t, digestOne(t, a), digestOne(t, b))
 	require.NotEqual(t, digestOne(t, a), digestOne(t, []byte{0xff}))
 }
+
+// TestUtxoDigesterByronOutputMatchesMapForm checks a Byron-era output, whose
+// block bytes carry the address as an inline CBOR array, against the map form
+// a snapshot import stores with the address bytes in a byte string.
+func TestUtxoDigesterByronOutputMatchesMapForm(t *testing.T) {
+	t.Parallel()
+	payload := mustCbor(t, []any{
+		make([]byte, 28), map[uint64]any{}, uint64(0),
+	})
+	addr := mustCbor(t, []any{
+		cbor.Tag{Number: 24, Content: payload}, uint64(3735928559),
+	})
+	legacy := mustCbor(t, []any{cbor.RawMessage(addr), uint64(5000000)})
+	mapped := mustCbor(t, map[uint64]any{0: addr, 1: uint64(5000000)})
+	require.Equal(
+		t, digestOne(t, mapped), digestOne(t, legacy),
+		"a Byron output must digest as its map form",
+	)
+}
