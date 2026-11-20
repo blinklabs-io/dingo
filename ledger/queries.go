@@ -1458,13 +1458,9 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyPoolStateQuery:
 		return ls.queryShelleyPoolState(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		return nil, queryNotAnswered(
-			"GetNonMyopicMemberRewards", missingPoolPerformance,
-		)
+		return ls.queryShelleyNonMyopicMemberRewards(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-		return nil, queryNotAnswered(
-			"GetRewardInfoPools", missingPoolPerformance,
-		)
+		return ls.queryShelleyRewardInfoPools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		return nil, queryNotAnswered("DebugEpochState", missingEpochState)
 	case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
@@ -1533,6 +1529,19 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	// PoolDistr newtype, whose CBOR is the bare pool map, pinned by
 	// TestQueryShelleyStakeDistribution_ViaGetCBOR and
 	// TestQueryShelleyPoolDistr_ViaGetCBOR.
+	if info, ok := inner.(olocalstatequery.RewardInfoPoolsResult); ok {
+		// The result type marshals with its own one-element wrapper; the
+		// tag-24 content is the bare array(2) of reward params and pools.
+		encoded, err := cbor.Encode(struct {
+			cbor.StructAsArray
+			Params olocalstatequery.RewardParams
+			Pools  map[ledger.Blake2b224]olocalstatequery.RewardInfoPool
+		}{Params: info.Params, Pools: info.Pools})
+		if err != nil {
+			return nil, err
+		}
+		return []any{cbor.Tag{Number: cbor.CborTagCbor, Content: encoded}}, nil
+	}
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(

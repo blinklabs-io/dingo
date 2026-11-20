@@ -954,8 +954,22 @@ type mempoolTransactionSource interface {
 	RemoveTxsByHash(hashes []string)
 }
 
+// blockCandidateSource is implemented by mempools that order transactions for
+// block production by a configured selection policy.
+type blockCandidateSource interface {
+	BlockCandidates() []mempool.MempoolTransaction
+}
+
+// mempoolTransactions returns the pending transactions in the order block
+// production should try them. Only forging reads this order; relay and the
+// query APIs keep admission order.
 func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
-	txs := source.Transactions()
+	var txs []mempool.MempoolTransaction
+	if candidates, ok := source.(blockCandidateSource); ok {
+		txs = candidates.BlockCandidates()
+	} else {
+		txs = source.Transactions()
+	}
 	result := make([]mempoolTxView, len(txs))
 	for i, tx := range txs {
 		result[i] = mempoolTxView{

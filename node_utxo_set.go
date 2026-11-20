@@ -73,6 +73,7 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 		FinishImport:               n.finishDrainedImport,
 		Publish:                    n.setDrainedFamilies,
 		Resume:                     n.ledgerState.ResumeUtxoSetFrom,
+		ResolveRewardInputs:        n.ledgerState.ResolvePendingRewardStakeInputs,
 		RewindBlocks:               n.shelleySecurityParam(),
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
 		DelegatorInactivity:        n.config.delegatorInactivity,

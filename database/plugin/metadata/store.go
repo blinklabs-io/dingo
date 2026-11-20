@@ -3150,6 +3150,27 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
+	SaveRewardLikelihoodState(
+		*models.RewardLikelihoodState,
+		[]*models.RewardPoolLikelihood,
+		types.Txn,
+	) error
+
+	GetRewardLikelihoodStateBeforeEpoch(
+		uint64,
+		types.Txn,
+	) (*models.RewardLikelihoodState, error)
+
+	GetRewardLikelihoodStateAtSlot(
+		uint64,
+		types.Txn,
+	) (*models.RewardLikelihoodState, error)
+
+	GetRewardPoolLikelihoods(
+		uint64,
+		types.Txn,
+	) ([]*models.RewardPoolLikelihood, error)
+
 	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
 	// overwriting any existing row for the (epoch, snapshot_type) pair
 	// (including its authoritative flag). Used by the authoritative

@@ -154,6 +154,11 @@ const (
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 	DefaultMempoolRevalidationDeltaCap = 64
 	DefaultMempoolImplementation       = "fifo"
+	// MempoolSelectionAdmission and MempoolSelectionFeeDensity are the values
+	// of plugins.mempool.config.selection. They mirror mempool.SelectionPolicy,
+	// which this package does not import.
+	MempoolSelectionAdmission  = "admission"
+	MempoolSelectionFeeDensity = "feeDensity"
 )
 
 // RunMode represents the operational mode of the dingo node

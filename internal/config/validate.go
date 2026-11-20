@@ -1010,6 +1010,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			))
 		}
 	}
+	if value, ok := c.Plugins.Mempool.Config["selection"]; ok {
+		selection, isString := value.(string)
+		if !isString || (selection != MempoolSelectionAdmission &&
+			selection != MempoolSelectionFeeDensity) {
+			errs = append(errs, fmt.Errorf(
+				"invalid plugins.mempool.config.selection: %v (must be %q or %q)",
+				value,
+				MempoolSelectionAdmission,
+				MempoolSelectionFeeDensity,
+			))
+		}
+	}
 
 	if c.TokenRegistry.MaxDecompressedBytes < 0 {
 		errs = append(errs, fmt.Errorf(
