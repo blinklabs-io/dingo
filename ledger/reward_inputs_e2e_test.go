@@ -19,9 +19,12 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -262,4 +265,94 @@ func TestRewardStakeInputPruneReachesTheSet(t *testing.T) {
 	require.Equal(t, before.Snapshot, after.Snapshot)
 	require.Equal(t, before.Pools, after.Pools)
 	require.Equal(t, s.StoreInputs(6), after)
+}
+
+// seedPartialStakeInputs gives the metadata store a snapshot whose stake rows
+// were only partly written when the node stopped: the mark snapshot, its pool
+// input and one stake row of epoch 4, with the pending marker when pending is
+// set.
+func seedPartialStakeInputs(
+	t *testing.T,
+	s ledger.RewardBlocksScenario,
+	pending bool,
+) {
+	t.Helper()
+	meta := s.DB.Metadata()
+	pool := bytes.Repeat([]byte{0xa1}, 28)
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch: 4, SnapshotType: "mark", CapturedSlot: 7, BoundarySlot: 8,
+		TotalDelegators: 2,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs(
+		[]*models.RewardPoolInput{{
+			Epoch: 4, PoolKeyHash: pool, CapturedSlot: 7, BoundarySlot: 8,
+		}}, nil,
+	))
+	require.NoError(t, meta.SaveRewardStakeInputs(
+		[]*models.RewardStakeInput{{
+			Epoch: 4, PoolKeyHash: pool, StakingKey: bytes.Repeat([]byte{0x71}, 28),
+			Stake: 1, CapturedSlot: 7, BoundarySlot: 8,
+		}}, nil,
+	))
+	if pending {
+		require.NoError(t, meta.SetSyncState(
+			models.RewardStakeInputsPendingKey,
+			`{"entries":[{"epoch":4,"boundary_slot":8}]}`, nil,
+		))
+	}
+}
+
+// A store whose deferred stake-input write was interrupted holds a pending
+// marker and part of the rows. Loading it into the set and draining the
+// family must leave the epoch reported incomplete, not the partial rows
+// trusted as the whole input, and a later clear of the marker must reach the
+// set.
+func TestDrainedRewardInputsKeepTheIncompleteStakeMarker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		pending bool
+	}{
+		{"pending marker", true},
+		{"no marker", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = set.Close() })
+			s := ledger.NewRewardBlocksScenarioForTest(
+				t, set, "set", nil, ledger.RewardBlocksOptions{},
+			)
+			seedPartialStakeInputs(t, s, tc.pending)
+			require.NoError(t, set.LoadLedgerState(
+				t.Context(), dbadapter.New(s.DB),
+			))
+			r := &rewardBlocksRun{scenario: s, set: set}
+			src := rewardBlocksDrainSource{r: r}
+			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
+				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
+			}, rewardInputEntries(t, src)))
+
+			incomplete, err := s.StakeInputsIncomplete(4, 5)
+			require.NoError(t, err)
+			require.Equal(t, tc.pending, incomplete)
+			other, err := s.StakeInputsIncomplete(5, 6)
+			require.NoError(t, err)
+			require.False(t, other, "only the pending epoch is incomplete")
+			if !tc.pending {
+				return
+			}
+
+			ldb := s.LedgerDB()
+			txn := ldb.Begin(t.Context(), true)
+			require.NoError(t, ldb.SetSyncState(
+				models.RewardStakeInputsPendingKey, `{"entries":[]}`, txn,
+			))
+			require.NoError(t, txn.Commit())
+			incomplete, err = s.StakeInputsIncomplete(4, 5)
+			require.NoError(t, err)
+			require.False(t, incomplete, "the cleared marker reaches the set")
+		})
+	}
 }

@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -118,6 +119,11 @@ type Reconcile struct {
 	// DataDir is the data directory whose volume a migration must fit in.
 	DataDir string
 	Logger  *slog.Logger
+	// ResolveRewardInputs completes the reward stake inputs a deferred write
+	// left partial, from the metadata store's UTxO and delegation history. It
+	// runs before the UTxO rows move into the set, which deletes that history;
+	// nil resolves nothing.
+	ResolveRewardInputs func(context.Context, ledgerdb.LedgerDB) error
 	// FinishImport completes a pending import of ledger state into the set;
 	// nil uses FinishDrainedImport.
 	FinishImport func(context.Context) error
@@ -165,6 +171,9 @@ func (r Reconcile) Run(ctx context.Context) error {
 		return err
 	}
 	if err := r.rewindMetadataLedger(ctx); err != nil {
+		return err
+	}
+	if err := r.resolveRewardInputs(ctx); err != nil {
 		return err
 	}
 	if err := migrateUtxoRows(
@@ -326,6 +335,30 @@ func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
 			"slot", target.Slot,
 			"block", target.Number,
 		)
+	}
+	return nil
+}
+
+// resolveRewardInputs runs ResolveRewardInputs while the metadata store still
+// holds its UTxO rows and its reward families, that is before the move into
+// the set marks the database or drains a family.
+func (r Reconcile) resolveRewardInputs(ctx context.Context) error {
+	if r.ResolveRewardInputs == nil {
+		return nil
+	}
+	marked, err := r.DB.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set mode: %w", err)
+	}
+	drained, err := r.DB.EffectiveDrainedFamilies(ctx)
+	if err != nil {
+		return err
+	}
+	if marked != "" || drained != 0 {
+		return nil
+	}
+	if err := r.ResolveRewardInputs(ctx, dbadapter.New(r.DB)); err != nil {
+		return fmt.Errorf("resolve pending reward stake inputs: %w", err)
 	}
 	return nil
 }

@@ -702,6 +702,28 @@ type RewardStore interface {
 	) ([]*models.AccountRewardDelta, error)
 	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
 	GetRewardAdaPots(epoch uint64, txn Txn) (*models.RewardAdaPots, error)
+	// SaveRewardLikelihoodState installs the non-myopic state visible from a
+	// completed reward boundary.
+	SaveRewardLikelihoodState(
+		state *models.RewardLikelihoodState,
+		pools []*models.RewardPoolLikelihood,
+		txn Txn,
+	) error
+	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
+	GetRewardLikelihoodStateBeforeEpoch(
+		epoch uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
+	GetRewardLikelihoodStateAtSlot(
+		slot uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
+	GetRewardPoolLikelihoods(
+		epoch uint64,
+		txn Txn,
+	) ([]*models.RewardPoolLikelihood, error)
 	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
 	GetRewardPoolInputs(
 		epoch uint64,
