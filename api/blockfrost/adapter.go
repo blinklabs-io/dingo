@@ -220,7 +220,11 @@ func NewNodeAdapter(
 // dataTip is the chain position the served rows cover: the IndexerDB's tip,
 // so no history route answers beyond what the IndexerDB holds.
 func (a *NodeAdapter) dataTip() (ochainsync.Tip, error) {
-	tip, err := a.indexer.Tip(nil)
+	return a.dataTipAt(nil)
+}
+
+func (a *NodeAdapter) dataTipAt(txn *database.Txn) (ochainsync.Tip, error) {
+	tip, err := a.indexer.Tip(txn)
 	if err != nil {
 		return ochainsync.Tip{}, fmt.Errorf("read indexer tip: %w", err)
 	}
@@ -1976,13 +1980,17 @@ func (a *NodeAdapter) PoolsRetiring(
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	current, err := a.currentEpochNumberAt(txn)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	offset, ok := paginationOffset(params)
 	if !ok {
 		return []PoolRetiringInfo{}, 0, nil
 	}
 	rows, total, err := db.Metadata().GetRetiringPoolsPage(
-		a.ledgerState.CurrentEpoch(),
+		current,
 		params.Count,
 		offset,
 		params.Order == PaginationOrderDesc,

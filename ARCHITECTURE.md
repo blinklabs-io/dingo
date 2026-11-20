@@ -3889,7 +3889,9 @@ database through one `db()` accessor, Mesh and Midnight read `Node.indexerDB`,
 MCP, off-chain metadata and the token registry take `Node.apiDatabase()` (MCP
 also runs on a core node, where that is the ledger database), and
 Kupo and Blockfrost report the IndexerDB tip (`dataTip`) in latest-block and
-epoch responses and clamp history to it. Block bodies are shared through one
+epoch responses and clamp history to it. Blockfrost's retired and retiring
+pool lists partition retirement epochs using that tip from the same read
+transaction as their pool rows. Block bodies are shared through one
 blob store, so Midnight wraps its database in `NewBoundedDatabase`, which hides
 blocks above the IndexerDB tip. `internal/apiready`
 gates routes on `indexerdb.Store.Ready`: each API classifies its own routes
