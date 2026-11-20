@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/prometheus/client_golang/prometheus"
@@ -78,4 +79,47 @@ func TestPoolStakeSnapshotFactRowsReadEpochsOnce(t *testing.T) {
 	require.Len(t, rows.Rows, epochCount*len(rewardSnapshotTypes))
 	require.LessOrEqual(t, set.epochsReads.Load(), int64(2),
 		"Epochs reads for %d epochs", epochCount)
+}
+
+// countingSummarySet is countingEpochSet with one summary row per epoch.
+type countingSummarySet struct {
+	*countingEpochSet
+}
+
+func (*countingSummarySet) EpochSummariesLoaded() (bool, error) {
+	return true, nil
+}
+
+func (*countingSummarySet) EpochSummary(
+	epoch uint64,
+) (*models.EpochSummary, error) {
+	return &models.EpochSummary{Epoch: epoch}, nil
+}
+
+// A summary read with no rollback staged leaves the epoch family alone, so a
+// caller walking every epoch does not decode it once per epoch.
+func TestEpochSummaryReadsSkipEpochsWithoutRollback(t *testing.T) {
+	t.Parallel()
+	const epochCount = 6
+	set := &countingSummarySet{countingEpochSet: &countingEpochSet{
+		memNonceSet: &memNonceSet{nonces: map[string]models.BlockNonce{}},
+	}}
+	for e := uint64(1); e <= epochCount; e++ {
+		set.epochs = append(set.epochs, models.Epoch{
+			EpochId: e, StartSlot: e * 100,
+		})
+	}
+	ls, db := newDiskTestLedger(t)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.config.UtxoSet = set
+	store := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: ls}
+
+	for e := uint64(1); e <= epochCount; e++ {
+		sm, err := store.GetEpochSummary(e, nil)
+		require.NoError(t, err)
+		require.NotNil(t, sm)
+		require.Equal(t, e, sm.Epoch)
+	}
+	require.Less(t, set.epochsReads.Load(), int64(epochCount),
+		"Epochs reads for %d summary reads", epochCount)
 }
