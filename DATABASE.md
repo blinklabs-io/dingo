@@ -2836,7 +2836,7 @@ UTxO changes. Their tags and markers are declared in
 | `mblkfee2` | set once the `E` rows of every epoch reward calculation can still read are loaded, with kinds 3 and 4; the earlier `mblkfee` marked rows without them and makes the set reload them |
 | `I` + epoch + pool key hash (28 bytes) + credential tag (1 byte) + credential (28 bytes) | one credential's stake at a reward snapshot: the stake (8 bytes, big-endian), an owner and a registered flag (1 byte), then the captured and boundary slots (8 bytes each) |
 | `J` + epoch + pool key hash (28 bytes) | one pool's reward inputs: a flag byte for the margin, block counts and reward account that are present, the reward account credential tag, pledge, delegated stake, owner stake, cost, delegator count, captured and boundary slots (8 bytes each), the optional block counts, then the margin as its text and the reward account, each length-prefixed |
-| `S` + epoch + kind (1 byte) + snapshot type | kind 0: a reward snapshot header (flags for the excluded stake, authoritative and epoch nonce, then the total active stake, excluded stake, pool count, delegators, captured slot, boundary slot, protocol version and calculation version, and the length-prefixed nonce). Kind 1: the imported reward basis failure, its captured slot (8 bytes) and the reason |
+| `S` + epoch + kind (1 byte) + snapshot type | kind 0: a reward snapshot header (flags for the excluded stake, authoritative and epoch nonce, then the total active stake, excluded stake, pool count, delegators, captured slot, boundary slot, protocol version and calculation version, and the length-prefixed nonce). Kind 1: the imported reward basis failure, its captured slot (8 bytes) and the reason. Kind 2 (no snapshot type): the epoch's stake rows are still being written, its boundary slot (8 bytes); the record `dingo:stake-reward:stake-inputs-pending` holds once the family is drained |
 | `A` + epoch | the epoch's ADA pots: a flag for the imported epoch fees, then treasury, reserves, fees, rewards, captured slot and imported epoch fees (8 bytes each) |
 | `mrewardin` | set once the `I`, `J`, `S` and `A` rows of every epoch reward calculation can still read are loaded |
 | `U` + epoch + kind 0x70 + pool key hash | one pool's reward output of a snapshot epoch: a flag for the apparent performance, then optimal reward, total reward, leader reward, leader reward deficit, member reward total, owner stake, undistributed, unspendable, captured slot and boundary slot (8 bytes each), then the performance as its text, length-prefixed |
@@ -3892,9 +3892,15 @@ rebuilt from the set. The reward round's reads
 boundary capture's own read the set, as a rollback to the transaction's lowest
 staged rollback would leave it with the staged changes applied. A set without
 `mrewardin` loads every epoch's pots,
-header, pool inputs and failure and the window's stake inputs from the store
+header, pool inputs and failure and the window's stake inputs from the store,
+and the pending record (an epoch whose stake rows are only partly written
+stays incomplete in the set)
 (an imported failure keeps its snapshot's captured slot, which the store does
-not return). The load writes a range tombstone for each epoch's pots, header,
+not return). Before that load, and before the UTxO rows move into the set, the
+node's startup and `dingo load` rebuild every pending epoch from the store's UTxO and delegation history and
+clear its marker; the set cannot rebuild an epoch from before its journal.
+An epoch whose rebuild does not reproduce the retained pool totals keeps its
+marker. The load writes a range tombstone for each epoch's pots, header,
 failure, pool rows and stake rows at their captured slots (the earliest of an
 epoch's rows for the pool and stake prefixes), so a rollback below a loaded
 epoch's capture drops its rows as the store's own rollback does. `Verify`
