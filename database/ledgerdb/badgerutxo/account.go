@@ -46,6 +46,10 @@ type AccountRow struct {
 	AddedSlot       uint64
 	CreatedSlot     uint64
 	ExpirationEpoch uint64
+	// InactivityActivation and its epoch preserve the one-time CIP-0163
+	// activation membership and floor with the set-owned account.
+	InactivityActivation      bool
+	InactivityActivationEpoch uint64
 }
 
 // AccountPut sets an account as of the change at Slot.
@@ -106,7 +110,13 @@ func encodeAccount(r AccountRow) []byte {
 	b = binary.BigEndian.AppendUint64(b, r.CreatedSlot)
 	b = binary.BigEndian.AppendUint64(b, r.ExpirationEpoch)
 	b = appendBytes(b, r.Pool)
-	return appendBytes(b, r.Drep)
+	b = appendBytes(b, r.Drep)
+	if r.InactivityActivation {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	return binary.BigEndian.AppendUint64(b, r.InactivityActivationEpoch)
 }
 
 var errMalformedAccount = errors.New("badgerutxo: malformed account entry")
@@ -148,7 +158,15 @@ func decodeAccount(cred, v []byte) (AccountRow, error) {
 	if r.Drep, rest, err = readBytes(rest); err != nil {
 		return AccountRow{}, err
 	}
-	if len(rest) != 0 {
+	if len(rest) == 0 {
+		return r, nil
+	}
+	if len(rest) != 9 || rest[0] > 1 {
+		return AccountRow{}, errMalformedAccount
+	}
+	r.InactivityActivation = rest[0] == 1
+	r.InactivityActivationEpoch = binary.BigEndian.Uint64(rest[1:])
+	if !r.InactivityActivation && r.InactivityActivationEpoch != 0 {
 		return AccountRow{}, errMalformedAccount
 	}
 	return r, nil
@@ -375,8 +393,104 @@ func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error 
 		if err := txn.Delete(legacyAccountsKey); err != nil {
 			return err
 		}
+		if err := txn.Delete(accountInactivityActivationKey); err != nil {
+			return err
+		}
 		return txn.Set(accountsKey, []byte{1})
 	})
+}
+
+// LoadAccountInactivityActivation adds the one-time CIP-0163 activation
+// provenance to legacy account rows. A journal entry at slot S stores the
+// state before S, so only entries after the activation boundary carry it.
+func (s *Store) LoadAccountInactivityActivation(
+	epoch, boundary uint64,
+	members map[string]struct{},
+) error {
+	wb := s.newWriteBatch()
+	defer wb.Cancel()
+	patch := func(cred, value []byte) ([]byte, error) {
+		if len(cred) < 1 {
+			return nil, errMalformedAccount
+		}
+		if _, ok := members[string(cred)]; !ok {
+			return nil, nil
+		}
+		r, err := decodeAccount(cred, value)
+		if err != nil {
+			return nil, err
+		}
+		r.InactivityActivation = true
+		r.InactivityActivationEpoch = epoch
+		return encodeAccount(r), nil
+	}
+	if err := s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{AccountTag}
+		it := txn.NewIterator(opts)
+		for it.Rewind(); it.Valid(); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				it.Close()
+				return err
+			}
+			v, err = patch(k[1:], v)
+			if err != nil {
+				it.Close()
+				return err
+			}
+			if v != nil {
+				if err := wb.Set(k, v); err != nil {
+					it.Close()
+					return err
+				}
+			}
+		}
+		it.Close()
+
+		opts.Prefix = []byte{StateJournalTag}
+		it = txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			if len(k) < 11 || k[9] != AccountTag ||
+				binary.BigEndian.Uint64(k[1:9]) <= boundary {
+				continue
+			}
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if len(v) < 2 || v[0] != 1 {
+				continue
+			}
+			encoded, err := patch(k[10:], v[1:])
+			if err != nil {
+				return err
+			}
+			if encoded != nil {
+				if err := wb.Set(k, append([]byte{1}, encoded...)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("badgerutxo: load account inactivity activation: %w", err)
+	}
+	if err := wb.Flush(); err != nil {
+		return fmt.Errorf("badgerutxo: load account inactivity activation: %w", err)
+	}
+	return s.update(func(txn *badger.Txn) error {
+		return txn.Set(accountInactivityActivationKey, []byte{1})
+	})
+}
+
+// AccountInactivityActivationLoaded reports whether account rows carry the
+// CIP-0163 activation provenance relation.
+func (s *Store) AccountInactivityActivationLoaded() (bool, error) {
+	return s.hasMarker(accountInactivityActivationKey)
 }
 
 // AccountsLoaded reports whether the store holds every account up to its

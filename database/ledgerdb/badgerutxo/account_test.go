@@ -91,6 +91,63 @@ func TestAccountSecondaryKeysFollowTheAccount(t *testing.T) {
 	require.False(t, r.Active)
 }
 
+// Activation provenance survives restart, while an account encoded by the
+// previous format remains readable with no invented membership.
+func TestAccountInactivityActivationEncoding(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := open(t, dir)
+	bootstrap(t, s, point(1, 0x01))
+	r := acct(1, 'p', 0, true, 5)
+	r.InactivityActivation = true
+	r.InactivityActivationEpoch = 7
+	applyAccounts(t, s, point(10, 0x10), r)
+	require.NoError(t, s.Close())
+
+	s = open(t, dir)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	got, ok, err := s.Account(r.Tag, r.Key)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, r, got)
+
+	legacy, err := badgerutxo.DecodeLegacyAccountForTest(r)
+	require.NoError(t, err)
+	require.False(t, legacy.InactivityActivation)
+	require.Zero(t, legacy.InactivityActivationEpoch)
+}
+
+// Migrating a legacy account patches only journal states after activation, so
+// rollback keeps the membership at and after the boundary and removes it
+// before the boundary.
+func TestLoadAccountInactivityActivationPreservesRollback(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	before := acct(1, 'p', 0, true, 5)
+	applyAccounts(t, s, point(5, 0x05), before)
+	stamped := before
+	stamped.ExpirationEpoch = 3
+	applyAccounts(t, s, point(10, 0x10), stamped)
+	after := stamped
+	after.Active = false
+	applyAccounts(t, s, point(20, 0x20), after)
+
+	members := map[string]struct{}{string(append([]byte{before.Tag}, before.Key...)): {}}
+	require.NoError(t, s.LoadAccountInactivityActivation(1, 10, members))
+	at15, ok, err := s.AccountAt(before.Tag, before.Key, 15)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, at15.InactivityActivation)
+	require.Equal(t, uint64(1), at15.InactivityActivationEpoch)
+	at9, ok, err := s.AccountAt(before.Tag, before.Key, 9)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, at9.InactivityActivation)
+	require.Zero(t, at9.InactivityActivationEpoch)
+}
+
 // A rollback restores every account to its state at the target, newest
 // change first, in both rollback paths, including removing an account
 // created after it.

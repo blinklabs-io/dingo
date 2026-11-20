@@ -135,6 +135,13 @@ func (s *Store) RefuseLoadsFor(drained nodesettings.FamilyMask) {
 	s.loadsRefused.Store(uint64(drained))
 }
 
+// LoadsRefusedFor reports whether family has lost its source rows. In-place
+// migrations use this to avoid querying a drained source before upgrading the
+// set's retained rows.
+func (s *Store) LoadsRefusedFor(family nodesettings.Family) bool {
+	return nodesettings.FamilyMask(s.loadsRefused.Load()).Has(family)
+}
+
 // Open opens or creates the store in dir.
 func Open(dir string, options ...Option) (*Store, error) {
 	s := &Store{}

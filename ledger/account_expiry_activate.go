@@ -87,7 +87,11 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	ls.stageAccountExpirations(txn, nil, expiration, boundarySlot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	// The set applies after commit, under the ledger lifecycle context.
+	//nolint:contextcheck
+	ls.stageAccountExpirationsWithActivation(
+		txn, nil, expiration, boundarySlot, &currentEpoch,
+	)
 	// Record the activation epoch A (not a bare flag) so the rollback recompute
 	// can clamp orphaned accounts back up to the activation floor A + W.
 	if err := ls.ledgerDB().SetSyncState(

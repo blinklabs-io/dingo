@@ -42,7 +42,7 @@ import (
 var loadedMarkers = [][]byte{
 	noncesKey, legacyNoncesKey, epochStateKey, summaryKey,
 	legacyEpochStateKey, networkStateKey, pparamsKey, accountsKey,
-	legacyAccountsKey, syncMarkersKey, drepsKey, poolsKey, poolHistoryKey,
+	legacyAccountsKey, accountInactivityActivationKey, syncMarkersKey, drepsKey, poolsKey, poolHistoryKey,
 	legacyPoolHistoryKey, registrationHistoryKey,
 	legacyRegistrationHistoryKey, genesisMIRKey, opCertsKey, legacyOpCertsKey,
 	committeeKey, governanceKey, legacyGovernanceKey, pparamUpdatesKey,

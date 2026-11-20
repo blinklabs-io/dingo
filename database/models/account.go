@@ -142,6 +142,13 @@ type Account struct {
 	// Drep.ExpiryEpoch. Set/bumped by RenewAccountExpirations and the one-time
 	// activation stamp; only read when the delegator-inactivity gate is on.
 	ExpirationEpoch uint64
+	// InactivityActivation records that this account was active when the
+	// one-time CIP-0163 activation stamp ran. The epoch is the activation
+	// floor used when retained witness history predates that stamp. These
+	// fields are owned by the live set; SQL stores the same relation in
+	// account_inactivity_activation.
+	InactivityActivation      bool
+	InactivityActivationEpoch uint64
 }
 
 // AccountInactivityActivation records the exact reward-account credentials
