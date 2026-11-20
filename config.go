@@ -630,6 +630,13 @@ func (n *Node) configValidate() error {
 	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
 		return err
 	}
+	if n.config.cfg.AdvertiseAddress != "" {
+		if err := internalconfig.ValidateAdvertiseAddress(
+			n.config.cfg.AdvertiseAddress,
+		); err != nil {
+			return fmt.Errorf("invalid advertise address: %w", err)
+		}
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {

@@ -11430,7 +11430,8 @@ public IP:port of the node's own NtN listener, which differs from `bindAddr` and
 the reply cap and is not repeated if a peer shares the same address, and it
 passes the same routability check; configuration rejects a hostname, a zero
 port, or a non-routable address, and the server drops an invalid value rather
-than share it. Valid candidates
+than share it. The programmatic node and Ouroboros constructors enforce the
+same validation before startup. Valid candidates
 are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different

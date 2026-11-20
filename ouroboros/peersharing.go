@@ -198,9 +198,9 @@ func (o *Ouroboros) shareCandidates(
 }
 
 // advertisedPeer returns the configured advertise address as a wire peer
-// address. An unparseable, unroutable, or zero-port value is dropped with a
-// warning rather than shared, since config validation is the only other
-// guard and this value is sent to arbitrary remote nodes.
+// address. Keep the defensive check here even though production constructors
+// validate the value, so an invalid in-package construction cannot put an
+// unroutable address on the wire.
 func (o *Ouroboros) advertisedPeer() (opeersharing.PeerAddress, bool) {
 	if o.config.AdvertiseAddress == "" {
 		return opeersharing.PeerAddress{}, false

@@ -77,10 +77,10 @@ func validateHostPort(addr string) error {
 	return nil
 }
 
-// validateAdvertiseAddress checks that addr is an IP:port that remote nodes
+// ValidateAdvertiseAddress checks that addr is an IP:port that remote nodes
 // can route to. The PeerSharing wire format carries IP literals only, and
 // peers drop non-routable addresses, so anything else would never be shared.
-func validateAdvertiseAddress(addr string) error {
+func ValidateAdvertiseAddress(addr string) error {
 	ap, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return errors.New("must be an IP literal and port, as IP:port")
@@ -637,7 +637,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 
 	if c.AdvertiseAddress != "" {
-		if err := validateAdvertiseAddress(c.AdvertiseAddress); err != nil {
+		if err := ValidateAdvertiseAddress(c.AdvertiseAddress); err != nil {
 			errs = append(errs, fmt.Errorf(
 				"invalid advertiseAddress %q: %w",
 				c.AdvertiseAddress,
