@@ -244,3 +244,43 @@ func TestStakeInputPageReadsOnlyEpochsCapturedInTheSlotRange(t *testing.T) {
 		"epoch 1 is captured outside the range and must not be read")
 	require.Len(t, got.Rows, 5, "epoch 2's three rows and epoch 3's two")
 }
+
+// A stake input page reads in full an epoch whose committed rows the view
+// does not serve as they are: one with staged stake rows, and every epoch of
+// a view with a rollback ceiling.
+func TestStakeInputPageReadsEpochsTheViewChanges(t *testing.T) {
+	t.Parallel()
+	staged := &models.RewardStakeInput{
+		Epoch: 1, PoolKeyHash: []byte{1}, StakingKey: []byte{9},
+		CapturedSlot: 50,
+	}
+	inputs := &slotBoundedInputs{slots: map[uint64][]uint64{
+		1: {10, 10},
+		2: {10, 10},
+	}}
+	ex := rewardInputsExport{
+		view: rewardInputsView{r: inputs, st: rewardInputsStaged{
+			changes: []RewardInputChange{{
+				Kind: RewardInputStakes, Epoch: 1,
+				Stakes: []*models.RewardStakeInput{staged},
+			}},
+		}},
+		epochs: []uint64{1, 2},
+	}
+	got, _, err := stakeInputPageOver(ex, 40, 100, 0, 100)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1}, inputs.reads,
+		"epoch 1 has staged rows and must be read")
+	require.Len(t, got.Rows, 1, "the staged row captured in the range")
+
+	inputs.reads = nil
+	ceiling := uint64(30)
+	ex = rewardInputsExport{
+		view:   rewardInputsView{r: inputs, at: &ceiling},
+		epochs: []uint64{1, 2},
+	}
+	_, _, err = stakeInputPageOver(ex, 40, 100, 0, 100)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 2}, inputs.reads,
+		"a view with a rollback ceiling reads every epoch")
+}
