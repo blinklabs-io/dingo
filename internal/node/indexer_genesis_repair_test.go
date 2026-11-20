@@ -16,6 +16,7 @@ package node
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -30,6 +31,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +183,86 @@ func TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor(t *testing.T) {
 	phase, err = store.Bootstrap(nil)
 	require.NoError(t, err)
 	require.Equal(t, indexerdb.PhaseDone, phase)
+}
+
+// TestIndexerServiceKeepsOutputAtSharedZeroByronReference adds a zero-coin
+// Shelley initialFunds entry, which the reference keeps, at the address of a
+// zero-coin Byron genesis output, so both have the same reference, seeds the
+// Shelley output in the IndexerDB, and requires building the writer to keep it
+// and its transaction.
+func TestIndexerServiceKeepsOutputAtSharedZeroByronReference(t *testing.T) {
+	t.Parallel()
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardano.EmbeddedConfigPath("preview"), "preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	byronUtxos, err := nodeCfg.ByronGenesis().GenesisUtxos()
+	require.NoError(t, err)
+	var zeroByron lcommon.Utxo
+	for _, u := range byronUtxos {
+		if u.Output.Amount().Sign() == 0 {
+			zeroByron = u
+			break
+		}
+	}
+	require.NotNil(t, zeroByron.Output)
+	addrBytes, err := zeroByron.Output.Address().Bytes()
+	require.NoError(t, err)
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	if shelleyGenesis.InitialFunds == nil {
+		shelleyGenesis.InitialFunds = map[string]uint64{}
+	}
+	shelleyGenesis.InitialFunds[hex.EncodeToString(addrBytes)] = 0
+	shelleyUtxos, err := shelleyGenesis.GenesisUtxos()
+	require.NoError(t, err)
+	var shared lcommon.Utxo
+	for _, u := range shelleyUtxos {
+		if u.Id.Id() == zeroByron.Id.Id() {
+			shared = u
+		}
+	}
+	require.NotNil(t, shared.Output)
+
+	consensus, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(), Network: "preview",
+	})
+	require.NoError(t, err)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, indexerDB)
+	require.NoError(t, err)
+	genesisHash, err := ledger.GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+	data, err := cbor.Encode(shared.Output)
+	require.NoError(t, err)
+	output := shared.Output.(shelley.ShelleyTransactionOutput)
+	(&output).SetCbor(data)
+	id := shared.Id.Id()
+	ref := database.UtxoRef{TxId: id, OutputIdx: shared.Id.Index()}
+	require.NoError(t, indexerDB.SetGenesisTransaction(
+		t.Context(), id.Bytes(), genesisHash[:],
+		[]lcommon.Utxo{{Id: shared.Id, Output: output}},
+		map[database.UtxoRef]database.CborOffset{ref: {}}, nil,
+	))
+
+	_, err = NewIndexerService(dingo.IndexerWriterDeps{
+		Consensus: consensus, Indexer: indexerDB, NodeConfig: nodeCfg,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxReadyLagBlocks: 10,
+	})
+	require.NoError(t, err)
+
+	var utxos, transactions int
+	require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM utxo x JOIN "transaction" t ON t.id = x.tx_id
+WHERE t.hash = ? AND x.output_idx = ?`,
+		id.Bytes(), shared.Id.Index()).Scan(&utxos))
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		id.Bytes()).Scan(&transactions))
+	require.Equal(t, 1, utxos, "the Shelley output stays")
+	require.Equal(t, 1, transactions, "and so does its transaction")
 }

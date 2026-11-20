@@ -351,3 +351,89 @@ func TestReconcileRemovesGenesisFromLiveSetOnlyStore(t *testing.T) {
 		require.True(t, liveSetHolds(t, set, u))
 	}
 }
+
+// TestReconcileKeepsOutputAtSharedZeroByronReference adds a Shelley
+// initialFunds entry at the address of a zero-coin Byron genesis output, so
+// both have the same reference, seeds the Shelley output in the metadata store
+// and the live UTxO set, and requires Reconcile to keep it in both while the
+// other zero-coin Byron outputs go. Byron genesis rejects two outputs at one
+// reference, so a retained Byron output cannot share one.
+func TestReconcileKeepsOutputAtSharedZeroByronReference(t *testing.T) {
+	t.Parallel()
+	for name, coin := range map[string]uint64{"funded": 7, "zero-coin": 0} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			g := newLegacyGenesis(t)
+			addrBytes, err := g.zeroByron[0].Output.Address().Bytes()
+			require.NoError(t, err)
+			g.nodeCfg.ShelleyGenesis().InitialFunds[hex.EncodeToString(addrBytes)] = coin
+			shelleyUtxos, err := g.nodeCfg.ShelleyGenesis().GenesisUtxos()
+			require.NoError(t, err)
+			var shared lcommon.Utxo
+			for _, u := range shelleyUtxos {
+				if u.Id.Id() == g.zeroByron[0].Id.Id() {
+					shared = u
+				}
+			}
+			require.NotNil(t, shared.Output)
+			require.Equal(t, g.zeroByron[0].Id.Index(), shared.Id.Index())
+			seeded := append(
+				append([]lcommon.Utxo{}, g.zeroByron[1:]...),
+				g.fundedByron, g.zeroShelley, shared,
+			)
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+			seedLegacyStore(t, db, g.nodeCfg, seeded)
+			set, dir := newLegacyLiveSet(t, g)
+			seedLiveSet(t, set, g.nodeCfg, seeded)
+
+			runReconcile(t, db, set, dir, g.nodeCfg)
+
+			for _, u := range g.zeroByron[1:] {
+				utxos, txs := metadataRows(t, raw, u)
+				require.Zero(t, utxos)
+				require.Zero(t, txs)
+				require.False(t, liveSetHolds(t, set, u))
+			}
+			for _, u := range []lcommon.Utxo{
+				shared, g.fundedByron, g.zeroShelley,
+			} {
+				utxos, txs := metadataRows(t, raw, u)
+				require.Equal(t, 1, utxos, "metadata output %s", u.Id.Id())
+				require.Equal(t, 1, txs)
+				require.True(t, liveSetHolds(t, set, u),
+					"live set output %s", u.Id.Id())
+			}
+			count, err := set.Count()
+			require.NoError(t, err)
+			require.Equal(t, uint64(3), count)
+		})
+	}
+}
+
+// TestRemoveZeroCoinOutputsKeepsOutputWithCoin pins that the live-set removal
+// checks the coin of each output it is given: a funded output named with a
+// zero-coin one stays.
+func TestRemoveZeroCoinOutputsKeepsOutputWithCoin(t *testing.T) {
+	t.Parallel()
+	g := newLegacyGenesis(t)
+	set, _ := newLegacyLiveSet(t, g)
+	seedLiveSet(t, set, g.nodeCfg, g.all())
+	refs := make([]models.UtxoId, 0, 2)
+	for _, u := range []lcommon.Utxo{g.fundedByron, g.zeroByron[0]} {
+		refs = append(refs, models.UtxoId{
+			Hash: u.Id.Id().Bytes(), Idx: u.Id.Index(),
+		})
+	}
+
+	removed, err := set.RemoveZeroCoinOutputs(refs)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, removed)
+	require.True(t, liveSetHolds(t, set, g.fundedByron))
+	require.False(t, liveSetHolds(t, set, g.zeroByron[0]))
+}

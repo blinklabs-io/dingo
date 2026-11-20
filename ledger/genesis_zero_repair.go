@@ -49,7 +49,9 @@ const ByronGenesisZeroRepairSyncKey = "ledger.byron_genesis_zero_repair"
 //
 // The reference Byron to Shelley UTxO translation drops exactly these
 // outputs; a zero-coin Shelley initialFunds output is kept, so only the
-// Byron genesis decides membership.
+// Byron genesis decides membership. A Byron output whose reference a retained
+// genesis output also has is left out of Refs, since removing by reference
+// would remove the retained output.
 func ZeroValueByronGenesisOutputs(
 	nodeCfg *cardano.CardanoNodeConfig,
 ) (ZeroValueByronOutputs, error) {
@@ -72,19 +74,29 @@ func ZeroValueByronGenesisOutputs(
 		}
 		retained = append(retained, shelleyUtxos...)
 	}
-	// A genesis transaction's id is the hash of its address, so a retained
-	// output at the same address shares the transaction.
+	// A genesis transaction's id is the hash of its address and its one
+	// output is index 0, so a retained output at the same address has the
+	// same reference and shares the transaction. The reference then names the
+	// retained output, so it is never one to remove.
+	type outputRef struct {
+		id  [32]byte
+		idx uint32
+	}
+	kept := make(map[outputRef]struct{}, len(retained))
 	shared := make(map[[32]byte]struct{}, len(retained))
 	for _, u := range retained {
+		kept[outputRef{u.Id.Id(), u.Id.Index()}] = struct{}{}
 		shared[u.Id.Id()] = struct{}{}
 	}
 	seen := make(map[[32]byte]struct{}, len(dropped))
 	for _, u := range dropped {
 		id := u.Id.Id()
-		zero.Refs = append(zero.Refs, models.UtxoId{
-			Hash: id.Bytes(),
-			Idx:  u.Id.Index(),
-		})
+		if _, ok := kept[outputRef{id, u.Id.Index()}]; !ok {
+			zero.Refs = append(zero.Refs, models.UtxoId{
+				Hash: id.Bytes(),
+				Idx:  u.Id.Index(),
+			})
+		}
 		if _, ok := shared[id]; ok {
 			continue
 		}

@@ -3442,7 +3442,9 @@ names the outputs exactly: `ledger.ZeroValueByronGenesisOutputs` lists the
 zero-coin outputs of `ByronGenesis().GenesisUtxos()`, the source
 `buildGenesisUtxoSet` reads, and the genesis transactions no retained genesis
 output shares (a genesis transaction's id is the hash of its address). A
-network with none of them does nothing.
+zero-coin Byron output at the address of a Shelley `initialFunds` entry has
+the same reference as that retained output, so it is not listed. A network
+with none of them does nothing.
 
 - Metadata store. `nodestorage.Reconcile.Run` starts with
   `ledger.RepairZeroValueByronGenesis`, so it runs before anything copies
@@ -3470,8 +3472,9 @@ network with none of them does nothing.
   `applied_transaction` rows, so the same transaction takes the removed
   application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
 - Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
-  `Set.RemoveOutputs` (`badgerutxo.Store.RemoveOutputs`) on every start. It
-  deletes the listed outputs the set holds and adjusts the output count and the
+  `Set.RemoveZeroCoinOutputs` (`badgerutxo.Store.RemoveOutputs`) on every
+  start. It deletes the listed outputs the set holds whose coin is zero, as the
+  metadata repair checks the amount, and adjusts the output count and the
   stake sums in the same transaction. It writes no journal record and leaves the
   tip alone: a record would sit newest in the journal and the next rollback, of
   any depth, would undo it first and make the outputs live again. No journal
@@ -3488,7 +3491,9 @@ the amount is zero, so no `reward_live_stake` row or stake sum includes them.
 `TestReconcileRemovesLegacyZeroValueByronGenesis` and
 `TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
 `TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
-repaired IndexerDB, and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
+repaired IndexerDB, `TestReconcileKeepsOutputAtSharedZeroByronReference` and
+`TestIndexerServiceKeepsOutputAtSharedZeroByronReference` a shared reference,
+and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
 statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
 run on SQLite.
 

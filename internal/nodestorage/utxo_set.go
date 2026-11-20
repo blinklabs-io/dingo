@@ -220,14 +220,14 @@ func (r Reconcile) Run(ctx context.Context) error {
 // rather than keeping a mark: the set can be rebuilt or restored from a
 // checkpoint that predates the removal, and a mark would then outlive the
 // outputs it vouched for. An output the set does not hold, because it was
-// spent, is not touched.
+// spent, is not touched, and neither is one with coin.
 func (r Reconcile) removeLiveSetZeroValueByronGenesis(
 	zero ledger.ZeroValueByronOutputs,
 ) error {
 	if r.Set == nil || len(zero.Refs) == 0 {
 		return nil
 	}
-	removed, err := r.Set.RemoveOutputs(zero.Refs)
+	removed, err := r.Set.RemoveZeroCoinOutputs(zero.Refs)
 	if err != nil {
 		return fmt.Errorf(
 			"remove zero-value Byron genesis outputs from the live UTxO set: %w",

@@ -37,7 +37,7 @@ func TestRemoveOutputsLeavesNoJournalRecord(t *testing.T) {
 
 	removed, err := s.RemoveOutputs([]badgerutxo.Ref{
 		ref(1, 0), ref(9, 9), ref(2, 1),
-	})
+	}, func([]byte) bool { return true })
 	require.NoError(t, err)
 	require.Equal(t, 2, removed, "the output that is not live is not counted")
 	requireLive(t, s, false, ref(1, 0))
@@ -63,5 +63,27 @@ func TestRemoveOutputsLeavesNoJournalRecord(t *testing.T) {
 	requireLive(t, s, false, ref(2, 1))
 	requireLive(t, s, true, ref(4, 2))
 	require.Len(t, contents(t, s), 1)
+	requireSums(t, s)
+}
+
+// TestRemoveOutputsKeepsRejectedOutput pins that an output whose CBOR the
+// predicate rejects stays live and counted.
+func TestRemoveOutputsKeepsRejectedOutput(t *testing.T) {
+	t.Parallel()
+	s, err := badgerutxo.Open(t.TempDir(), badgerutxo.WithAggregator(testAgg))
+	require.NoError(t, err)
+	defer s.Close()
+	bootstrap(t, s, point(1, 1), out(1, 0), out(2, 1), out(4, 2))
+
+	removed, err := s.RemoveOutputs(
+		[]badgerutxo.Ref{ref(1, 0), ref(2, 1)},
+		func(cbor []byte) bool { return cbor[0] != 2 },
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, removed)
+	requireLive(t, s, false, ref(1, 0))
+	requireLive(t, s, true, ref(2, 1))
+	requireLive(t, s, true, ref(4, 2))
+	require.Len(t, contents(t, s), 2)
 	requireSums(t, s)
 }

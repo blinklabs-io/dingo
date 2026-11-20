@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -361,8 +362,101 @@ func TestZeroValueByronGenesisOutputsKeepsSharedTransaction(t *testing.T) {
 	zero, err := ZeroValueByronGenesisOutputs(f.nodeCfg)
 	require.NoError(t, err)
 
-	require.Len(t, zero.Refs, 2)
+	require.Equal(t, []models.UtxoId{{
+		Hash: f.zeroByron[1].Id.Id().Bytes(),
+		Idx:  f.zeroByron[1].Id.Index(),
+	}}, zero.Refs, "the Shelley output holds the shared reference")
 	require.Equal(t, [][]byte{f.zeroByron[1].Id.Id().Bytes()}, zero.TxHashes)
+}
+
+// shelleyAtByronAddress adds a Shelley initialFunds entry of coin at the
+// address of u, a zero-coin Byron genesis output, and returns its output,
+// which has the same reference as u.
+func shelleyAtByronAddress(
+	t *testing.T,
+	nodeCfg *cardano.CardanoNodeConfig,
+	u lcommon.Utxo,
+	coin uint64,
+) lcommon.Utxo {
+	t.Helper()
+	addrBytes, err := u.Output.Address().Bytes()
+	require.NoError(t, err)
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	shelleyGenesis.InitialFunds[hex.EncodeToString(addrBytes)] = coin
+	shelleyUtxos, err := shelleyGenesis.GenesisUtxos()
+	require.NoError(t, err)
+	for _, s := range shelleyUtxos {
+		if s.Id.Id() == u.Id.Id() {
+			require.Equal(t, u.Id.Index(), s.Id.Index())
+			return s
+		}
+	}
+	t.Fatalf("no Shelley genesis output at %s", u.Id.Id())
+	return lcommon.Utxo{}
+}
+
+// TestZeroValueByronGenesisOutputsLeavesRetainedReference pins that a
+// reference a retained Shelley initialFunds output occupies, funded or
+// zero-coin, is never named for removal, though the Byron output there is
+// dropped.
+func TestZeroValueByronGenesisOutputsLeavesRetainedReference(t *testing.T) {
+	t.Parallel()
+	for name, coin := range map[string]uint64{"funded": 7, "zero-coin": 0} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newZeroGenesisFixture(t)
+			shelleyAtByronAddress(t, f.nodeCfg, f.zeroByron[0], coin)
+
+			zero, err := ZeroValueByronGenesisOutputs(f.nodeCfg)
+			require.NoError(t, err)
+
+			kept := f.zeroByron[1]
+			require.Equal(t, []models.UtxoId{{
+				Hash: kept.Id.Id().Bytes(), Idx: kept.Id.Index(),
+			}}, zero.Refs)
+			require.Equal(t, [][]byte{kept.Id.Id().Bytes()}, zero.TxHashes)
+		})
+	}
+}
+
+// TestRepairZeroValueByronGenesisKeepsOutputAtSharedReference seeds the
+// Shelley initialFunds output that shares a zero-coin Byron output's
+// reference, as the store of a node that dropped the Byron output holds it,
+// and requires the metadata repair to keep it and its transaction in both
+// storage modes. A zero-coin one passes the repair's amount check, so only
+// the reference set protects it.
+func TestRepairZeroValueByronGenesisKeepsOutputAtSharedReference(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		for name, coin := range map[string]uint64{"funded": 7, "zero-coin": 0} {
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				f := newZeroGenesisFixture(t)
+				shared := shelleyAtByronAddress(
+					t, f.nodeCfg, f.zeroByron[0], coin,
+				)
+				db, err := dbtest.NewDatabase(t, &database.Config{
+					DataDir:     t.TempDir(),
+					StorageMode: mode,
+				})
+				require.NoError(t, err)
+				raw, err := dbtest.RawSQLiteMetadata(t, db)
+				require.NoError(t, err)
+				seedUnfilteredGenesis(t, db, f.nodeCfg, []lcommon.Utxo{
+					f.zeroByron[1], f.fundedByron, f.zeroShelley, shared,
+				})
+
+				repairFixture(t, db, f)
+
+				require.Equal(t, 1, utxoRows(t, raw, shared),
+					"the Shelley output at the shared reference stays")
+				require.Equal(t, 2, txRows(t, raw, shared))
+				require.Zero(t, utxoRows(t, raw, f.zeroByron[1]))
+				require.Zero(t, txRows(t, raw, f.zeroByron[1]))
+				require.Equal(t, 3, rowCount(t, raw, `SELECT COUNT(*) FROM utxo`))
+			})
+		}
+	}
 }
 
 // TestZeroValueByronGenesisOutputsOfPreview pins the zero-coin Byron outputs

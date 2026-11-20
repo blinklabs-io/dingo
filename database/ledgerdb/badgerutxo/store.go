@@ -883,9 +883,9 @@ func samePoint(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
-// RemoveOutputs deletes the live outputs among refs and returns how many it
-// deleted. The count and the sums follow, in the same transaction as each
-// delete.
+// RemoveOutputs deletes the live outputs among refs whose CBOR removable
+// accepts and returns how many it deleted. An output removable rejects stays.
+// The count and the sums follow, in the same transaction as each delete.
 //
 // The removal is not a change of the chain, so it writes no journal record and
 // leaves the tip alone: a record would sit newest in the journal and the next
@@ -893,7 +893,10 @@ func samePoint(a, b ocommon.Point) bool {
 // again. A journal record that already holds an output keeps its prior state,
 // which no rollback reaches for an output no block has touched. It refuses
 // while a rollback is pending, like a batch.
-func (s *Store) RemoveOutputs(refs []Ref) (int, error) {
+func (s *Store) RemoveOutputs(
+	refs []Ref,
+	removable func(cbor []byte) bool,
+) (int, error) {
 	entries, _ := s.txnBudget()
 	// A delete, a sum write at most and the count are written per output.
 	chunk := int(max(entries/3, 1))
@@ -924,6 +927,9 @@ func (s *Store) RemoveOutputs(refs []Ref) (int, error) {
 				v, err := item.ValueCopy(nil)
 				if err != nil {
 					return err
+				}
+				if !removable(v) {
+					continue
 				}
 				if err := txn.Delete(utxoKey(r)); err != nil {
 					return err
