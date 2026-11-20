@@ -39,6 +39,11 @@ type activePoolCache struct {
 	key     activePoolCacheKey
 	hashes  [][]byte
 	loading chan struct{}
+	// onWait is a test hook, nil in production. It is called, without mu
+	// held, just before a caller parks on an in-flight load, so a test can
+	// observe the parked waiter instead of inferring it from goroutine
+	// stacks.
+	onWait func()
 }
 
 // get returns the active pool key hashes for key, calling load when no list
@@ -59,7 +64,11 @@ func (c *activePoolCache) get(
 			return hashes, nil
 		}
 		if wait := c.loading; wait != nil {
+			onWait := c.onWait
 			c.mu.Unlock()
+			if onWait != nil {
+				onWait()
+			}
 			select {
 			case <-wait:
 				continue

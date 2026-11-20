@@ -241,6 +241,30 @@ func rollbackEpochStarts(
 	return newest, found
 }
 
+// stagedRollbackEpochStarts maps each epoch the set holds to its start slot
+// when ops stage a rollback, and is empty otherwise. Only a rollback reads the
+// starts, and Epochs decodes every epoch row, so a read with none staged must
+// not pay for it once per epoch it is asked about.
+func stagedRollbackEpochStarts(
+	r EpochStateReader,
+	ops []epochStateOps,
+) (map[uint64]uint64, error) {
+	if !slices.ContainsFunc(ops, func(o epochStateOps) bool {
+		return o.rollbackTo != nil
+	}) {
+		return map[uint64]uint64{}, nil
+	}
+	epochs, err := r.Epochs()
+	if err != nil {
+		return nil, err
+	}
+	starts := make(map[uint64]uint64, len(epochs))
+	for _, e := range epochs {
+		starts[e.EpochId] = e.StartSlot
+	}
+	return starts, nil
+}
+
 // snapshotView is epoch's snapshot rows of typ as txn sees the set.
 func (ls *LedgerState) snapshotView(
 	r EpochStateReader,
@@ -266,13 +290,9 @@ func (ls *LedgerState) snapshotViewLocked(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := r.Epochs()
+	starts, err := stagedRollbackEpochStarts(r, ops)
 	if err != nil {
 		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
 	}
 	view := make(map[string]*models.PoolStakeSnapshot, len(rows))
 	for _, s := range rows {

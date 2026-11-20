@@ -15,7 +15,6 @@
 package ouroboros
 
 import (
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -203,6 +203,17 @@ func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {
 	o, err := NewOuroboros(cfg)
 	require.Nil(t, o)
 	require.ErrorContains(t, err, "invalid chainsync capacity")
+}
+
+func TestNewOuroborosRejectsInvalidAdvertiseAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := newWiringTestDeps(t)
+	cfg.AdvertiseAddress = "relay.example.com:3001"
+
+	o, err := NewOuroboros(cfg)
+	require.Nil(t, o)
+	require.ErrorContains(t, err, "invalid advertise address")
 }
 
 // TestSetLeiosHandlersRejectNil guards the optional handlers against being

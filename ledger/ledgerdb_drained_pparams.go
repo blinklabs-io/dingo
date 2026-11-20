@@ -177,6 +177,9 @@ func (s stagingLedgerDB) GetSyncState(
 	if isRewardCursorKey(key) {
 		return s.getCursor(key, txn)
 	}
+	if key == rewardStakeInputsPendingKey && s.rewardInputsDrained() {
+		return s.getPendingStakeInputs(txn)
+	}
 	return s.LedgerDB.GetSyncState(key, txn)
 }
 
@@ -194,6 +197,9 @@ func (s stagingLedgerDB) SetSyncState(
 		}
 		s.cursorWrite(key, value, txn)
 		return nil
+	}
+	if key == rewardStakeInputsPendingKey {
+		return s.setPendingStakeInputs(value, txn)
 	}
 	if !database.IsPParamsSyncMarker(key) {
 		return s.LedgerDB.SetSyncState(key, value, txn)
@@ -216,6 +222,9 @@ func (s stagingLedgerDB) DeleteSyncState(
 	key string,
 	txn ledgerdb.Txn,
 ) error {
+	if key == rewardStakeInputsPendingKey {
+		return s.deletePendingStakeInputs(txn)
+	}
 	if !database.IsPParamsSyncMarker(key) {
 		return s.LedgerDB.DeleteSyncState(key, txn)
 	}

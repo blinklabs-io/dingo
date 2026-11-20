@@ -360,6 +360,18 @@ var FactTables = []FactTable{
 		Key:         []string{"snapshot_epoch"},
 	},
 	{
+		Name:        "reward_likelihood_state",
+		SlotColumns: []string{"boundary_slot"},
+		Key:         []string{"epoch"},
+		Paged:       true,
+	},
+	{
+		Name:        "reward_pool_likelihood",
+		SlotColumns: []string{"boundary_slot"},
+		Key:         []string{"epoch", "pool_key_hash"},
+		Paged:       true,
+	},
+	{
 		Name:        "network_state",
 		SlotColumns: []string{"slot"},
 		Key:         []string{"slot"},

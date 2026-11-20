@@ -1553,7 +1553,7 @@ func newImmutableProgressWithContext(
 			"artifact", artifact,
 			"immutable_archives_completed", doneArchives,
 			"immutable_archives_total", totalArchives,
-			"percent", archivePercent,
+			"percent", roundPercent(archivePercent),
 		)
 		lastLog = now
 		lastLoggedPercent = archivePercent

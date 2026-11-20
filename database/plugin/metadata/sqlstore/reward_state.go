@@ -135,6 +135,172 @@ func (s *Store) GetRewardAdaPots(
 	}, nil
 }
 
+func (s *Store) SaveRewardLikelihoodState(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+	txn types.Txn,
+) error {
+	if state == nil {
+		return errors.New("save reward likelihood state: state is nil")
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			for _, pool := range pools {
+				if pool == nil {
+					return errors.New("save reward pool likelihood: pool is nil")
+				}
+				if pool.Epoch != state.Epoch {
+					return fmt.Errorf(
+						"save reward pool likelihood: pool epoch %d does not match state epoch %d",
+						pool.Epoch,
+						state.Epoch,
+					)
+				}
+			}
+			epoch, err := checkedInt64(state.Epoch)
+			if err != nil {
+				return err
+			}
+			capturedSlot, err := checkedInt64(state.CapturedSlot)
+			if err != nil {
+				return err
+			}
+			boundarySlot, err := checkedInt64(state.BoundarySlot)
+			if err != nil {
+				return err
+			}
+			id, err := q.SaveRewardLikelihoodState(
+				ctx,
+				sqlitequery.SaveRewardLikelihoodStateParams{
+					Epoch:        epoch,
+					RewardPot:    decimalUint64(state.RewardPot),
+					CapturedSlot: capturedSlot,
+					BoundarySlot: boundarySlot,
+					Complete:     state.Complete,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("save reward likelihood state: %w", err)
+			}
+			state.ID = uint(id)
+			if err := q.DeleteRewardPoolLikelihoodsForEpoch(ctx, epoch); err != nil {
+				return fmt.Errorf("replace reward pool likelihoods: %w", err)
+			}
+			for _, pool := range pools {
+				poolID, err := q.SaveRewardPoolLikelihood(
+					ctx,
+					sqlitequery.SaveRewardPoolLikelihoodParams{
+						Epoch:               epoch,
+						PoolKeyHash:         pool.PoolKeyHash,
+						LogWeights:          pool.LogWeights,
+						PerformanceEstimate: pool.PerformanceEstimate,
+						BoundarySlot:        boundarySlot,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("save reward pool likelihood: %w", err)
+				}
+				pool.ID = uint(poolID)
+			}
+			return nil
+		},
+	)
+}
+
+func rewardLikelihoodStateFromRow(
+	row sqlitequery.RewardLikelihoodState,
+) (*models.RewardLikelihoodState, error) {
+	rewardPot, err := parseUint64("reward_pot", row.RewardPot)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardLikelihoodState{
+		ID:           uint(row.ID),
+		Epoch:        uint64(row.Epoch),
+		RewardPot:    types.Uint64(rewardPot),
+		CapturedSlot: uint64(row.CapturedSlot),
+		BoundarySlot: uint64(row.BoundarySlot),
+		Complete:     row.Complete,
+	}, nil
+}
+
+func (s *Store) GetRewardLikelihoodStateBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.RewardLikelihoodState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.operationalQueries(db).
+		GetRewardLikelihoodStateBeforeEpoch(ctx, sqlEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward likelihood state before epoch: %w", err)
+	}
+	return rewardLikelihoodStateFromRow(row)
+}
+
+func (s *Store) GetRewardLikelihoodStateAtSlot(
+	slot uint64,
+	txn types.Txn,
+) (*models.RewardLikelihoodState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.operationalQueries(db).
+		GetRewardLikelihoodStateAtSlot(ctx, sqlSlot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward likelihood state at slot: %w", err)
+	}
+	return rewardLikelihoodStateFromRow(row)
+}
+
+func (s *Store) GetRewardPoolLikelihoods(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardPoolLikelihood, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).GetRewardPoolLikelihoods(ctx, sqlEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get reward pool likelihoods: %w", err)
+	}
+	ret := make([]*models.RewardPoolLikelihood, 0, len(rows))
+	for _, row := range rows {
+		ret = append(ret, &models.RewardPoolLikelihood{
+			ID:                  uint(row.ID),
+			Epoch:               uint64(row.Epoch),
+			PoolKeyHash:         row.PoolKeyHash,
+			LogWeights:          row.LogWeights,
+			PerformanceEstimate: row.PerformanceEstimate,
+		})
+	}
+	return ret, nil
+}
+
 func (s *Store) SaveRewardSnapshot(
 	snapshot *models.RewardSnapshot,
 	txn types.Txn,
@@ -1598,6 +1764,14 @@ func (s *Store) deleteRewardStateAfterSlot(
 				); err != nil {
 					return err
 				}
+			}
+			if err := q.DeleteRewardLikelihoodStatesAfterSlot(
+				ctx, sqlSlot,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteOrphanRewardPoolLikelihoods(ctx); err != nil {
+				return err
 			}
 			// A reward output depends only on inputs captured at or before
 			// its captured slot, so a rollback that stays above that slot

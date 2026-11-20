@@ -77,13 +77,9 @@ func (ls *LedgerState) summaryViewLocked(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := er.Epochs()
+	starts, err := stagedRollbackEpochStarts(er, ops)
 	if err != nil {
 		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
 	}
 	for _, o := range ops {
 		if o.rollbackTo != nil {
@@ -196,13 +192,9 @@ func (ls *LedgerState) summaryListViewLocked(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := er.Epochs()
+	starts, err := stagedRollbackEpochStarts(er, ops)
 	if err != nil {
 		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
 	}
 	view := make(map[uint64]models.EpochSummary, len(rows))
 	for _, sm := range rows {

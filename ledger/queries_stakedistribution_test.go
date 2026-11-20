@@ -84,7 +84,27 @@ func seedLiveStakeFixture(
 	slot uint64,
 ) lcommon.PoolKeyHash {
 	t.Helper()
+	return seedLiveStakeFixtureWithPledge(
+		t, db, poolKeyHash, vrfKeyHash, stake, slot, 1, 1,
+	)
+}
+
+// seedLiveStakeFixtureWithPledge is seedLiveStakeFixture for a pool with the
+// given pledge and cost. The pool's one delegator is also its owner.
+func seedLiveStakeFixtureWithPledge(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	stake uint64,
+	slot uint64,
+	pledge uint64,
+	cost uint64,
+) lcommon.PoolKeyHash {
+	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+	stakingKey := make([]byte, 28)
+	copy(stakingKey, poolKeyHash)
 	require.NoError(t, db.ImportPool(
 		context.Background(),
 		nil,
@@ -93,12 +113,13 @@ func seedLiveStakeFixture(
 			PoolKeyHash: pkh.Bytes(),
 			VrfKeyHash:  vrfKeyHash,
 			AddedSlot:   slot,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
+			Pledge:      dbtypes.Uint64(pledge),
+			Cost:        dbtypes.Uint64(cost),
+			Owners: []models.PoolRegistrationOwner{
+				{KeyHash: stakingKey},
+			},
 		},
 	))
-	stakingKey := make([]byte, 28)
-	copy(stakingKey, poolKeyHash)
 	require.NoError(
 		t,
 		db.CreateAccount(context.Background(), nil, &models.Account{
