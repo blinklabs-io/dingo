@@ -2653,7 +2653,10 @@ context detached from the shutdown deadline, and `Host.Stop` keeps waiting for
 it after the deadline passes, logging the store name and elapsed time at
 start, finish, and periodically while it runs. An overrun is reported as the
 warning `storage close finished after the shutdown deadline`,
-not as an error. Closing a large badger store can take minutes under I/O load
+not as an error. An ordinary provider stopped afterward still receives the
+original context; a successful stop does not turn the durable overrun into a
+shutdown error. Provider errors and cancellation during ordinary teardown remain
+errors. Closing a large badger store can take minutes under I/O load
 because it syncs every table file, and abandoning it risks leaving the store
 needing recovery, as cardano-node always closes its databases fully. `Node.Stop`
 therefore returns after `shutdownTimeout` plus the store close time, and the
