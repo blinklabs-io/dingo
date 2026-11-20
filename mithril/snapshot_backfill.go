@@ -224,10 +224,12 @@ func pinnedArtifactPruned(
 // immutable files from the certified tip down to the one holding the
 // history-expiry cutoff (ledger slot minus StabilityWindow), and downloads and
 // verifies the ancillary archive against its signed manifest. The archive's
-// immutable file, the one after the certified tip, extends the loaded chain,
-// and the ledger state is the newest one at or before its last block. All of
-// that happens before the first database write, so a failure there leaves
-// the database exactly as it was.
+// immutable file, the one after the certified tip, is read against that
+// manifest, and the ledger state is the newest one at or before its last
+// block. All of that happens before the first database write, so a failure
+// there leaves the database exactly as it was. Whether that file's blocks
+// continue the certified chain, and whether the state's block is then stored,
+// is checked only after the certified blocks are loaded.
 //
 // It then loads the blocks, imports the ledger state, records the Mithril
 // trust boundary and the bootstrap marker, and clears the sync state, in the
@@ -561,7 +563,7 @@ func RunSnapshotBackfill(
 
 	// Still the block phase: the ledger import is marked begun only once the
 	// state's block is stored.
-	landed, err := landAncillaryChunk(ctx, db, ancillaryBlocks, false)
+	landed, err := landAncillaryChunk(ctx, db, ancillaryBlocks)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf(
 			"storing signed ancillary chunk: %w", err,

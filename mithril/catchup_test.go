@@ -766,6 +766,99 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 		"ordinary replay must see the snapshot output as live")
 }
 
+// TestSyncRewardRepairKeepsSignedChunkPastLocalTip covers a reward repair
+// whose local chain ends inside the signed ancillary chunk and whose state is
+// at the certified tip. The chunk's blocks past the old local tip continue
+// the verified tail, so they stay stored for replay.
+func TestSyncRewardRepairKeepsSignedChunkPastLocalTip(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	trio, _ := ancillaryChunkAfter(t, 1100, 3, certifiedHash)
+	signed, err := readAncillaryChunk(
+		discard, signedAncillary(t, trio, nil), 0,
+	)
+	require.NoError(t, err)
+	require.Len(t, signed, 3)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber: 0,
+		validImmutable:      true,
+		ancillaryChunk:      trio,
+		ancillaryLedgerSlot: 1000,
+		ancillaryLedgerState: minimalLedgerState(
+			t, 1000, certifiedHash,
+		),
+	})
+
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	for _, block := range []models.Block{
+		{
+			Slot:     1000,
+			Hash:     certifiedHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		},
+		{
+			Slot: signed[0].Slot, Hash: signed[0].Hash,
+			PrevHash: certifiedHash, Cbor: signed[0].Cbor, Number: 3,
+			Type: signed[0].Type,
+		},
+	} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	require.NoError(t, setImmutableImportMarker(db, 0))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey, "1000", nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey, hex.EncodeToString(certifiedHash), nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		RewardStateRepairPendingKey, "1", nil,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	_, err = Sync(context.Background(), SyncConfig{
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: dataDir,
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:                 BackendV2,
+		PinnedDigest:            "original-bootstrap-pin",
+		VerifyCertChain:         true,
+		AggregatorURL:           fixture.server.URL,
+		AllowInsecureHTTP:       true,
+		StoragePlugins:          testStoragePlugins(),
+		DatabaseWorkers:         1,
+		Logger:                  discard,
+		RepairLegacyRewardState: true,
+	})
+	require.NoError(t, err)
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	for _, block := range signed {
+		_, err := database.BlockByHash(context.Background(), db, block.Hash)
+		require.NoError(t, err, "signed chunk block at slot %d", block.Slot)
+	}
+}
+
 func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) {
 	t.Parallel()
 

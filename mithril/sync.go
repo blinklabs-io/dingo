@@ -1098,8 +1098,8 @@ func Sync(
 	}
 	immutableTip := ancillaryTip(*certifiedTip, ancillaryBlocks)
 
-	var preparedRepairImport *preparedLedgerStateImport
 	var preservedLocalTail map[string]struct{}
+	var localTip models.Block
 
 	// Catch-up: confirm the local chain is an ancestor of the target artifact
 	// before mutating anything. A divergent database is left untouched and the
@@ -1119,7 +1119,7 @@ func Sync(
 				"catch-up: local database has no chain tip",
 			)
 		}
-		localTip := recent[0]
+		localTip = recent[0]
 		targetImmutable := uint64(0)
 		if bootstrapResult.Snapshot != nil {
 			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
@@ -1155,24 +1155,29 @@ func Sync(
 			}
 			return SyncResult{}, nil
 		}
+	}
+
+	// The ledger state is selected, verified and parsed before the first
+	// write. A run refused here leaves no in-progress marker, so the next run
+	// selects the aggregator's latest artifact instead of resuming this one.
+	prepared, err := prepareLedgerStateImport(
+		logger, bootstrapResult, immutableTip.Slot,
+	)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("preparing ledger state: %w", err)
+	}
+	defer prepared.Close()
+
+	if catchUp {
 		if cfg.RepairLegacyRewardState {
-			preparedRepairImport, err = prepareLedgerStateImport(
-				logger, bootstrapResult, immutableTip.Slot,
-			)
-			if err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"preparing reward-repair ledger state: %w", err,
-				)
-			}
-			defer preparedRepairImport.Close()
 			if err := verifyRewardRepairStateNotBehindStablePoint(
-				db, preparedRepairImport,
+				db, prepared,
 			); err != nil {
 				return SyncResult{}, err
 			}
 			if localTip.Slot > certifiedTip.Slot {
 				preservedLocalTail, err = verifyRewardRepairLocalTail(
-					ctx, db, localTip, preparedRepairImport,
+					ctx, db, localTip, prepared,
 				)
 				if err != nil {
 					return SyncResult{}, err
@@ -1180,7 +1185,7 @@ func Sync(
 				logger.Info(
 					"reward repair will preserve the verified local chain tail for startup replay",
 					"component", "mithril",
-					"snapshot_slot", preparedRepairImport.state.Tip.Slot,
+					"snapshot_slot", prepared.state.Tip.Slot,
 					"local_tip_slot", localTip.Slot,
 					"preserved_blocks", len(preservedLocalTail),
 				)
@@ -1259,9 +1264,6 @@ func Sync(
 	// prevents independent SQLite write transactions from contending during a
 	// bootstrap. Each phase is resumable if the later phase fails.
 	var loadResult *node.LoadBlobsResult
-	// chunksAdopted is set when the certified chunk files were moved into the
-	// database's ImmutableDB instead of copied as block bodies.
-	chunksAdopted := false
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte
 
@@ -1279,41 +1281,22 @@ func Sync(
 			})
 		}
 		// The state is loaded only once its block is in the ImmutableDB.
-		inImmutableDB := func(prepared *preparedLedgerStateImport) error {
-			return requireStateInImmutableDB(
-				ctx, db, immutableTip, prepared.point(),
-			)
-		}
+		importErr := requireStateInImmutableDB(
+			ctx, db, immutableTip, prepared.point(),
+		)
 		var slot uint64
 		var hash []byte
-		var importErr error
-		if preparedRepairImport != nil {
-			importErr = inImmutableDB(preparedRepairImport)
-			if importErr == nil {
-				slot, hash, importErr = importPreparedLedgerState(
-					ctx,
-					db,
-					logger,
-					nodeCfg,
-					bootstrapResult,
-					preparedRepairImport,
-					catchUp,
-					cfg.UtxoSet,
-					onLedger,
-				)
-			}
-		} else {
-			slot, hash, importErr = importLedgerState(
+		if importErr == nil {
+			slot, hash, importErr = importPreparedLedgerState(
 				ctx,
 				db,
 				logger,
 				nodeCfg,
 				bootstrapResult,
+				prepared,
 				catchUp,
-				immutableTip.Slot,
 				cfg.UtxoSet,
 				onLedger,
-				inImmutableDB,
 			)
 		}
 		if importErr != nil {
@@ -1365,7 +1348,6 @@ func Sync(
 			)
 			switch {
 			case loadErr == nil:
-				chunksAdopted = true
 				cfg.emit(SyncProgress{
 					Phase:       PhaseImmutableCopy,
 					Active:      true,
@@ -1434,13 +1416,18 @@ func Sync(
 	if err := copyImmutablePhase(); err != nil {
 		return SyncResult{}, err
 	}
-	landed, err := landAncillaryChunk(
-		ctx, db, ancillaryBlocks, chunksAdopted,
-	)
+	landed, err := landAncillaryChunk(ctx, db, ancillaryBlocks)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf(
 			"storing signed ancillary chunk: %w", err,
 		)
+	}
+	if len(preservedLocalTail) > 0 {
+		// The signed chunk can run past the old local tip. The blocks it
+		// appended continue the verified tail, so replay needs them too.
+		for _, block := range ancillaryBlocks {
+			preservedLocalTail[string(block.Hash)] = struct{}{}
+		}
 	}
 	if loadResult == nil {
 		loadResult = &node.LoadBlobsResult{}
@@ -1459,7 +1446,7 @@ func Sync(
 	if err := importLedgerStatePhase(); err != nil {
 		return SyncResult{}, err
 	}
-	if cfg.RepairLegacyRewardState && preparedRepairImport != nil {
+	if cfg.RepairLegacyRewardState {
 		// Rolling back to the selected state must discard post-state metadata
 		// and restore spends, whether or not the local chain has a tail beyond
 		// the ImmutableDB tip.

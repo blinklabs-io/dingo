@@ -131,12 +131,12 @@ func ancillaryTip(
 // chain already holds are not stored again. It returns the number of blocks
 // stored.
 //
-// chunkFiles is set by an import that moved the certified chunk files into
-// the database's ImmutableDB: the blocks are then appended to those files
-// through the database's own chunk writer, so the recorded tip is the signed
-// chunk's last block before any ledger state is loaded. An import that copied
-// block bodies leaves these as bodies too, for the node to promote with the
-// rest.
+// When the database records an ImmutableDB tip, every block through the
+// signed chunk's last one is then appended to the chunk files through the
+// database's own chunk writer, certified bodies an import copied included, so
+// the recorded tip is the signed chunk's last block before any ledger state is
+// loaded. Left as bodies, they would sit above the recorded tip, where the
+// chain accepts a rollback that the loaded ledger state cannot follow.
 //
 // The chain refuses a block that does not extend its tip, so a chunk that
 // does not continue the certified chain stores nothing and is an error. The
@@ -145,7 +145,6 @@ func landAncillaryChunk(
 	ctx context.Context,
 	db *database.Database,
 	blocks []immutable.Block,
-	chunkFiles bool,
 ) (int, error) {
 	if len(blocks) == 0 {
 		return 0, nil
@@ -198,9 +197,6 @@ func landAncillaryChunk(
 			recent[0].Slot, recent[0].Hash, last.Slot, last.Hash,
 		)
 	}
-	if !chunkFiles {
-		return stored, nil
-	}
 	if st, ok := db.ImmutableState(); ok && st.HasTip &&
 		st.TipIndex < block.ID {
 		if _, err := db.PromoteThroughLocked(ctx, block.ID); err != nil {
@@ -213,41 +209,30 @@ func landAncillaryChunk(
 	return stored, nil
 }
 
-// refuseStateAboveImmutableTip returns ErrLedgerStateTooRecent when state is
-// later than limit, or later than the tip the database's ImmutableDB records
-// when it keeps one. It is for a load into a running node's database, whose
-// promotion keeps that recorded tip current.
-func refuseStateAboveImmutableTip(
-	db *database.Database,
-	limit ocommon.Point,
-	state ocommon.Point,
-) error {
-	slot := limit.Slot
-	if own, ok := db.ImmutablePoint(); ok && own.Slot < slot {
-		slot = own.Slot
+// immutableBoundSlot returns limit, or the slot of the tip the database's
+// ImmutableDB records when that is lower: the latest slot a ledger state may
+// be loaded at.
+func immutableBoundSlot(db *database.Database, limit uint64) uint64 {
+	if own, ok := db.ImmutablePoint(); ok && own.Slot < limit {
+		return own.Slot
 	}
-	if state.Slot > slot {
-		return fmt.Errorf(
-			"%w: state slot %d, ImmutableDB tip slot %d",
-			ErrLedgerStateTooRecent, state.Slot, slot,
-		)
-	}
-	return nil
+	return limit
 }
 
 // requireStateInImmutableDB returns ErrLedgerStateTooRecent unless state is a
 // stored block at or below immutableTip, the last block an import stored from
-// the certified immutable files and the signed ancillary chunk.
+// the certified immutable files and the signed ancillary chunk, and at or
+// below the tip the database's ImmutableDB records when it keeps one.
 func requireStateInImmutableDB(
 	ctx context.Context,
 	db *database.Database,
 	immutableTip ocommon.Point,
 	state ocommon.Point,
 ) error {
-	if state.Slot > immutableTip.Slot {
+	if bound := immutableBoundSlot(db, immutableTip.Slot); state.Slot > bound {
 		return fmt.Errorf(
 			"%w: state slot %d, ImmutableDB tip slot %d",
-			ErrLedgerStateTooRecent, state.Slot, immutableTip.Slot,
+			ErrLedgerStateTooRecent, state.Slot, bound,
 		)
 	}
 	if _, err := database.BlockByPoint(ctx, db, state); err != nil {

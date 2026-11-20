@@ -188,7 +188,7 @@ func TestSyncRefusesLedgerStateAboveImmutableDBTip(t *testing.T) {
 				ancillaryLedgerSlot: 1100,
 			})
 			set := newSyncTestSet(t)
-			_, err := Sync(context.Background(), SyncConfig{
+			cfg := SyncConfig{
 				UtxoSet: set,
 				Network: "preprod",
 				DataDir: t.TempDir(),
@@ -200,11 +200,41 @@ func TestSyncRefusesLedgerStateAboveImmutableDBTip(t *testing.T) {
 				AllowInsecureHTTP: true,
 				VerifyCertChain:   true,
 				Logger:            slog.New(slog.DiscardHandler),
-			})
+			}
+			_, err := Sync(context.Background(), cfg)
 			require.ErrorIs(t, err, ErrLedgerStateTooRecent)
 			_, loaded, err := set.Tip()
 			require.NoError(t, err)
 			require.False(t, loaded, "no ledger state may be loaded")
+			runtime, err := openDatabase(
+				context.Background(), cfg, slog.New(slog.DiscardHandler), 1,
+			)
+			require.NoError(t, err)
+			status, err := runtime.Database.GetSyncState("sync_status", nil)
+			require.NoError(t, err)
+			require.Empty(t, status, "a refused state must not leave the run to resume")
+			require.NoError(t, runtime.Close(context.Background()))
+
+			// The next run takes the aggregator's latest artifact.
+			eligible, eligibleHashes := ancillaryChunkAfter(
+				t, 1100, 3, certifiedHash,
+			)
+			next := newV2Fixture(t, v2FixtureOptions{
+				validImmutable: true,
+				ancillaryChunk: eligible,
+				ancillaryLedgerState: minimalLedgerState(
+					t, 1100, eligibleHashes[2],
+				),
+				ancillaryLedgerSlot: 1100,
+			})
+			cfg.UtxoSet = newSyncTestSet(t)
+			cfg.CardanoNodeConfig = testNodeConfigWithMithrilKeys(
+				t, next.genesisVKey, next.ancillaryVKey,
+			)
+			cfg.AggregatorURL = next.server.URL
+			result, err := Sync(context.Background(), cfg)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1100), result.LedgerSlot)
 		})
 	}
 }
@@ -314,7 +344,7 @@ func TestRollbackAfterLoadAtAncillaryChunkTip(t *testing.T) {
 
 	unlock, err := db.LockImmutable(ctx)
 	require.NoError(t, err)
-	stored, err := landAncillaryChunk(ctx, db, blocks, true)
+	stored, err := landAncillaryChunk(ctx, db, blocks)
 	unlock()
 	require.NoError(t, err)
 	require.Equal(t, 3, stored)
@@ -384,6 +414,79 @@ func TestRollbackAfterLoadAtAncillaryChunkTip(t *testing.T) {
 	)
 	_, err = set.Rollback(below)
 	require.ErrorIs(t, err, badgerutxo.ErrRollbackBeyondJournal)
+}
+
+// TestLandAncillaryChunkPromotesCopiedBodies covers an import that copies
+// block bodies into a database whose recorded ImmutableDB tip lags the
+// certified chain. A state above the recorded tip is refused, and storing the
+// signed chunk moves the recorded tip to the chunk's last block, so the state
+// taken there loads.
+func TestLandAncillaryChunkPromotesCopiedBodies(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	logger := slog.New(slog.DiscardHandler)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:   t.TempDir(),
+		Logger:    logger,
+		Immutable: database.ImmutableConfig{Enabled: true, ChunkSlots: 1000},
+	})
+	require.NoError(t, err)
+
+	certifiedFiles, certifiedHashes := validImmutableChunk(
+		t, 999, 2, common.Blake2b256{},
+	)
+	certifiedDir := t.TempDir()
+	for name, content := range certifiedFiles {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(certifiedDir, filepath.Base(name)), content, 0o640,
+		))
+	}
+	cm, err := chain.NewManager(ctx, db, nil)
+	require.NoError(t, err)
+	_, err = node.CopyImmutableBlocks(
+		ctx, cm.PrimaryChain(), immutableBlocksIn(t, certifiedDir),
+	)
+	require.NoError(t, err)
+	first, err := database.BlockByPoint(
+		ctx, db, ocommon.NewPoint(998, certifiedHashes[0]),
+	)
+	require.NoError(t, err)
+	_, err = db.PromoteThrough(ctx, first.ID)
+	require.NoError(t, err)
+
+	trio, hashes := ancillaryChunkAfter(t, 1100, 3, certifiedHashes[1])
+	result := signedAncillary(t, trio, nil)
+	blocks, err := readAncillaryChunk(logger, result, 0)
+	require.NoError(t, err)
+	immutableTip := ancillaryTip(
+		ocommon.NewPoint(999, certifiedHashes[1]), blocks,
+	)
+	require.Equal(t, ocommon.NewPoint(1100, hashes[2]), immutableTip)
+
+	// Stored as bodies only, the chunk's blocks are above the recorded tip.
+	cm, err = chain.NewManager(ctx, db, nil)
+	require.NoError(t, err)
+	_, err = node.CopyImmutableBlocks(ctx, cm.PrimaryChain(), blocks)
+	require.NoError(t, err)
+	require.ErrorIs(
+		t,
+		requireStateInImmutableDB(ctx, db, immutableTip, immutableTip),
+		ErrLedgerStateTooRecent,
+	)
+
+	unlock, err := db.LockImmutable(ctx)
+	require.NoError(t, err)
+	_, err = landAncillaryChunk(ctx, db, blocks)
+	unlock()
+	require.NoError(t, err)
+
+	own, ok := db.ImmutablePoint()
+	require.True(t, ok)
+	require.Equal(t, immutableTip, own)
+	require.NoError(
+		t, requireStateInImmutableDB(ctx, db, immutableTip, immutableTip),
+	)
 }
 
 // TestSnapshotBackfillLoadsStateAtSignedAncillaryChunkTip requires a restore

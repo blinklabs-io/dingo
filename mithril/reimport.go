@@ -174,6 +174,7 @@ func ReimportLedgerState(
 		)
 		if errors.Is(err, errNotOnLocalChain) ||
 			errors.Is(err, errBlocksNotStored) ||
+			errors.Is(err, ErrLedgerStateTooRecent) ||
 			errors.Is(err, ledgerstate.ErrNoUsableLedgerState) {
 			logger.Info(
 				"mithril: artifact has no usable ledger state for the local chain",
@@ -253,15 +254,10 @@ func reimportFromArtifact(
 	defer result.Cleanup(logger)
 	slot, hash, err := importLedgerState(
 		ctx, cfg.DB, logger, cfg.CardanoNodeConfig, result,
-		true, cfg.LocalTip.Slot, cfg.UtxoSet,
+		true, immutableBoundSlot(cfg.DB, cfg.LocalTip.Slot), cfg.UtxoSet,
 		func(ledgerstate.ImportProgress) {},
 		func(p *preparedLedgerStateImport) error {
 			point := p.point()
-			if err := refuseStateAboveImmutableTip(
-				cfg.DB, cfg.LocalTip, point,
-			); err != nil {
-				return err
-			}
 			onChain, err := cfg.OnChain(ctx, point)
 			if err != nil {
 				return fmt.Errorf("check the ledger state's tip on the chain: %w", err)
