@@ -985,6 +985,8 @@ func TestRemoteClientPrepareReplacesASessionThatGoesStaleBeforeTheSlot(
 
 	require.NoError(t, c.Prepare())
 	prepared := a.accepts.Load()
+	require.Equal(t, int32(2), prepared,
+		"Prepare must replace a session that goes stale before the slot")
 	// The leader slot's sign comes about 3.5s after the prepare.
 	age(3500 * time.Millisecond)
 	sig, err := c.Sign(0, []byte("header"))
@@ -1034,4 +1036,27 @@ func TestRemoteClientPrepareKeepsAFreshSessionWhenTheReplacementFails(
 	c.mu.Unlock()
 	require.True(t, kept,
 		"a failed replacement must not drop a session that is still fresh")
+}
+
+func TestRemoteClientPrepareClosesTheSessionItReplaces(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	old := c.conn
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	require.NoError(t, c.Prepare())
+	require.Equal(t, int32(2), a.accepts.Load())
+	c.mu.Lock()
+	replaced := c.conn != old
+	c.mu.Unlock()
+	require.True(t, replaced)
+	require.ErrorIs(t, old.SetDeadline(time.Time{}), net.ErrClosed,
+		"the replaced session must be closed once its successor is admitted")
 }
