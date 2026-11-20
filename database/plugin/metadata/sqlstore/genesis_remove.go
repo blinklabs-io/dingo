@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -27,7 +28,7 @@ import (
 // spent, not marked deleted, not a collateral return, and referenced by no
 // asset, reference input or collateral edge. The zero amount ties the row to
 // a zero-coin output; core storage mode stores the amount as well.
-const unspentGenesisUtxoQuery = `
+const unspentGenesisUtxoQuery = `-- name: GetUnspentGenesisUtxo :one
 SELECT u.id FROM utxo u
 JOIN "transaction" t ON t.id = u.tx_id
 WHERE t.hash = ? AND u.output_idx = ?
@@ -42,7 +43,7 @@ WHERE t.hash = ? AND u.output_idx = ?
 // unreferencedGenesisTransactionQuery selects the row of a genesis
 // transaction, one applied at slot 0, that no output, spend or edge refers
 // to.
-const unreferencedGenesisTransactionQuery = `
+const unreferencedGenesisTransactionQuery = `-- name: GetUnreferencedGenesisTransaction :one
 SELECT t.id FROM "transaction" t
 WHERE t.hash = ?
   AND EXISTS (
@@ -53,6 +54,28 @@ WHERE t.hash = ?
       SELECT 1 FROM utxo x WHERE x.collateral_return_for_tx_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM utxo_reference_edge e WHERE e.tx_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM utxo_collateral_edge e WHERE e.tx_id = t.id)`
+
+// genesisUtxoDeletes delete one output by its row id, its dependent rows
+// before the row they reference.
+var genesisUtxoDeletes = []string{
+	`-- name: DeleteGenesisUtxoAddress :exec
+DELETE FROM utxo_address WHERE utxo_id = ?`,
+	`-- name: DeleteGenesisUtxoPointer :exec
+DELETE FROM utxo_pointer WHERE utxo_id = ?`,
+	`-- name: DeleteGenesisUtxoReferenceScript :exec
+DELETE FROM utxo_reference_script WHERE utxo_id = ?`,
+	`-- name: DeleteGenesisUtxo :exec
+DELETE FROM utxo WHERE id = ?`,
+}
+
+const (
+	deleteGenesisAddressTransactions = `-- name: DeleteGenesisAddressTransactions :exec
+DELETE FROM address_transaction WHERE transaction_id = ?`
+	deleteGenesisAppliedTransaction = `-- name: DeleteGenesisAppliedTransaction :execresult
+DELETE FROM applied_transaction WHERE tx_id = ?`
+	deleteGenesisTransaction = `-- name: DeleteGenesisTransaction :exec
+DELETE FROM "transaction" WHERE id = ?`
+)
 
 // DeleteUnspentGenesisUtxos removes the zero-coin outputs named by refs that
 // are unspent, with their address, pointer and reference-script rows, and then
@@ -87,19 +110,10 @@ func (s *Store) DeleteUnspentGenesisUtxos(
 				if !found {
 					continue
 				}
-				for _, table := range []string{
-					"utxo_address", "utxo_pointer", "utxo_reference_script",
-				} {
-					if _, err := db.ExecContext(
-						ctx, "DELETE FROM "+table+" WHERE utxo_id = ?", id,
-					); err != nil {
-						return fmt.Errorf("delete %s: %w", table, err)
+				for _, query := range genesisUtxoDeletes {
+					if _, err := db.ExecContext(ctx, query, id); err != nil {
+						return fmt.Errorf("delete genesis output: %w", err)
 					}
-				}
-				if _, err := db.ExecContext(
-					ctx, "DELETE FROM utxo WHERE id = ?", id,
-				); err != nil {
-					return fmt.Errorf("delete utxo: %w", err)
 				}
 				removed = append(removed, ref)
 			}
@@ -116,14 +130,12 @@ func (s *Store) DeleteUnspentGenesisUtxos(
 				// The application row goes before the identity row it
 				// references.
 				if _, err := db.ExecContext(
-					ctx,
-					"DELETE FROM address_transaction WHERE transaction_id = ?",
-					id,
+					ctx, deleteGenesisAddressTransactions, id,
 				); err != nil {
 					return fmt.Errorf("delete genesis transaction: %w", err)
 				}
 				result, err := db.ExecContext(
-					ctx, "DELETE FROM applied_transaction WHERE tx_id = ?", id,
+					ctx, deleteGenesisAppliedTransaction, id,
 				)
 				if err != nil {
 					return fmt.Errorf("delete genesis transaction: %w", err)
@@ -134,7 +146,7 @@ func (s *Store) DeleteUnspentGenesisUtxos(
 				}
 				applied += uint64(n) //nolint:gosec // a row count
 				if _, err := db.ExecContext(
-					ctx, `DELETE FROM "transaction" WHERE id = ?`, id,
+					ctx, deleteGenesisTransaction, id,
 				); err != nil {
 					return fmt.Errorf("delete genesis transaction: %w", err)
 				}
@@ -157,7 +169,7 @@ func queryOneID(
 ) (int64, bool, error) {
 	var id int64
 	err := db.QueryRowContext(ctx, query, args...).Scan(&id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {
