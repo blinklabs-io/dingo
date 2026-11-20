@@ -193,7 +193,7 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 
 func TestUtxoOrderingAssetFilterResultsSQLite(t *testing.T) {
 	t.Parallel()
-	testUtxoOrderingAssetFilter(t, newMigratedSQLiteStore(t))
+	testUtxoOrderingAssetFilter(t, withAPIStorage(newMigratedSQLiteStore(t)))
 }
 
 // With an address filter the live set is already narrowed, so the asset

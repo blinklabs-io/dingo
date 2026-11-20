@@ -134,7 +134,14 @@ func Apply(cfg *config.Config) (err error) {
 		return err
 	}
 
-	persisted, ok := readPersistedGateValues(cfg)
+	if err := refuseInterruptedBackfill(cfg); err != nil {
+		return err
+	}
+
+	persisted, ok, err := readPersistedGateValues(cfg)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}
@@ -254,6 +261,17 @@ func checkMetadataPluginSidecar(cfg *config.Config) error {
 	)
 }
 
+// ReadPersistedGateValues returns the node settings persisted in the metadata
+// store at cfg.DatabasePath, opened alone and closed again. ok is false when
+// the store cannot be opened or read. err is the refusal of a store that no
+// later open may migrate (metadata.ErrInterruptedBackfill); every other
+// failure is left for the open that follows to report.
+func ReadPersistedGateValues(
+	cfg *config.Config,
+) (values nodesettings.Values, ok bool, err error) {
+	return readPersistedGateValues(cfg)
+}
+
 // readPersistedGateValues opens only the metadata store at cfg.DatabasePath
 // and merges the legacy node_settings row with node_settings_gate the same
 // way database/commit_timestamp.go's persistedGateValues does: the legacy
@@ -268,15 +286,47 @@ func checkMetadataPluginSidecar(cfg *config.Config) error {
 // leaves database.New to report the real problem properly.
 func readPersistedGateValues(
 	cfg *config.Config,
-) (values nodesettings.Values, ok bool) {
+) (values nodesettings.Values, ok bool, err error) {
+	values, ok, err = readGateValuesFrom(cfg, false, cfg.StorageMode)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	provider := cfg.Plugins.Storage.Metadata.Provider
+	if values["indexer_layout"] != config.IndexerLayoutSplit ||
+		(provider != "postgres" && provider != "mysql") {
+		return values, true, nil
+	}
+	// The configured PostgreSQL or MySQL database of a split node is its
+	// IndexerDB. The node's settings are the consensus namespace's, as the
+	// SQLite consensus store's are; until adoption has copied them there,
+	// the IndexerDB's are the only ones recorded.
+	core, coreOK, _ := readGateValuesFrom(cfg, true, "core")
+	if !coreOK || core["network"] == "" {
+		return values, true, nil
+	}
+	return core, true, nil
+}
+
+// newHost builds the plugin host readGateValuesFrom opens a store on. Tests
+// replace it to register a stand-in provider.
+var newHost = internalplugins.NewHost
+
+// readGateValuesFrom opens the configured metadata store alone, or its
+// consensus namespace when coreNamespace is set, and returns its merged
+// settings.
+func readGateValuesFrom(
+	cfg *config.Config,
+	coreNamespace bool,
+	storageMode string,
+) (values nodesettings.Values, ok bool, err error) {
 	ctx := context.Background()
-	host, err := internalplugins.NewHost()
+	host, err := newHost()
 	if err != nil {
 		slog.Debug(
 			"settingsresolve: failed to build plugin host",
 			"error", err,
 		)
-		return nil, false
+		return nil, false, nil
 	}
 	defer func() {
 		if stopErr := host.Stop(ctx); stopErr != nil {
@@ -294,19 +344,23 @@ func readPersistedGateValues(
 		cfg.Plugins.Storage.Metadata.Provider,
 		cfg.Plugins.Storage.Metadata.Config,
 		metadata.ProviderDependencies{
+			CoreNamespace:  coreNamespace,
 			DataDir:        cfg.DatabasePath,
-			StorageMode:    cfg.StorageMode,
+			StorageMode:    storageMode,
 			MaxConnections: 1,
 			Logger:         slog.Default(),
 		},
 	)
 	if err != nil {
+		if errors.Is(err, metadata.ErrInterruptedBackfill) {
+			return nil, false, err
+		}
 		slog.Debug(
 			"settingsresolve: failed to open metadata store; leaving configuration unresolved",
 			"error",
 			err,
 		)
-		return nil, false
+		return nil, false, nil
 	}
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
@@ -323,7 +377,7 @@ func readPersistedGateValues(
 			"settingsresolve: failed to read legacy node settings",
 			"error", err,
 		)
-		return nil, false
+		return nil, false, nil
 	}
 	gates, err := store.GetNodeSettingsGates(context.Background())
 	if err != nil {
@@ -331,7 +385,7 @@ func readPersistedGateValues(
 			"settingsresolve: failed to read node settings gates",
 			"error", err,
 		)
-		return nil, false
+		return nil, false, nil
 	}
 
 	values = make(nodesettings.Values, len(gates)+2)
@@ -344,7 +398,7 @@ func readPersistedGateValues(
 		}
 	}
 	maps.Copy(values, gates)
-	return values, true
+	return values, true, nil
 }
 
 // overrideEligibleGateNames returns the set of gate names Apply is allowed
@@ -445,10 +499,16 @@ func gateBindings() []gateBinding {
 		{
 			name:       "storage_mode",
 			provenance: []string{"StorageMode"},
+			// The gate belongs to the consensus store, which is core on the
+			// split layout whatever StorageMode says: that value is the
+			// IndexerDB's.
 			configuredValue: func(cfg *config.Config) (string, bool) {
-				return cfg.StorageMode, true
+				return cfg.ConsensusStorageMode(), true
 			},
 			applyEffective: func(cfg *config.Config, value string) {
+				if cfg.SplitIndexer() {
+					return
+				}
 				cfg.StorageMode = value
 			},
 		},

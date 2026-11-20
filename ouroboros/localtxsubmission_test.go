@@ -94,6 +94,32 @@ func TestLocalTxSubmissionRejectReason_ConwayGenericUsesMempoolFailure(
 	assert.Equal(t, expected, wire)
 }
 
+type submittedEraTestError struct {
+	era uint
+	err error
+}
+
+func (e submittedEraTestError) Error() string       { return e.err.Error() }
+func (e submittedEraTestError) Unwrap() error       { return e.err }
+func (e submittedEraTestError) SubmissionEra() uint { return e.era }
+
+func TestLocalTxSubmissionRejectReasonUsesTranslatedEra(t *testing.T) {
+	t.Parallel()
+
+	err := localTxSubmissionRejectReason(
+		gledger.EraIdBabbage,
+		submittedEraTestError{
+			era: uint(gledger.EraIdConway),
+			err: errors.New("translated validation failure"),
+		},
+	)
+	var reason cborRejectReason
+	require.ErrorAs(t, err, &reason)
+	wire, marshalErr := reason.MarshalCBOR()
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(wire), "translated validation failure")
+}
+
 func TestLocalTxSubmissionRejectReason_ConwayStructuredFailures(t *testing.T) {
 	t.Parallel()
 

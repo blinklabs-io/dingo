@@ -24,6 +24,14 @@ type NetworkState struct {
 	Slot     uint64
 }
 
+// NetworkDonation is the treasury donations of the block at Slot, in
+// Epoch.
+type NetworkDonation struct {
+	Slot   uint64
+	Epoch  uint64
+	Amount uint64
+}
+
 // SyncState stores ephemeral key-value pairs used during
 // one-time sync/load operations. Cleaned up after completion.
 type SyncState struct {

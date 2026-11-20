@@ -64,7 +64,17 @@ func budgetChain(
 				StakeDistributionParty{PartyID: fmt.Sprintf("p%d", s), Stake: 1},
 			)
 		}
+		// The genesis certificate is in epoch 0 and announces epoch 1's AVK
+		// and parameters; the rest of the chain is epoch 1.
+		cert.Epoch = 1
+		cert.ProtocolMessage.MessageParts["current_epoch"] = "1"
 		if i == length-1 {
+			cert.Epoch = 0
+			cert.ProtocolMessage.MessageParts = map[string]string{
+				"current_epoch":                   "0",
+				"next_aggregate_verification_key": cert.AggregateVerificationKey,
+				"next_protocol_parameters":        cert.Metadata.Parameters.ComputeHash(),
+			}
 			cert.MultiSignature = ""
 			cert.GenesisSignature = "genesis_sig"
 			finalizeTestCertificate(t, &cert)
@@ -228,19 +238,32 @@ func TestGetCertificateBodyLimit(t *testing.T) {
 		t.Cleanup(server.Close)
 		return NewClient(server.URL, WithAllowInsecureHTTP())
 	}
-	body := func(n int) string {
-		const frame = `{"hash":""}`
-		return `{"hash":"` + strings.Repeat("a", n-len(frame)) + `"}`
+	frame, err := json.Marshal(Certificate{
+		Metadata: CertificateMetadata{
+			InitiatedAt: "2025-01-01T00:00:00Z",
+			SealedAt:    "2025-01-01T00:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+	limit := int64(len(frame)) + 32
+	// body pads the certificate's hash so the whole body is n bytes.
+	body := func(n int64) string {
+		return strings.Replace(
+			string(frame),
+			`"hash":""`,
+			`"hash":"`+strings.Repeat("a", int(n)-len(frame))+`"`,
+			1,
+		)
 	}
 
-	_, size, err := serve(body(64)).getCertificateWithLimit(
-		context.Background(), "h", 64,
+	_, size, err := serve(body(limit)).getCertificateWithLimit(
+		context.Background(), "h", limit,
 	)
 	require.NoError(t, err, "a body exactly at the limit is accepted")
-	require.Equal(t, int64(64), size)
+	require.Equal(t, limit, size)
 
-	_, _, err = serve(body(65)).getCertificateWithLimit(
-		context.Background(), "h", 64,
+	_, _, err = serve(body(limit+1)).getCertificateWithLimit(
+		context.Background(), "h", limit,
 	)
 	require.ErrorIs(t, err, errCertificateChainBudget)
 
@@ -540,25 +563,84 @@ func TestProtocolMessagePartsCap(t *testing.T) {
 		for i := range entries {
 			entries[i] = fmt.Sprintf(`"k%d":"v"`, i)
 		}
-		return `{"protocol_message":{"message_parts":{` +
-			strings.Join(entries, ",") + `}}}`
+		return `{"message_parts":{` + strings.Join(entries, ",") + `}}`
 	}
 
-	var cert Certificate
+	var msg ProtocolMessage
 	require.NoError(t, json.Unmarshal(
-		[]byte(parts(maxProtocolMessageParts)), &cert,
+		[]byte(parts(maxProtocolMessageParts)), &msg,
 	), "parts exactly at the cap are accepted")
-	require.Len(t, cert.ProtocolMessage.MessageParts, maxProtocolMessageParts)
-	require.Equal(t, "v", cert.ProtocolMessage.MessageParts["k0"])
+	require.Len(t, msg.MessageParts, maxProtocolMessageParts)
+	require.Equal(t, "v", msg.MessageParts["k0"])
 
-	err := json.Unmarshal([]byte(parts(maxProtocolMessageParts+1)), &cert)
+	err := json.Unmarshal([]byte(parts(maxProtocolMessageParts+1)), &msg)
 	require.ErrorIs(t, err, errCertificateChainBudget)
 
-	var msg ProtocolMessage
+	// A certificate reaches the same bounded decoder after its shape is
+	// checked.
+	cert := Certificate{
+		Metadata: CertificateMetadata{
+			InitiatedAt: "2025-01-01T00:00:00Z",
+			SealedAt:    "2025-01-01T00:00:00Z",
+		},
+	}
+	encoded, err := json.Marshal(cert)
+	require.NoError(t, err)
+	oversized := strings.Replace(
+		string(encoded),
+		`"message_parts":{}`,
+		parts(maxProtocolMessageParts + 1)[1:len(parts(maxProtocolMessageParts+1))-1],
+		1,
+	)
+	require.NotEqual(t, string(encoded), oversized)
+	err = json.Unmarshal([]byte(oversized), &cert)
+	require.ErrorIs(t, err, errCertificateChainBudget)
+
 	require.NoError(t, json.Unmarshal([]byte(`{"message_parts":null}`), &msg))
 	require.Nil(t, msg.MessageParts)
 	require.NoError(t, json.Unmarshal([]byte(`{}`), &msg))
 	require.Nil(t, msg.MessageParts)
 	require.Error(t, json.Unmarshal([]byte(`{"message_parts":[]}`), &msg))
 	require.Error(t, json.Unmarshal([]byte(`{"message_parts":{"a":1}}`), &msg))
+}
+
+// The collection bounds must count the members the decode reads. encoding/json
+// matches keys case-insensitively and lets the last one win, while the
+// serde shape keeps only the exact key, so a count taken from the raw
+// message reads an empty alias and lets the real array through.
+func TestParseSTMAggregateSignatureBoundsSignersBehindCaseAlias(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(
+		"testdata/reference/preprod-cardano-blocks-transactions.json",
+	)
+	require.NoError(t, err)
+	var cert struct {
+		MultiSignature string `json:"multi_signature"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &cert))
+	msg, err := hex.DecodeString(cert.MultiSignature)
+	require.NoError(t, err)
+	var aggregate struct {
+		Signatures []json.RawMessage `json:"signatures"`
+		BatchProof json.RawMessage   `json:"batch_proof"`
+	}
+	require.NoError(t, json.Unmarshal(msg, &aggregate))
+	require.NotEmpty(t, aggregate.Signatures)
+
+	sigs := make([]json.RawMessage, stmMaxSigners+1)
+	for i := range sigs {
+		sigs[i] = aggregate.Signatures[0]
+	}
+	sigsJSON, err := json.Marshal(sigs)
+	require.NoError(t, err)
+	for _, alias := range []string{"SIGNATURES", "Signatures"} {
+		forged := `{"signatures":` + string(sigsJSON) +
+			`,"batch_proof":` + string(aggregate.BatchProof) +
+			`,"` + alias + `":[]}`
+		_, err := parseSTMAggregateSignature(
+			hex.EncodeToString([]byte(forged)),
+		)
+		require.ErrorContains(t, err, "verification budget exceeded", alias)
+	}
 }

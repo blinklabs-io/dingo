@@ -31,12 +31,11 @@ import (
 )
 
 const (
-	txsubmissionRequestTxIdsCount        = 10              // Number of TxIds to request from peer at one time
-	txsubmissionMaxConsecutiveRateLimits = 3               // Drop TxIds after this many consecutive hits
-	txsubmissionMaxAdmissionRetryStreak  = 3               // Drop one offered TX after this many lost headroom races
-	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
-	txsubmissionBaseBackoff              = 150 * time.Millisecond
-	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+	txsubmissionRequestTxIdsCount       = 10              // Number of TxIds to request from peer at one time
+	txsubmissionMaxAdmissionRetryStreak = 3               // Drop one offered TX after this many transient admission failures
+	txsubmissionMaxBackoff              = 5 * time.Second // Cap on exponential backoff wait
+	txsubmissionBaseBackoff             = 150 * time.Millisecond
+	txsubmissionLogEvery                = 10 // Log every Nth rate limit hit after the 1st
 	// Match the reference TxSubmission V2 advertised-size discrepancy.
 	txsubmissionMaxSizeDiscrepancy uint64 = 32
 	// Give up on a peer only after this many consecutive rejected replies.
@@ -311,9 +310,9 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 	return d
 }
 
-// retryTxsubmissionAdmission retries add while the mempool reports it full.
-// waitForHeadroom receives the bytes the rejected admission needed, which the
-// pool measures after decoding and which can exceed the advertised size.
+// retryTxsubmissionAdmission retries transient admission failures. Capacity
+// failures wait for the bytes the rejected admission needed; a moved ledger
+// snapshot can retry immediately because AddTransaction obtains a new snapshot.
 func retryTxsubmissionAdmission(
 	add func() error,
 	waitForHeadroom func(need int64) bool,
@@ -324,22 +323,27 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		full, ok := errors.AsType[*mempool.MempoolFullError](err)
-		if !ok {
+		full, capacityFailure := errors.AsType[*mempool.MempoolFullError](err)
+		if !capacityFailure && !errors.Is(err, mempool.ErrPendingStateMoved) {
 			return err
 		}
 		retryStreak++
 		recordRetry(retryStreak)
 		if retryStreak >= txsubmissionMaxAdmissionRetryStreak {
 			return fmt.Errorf(
-				"%w after %d capacity failures: %w",
+				"%w after %d transient failures: %w",
 				errTxsubmissionAdmissionRetriesExhausted,
 				retryStreak,
 				err,
 			)
 		}
-		if !waitForHeadroom(int64(full.TxSize)) {
-			return errTxsubmissionAdmissionStopped
+		if capacityFailure {
+			if waitForHeadroom == nil {
+				return err
+			}
+			if !waitForHeadroom(int64(full.TxSize)) {
+				return errTxsubmissionAdmissionStopped
+			}
 		}
 	}
 }
@@ -471,6 +475,10 @@ func (o *Ouroboros) txsubmissionServerInit(
 		for {
 			headroom, limitAdmission := o.mempool.(mempool.AdmissionHeadroom)
 			requestCount := txsubmissionRequestTxIdsCount
+			if limiter := o.txSubmissionRateLimiter; limiter != nil &&
+				limiter.burst >= 1 && limiter.burst < float64(requestCount) {
+				requestCount = int(limiter.burst)
+			}
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
 					1,
@@ -523,65 +531,35 @@ func (o *Ouroboros) txsubmissionServerInit(
 				return
 			}
 			if len(txIds) > 0 {
-				// Check per-peer rate limit before processing
-				if o.txSubmissionRateLimiter != nil &&
-					!o.txSubmissionRateLimiter.Allow(
-						ctx.ConnectionId,
-						len(txIds),
-					) {
-					consecutiveRateLimits++
-					rateLimitTotal++
-
-					// Log throttle: 1st hit + every Nth
-					if consecutiveRateLimits == 1 ||
-						rateLimitTotal%txsubmissionLogEvery == 0 {
-						o.config.Logger.Warn(
-							"tx submission rate limit exceeded",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"tx_count", len(txIds),
-							"consecutive_hits", consecutiveRateLimits,
-							"total_hits", rateLimitTotal,
-						)
-					}
-
-					// Drop after N consecutive hits — peer will
-					// re-offer, goroutine parks on blocking
-					// RequestTxIds (zero CPU).
-					if consecutiveRateLimits > txsubmissionMaxConsecutiveRateLimits {
-						o.config.Logger.Info(
-							"dropping txids after sustained rate limiting",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"dropped_count", len(txIds),
-							"consecutive_hits", consecutiveRateLimits,
-						)
-						continue
-					}
-
-					// Exponential backoff with reused timer
-					wait := txsubmissionBackoffDuration(
-						consecutiveRateLimits,
-					)
-					backoffTimer.Reset(wait)
-					select {
-					case <-backoffTimer.C:
-						// Re-check after backoff; if still
-						// limited, loop back for next offer
-						if !o.txSubmissionRateLimiter.Allow(
-							ctx.ConnectionId,
-							len(txIds),
-						) {
-							continue
+				if o.txSubmissionRateLimiter != nil {
+					// RequestTxIds acknowledges the previous offer. Keep this
+					// offer until its bodies can be fetched, or rate limiting
+					// permanently loses transactions and their dependent inputs.
+					for !o.txSubmissionRateLimiter.Allow(ctx.ConnectionId, len(txIds)) {
+						consecutiveRateLimits++
+						rateLimitTotal++
+						if consecutiveRateLimits == 1 ||
+							rateLimitTotal%txsubmissionLogEvery == 0 {
+							o.config.Logger.Warn(
+								"tx submission rate limit exceeded",
+								"component", "network",
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+								"tx_count", len(txIds),
+								"consecutive_hits", consecutiveRateLimits,
+								"total_hits", rateLimitTotal,
+							)
 						}
-					case <-connDone:
-						return
+						backoffTimer.Reset(
+							txsubmissionBackoffDuration(consecutiveRateLimits),
+						)
+						select {
+						case <-backoffTimer.C:
+						case <-connDone:
+							return
+						}
 					}
-				} else {
 					consecutiveRateLimits = 0
 				}
 				requestedTxs := make(
@@ -727,38 +705,34 @@ func (o *Ouroboros) txsubmissionServerInit(
 						"connection_id", ctx.ConnectionId.String(),
 					)
 					// Admission headroom can be consumed by another peer
-					// between the wait above and this commit. Retry only
-					// capacity failures, and bound the retry streak so one
-					// contested offer cannot stall this peer indefinitely.
+					// between the wait above and this commit, and the ledger
+					// snapshot can move while the pool reconciles. Bound both
+					// retry paths so one offer cannot stall this peer.
+					var waitForHeadroom func(int64) bool
 					if limitAdmission {
-						err = retryTxsubmissionAdmission(
-							func() error {
-								return o.mempool.AddTransaction(
-									validationCtx,
-									uint(txBody.EraId),
-									txBody.TxBody,
-								)
-							},
-							func(need int64) bool {
-								// A transaction that cannot fit even an empty
-								// pool waits for the whole budget and is then
-								// dropped by the retry bound; asking for more
-								// would end intake for this peer.
-								limit := headroom.MaxAdmissionHeadroomBytes()
-								return headroom.WaitForAdmissionHeadroom(
-									min(need, limit),
-									connDone,
-								)
-							},
-							o.recordTxsubmissionAdmissionRetry,
-						)
-					} else {
-						err = o.mempool.AddTransaction(
-							validationCtx,
-							uint(txBody.EraId),
-							txBody.TxBody,
-						)
+						waitForHeadroom = func(need int64) bool {
+							// A transaction that cannot fit even an empty
+							// pool waits for the whole budget and is then
+							// dropped by the retry bound; asking for more
+							// would end intake for this peer.
+							limit := headroom.MaxAdmissionHeadroomBytes()
+							return headroom.WaitForAdmissionHeadroom(
+								min(need, limit),
+								connDone,
+							)
+						}
 					}
+					err = retryTxsubmissionAdmission(
+						func() error {
+							return o.mempool.AddTransaction(
+								validationCtx,
+								uint(txBody.EraId),
+								txBody.TxBody,
+							)
+						},
+						waitForHeadroom,
+						o.recordTxsubmissionAdmissionRetry,
+					)
 					if errors.Is(
 						err,
 						errTxsubmissionAdmissionStopped,
@@ -773,7 +747,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						errTxsubmissionAdmissionRetriesExhausted,
 					) {
 						o.config.Logger.Warn(
-							"dropping peer transaction after repeated mempool admission contention",
+							"dropping peer transaction after repeated transient mempool admission failures",
 							"component",
 							"network",
 							"protocol",

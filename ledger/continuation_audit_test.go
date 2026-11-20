@@ -232,6 +232,7 @@ func newLeiosAuditFixtureOpts(
 		return []cbor.RawMessage{rawTx, rawRepeatTx}, true
 	}
 
+	attachTestLiveSet(t, ls)
 	return &leiosAuditFixture{
 		chainsyncRollbackFixture: fixture,
 		certRB:                   certRB,

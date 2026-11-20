@@ -25,17 +25,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// FinalizeBackfillPlannerStats refreshes statistics once per completed backfill.
-// Call after critical index repair and before declaring the database ready.
-// A missing completion marker also repairs databases created by older releases.
-func FinalizeBackfillPlannerStats(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-) error {
-	return finalizeBackfillPlannerStats(ctx, db, logger, false)
-}
-
 // FinalizeMithrilBackfillPlannerStats permits sampled planner statistics for
 // a fresh bootstrap. Resumed databases retain the full statistics refresh.
 func FinalizeMithrilBackfillPlannerStats(

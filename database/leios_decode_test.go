@@ -56,7 +56,7 @@ func TestGetLeiosEBTxsReadsOwnTheirPayload(t *testing.T) {
 	db := newTestDB(t)
 	hash := bytes.Repeat([]byte{42}, 32)
 	want := []cbor.RawMessage{{0x81, 1}, {0x81, 2}}
-	require.NoError(t, db.SetLeiosEBTxs(7, hash, want))
+	require.NoError(t, db.SetLeiosEB(7, hash, []byte("manifest"), want))
 	first, err := db.GetLeiosEBTxs(hash, 7)
 	require.NoError(t, err)
 	second, err := db.GetLeiosEBTxs(hash, 7)

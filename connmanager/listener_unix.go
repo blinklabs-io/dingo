@@ -182,9 +182,13 @@ func validateUnixSocketParent(root *os.Root) error {
 	if int64(stat.Uid) != int64(os.Geteuid()) && stat.Uid != 0 {
 		return errors.New("unix socket parent must be owned by the current user or root")
 	}
-	if info.Mode().Perm()&0o022 != 0 {
+	// A sticky directory stops other users from removing or renaming the
+	// socket; the private quarantine and no-replace rename cover the rest.
+	if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
 		return errors.New(
-			"unix socket parent must not be writable by group or other users",
+			"unix socket parent must not be writable by group or other users " +
+				"without the sticky bit; set the sticky bit on it (chmod +t) " +
+				"or remove its group and other write access",
 		)
 	}
 	return nil

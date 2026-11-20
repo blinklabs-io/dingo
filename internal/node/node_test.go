@@ -561,7 +561,9 @@ func TestLogEffectiveConfigInfoLineHasNoSecrets(t *testing.T) {
 	}
 	if rec["component"] != "node" ||
 		rec["genesis_selection_mode"] != true ||
-		rec["health_ready_gap_slots"] != float64(config.DefaultHealthReadyGapSlots) {
+		rec["health_ready_gap_slots"] != float64(
+			config.DefaultHealthReadyGapSlots,
+		) {
 		t.Fatalf("unexpected fields: %v", rec)
 	}
 	for _, sentinel := range sentinels {
@@ -899,6 +901,17 @@ func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
 			ShelleyKESAgentClientCertFile:   "/keys/b/client.crt",
 			ShelleyKESAgentClientKeyFile:    "/keys/b/client.key",
 			ShelleyKESAgentServerSPKISHA256: strings.Repeat("ab", 32),
+			ShelleyKESAgentProfile:          "pool-b",
+		},
+		{
+			ShelleyVRFKey:                 "/keys/c/vrf.skey",
+			ShelleyOperationalCertificate: "/keys/c/node.cert",
+			ShelleyKESAgentAddresses: []string{
+				"agent-a.example:3105",
+				"agent-b.example:3105",
+			},
+			ShelleyKESAgentMode:      "sign",
+			ShelleyKESAgentPlaintext: true,
 		},
 	}
 	cfg := &config.Config{
@@ -918,7 +931,7 @@ func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
 		chainsync.HeaderSyncStrategyPrimary,
 	)
 
-	if got := built.BlockProducerPools(); !slices.Equal(got, want) {
+	if got := built.BlockProducerPools(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("block producer pools = %+v, want %+v", got, want)
 	}
 }
@@ -1505,4 +1518,14 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
+}
+
+func TestNodeStorageModeValidatesTheConfiguredMode(t *testing.T) {
+	t.Parallel()
+	mode, err := nodeStorageMode(&config.Config{StorageMode: "api"})
+	require.NoError(t, err)
+	require.Equal(t, dingo.StorageModeAPI, mode)
+
+	_, err = nodeStorageMode(&config.Config{StorageMode: "bogus"})
+	require.ErrorContains(t, err, "invalid storage mode")
 }

@@ -22,9 +22,12 @@ import (
 	"log/slog"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,8 +43,17 @@ type Config struct {
 	Logger       *slog.Logger
 	DataDir      string
 	StorageMode  string // "core" or "api"
-	Network      string // Cardano network name (e.g. "preview", "mainnet")
-	CacheConfig  CborCacheConfig
+	// Role is empty for the ledger's own database and RoleIndexer for the
+	// IndexerDB. An indexer database holds no commit timestamp: that value
+	// pairs the ledger's two stores, and the IndexerDB's own transaction
+	// carries its tip instead.
+	Role string
+	// IndexerLayout is "split" beside an IndexerDB and "shared" without one;
+	// empty means the caller does not know it and the indexer_layout gate is
+	// left unchecked.
+	IndexerLayout string
+	Network       string // Cardano network name (e.g. "preview", "mainnet")
+	CacheConfig   CborCacheConfig
 	// StrictUtxoValidation, when true, turns an unrecoverable consumed UTxO
 	// (not present in the metadata store and not reconstructable from the
 	// blob store) into a hard error for blocks past the recorded Mithril
@@ -69,13 +81,24 @@ type Config struct {
 	// produced this database.
 	BlobPlugin     string
 	MetadataPlugin string
+	// Immutable configures the ImmutableDB of promoted block bodies.
+	Immutable ImmutableConfig
 }
+
+// RoleIndexer is the Config.Role of an IndexerDB.
+const RoleIndexer = "indexer"
 
 // Stores contains the provider-owned storage services injected into a
 // Database. Their lifecycle remains owned by the plugin host.
 type Stores struct {
 	Blob     blob.BlobStore
 	Metadata metadata.MetadataStore
+	// Immutable provides the ImmutableDB. It is required only when the
+	// database uses one: a recorded state or an enabled configuration.
+	Immutable immplugin.ImmutableDB
+	// Leios is the endorser-block store. Nil lets the Database open its own
+	// under the data directory on first use and close it with Close.
+	Leios leiosdb.Store
 }
 
 // isNilStore reports whether an injected store is a nil interface or an
@@ -94,6 +117,25 @@ type Database struct {
 	config   *Config
 	logger   *slog.Logger
 	metadata metadata.MetadataStore
+	// liveUtxo is set when the ledger holds the live UTxO set outside the
+	// metadata store; see SetLiveUtxoSource.
+	liveUtxo bool
+	// drained is the persisted ledger-state latch; see FamilyDrained.
+	drained drainedMask
+	// nonceSource serves rollback nonce reads once the nonces family is
+	// drained; see SetNonceSource.
+	nonceSource atomic.Pointer[NonceSource]
+	// epochSource serves epoch and era switch reads once those families are
+	// drained; see SetEpochSource.
+	epochSource atomic.Pointer[EpochSource]
+	// pparamsSource serves protocol parameter, update proposal and sync
+	// marker reads once the pparams-updates family is drained; see
+	// SetPParamsSource. pparamsSourceLoaded caches that it holds them all.
+	pparamsSource       atomic.Pointer[PParamsSource]
+	pparamsSourceLoaded atomic.Bool
+	// poolSource serves pool reads once the pools-history family is
+	// drained.
+	poolSource atomic.Pointer[PoolSource]
 	// blobRef is the installed blob store, guarded by blobMu. See
 	// blob_store.go for the ownership, locking, and replacement rules that
 	// apply to both fields; nothing outside that file touches blobRef
@@ -110,8 +152,21 @@ type Database struct {
 	// retained_bound.go.
 	retained retainedBound
 
+	// immutable is the ImmutableDB handle; nil until a state record exists.
+	immutable *immutableRuntime
+	// immutableDB is the injected ImmutableDB service; nil when the caller
+	// supplied none.
+	immutableDB immplugin.ImmutableDB
+	// leios is the lazily opened endorser-block store; see leios.go.
+	leiosMu sync.Mutex
+	leios   leiosStoreState
+
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
+	// extraDiskSizes are disk figures other components report under
+	// dingo_database_size_bytes; see RegisterDiskSizeSource.
+	extraDiskMu     sync.Mutex
+	extraDiskSizes  map[string]*extraDiskSize
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
@@ -485,9 +540,25 @@ func (d *Database) Close() error {
 			close(d.sizeMetricsStop)
 			<-d.sizeMetricsDone
 		}
+		if rt := d.immutable; rt != nil {
+			rt.mu.Lock()
+			rt.dropStore()
+			rt.mu.Unlock()
+		}
+		d.closeErr = d.closeLeiosDB()
 	})
 	return d.closeErr
 }
+
+// isIndexer reports whether d is an IndexerDB. A Database built without a
+// Config is the ledger's.
+func (d *Database) isIndexer() bool {
+	return d.config != nil && d.config.Role == RoleIndexer
+}
+
+// IsIndexer reports whether d is an IndexerDB, whose metadata tip row its own
+// writer owns, and not the ledger's database.
+func (d *Database) IsIndexer() bool { return d.isIndexer() }
 
 func (d *Database) init(ctx context.Context) error {
 	if d.logger == nil {
@@ -496,8 +567,10 @@ func (d *Database) init(ctx context.Context) error {
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := d.checkCommitTimestamp(ctx); err != nil {
-		return err
+	if !d.isIndexer() {
+		if err := d.checkCommitTimestamp(ctx); err != nil {
+			return err
+		}
 	}
 	// Check immutable settings have not changed since initial sync
 	if err := d.CheckNodeSettings(ctx); err != nil {
@@ -553,11 +626,18 @@ func New(
 	if stores.Metadata == nil || isNilStore(stores.Metadata) {
 		return nil, errors.New("metadata store is required")
 	}
+	if stores.Immutable != nil && isNilStore(stores.Immutable) {
+		return nil, errors.New("immutable store must not be a typed nil")
+	}
 	db := &Database{
-		blobRef:  newBlobStoreRef(stores.Blob),
-		metadata: stores.Metadata,
-		logger:   configCopy.Logger,
-		config:   configCopy,
+		blobRef:     newBlobStoreRef(stores.Blob),
+		metadata:    stores.Metadata,
+		immutableDB: stores.Immutable,
+		logger:      configCopy.Logger,
+		config:      configCopy,
+	}
+	if stores.Leios != nil && !isNilStore(stores.Leios) {
+		db.leios.store = stores.Leios
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
@@ -646,12 +726,20 @@ func New(
 							metadataSizeGauge.Set(float64(size))
 						}
 					}
+					db.sampleExtraDiskSizes()
 				}
 			}
 		}()
 	}
+	// The marker-resolving read path goes in before anything reads a block.
+	if err := db.initImmutable(); err != nil {
+		return db, err
+	}
 	if err := db.init(ctx); err != nil {
 		// Database is available for recovery, so return it with error
+		return db, err
+	}
+	if err := db.recordImmutableState(); err != nil {
 		return db, err
 	}
 	if err := db.EnsureBlockInventory(); err != nil {

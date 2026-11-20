@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -200,6 +201,7 @@ func newWrappedBlobTestDB(
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](

@@ -43,11 +43,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/klauspost/compress/zstd"
@@ -217,6 +217,85 @@ func validImmutableChunk(
 	}, hashes
 }
 
+func testConwayPParams() *conway.ConwayProtocolParameters {
+	return &conway.ConwayProtocolParameters{
+		MinFeeA:            44,
+		MinFeeB:            155381,
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		KeyDeposit:         2000000,
+		PoolDeposit:        500000000,
+		MaxEpoch:           18,
+		NOpt:               500,
+		A0:                 &cbor.Rat{Rat: big.NewRat(3, 10)},
+		Rho:                &cbor.Rat{Rat: big.NewRat(3, 1000)},
+		Tau:                &cbor.Rat{Rat: big.NewRat(1, 5)},
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{
+			Major: 10,
+			Minor: 0,
+		},
+		MinPoolCost:    340000000,
+		AdaPerUtxoByte: 4310,
+		CostModels:     map[uint][]int64{1: {0}},
+		ExecutionCosts: common.ExUnitPrice{
+			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
+			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
+		},
+		MaxTxExUnits: common.ExUnits{
+			Memory: 10000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: common.ExUnits{
+			Memory: 50000000,
+			Steps:  40000000000,
+		},
+		MaxValueSize:         5000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpSecurityGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			UpdateToConstitution:  cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpNetworkGroup:        cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpEconomicGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpTechnicalGroup:      cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpGovGroup:            cbor.Rat{Rat: big.NewRat(1, 2)},
+			TreasuryWithdrawal:    cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		MinCommitteeSize:        5,
+		CommitteeTermLimit:      146,
+		GovActionValidityPeriod: 20,
+		GovActionDeposit:        100000000000,
+		DRepDeposit:             500000000,
+		DRepInactivityPeriod:    20,
+		MinFeeRefScriptCostPerByte: &cbor.Rat{
+			Rat: big.NewRat(1, 1),
+		},
+	}
+}
+
+// conwayTelescope builds a flat hard-fork telescope whose last entry is the
+// Conway era: one past entry per earlier era, then the current entry. The
+// import refuses ledger states from any earlier era.
+func conwayTelescope(pastEra, currentEra []byte) []any {
+	const conwayIndex = 6
+	entries := make([]any, 0, conwayIndex+1)
+	for range conwayIndex {
+		entries = append(entries, cbor.RawMessage(pastEra))
+	}
+	return append(entries, cbor.RawMessage(currentEra))
+}
+
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
 }
@@ -271,7 +350,46 @@ func minimalLedgerStateWithUTxOMap(
 	if len(utxoMap) == 0 {
 		utxoMap = emptyMap
 	}
-	utxoState, err := cbor.Encode([]any{cbor.RawMessage(utxoMap)})
+	pparams, err := cbor.Encode(testConwayPParams())
+	require.NoError(t, err)
+	// The import refuses pre-Conway states, and a Conway reconcile needs the
+	// governance state: no proposals, no committee, an empty pulsing state.
+	govState, err := cbor.Encode([]any{
+		[]any{
+			[]any{[]any{}, []any{}, []any{}, []any{}},
+			[]any{},
+		},
+		[]any{},
+		[]any{
+			[]any{
+				"https://example.com/constitution",
+				bytes.Repeat([]byte{0xAA}, 32),
+			},
+			nil,
+		},
+		cbor.RawMessage(pparams),
+		cbor.RawMessage(pparams),
+		cbor.RawMessage(pparams),
+		[]any{
+			[]any{
+				[]any{},
+				cbor.RawMessage(emptyMap),
+				cbor.RawMessage(emptyMap),
+				cbor.RawMessage(emptyMap),
+			},
+			[]any{
+				[]any{[]any{}, nil, nil, nil, nil, nil, nil},
+				[]any{}, []any{}, false,
+			},
+		},
+	})
+	require.NoError(t, err)
+	utxoState, err := cbor.Encode([]any{
+		cbor.RawMessage(utxoMap),
+		uint64(0),
+		uint64(0),
+		cbor.RawMessage(govState),
+	})
 	require.NoError(t, err)
 	ledgerState, err := cbor.Encode([]any{
 		cbor.RawMessage(certState),
@@ -318,9 +436,7 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(bound), cbor.RawMessage(shelleyState),
 	})
 	require.NoError(t, err)
-	telescope, err := cbor.Encode([]any{
-		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
-	})
+	telescope, err := cbor.Encode(conwayTelescope(pastEra, currentEra))
 	require.NoError(t, err)
 	neutralNonce, err := cbor.Encode([]any{uint64(0)})
 	require.NoError(t, err)
@@ -339,9 +455,9 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(bound), cbor.RawMessage(praosState),
 	})
 	require.NoError(t, err)
-	praosTelescope, err := cbor.Encode([]any{
-		cbor.RawMessage(pastEra), cbor.RawMessage(praosCurrentEra),
-	})
+	praosTelescope, err := cbor.Encode(
+		conwayTelescope(pastEra, praosCurrentEra),
+	)
 	require.NoError(t, err)
 	headerState, err := cbor.Encode([]any{
 		[]any{}, cbor.RawMessage(praosTelescope),
@@ -1210,9 +1326,9 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 	var immutableBlocksCopied atomic.Int64
 
 	_, err := Sync(context.Background(), SyncConfig{
-		Network:     "preprod",
-		DataDir:     t.TempDir(),
-		StorageMode: "core",
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: t.TempDir(),
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t, fixture.genesisVKey, fixture.ancillaryVKey,
 		),
@@ -1263,9 +1379,9 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	dataDir := t.TempDir()
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "core",
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t,
 			fixture.genesisVKey,
@@ -2428,255 +2544,4 @@ func (f *v2Fixture) requestedImmutables() []uint64 {
 	f.immutableMu.Lock()
 	defer f.immutableMu.Unlock()
 	return slices.Clone(f.immutableRequests)
-}
-
-func TestSyncV2APIModeRemovesImmutableTreeBeforeBackfill(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	var backfillStarted atomic.Bool
-	var treesAtBackfill atomic.Int64
-	treesAtBackfill.Store(-1)
-	countTrees := func() int64 {
-		matches, err := filepath.Glob(
-			filepath.Join(dataDir, ".mithril-cache", "immutable-*"),
-		)
-		require.NoError(t, err)
-		var trees int64
-		for _, match := range matches {
-			if hasChunkFiles(filepath.Join(match, "immutable")) {
-				trees++
-			}
-		}
-		return trees
-	}
-
-	_, err := Sync(context.Background(), SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-		OnProgress: func(progress SyncProgress) {
-			if progress.Phase == PhaseBackfill && progress.Active &&
-				backfillStarted.CompareAndSwap(false, true) {
-				treesAtBackfill.Store(countTrees())
-			}
-		},
-	})
-	require.NoError(t, err)
-	require.True(t, backfillStarted.Load(), "API sync must reach backfill")
-	require.Zero(
-		t,
-		treesAtBackfill.Load(),
-		"the extracted immutable tree must be removed before backfill starts",
-	)
-}
-
-func TestSyncV2APIModeResumesBackfillAfterImmutableTreeRemoved(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-
-	result, err := Sync(context.Background(), baseConfig)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), result.LedgerSlot)
-}
-
-// Once sync_status is "backfill" every block is in the blob store and the
-// extracted tree is gone, so resuming must run the backfill from its checkpoint
-// without contacting the aggregator or downloading the snapshot again.
-func TestSyncV2APIModeResumesBackfillWithoutAggregator(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-	cacheBefore := listCacheEntries(t, dataDir)
-
-	resumed := baseConfig
-	resumed.AggregatorURL = "http://127.0.0.1:1"
-	result, err := Sync(context.Background(), resumed)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), result.LedgerSlot)
-
-	db := openSyncedDB(t, dataDir)
-	status, err := db.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status)
-	require.Equal(
-		t, cacheBefore, listCacheEntries(t, dataDir),
-		"resume must not download or extract",
-	)
-}
-
-// The backfill resume path must apply the same pin checks as the other resume
-// paths: a pin recorded for another network cannot be finished against this
-// run's configuration.
-func TestSyncV2APIModeBackfillResumeRejectsPinForOtherNetwork(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     dataDir,
-		Logger:      slog.New(slog.DiscardHandler),
-		StorageMode: "api",
-	})
-	require.NoError(t, err)
-	pin, hasPin, err := getPinnedArtifact(db)
-	require.NoError(t, err)
-	require.True(t, hasPin)
-	pin.Network = "mainnet"
-	require.NoError(t, setPinnedArtifact(db, pin))
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	resumed := baseConfig
-	resumed.AggregatorURL = "http://127.0.0.1:1"
-	_, err = Sync(context.Background(), resumed)
-	require.ErrorContains(t, err, "pinned artifact")
-	require.ErrorContains(t, err, "network mainnet")
-}
-
-func listCacheEntries(t *testing.T, dataDir string) []string {
-	t.Helper()
-	var names []string
-	root := filepath.Join(dataDir, ".mithril-cache")
-	err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		names = append(names, path)
-		return nil
-	})
-	require.NoError(t, err)
-	return names
 }

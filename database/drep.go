@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // CreateDrep inserts a Drep row directly. See the MetadataStore
@@ -31,6 +32,10 @@ func (d *Database) CreateDrep(
 	txn *Txn,
 	drep *models.Drep,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	if txn != nil {
 		return d.governanceStore().CreateDrep(txn.Metadata(), drep)
 	}
@@ -47,6 +52,10 @@ func (d *Database) RestoreDrepStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().RestoreDrepStateAtSlot(
 			slot,
@@ -70,6 +79,10 @@ func (d *Database) GetDrep(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -93,6 +106,10 @@ func (d *Database) GetDrepByCredential(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -114,6 +131,10 @@ func (d *Database) GetActiveDreps(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.Drep, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -155,6 +176,10 @@ func (d *Database) InsertDrepIfAbsent(
 	active bool,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().InsertDrepIfAbsent(
 			credentialTag,
@@ -185,6 +210,14 @@ func (d *Database) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (uint64, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return 0, err
+	}
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return 0, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -207,6 +240,10 @@ func (d *Database) GetDRepDelegators(
 	drepCredential []byte,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -227,6 +264,10 @@ func (d *Database) GetDRepDelegatorsAtSlot(
 	slot uint64,
 	txn *Txn,
 ) (map[string][]models.StakeCredentialRef, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -246,6 +287,10 @@ func (d *Database) GetDrepsAtSlot(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.Drep, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -282,6 +327,14 @@ func (d *Database) GetDRepVotingPowerBatch(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -311,6 +364,14 @@ func (d *Database) GetDRepVotingPowerByType(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[uint64]uint64, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -342,6 +403,10 @@ func (d *Database) UpdateDRepActivity(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().UpdateDRepActivity(
 			credentialTag,
@@ -367,6 +432,10 @@ func (d *Database) BumpDormantDRepExpiries(
 	slot uint64,
 	txn *Txn,
 ) (int, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return 0, err
+	}
 	var affected int
 	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		var err error
@@ -383,6 +452,10 @@ func (d *Database) BumpDormantDRepExpiries(
 }
 
 func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return 0, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -391,6 +464,10 @@ func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, 
 }
 
 func (d *Database) ResetDormantDRepEpochs(ctx context.Context, slot uint64, txn *Txn) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().ResetDormantDRepEpochs(
 			slot,
@@ -407,6 +484,10 @@ func (d *Database) SetImportedDormantDRepEpochs(
 	dormantEpochs uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetImportedDormantDRepEpochs(
 			dormantEpochs,
@@ -430,6 +511,10 @@ func (d *Database) RecordDRepActivityEpoch(
 	activityEpoch uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().RecordDRepActivityEpoch(
 			credentialTag,
@@ -453,6 +538,10 @@ func (d *Database) GetExpiredDReps(
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.Drep, error) {
+	if d.FamilyDrained(nodesettings.FamilyDReps) {
+		err := drainedWrite(nodesettings.FamilyDReps)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()

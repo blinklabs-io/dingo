@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,6 +283,28 @@ type txsubmissionCorruptingService struct {
 // to mempool.Service so the relay pump uses its batched-request path.
 type txsubmissionServiceWithoutHeadroom struct {
 	mempool.Service
+}
+
+type txsubmissionTransientAdmissionService struct {
+	mempool.Service
+	mempool.AdmissionHeadroom
+	remaining atomic.Int64
+	attempts  atomic.Int64
+}
+
+func (s *txsubmissionTransientAdmissionService) AddTransaction(
+	ctx context.Context,
+	txType uint,
+	txBytes []byte,
+) error {
+	s.attempts.Add(1)
+	if s.remaining.Add(-1) >= 0 {
+		return fmt.Errorf(
+			"test ledger movement: %w",
+			mempool.ErrPendingStateMoved,
+		)
+	}
+	return s.Service.AddTransaction(ctx, txType, txBytes)
 }
 
 func (s *txsubmissionCorruptingService) NewConsumer(
@@ -1083,16 +1106,17 @@ func mustTxSubmissionTestTxId(t *testing.T, hash string) txsubmission.TxId {
 // loop itself, which the callback-level tests above cannot reach since
 // ctx.Server is a concrete network-backed type.
 type txSubmissionRelayHarness struct {
-	nodeA *Ouroboros
-	nodeB *Ouroboros
-	connA *ouroboros.Connection
-	connB *ouroboros.Connection
-	cmA   *connmanager.ConnectionManager
-	cmB   *connmanager.ConnectionManager
-	mA    *mempool.Mempool
-	mB    *mempool.Mempool
-	busA  *event.EventBus
-	busB  *event.EventBus
+	nodeA               *Ouroboros
+	nodeB               *Ouroboros
+	connA               *ouroboros.Connection
+	connB               *ouroboros.Connection
+	cmA                 *connmanager.ConnectionManager
+	cmB                 *connmanager.ConnectionManager
+	mA                  *mempool.Mempool
+	mB                  *mempool.Mempool
+	busA                *event.EventBus
+	busB                *event.EventBus
+	transientAdmissionA *txsubmissionTransientAdmissionService
 }
 
 // newTxSubmissionRelayHarness intentionally does not register any
@@ -1132,6 +1156,9 @@ type txSubmissionRelayHarnessOpts struct {
 	promRegistryA prometheus.Registerer
 	// rateLimiterA is node A's per-peer TxSubmission rate limiter.
 	rateLimiterA *txSubmissionRateLimiter
+	// pendingStateMovesA injects transient ledger movement before node A's
+	// real mempool admission.
+	pendingStateMovesA int64
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -1185,6 +1212,17 @@ func newTxSubmissionRelayHarnessWithOpts(
 		nodeAMempool = &txsubmissionServiceWithoutHeadroom{
 			Service: nodeAMempool,
 		}
+	}
+	var transientAdmissionA *txsubmissionTransientAdmissionService
+	if opts.pendingStateMovesA > 0 {
+		headroom, ok := nodeAMempool.(mempool.AdmissionHeadroom)
+		require.True(t, ok)
+		transientAdmissionA = &txsubmissionTransientAdmissionService{
+			Service:           nodeAMempool,
+			AdmissionHeadroom: headroom,
+		}
+		transientAdmissionA.remaining.Store(opts.pendingStateMovesA)
+		nodeAMempool = transientAdmissionA
 	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
@@ -1339,16 +1377,17 @@ func newTxSubmissionRelayHarnessWithOpts(
 	)
 
 	return &txSubmissionRelayHarness{
-		nodeA: nodeA,
-		nodeB: nodeB,
-		connA: connA,
-		connB: connB,
-		cmA:   cmA,
-		cmB:   cmB,
-		mA:    mA,
-		mB:    mB,
-		busA:  busA,
-		busB:  busB,
+		nodeA:               nodeA,
+		nodeB:               nodeB,
+		connA:               connA,
+		connB:               connB,
+		cmA:                 cmA,
+		cmB:                 cmB,
+		mA:                  mA,
+		mB:                  mB,
+		busA:                busA,
+		busB:                busB,
+		transientAdmissionA: transientAdmissionA,
 	}
 }
 
@@ -1425,6 +1464,31 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 	relayed := h.mA.Transactions()[0]
 	require.Equal(t, wantTx.Hash().String(), relayed.Hash)
 	require.Equal(t, txBytes, relayed.Cbor)
+}
+
+func TestTxSubmissionServerInitRetriesMovedAdmissionSnapshot(t *testing.T) {
+	t.Parallel()
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		pendingStateMovesA: 1,
+	})
+	defer h.close(t)
+
+	fixture := txsubmissionTestFixtures(t)[0]
+	addTxSubmissionTestFixtures(t, h.mB, fixture)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, admitted := h.mA.GetTransaction(fixture.hash)
+			return admitted
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a moved ledger snapshot to be retried before the offer is dropped",
+	)
+	require.Equal(t, int64(2), h.transientAdmissionA.attempts.Load())
 }
 
 // The real TxSubmission client advertises a size 32 bytes below the wrapped
@@ -2346,5 +2410,64 @@ func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
 				)
 			},
 		)
+	}
+}
+
+func TestTxSubmissionRetainsOfferUntilRateLimitRefills(t *testing.T) {
+	t.Parallel()
+	for _, batchRequests := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batched=%t", batchRequests), func(t *testing.T) {
+			t.Parallel()
+			fixtures := txsubmissionTestFixtures(t)[:2]
+			limiter := newTxSubmissionRateLimiter(1, 1)
+			frozen := time.Now()
+			var elapsed atomic.Int64
+			var calls atomic.Int32
+			deniedAfterBackoff := make(chan struct{})
+			// Freeze time through the denied retry so advancing to another offer
+			// cannot recover this transaction when tokens become available.
+			limiter.nowFunc = func() time.Time {
+				now := frozen.Add(time.Duration(elapsed.Load()))
+				if calls.Add(1) == 4 {
+					close(deniedAfterBackoff)
+				}
+				return now
+			}
+			h := newTxSubmissionRelayHarnessWithOpts(
+				t,
+				txSubmissionRelayHarnessOpts{
+					rateLimiterA:   limiter,
+					batchRequestsA: batchRequests,
+				},
+			)
+			defer h.close(t)
+			for _, fixture := range fixtures {
+				require.NoError(
+					t,
+					h.mB.AddTransaction(
+						context.Background(),
+						txsubmissionRelayTestEraId,
+						fixture.body,
+					),
+				)
+			}
+			require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+			select {
+			case <-deniedAfterBackoff:
+			case <-time.After(5 * time.Second):
+				t.Fatal("second offer never reached its denied retry")
+			}
+			elapsed.Store(int64(10 * time.Second))
+			require.Eventually(
+				t,
+				func() bool {
+					_, ok := h.mA.GetTransaction(fixtures[1].hash)
+					return ok
+				},
+				3*time.Second,
+				10*time.Millisecond,
+				"rate-limited offer must survive until it can be fetched",
+			)
+		})
 	}
 }

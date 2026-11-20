@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -242,116 +243,130 @@ func (d *Database) rollbackAfterSlot(
 	}
 	// Revert reward-account changes before account restoration can delete
 	// accounts registered after the rollback slot.
-	if err := d.DeleteAccountRewardsAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete account reward deltas after rollback: %w",
-			err,
-		)
-	}
-	// Restore account delegation state
-	if err := d.RestoreAccountStateAtSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"restore account state after rollback: %w",
-			err,
-		)
+	if !d.FamilyDrained(nodesettings.FamilyAccounts) {
+		if err := d.DeleteAccountRewardsAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete account reward deltas after rollback: %w",
+				err,
+			)
+		}
+		// Restore account delegation state
+		if err := d.RestoreAccountStateAtSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"restore account state after rollback: %w",
+				err,
+			)
+		}
 	}
 	// Restore DRep state
-	if err := d.RestoreDrepStateAtSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"restore DRep state after rollback: %w",
-			err,
-		)
+	if !d.FamilyDrained(nodesettings.FamilyDReps) {
+		if err := d.RestoreDrepStateAtSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"restore DRep state after rollback: %w",
+				err,
+			)
+		}
 	}
-	// Delete rolled-back protocol parameters
-	if err := d.DeletePParamsAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete protocol params after rollback: %w",
-			err,
-		)
+	// Delete rolled-back protocol parameters and updates. A drained family
+	// has no rows; the set drops its own in the same rollback.
+	if !d.pparamsDrained() {
+		if err := d.DeletePParamsAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete protocol params after rollback: %w",
+				err,
+			)
+		}
+		if err := d.DeletePParamUpdatesAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete protocol param updates after rollback: %w",
+				err,
+			)
+		}
 	}
-	// Delete rolled-back protocol parameter updates
-	if err := d.DeletePParamUpdatesAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete protocol param updates after rollback: %w",
-			err,
-		)
+	// Delete rolled-back governance proposals and votes. A drained family
+	// has no rows, and the set drops its own in the same rollback.
+	if !d.FamilyDrained(nodesettings.FamilyGovernance) {
+		if err := d.DeleteGovernanceProposalsAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete governance proposals after rollback: %w",
+				err,
+			)
+		}
+		if err := d.DeleteGovernanceVotesAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete governance votes after rollback: %w",
+				err,
+			)
+		}
 	}
-	// Delete rolled-back governance proposals
-	if err := d.DeleteGovernanceProposalsAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete governance proposals after rollback: %w",
-			err,
-		)
-	}
-	// Delete rolled-back governance votes
-	if err := d.DeleteGovernanceVotesAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete governance votes after rollback: %w",
-			err,
-		)
-	}
-	// Delete rolled-back constitutions
-	if err := d.DeleteConstitutionsAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete constitutions after rollback: %w",
-			err,
-		)
-	}
-	// Delete rolled-back committee state
-	if err := d.DeleteCommitteeMembersAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete committee state after rollback: %w",
-			err,
-		)
+	// A drained committee family has no rows to roll back; the set drops its
+	// own in the same rollback.
+	if !d.FamilyDrained(nodesettings.FamilyCommitteeConstitution) {
+		// Delete rolled-back constitutions
+		if err := d.DeleteConstitutionsAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete constitutions after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back committee state
+		if err := d.DeleteCommitteeMembersAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete committee state after rollback: %w",
+				err,
+			)
+		}
 	}
 	// Delete epoch entries whose nonces were computed from rolled-back
 	// blocks. Epochs starting after the rollback slot used blocks that no
 	// longer exist, so their nonces are stale and must be recomputed
 	// during re-sync.
-	if err := d.DeleteEpochsAfterSlot(
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete epochs after rollback: %w",
-			err,
-		)
+	if !d.FamilyDrained(nodesettings.FamilyEpochs) {
+		if err := d.DeleteEpochsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete epochs after rollback: %w",
+				err,
+			)
+		}
 	}
 	// An epoch row survives a rollback that stays inside its epoch, so an era
 	// translation applied mid-epoch must be undone explicitly.
@@ -367,7 +382,10 @@ func (d *Database) rollbackAfterSlot(
 	// distribution for an epoch whose boundary it never crossed, and a
 	// competing fork that does not reach that epoch must not leave one behind
 	// for leader-schedule, stake-distribution or epoch API reads.
-	if err := d.deleteEpochKeyedStateAfterRemainingEpochs(txn); err != nil {
+	if err := d.deleteEpochKeyedStateAfterRemainingEpochs(
+		point.Slot,
+		txn,
+	); err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
 	// Delete reward-state rows captured at epoch boundaries that no
@@ -384,7 +402,7 @@ func (d *Database) rollbackAfterSlot(
 	// Delete block nonce rows from the abandoned fork. Epoch nonces are
 	// derived from slot-range block_nonce lookups, so same-slot
 	// competitors and later fork rows must not survive rollback.
-	if err := d.DeleteBlockNoncesAfterPoint(
+	if err := d.deleteBlockNoncesAfterPointUnlessDrained(
 		point,
 		txn,
 	); err != nil {
@@ -394,27 +412,55 @@ func (d *Database) rollbackAfterSlot(
 		)
 	}
 	// Delete rolled-back network state records
-	if err := d.DeleteNetworkStateAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete network state after rollback: %w",
-			err,
-		)
+	if !d.FamilyDrained(nodesettings.FamilyNetworkDonations) {
+		if err := d.DeleteNetworkStateAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete network state after rollback: %w",
+				err,
+			)
+		}
 	}
 	// Delete rolled-back treasury donation records
-	if err := d.DeleteNetworkDonationsAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
+	if !d.FamilyDrained(nodesettings.FamilyNetworkDonations) {
+		if err := d.DeleteNetworkDonationsAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"delete network donations after rollback: %w",
+				err,
+			)
+		}
+	}
+	// Before the UTxO deletes, which can exhaust the blob transaction's
+	// budget: a stale marker would keep an endorser block that the selected
+	// chain no longer certifies. Only a database that has not finished the
+	// Leios store migration holds markers.
+	if err := d.deleteLeiosEBCertifiedFromSlot(point.Slot, txn); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete network donations after rollback: %w",
+			"delete Leios certification markers after rollback: %w",
 			err,
 		)
 	}
+	// The LeiosDB commits on its own, so the pins certified by the removed
+	// ranking blocks are rolled back only after this transaction commits. A
+	// crash between the two leaves pins above the chain, which the pin walk
+	// reconciles against the immutable point on its next run.
+	txn.AfterCommit(func() {
+		if _, err := d.RollbackLeiosPins(point); err != nil {
+			d.logger.Error(
+				"failed to roll back Leios pins after truncate",
+				"component", "database",
+				"slot", point.Slot,
+				"error", err,
+			)
+		}
+	})
 	// Delete rolled-back UTxOs (blob offsets and metadata).
 	//
 	// Floor the deletion slot at mithrilFloor. UTxOs produced by gap
@@ -484,7 +530,7 @@ func (d *Database) rollbackAfterSlot(
 		}
 		newTip.BlockNumber = truncateBlock.Number
 		// Load nonce for rollback point
-		newNonce, err = d.GetBlockNonce(point, txn)
+		newNonce, err = d.truncateTargetNonce(point, txn)
 		if err != nil {
 			return ochainsync.Tip{}, nil, fmt.Errorf(
 				"failed to get block nonce: %w",
@@ -534,7 +580,7 @@ func (d *Database) rollbackAfterSlot(
 			// nothing to fold from -- reject exactly as before, since
 			// resuming nonce computation from an empty value would
 			// silently corrupt every epoch nonce computed afterward.
-			hasCheckpoint, cpErr := d.hasBlockNonceCheckpointAtOrBeforeSlot(
+			hasCheckpoint, cpErr := d.truncateHasNonceCheckpoint(
 				point.Slot,
 				txn,
 			)
@@ -586,21 +632,20 @@ func (d *Database) rollbackAfterSlot(
 }
 
 // deleteEpochKeyedStateAfterRemainingEpochs deletes the pool stake snapshot
-// and epoch summary rows of every epoch above the newest epoch row that
-// survived DeleteEpochsAfterSlot. It must run after that deletion.
+// and epoch summary rows of every epoch above the newest epoch a rollback to
+// slot leaves. A drained epochs family answers that epoch from the source; a
+// drained summaries family has no rows to delete and the set drops its own in
+// the same rollback.
 func (d *Database) deleteEpochKeyedStateAfterRemainingEpochs(
+	slot uint64,
 	txn *Txn,
 ) error {
-	epochs, err := d.GetEpochs(txn)
+	lastEpoch, found, err := d.newestEpochAtOrBefore(slot, txn)
 	if err != nil {
-		return fmt.Errorf("read epochs after rollback: %w", err)
+		return err
 	}
-	if len(epochs) == 0 {
+	if !found {
 		return nil
-	}
-	lastEpoch := epochs[0].EpochId
-	for _, epoch := range epochs[1:] {
-		lastEpoch = max(lastEpoch, epoch.EpochId)
 	}
 	store := d.stakeSnapshotStore()
 	if err := store.DeletePoolStakeSnapshotsAfterEpoch(
@@ -611,6 +656,9 @@ func (d *Database) deleteEpochKeyedStateAfterRemainingEpochs(
 			"delete pool stake snapshots after rollback: %w",
 			err,
 		)
+	}
+	if d.FamilyDrained(nodesettings.FamilySummaries) {
+		return nil
 	}
 	if err := store.DeleteEpochSummariesAfterEpoch(
 		lastEpoch,

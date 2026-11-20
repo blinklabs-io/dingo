@@ -482,7 +482,70 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	if start.Slot == end.Slot && !bytes.Equal(start.Hash, end.Hash) {
+		orderIter, orderErr := o.ledgerState.GetChainFromPoint(start, true)
+		ordered := false
+		if orderErr == nil && orderIter != nil {
+			ordered = blockfetchStartPrecedesEnd(orderIter, start, end)
+			orderIter.Cancel()
+		}
+		if !ordered {
+			o.config.Logger.Warn(
+				"blockfetch: requested range has start after end in one slot, sending NoBlocks",
+				"connection_id", ctx.ConnectionId.String(),
+				"slot", start.Slot,
+			)
+			endIter.Cancel()
+			chainIter.Cancel()
+			if err := ctx.Server.NoBlocks(); err != nil {
+				return fmt.Errorf(
+					"blockfetch NoBlocks after same-slot inverted range: %w",
+					err,
+				)
+			}
+			o.blockfetchRecordNoBlocksAndMaybeClose(
+				ctx.ConnectionId,
+				start,
+				"blockfetch: closing stuck peer after repeated inverted range requests",
+				"blockfetch: peer stuck on inverted range",
+			)
+			return nil
+		}
+	}
+	appliedTip := o.ledgerState.Tip()
+	tipIter, tipErr := o.ledgerState.GetChainFromPoint(appliedTip.Point, true)
+	if tipErr == nil {
+		tipIter.Cancel()
+	}
+	endApplied := tipErr == nil && blockfetchEndAtOrBeforeAppliedTip(
+		endIter,
+		end,
+		appliedTip.Point,
+	)
 	endIter.Cancel()
+	if !endApplied {
+		o.config.Logger.Debug(
+			"blockfetch: end point is ahead of the applied ledger tip, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"end_slot", end.Slot,
+			"applied_tip_slot", appliedTip.Point.Slot,
+			"error", tipErr,
+		)
+		chainIter.Cancel()
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after unapplied end point: %w",
+				err,
+			)
+		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated unapplied range requests",
+			"blockfetch: peer stuck on unapplied range",
+		)
+		return nil
+	}
 	maxBlocks := maxBlockFetchBlocksForSecurityParam(
 		o.ledgerState.SecurityParam(),
 	)
@@ -567,6 +630,56 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}()
 	return nil
+}
+
+// blockfetchEndAtOrBeforeAppliedTip reports whether an end point on the
+// primary chain is at or before the applied tip. Equal-slot points need an
+// iterator-order check because a Byron main block can share its slot and block
+// number with the epoch-boundary block immediately before it.
+func blockfetchEndAtOrBeforeAppliedTip(
+	endIter blockfetchRangeIterator,
+	end ocommon.Point,
+	appliedTip ocommon.Point,
+) bool {
+	if len(appliedTip.Hash) == 0 {
+		return false
+	}
+	if end.Slot < appliedTip.Slot {
+		return true
+	}
+	if end.Slot > appliedTip.Slot {
+		return false
+	}
+	for {
+		next, err := endIter.Next(false)
+		if err != nil || next == nil || next.Rollback ||
+			next.Point.Slot != appliedTip.Slot {
+			return false
+		}
+		if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
+			return true
+		}
+	}
+}
+
+// blockfetchStartPrecedesEnd reports whether end follows start on the chain
+// when both points share a slot, which only a Byron epoch-boundary block and
+// the main block after it do. Slot order alone cannot tell them apart.
+func blockfetchStartPrecedesEnd(
+	startIter blockfetchRangeIterator,
+	start ocommon.Point,
+	end ocommon.Point,
+) bool {
+	for {
+		next, err := startIter.Next(false)
+		if err != nil || next == nil || next.Rollback ||
+			next.Point.Slot != start.Slot {
+			return false
+		}
+		if bytes.Equal(next.Point.Hash, end.Hash) {
+			return true
+		}
+	}
 }
 
 // blockfetchRejectSaturated answers a range request that exceeded the

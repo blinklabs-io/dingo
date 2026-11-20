@@ -424,6 +424,9 @@ func (cs *ChainSelector) caughtUp(snap gsmSnapshot) bool {
 // may call back into the selector.
 func (cs *ChainSelector) advanceGenesisStateMachine() bool {
 	if !cs.genesisEnabled {
+		if cs.judgementWanted.Load() {
+			cs.advanceCaughtUpJudgement()
+		}
 		return false
 	}
 	defer rtrace.StartRegion(

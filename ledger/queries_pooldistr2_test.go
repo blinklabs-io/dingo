@@ -62,6 +62,7 @@ func newPoolDistr2Ledger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachQueryLiveUtxoSet(t, ls, db)
 	ls.publishSnapshotsLocked()
 	return ls
 }

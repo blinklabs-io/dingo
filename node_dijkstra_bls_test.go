@@ -58,3 +58,31 @@ func TestLedgerStateConfigSelectsDijkstraBlsProofDomain(t *testing.T) {
 		})
 	}
 }
+
+func TestLeiosVoteManagerUsesSelectedKeyProofDomain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		network string
+		magic   uint32
+		want    lcommon.DijkstraBlsProofDomain
+	}{
+		{"dijkstra", 6, lcommon.DijkstraBlsProofDomainLegacySig},
+		{"musashi", 164, lcommon.DijkstraBlsProofDomainPop},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			t.Parallel()
+			c, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+				cardano.EmbeddedConfigFS,
+				cardano.EmbeddedConfigPath("dijkstra"),
+			)
+			require.NoError(t, err)
+			n, _ := newLiveLifecycleTestNode(t, 1)
+			n.config.network = tc.network
+			n.config.networkMagic = tc.magic
+			n.config.cardanoNodeConfig = c
+			require.NoError(t, n.initLeiosVoteManager(t.Context()))
+			t.Cleanup(func() { _ = n.leiosVoteManager.Stop() })
+			require.Equal(t, tc.want, n.leiosVoteManager.KeyProofDomain())
+		})
+	}
+}

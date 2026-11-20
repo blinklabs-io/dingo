@@ -316,6 +316,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.blockPromoter != nil {
+		if stopErr := n.blockPromoter.Stop(ctx); stopErr != nil {
+			// Stop fails only while a ceiling lookup is still running, and
+			// that lookup reads the blob store when it returns.
+			storageDrainConfirmed = false
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("block promotion shutdown: %w", stopErr))
+		}
+	}
 	if n.historyExpiry != nil {
 		if stopErr := n.historyExpiry.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -375,6 +384,19 @@ func (n *Node) shutdown() error {
 				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
 			)
 		}
+	}
+
+	// The IndexerDB writer reads the ledger database and writes the
+	// IndexerDB, so it stops here and the IndexerDB closes in phase 3 before
+	// the ledger database does.
+	if stopErr := stopWithDeadline(
+		max(time.Until(deadline), 0), "indexer writer",
+		func() error { return n.stopIndexerWriter(ctx) },
+	); stopErr != nil {
+		if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+			storageDrainConfirmed = false
+		}
+		err = errors.Join(err, stopErr)
 	}
 
 	n.config.logger.Info(
@@ -444,9 +466,9 @@ func (n *Node) shutdown() error {
 	// This is the only shutdown close of Ouroboros. Acquired LocalStateQuery
 	// snapshots are read transactions on the database phase 3 closes, and an
 	// NtC client can acquire one until its connection drains, so the close
-	// runs after phase 2 rather than in phase 1. It also drains the Leios
-	// persistence writer and retention GC, which write to the database. Close
-	// waits on Leios validation and EventBus handlers with no deadline of its
+	// runs after phase 2 rather than in phase 1. It also waits for in-flight
+	// Leios endorser-block writes and stops the retention GC, which write to
+	// the database. Close waits on Leios validation and EventBus handlers with no deadline of its
 	// own, so it is bounded like a phase-1 stop, and skipped when phase 2
 	// already abandoned a handler: phase 3 then leaves the database open and
 	// the snapshots with it. An unconfirmed persistence drain likewise leaves
@@ -523,6 +545,39 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.utxoSet != nil {
+		if !storageDrainConfirmed {
+			n.config.logger.Error(
+				"leaving the live UTxO set open because shutdown drain was not confirmed",
+			)
+		} else {
+			// Not bounded by the shutdown deadline: abandoning a Badger
+			// close mid-sync leaves the set needing recovery.
+			if closeErr := n.closeUtxoSet(); closeErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("live UTxO set close: %w", closeErr),
+				)
+			}
+			if ctx.Err() != nil {
+				n.config.logger.Warn(
+					"live UTxO set close finished after the shutdown deadline",
+					"timeout", shutdownTimeout,
+					"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+				)
+			}
+		}
+	}
+
+	if n.indexerDB != nil {
+		if !storageDrainConfirmed {
+			n.config.logger.Error(
+				"skipping indexer database close because a storage user drain was not confirmed",
+			)
+		} else if closeErr := n.closeIndexerDatabase(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}
 	if n.db != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(
@@ -536,10 +591,11 @@ func (n *Node) shutdown() error {
 			)
 		} else {
 			n.config.logger.Info("closing database")
-			if closeErr := n.closeWithShutdownTimeout(
-				ctx,
+			// Not bounded by the shutdown deadline: the close takes the
+			// ImmutableDB lock a promotion batch holds, and the stores the
+			// plugin host closes next must not see that batch still running.
+			if closeErr := n.closeDurable(
 				"database",
-				shutdownTimeout,
 				n.db.Close,
 			); closeErr != nil {
 				err = errors.Join(
@@ -554,11 +610,26 @@ func (n *Node) shutdown() error {
 			n.config.logger.Error(
 				"skipping plugin host shutdown because a storage user drain was not confirmed",
 			)
-		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("plugin host shutdown: %w", stopErr),
-			)
+		} else {
+			// The shutdown deadline does not bound storage providers
+			// (plugin.Descriptor.DurableClose): the plugin host closes them
+			// to completion, so Node.Stop can outlive the deadline by the
+			// store close time.
+			n.pluginHost.SetLogger(n.config.logger)
+			stopErr := n.pluginHost.Stop(ctx)
+			if stopErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("plugin host shutdown: %w", stopErr),
+				)
+			}
+			if ctx.Err() != nil {
+				n.config.logger.Warn(
+					"storage close finished after the shutdown deadline",
+					"timeout", shutdownTimeout,
+					"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+				)
+			}
 		}
 	}
 

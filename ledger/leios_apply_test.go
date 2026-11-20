@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
@@ -250,7 +251,7 @@ func leiosApplyTestApplyEndorserBlock(
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, _, err = ls.applyEndorserBlock(
+		applied, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -619,6 +620,7 @@ func newLeiosApplyTestLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
 	return ls, db, raw
 }
@@ -692,15 +694,11 @@ func requireLeiosApplyTestEndorserBlob(
 	want []byte,
 ) {
 	t.Helper()
-	txn := db.BlobTxn(false)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		got, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
-		if err != nil {
-			return err
-		}
-		require.Equal(t, want, got)
-		return nil
-	}))
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	got, err := store.GetClosure(leiosdb.Ref{Slot: slot, Hash: hash})
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func leiosApplyTestBlob(body []byte, tx lcommon.Transaction) []byte {
@@ -723,7 +721,7 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, _, err = ls.applyEndorserBlock(
+		applied, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x33),
@@ -760,7 +758,7 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, _, err = ls.applyEndorserBlock(
+		applied, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x55),
@@ -792,7 +790,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		appliedFirst, _, err = ls.applyEndorserBlock(
+		appliedFirst, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x81),
@@ -804,7 +802,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		appliedSameTxnDuplicate, _, err = ls.applyEndorserBlock(
+		appliedSameTxnDuplicate, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x83),
@@ -816,7 +814,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		appliedSecondUnique, _, err = ls.applyEndorserBlock(
+		appliedSecondUnique, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x85),
@@ -849,7 +847,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		appliedCommittedDuplicate, _, err = ls.applyEndorserBlock(
+		appliedCommittedDuplicate, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x87),
@@ -881,7 +879,7 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, _, err = ls.applyEndorserBlock(
+		applied, _, _, err = ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x77),
@@ -956,7 +954,7 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	rbPoint := leiosApplyTestRankingPoint(0x79)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		applied, _, err := ls.applyEndorserBlock(
+		applied, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -1010,7 +1008,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 
 	txn := db.Transaction(t.Context(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			t.Context(),
 			txn,
 			leiosApplyTestRankingPoint(0x7a),
@@ -1047,7 +1045,7 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			firstPoint,
@@ -1061,7 +1059,7 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			replayPoint,
@@ -2526,7 +2524,7 @@ func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
 	}))
 	require.Zero(t, publications, "rollover alone must not publish certifying-block transaction events")
 	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure})
+		_, _, _, err := ls.applyEndorserBlock(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure})
 		return err
 	}
 	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {

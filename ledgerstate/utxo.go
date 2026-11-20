@@ -687,9 +687,9 @@ func convertMultiAsset(
 	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
 ) []ParsedAsset {
 	var assets []ParsedAsset //nolint:prealloc
-	for _, policyId := range multiAsset.Policies() {
+	for _, policyId := range models.SortedPolicies(multiAsset) {
 		policyIdBytes := policyId.Bytes()
-		for _, assetName := range multiAsset.Assets(policyId) {
+		for _, assetName := range models.SortedAssetNames(multiAsset, policyId) {
 			amount := multiAsset.Asset(policyId, assetName)
 			assets = append(assets, ParsedAsset{
 				PolicyId: policyIdBytes,

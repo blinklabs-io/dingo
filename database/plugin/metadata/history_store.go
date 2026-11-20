@@ -76,8 +76,9 @@ type HistoryStore interface {
 	) (uint64, bool, error)
 
 	// GetEpochStakes returns the registered, delegated credentials captured
-	// by the reward snapshot labelled epoch, ordered by pool then credential.
-	// A nil poolKeyHash selects every pool.
+	// by the reward snapshot labelled epoch. A nil poolKeyHash selects every
+	// pool, in the order the snapshot was stored; a pool's credentials are
+	// ordered by credential.
 	GetEpochStakes(
 		epoch uint64,
 		poolKeyHash []byte,

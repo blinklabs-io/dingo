@@ -33,7 +33,7 @@ import (
 func hexOf(b []byte) string { return hex.EncodeToString(b) }
 
 func setTip(fx *epochFixture, slot uint64) {
-	fx.adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+	setChainTip(fx.t, fx.adapter, ochainsync.Tip{
 		Point:       ocommon.Point{Slot: slot, Hash: fill32(0xee)},
 		BlockNumber: 9,
 	})
@@ -78,20 +78,13 @@ func TestHandleAccountHistoryErrors(t *testing.T) {
 // tip into epoch 5.
 func (fx *epochFixture) extendToEpochFive(t *testing.T) {
 	t.Helper()
-	for epoch := uint64(3); epoch < 6; epoch++ {
-		_, err := fx.raw.Exec(
-			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (?, ?, 86400, 1000, 6)`,
-			epoch, epoch*86400,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, fx.adapter.ledgerState.PrepareEpochCacheForStartup(context.Background()))
+	seedEpochs(t, fx.adapter, fx.raw, 3, 6)
 	setTip(fx, 5*86400+100)
 }
 
 func (fx *epochFixture) addAccount(t *testing.T, key byte) string {
 	t.Helper()
-	require.NoError(t, fx.adapter.ledgerState.Database().CreateAccount(
+	require.NoError(t, fx.adapter.db().CreateAccount(
 		context.Background(), nil, &models.Account{
 			CredentialTag: 0,
 			StakingKey:    bytes32of(28, key),
@@ -313,6 +306,7 @@ func TestNodeAdapterStakeHistoryRefusesIncompleteSnapshot(t *testing.T) {
 	ctx := context.Background()
 	address := fx.addAccount(t, 0x01)
 	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	// The ledger records a pending write in its own store.
 	meta := fx.adapter.ledgerState.Database().Metadata()
 	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
 
@@ -358,7 +352,7 @@ func TestNodeAdapterStakeHistoryIgnoresIncompleteSnapshotBeforeAccount(t *testin
 	fx := newEpochFixture(t)
 	ctx := context.Background()
 	key := bytes32of(28, 0x09)
-	require.NoError(t, fx.adapter.ledgerState.Database().CreateAccount(
+	require.NoError(t, fx.adapter.db().CreateAccount(
 		ctx, nil, &models.Account{
 			CredentialTag: 0, StakingKey: key, Active: true,
 			AddedSlot: 172810, CreatedSlot: 172810,

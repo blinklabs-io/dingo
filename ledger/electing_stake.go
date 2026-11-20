@@ -93,7 +93,7 @@ func (ls *LedgerState) ElectingPoolStake(
 			snap.kind,
 		)
 	}
-	total, err := ls.db.Metadata().GetTotalActiveStake(
+	total, err := ls.ledgerDB().GetTotalActiveStake(
 		snap.epoch,
 		snap.kind,
 		nil,

@@ -120,7 +120,9 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
-		"BlockProducerPools":                   {},
+		"BlockProducerPools": {},
+		// Resolved at startup from an adopted server store, never set.
+		"ServerCoreNamespace":                  {},
 		"GenesisBootstrap.ControlGroups":       {},
 		"MetricsAuthToken":                     {},
 		"KoiosParity.APIKey":                   {},

@@ -258,6 +258,17 @@ type BatchedTxIngestOpts struct {
 	// withdrawals without replaying account state over the imported snapshot.
 	// Live ledger ingestion leaves this false and enforces balance sufficiency.
 	HistoricalBackfill bool
+
+	// DebitWithdrawals makes a HistoricalBackfill withdrawal debit the
+	// account's reward balance and refuse one above it, as live ingestion
+	// does. Set it only when the replay also applies the reward credits the
+	// balance was built from; a replay over an imported balance leaves it
+	// false.
+	DebitWithdrawals bool
+}
+
+type withdrawalDebitSetter interface {
+	SetDebitWithdrawals(bool)
 }
 
 type batchStatsSetter interface {
@@ -445,7 +456,8 @@ func (d *Database) SetTransactionBatchedWithOpts(
 				point.Slot,
 			)
 		}
-		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted {
+		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted ||
+			d.liveUtxo {
 			// Offset is required to be computed (validated above) so a
 			// regression in the indexer is still caught, but the blob
 			// write itself is elided: the immutable-copy phase already
@@ -490,6 +502,9 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(batchStatsSetter); ok {
 		setter.SetBackfillStats(opts.Stats)
 	}
+	if setter, ok := acc.(withdrawalDebitSetter); ok {
+		setter.SetDebitWithdrawals(opts.DebitWithdrawals)
+	}
 	var metadataErr error
 	if closureBatch {
 		store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
@@ -522,6 +537,9 @@ func (d *Database) SetTransactionBatchedWithOpts(
 
 	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
+			if d.pparamsDrained() {
+				break
+			}
 			if err := d.SetPParamUpdate(
 				genesisHash.Bytes(),
 				update.Cbor(),

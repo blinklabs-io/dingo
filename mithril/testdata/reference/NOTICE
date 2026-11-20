@@ -1,0 +1,28 @@
+corpus.jsonl.gz holds answers recorded from the reference Mithril
+verification code: mithril-stm 0.13.0 and mithril-common 0.8.3 at Mithril
+release 2642.0 (commit e85df3ddc52b528c7b9ddbdddf1941fec6d5f348), built
+unmodified from crates.io with an additive patch exposing crate-private
+functions to the recording harness. The inputs and the harness come from
+mithril2pq (https://github.com/chrisguiney/mithril2pq,
+internal/mithril/difftest), Copyright 2026 Chris Guiney, licensed under the
+Apache License, Version 2.0. Each record is one request with its generator
+arguments expanded, and the answer the Rust code gave.
+
+Mithril (https://github.com/IntersectMBO/mithril) NOTICE:
+
+   Copyright 2022 Input Output (Hong Kong) Ltd.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+Live certificates in the corpus were published by the Mithril aggregators
+for mainnet, preprod and preview.

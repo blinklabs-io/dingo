@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -96,6 +97,10 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 			start := point(0)
 			validEnd := point(0)
 			invalidEnd := test.end(blocks)
+			ledgerState.SetTipForTesting(ochainsync.Tip{
+				Point:       validEnd,
+				BlockNumber: blocks[0].BlockNumber(),
+			})
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			bus := event.NewEventBus(nil, logger)
 			t.Cleanup(bus.Close)

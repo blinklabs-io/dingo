@@ -38,6 +38,20 @@ var ErrNotFound = errors.New("metadata not found")
 // limit. The value is not read.
 var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
 
+// ErrInterruptedBackfill refuses an API-mode store whose v0.94.2 Mithril
+// bootstrap stopped while it was still writing API history. That history ends
+// below the ledger tip and the pass leaves account rows it has yet to put
+// back, so the store cannot be moved to the storage-role layout, and only the
+// release that began the backfill can finish it. A store is refused before
+// this version's schema migrations run: v0.94.2 does not open a store whose
+// schema is newer than its own.
+var ErrInterruptedBackfill = errors.New(
+	"the database holds an interrupted Mithril metadata backfill " +
+		"(sync_status is \"backfill\"), which this version cannot finish: " +
+		"start dingo v0.94.2 on this database until it finishes the " +
+		"backfill, then start this version again. Nothing was changed",
+)
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -426,6 +440,30 @@ type GovernanceStore interface {
 	// most recent record is a ClearCommitteeQuorum marker. A zero
 	// threshold is returned as a non-nil rational.
 	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
+
+	// GetAllGovernanceProposals returns every governance proposal row,
+	// soft-deleted ones included, in no particular order.
+	GetAllGovernanceProposals(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetAllGovernanceVotes returns every governance vote row, soft-deleted
+	// ones included, each with its proposal's transaction hash and action
+	// index, in no particular order.
+	GetAllGovernanceVotes(
+		types.Txn,
+	) ([]*models.GovernanceVoteRef, error)
+
+	// LatestCommitteeQuorum returns the committee quorum row with the
+	// highest added slot, whose Quorum is nil when it is a clear marker,
+	// or nil when there is no row.
+	LatestCommitteeQuorum(types.Txn) (*models.CommitteeQuorum, error)
+
+	// LatestCommitteeResignations returns, for every cold credential with a
+	// resignation, the resignation with the highest added slot.
+	LatestCommitteeResignations(
+		types.Txn,
+	) ([]*models.ResignCommitteeCold, error)
 
 	// GetCommitteeMembers retrieves all active (non-deleted)
 	// snapshot-imported committee members.
@@ -991,6 +1029,77 @@ type UtxoStore interface {
 		fn func(*models.Utxo) error,
 	) error
 
+	// IterateAccounts invokes fn once for each account row, active or
+	// not, in unspecified order.
+	IterateAccounts(
+		txn types.Txn,
+		fn func(*models.Account) error,
+	) error
+
+	// ListPoolKeyHashes returns the key hash of every pool row,
+	// registered or not.
+	ListPoolKeyHashes(txn types.Txn) ([][]byte, error)
+
+	// IterateDreps invokes fn once for each DRep row, active or not, in
+	// unspecified order.
+	IterateDreps(txn types.Txn, fn func(*models.Drep) error) error
+
+	// IterateLiveDrepDelegators invokes fn once for each live
+	// drep_delegator link.
+	IterateLiveDrepDelegators(
+		txn types.Txn,
+		fn func(drep, stake models.StakeCredentialRef) error,
+	) error
+
+	// IterateAccountImportBaselines invokes fn once for each
+	// account_import_baseline row, active or not, in unspecified order.
+	IterateAccountImportBaselines(
+		txn types.Txn,
+		fn func(models.AccountImportBaselineRow) error,
+	) error
+
+	// IterateAccountWitnessSlots invokes fn once for each distinct slot at
+	// which a credential has a witness: a row of a stake-witnessing
+	// certificate table, an account_withdrawal_witness row or an
+	// account_reward_delta withdrawal row, the set AccountLastWitnessSlots
+	// reads, in unspecified order.
+	IterateAccountWitnessSlots(
+		txn types.Txn,
+		fn func(ref models.StakeCredentialRef, slot uint64) error,
+	) error
+
+	// IterateStakeDelegationEvents invokes fn for each pool delegation
+	// certificate of every stake credential, in unspecified order.
+	IterateStakeDelegationEvents(
+		txn types.Txn,
+		fn func(models.StakeDelegationEventRow) error,
+	) error
+
+	// IterateLeiosClosureUtxoEffects invokes fn for each staked output a Leios
+	// closure transaction created or spent whose context slot differs from
+	// the slot it was applied at, in unspecified order.
+	IterateLeiosClosureUtxoEffects(
+		txn types.Txn,
+		fn func(models.LeiosClosureUtxoEffect) error,
+	) error
+
+	// IterateAccountWitnessEffectiveSlots is IterateAccountWitnessSlots with
+	// the slot each witness takes effect at, which a Leios closure's
+	// transaction context moves before the slot it was applied at.
+	IterateAccountWitnessEffectiveSlots(
+		txn types.Txn,
+		fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
+	) error
+
+	// IterateAccountWithdrawalEffectiveSlots invokes fn once for each
+	// distinct (credential, applied slot, effective slot) reward withdrawal
+	// whose effective slot, the context slot of its Leios closure, is before
+	// the slot it was applied at.
+	IterateAccountWithdrawalEffectiveSlots(
+		txn types.Txn,
+		fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
+	) error
+
 	// IterateUtxosAsOf invokes fn once for each UTxO row that was live as
 	// of atSlot -- added at or before atSlot, and either never spent or
 	// spent strictly after atSlot -- in unspecified order. fn receives a
@@ -1322,10 +1431,9 @@ type TransactionStore interface {
 		uint64, // protocol major version
 	) error
 
-	// SetGapBlockTransaction stores a transaction record and its
-	// produced outputs without looking up or consuming input UTxOs.
-	// This is used for mithril gap blocks where the snapshot's UTxO
-	// set already reflects the correct spent/unspent state.
+	// SetGapBlockTransaction stores a mithril gap block's transaction and
+	// its certificates, but no output rows or stake changes: the LedgerDB
+	// UTxO set already reflects the block.
 	SetGapBlockTransaction(
 		lcommon.Transaction,
 		ocommon.Point,
@@ -1333,19 +1441,6 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 		uint64, // protocol major version
-	) error
-
-	// RecomputeGapCollateralFee recomputes and persists the collateral fee
-	// for a phase-2-invalid gap-block transaction after its consumed
-	// collateral inputs have been recovered into the metadata UTxO table.
-	// SetGapBlockTransaction computes the collateral fee before those inputs
-	// exist, so for a transaction that declares no total collateral the fee
-	// is undercounted until this recompute runs. It is a no-op for valid
-	// transactions (which have no collateral fee).
-	RecomputeGapCollateralFee(
-		lcommon.Transaction,
-		ocommon.Point,
-		types.Txn,
 	) error
 
 	// SetGenesisTransaction stores a genesis transaction record.
@@ -2114,6 +2209,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolStatus returns the pool's lifecycle from its stored current
+	// state, without scanning or loading its certificate history.
+	GetPoolStatus(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (models.PoolStatus, error)
+
 	UpdatePoolOpCertSequence(
 		lcommon.PoolKeyHash,
 		uint64, // sequence
@@ -2180,6 +2282,13 @@ type MetadataStore interface {
 	LatestPoolOpCertSequences(
 		types.Txn,
 	) (map[string]uint64, error)
+
+	// LatestPoolOpCertCounters returns, for every pool that has issued a
+	// block, its highest observed op-cert sequence and the highest slot of
+	// any of its op-cert rows.
+	LatestPoolOpCertCounters(
+		types.Txn,
+	) ([]models.PoolOpCertCounter, error)
 
 	// LatestPoolOpCertSequencesAtOrBefore is LatestPoolOpCertSequences
 	// restricted to rows at or before slot: the counters as they stood there.
@@ -2705,7 +2814,7 @@ type MetadataStore interface {
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateDreps(types.Txn, []models.StakeCredentialRef) error
+	DeactivateDreps(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// RetirePools records a retirement at the given epoch (and added slot) for
 	// each supplied pool key hash, mirroring a retirement certificate. Used by
@@ -2741,6 +2850,12 @@ type MetadataStore interface {
 		uint, // eraId
 		types.Txn,
 	) ([]models.PParams, error)
+
+	// ListPParamUpdates returns every stored protocol parameter update
+	// proposal in insertion order.
+	ListPParamUpdates(
+		types.Txn,
+	) ([]models.PParamUpdate, error)
 
 	// GetPParamUpdates retrieves protocol parameter updates for a given epoch.
 	GetPParamUpdates(
@@ -3213,6 +3328,13 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardAccountOutput, error)
 
+	// IterateUnfoldedRewardAccountOutputs invokes fn with every spendable,
+	// unguarded reward account output not yet folded, of any epoch.
+	IterateUnfoldedRewardAccountOutputs(
+		types.Txn,
+		func(*models.RewardAccountOutput) error,
+	) error
+
 	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
 	// one stake credential in the credited rounds folded and returns them,
 	// for the caller to write to the account in the same transaction.
@@ -3365,6 +3487,9 @@ type MetadataStore interface {
 	// SumNetworkDonationsForEpoch returns the total donation
 	// contributed by blocks in the given epoch.
 	SumNetworkDonationsForEpoch(epoch uint64, txn types.Txn) (uint64, error)
+
+	// ListNetworkDonations returns every donation record, in slot order.
+	ListNetworkDonations(txn types.Txn) ([]models.NetworkDonation, error)
 
 	// DeleteNetworkDonationsAfterSlot removes donation records added
 	// after the given slot. This is used during chain rollbacks.
@@ -3551,6 +3676,13 @@ type UtxoSpendStateReader interface {
 	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
 }
 
+// BackfillInputPrefetcher optionally warms metadata pages for the consumed
+// inputs of upcoming historical blocks. The operation is advisory only: it
+// must not mutate state or change the result of the ordered backfill writer.
+type BackfillInputPrefetcher interface {
+	PrefetchBackfillInputs(context.Context, []models.UtxoId) error
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.
@@ -3643,6 +3775,87 @@ type IncrementalPlannerStatsUpdater interface {
 	) (types.PlannerStatsResult, error)
 }
 
+// PlannerStatsPresenceChecker is an optional interface for metadata stores
+// that can report whether planner statistics have ever been collected. A
+// backend without a stored statistics catalog reports false.
+type PlannerStatsPresenceChecker interface {
+	HasPlannerStats(ctx context.Context) (bool, error)
+}
+
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
+
+// DrainedFamilyResetter is the optional capability a metadata store offers to
+// forget every drained family, for an import that writes their rows again.
+// SetDrainedFamilies only widens, so it cannot lift the mask.
+type DrainedFamilyResetter interface {
+	ResetDrainedFamilies()
+}
+
+// DrainedFamilyAware is the optional capability a metadata store offers to
+// stop writing, rolling back and pruning the tables of drained ledger-state
+// families. The database pushes the latch to it each time it reads or widens
+// the latch.
+type DrainedFamilyAware interface {
+	SetDrainedFamilies(mask nodesettings.FamilyMask)
+}
+
+// LedgerStateRowDrainer is the optional capability a metadata store offers to
+// drop a table's rows in resumable chunks once the live UTxO set holds the
+// state they carried. A store without it cannot drain.
+type LedgerStateRowDrainer interface {
+	// DeleteRowsChunk deletes up to limit rows of table in ascending order
+	// of keyColumn, a unique column, and returns how many it deleted. A
+	// result below limit means the table is empty.
+	DeleteRowsChunk(
+		ctx context.Context,
+		table string,
+		keyColumn string,
+		limit int,
+	) (int64, error)
+}
+
+// RewardStateRollbackSkipper is the optional capability a metadata store
+// offers to roll back reward state while leaving the tables of drained
+// families untouched. A store without it cannot roll back after a drain.
+type RewardStateRollbackSkipper interface {
+	// DeleteRewardStateAfterSlotSkippingBlockCounts is
+	// MetadataStore.DeleteRewardStateAfterSlot without the delete of the
+	// imported pool block counts and epoch block totals.
+	DeleteRewardStateAfterSlotSkippingBlockCounts(
+		slot uint64,
+		txn types.Txn,
+	) error
+	// DeleteRewardStateAfterSlotSkipping is
+	// MetadataStore.DeleteRewardStateAfterSlot without the deletes skips
+	// names.
+	DeleteRewardStateAfterSlotSkipping(
+		slot uint64,
+		skips types.RewardStateSkips,
+		txn types.Txn,
+	) error
+}
+
+// RewardOutputPruner is the optional capability a metadata store offers to
+// prune reward account outputs while leaving the stake inputs of a drained
+// family untouched.
+type RewardOutputPruner interface {
+	// DeleteRewardAccountOutputsBeforeEpoch is the reward account output half
+	// of MetadataStore.DeleteRewardStateBeforeEpoch.
+	DeleteRewardAccountOutputsBeforeEpoch(
+		ctx context.Context,
+		epoch uint64,
+		txn types.Txn,
+	) error
+}
+
+// RewardSeedFailureSlotReader is implemented by a metadata store that returns
+// the slot an imported reward-basis failure was captured at with its reason.
+type RewardSeedFailureSlotReader interface {
+	GetRewardSeedFailureSlot(
+		epoch uint64,
+		snapshotType string,
+		txn types.Txn,
+	) (string, uint64, error)
+}

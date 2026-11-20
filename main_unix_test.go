@@ -17,7 +17,11 @@
 package dingo
 
 import (
+	"flag"
 	"os"
+	"runtime"
+	"runtime/debug"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -30,5 +34,13 @@ import (
 // explicitly.
 func TestMain(m *testing.M) {
 	syscall.Umask(0o022)
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(50)
+	}
+	if runtime.GOMAXPROCS(0) > 16 {
+		if err := flag.Set("test.parallel", strconv.Itoa(16)); err != nil {
+			panic(err)
+		}
+	}
 	os.Exit(m.Run())
 }

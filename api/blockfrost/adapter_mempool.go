@@ -98,11 +98,18 @@ func (a *NodeAdapter) decodeMempoolTransaction(
 	return decoded, nil
 }
 
+// ledgerDB is the store the mempool reads confirmed epoch and protocol state
+// from. Mempool transactions validate against the ledger tip, which the
+// IndexerDB may not have reached, so they read the ledger store, never the
+// IndexerDB.
+func (a *NodeAdapter) ledgerDB() *database.Database {
+	return a.ledgerState.Database()
+}
+
 // confirmedInputAddresses resolves the addresses of the inputs that name a
 // stored, unspent output. An input of another mempool transaction, or one
 // already spent, has no confirmed output to resolve and is left out.
 func (a *NodeAdapter) confirmedInputAddresses(
-	ctx context.Context,
 	inputs []lcommon.TransactionInput,
 ) (map[database.UtxoRef]string, error) {
 	seen := make(map[database.UtxoRef]struct{}, len(inputs))
@@ -122,7 +129,9 @@ func (a *NodeAdapter) confirmedInputAddresses(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	utxos, err := a.ledgerState.Database().UtxosByRefs(ctx, refs, nil)
+	// The ledger's live UTxO set is the only copy of the unspent outputs: the
+	// ledger store keeps no rows for them.
+	utxos, err := a.ledgerState.UtxosByRefs(refs)
 	if err != nil {
 		return nil, fmt.Errorf("resolve mempool transaction inputs: %w", err)
 	}
@@ -152,7 +161,7 @@ func (a *NodeAdapter) mempoolDeposit(
 	if len(tx.Certificates()) == 0 {
 		return 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.ledgerDB()
 	slot := a.ledgerState.Tip().Point.Slot
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
@@ -163,7 +172,7 @@ func (a *NodeAdapter) mempoolDeposit(
 	if epoch == nil {
 		return 0, nil
 	}
-	return a.transactionDeposit(ctx, tx, epoch.EraId, slot)
+	return a.transactionDepositFrom(db, ctx, tx, epoch.EraId, slot)
 }
 
 // outputAsUtxo carries the lovelace and native asset amounts of a decoded
@@ -250,7 +259,7 @@ func (a *NodeAdapter) MempoolTransaction(
 	allInputs = append(allInputs, tx.Inputs()...)
 	allInputs = append(allInputs, tx.Collateral()...)
 	allInputs = append(allInputs, tx.ReferenceInputs()...)
-	addresses, err := a.confirmedInputAddresses(ctx, allInputs)
+	addresses, err := a.confirmedInputAddresses(allInputs)
 	if err != nil {
 		return MempoolTransactionInfo{}, err
 	}

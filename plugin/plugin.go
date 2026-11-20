@@ -23,11 +23,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,15 +38,16 @@ import (
 type Capability string
 
 const (
-	CapabilityStorageBlob     Capability = "storage.blob"
-	CapabilityStorageMetadata Capability = "storage.metadata"
-	CapabilityConsensus       Capability = "consensus"
-	CapabilityMempool         Capability = "mempool"
-	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
-	CapabilityAPIKupo         Capability = "api.kupo"
-	CapabilityAPIMesh         Capability = "api.mesh"
-	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
-	CapabilityAPIMcp          Capability = "api.mcp"
+	CapabilityStorageBlob      Capability = "storage.blob"
+	CapabilityStorageMetadata  Capability = "storage.metadata"
+	CapabilityStorageImmutable Capability = "storage.immutable"
+	CapabilityConsensus        Capability = "consensus"
+	CapabilityMempool          Capability = "mempool"
+	CapabilityAPIBlockfrost    Capability = "api.blockfrost"
+	CapabilityAPIKupo          Capability = "api.kupo"
+	CapabilityAPIMesh          Capability = "api.mesh"
+	CapabilityAPIUtxorpc       Capability = "api.utxorpc"
+	CapabilityAPIMcp           Capability = "api.mcp"
 )
 
 // allCapabilities is the single enumeration of the capabilities this platform
@@ -54,6 +57,7 @@ const (
 var allCapabilities = []Capability{
 	CapabilityStorageBlob,
 	CapabilityStorageMetadata,
+	CapabilityStorageImmutable,
 	CapabilityConsensus,
 	CapabilityMempool,
 	CapabilityAPIBlockfrost,
@@ -80,6 +84,12 @@ type Descriptor struct {
 	Capability  Capability
 	Name        string
 	Description string
+	// DurableClose marks a provider whose Stop persists state and must run to
+	// completion. Host stops such an instance with a context that ignores
+	// cancellation and deadline, waits for it even after the Stop context
+	// expires, and logs progress while it runs. Everything else keeps the
+	// Stop context's deadline.
+	DurableClose bool
 }
 
 // Instance is the lifecycle owned by a Host. Start and Stop must honor the
@@ -148,6 +158,38 @@ type Host struct {
 	// while stopped is false; Stop sets stopped under mu before it Waits.
 	stopCapabilityWG  sync.WaitGroup
 	capabilityStopErr error
+	// stopDurable records that Stop found a DurableClose instance to stop, so
+	// waitForStop keeps waiting for teardown after its context expires.
+	stopDurable bool
+	// durableCapabilityStops counts in-flight StopCapability calls that took a
+	// DurableClose instance out of started. Stop must still wait for those
+	// even though started no longer lists them.
+	durableCapabilityStops int
+	logger                 *slog.Logger
+	// progressInterval overrides defaultDurableCloseProgressInterval when
+	// positive.
+	progressInterval time.Duration
+}
+
+// defaultDurableCloseProgressInterval is how often a durable close, or a
+// Host.Stop waiting on one past its deadline, logs that it is still running.
+const defaultDurableCloseProgressInterval = 10 * time.Second
+
+// SetLogger sets the logger used for durable-close progress. A nil logger
+// selects slog.Default.
+func (h *Host) SetLogger(logger *slog.Logger) {
+	h.mu.Lock()
+	h.logger = logger
+	h.mu.Unlock()
+}
+
+func (h *Host) log() *slog.Logger {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.logger == nil {
+		return slog.Default()
+	}
+	return h.logger
 }
 
 // NewHost returns an empty plugin host.
@@ -441,12 +483,18 @@ func (h *Host) Stop(ctx context.Context) error {
 	h.mu.Lock()
 	if h.stopped {
 		done := h.stopDone
+		durable := h.stopDurable
 		h.mu.Unlock()
-		return h.waitForStop(ctx, done)
+		return h.waitForStop(ctx, done, durable)
 	}
 	h.stopped = true
 	h.stopDone = make(chan struct{})
 	done := h.stopDone
+	durable := h.durableCapabilityStops > 0 ||
+		slices.ContainsFunc(h.started, func(i startedInstance) bool {
+			return i.descriptor.DurableClose
+		})
+	h.stopDurable = durable
 	if len(h.stopping) == 0 && len(h.started) == 0 {
 		h.stopErr = h.capabilityStopErr
 		close(done)
@@ -456,27 +504,58 @@ func (h *Host) Stop(ctx context.Context) error {
 	}
 	h.mu.Unlock()
 	go h.finishStop(ctx)
-	return h.waitForStop(ctx, done)
+	return h.waitForStop(ctx, done, durable)
 }
 
-func (h *Host) waitForStop(ctx context.Context, done <-chan struct{}) error {
+// waitForStop waits for teardown to finish. When the host has a durable
+// instance to close it keeps waiting after ctx expires, logging periodically,
+// because abandoning that close would let the process exit mid-write.
+func (h *Host) waitForStop(
+	ctx context.Context,
+	done <-chan struct{},
+	durable bool,
+) error {
+	result := func() error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.stopErr
+	}
 	select {
 	case <-done:
-		h.mu.Lock()
-		err := h.stopErr
-		h.mu.Unlock()
-		return err
+		return result()
 	case <-ctx.Done():
+	}
+	select {
+	case <-done:
+		return result()
+	default:
+	}
+	if !durable {
+		return ctx.Err()
+	}
+	start := time.Now()
+	ticker := time.NewTicker(h.progressEvery())
+	defer ticker.Stop()
+	for {
 		select {
 		case <-done:
-			h.mu.Lock()
-			err := h.stopErr
-			h.mu.Unlock()
-			return err
-		default:
-			return ctx.Err()
+			return result()
+		case <-ticker.C:
+			h.log().Warn(
+				"plugin host stop is past its deadline, waiting for durable close",
+				"elapsed", time.Since(start).Round(time.Millisecond),
+			)
 		}
 	}
+}
+
+func (h *Host) progressEvery() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.progressInterval > 0 {
+		return h.progressInterval
+	}
+	return defaultDurableCloseProgressInterval
 }
 
 func (h *Host) finishStop(ctx context.Context) {
@@ -488,9 +567,10 @@ func (h *Host) finishStop(ctx context.Context) {
 	started := h.started
 	h.started = nil
 	err := h.capabilityStopErr
+	durable := h.stopDurable
 	h.mu.Unlock()
-	err = errors.Join(err, stopReverse(ctx, started))
-	err = errors.Join(err, ctx.Err())
+	stopErr, deadlineErr := h.stopReverse(ctx, started, durable)
+	err = errors.Join(err, stopErr, deadlineErr)
 	h.mu.Lock()
 	h.stopErr = err
 	close(h.stopDone)
@@ -527,9 +607,18 @@ func (h *Host) StopCapability(
 		}
 	}
 	h.started = remaining
+	durable := slices.ContainsFunc(selected, func(i startedInstance) bool {
+		return i.descriptor.DurableClose
+	})
+	if durable {
+		h.durableCapabilityStops++
+	}
 	h.mu.Unlock()
-	err := stopReverse(ctx, selected)
+	err, _ := h.stopReverse(ctx, selected, false)
 	h.mu.Lock()
+	if durable {
+		h.durableCapabilityStops--
+	}
 	h.capabilityStopErr = errors.Join(h.capabilityStopErr, err)
 	h.stopping[capability]--
 	if h.stopping[capability] <= 0 {
@@ -540,10 +629,28 @@ func (h *Host) StopCapability(
 	return err
 }
 
-func stopReverse(ctx context.Context, started []startedInstance) error {
-	var ret error
+// stopReverse stops started in reverse order. A DurableClose instance gets a
+// context detached from ctx's cancellation and is waited for, with progress
+// logged. The second result is ctx's error observed after the last
+// non-durable stop, or after the whole list when no durable close is part of
+// this teardown (durableElsewhere reports one running in StopCapability): a
+// deadline that only a durable close outran is not an error.
+func (h *Host) stopReverse(
+	ctx context.Context,
+	started []startedInstance,
+	durableElsewhere bool,
+) (ret, deadlineErr error) {
+	durableSeen := durableElsewhere
 	for _, item := range slices.Backward(started) {
-		if err := item.instance.Stop(ctx); err != nil {
+		var err error
+		if item.descriptor.DurableClose {
+			durableSeen = true
+			err = h.closeDurable(ctx, item)
+		} else {
+			err = item.instance.Stop(ctx)
+			deadlineErr = ctx.Err()
+		}
+		if err != nil {
 			ret = errors.Join(ret, fmt.Errorf(
 				"stop plugin %s/%s: %w",
 				item.descriptor.Capability,
@@ -552,7 +659,47 @@ func stopReverse(ctx context.Context, started []startedInstance) error {
 			))
 		}
 	}
-	return ret
+	if !durableSeen {
+		deadlineErr = ctx.Err()
+	}
+	return ret, deadlineErr
+}
+
+func (h *Host) closeDurable(ctx context.Context, item startedInstance) error {
+	logger := h.log().With(
+		"capability", item.descriptor.Capability,
+		"plugin", item.descriptor.Name,
+	)
+	start := time.Now()
+	logger.Info("closing durable plugin store")
+	finished := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(h.progressEvery())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-finished:
+				return
+			case <-ticker.C:
+				logger.Warn(
+					"durable plugin store close still in progress",
+					"elapsed", time.Since(start).Round(time.Millisecond),
+				)
+			}
+		}
+	}()
+	err := item.instance.Stop(context.WithoutCancel(ctx))
+	close(finished)
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		logger.Error(
+			"durable plugin store close failed",
+			"elapsed", elapsed, "error", err,
+		)
+		return err
+	}
+	logger.Info("durable plugin store closed", "elapsed", elapsed)
+	return nil
 }
 
 func decodeStrict(raw map[string]any, dst any) error {
@@ -576,6 +723,10 @@ var knownOptionalProviders = map[Capability]map[string]struct{}{
 	CapabilityStorageMetadata: {
 		"mysql":    {},
 		"postgres": {},
+	},
+	CapabilityStorageImmutable: {
+		"gcs": {},
+		"s3":  {},
 	},
 }
 

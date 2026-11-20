@@ -412,6 +412,43 @@ func checkpointWAL(
 	}
 }
 
+// syncCommitsBusyTimeout bounds how long a durability checkpoint waits for a
+// reader or the writer. The caller is the only writer of its store, and API
+// readers hold a snapshot only for one statement. The wait cannot be
+// interrupted by the context, so it is kept short: a node shutting down waits
+// at most this long, and a checkpoint that could not finish is retried.
+const syncCommitsBusyTimeout = 2 * time.Second
+
+// syncCommitsWAL returns a Store.SyncCommits callback. Under
+// synchronous=NORMAL a commit reaches the OS page cache and is synced only
+// when SQLite checkpoints, so a power loss can roll back recent commits.
+// PRAGMA wal_checkpoint(FULL) syncs the WAL, copies every frame into the
+// database file and syncs that, which makes everything committed before it
+// durable. It reports busy=1, or fewer frames checkpointed than the log
+// holds, when it could not finish, and that is an error: the commits are not
+// known to be durable.
+func syncCommitsWAL(databaseURI string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		db, err := openMaintenanceDB(databaseURI, syncCommitsBusyTimeout)
+		if err != nil {
+			return fmt.Errorf("open durability connection: %w", err)
+		}
+		defer func() { _ = db.Close() }()
+		var busy, walLog, checkpointed int
+		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)")
+		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+			return fmt.Errorf("WAL checkpoint(FULL): %w", err)
+		}
+		if busy != 0 || walLog != checkpointed {
+			return fmt.Errorf(
+				"WAL checkpoint(FULL) incomplete: busy=%d frames=%d checkpointed=%d",
+				busy, walLog, checkpointed,
+			)
+		}
+		return nil
+	}
+}
+
 // checkpointWALWith drains the WAL without asking SQLite to truncate it while
 // a reader still holds an old snapshot. A direct TRUNCATE checkpoint can hold
 // SQLite's writer lock while it copies a large WAL, starving import writers.
@@ -617,6 +654,7 @@ func openSQLStoreWithDialect(
 		vacuum         func(context.Context) error
 		vacuumInterval time.Duration
 		checkpoint     func(context.Context) error
+		syncCommits    func(context.Context) error
 		backupTo       func(context.Context, string) error
 		restoreFrom    func(context.Context, string) error
 		databasePath   string
@@ -627,8 +665,9 @@ func openSQLStoreWithDialect(
 				"&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			sharedMemoryDBSequence.Add(1),
 		)
-		writeDB, err = sqlstore.OpenDB(
+		writeDB, err = sqlstore.OpenGuardedDB(
 			"sqlite", dsn, "sqlite", dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -657,7 +696,7 @@ func openSQLStoreWithDialect(
 		// characters in the configured data directory remain part of the
 		// filename instead of being interpreted as DSN options/fragments.
 		databaseURI := sqliteFileURI(databasePath)
-		writeDB, err = sqlstore.OpenDB(
+		writeDB, err = sqlstore.OpenGuardedDB(
 			"sqlite",
 			fmt.Sprintf(
 				"%s?_txlock=immediate%s%s",
@@ -667,11 +706,12 @@ func openSQLStoreWithDialect(
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		readDB, err = sqlstore.OpenDB(
+		readDB, err = sqlstore.OpenGuardedDB(
 			"sqlite",
 			fmt.Sprintf(
 				"%s?mode=ro%s",
@@ -680,6 +720,7 @@ func openSQLStoreWithDialect(
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			_ = writeDB.Close()
@@ -708,6 +749,7 @@ func openSQLStoreWithDialect(
 			checkpointLogger = slog.Default()
 		}
 		checkpoint = checkpointWAL(databaseURI, checkpointLogger)
+		syncCommits = syncCommitsWAL(databaseURI)
 		backupTo = func(ctx context.Context, dstPath string) error {
 			return backupSQLite(ctx, databasePath, dataDir, dstPath)
 		}
@@ -737,6 +779,7 @@ func openSQLStoreWithDialect(
 		VacuumInterval:          vacuumInterval,
 		Checkpoint:              checkpoint,
 		CheckpointInterval:      checkpointInterval,
+		SyncCommits:             syncCommits,
 		BackupTo:                backupTo,
 		RestoreFrom:             restoreFrom,
 		PromRegistry:            dependencies.PromRegistry,

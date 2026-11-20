@@ -199,6 +199,11 @@ type NodeSettings struct {
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
+// ErrBlobTooLarge is wrapped by a bounded blob read whose value is larger
+// than the caller's limit. It distinguishes a value that exists but was not
+// read from a read that failed.
+var ErrBlobTooLarge = errors.New("blob object exceeds maximum size")
+
 // ErrHistoryExpired is returned when a block's local CBOR has expired from
 // history storage. Callers can use errors.Is(err, ErrHistoryExpired) for
 // existence checks. To get the (slot, hash), use errors.As to extract a
@@ -524,4 +529,54 @@ func BlockTombstone() []byte {
 // must never be misread as block CBOR.
 func IsBlockTombstone(data []byte) bool {
 	return bytes.HasPrefix(data, BlockTombstoneMagic[:])
+}
+
+// LiveUtxoSource resolves live outputs for a metadata store that keeps no
+// utxo rows, because the ledger holds the live UTxO set elsewhere. txn is the
+// metadata transaction the store is writing in; the source answers as that
+// transaction sees the live set, including outputs the transaction created.
+type LiveUtxoSource interface {
+	LiveUtxoCbor(txn Txn, txID []byte, index uint32) ([]byte, bool, error)
+	// LiveUtxoStake returns the lovelace in live outputs whose address names
+	// the stake credential (credentialTag, stakingKey), classified as utxo
+	// rows classify outputs, as txn sees the live set. txn may be nil.
+	LiveUtxoStake(
+		txn Txn,
+		credentialTag uint8,
+		stakingKey []byte,
+	) (uint64, error)
+	// LivePointerStakes returns the lovelace in live outputs at pointer
+	// addresses, per certificate position named, as txn sees the live set.
+	// txn may be nil.
+	LivePointerStakes(txn Txn) ([]PointerStake, error)
+	// EachLiveUtxoStake calls fn for every stake credential with lovelace in
+	// live outputs as LiveUtxoStake counts it, as txn sees the live set.
+	// txn may be nil.
+	EachLiveUtxoStake(
+		txn Txn,
+		fn func(credentialTag uint8, stakingKey []byte, lovelace uint64) error,
+	) error
+}
+
+// PointerStake is the lovelace in live outputs at pointer addresses naming
+// the certificate at (Slot, TxIndex, CertIndex).
+type PointerStake struct {
+	Slot      uint64
+	TxIndex   uint64
+	CertIndex uint64
+	Lovelace  uint64
+}
+
+// RewardStateSkips names the reward-state tables a rollback leaves alone
+// because a drained family owns them.
+type RewardStateSkips struct {
+	// BlockCounts skips the imported pool block counts and epoch block
+	// totals.
+	BlockCounts bool
+	// Inputs skips the ADA pots, snapshots, seed failures, pool inputs and
+	// stake inputs, and the reset of a reward pot whose round has no outputs.
+	Inputs bool
+	// Outputs skips the pool and account outputs and the credited rounds,
+	// and the unfold of an output whose round the rollback removes.
+	Outputs bool
 }

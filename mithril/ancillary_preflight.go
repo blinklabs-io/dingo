@@ -176,8 +176,8 @@ func parseAndVerifyAncillaryManifest(
 			"ancillary manifest signature has unexpected size %d", len(signature),
 		)
 	}
-	if !ed25519.Verify(
-		ed25519.PublicKey(key.RawKeyBytes), manifest.computeHash(), signature,
+	if !verifyEd25519Strict(
+		key.RawKeyBytes, manifest.computeHash(), signature,
 	) {
 		return nil, errors.New("ancillary manifest signature is invalid")
 	}

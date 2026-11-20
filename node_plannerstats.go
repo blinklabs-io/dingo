@@ -18,19 +18,19 @@ import (
 	"context"
 	"errors"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 )
 
-// newPlannerStatsManager builds the planner-statistics manager for the
-// current database handle, or returns nil when the refresh is disabled or
-// the metadata store has no incremental form. A restore or truncate replaces
-// the handle, so the manager is rebuilt with it rather than reused.
-func (n *Node) newPlannerStatsManager() *plannerstats.Manager {
-	if !n.config.PlannerStatsRefreshEnabled() || n.db == nil {
+// newPlannerStatsManager builds the planner-statistics manager for db's
+// metadata store, or returns nil when refresh is disabled or the store keeps
+// no planner statistics.
+func (n *Node) newPlannerStatsManager(db *database.Database) *plannerstats.Manager {
+	if !n.config.PlannerStatsRefreshEnabled() || db == nil {
 		return nil
 	}
-	updater, ok := n.db.Metadata().(metadata.IncrementalPlannerStatsUpdater)
+	updater, ok := db.Metadata().(metadata.IncrementalPlannerStatsUpdater)
 	if !ok {
 		return nil
 	}
@@ -41,7 +41,7 @@ func (n *Node) newPlannerStatsManager() *plannerstats.Manager {
 // processed. A failure is logged and does not stop the node: the node still
 // works, only with the planner statistics it had.
 func (n *Node) runPlannerStatsStartup(ctx context.Context) {
-	n.plannerStatsMgr = n.newPlannerStatsManager()
+	n.plannerStatsMgr = n.newPlannerStatsManager(n.db)
 	if n.plannerStatsMgr == nil {
 		return
 	}
@@ -64,10 +64,29 @@ func (n *Node) runPlannerStatsStartup(ctx context.Context) {
 // creating it first when the database handle was replaced.
 func (n *Node) startPlannerStatsManager(ctx context.Context) error {
 	if n.plannerStatsMgr == nil {
-		n.plannerStatsMgr = n.newPlannerStatsManager()
+		n.plannerStatsMgr = n.newPlannerStatsManager(n.db)
 	}
 	if n.plannerStatsMgr == nil {
 		return nil
 	}
 	return n.plannerStatsMgr.Start(ctx)
+}
+
+// startIndexerPlannerStatsManager starts the IndexerDB's manager with a
+// queued startup pass. The IndexerDB holds the API history, which can take
+// minutes to analyze, so callers place it after the API listeners start and
+// planner maintenance cannot delay availability. withStartup is false when the
+// manager restarts after a storage reinitialization.
+func (n *Node) startIndexerPlannerStatsManager(
+	ctx context.Context,
+	withStartup bool,
+) error {
+	n.indexerPlannerStatsMgr = n.newPlannerStatsManager(n.indexerDB)
+	if n.indexerPlannerStatsMgr == nil {
+		return nil
+	}
+	if withStartup {
+		return n.indexerPlannerStatsMgr.StartWithStartup(ctx)
+	}
+	return n.indexerPlannerStatsMgr.Start(ctx)
 }

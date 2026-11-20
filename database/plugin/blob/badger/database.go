@@ -186,7 +186,13 @@ func (t *badgerTxn) Commit() error {
 		t.finished = true
 		return nil
 	}
-	if err := t.tx.Commit(); err != nil {
+	// Reclaim blocks badger's write path for a moment, and a commit that
+	// reaches it then fails with ErrBlockedWrites. The gate keeps commits
+	// out of that window.
+	t.store.commitGate.RLock()
+	err := t.tx.Commit()
+	t.store.commitGate.RUnlock()
+	if err != nil {
 		return err
 	}
 	t.finished = true
@@ -321,14 +327,18 @@ func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry         prometheus.Registerer
-	db                   *badger.DB
-	logger               *slog.Logger
-	gcTicker             *time.Ticker
-	gcStopCh             chan struct{}
-	runValueLogGC        func(float64) error
-	dataDir              string
+	promRegistry  prometheus.Registerer
+	db            *badger.DB
+	logger        *slog.Logger
+	gcTicker      *time.Ticker
+	gcStopCh      chan struct{}
+	runValueLogGC func(float64) error
+	dataDir       string
+	// subdir names the directory under dataDir that holds the badger files.
+	// Empty selects "blob".
+	subdir               string
 	gcWg                 sync.WaitGroup
+	commitGate           sync.RWMutex
 	gcMetrics            *badgerGCMetrics
 	closeOnce            sync.Once
 	closeDone            chan struct{}
@@ -337,6 +347,7 @@ type BlobStoreBadger struct {
 	indexCacheSize       uint64
 	valueLogFileSize     int64
 	memTableSize         int64
+	inMemoryMemTableSize int64
 	valueThreshold       int64
 	compactBlockMetadata bool
 	compressionEnabled   bool
@@ -405,6 +416,14 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	return db, nil
 }
 
+// storeSubdir is the directory under dataDir that holds this store's files.
+func (db *BlobStoreBadger) storeSubdir() string {
+	if db.subdir == "" {
+		return "blob"
+	}
+	return db.subdir
+}
+
 // open initializes and opens the Badger database using the configured options.
 func (db *BlobStoreBadger) open() error {
 	var blobDb *badger.DB
@@ -420,6 +439,19 @@ func (db *BlobStoreBadger) open() error {
 			WithValueThreshold(db.valueThreshold).
 			WithCompression(db.badgerCompression()).
 			WithZSTDCompressionLevel(db.compressionLevel)
+		if db.inMemoryMemTableSize > 0 {
+			badgerOpts = badgerOpts.WithMemTableSize(db.inMemoryMemTableSize)
+		}
+		// Badger sizes the block cache's admission sketch from
+		// BlockCacheSize when the store opens, tens of megabytes at its
+		// 256 MiB default, and requires the cache only for compressed or
+		// encrypted blocks. An uncompressed in-memory store already holds
+		// its blocks in memory, and a process that opens thousands of
+		// them, as a test binary does, keeps one sketch per store
+		// reachable.
+		if !db.compressionEnabled {
+			badgerOpts = badgerOpts.WithBlockCacheSize(0)
+		}
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)
@@ -435,10 +467,7 @@ func (db *BlobStoreBadger) open() error {
 				return fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
-		blobDir := filepath.Join(
-			db.dataDir,
-			"blob",
-		)
+		blobDir := filepath.Join(db.dataDir, db.storeSubdir())
 		badgerOpts := badger.DefaultOptions(blobDir).
 			WithLogger(NewBadgerLogger(db.logger)).
 			WithLoggingLevel(badger.WARNING).
@@ -639,7 +668,7 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 			if db := d.DB(); db != nil {
 				d.closeErr = db.Close()
 				if d.closeErr == nil && d.dataDir != "" {
-					lockDir := filepath.Join(d.dataDir, "blob")
+					lockDir := filepath.Join(d.dataDir, d.storeSubdir())
 					if !waitForDirLockRelease(
 						lockDir, dirLockReleaseTimeout,
 					) {
@@ -700,7 +729,7 @@ func (d *BlobStoreBadger) onDiskSize() (lsm, vlog int64, err error) {
 	if d.dataDir == "" {
 		return 0, 0, nil
 	}
-	entries, err := os.ReadDir(filepath.Join(d.dataDir, "blob"))
+	entries, err := os.ReadDir(filepath.Join(d.dataDir, d.storeSubdir()))
 	if err != nil {
 		return 0, 0, fmt.Errorf("read badger dir: %w", err)
 	}
@@ -809,8 +838,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if item.ValueSize() > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	value, err := item.ValueCopy(nil)
@@ -819,8 +847,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	if err := ctx.Err(); err != nil {

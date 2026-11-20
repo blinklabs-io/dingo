@@ -64,6 +64,7 @@ func newReplayTestLedger(
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                testLogger(),
@@ -74,6 +75,7 @@ func newReplayTestLedger(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	setReplayTestLedgerOrigin(ls, era, pparams)
 	require.NoError(t, cm.SetLedger(ls))
 	return ls
@@ -277,7 +279,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				inputIds := [][]byte{f.spendTxId, f.collateralTxId}
 				before := make([]*models.Utxo, 0, len(inputIds))
 				for _, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
+					utxo, err := ls.UtxoByRef(id, 0)
 					require.NoError(t, err)
 					before = append(before, utxo)
 				}
@@ -288,7 +290,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				if tc.witnessDatum {
 					require.NoError(t, err)
 					require.Equal(t, block.Hash().Bytes(), tip.Point.Hash)
-					_, err = f.db.UtxoByRef(context.Background(), f.spendTxId, 0, nil)
+					_, err = ls.UtxoByRef(f.spendTxId, 0)
 					require.ErrorIs(t, err, types.ErrUtxoNotFound)
 					return
 				}
@@ -297,7 +299,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				require.Equal(t, f.script.Hash(), missing.ScriptHash)
 				require.Equal(t, ochainsync.Tip{}, tip)
 				for i, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
+					utxo, err := ls.UtxoByRef(id, 0)
 					require.NoError(t, err)
 					require.Equal(t, before[i], utxo)
 				}

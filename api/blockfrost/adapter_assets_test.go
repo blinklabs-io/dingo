@@ -236,7 +236,7 @@ func newSlotTimeDBBackedAdapter(
 func seedAssetTransaction(
 	t *testing.T,
 	raw *sql.DB,
-	db *database.Database,
+	adapter *NodeAdapter,
 	txHash []byte,
 	height uint64,
 	slot uint64,
@@ -244,7 +244,7 @@ func seedAssetTransaction(
 ) *models.Transaction {
 	t.Helper()
 	blockHash := fill32(byte(0xd0 + height))
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash: blockHash, Slot: slot, Number: height,
 		ID:   height + database.BlockInitialIndex,
 		Type: 0, Cbor: []byte{byte(height)},
@@ -264,18 +264,12 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	policyHex := hex.EncodeToString(policy)
 	mint, move := fill32(0x01), fill32(0x02)
 
-	seedAssetTransaction(t, raw, db, mint, 1, 10, 0)
-	seedAssetTransaction(t, raw, db, move, 3, 30, 1)
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(30, fill32(0xd3)),
-				BlockNumber: 3,
-			},
-			nil,
-		),
-	)
+	seedAssetTransaction(t, raw, adapter, mint, 1, 10, 0)
+	seedAssetTransaction(t, raw, adapter, move, 3, 30, 1)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, fill32(0xd3)),
+		BlockNumber: 3,
+	})
 	seedMintBurn(t, raw, mint, policy, "T", 10, "5")
 	addr, _, _ := testKeyAddress(t, 0xd2, 0)
 	// produce creates an output holding the asset in block 2, which move
@@ -284,7 +278,7 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	seedAddressOutput(t, raw, db, addr, produce, 20, 1_000_000,
 		[]models.Asset{{PolicyId: policy, Name: []byte("T"), Amount: 5}}, move)
 	blockHash := fill32(0xd2)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash: blockHash, Slot: 20, Number: 2,
 		ID:   2 + database.BlockInitialIndex,
 		Type: 0, Cbor: []byte{2},
@@ -401,9 +395,9 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 
 	// first: an inline-datum output in block 1; second: a plain output in
 	// block 3. A spent holding in block 2 is not a current UTxO.
-	firstTx := seedAssetTransaction(t, raw, db, fill32(0x01), 1, 10, 0)
-	spentTx := seedAssetTransaction(t, raw, db, fill32(0x02), 2, 20, 0)
-	secondTx := seedAssetTransaction(t, raw, db, fill32(0x03), 3, 30, 1)
+	firstTx := seedAssetTransaction(t, raw, adapter, fill32(0x01), 1, 10, 0)
+	spentTx := seedAssetTransaction(t, raw, adapter, fill32(0x02), 2, 20, 0)
+	secondTx := seedAssetTransaction(t, raw, adapter, fill32(0x03), 3, 30, 1)
 	spender := &models.Transaction{Hash: fill32(0x04), Slot: 40, Valid: true}
 	insertAdapterTransaction(t, raw, spender)
 	for i, tx := range []*models.Transaction{firstTx, spentTx, secondTx} {
@@ -484,16 +478,10 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(secondTx.Hash), rows[0].TxHash)
 
 	// A block range selects on the producing transaction's position.
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(30, fill32(0xd3)),
-				BlockNumber: 3,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, fill32(0xd3)),
+		BlockNumber: 3,
+	})
 	ranged := params
 	ranged.From = &BlockRangePosition{Block: 2}
 	rows, total, err = adapter.AssetUTXOs(ctx, policyHex, []byte("T"), ranged)
@@ -554,7 +542,7 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 		return []models.Asset{{PolicyId: policy, Name: []byte("C"), Amount: 1}}
 	}
 
-	valid := seedAssetTransaction(t, raw, db, fill32(0x11), 5, 50, 1)
+	valid := seedAssetTransaction(t, raw, adapter, fill32(0x11), 5, 50, 1)
 	insertAdapterUtxo(t, raw, &models.Utxo{
 		TransactionID: &valid.ID,
 		TxId:          valid.Hash,
@@ -581,16 +569,10 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 	}
 	insertAdapterTransaction(t, raw, failed)
 	storePointerOutputCbor(t, db, failed.Hash, 1, addr, 2_000_000)
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(50, fill32(0xd5)),
-				BlockNumber: 5,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(50, fill32(0xd5)),
+		BlockNumber: 5,
+	})
 
 	index := uint32(2)
 	params := TransactionRangeParams{

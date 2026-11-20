@@ -205,8 +205,8 @@ func ledgerInputIDBytes(input lcommon.TransactionInput) []byte {
 }
 
 // consumedInputKey is a comparable, allocation-free dedup key for a
-// transaction input's hash+index. ensureTransactionConsumedUtxos and
-// ensureGapConsumedUtxos use it to skip repeated processing of an input a
+// transaction input's hash+index. ensureTransactionConsumedUtxos uses it to
+// skip repeated processing of an input a
 // transaction's Consumed() set lists more than once. Both fields are plain
 // value types (a fixed-size byte array and a uint32), so using this struct
 // as a map key never allocates, unlike the fmt.Sprintf-formatted hex string
@@ -377,8 +377,9 @@ func (d *Database) SetTransactionWithOpts(
 				point.Slot,
 			)
 		}
-		// Store offset reference
-		if opts.OffsetsPersisted {
+		// Store offset reference. The live UTxO set holds output bytes
+		// itself.
+		if opts.OffsetsPersisted || d.liveUtxo {
 			continue
 		}
 		offsetData := EncodeUtxoOffset(&offset)
@@ -430,7 +431,7 @@ func (d *Database) SetTransactionWithOpts(
 		)
 	}
 
-	if len(pparamUpdates) > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() && !d.pparamsDrained() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
@@ -505,10 +506,9 @@ func (d *Database) SetTransactionMetadataOnly(
 }
 
 // SetGapBlockTransaction stores a transaction from a mithril gap block.
-// It records blob offsets (TX and UTxO) for CBOR resolution and creates the
-// transaction, certificate, and output metadata records, but does NOT look
-// up or consume input UTxOs because the mithril snapshot already reflects the
-// correct spent/unspent state.
+// It records the transaction's blob offset for CBOR resolution and creates
+// the transaction and certificate metadata records. It writes no UTxO rows
+// or stake changes: the LedgerDB UTxO set is already at or past the block.
 func (d *Database) SetGapBlockTransaction(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -559,8 +559,8 @@ func (d *Database) SetGapBlockTransaction(
 	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set gap block tx offset: %w", err)
 	}
-
-	// Store UTxO offsets for produced outputs
+	// The produced outputs live in the LedgerDB UTxO set, so only their
+	// offsets' presence is checked here.
 	for _, utxo := range tx.Produced() {
 		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
@@ -570,20 +570,12 @@ func (d *Database) SetGapBlockTransaction(
 			TxId:      utxoTxHashArray,
 			OutputIdx: outputIdx,
 		}
-		offset, ok := offsets.UtxoOffsets[ref]
-		if !ok {
+		if _, ok := offsets.UtxoOffsets[ref]; !ok {
 			return fmt.Errorf(
 				"missing UTxO offset for gap block %s#%d at slot %d",
 				hex.EncodeToString(bytePrefix(txId)),
 				outputIdx,
 				point.Slot,
-			)
-		}
-		offsetData := EncodeUtxoOffset(&offset)
-		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf(
-				"set gap block utxo offset %x#%d: %w",
-				bytePrefix(txId), outputIdx, err,
 			)
 		}
 	}
@@ -595,36 +587,9 @@ func (d *Database) SetGapBlockTransaction(
 			"set gap block transaction metadata: %w", err,
 		)
 	}
-	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
-	// the consumed inputs spent by this tx (utxo.spent_by_tx_id holds
-	// transaction.id), so the transaction row has to exist first.
-	if err := d.ensureGapConsumedUtxos(
-		tx,
-		point,
-		txn,
-	); err != nil {
-		return err
-	}
-	// For a phase-2-invalid transaction the consumed set is its collateral
-	// inputs. SetGapBlockTransaction above computed the collateral fee before
-	// ensureGapConsumedUtxos recovered those inputs from the blob store, so
-	// when the tx declares no total collateral the fee was computed from an
-	// incomplete UTxO view and undercounts. Recompute it now that the inputs
-	// are materialized so the epoch fee pot is correct.
-	if err := d.transactionStore().RecomputeGapCollateralFee(
-		tx, point, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"recompute gap block collateral fee: %w", err,
-		)
-	}
-
 	if owned {
-		if err := txn.Commit(); err != nil {
-			return err
-		}
+		return txn.Commit()
 	}
-
 	return nil
 }
 
@@ -655,7 +620,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	opts BatchedTxIngestOpts,
 ) error {
 	consumed := tx.Consumed()
-	if len(consumed) == 0 {
+	if len(consumed) == 0 || d.liveUtxo {
 		return nil
 	}
 
@@ -799,121 +764,6 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	return nil
 }
 
-func (d *Database) ensureGapConsumedUtxos(
-	tx lcommon.Transaction,
-	point ocommon.Point,
-	txn *Txn,
-) error {
-	consumed := tx.Consumed()
-	if len(consumed) == 0 {
-		return nil
-	}
-	spenderTxHash := ledgerHashBytes(tx.Hash())
-	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[consumedInputKey]struct{}, len(consumed))
-	for _, input := range consumed {
-		inputTxId := ledgerInputIDBytes(input)
-		inputKey := newConsumedInputKey(input)
-		if _, ok := seen[inputKey]; ok {
-			continue
-		}
-		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
-			inputTxId,
-			input.Index(),
-			txn.Metadata(),
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"check gap input utxo %s at slot %d: %w",
-				input.String(),
-				point.Slot,
-				err,
-			)
-		}
-		if existingUtxo != nil {
-			// Already spent by this same transaction: idempotent
-			// re-processing of the same gap block is a no-op.
-			if existingUtxo.SpentAtTxHash != nil &&
-				bytes.Equal(existingUtxo.SpentAtTxHash, spenderTxHash) {
-				continue
-			}
-			// Live rows from an earlier gap block or snapshot need to
-			// be consumed now. Same-slot deleted rows with a missing
-			// SpentAtTxHash need their consumer link backfilled.
-			if existingUtxo.SpentAtTxHash == nil &&
-				(existingUtxo.DeletedSlot == 0 ||
-					existingUtxo.DeletedSlot == point.Slot) {
-				if err := d.utxoStore().SetUtxoDeletedAtSlot(
-					input,
-					point.Slot,
-					spenderTxHash,
-					txn.Metadata(),
-				); err != nil {
-					// ErrUtxoConflict can occur if another path raced
-					// the row into a different state between our read
-					// and the update; treat it like NotFound so the
-					// recover-from-blob path runs (which is a no-op for
-					// any row that actually still exists thanks to
-					// ImportUtxos' ON CONFLICT DO NOTHING).
-					switch {
-					case errors.Is(err, types.ErrUtxoNotFound),
-						errors.Is(err, types.ErrUtxoConflict):
-						existingUtxo = nil
-					default:
-						return fmt.Errorf(
-							"mark gap input utxo %s spent at slot %d: %w",
-							input.String(),
-							point.Slot,
-							err,
-						)
-					}
-				}
-				if existingUtxo != nil {
-					continue
-				}
-			} else {
-				// Already spent by a different tx (e.g. the Mithril
-				// snapshot import already recorded this spend): leave the
-				// existing row alone.
-				continue
-			}
-		}
-		// Mithril gap-closure recovers producers from imported history that
-		// legitimately has no block-index entry, so the primary-chain
-		// membership check is not applied on this path.
-		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn, false)
-		if err != nil {
-			return fmt.Errorf(
-				"recover gap input utxo %s at slot %d: %w",
-				input.String(),
-				point.Slot,
-				err,
-			)
-		}
-		recoveredUtxo.DeletedSlot = point.Slot
-		recoveredUtxo.SpentAtTxHash = append(
-			[]byte(nil),
-			spenderTxHash...,
-		)
-		recoveredUtxos = append(recoveredUtxos, *recoveredUtxo)
-	}
-	if len(recoveredUtxos) == 0 {
-		return nil
-	}
-	if err := d.utxoStore().ImportUtxos(
-		recoveredUtxos,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"import recovered gap input utxos at slot %d: %w",
-			point.Slot,
-			err,
-		)
-	}
-	return nil
-}
-
 // recoveredProducerOnPrimaryChain reports whether the block that produced a
 // blob-recovered UTxO is the block currently indexed on the applied primary
 // chain at that height. The append-only blob store retains blocks from
@@ -982,6 +832,51 @@ func (d *Database) refuseOffPrimaryChainProducer(
 	return nil
 }
 
+// refuseOffPrimaryChainClosure applies the primary-chain check to a UTxO
+// recovered from an endorser block's closure. A closure is not a chain block
+// and has no block index, so its producer is the ranking block that certifies
+// it: the producing transaction's metadata row is recorded under that block,
+// and rollback deletes the row with the block's application. A row that is
+// absent, or whose ranking block is not the block indexed at its height, means
+// the closure belongs to an abandoned fork.
+func (d *Database) refuseOffPrimaryChainClosure(
+	txn *Txn,
+	input lcommon.TransactionInput,
+) error {
+	producerTx, err := d.metadata.GetTransactionByHash(
+		ledgerInputIDBytes(input),
+		txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"lookup certifying block of closure for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	if producerTx == nil || len(producerTx.BlockHash) == 0 {
+		return ErrUtxoNotFound
+	}
+	block, err := BlockByPointTxn(
+		txn,
+		ocommon.NewPoint(producerTx.Slot, producerTx.BlockHash),
+	)
+	if errors.Is(err, models.ErrBlockNotFound) ||
+		errors.Is(err, types.ErrBlobKeyNotFound) {
+		return ErrUtxoNotFound
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"load certifying block of closure for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	return d.refuseOffPrimaryChainProducer(
+		txn, block.ID, block.Slot, block.Hash, input,
+	)
+}
+
 func (d *Database) recoverConsumedUtxo(
 	input lcommon.TransactionInput,
 	txn *Txn,
@@ -1010,6 +905,7 @@ func (d *Database) recoverConsumedUtxo(
 	}
 	addedSlot := uint64(0)
 	outputCbor := utxoData
+	fromClosure := false
 	switch {
 	case err == nil && IsUtxoOffsetStorage(utxoData):
 		offset, err := DecodeUtxoOffset(utxoData)
@@ -1021,6 +917,16 @@ func (d *Database) recoverConsumedUtxo(
 			offset.BlockSlot,
 			offset.BlockHash[:],
 		)
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			// An endorser block's closure lives in the LeiosDB and has no
+			// block metadata.
+			if closure, closureErr := d.leiosClosure(
+				offset.BlockSlot, offset.BlockHash[:],
+			); closureErr == nil {
+				blockCbor, producerMeta, err = closure, types.BlockMetadata{}, nil
+				fromClosure = true
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("load producer block: %w", err)
 		}
@@ -1035,7 +941,11 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor = blockCbor[offset.ByteOffset:end]
 		addedSlot = offset.BlockSlot
-		if enforcePrimaryChain {
+		if enforcePrimaryChain && fromClosure {
+			if err := d.refuseOffPrimaryChainClosure(txn, input); err != nil {
+				return nil, err
+			}
+		} else if enforcePrimaryChain {
 			if err := d.refuseOffPrimaryChainProducer(
 				txn,
 				producerMeta.ID,
@@ -1242,15 +1152,20 @@ func (d *Database) SetGenesisTransaction(
 			)
 		}
 
-		// Store offset reference
-		offsetData := EncodeUtxoOffset(&offset)
-		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf(
-				"set genesis utxo offset %x#%d: %w",
-				bytePrefix(txId),
-				outputIdx,
-				err,
-			)
+		// The metadata store still needs the model of a live-set output: its
+		// stake credential feeds reward_live_stake.
+		if !d.liveUtxo {
+			offsetData := EncodeUtxoOffset(&offset)
+			if err := blob.SetUtxo(
+				blobTxn, txId, outputIdx, offsetData,
+			); err != nil {
+				return fmt.Errorf(
+					"set genesis utxo offset %x#%d: %w",
+					bytePrefix(txId),
+					outputIdx,
+					err,
+				)
+			}
 		}
 
 		// Build model for metadata store

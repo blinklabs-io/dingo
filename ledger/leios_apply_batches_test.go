@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -92,6 +93,7 @@ func newLeiosApplyDenseLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
 
 	budget, ok := db.Blob().(interface {
@@ -135,7 +137,7 @@ func TestApplyEndorserBlockDenseOffsetsExceedBlobTransaction(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		applied, _, err := ls.applyEndorserBlock(
+		applied, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -205,7 +207,7 @@ func applyLeiosDenseBlock(
 ) error {
 	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -235,13 +237,13 @@ func TestApplyEndorserBlockDenseOffsetsReadableByLaterBlock(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if _, _, err := ls.applyEndorserBlock(
+		if _, _, _, err := ls.applyEndorserBlock(
 			context.Background(), txn, rbPoint, 1, 710,
 			leiosApplyTestEbHash(0x55), raws,
 		); err != nil {
 			return err
 		}
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(), txn, rbPoint, 1, 711,
 			leiosApplyTestEbHash(0x56), []cbor.RawMessage{spendRaw},
 		)
@@ -306,6 +308,40 @@ func TestApplyEndorserBlockDenseOffsetsCrashBetweenBatches(t *testing.T) {
 	ls.afterEndorserOffsetBatch = nil
 	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 720, ebHash, raws))
 	requireLeiosApplyTestTxCount(t, raw, int64(count))
+	requireLeiosDenseOutputsResolve(t, db, txs)
+}
+
+// The closure commits in the LeiosDB before any offset batch that points into
+// it, so a crash after the first committed batch never leaves an offset naming
+// a closure the store lacks, and the retry rewrites the same record.
+func TestApplyEndorserBlockClosureCommitsBeforeOffsets(t *testing.T) {
+	t.Parallel()
+
+	ls, db, count := newLeiosApplyDenseLedger(t)
+	raws, txs := leiosApplyDenseBlock(t, count)
+	rbPoint := leiosApplyTestRankingPoint(0x5e)
+	ebHash := leiosApplyTestEbHash(0x5f)
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	ref := leiosdb.Ref{Slot: 740, Hash: ebHash}
+
+	injected := errors.New("injected crash between offset batches")
+	closureAtCrash := -1
+	ls.afterEndorserOffsetBatch = func() error {
+		if closure, err := store.GetClosure(ref); err == nil {
+			closureAtCrash = len(closure)
+		}
+		return injected
+	}
+	err = applyLeiosDenseBlock(ls, db, rbPoint, 740, ebHash, raws)
+	require.ErrorIs(t, err, injected)
+	require.Positive(t, closureAtCrash, "closure was not committed before the first offset batch")
+
+	ls.afterEndorserOffsetBatch = nil
+	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 740, ebHash, raws))
+	closure, err := store.GetClosure(ref)
+	require.NoError(t, err)
+	require.Equal(t, closureAtCrash, len(closure))
 	requireLeiosDenseOutputsResolve(t, db, txs)
 }
 

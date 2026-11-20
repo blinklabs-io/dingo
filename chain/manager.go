@@ -624,6 +624,11 @@ func (cm *ChainManager) removeBlockByIndex(
 	// rollbackLocked calls it once per block, so acquiring the barrier here
 	// would release it between blocks. The ledger rollback caller holds it
 	// across the whole chain-delete -> metadata-truncate sequence instead.
+	// Refuse before any event is recorded: a removal that cannot happen must
+	// not tell the other chains it did.
+	if err := cm.db.CheckImmutableFloor(blockIndex); err != nil {
+		return models.Block{}, err
+	}
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {

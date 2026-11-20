@@ -353,7 +353,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 		blockTxn = blob.NewTransaction(false)
 		defer blockTxn.Rollback() //nolint:errcheck
 	}
-	blockCbor, _, err := blob.GetBlock(
+	blockCbor, err := c.getBlockCbor(blob,
 		blockTxn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
@@ -382,6 +382,30 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	// Populate hot cache
 	c.cacheResolvedUtxo(blob, txId, outputIdx, utxoData, cbor, callerTxn)
 	return cbor, nil
+}
+
+// getBlockCbor reads the block CBOR a transaction offset points into. An
+// endorser block's certified closure is not a block in the blob store: it lives
+// in the LeiosDB, so a miss in the blob store falls back to it. Closures
+// written before the LeiosDB existed are synthetic blocks in the blob store
+// and are found by the first read.
+func (c *TieredCborCache) getBlockCbor(
+	store blob.BlobStore,
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, error) {
+	blockCbor, _, err := store.GetBlock(txn, slot, hash)
+	if err == nil || !errors.Is(err, types.ErrBlobKeyNotFound) || c.db == nil {
+		return blockCbor, err
+	}
+	closure, closureErr := c.db.leiosClosure(slot, hash)
+	if closureErr != nil {
+		// The blob miss is the more useful error: it names the block the
+		// offset points at, and the closure miss only repeats it.
+		return nil, err
+	}
+	return closure, nil
 }
 
 // ResolveTxCbor resolves transaction body CBOR data by transaction hash.
@@ -473,7 +497,7 @@ func (c *TieredCborCache) ResolveTxCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
-	blockCbor, _, err := blob.GetBlock(
+	blockCbor, err := c.getBlockCbor(blob,
 		blobTxn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
@@ -618,7 +642,7 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 			c.metrics.IncBlockLRUMiss()
 
 			// Fetch block from blob store
-			blockCbor, _, err := blob.GetBlock(txn, group.slot, group.hash[:])
+			blockCbor, err := c.getBlockCbor(blob, txn, group.slot, group.hash[:])
 			if err != nil {
 				return nil, fmt.Errorf(
 					"get block for utxo batch extraction (slot=%d, hash=%x): %w",
@@ -767,7 +791,7 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 			c.metrics.IncBlockLRUMiss()
 
 			// Fetch block from blob store
-			blockCbor, _, err := blob.GetBlock(txn, group.slot, group.hash[:])
+			blockCbor, err := c.getBlockCbor(blob, txn, group.slot, group.hash[:])
 			if err != nil {
 				return nil, fmt.Errorf(
 					"get block for tx batch extraction (slot=%d, hash=%x): %w",

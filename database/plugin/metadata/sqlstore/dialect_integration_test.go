@@ -136,6 +136,22 @@ func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
 	)
 }
 
+func TestPostgresListMintedAssetsPastSlotFoldLimit(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testListMintedAssetsPastSlotFoldLimit(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLListMintedAssetsPastSlotFoldLimit(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testListMintedAssetsPastSlotFoldLimit(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestPostgresAccountAggregateLimits(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	testAccountAggregateLimits(
@@ -343,10 +359,13 @@ func testSQLStoreIntegration(
 	require.Equal(t, types.Uint64(22), state.Reserves)
 	require.Equal(t, uint64(33), state.Slot)
 
-	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
-		StorageMode: types.StorageModeCore,
-		Network:     "integration",
-	}))
+	require.NoError(
+		t,
+		store.SetNodeSettings(context.Background(), &types.NodeSettings{
+			StorageMode: types.StorageModeCore,
+			Network:     "integration",
+		}),
+	)
 	settings, err := store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "integration", settings.Network)
@@ -357,10 +376,13 @@ func testSQLStoreIntegration(
 		dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"),
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
-		StorageMode: types.StorageModeCore,
-		Network:     "legacy-fixed",
-	}))
+	require.NoError(
+		t,
+		store.SetNodeSettings(context.Background(), &types.NodeSettings{
+			StorageMode: types.StorageModeCore,
+			Network:     "legacy-fixed",
+		}),
+	)
 	settings, err = store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "legacy-fixed", settings.Network)
@@ -669,7 +691,10 @@ func testBatchedTransactionWrites(t *testing.T, store *Store) {
 		transaction := makeTransaction(byte(id + 1))
 		txn := store.Transaction(t.Context())
 		batch := store.NewBatchAccumulator()
-		point := ocommon.Point{Slot: uint64(id + 1), Hash: transaction.Hash().Bytes()}
+		point := ocommon.Point{
+			Slot: uint64(id + 1),
+			Hash: transaction.Hash().Bytes(),
+		}
 		var err error
 		if historical {
 			err = store.SetTransactionBatchedHistorical(
@@ -708,4 +733,26 @@ func TestPostgresDrepAmountPageAdjustmentTyping(t *testing.T) {
 		require.Equal(t, 1, total)
 		require.Len(t, page, 1)
 	}
+}
+
+func TestPostgresConsensusStateCopy(t *testing.T) {
+	sourceDSN, sourceSchema := newPostgresIntegrationSchema(t)
+	destDSN, destSchema := newPostgresIntegrationSchema(t)
+	source := newIntegrationSQLStore(
+		t,
+		"pgx",
+		sourceDSN,
+		"postgres",
+		sourceSchema,
+	)
+	dest := newIntegrationSQLStore(t, "pgx", destDSN, "postgres", destSchema)
+	testConsensusCopyCarriesCoreModeState(t, source, dest)
+}
+
+func TestMySQLConsensusStateCopy(t *testing.T) {
+	sourceDSN, sourceName := newMySQLIntegrationDatabase(t)
+	destDSN, destName := newMySQLIntegrationDatabase(t)
+	source := newIntegrationSQLStore(t, "mysql", sourceDSN, "mysql", sourceName)
+	dest := newIntegrationSQLStore(t, "mysql", destDSN, "mysql", destName)
+	testConsensusCopyCarriesCoreModeState(t, source, dest)
 }

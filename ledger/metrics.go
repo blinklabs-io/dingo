@@ -40,6 +40,7 @@ type stateMetrics struct {
 	observerHorizonOvershoot prometheus.Histogram
 	observerReadAheadParks   prometheus.Counter
 	holdsPointRetries        prometheus.Counter
+	leiosPinsContentPending  prometheus.Counter
 	blockfetchEventMu        sync.Mutex
 	blockfetchEventStarts    map[uint64]time.Time
 	blockfetchEventNextID    uint64
@@ -284,6 +285,7 @@ type stateMetrics struct {
 	// that block is missing, so a rising value means ledger.tx subscribers
 	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
+
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
@@ -1030,6 +1032,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.observerReadAheadParks = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_ledger_observer_readahead_parks_total",
 		Help: "observer chainsync callbacks parked because the header lay more than k blocks above the header tip",
+	})
+	m.leiosPinsContentPending = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_ledger_leios_pins_content_pending_total",
+		Help: "certified endorser blocks pinned before their manifest or transactions were stored",
 	})
 	m.holdsPointRetries = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_ledger_fork_anchor_membership_retries_total",

@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // DelegatorInactivityActivatedSyncKey is the durable sync_state marker key
@@ -139,14 +140,18 @@ func RecomputeAccountExpirationsAfterTruncate(
 	// remain reset to 0 instead of being reconstructed from its surviving
 	// pre-activation witness.
 	if activated && activationEpoch > rollbackEpoch.EpochId {
-		resetRefs, resetErr := d.ResetAccountExpirationActivation(ctx, txn)
-		if resetErr != nil {
-			return fmt.Errorf(
-				"reset delegator-inactivity activation stamp: %w",
-				resetErr,
-			)
+		// A drained accounts family has no SQL rows to reset: the set's
+		// rollback restores each account's expiration from its journal.
+		if !d.FamilyDrained(nodesettings.FamilyAccounts) {
+			resetRefs, resetErr := d.ResetAccountExpirationActivation(ctx, txn)
+			if resetErr != nil {
+				return fmt.Errorf(
+					"reset delegator-inactivity activation stamp: %w",
+					resetErr,
+				)
+			}
+			affectedRefs = mergeStakeCredentialRefs(affectedRefs, resetRefs)
 		}
-		affectedRefs = mergeStakeCredentialRefs(affectedRefs, resetRefs)
 		if err := d.DeleteSyncState(DelegatorInactivityActivatedSyncKey, txn); err != nil {
 			return fmt.Errorf(
 				"clear delegator-inactivity activation marker: %w",
@@ -155,7 +160,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 		}
 		activated = false
 	}
-	if len(affectedRefs) == 0 {
+	if len(affectedRefs) == 0 || d.FamilyDrained(nodesettings.FamilyAccounts) {
 		return nil
 	}
 	lastWitness, err := d.AccountLastWitnessSlots(

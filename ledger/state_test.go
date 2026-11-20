@@ -39,6 +39,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -3967,6 +3969,7 @@ func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		PromRegistry:      prometheus.NewRegistry(),
@@ -4706,6 +4709,7 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 			require.NoError(t, err)
 			ls, err := NewLedgerState(LedgerStateConfig{
 				Database:       db,
+				UtxoSet:        NewMemLiveSetForTest(),
 				ChainManager:   cm,
 				Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
 				EnableDijkstra: tt.enableDijkstra,
@@ -4784,6 +4788,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		require.NoError(t, err)
 		ls, err := NewLedgerState(LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4866,6 +4871,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -5432,7 +5438,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,
@@ -6440,7 +6446,8 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 			)
 			require.NoError(t, err)
 			block := &conway.ConwayBlock{
-				BlockHeader: &conway.ConwayBlockHeader{},
+				BlockHeader:         &conway.ConwayBlockHeader{},
+				InvalidTransactions: []uint{},
 			}
 			block.BlockHeader.Body.BlockNumber = 1
 			block.BlockHeader.Body.Slot = 1
@@ -6530,6 +6537,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				},
 			}
 			ls.epochCache = []models.Epoch{ls.currentEpoch}
+			attachTestLiveSet(t, ls)
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			for path, run := range map[string]func() error{
@@ -7684,6 +7692,7 @@ func newBoundaryRolloverLedger(
 		},
 	}
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
+	attachTestLiveSet(t, ls)
 	return ls, db
 }
 
@@ -7699,7 +7708,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -7857,7 +7866,7 @@ func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
 	ls, db := newBoundaryRolloverLedger(t)
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -7993,7 +8002,7 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -8602,25 +8611,25 @@ func TestHardForkBoundaryDiscardsDeferredSnapshotCapture(t *testing.T) {
 	ratifyResult := f.rollover(t, f.ls.currentEpoch, f.pparams)
 	require.Equal(t, uint64(742), ratifyResult.NewCurrentEpoch.EpochId)
 
-	noop := func(*database.Txn, event.EpochTransitionEvent) error { return nil }
+	noop := func(ledgerdb.Txn, event.EpochTransitionEvent) error { return nil }
 	f.ls.SetEpochBoundarySnapshotStakeHook(noop)
 	f.ls.SetEpochBoundarySnapshotHook(noop)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			*database.Txn, event.EpochTransitionEvent, uint,
+			ledgerdb.Txn, event.EpochTransitionEvent, uint,
 		) ([]*models.PoolStakeSnapshot, error) {
 			return nil, nil
 		},
 	)
 	var captured, discarded []uint64
 	f.ls.SetDeferredEpochBoundarySnapshotHooks(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captured = append(captured, evt.NewEpoch)
 			return nil
 		},
 		func(epoch uint64) { discarded = append(discarded, epoch) },
 		func(
-			*database.Txn, event.EpochTransitionEvent,
+			ledgerdb.Txn, event.EpochTransitionEvent,
 		) (DeferredBoundarySnapshot, error) {
 			return nil, errors.New("hard-fork boundary deferred its snapshot")
 		},
@@ -10592,6 +10601,32 @@ func shrinkGatherCoalesceRetryInterval(
 	})
 }
 
+// runReaderUntilCleanup runs reader in a goroutine and registers a cleanup
+// that cancels it and waits for it to return. Tests that swap the
+// gatherCoalesce* seams register their restores first, and cleanups run
+// last-registered first, so the reader has exited before any seam is
+// restored.
+func runReaderUntilCleanup(
+	t *testing.T,
+	cancel context.CancelFunc,
+	reader func(),
+) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reader()
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(testutil.AsyncWait):
+			t.Error("ledgerReadChainIterator did not return after cancel")
+		}
+	})
+}
+
 // scriptedGapLedgerReadIterator scripts a fixed sequence of non-blocking
 // Next outcomes. A nil entry simulates the iterator momentarily having
 // nothing ready (chain.ErrIteratorChainTip on a non-blocking probe) without
@@ -10676,7 +10711,9 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10734,7 +10771,9 @@ func TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10787,7 +10826,9 @@ func TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10836,7 +10877,9 @@ func TestLedgerReadChainIteratorGapCapResetsPerBlock(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10886,7 +10929,9 @@ func TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly(
 	ls.advanceUpstreamTipSlot(1)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, 10*time.Second,
@@ -11219,7 +11264,9 @@ func TestLedgerReadChainIteratorTakesNoConnectionLocksInsideGatherSpan(
 	}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -11289,7 +11336,9 @@ func TestLedgerReadChainIteratorSkipsCoalesceAfterReachingTip(t *testing.T) {
 	ls.reachedTip.Store(true)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, 10*time.Second,
@@ -11338,7 +11387,9 @@ func TestLedgerReadChainIteratorCommitBatchBlocksSkipsEmptyPasses(
 	ls.metrics.init(prometheus.NewRegistry())
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	empty := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -11475,7 +11526,9 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass(
 	}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	// The whole pass is attempts*1ms of sleeping, so a deadline in seconds
 	// separates "flushed after exhausting the budget" from "still retrying"
@@ -11547,6 +11600,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
 		EventBus:          bus,
@@ -11772,11 +11826,12 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			cfg := seed.config
 			cfg.Database = db
 			cfg.ChainManager = cm
+			cfg.UtxoSet = NewMemLiveSetForTest()
 			ls, err := NewLedgerState(cfg)
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
 			t.Cleanup(func() { require.NoError(t, ls.Close()) })
-			cutoff, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 3)
+			cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
 			require.NoError(t, err)
 			ancestor := chain.RawBlock{
 				Slot: cutoff + 1, Hash: testHashBytes("reward-ancestor"),
@@ -11815,6 +11870,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			txn := db.Transaction(context.Background(), false)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				app, ok, err := ls.precomputedStakeRewardApplication(
+					context.Background(),
 					txn,
 					4,
 					1_200,
@@ -11948,7 +12004,7 @@ func TestRollbackFailureDuringCloseDoesNotRestoreRewardPrecompute(
 	ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		// Close marks the ledger closed and discards queued precompute
 		// work while this transaction is still open.
@@ -11995,6 +12051,7 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -12112,6 +12169,7 @@ func newSameSlotCompetitorFixtureOpts(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -12330,6 +12388,7 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm,
+		UtxoSet:           NewMemLiveSetForTest(),
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -13388,6 +13447,7 @@ func newPrunedUtxoFixtureWithFillers(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -13452,6 +13512,7 @@ func newPrunedUtxoFixtureWithFillers(
 				AddedSlot:   addedSlot,
 				DeletedSlot: deletedSlot,
 				Amount:      types.Uint64(1_000_000),
+				Address:     append([]byte{0x60}, bytes.Repeat([]byte{0x01}, 28)...),
 			})
 		}))
 	}
@@ -14136,6 +14197,7 @@ func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	require.NoError(t, err)
 	_, err = NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+		UtxoSet: NewMemLiveSetForTest(),
 	})
 	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
 }

@@ -26,18 +26,14 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
-	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -109,7 +105,8 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close(context.Background()) })
-	gates, err := reopened.Database.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := reopened.Database.Metadata().
+		GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -198,7 +195,9 @@ func TestMithrilRewardRepairConfig(t *testing.T) {
 func TestMithrilRewardRepairNetwork(t *testing.T) {
 	t.Parallel()
 
-	name, err := mithrilRewardRepairNetwork(&config.Config{NetworkMagic: 764824073})
+	name, err := mithrilRewardRepairNetwork(
+		&config.Config{NetworkMagic: 764824073},
+	)
 	require.NoError(t, err)
 	require.Equal(t, "mainnet", name)
 
@@ -235,7 +234,49 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 		"serve must resume an interrupted in-place repair before node startup")
 }
 
-func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(t *testing.T) {
+func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		RunMode:      config.RunModeServe,
+		StorageMode:  "core",
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	seedMigratedMetadata(t, cfg)
+	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, runtime.Database.SetSyncState(
+		database.LedgerReimportSyncKey, "1", nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+
+	require.NoError(t, checkSyncState(cfg, logger),
+		"serve must let the node run its own interrupted re-import")
+
+	// The same status without the re-import mark is still an incomplete sync.
+	runtime, err = openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		runtime.Database.DeleteSyncState(database.LedgerReimportSyncKey, nil),
+	)
+	require.NoError(t, runtime.Close(context.Background()))
+	require.ErrorContains(
+		t,
+		checkSyncState(cfg, logger),
+		"incomplete sync detected",
+	)
+}
+
+func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -299,184 +340,72 @@ func TestRetryMithrilRewardStateRepairStopsOnOtherErrors(t *testing.T) {
 	require.Equal(t, 1, attempts)
 }
 
-// TestEffectiveStorageMode pins effectiveStorageMode's dev-mode override so
-// preflight callers and internal/node.Run's own "dev mode always uses API
-// storage" upgrade never disagree about which mode a dev-mode config
-// actually runs with.
+// TestEffectiveStorageMode pins that a preflight opens the consensus store in
+// core mode whatever the configuration asks for: API rows live in the
+// IndexerDB, and the node opens the consensus store as core in every run mode.
 func TestEffectiveStorageMode(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name    string
-		runMode config.RunMode
-		mode    string
-		want    dingo.StorageMode
-	}{
-		{
-			"dev mode upgrades core to api",
-			config.RunModeDev,
-			"core",
-			dingo.StorageModeAPI,
-		},
-		{
-			"dev mode leaves api as api",
-			config.RunModeDev,
-			"api",
-			dingo.StorageModeAPI,
-		},
-		{
-			"dev mode upgrades unset mode to api",
-			config.RunModeDev,
-			"",
-			dingo.StorageModeAPI,
-		},
-		{
-			"serve mode leaves core alone",
-			config.RunModeServe,
-			"core",
-			dingo.StorageModeCore,
-		},
-		{
-			"serve mode leaves api alone",
-			config.RunModeServe,
-			"api",
-			dingo.StorageModeAPI,
-		},
-		{
-			// internal/node.Run normalizes an unset mode to core before
-			// WithStorageMode, so this helper must return core too, not "".
-			// It returned "" before, and converged with Run only because
-			// database.New applies its own empty-to-core default -- leaving
-			// this helper's contract resting on a third component's default.
-			"serve mode normalizes unset mode to core",
-			config.RunModeServe,
-			"",
-			dingo.StorageModeCore,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := effectiveStorageMode(&config.Config{
-				RunMode:     tt.runMode,
-				StorageMode: tt.mode,
-			})
-			require.Equal(t, tt.want, got)
-		})
+	for _, runMode := range []config.RunMode{
+		config.RunModeServe, config.RunModeDev,
+	} {
+		for _, mode := range []string{"", "core", "api"} {
+			require.Equal(
+				t,
+				dingo.StorageModeCore,
+				effectiveStorageMode(&config.Config{
+					RunMode: runMode, StorageMode: mode,
+				}),
+				"run mode %q, storage mode %q", runMode, mode,
+			)
+		}
 	}
 }
 
-// TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen is a regression test
-// for a reachable startup failure: validate.go exempts midnight.enabled
-// from its storageMode-must-be-api check in dev mode, on the assumption
-// that internal/node.Run's own "dev mode always uses API storage" override
-// makes the contradiction moot. But serveRun's preflight (checkSyncState)
-// opens the database before node.Run ever runs, and used to do so with the
-// raw configured storage mode ("core" here) rather than the mode node.Run
-// was about to upgrade to. That latched storage_mode="core" as a node
-// settings gate; storage_mode is a LatchEnum that only ever moves
-// api-to-core, never back, so node.Run's subsequent api-mode open of the
-// same database would then fail enforcement.
-//
-// With effectiveStorageMode applied consistently, checkSyncState's open
-// already uses "api" for a dev-mode config, so the gate it latches matches
-// what every later open (including the one this test performs directly,
-// standing in for node.Run's) needs.
-func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
+// TestCheckSyncStateDevModeAgreesWithTheNodeOpen starts a dev-mode node twice
+// over one database: the preflight open, then the open node.Run performs once
+// it has applied the dev-mode override. storage_mode only moves api to core,
+// so a preflight that opened the consensus store as api was refused on the
+// second start, after the node had latched it as core.
+func TestCheckSyncStateDevModeAgreesWithTheNodeOpen(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dir := t.TempDir()
 	cfg := &config.Config{
 		RunMode:      config.RunModeDev,
 		StorageMode:  "core",
 		Network:      "preview",
-		DatabasePath: dir,
+		DatabasePath: t.TempDir(),
 		Plugins:      testStoragePlugins(),
 	}
-
-	// Preflight open, exactly as serveRun performs it before node.Run runs.
 	seedMigratedMetadata(t, cfg)
-	require.NoError(t, checkSyncState(cfg, logger))
+	for start := range 2 {
+		preflight := *cfg
+		require.NoError(t, checkSyncState(&preflight, logger), "start %d", start)
 
-	// Stand-in for node.Run's own database open, once it has upgraded to
-	// API mode. Reuses openConfiguredDatabase (which node.go's real open
-	// path also ultimately composes the same storage config through) so
-	// this exercises the same effective-mode computation both call sites
-	// share.
-	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
-	require.NoError(t, err)
-	require.NoError(t, runtime.RecoveryError())
-	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
-
-	gates, err := runtime.Database.Metadata().GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"api",
-		gates["storage_mode"],
-		"dev mode's preflight open must have already latched api, not core",
-	)
-}
-
-func TestResumeBackfillFinalizesStatsBeforeClearingSync(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{
-		RunMode:           config.RunModeServe,
-		StorageMode:       "api",
-		Network:           "preview",
-		DatabasePath:      t.TempDir(),
-		Plugins:           testStoragePlugins(),
-		BackfillBatchSize: 100,
-		DatabaseWorkers:   1,
+		run := *cfg
+		run.ApplyRunModeOverrides(run.RunMode)
+		require.True(t, run.SplitIndexer(), "dev mode serves the APIs")
+		mode := run.ConsensusStorageMode()
+		runtime, err := internalplugins.OpenDatabase(
+			t.Context(),
+			&database.Config{
+				DataDir: run.DatabasePath, Logger: logger,
+				StorageMode: mode, Network: run.Network,
+			},
+			internalplugins.ConfiguredStorageSelections(&run),
+			internalplugins.StorageDependencies{
+				DataDir: run.DatabasePath, RunMode: string(run.RunMode),
+				StorageMode: mode, Logger: logger, GenesisStakingEmpty: true,
+			},
+		)
+		require.NoError(t, err, "start %d", start)
+		require.NoError(t, runtime.RecoveryError())
+		gates, err := runtime.Database.Metadata().
+			GetNodeSettingsGates(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, "core", gates["storage_mode"])
+		require.NoError(t, runtime.Close(context.WithoutCancel(t.Context())))
 	}
-	logger := slog.New(slog.DiscardHandler)
-	seedMigratedMetadata(t, cfg)
-	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
-	require.NoError(t, err)
-	require.NoError(
-		t,
-		runtime.Database.Metadata().
-			SetBackfillCheckpoint(&models.BackfillCheckpoint{Phase: "metadata", Completed: true, UpdatedAt: time.Now().UTC()}, nil),
-	)
-	require.NoError(
-		t,
-		runtime.Database.SetSyncState("sync_status", syncStatusBackfill, nil),
-	)
-	raw, err := dbtest.RawSQLiteMetadata(t, runtime.Database)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		`CREATE TRIGGER fail_stats_marker BEFORE INSERT ON sync_state WHEN NEW.sync_key='metadata_planner_stats_backfill' BEGIN SELECT RAISE(ABORT,'marker interrupted'); END`,
-	)
-	require.NoError(t, err)
-	require.NoError(t, runtime.Close(t.Context()))
-	require.ErrorContains(
-		t,
-		resumeBackfill(t.Context(), cfg, logger),
-		"marker interrupted",
-	)
-	var status string
-	require.NoError(
-		t,
-		raw.QueryRow("SELECT value FROM sync_state WHERE sync_key='sync_status'").
-			Scan(&status),
-	)
-	require.Equal(t, syncStatusBackfill, status)
-	_, err = raw.Exec("DROP TRIGGER fail_stats_marker")
-	require.NoError(t, err)
-	require.NoError(t, resumeBackfill(t.Context(), cfg, logger))
-	var count int
-	require.NoError(
-		t,
-		raw.QueryRow("SELECT COUNT(*) FROM sync_state WHERE sync_key='sync_status'").
-			Scan(&count),
-	)
-	require.Zero(t, count)
-	require.NoError(
-		t,
-		raw.QueryRow("SELECT value FROM sync_state WHERE sync_key=?", metadata.PlannerStatsBackfillSyncKey).
-			Scan(&status),
-	)
-	require.NotEmpty(t, status)
 }
 
 // With mithril.enabled the node syncs an empty database itself, so serve
@@ -555,65 +484,4 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot",
 		"stream mode resumed a snapshot restore")
 	require.NotContains(t, err.Error(), "dingo sync")
-}
-
-// TestResumeBackfillWritesBlockNonces covers the rows the Blockfrost epoch
-// block lists read: a resumed API-mode backfill must store a block_nonce row
-// for each block it replays.
-func TestResumeBackfillWritesBlockNonces(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{
-		RunMode:           config.RunModeServe,
-		StorageMode:       "api",
-		Network:           "preview",
-		DatabasePath:      t.TempDir(),
-		Plugins:           testStoragePlugins(),
-		BackfillBatchSize: 100,
-		DatabaseWorkers:   1,
-	}
-	logger := slog.New(slog.DiscardHandler)
-	seedMigratedMetadata(t, cfg)
-	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
-	require.NoError(t, err)
-	db := runtime.Database
-	require.NoError(t, db.SetEpoch(
-		0, 0, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1000, 100, nil,
-	))
-	pparams := mockledger.NewMockConwayProtocolParams()
-	pparamsCbor, err := cbor.Encode(&pparams)
-	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
-		pparamsCbor, 0, 0, eras.ConwayEraDesc.Id, nil,
-	))
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      "metadata",
-			TotalSlots: 3,
-			StartedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
-		},
-		nil,
-	))
-	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 3)
-	require.NoError(t, err)
-	for _, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:   block.SlotNumber(),
-			Hash:   block.Hash().Bytes(),
-			Number: block.BlockNumber(),
-			Cbor:   block.Cbor(),
-			Type:   uint(block.Type()),
-		}, nil))
-	}
-	require.NoError(t, runtime.Close(t.Context()))
-
-	require.NoError(t, resumeBackfill(t.Context(), cfg, logger))
-
-	runtime, err = openConfiguredDatabase(t.Context(), cfg, logger, 1)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
-	rows, err := runtime.Database.Metadata().
-		GetBlockNoncesInSlotRange(0, 100, nil)
-	require.NoError(t, err)
-	require.Len(t, rows, 3)
 }

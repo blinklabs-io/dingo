@@ -1127,6 +1127,55 @@ func (s *Store) GetPParamUpdates(
 	return ret, nil
 }
 
+// ListPParamUpdatesSQL is the statement ListPParamUpdates issues.
+const ListPParamUpdatesSQL = `
+SELECT genesis_hash, cbor, id, added_slot, epoch
+FROM pparam_update
+ORDER BY id`
+
+// ListPParamUpdates returns every stored protocol parameter update
+// proposal in ascending row order.
+func (s *Store) ListPParamUpdates(
+	txn types.Txn,
+) ([]models.PParamUpdate, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, ListPParamUpdatesSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []models.PParamUpdate
+	for rows.Next() {
+		var (
+			genesis, cborData []byte
+			id                int64
+			addedSlot, epoch  sql.NullInt64
+		)
+		if err := rows.Scan(&genesis, &cborData, &id, &addedSlot, &epoch); err != nil {
+			return nil, err
+		}
+		slot, err := checkedUint64(addedSlot.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparam updates: %w", err)
+		}
+		e, err := checkedUint64(epoch.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparam updates: %w", err)
+		}
+		ret = append(ret, models.PParamUpdate{
+			GenesisHash: genesis,
+			Cbor:        cborData,
+			ID:          uint(id), //nolint:gosec // a row id is a positive int64
+			AddedSlot:   slot,
+			Epoch:       e,
+		})
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) HasPParamsForEra(
 	eraID uint,
 	txn types.Txn,
@@ -1392,6 +1441,48 @@ SELECT amount FROM network_donation WHERE epoch = ?`), sqlEpoch)
 		)
 	}
 	return total, nil
+}
+
+func (s *Store) ListNetworkDonations(
+	txn types.Txn,
+) ([]models.NetworkDonation, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("list network donations: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT slot, epoch, amount FROM network_donation ORDER BY slot`)
+	if err != nil {
+		return nil, fmt.Errorf("list network donations: %w", err)
+	}
+	defer rows.Close()
+	var out []models.NetworkDonation
+	for rows.Next() {
+		var slot, epoch int64
+		var raw any
+		if err := rows.Scan(&slot, &epoch, &raw); err != nil {
+			return nil, fmt.Errorf("list network donations: %w", err)
+		}
+		d := models.NetworkDonation{}
+		if d.Slot, err = checkedUint64(slot); err != nil {
+			return nil, err
+		}
+		if d.Epoch, err = checkedUint64(epoch); err != nil {
+			return nil, err
+		}
+		text, err := decimalAmountText(raw)
+		if err != nil {
+			return nil, err
+		}
+		if d.Amount, err = parseUint64("amount", text); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list network donations: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) DeleteNetworkDonationsAfterSlot(

@@ -26,6 +26,7 @@ import (
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +44,10 @@ func TestBlockfetchServerRequestRange_ReleasesLookupSlots(t *testing.T) {
 	require.NoError(t, ledgerState.Chain().
 		AddBlock(context.Background(), blocks[0], nil))
 	served := ocommon.NewPoint(blocks[0].SlotNumber(), blocks[0].Hash().Bytes())
+	ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       served,
+		BlockNumber: blocks[0].BlockNumber(),
+	})
 	missingHash := make([]byte, 32)
 	copy(missingHash, "missing-start")
 	missing := ocommon.NewPoint(blocks[0].SlotNumber(), missingHash)

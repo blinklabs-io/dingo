@@ -79,8 +79,9 @@ func newByronQueryServer(
 ) *queryServiceServer {
 	t.Helper()
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: stubQueryDB(ls),
 	})
 	return &queryServiceServer{utxorpc: u}
 }

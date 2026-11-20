@@ -107,7 +107,14 @@ specs or the `--accelerated` timeline.
 The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
 Its 240-slot nonce stability window contains 12 expected blocks, which keeps
 the finite era horizon advancing while leaving half of the ten-minute scenario
-after voting registrations become usable in epoch 2.
+after voting registrations become usable in epoch 2. The configurator sets
+`LeiosMinOfferLead` to 30 slots: with `k: 3` the immutable tip trails the tip by
+far less than the 3600-slot default, which would hold back every endorser-block
+offer.
+The configurator also enables `LeiosAdaptiveEndorsements`, as the reference
+devnets do, so the producers scale their endorser blocks by the quorums the
+announcements reach. Each sample is logged as `leios adaptive endorsements`
+with `eb_capacity_scale`.
 
 ## Network parameters
 
@@ -523,7 +530,10 @@ For a manually started network, `./start.sh --leios` prints the environment
 and Go command for the matching producer-to-peer test. The test-only signing
 key and proof are paired fixtures under `testdata/`; a focused unit test
 checks that the registered proof and signing key agree. The configurator
-places the secret only in the generated local pool-key volume.
+places the secret only in the generated local pool-key volume. The first pool's
+vote key file is a JSON array holding an unregistered key followed by its
+registered key, so that pool votes through the multi-key path; the other pools
+use a single key file.
 
 ## Failure artifacts
 

@@ -392,6 +392,16 @@ func (b *rowBatch) flush(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
 			}
+			if entry.shape.table == "utxo_address" {
+				ids := make([]int64, 0, end-start)
+				for _, row := range entry.rows[start:end] {
+					id, _ := row[0].(int64)
+					ids = append(ids, id)
+				}
+				if err := fillUtxoAddressOrderByIDs(ctx, db, ids); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

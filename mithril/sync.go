@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -30,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -184,6 +184,80 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 		return false, fmt.Errorf(
 			"cleaning rejected stored repair gap before import: %w",
 			err,
+		)
+	}
+	return true, nil
+}
+
+// errRejectedTailAfterUTxOImport is terminal for the database: the stored
+// blocks and the checkpoint that cause it are unchanged by a re-run, which
+// refuses again. Only a fresh bootstrap recovers.
+var errRejectedTailAfterUTxOImport = errors.New(
+	"the UTxOs of that state are already imported, and removing the stored " +
+		"tail would delete them; nothing was deleted, a re-run refuses the " +
+		"same way, so run the sync again with an empty data directory",
+)
+
+// cleanRejectedStoredGapBeforeImport removes the stored blocks above the
+// immutable tip, and the rows their processing wrote, when they do not extend
+// to the prepared ledger state. It runs before the import so the cleanup, which
+// cuts at the immutable tip's slot, never meets a row the import wrote at the
+// state's slot or below it.
+//
+// An import that skips its UTxO phase on resume does not rewrite what the
+// cleanup deletes, so a checkpoint that records the phase as complete makes
+// the cleanup refuse. A reconcile import never reads a checkpoint and rewrites
+// every phase.
+func cleanRejectedStoredGapBeforeImport(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	prepared *preparedLedgerStateImport,
+	result *BootstrapResult,
+	reconcile bool,
+	immutableTipSlot uint64,
+) (bool, error) {
+	tip := prepared.state.Tip
+	gap, err := checkStoredGap(
+		ctx, db, immutableTipSlot, tip.Slot, tip.BlockHash,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !gap.present || gap.rejected == nil {
+		return false, nil
+	}
+	logger.Warn(
+		"stored volatile gap blocks failed continuity check, refetching from relay",
+		"component", "mithril",
+		"immutable_tip_slot", immutableTipSlot,
+		"resume_gap_end_slot", gap.resumeGapEnd,
+		"ledger_state_slot", tip.Slot,
+		"ledger_state_hash", hex.EncodeToString(tip.BlockHash),
+		"error", gap.rejected,
+	)
+	if key := importCheckpointKey(reconcile, result, tip.Slot); key != "" {
+		checkpoint, err := db.Metadata().GetImportCheckpoint(key, nil)
+		if err != nil {
+			return false, fmt.Errorf("reading import checkpoint: %w", err)
+		}
+		if checkpoint != nil &&
+			models.IsPhaseCompleted(checkpoint.Phase, models.ImportPhaseUTxO) {
+			return false, fmt.Errorf(
+				"stored volatile gap blocks above slot %d do not extend to ledger state slot %d: %w: %w",
+				immutableTipSlot, tip.Slot, errRejectedTailAfterUTxOImport, gap.rejected,
+			)
+		}
+	}
+	// Drop the rejected blob blocks so neither the later BlocksRecent query
+	// nor any slot-ordered iterator can resurface them as the chain tip after
+	// the relay refetch.
+	if err := deleteBlobBlocksAboveSlotExcept(
+		ctx, db, immutableTipSlot, nil,
+	); err != nil {
+		return false, fmt.Errorf(
+			"removing rejected gap blocks above slot %d: %w",
+			immutableTipSlot, err,
 		)
 	}
 	return true, nil
@@ -384,7 +458,6 @@ func decideCatchUp(
 	db *database.Database,
 	mode syncMode,
 	backend string,
-	storageMode string,
 	aggregatorURL string,
 	allowInsecureHTTP bool,
 	logger *slog.Logger,
@@ -402,16 +475,6 @@ func decideCatchUp(
 	case syncModeBootstrap:
 		return catchUpDecision{}, nil
 	case syncModeResume:
-		if isAPIMode(storageMode) {
-			repairPending, pendingErr := RewardStateRepairPending(db)
-			if pendingErr != nil {
-				return catchUpDecision{}, pendingErr
-			}
-			if repairPending {
-				return catchUpDecision{engage: true, start: marker}, nil
-			}
-			return catchUpDecision{}, nil
-		}
 		if hasMarker {
 			logger.Info(
 				"resuming interrupted Mithril v2 catch-up",
@@ -437,26 +500,6 @@ func decideCatchUp(
 		}
 		return catchUpDecision{}, nil
 	case syncModeCatchUp:
-		if isAPIMode(storageMode) {
-			repairPending, pendingErr := RewardStateRepairPending(db)
-			if pendingErr != nil {
-				return catchUpDecision{}, pendingErr
-			}
-			if !repairPending {
-				if hasMarker {
-					return catchUpDecision{}, errors.New(
-						"mithril v2 catch-up supports core storage mode only; " +
-							"API-mode metadata replacement requires a pending " +
-							"in-place reward-state repair",
-					)
-				}
-				return catchUpDecision{}, nil
-			}
-			logger.Info(
-				"reconciling API-mode metadata through the certified ledger anchor",
-				"component", "mithril",
-			)
-		}
 		if !hasMarker {
 			logger.Info(
 				"complete database has no Mithril immutable-import marker "+
@@ -522,7 +565,6 @@ const (
 	PhaseImmutableCopy SyncPhase = "immutable_copy"
 	PhaseGapBlocks     SyncPhase = "gap_blocks"
 	PhasePostLedger    SyncPhase = "post_ledger_state"
-	PhaseBackfill      SyncPhase = "backfill"
 	PhaseIndexRebuild  SyncPhase = "index_rebuild"
 	PhaseComplete      SyncPhase = "complete"
 )
@@ -535,7 +577,7 @@ type SyncProgress struct {
 	Active          bool    // true while the phase is active (begin + every mid-phase tick); false only marks the phase end
 	BytesDownloaded int64   // download phase
 	TotalBytes      int64   // download phase
-	BytesPerSecond  float64 // download/copy/backfill rate
+	BytesPerSecond  float64 // download/copy rate
 	CurrentSlot     uint64
 	TipSlot         uint64
 	Percent         float64
@@ -549,9 +591,17 @@ type SyncProgressFunc func(SyncProgress)
 
 // SyncConfig is the input to a full Mithril bootstrap of a node database.
 type SyncConfig struct {
-	Network                string                     // "mainnet" | "preprod" | "preview"
-	DataDir                string                     // node database path
-	StorageMode            string                     // "api" | "core"
+	Network string // "mainnet" | "preprod" | "preview"
+	DataDir string // node database path
+	// IndexerLayout is "split" for an API node, whose IndexerDB the node fills
+	// from the ledger database after the bootstrap, or empty. Such a bootstrap
+	// fills the layout gate on a database that has no chain state yet, and
+	// refuses to advance a database that is already complete: the IndexerDB
+	// follows one ledger anchor.
+	IndexerLayout string
+	// ServerCoreNamespace keeps the derived consensus database selected
+	// when a formerly API-mode server runs in core mode.
+	ServerCoreNamespace    bool
 	CardanoNodeConfig      *cardano.CardanoNodeConfig // genesis + Mithril verification keys; if nil, loaded from EmbeddedConfigFS for Network
 	CardanoConfigPath      string                     // optional explicit config path (else the network's embedded config)
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
@@ -564,6 +614,13 @@ type SyncConfig struct {
 	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
+	// KeepChunks moves the verified ImmutableDB chunk files into the
+	// database's own ImmutableDB and indexes them in place instead of copying
+	// every block body into the blob store. It applies only to a bootstrap of
+	// an empty database, or the resume of one; a catch-up or reward repair
+	// copies bodies. The ImmutableDB state is created even when it does not
+	// apply.
+	KeepChunks bool
 	// RepairLegacyRewardState forces a same-chain Mithril reconciliation for
 	// an existing database marked by the reward-pot migration. The node may
 	// serve only after an artifact covers the local tip and the reconciliation
@@ -571,12 +628,41 @@ type SyncConfig struct {
 	RepairLegacyRewardState bool
 	StoragePlugins          StoragePlugins
 	RunMode                 string
-	BackfillBatchSize       int
 	DatabaseWorkers         int
 	Tracing                 bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
 	Logger                  *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress              SyncProgressFunc // optional
 	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
+	// UtxoSet is the LedgerDB set that receives the ledger state's UTxO set
+	// and families; see ledgerstate.ImportConfig.UtxoSet.
+	UtxoSet ledgerstate.FamilyLoader
+	// InvalidateUtxoSetGovernance, when set, is called after the gap cleanup
+	// has deleted governance rows from the metadata store, so a live UTxO
+	// set that kept copies of them reloads them at its next startup instead
+	// of serving rows the store no longer has.
+	InvalidateUtxoSetGovernance func() error
+}
+
+// deleteGapBlocksAbove is deleteBlobBlocksAboveSlotExcept followed by the
+// governance invalidation, which runs even when the cleanup failed part way
+// since its deletes are not atomic with the set.
+func (cfg SyncConfig) deleteGapBlocksAbove(
+	ctx context.Context,
+	db *database.Database,
+	slot uint64,
+	preserved map[string]struct{},
+) error {
+	err := deleteBlobBlocksAboveSlotExcept(ctx, db, slot, preserved)
+	if cfg.InvalidateUtxoSetGovernance == nil {
+		return err
+	}
+	if invErr := cfg.InvalidateUtxoSetGovernance(); invErr != nil {
+		return errors.Join(
+			err,
+			fmt.Errorf("invalidate live UTxO set governance: %w", invErr),
+		)
+	}
+	return err
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -600,11 +686,6 @@ func (cfg SyncConfig) emit(p SyncProgress) {
 	}
 }
 
-// isAPIMode returns true when storageMode is "api" (case-insensitive).
-func isAPIMode(m string) bool {
-	return strings.EqualFold(m, "api")
-}
-
 // pctOf returns cur/total*100, or 0 if total <= 0.
 func pctOf(cur, total int64) float64 {
 	if total <= 0 {
@@ -613,14 +694,22 @@ func pctOf(cur, total int64) float64 {
 	return float64(cur) / float64(total) * 100
 }
 
+// errSplitCatchUp refuses to advance a complete API node's database to a newer
+// snapshot: the IndexerDB's rows belong to the anchor it was built at, and a
+// catch-up import rewrites the ledger state under it.
+var errSplitCatchUp = errors.New(
+	"mithril sync cannot advance a complete database that has an " +
+		"IndexerDB: the IndexerDB follows the ledger from the anchor it " +
+		"was built at; sync a new data directory instead",
+)
+
 // markSyncInProgress marks the database as an incomplete sync (so `dingo serve`
-// refuses to start) and, for API mode, pre-seeds the backfill checkpoint. It is
+// refuses to start). It is
 // called at the first actual write rather than before bootstrap, so a bootstrap
 // that fails before writing anything leaves an existing healthy database
 // untouched. Idempotent: safe to call more than once per sync.
 func markSyncInProgress(
 	db *database.Database,
-	storageMode string,
 	repairLegacyRewardState bool,
 ) error {
 	if repairLegacyRewardState {
@@ -638,18 +727,12 @@ func markSyncInProgress(
 	); err != nil {
 		return fmt.Errorf("marking sync in-progress: %w", err)
 	}
-	if isAPIMode(storageMode) {
-		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
-			return fmt.Errorf("marking backfill in-progress: %w", err)
-		}
-	}
 	return nil
 }
 
 // Sync performs a full Mithril bootstrap of the database at cfg.DataDir:
 // download + verify + extract a snapshot, import ledger state and immutable
-// blocks, close the volatile gap, backfill metadata, and mark the sync
-// complete. The resulting database is servable by dingo.Node.Run.
+// blocks, close the volatile gap, and mark the sync complete. The resulting database is servable by dingo.Node.Run.
 func Sync(
 	ctx context.Context,
 	cfg SyncConfig,
@@ -658,29 +741,17 @@ func Sync(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if cfg.UtxoSet == nil {
+		return SyncResult{}, errors.New("mithril sync requires the LedgerDB UTxO set")
+	}
 	cfg.Backend = normalizeBackend(cfg.Backend)
 
 	network := cfg.Network
 
 	// Load or reuse Cardano node config.
-	nodeCfg := cfg.CardanoNodeConfig
-	if nodeCfg == nil {
-		cardanoConfigPath := cfg.CardanoConfigPath
-		if cardanoConfigPath == "" {
-			cardanoConfigPath = cardano.EmbeddedConfigPath(network)
-		}
-		var err error
-		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
-			cardanoConfigPath,
-			network,
-			cardano.EmbeddedConfigFS,
-		)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"loading cardano node config: %w",
-				err,
-			)
-		}
+	nodeCfg, err := cfg.resolveNodeConfig()
+	if err != nil {
+		return SyncResult{}, err
 	}
 
 	aggregatorURL := cfg.AggregatorURL
@@ -737,6 +808,13 @@ func Sync(
 	db := runtime.Database
 	skipImmutableUtxoOffsets := db.StorageMode() == datatypes.StorageModeCore
 	defer runtime.Close(context.Background()) //nolint:contextcheck
+	// The import rewrites blocks and may roll the chain back, which a
+	// promotion step sharing this database must not interleave with.
+	unlockImmutable, err := db.LockImmutable(ctx)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("locking immutable database: %w", err)
+	}
+	defer unlockImmutable()
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
 		// interrupted run; mithril import heals it on forward progress.
@@ -762,8 +840,7 @@ func Sync(
 	// clear) running against the v2 backend is advanced with
 	// catch-up semantics instead of a blind re-bootstrap: the import first
 	// checks for chain divergence and the ledger import reconciles stale live
-	// rows. A pending API-mode reward repair also rebuilds metadata through the
-	// certified anchor. If an immutable-import marker exists, only the missing
+	// rows. If an immutable-import marker exists, only the missing
 	// archives are downloaded; markerless complete databases use the same
 	// reconciliation path over the full artifact range.
 	catchUp := false
@@ -771,6 +848,9 @@ func Sync(
 	mode, modeErr := determineSyncMode(ctx, db)
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
+	}
+	if cfg.IndexerLayout == "split" && mode == syncModeCatchUp {
+		return SyncResult{}, errSplitCatchUp
 	}
 	pinnedDigest := cfg.PinnedDigest
 	if cfg.RepairLegacyRewardState {
@@ -809,7 +889,7 @@ func Sync(
 		)
 	}
 	dec, decErr := decideCatchUp(
-		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
+		ctx, db, mode, cfg.Backend, aggregatorURL,
 		cfg.AllowInsecureHTTP, logger,
 	)
 	if decErr != nil {
@@ -827,27 +907,26 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
-	if mode == syncModeResume && !catchUp && isAPIMode(cfg.StorageMode) {
-		status, statusErr := db.GetSyncState("sync_status", nil)
-		if statusErr != nil {
-			return SyncResult{}, fmt.Errorf("reading sync_status: %w", statusErr)
-		}
-		if status == syncStatusBackfill {
-			syncResult, syncErr = resumeMithrilBackfill(
-				ctx, cfg, db, nodeCfg, pinnedDigest, network, logger,
-			)
-			if syncErr != nil {
-				logger.Error(
-					"sync did not complete; "+
-						"re-run 'dingo mithril sync' to resume",
-					"component", "mithril",
-					"error", syncErr,
-				)
-			}
-			return syncResult, syncErr
-		}
+	// A database that drained ledger-state families takes the import when
+	// the live UTxO set can hold them: the rows are written to SQL as for any
+	// database and moved into the set once the import is complete.
+	drainedImport, beginErr := db.BeginDrainedImport(ctx)
+	if beginErr != nil {
+		return SyncResult{}, beginErr
 	}
-
+	if drainedImport {
+		defer func() {
+			if syncErr != nil {
+				db.EndDrainedImport(ctx)
+			}
+		}()
+	} else if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+		return SyncResult{}, err
+	}
+	catchUpStart, err = resumeStartImmutable(db, mode, catchUpStart)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
 	// phase checkpoints belong to. Re-selecting the aggregator's latest
@@ -977,7 +1056,7 @@ func Sync(
 		// existing healthy database untouched.
 		if !pipeCopied {
 			if merr := markSyncInProgress(
-				db, cfg.StorageMode, cfg.RepairLegacyRewardState,
+				db, cfg.RepairLegacyRewardState,
 			); merr != nil {
 				return merr
 			}
@@ -995,6 +1074,25 @@ func Sync(
 		}
 		pipeLastChunk = chunk.Num
 		pipeCopied = true
+		if cfg.CleanupAfterLoad {
+			// Chunk.Num is committed through its last block. Keep it as the
+			// resume anchor and drop everything below, recording the bound
+			// first so an interruption never leaves the marker behind the
+			// deletions.
+			if serr := db.Blob().Sync(); serr != nil {
+				return fmt.Errorf(
+					"syncing blob store before retiring chunks: %w", serr,
+				)
+			}
+			if merr := setImmutableRetiredBelow(db, chunk.Num); merr != nil {
+				return merr
+			}
+			if rerr := pipeImm.RemoveChunksBefore(chunk.Num); rerr != nil {
+				return fmt.Errorf(
+					"retiring pipelined chunks below %d: %w", chunk.Num, rerr,
+				)
+			}
+		}
 		return nil
 	}
 
@@ -1002,8 +1100,12 @@ func Sync(
 	// [catchUpStart..N] range fully, then runs the divergence check before any
 	// mutation. Verified Mithril bootstrap also waits for the ancillary
 	// signature and ledger-state checks before allowing database mutation.
+	//
+	// Adopting the chunk files is not pipelined: it moves each chunk out of
+	// the extracted tree, so it runs once the whole tree is verified.
+	keepChunks := cfg.keepsChunks(catchUp)
 	chunkHook := onChunkContiguous
-	if catchUp || cfg.VerifyCertChain {
+	if catchUp || cfg.VerifyCertChain || keepChunks {
 		chunkHook = nil
 	}
 
@@ -1240,11 +1342,6 @@ func Sync(
 				)
 			}
 		}
-		if cfg.RepairLegacyRewardState && isAPIMode(cfg.StorageMode) {
-			if err := resetMithrilBackfillCheckpoint(db); err != nil {
-				return SyncResult{}, err
-			}
-		}
 		// The import is about to mutate the database. Record the catch-up so
 		// an interrupted run resumes with catch-up semantics (reconcile)
 		// instead of a plain bootstrap — a markerless catch-up leaves no
@@ -1260,7 +1357,7 @@ func Sync(
 	// already set it. Set after a successful bootstrap and before any
 	// post-bootstrap write or deferred-index drop.
 	if err := markSyncInProgress(
-		db, cfg.StorageMode, cfg.RepairLegacyRewardState,
+		db, cfg.RepairLegacyRewardState,
 	); err != nil {
 		return SyncResult{}, err
 	}
@@ -1269,12 +1366,14 @@ func Sync(
 	syncComplete := false
 	defer func() {
 		if !syncComplete {
-			logger.Error(
-				"sync did not complete; "+
-					"re-run 'dingo mithril sync' to resume",
-				"component", "mithril",
-				"error", syncErr,
-			)
+			msg := "sync did not complete; " +
+				"re-run 'dingo mithril sync' to resume"
+			if errors.Is(syncErr, errRejectedTailAfterUTxOImport) {
+				msg = "sync did not complete and cannot resume on this " +
+					"database; run 'dingo mithril sync' with an empty " +
+					"data directory"
+			}
+			logger.Error(msg, "component", "mithril", "error", syncErr)
 		}
 	}()
 
@@ -1291,10 +1390,11 @@ func Sync(
 	// A rejected pre-existing gap must be cleared before importing an
 	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
 	// slot, and doing that after import would remove the authoritative snapshot
-	// UTxOs whose AddedSlot is the selected state slot.
-	repairGapCleanedBeforeImport := false
+	// UTxOs whose AddedSlot is the selected state slot. Every route clears it
+	// here or in importLedgerStatePhase; none clears it afterwards.
+	gapCleanedBeforeImport := false
 	if preparedRepairImport != nil {
-		repairGapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
+		gapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
 			ctx,
 			db,
 			*certifiedTip,
@@ -1302,6 +1402,10 @@ func Sync(
 			preservedLocalTail,
 			logger,
 		)
+		if cfg.InvalidateUtxoSetGovernance != nil &&
+			(gapCleanedBeforeImport || err != nil) {
+			err = errors.Join(err, cfg.InvalidateUtxoSetGovernance())
+		}
 		if err != nil {
 			return SyncResult{}, err
 		}
@@ -1371,6 +1475,7 @@ func Sync(
 				bootstrapResult,
 				preparedRepairImport,
 				catchUp,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		} else {
@@ -1382,7 +1487,25 @@ func Sync(
 				bootstrapResult,
 				catchUp,
 				certifiedTip.Slot,
+				cfg.UtxoSet,
 				onLedger,
+				func(prepared *preparedLedgerStateImport) error {
+					var cleanErr error
+					gapCleanedBeforeImport, cleanErr = cleanRejectedStoredGapBeforeImport(
+						ctx, db, logger, prepared, bootstrapResult, catchUp,
+						loadResult.ImmutableTipSlot,
+					)
+					// The cleanup deletes governance rows without going
+					// through the live set, so it is invalidated here as
+					// deleteGapBlocksAbove does for the other cleanups.
+					if cfg.InvalidateUtxoSetGovernance != nil &&
+						(gapCleanedBeforeImport || cleanErr != nil) {
+						cleanErr = errors.Join(
+							cleanErr, cfg.InvalidateUtxoSetGovernance(),
+						)
+					}
+					return cleanErr
+				},
 			)
 		}
 		if importErr != nil {
@@ -1412,6 +1535,49 @@ func Sync(
 			"immutable_dir", bootstrapResult.ImmutableDir,
 		)
 		var loadErr error
+		if keepChunks {
+			loadResult, loadErr = node.AdoptImmutableChunks(
+				ctx, logger, db, node.AdoptChunksConfig{
+					SourceDir: bootstrapResult.ImmutableDir,
+					Digests:   bootstrapResult.ImmutableDigests,
+					OnChunkCommitted: func(firstUnadopted uint64) error {
+						return setImmutableRetiredBelow(db, firstUnadopted)
+					},
+					OnProgress: func(p node.LoadBlobsProgress) {
+						cfg.emit(SyncProgress{
+							Phase:          PhaseImmutableCopy,
+							Active:         true,
+							Count:          p.BlocksCopied,
+							CurrentSlot:    p.CurrentSlot,
+							TipSlot:        p.TipSlot,
+							Percent:        p.Percent,
+							BytesPerSecond: p.BlocksPerSecond,
+						})
+					},
+				},
+			)
+			switch {
+			case loadErr == nil:
+				cfg.emit(SyncProgress{
+					Phase:       PhaseImmutableCopy,
+					Active:      true,
+					Count:       loadResult.BlocksCopied,
+					CurrentSlot: loadResult.ImmutableTipSlot,
+					TipSlot:     loadResult.ImmutableTipSlot,
+					Percent:     100,
+				})
+				return nil
+			case errors.Is(loadErr, node.ErrAdoptUnavailable):
+				logger.Warn(
+					"database already holds block bodies; copying them "+
+						"instead of keeping the chunk files",
+					"component", "mithril",
+				)
+				loadResult = nil
+			default:
+				return fmt.Errorf("adopting ImmutableDB chunks: %w", loadErr)
+			}
+		}
 		loadOptions := []node.LoadBlobsOption{
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
@@ -1425,6 +1591,17 @@ func Sync(
 					BytesPerSecond: p.BlocksPerSecond,
 				})
 			}),
+		}
+		if cfg.CleanupAfterLoad {
+			// The extracted tree is discarded after the load anyway, so each
+			// chunk goes as soon as its blocks are committed rather than
+			// holding a second copy of the chain until the end.
+			loadOptions = append(
+				loadOptions,
+				node.WithChunkRetirement(func(firstKept uint64) error {
+					return setImmutableRetiredBelow(db, firstKept)
+				}),
+			)
 		}
 		loadResult, loadErr = node.LoadBlobsWithDB(
 			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
@@ -1532,7 +1709,7 @@ func Sync(
 		// The selected state can precede the certified tip. Keep the verified
 		// local chain after that point, including certified blocks, and remove
 		// same-range fork blobs before ordinary ledger replay sees them.
-		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+		if cleanupErr := cfg.deleteGapBlocksAbove(
 			ctx, db, ledgerStateSlot, preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1562,7 +1739,7 @@ func Sync(
 			"stored_tip_slot", recentBlocks[0].Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+		if cleanupErr := cfg.deleteGapBlocksAbove(
 			ctx,
 			db, immutableTipSlot,
 			preservedLocalTail,
@@ -1580,99 +1757,39 @@ func Sync(
 			)
 		}
 	}
-	if len(recentBlocks) > 0 &&
-		recentBlocks[0].Slot > immutableTipSlot &&
-		immutableTipSlot < ledgerStateSlot {
+	storedGap, err := checkStoredGap(
+		ctx, db, immutableTipSlot, ledgerStateSlot, ledgerStateHash,
+	)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	if storedGap.present {
 		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true})
-		resumeGapEnd := min(recentBlocks[0].Slot, ledgerStateSlot)
+		resumeGapEnd := storedGap.resumeGapEnd
+		storedGapBlocks := storedGap.blocks
+		immutableTip := storedGap.immutableTip
 		logger.Info(
 			"processing stored volatile gap blocks from blob store",
 			"component", "mithril",
 			"immutable_tip_slot", immutableTipSlot,
-			"stored_tip_slot", recentBlocks[0].Slot,
+			"stored_tip_slot", storedGap.storedTipSlot,
 			"resume_gap_end_slot", resumeGapEnd,
 		)
-		storedGapBlocks, err := loadGapBlocksFromBlob(
-			ctx,
-			db,
-			immutableTipSlot+1,
-			resumeGapEnd,
-		)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"loading stored gap blocks from blob store: %w",
-				err,
-			)
-		}
-		immutableTip, err := database.BlockBeforeSlot(
-			ctx,
-			db,
-			immutableTipSlot+1,
-		)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"reading immutable tip for stored gap validation: %w",
-				err,
-			)
-		}
-		if immutableTip.Slot != immutableTipSlot {
-			return SyncResult{}, fmt.Errorf(
-				"reading immutable tip for stored gap validation: expected slot %d, got slot %d",
-				immutableTipSlot,
-				immutableTip.Slot,
-			)
-		}
-		// Only enforce the terminal-hash check against ledgerStateHash
-		// when the stored gap reaches the ledger state tip. A partial
-		// stored gap is still useful: continuity-validate it and let
-		// the volatile fetch path below pull the remainder.
-		var validateErr error
-		if resumeGapEnd == ledgerStateSlot {
-			validateErr = validateCompleteGapBlocks(
-				storedGapBlocks,
-				ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
-				ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
-			)
-		} else {
-			validateErr = validateStoredGapContinuity(
-				storedGapBlocks,
-				immutableTip,
-			)
-		}
-		if validateErr != nil {
-			logger.Warn(
-				"stored volatile gap blocks failed continuity check, refetching from relay",
-				"component",
-				"mithril",
-				"immutable_tip_slot",
-				immutableTipSlot,
-				"resume_gap_end_slot",
-				resumeGapEnd,
-				"ledger_state_slot",
-				ledgerStateSlot,
-				"ledger_state_hash",
-				hex.EncodeToString(ledgerStateHash),
-				"error",
-				validateErr,
-			)
-			// Drop the rejected blob blocks so neither the upcoming
-			// BlocksRecent query nor any slot-ordered iterator can
-			// resurface them as the chain tip after the relay refetch.
-			if !repairGapCleanedBeforeImport {
-				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
-					ctx,
-					db, immutableTipSlot,
-					preservedLocalTail,
-				); cleanupErr != nil {
-					return SyncResult{}, fmt.Errorf(
-						"removing rejected gap blocks above slot %d: %w",
-						immutableTipSlot, cleanupErr,
-					)
-				}
+		if validateErr := storedGap.rejected; validateErr != nil {
+			// The rejected blocks and their rows are removed before the
+			// import, never here: their cleanup is cut at a slot below the
+			// imported rows' own, so running it after the import would delete
+			// them. A rejection that reaches this point means the stored
+			// blocks changed since the decision was taken.
+			if !gapCleanedBeforeImport {
+				return SyncResult{}, fmt.Errorf(
+					"stored volatile gap blocks above slot %d were rejected after the ledger state import: %w",
+					immutableTipSlot, validateErr,
+				)
 			}
 			recentBlocks = []models.Block{immutableTip}
 		} else {
-			storedTipSlot := recentBlocks[0].Slot
+			storedTipSlot := storedGap.storedTipSlot
 			if storedTipSlot > resumeGapEnd {
 				logger.Info(
 					"removing stored volatile blocks beyond ledger state tip",
@@ -1680,7 +1797,7 @@ func Sync(
 					"stored_tip_slot", storedTipSlot,
 					"resume_gap_end_slot", resumeGapEnd,
 				)
-				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+				if cleanupErr := cfg.deleteGapBlocksAbove(
 					ctx,
 					db, resumeGapEnd,
 					preservedLocalTail,
@@ -1801,79 +1918,6 @@ func Sync(
 	); err != nil {
 		return SyncResult{}, err
 	}
-	if isAPIMode(cfg.StorageMode) {
-		if err := updateMithrilReadyState(
-			ctx,
-			db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
-			syncStatusBackfill, false,
-		); err != nil {
-			return SyncResult{}, err
-		}
-		// Backfill reads blocks from the blob store, not the extracted
-		// immutable tree, and runs for days on mainnet; holding the tree
-		// (hundreds of GB there) until it ends can exhaust the disk. With
-		// sync_status now "backfill", serve resumes the backfill without it.
-		if cfg.CleanupAfterLoad {
-			bootstrapResult.Cleanup(logger)
-			cleanedUp = true
-		}
-	}
-
-	// Backfill historical metadata through the stable ledger anchor if storage
-	// mode is API. Blocks after the anchor are left for ordinary ledger replay,
-	// which also populates the API indexes.
-	if isAPIMode(cfg.StorageMode) {
-		cfg.emit(SyncProgress{Phase: PhaseBackfill, Active: true})
-		logger.Info(
-			"backfilling historical metadata for API mode",
-			"component", "mithril",
-		)
-		if err := node.RunPlannerStats(db, logger); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"running planner statistics before backfill: %w",
-				err,
-			)
-		}
-		bf := node.NewBackfill(db, nodeCfg, logger)
-		bf.SetFreshDatabaseBootstrap(mode == syncModeBootstrap)
-		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
-		// point with the delegator-inactivity gate enabled
-		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
-		// always elided here. SyncConfig has no gate field to thread through
-		// (Mithril bootstrap and the gate are mutually exclusive by
-		// construction), so this is explicit rather than the zero-value
-		// default.
-		bf.SetDelegatorInactivityEnabled(false)
-		// The running-total finalizer is safe only after a complete fresh
-		// ledger-state import established every live credential row. An
-		// interrupted API sync may have incomplete aggregate state, so its
-		// resume path must use the authoritative rebuild.
-		bf.SetUseRunningTotalsFinalization(mode == syncModeBootstrap)
-		bf.SetEndSlot(ledgerStateSlot)
-		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"invalid backfill batch size %d in SetBatchSize: %w",
-				cfg.BackfillBatchSize,
-				err,
-			)
-		}
-		bf.SetProgressFunc(func(p node.BackfillProgress) {
-			cfg.emit(SyncProgress{
-				Phase:          PhaseBackfill,
-				Active:         true,
-				CurrentSlot:    p.Slot,
-				TipSlot:        p.TipSlot,
-				Percent:        p.ProgressPercent,
-				BytesPerSecond: p.BlocksPerSecond,
-				Count:          p.ProcessedBlocks,
-			})
-		})
-		if err := bf.Run(ctx); err != nil {
-			return SyncResult{}, fmt.Errorf("backfill: %w", err)
-		}
-		cfg.emit(SyncProgress{Phase: PhaseBackfill, Active: false})
-	}
-
 	indexRebuildElapsed, err := finishMithrilImport(
 		ctx, db, logger, cfg.emit, deferredIndexes, cleanupBulkLoadPragmas,
 		loadResult, ledgerStateSlot, ledgerStateHash,
@@ -1883,6 +1927,16 @@ func Sync(
 		return SyncResult{}, err
 	}
 	syncComplete = true
+	if drainedImport {
+		if err := ledgerstate.FinishDrainedImport(
+			ctx, db, cfg.UtxoSet,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"moving the imported ledger state into the live UTxO set: %w",
+				err,
+			)
+		}
+	}
 
 	// Record the highest imported immutable file number so a later catch-up can
 	// skip already-present archives and anchor its intersection check. Written
@@ -1903,6 +1957,9 @@ func Sync(
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.CleanupAfterLoad && !cleanedUp {
+		if serr := syncBlobBeforeCleanup(db); serr != nil {
+			return SyncResult{}, serr
+		}
 		bootstrapResult.Cleanup(logger)
 	}
 
@@ -1988,7 +2045,6 @@ func finishMithrilImport(
 	if err := updateMithrilReadyState(
 		ctx,
 		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
-		"", true,
 	); err != nil {
 		return 0, err
 	}
@@ -2037,6 +2093,60 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	return val != syncStatusBackfill, nil
 }
 
+// resolveNodeConfig returns the configured Cardano node config, loading the
+// network's own when none was supplied.
+func (cfg SyncConfig) resolveNodeConfig() (*cardano.CardanoNodeConfig, error) {
+	if cfg.CardanoNodeConfig != nil {
+		return cfg.CardanoNodeConfig, nil
+	}
+	path := cfg.CardanoConfigPath
+	if path == "" {
+		path = cardano.EmbeddedConfigPath(cfg.Network)
+	}
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		path, cfg.Network, cardano.EmbeddedConfigFS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
+	return nodeCfg, nil
+}
+
+// immutableConfig is the ImmutableDB configuration the sync opens its database
+// with: the network's chunk geometry when chunk files are kept, otherwise none.
+func (cfg SyncConfig) immutableConfig() (database.ImmutableConfig, error) {
+	if !cfg.KeepChunks {
+		return database.ImmutableConfig{}, nil
+	}
+	switch provider := cfg.StoragePlugins.Blob.Provider; provider {
+	case "", "badger", immplugin.S3ProviderName, immplugin.GCSProviderName:
+	default:
+		return database.ImmutableConfig{}, fmt.Errorf(
+			"blob provider %q does not support Mithril chunk adoption", provider,
+		)
+	}
+	nodeCfg, err := cfg.resolveNodeConfig()
+	if err != nil {
+		return database.ImmutableConfig{}, err
+	}
+	slots, ebb, err := nodeCfg.ImmutableChunkGeometry()
+	if err != nil {
+		return database.ImmutableConfig{}, fmt.Errorf(
+			"deriving ImmutableDB chunk geometry: %w", err,
+		)
+	}
+	return database.ImmutableConfig{
+		Enabled: true, ChunkSlots: slots, CanContainEBB: ebb,
+	}, nil
+}
+
+// keepsChunks reports whether this run adopts the chunk files. A catch-up or
+// reward repair joins onto blocks already in the blob store, which chunk files
+// cannot be joined onto.
+func (cfg SyncConfig) keepsChunks(catchUp bool) bool {
+	return cfg.KeepChunks && !catchUp && !cfg.RepairLegacyRewardState
+}
+
 func openDatabase(
 	ctx context.Context,
 	cfg SyncConfig,
@@ -2049,6 +2159,10 @@ func openDatabase(
 	if err != nil {
 		return nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
+	immutableCfg, err := cfg.immutableConfig()
+	if err != nil {
+		return nil, err
+	}
 	storagePlugins := cfg.StoragePlugins
 	if storagePlugins.Blob.Provider == "" {
 		storagePlugins.Blob.Provider = "badger"
@@ -2060,19 +2174,22 @@ func openDatabase(
 		ctx,
 		&database.Config{
 			DataDir: cfg.DataDir, Logger: logger,
-			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			StorageMode: datatypes.StorageModeCore, Network: cfg.Network,
+			IndexerLayout: cfg.IndexerLayout,
 			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
 			),
+			Immutable: immutableCfg,
 		},
 		internalplugins.StorageSelections{
-			Blob:     storagePlugins.Blob,
-			Metadata: storagePlugins.Metadata,
+			Blob:         storagePlugins.Blob,
+			Metadata:     storagePlugins.Metadata,
+			SplitIndexer: cfg.IndexerLayout == "split" || cfg.ServerCoreNamespace,
 		},
 		internalplugins.StorageDependencies{
 			GenesisStakingEmpty: genesisStakingEmpty,
 			DataDir:             cfg.DataDir, RunMode: cfg.RunMode,
-			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
+			StorageMode: datatypes.StorageModeCore, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
 		},
 	)
@@ -2092,4 +2209,22 @@ func parseOptionalDuration(
 		return 0, fmt.Errorf("invalid %s %q: %w", name, value, err)
 	}
 	return duration, nil
+}
+
+// syncBlobBeforeCleanup flushes the blob store before the extracted immutable
+// tree is deleted. Blob-only batch commits are not fsynced, and a rerun that
+// finds nothing left to copy never reaches the copy loop's own flush, so the
+// tree must not be removed until the blocks it holds are durable.
+func syncBlobBeforeCleanup(db *database.Database) error {
+	store := db.Blob()
+	if store == nil {
+		return fmt.Errorf(
+			"syncing blob store before cleanup: %w",
+			datatypes.ErrBlobStoreUnavailable,
+		)
+	}
+	if err := store.Sync(); err != nil {
+		return fmt.Errorf("syncing blob store before cleanup: %w", err)
+	}
+	return nil
 }

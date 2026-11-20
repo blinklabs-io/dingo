@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -38,7 +38,7 @@ import (
 // It subscribes to EpochTransitionEvents and orchestrates the snapshot
 // lifecycle according to the Ouroboros Praos specification.
 type Manager struct {
-	db       *database.Database
+	db       ledgerdb.LedgerDB
 	eventBus *event.EventBus
 	logger   *slog.Logger
 
@@ -110,7 +110,7 @@ type pendingBoundarySnapshot struct {
 	// before CaptureEpochBoundarySnapshot; allowing a later retry with the same
 	// boundary identity to consume that stale distribution would persist state
 	// from the abandoned transaction instead of recomputing SNAP.
-	txn            *database.Txn
+	txn            ledgerdb.Txn
 	newEpoch       uint64
 	boundarySlot   uint64
 	snapshotSlot   uint64
@@ -134,7 +134,7 @@ func (m *Manager) stashBoundaryDistribution(
 // when it does not match, because a non-matching one can only be the residue of
 // a rollover that never reached its persist phase.
 func (m *Manager) takeBoundaryDistribution(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 	expiryEpoch uint64,
 ) (*StakeDistribution, bool) {
@@ -156,7 +156,7 @@ func (m *Manager) takeBoundaryDistribution(
 }
 
 func (m *Manager) stashIncomingEraDistribution(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 	expiryEpoch uint64,
 	distribution *StakeDistribution,
@@ -189,7 +189,7 @@ func (m *Manager) stashIncomingEraDistribution(
 // leave takeBoundaryDistribution's later persist-time read undisturbed. Same
 // matching rule as takeBoundaryDistribution, minus the consuming clear.
 func (m *Manager) peekBoundaryDistribution(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 	expiryEpoch uint64,
 ) *StakeDistribution {
@@ -242,7 +242,7 @@ func (m *Manager) peekBoundaryDistribution(
 // Without an explicit incoming era, a missing epoch row is not treated as a
 // change: an era that cannot be resolved is one no era-gated rule acts on.
 func (m *Manager) boundaryChangesStakeRules(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 	incomingEraID *uint,
 ) (bool, error) {
@@ -276,7 +276,7 @@ func (m *Manager) boundaryChangesStakeRules(
 
 // NewManager creates a new snapshot manager.
 func NewManager(
-	db *database.Database,
+	db ledgerdb.LedgerDB,
 	eventBus *event.EventBus,
 	logger *slog.Logger,
 ) *Manager {
@@ -293,7 +293,7 @@ func NewManager(
 // DeferredRewardStakeInputs is the per-credential reward basis of one mark
 // snapshot that CaptureEpochBoundarySnapshot staged instead of writing.
 type DeferredRewardStakeInputs struct {
-	txn          *database.Txn
+	txn          ledgerdb.Txn
 	Epoch        uint64
 	BoundarySlot uint64
 	Inputs       []*models.RewardStakeInput
@@ -311,7 +311,7 @@ func (m *Manager) SetDeferRewardStakeInputs(enabled bool) {
 // TakeDeferredRewardStakeInputs returns, and clears, the reward inputs the
 // capture staged in txn. ok is false when that capture staged none.
 func (m *Manager) TakeDeferredRewardStakeInputs(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*DeferredRewardStakeInputs, bool) {
 	m.mu.Lock()
 	deferred := m.deferredStakeInputs
@@ -692,10 +692,10 @@ func (m *Manager) handleEpochTransition(
 		return nil
 	}
 
-	preCheckTxn := m.db.Transaction(ctx, false)
+	preCheckTxn := m.db.Begin(ctx, false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
-		preCheckTxn.Metadata(),
+		preCheckTxn,
 	)
 	_ = preCheckTxn.Commit()
 	if err != nil {
@@ -742,10 +742,9 @@ func (m *Manager) handleEpochTransition(
 // open write transaction's metadata handle reads within that transaction.
 func (m *Manager) authoritativeMarkRewardSnapshotExists(
 	evt event.EpochTransitionEvent,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (bool, error) {
-	snapshot, err := m.db.Metadata().
-		GetRewardSnapshot(evt.NewEpoch, "mark", txn)
+	snapshot, err := m.db.GetRewardSnapshot(evt.NewEpoch, "mark", txn)
 	if err != nil {
 		return false, err
 	}
@@ -797,12 +796,12 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 // deterministic read and reproduces the same snapshot.
 func (m *Manager) ComputeEpochBoundarySnapshot(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 ) error {
 	m.lockConfiguration()
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
-	calculator := NewCalculator(m.db)
+	calculator := NewCalculator(m.db, m.logger)
 	distribution, err := calculator.calculateStakeDistributionInTxn(
 		ctx,
 		txn,
@@ -850,7 +849,7 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 // credits would corrupt the Mark snapshot.
 func (m *Manager) CaptureEpochBoundarySnapshot(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 ) error {
 	m.lockConfiguration()
@@ -893,7 +892,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 			"boundary_slot",
 			evt.BoundarySlot,
 		)
-		calculator := NewCalculator(m.db)
+		calculator := NewCalculator(m.db, m.logger)
 		var err error
 		// Persist runs after POOLREAP/governance. Force historical
 		// reconstruction: the normal boundary helper may use the live fast path
@@ -1022,7 +1021,7 @@ type deferredCapture struct {
 // retires, so it reads their stake rows now; it also stops the
 // epoch-transition handler capturing a fallback snapshot from later state.
 func (m *Manager) DeferEpochBoundaryCapture(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 ) error {
 	m.lockConfiguration()
@@ -1047,17 +1046,16 @@ func (m *Manager) DeferEpochBoundaryCapture(
 		pools = append(pools, refund.PoolKeyHash)
 	}
 	if len(pools) > 0 {
-		meta := m.db.Metadata()
-		metaTxn := txn.Metadata()
+		ldb := m.db
 		expiryEpoch := m.expiryEpoch(evt.NewEpoch)
-		rows, err := meta.GetLiveStakeInputsForPools(
-			pools, expiryEpoch, metaTxn,
+		rows, err := ldb.GetLiveStakeInputsForPools(
+			pools, expiryEpoch, txn,
 		)
 		if err != nil {
 			return fmt.Errorf("get retiring pool stake inputs: %w", err)
 		}
-		pointerRows, err := meta.GetPointerStakeInputsForPools(
-			pools, evt.SnapshotSlot, evt.BoundarySlot, expiryEpoch, metaTxn,
+		pointerRows, err := ldb.GetPointerStakeInputsForPools(
+			pools, evt.SnapshotSlot, evt.BoundarySlot, expiryEpoch, txn,
 		)
 		if err != nil {
 			return fmt.Errorf("get retiring pool pointer inputs: %w", err)
@@ -1146,7 +1144,7 @@ func deferredSnapPointRows(
 // committed boundary, as they do when the boundary persists its own snapshot.
 func (m *Manager) PrepareEpochBoundarySnapshot(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 ) (*DeferredEpochBoundarySnapshot, error) {
 	m.lockConfiguration()
@@ -1159,14 +1157,14 @@ func (m *Manager) PrepareEpochBoundarySnapshot(
 			evt.NewEpoch, evt.BoundarySlot,
 		)
 	}
-	postSnapshot, err := m.db.Metadata().GetPostSnapshotRewardCredits(
-		evt.BoundarySlot, txn.Metadata(),
+	postSnapshot, err := m.db.GetPostSnapshotRewardCredits(
+		evt.BoundarySlot, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get post-snapshot credits: %w", err)
 	}
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
-	calculator := NewCalculator(m.db)
+	calculator := NewCalculator(m.db, m.logger)
 	distribution, err := calculator.calculateAdjustedLiveStakeDistributionInTxn(
 		ctx,
 		txn,
@@ -1208,7 +1206,7 @@ func (d *DeferredEpochBoundarySnapshot) SPOStakeRows() []*models.PoolStakeSnapsh
 
 // Write writes the prepared snapshot through txn, staging deferred reward
 // stake inputs for txn as CaptureEpochBoundarySnapshot does.
-func (d *DeferredEpochBoundarySnapshot) Write(txn *database.Txn) error {
+func (d *DeferredEpochBoundarySnapshot) Write(txn ledgerdb.Txn) error {
 	d.m.mu.RLock()
 	deferStakeInputs := d.m.deferRewardStakeInputs
 	d.m.mu.RUnlock()
@@ -1222,7 +1220,7 @@ func (d *DeferredEpochBoundarySnapshot) Write(txn *database.Txn) error {
 
 func (m *Manager) CurrentBoundarySPOStakeRows(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 	incomingEraID uint,
 ) ([]*models.PoolStakeSnapshot, error) {
@@ -1244,7 +1242,7 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 		}
 	}
 	if distribution == nil {
-		calculator := NewCalculator(m.db)
+		calculator := NewCalculator(m.db, m.logger)
 		var err error
 		distribution, err = calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
 			ctx,
@@ -1302,8 +1300,8 @@ func (m *Manager) calculateSnapshotDistribution(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
-	calculator := NewCalculator(m.db)
-	txn := m.db.Transaction(ctx, false)
+	calculator := NewCalculator(m.db, m.logger)
+	txn := m.db.Begin(ctx, false)
 	defer func() { _ = txn.Commit() }()
 	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, boundarySlot, expiryEpoch, m.inactivityPeriod(),
@@ -1389,6 +1387,19 @@ func (m *Manager) captureMarkSnapshot(
 	return nil
 }
 
+// ErrGenesisMarkUnavailable reports a database whose ledger state as of slot 0
+// could not be read to capture the epoch 0 mark snapshot and which does not
+// record what stands in for it: that mark while still in epoch 0, or the
+// marks of the current epoch and the two before it afterwards. A start in
+// epoch 0 records the mark, so a database past its first block lacks it only
+// when an earlier capture failed; one moved into the live UTxO set there has
+// no journal reaching slot 0 to capture it from.
+var ErrGenesisMarkUnavailable = errors.New(
+	"the ledger state as of slot 0 cannot be read to capture the epoch 0 " +
+		"mark snapshot, and the database does not record the mark " +
+		"snapshots that stand in for it",
+)
+
 // HandleGenesisSnapshotError applies the standard policy for a failed genesis
 // (epoch 0) mark-snapshot capture: it is fatal for a block producer (which
 // cannot elect leaders without the snapshot) and a warning for a relay or
@@ -1450,13 +1461,37 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		ctx, 0, 0, m.expiryEpoch(0),
 	)
 	if err != nil {
+		// A database past its first block answers this from the ledger state
+		// as of slot 0, which one whose history starts later cannot give: a
+		// released database moved into the live UTxO set inside epoch 0 has
+		// no journal below the block it was moved at. The mark it captured
+		// at genesis is still recorded, and the genesis state it describes
+		// cannot have changed.
+		recorded, recErr := m.genesisMarkRecorded()
+		if recErr == nil && recorded {
+			m.logger.Info(
+				"epoch 0 mark snapshot already recorded; skipping genesis snapshot capture",
+				"component", "snapshot",
+				"reason", err,
+			)
+			return nil
+		}
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
 			m.metrics.captureDurationSeconds.Observe(
 				time.Since(start).Seconds(),
 			)
 		}
-		return fmt.Errorf("calculate genesis distribution: %w", err)
+		if recErr != nil {
+			return fmt.Errorf(
+				"calculate genesis distribution: %w",
+				errors.Join(err, recErr),
+			)
+		}
+		return fmt.Errorf(
+			"%w: calculate genesis distribution: %w",
+			ErrGenesisMarkUnavailable, err,
+		)
 	}
 
 	// After Mithril import, slot 0 has no pool data. Fall back to
@@ -1687,6 +1722,35 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	return nil
 }
 
+// genesisMarkRecorded reports whether a database still in epoch 0 holds the
+// epoch 0 mark snapshot: its ready epoch summary, with the totals of the pool
+// rows recorded beside it. A summary alone is not enough, since summaries
+// survive the pruning of the pool rows.
+func (m *Manager) genesisMarkRecorded() (bool, error) {
+	epochs, err := m.db.GetEpochs(nil)
+	if err != nil {
+		return false, fmt.Errorf("load epochs: %w", err)
+	}
+	if len(epochs) == 0 || epochs[len(epochs)-1].EpochId != 0 {
+		return false, nil
+	}
+	snapshots, err := m.db.GetPoolStakeSnapshotsByEpoch(0, "mark", nil)
+	if err != nil {
+		return false, fmt.Errorf("load mark snapshots for epoch 0: %w", err)
+	}
+	var totalStake uint64
+	for _, snapshot := range snapshots {
+		totalStake += uint64(snapshot.TotalStake)
+	}
+	summary, err := m.db.GetEpochSummary(0, nil)
+	if err != nil {
+		return false, fmt.Errorf("load epoch summary for epoch 0: %w", err)
+	}
+	return summary != nil && summary.SnapshotReady &&
+		uint64(summary.TotalActiveStake) == totalStake &&
+		summary.TotalPoolCount == uint64(len(snapshots)), nil
+}
+
 func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 	bool,
 	uint64,
@@ -1706,12 +1770,12 @@ func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 		return false, 0, 0, 0, nil
 	}
 
-	meta := m.db.Metadata()
+	ldb := m.db
 	var currentPools uint64
 	var currentStake uint64
 	for offset := uint64(0); offset <= 2 && offset <= currentEpoch; offset++ {
 		epoch := currentEpoch - offset
-		snapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+		snapshots, err := ldb.GetPoolStakeSnapshotsByEpoch(
 			epoch,
 			"mark",
 			nil,
@@ -1736,7 +1800,7 @@ func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 			// summary must also record the same empty totals: summaries
 			// survive pool-row pruning and a deep truncate, so a ready
 			// summary alone does not prove the rows were never there.
-			summary, err := meta.GetEpochSummary(epoch, nil)
+			summary, err := ldb.GetEpochSummary(epoch, nil)
 			if err != nil {
 				return false, 0, 0, 0, fmt.Errorf(
 					"load epoch summary for epoch %d: %w",

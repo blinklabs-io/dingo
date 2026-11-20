@@ -18,6 +18,7 @@ package connmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/securefs"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -123,6 +125,48 @@ func TestStartListener_UnixSocket_RejectsMutableParent(t *testing.T) {
 		err,
 		"parent must not be writable by group or other users",
 	)
+	require.ErrorContains(t, err, "sticky bit")
+}
+
+func TestStartListener_UnixSocket_AcceptsStickyMutableParent(t *testing.T) {
+	t.Parallel()
+	dir := unixTestTempDir(t)
+	require.NoError(t, os.Chmod(dir, 0o770|os.ModeSticky))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0o700)) })
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSticky)
+	require.NotZero(t, info.Mode().Perm()&0o020)
+
+	socketPath := filepath.Join(dir, "node.sock")
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{{
+			ListenNetwork:     "unix",
+			ListenAddress:     socketPath,
+			UnixSocketMode:    0o660,
+			UnixSocketModeSet: true,
+		}},
+	})
+	err = cm.Start(t.Context())
+	if errors.Is(err, securefs.ErrRenameNoReplaceUnsupported) {
+		// The FreeBSD fallback for kernels without RENAME_NOREPLACE
+		// refuses a mutable parent directory.
+		t.Skip("kernel cannot publish a socket into a mutable parent")
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, cm.Stop(stopCtx))
+	})
+	conn, err := net.DialTimeout("unix", socketPath, time.Second)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
 
 func TestStartListener_UnixSocket_ReportsSecurePathBudget(t *testing.T) {

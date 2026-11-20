@@ -130,6 +130,7 @@ func newDijkstraHardForkFixture(
 	}
 	// Block nonce evolution seeds from the Shelley genesis hash.
 	fx.ls.config.CardanoNodeConfig.ShelleyGenesisHash = strings.Repeat("00", 32)
+	attachTestLiveSet(t, fx.ls)
 	return fx
 }
 
@@ -165,7 +166,12 @@ func addDijkstraFailingScriptSpend(
 		OutputAmount:  10_000_000,
 	})
 	require.NoError(t, err)
+	fx.inputIds[0] = bytes.Repeat([]byte{0xa4}, lcommon.Blake2b256Size)
+	fx.tx.Body.TxInputs = conway.NewConwayTransactionInputSet([]shelley.ShelleyTransactionInput{{TxId: lcommon.NewBlake2b256(fx.inputIds[0])}})
 	require.NoError(t, fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		if err := fx.db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: fx.inputIds[0], OutputIdx: 0}); err != nil {
+			return err
+		}
 		return fx.db.Blob().SetUtxo(txn.Blob(), fx.inputIds[0], 0, outputCbor)
 	}))
 
@@ -262,6 +268,7 @@ func newDijkstraHardForkReplayFixture(
 	)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              fx.db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     fx.ls.config.CardanoNodeConfig,
 		Logger:                fx.ls.config.Logger,
@@ -272,6 +279,7 @@ func newDijkstraHardForkReplayFixture(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	seedDijkstraHardForkLedger(ls, fx.ls)
 	require.NoError(t, cm.SetLedger(ls))
 	fx.ls = ls
@@ -309,27 +317,18 @@ func requireDijkstraCollateralOnlyEffect(
 	fx *dijkstraCollateralReturnFixture,
 ) {
 	t.Helper()
-	_, err := fx.db.UtxoByRef(t.Context(), fx.inputIds[0], 0, nil)
+	_, err := fx.ls.UtxoByRef(fx.inputIds[0], 0)
 	require.NoError(t, err, "regular input must stay unspent")
-	_, err = fx.db.UtxoByRef(t.Context(), fx.inputIds[1], 0, nil)
+	_, err = fx.ls.UtxoByRef(fx.inputIds[1], 0)
 	require.ErrorIs(t, err, database.ErrUtxoNotFound, "collateral input must be spent")
-	collateral, err := fx.db.UtxoByRefIncludingSpent(t.Context(), fx.inputIds[1], 0, nil)
-	require.NoError(t, err)
-	require.NotZero(t, collateral.DeletedSlot)
-	collateralReturn, err := fx.db.UtxoByRef(
-		t.Context(),
+	_, err = fx.ls.UtxoByRef(
 		fx.tx.Hash().Bytes(),
 		uint32(len(fx.tx.Outputs())), // #nosec G115 -- fixture output count
-		nil,
 	)
 	require.NoError(t, err)
-	require.Zero(t, collateralReturn.DeletedSlot)
-	regularOutput, err := fx.db.UtxoByRefIncludingSpent(
-		t.Context(),
-		fx.tx.Hash().Bytes(), 0, nil,
-	)
-	require.NoError(t, err)
-	require.Nil(t, regularOutput, "regular outputs must not be created")
+	_, err = fx.ls.UtxoByRef(fx.tx.Hash().Bytes(), 0)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"regular outputs must not be created")
 	_, err = fx.db.GetGovernanceProposal(t.Context(), fx.tx.Hash().Bytes(), 0, nil)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 }
@@ -403,7 +402,7 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 		require.NoError(t, invalid.ls.chain.Rollback(t.Context(), ocommon.Point{}))
 		require.NoError(t, invalid.ls.rollback(t.Context(), ocommon.Point{}))
 		seedDijkstraHardForkLedger(invalid.ls, template)
-		_, err := invalid.db.UtxoByRef(t.Context(), invalid.inputIds[1], 0, nil)
+		_, err := invalid.ls.UtxoByRef(invalid.inputIds[1], 0)
 		require.NoError(t, err, "rollback must restore the spent collateral")
 		require.NoError(
 			t,

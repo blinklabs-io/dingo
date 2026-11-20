@@ -37,6 +37,9 @@ func (s *Store) GetAccountStakeHistory(
 	txn types.Txn,
 ) ([]models.AccountStakeHistoryRow, int, error) {
 	ret := []models.AccountStakeHistoryRow{}
+	if err := s.refuseDrained("reward_stake_input"); err != nil {
+		return nil, 0, err
+	}
 	if len(stakingKey) == 0 {
 		return ret, 0, nil
 	}
@@ -93,6 +96,9 @@ WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE
 func (s *Store) GetEarliestRewardStakeInputEpoch(
 	txn types.Txn,
 ) (epoch uint64, ok bool, err error) {
+	if err := s.refuseDrained("reward_stake_input"); err != nil {
+		return 0, false, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -149,7 +155,9 @@ WHERE reward.credential_tag = ? AND reward.credential = ?`
 		"SELECT txh.hash, reward.amount, tx.slot, tx.block_index, tx.block_hash"+
 			from+" ORDER BY mir.added_slot "+dir+", tx.block_index "+dir+
 			", certs.cert_index "+dir+", reward.id "+dir,
-		args, limit, offset,
+		args,
+		limit,
+		offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {

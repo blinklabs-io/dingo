@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -43,11 +44,16 @@ func providerDefaults() ProviderConfig {
 }
 
 type ProviderDependencies struct {
-	Logger             *slog.Logger
-	LedgerState        MeshLedgerState
-	Database           MeshDatabase
-	Chain              MeshChain
-	Mempool            MeshMempool
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen      func(string, string) (net.Listener, error)
+	Logger      *slog.Logger
+	LedgerState MeshLedgerState
+	Database    MeshDatabase
+	Chain       MeshChain
+	Mempool     MeshMempool
+	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// everything.
+	Ready              apiready.Check
 	Host               string
 	Network            string
 	NetworkMagic       uint32
@@ -70,8 +76,10 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, fmt.Errorf("mesh: %w", err)
 			}
 			server, err := NewServer(ServerConfig{
+				Listen: deps.Listen,
 				Logger: deps.Logger, LedgerState: deps.LedgerState,
 				Database: deps.Database, Chain: deps.Chain, Mempool: deps.Mempool,
+				Ready: deps.Ready,
 				ListenAddress: net.JoinHostPort(
 					deps.Host,
 					strconv.FormatUint(uint64(cfg.Port), 10),

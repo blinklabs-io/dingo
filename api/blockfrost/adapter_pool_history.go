@@ -35,7 +35,7 @@ func (a *NodeAdapter) knownPool(
 	if err != nil {
 		return nil, nil, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	pool, err := db.Metadata().GetPool(
@@ -67,7 +67,7 @@ func (a *NodeAdapter) PoolsRetired(
 	if !ok {
 		return []PoolRetiringInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetRetiredPoolsPage(
@@ -108,7 +108,7 @@ func (a *NodeAdapter) PoolHistory(
 	if !ok {
 		return []PoolHistoryInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetPoolHistory(
@@ -231,7 +231,7 @@ func (a *NodeAdapter) PoolDelegators(
 	if !ok {
 		return []PoolDelegatorInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetPoolDelegators(
@@ -268,11 +268,15 @@ func (a *NodeAdapter) PoolBlocks(
 	if !ok {
 		return []string{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	tip, err := a.dataTip()
+	if err != nil {
+		return nil, 0, err
+	}
 	if err := checkPoolBlockHistoryRetained(
-		db, txn, 0, a.ledgerState.Tip().Point.Slot,
+		db, txn, 0, tip.Point.Slot,
 	); err != nil {
 		return nil, 0, fmt.Errorf("pool blocks: %w", err)
 	}
@@ -300,7 +304,7 @@ func (a *NodeAdapter) PoolUpdates(
 	if !ok {
 		return []PoolUpdateInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	events, total, err := db.Metadata().GetPoolCertificateEvents(

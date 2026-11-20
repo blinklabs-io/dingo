@@ -16,10 +16,9 @@
 // runs. A fresh SQLite metadata database has no sqlite_stat1, so the planner
 // picks indexes by shape alone and can scan most of a large table for a query
 // that should seek; this package runs the backend's incremental statistics
-// maintenance before block processing starts, after each epoch rollover, and
-// on a fixed interval in between, because block application can grow tables
-// well past the cardinality the last run recorded long before the next
-// rollover.
+// maintenance during startup, after each epoch rollover, and on a fixed
+// interval in between, because block application can grow tables well past the
+// cardinality the last run recorded long before the next rollover.
 package plannerstats
 
 import (
@@ -109,6 +108,17 @@ func (m *Manager) RunStartup(
 // Start subscribes to epoch transitions and starts the worker. ctx is the
 // parent of every run; canceling it interrupts one in flight.
 func (m *Manager) Start(ctx context.Context) error {
+	return m.start(ctx, false)
+}
+
+// StartWithStartup starts the worker with a startup pass before it handles
+// epoch or periodic triggers. The pass runs on the worker, so this method does
+// not wait for planner maintenance to finish.
+func (m *Manager) StartWithStartup(ctx context.Context) error {
+	return m.start(ctx, true)
+}
+
+func (m *Manager) start(ctx context.Context, runStartup bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cancel != nil {
@@ -137,8 +147,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 	m.cancel = cancel
-	tick, stopTick := m.newTick()
 	m.wg.Go(func() {
+		if runStartup {
+			_, _ = m.run(childCtx, types.PlannerStatsTriggerStartup)
+		}
+		tick, stopTick := m.newTick()
 		defer stopTick()
 		m.worker(childCtx, tick)
 	})

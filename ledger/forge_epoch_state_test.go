@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -88,6 +89,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	fixture.ls.currentEra = validationEra
 	fixture.ls.activeEras = []eras.EraDesc{validationEra}
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
@@ -146,6 +148,7 @@ func TestValidateBlockReferenceScriptsUsesTickedSession(t *testing.T) {
 		fixture.currentPParams,
 	)
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
@@ -211,6 +214,7 @@ func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
 		},
 	})
 	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	phases := testutil.CollectAndCount(ls.metrics.epochRolloverPhaseDuration)
 
@@ -238,11 +242,11 @@ func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
 
 // TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion pins that the
 // aggregate reference-script check reads the parameters the boundary enacts.
-// Under major 10 a reference input missing from the UTxO set contributes
-// nothing to the aggregate; from major 11 it is an error. A HardForkInitiation
-// to major 11 ratified in the ending epoch must therefore change the verdict on
-// a block forged at the first slot of the next epoch and leave one in the
-// ending epoch alone.
+// Under major 10 an output produced earlier in the block is absent from the
+// aggregate UTxO, while major 11 adds it. A HardForkInitiation to major 11
+// ratified in the ending epoch must therefore change the verdict on a block
+// forged at the first slot of the next epoch and leave one in the ending epoch
+// alone.
 func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
 	t.Parallel()
 
@@ -276,28 +280,45 @@ func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
 		t.Context(), proposal, nil,
 	))
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
 	blockAt := func(slot uint64) *conway.ConwayBlock {
-		return &conway.ConwayBlock{
+		block := &conway.ConwayBlock{
 			BlockHeader: &conway.ConwayBlockHeader{
 				BabbageBlockHeader: babbage.BabbageBlockHeader{
 					Body: babbage.BabbageBlockHeaderBody{Slot: slot},
 				},
 			},
 			TransactionBodies: []conway.ConwayTransactionBody{{
+				TxOutputs: []babbage.BabbageTransactionOutput{
+					*additionalReferenceOutput(
+						t,
+						int(conway.MaxRefScriptSizePerBlock)+1,
+					),
+				},
+			}},
+			TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
+			InvalidTransactions:    []uint{},
+		}
+		produced := block.Transactions()[0].Hash()
+		block.TransactionBodies = append(
+			block.TransactionBodies,
+			conway.ConwayTransactionBody{
 				TxReferenceInputs: cbor.NewSetType(
 					[]shelley.ShelleyTransactionInput{{
-						TxId: lcommon.NewBlake2b256(
-							bytes.Repeat([]byte{7}, 32),
-						),
+						TxId: produced,
 					}},
 					false,
 				),
-			}},
-			TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
-		}
+			},
+		)
+		block.TransactionWitnessSets = append(
+			block.TransactionWitnessSets,
+			conway.ConwayTransactionWitnessSet{},
+		)
+		return block
 	}
 	boundary := fixture.currentEpoch.StartSlot +
 		uint64(fixture.currentEpoch.LengthInSlots)
@@ -325,20 +346,20 @@ func (c *boundaryHookCalls) total() int {
 
 func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 	ls.SetEpochBoundarySnapshotHook(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.snapshot++
 			return nil
 		},
 	)
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.stake++
 			return nil
 		},
 	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			*database.Txn,
+			ledgerdb.Txn,
 			event.EpochTransitionEvent,
 			uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -347,7 +368,7 @@ func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 		},
 	)
 	ls.SetEpochBoundaryDeferredStakeInputsHook(
-		func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+		func(ledgerdb.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
 			c.stakeInputs++
 			return 0, 0, nil, false
 		},
@@ -356,12 +377,12 @@ func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 		return
 	}
 	ls.SetDeferredEpochBoundarySnapshotHooks(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.capture++
 			return nil
 		},
 		func(uint64) { c.discard++ },
-		func(*database.Txn, event.EpochTransitionEvent) (
+		func(ledgerdb.Txn, event.EpochTransitionEvent) (
 			DeferredBoundarySnapshot, error,
 		) {
 			c.prepare++
@@ -388,6 +409,7 @@ func TestTxValidationSessionTickLeavesBoundaryStateUntouched(t *testing.T) {
 				t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
 			)
 			ls.epochCache = []models.Epoch{fixture.currentEpoch}
+			attachTestLiveSet(t, ls)
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			var calls boundaryHookCalls
@@ -460,6 +482,7 @@ func slotSessionFixture(t *testing.T) *treasuryRolloverFixture {
 		t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
 	)
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 	return fixture

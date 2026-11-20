@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -61,7 +62,11 @@ func convertBlock(
 	txs []models.Transaction,
 	addrNetworkID uint8,
 	timestamp int64,
-) *Block {
+) (*Block, error) {
+	blockID, err := blockIdentifier(block)
+	if err != nil {
+		return nil, err
+	}
 	meshTxs := make([]*Transaction, 0, len(txs))
 	for i := range txs {
 		meshTxs = append(
@@ -70,19 +75,13 @@ func convertBlock(
 		)
 	}
 
-	blockHash := hex.EncodeToString(block.Hash)
-
 	// Per Mesh spec, genesis block's parent is itself.
 	var parentID *BlockIdentifier
 	if block.Number == 0 {
-		parentID = &BlockIdentifier{
-			Index: 0,
-			Hash:  blockHash,
-		}
+		parentID = blockID
 	} else {
 		parentID = &BlockIdentifier{
-			// #nosec G115
-			Index: int64(block.Number - 1),
+			Index: blockID.Index - 1,
 			Hash: hex.EncodeToString(
 				block.PrevHash,
 			),
@@ -90,14 +89,31 @@ func convertBlock(
 	}
 
 	return &Block{
-		BlockIdentifier: &BlockIdentifier{
-			Index: int64(block.Number), // #nosec G115
-			Hash:  blockHash,
-		},
+		BlockIdentifier:       blockID,
 		ParentBlockIdentifier: parentID,
 		Timestamp:             timestamp,
 		Transactions:          meshTxs,
+	}, nil
+}
+
+func blockIdentifier(block models.Block) (*BlockIdentifier, error) {
+	return newBlockIdentifier(block.Number, block.Hash)
+}
+
+// newBlockIdentifier builds a Mesh block identifier. The Mesh index is a
+// signed 64-bit integer, so a block number above that range is an error
+// rather than a wrapped negative index.
+func newBlockIdentifier(number uint64, hash []byte) (*BlockIdentifier, error) {
+	if number > math.MaxInt64 {
+		return nil, fmt.Errorf(
+			"block number %d exceeds the Mesh index range",
+			number,
+		)
 	}
+	return &BlockIdentifier{
+		Index: int64(number),
+		Hash:  hex.EncodeToString(hash),
+	}, nil
 }
 
 // convertTransaction converts a database transaction
@@ -286,6 +302,10 @@ func appendUtxoOps(
 	})
 	opIdx++
 
+	// Callers may hand over rows in storage order, which predates canonical
+	// ordering on existing databases.
+	assets = slices.Clone(assets)
+	models.SortAssetsCanonical(assets)
 	for i := range assets {
 		asset := &assets[i]
 		assetValue := strconv.FormatUint(
@@ -507,9 +527,9 @@ func convertBodyToOps(
 		// Native assets
 		assets := output.Assets()
 		if assets != nil {
-			for _, policyID := range assets.Policies() {
-				for _, name := range assets.Assets(
-					policyID,
+			for _, policyID := range models.SortedPolicies(assets) {
+				for _, name := range models.SortedAssetNames(
+					assets, policyID,
 				) {
 					val := assets.Asset(policyID, name)
 					pHex := hex.EncodeToString(

@@ -58,6 +58,7 @@ func watchTxBuildForwardMessagesForTransactions(
 		if err != nil {
 			return nil, nil, fmt.Errorf("convert transaction: %w", err)
 		}
+		canonicalizeTxAssets(tmpTx)
 		var act watch.AnyChainTx
 		act.Chain = &watch.AnyChainTx_Cardano{Cardano: tmpTx}
 		applied = append(applied, &act)

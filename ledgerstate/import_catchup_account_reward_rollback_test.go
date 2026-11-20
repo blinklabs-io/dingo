@@ -190,6 +190,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 		nonce := make([]byte, 32)
 		eraBounds := make([]EraBound, EraConway+1)
 		return ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -307,6 +308,7 @@ func TestImportLedgerStateCatchUpClearsRewardJournalForDeletedAccount(
 	newImportConfig := func() ImportConfig {
 		nonce := make([]byte, 32)
 		return ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -403,6 +405,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 		nonce := make([]byte, 32)
 		eraBounds := make([]EraBound, EraConway+1)
 		return ImportConfig{
+			UtxoSet:   importSetFor(t, db),
 			Database:  db,
 			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Reconcile: reconcile,
@@ -522,6 +525,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 		nonce := make([]byte, 32)
 		eraBounds := make([]EraBound, EraConway+1)
 		return ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -652,6 +656,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	newCfg := func() ImportConfig {
 		nonce := make([]byte, 32)
 		return ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -772,6 +777,7 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	newCfg := func() ImportConfig {
 		nonce := make([]byte, 32)
 		return ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -881,6 +887,7 @@ func resumeImportConfig(
 	t.Helper()
 	nonce := make([]byte, 32)
 	return ImportConfig{
+		UtxoSet:   importSetFor(t, db),
 		Database:  db,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ImportKey: importKey,

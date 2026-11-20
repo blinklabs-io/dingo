@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"slices"
 	"sort"
@@ -81,6 +82,47 @@ type leiosForgedEBEntry struct {
 
 func (e leiosForgedEBEntry) isEndorserBlockOffer() bool {
 	return e.point != nil || e.txOffer != nil
+}
+
+// offeredEndorserBlockSlot returns the slot of the endorser block an offer
+// entry names, or nil for any other kind of entry.
+func (e leiosForgedEBEntry) offeredEndorserBlockSlot() *uint64 {
+	switch {
+	case e.txOffer != nil:
+		return &e.txOffer.Slot
+	case e.point != nil && e.announcement == nil && e.vote == nil:
+		return &e.point.Slot
+	default:
+		return nil
+	}
+}
+
+// leiosOfferRelayAllowed reports whether an endorser block at slot may be
+// offered to a peer: only if slot is at least LeiosMinOfferLead slots above
+// this node's immutable tip. The reference peer disconnects a node that offers
+// an endorser block below the peer's own immutable tip, and each side compares
+// against its own tip, so the lead is the margin that keeps an honest peer
+// whose tip is slightly ahead from dropping the connection.
+//
+// An unavailable immutable point reads as slot 0, as the reference reads an
+// empty chain. Without a ledger nothing is gated. A failed lookup refuses the
+// offer rather than risk a disconnect.
+func (o *Ouroboros) leiosOfferRelayAllowed(slot uint64) bool {
+	if o.leiosImmutableSlot == nil {
+		return true
+	}
+	immutable, found, err := o.leiosImmutableSlot(context.Background())
+	if err != nil {
+		return false
+	}
+	if !found {
+		immutable = 0
+	}
+	lead := o.config.LeiosMinOfferLead
+	if lead > math.MaxUint64-immutable {
+		return false
+	}
+	return slot >= immutable+lead
 }
 
 // prototype-2026w31 accepts announcements for up to ten minutes, and only
@@ -341,6 +383,39 @@ type leiosForgedEBLog struct {
 	retryCursors map[string]int
 	wakeCh       chan struct{}
 	announced    map[string]map[string]time.Time
+	// offered holds the endorser-block parts already offered on each
+	// connection. A receiver ends the connection on a second offer of the
+	// same body or closure, and the same part can be queued again: a peer
+	// offering a forged or relayed endorser block back marks it for relay.
+	offered map[string]map[leiosOfferedPart]struct{}
+}
+
+// leiosOfferedPart identifies the body offer (closure false) or the closure
+// offer (closure true) of one endorser block.
+type leiosOfferedPart struct {
+	slot    uint64
+	hash    string
+	closure bool
+}
+
+// offeredPart returns the part an offer entry offers, and false for any
+// other kind of entry.
+func (e leiosForgedEBEntry) offeredPart() (leiosOfferedPart, bool) {
+	switch {
+	case e.txOffer != nil:
+		return leiosOfferedPart{
+			slot:    e.txOffer.Slot,
+			hash:    string(e.txOffer.Hash),
+			closure: true,
+		}, true
+	case e.point != nil && e.announcement == nil && e.vote == nil:
+		return leiosOfferedPart{
+			slot: e.point.Slot,
+			hash: string(e.point.Hash),
+		}, true
+	default:
+		return leiosOfferedPart{}, false
+	}
 }
 
 func newLeiosForgedEBLog() *leiosForgedEBLog {
@@ -352,6 +427,7 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 		retryCursors: make(map[string]int),
 		wakeCh:       make(chan struct{}),
 		announced:    make(map[string]map[string]time.Time),
+		offered:      make(map[string]map[leiosOfferedPart]struct{}),
 	}
 }
 
@@ -540,8 +616,9 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 		retry = retry && retryIndex == cursor
 		header := len(item.entry.dependencyHeader) > 0 &&
 			!l.announcedToLocked(connKey, item.entry.dependencyHeader)
-		if len(item.entry.announcement) > 0 &&
-			l.announcedToLocked(connKey, item.entry.announcement) {
+		if (len(item.entry.announcement) > 0 &&
+			l.announcedToLocked(connKey, item.entry.announcement)) ||
+			l.offeredToLocked(connKey, item.entry) {
 			cursor = item.index + 1
 			l.cursors[connKey] = cursor
 			if retry {
@@ -619,6 +696,7 @@ func (l *leiosForgedEBLog) complete(
 					item.entry.expiresAt,
 				)
 			}
+			l.rememberOfferLocked(connKey, item.entry)
 		}
 		if l.cursors[connKey] == reserved.index {
 			l.cursors[connKey] = reserved.index + 1
@@ -646,6 +724,47 @@ func (l *leiosForgedEBLog) complete(
 func (l *leiosForgedEBLog) announcedToLocked(connKey string, raw []byte) bool {
 	_, present := l.announced[connKey][leiosAnnouncementIdentity(raw)]
 	return present
+}
+
+func (l *leiosForgedEBLog) offeredToLocked(
+	connKey string,
+	entry leiosForgedEBEntry,
+) bool {
+	part, ok := entry.offeredPart()
+	if !ok {
+		return false
+	}
+	_, present := l.offered[connKey][part]
+	return present
+}
+
+// rememberOfferLocked records a delivered offer for connKey. Past
+// leiosEBLogMaxEntries the lowest slots are forgotten first: the relay lead
+// keeps an offer that old from being sent at all.
+func (l *leiosForgedEBLog) rememberOfferLocked(
+	connKey string,
+	entry leiosForgedEBEntry,
+) {
+	part, ok := entry.offeredPart()
+	if !ok {
+		return
+	}
+	parts := l.offered[connKey]
+	if parts == nil {
+		parts = make(map[leiosOfferedPart]struct{})
+		l.offered[connKey] = parts
+	}
+	parts[part] = struct{}{}
+	for len(parts) > leiosEBLogMaxEntries {
+		var oldest leiosOfferedPart
+		first := true
+		for candidate := range parts {
+			if first || candidate.slot < oldest.slot {
+				oldest, first = candidate, false
+			}
+		}
+		delete(parts, oldest)
+	}
 }
 
 func (l *leiosForgedEBLog) rememberAnnouncementLocked(
@@ -789,6 +908,7 @@ func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
 	}
 	delete(l.cursors, connKey)
 	delete(l.announced, connKey)
+	delete(l.offered, connKey)
 	delete(l.owners, connKey)
 	delete(l.retryCursors, connKey)
 	l.pruneLocked()
@@ -1106,6 +1226,10 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 ) bool {
 	deadline, _ := ctx.Deadline()
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	if (!ok || !data.slotVerified) && !o.leiosElectionObserved(point) {
+		o.logLeiosOfferWithoutElection(connKey, point)
+		return false
+	}
 	if !ok {
 		// Manifest not cached yet (txs offered before/without a block
 		// offer): fetch the manifest first to learn the tx count.
@@ -1128,8 +1252,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		if !ok {
 			return false
 		}
-		// Persistence belongs to the node lifecycle and must outlive this peer request.
-		//nolint:contextcheck
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			respBlock.BlockRaw,
@@ -1149,6 +1272,16 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
+		//nolint:contextcheck // Persistence GC is node-owned and must outlive this peer request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			o.config.Logger.Debug(
+				"failed to persist cached leios EB on txs offer",
+				"error", err,
+				"connection_id", connKey,
+				"slot", point.Slot,
+			)
+			return false
+		}
 		return true
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
@@ -1184,8 +1317,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		)
 		return false
 	}
-	// Persistence belongs to the node lifecycle and must outlive this peer request.
-	//nolint:contextcheck
+	//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,
@@ -1635,7 +1767,8 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 // are dropped without touching the endorser-block cache or the backfill
 // source table, so a peer cannot churn those structures, or evict sources
 // recorded for real points, with arbitrary points. Dropping is not
-// penalized: clock skew makes edge-of-window offers legitimate.
+// penalized: clock skew makes edge-of-window offers legitimate. Offers that
+// checkLeiosPeerOffer rejects never reach it: they end the connection.
 func (o *Ouroboros) leiosOfferedPointPlausible(
 	point ocommon.Point,
 	budgetKey string,
@@ -1646,6 +1779,8 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 		reason = "host offer budget exceeded"
 	case len(point.Hash) != lcommon.Blake2b256Size:
 		reason = "invalid hash length"
+	case o.leiosBehindImmutableTip(point.Slot):
+		reason = "behind the immutable tip"
 	case !isNilInterface(o.leiosAnnouncementLedger):
 		start, err := o.leiosAnnouncementLedger.SlotToTime(point.Slot)
 		switch {
@@ -1671,9 +1806,82 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 	return false
 }
 
+func (o *Ouroboros) logInvalidLeiosOffer(
+	connectionID string,
+	point ocommon.Point,
+	err error,
+) {
+	o.config.Logger.Warn(
+		"disconnecting leios peer after invalid offer",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"slot", point.Slot,
+		"error", err,
+	)
+}
+
+func (o *Ouroboros) logLeiosOfferWithoutElection(
+	connectionID string,
+	point ocommon.Point,
+) {
+	o.config.Logger.Debug(
+		"not fetching leios endorser block offered without an observed election",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"slot", point.Slot,
+	)
+}
+
+// leiosElectionObserved reports whether an endorser block at point is
+// justified for fetching: its announcing header was verified, or a selected
+// chain header announcing it is being validated.
+// A peer's offer only identifies who can serve a point and never satisfies
+// this check.
+func (o *Ouroboros) leiosElectionObserved(point ocommon.Point) bool {
+	o.leiosAnnouncementsMu.Lock()
+	observed := o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
+	o.leiosAnnouncementsMu.Unlock()
+	if observed {
+		return true
+	}
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	_, observed = o.leiosSelectedHeaders[leiosBlockKey(point.Slot, point.Hash)]
+	return observed
+}
+
+// leiosBehindImmutableTip reports whether an unsolicited offer or announcement
+// names a slot the node has already settled: no later ranking block can certify
+// an endorser block announced there, so storing it would only feed the
+// collector. Endorser blocks the ledger needs for a chain-certified ranking
+// block are fetched by point through FetchEndorserBlockByPoint, which does not
+// pass through here.
+func (o *Ouroboros) leiosBehindImmutableTip(slot uint64) bool {
+	db := o.leiosDatabase()
+	if db == nil {
+		return false
+	}
+	bound, ok := o.leiosRetentionBound(db)
+	return ok && slot < bound
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
+) error {
+	return o.handleLeiosNotifyMessage(ctx, msg, false)
+}
+
+// handleLeiosNotifyMessage handles one leios-notify message. replay is true
+// when an offer remembered before its election was observed is re-submitted:
+// it was already screened and counted against its host's offer budget when it
+// first arrived.
+func (o *Ouroboros) handleLeiosNotifyMessage(
+	ctx oleiosnotify.CallbackContext,
+	msg protocol.Message,
+	replay bool,
 ) error {
 	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	connId := leiosConnectionIdString(ctx.ConnectionId)
@@ -1690,20 +1898,41 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
+		// A replayed offer was checked when it first arrived. Checking comes
+		// before every screen and every commit below, so no path can act on
+		// an offer this peer was not entitled to make.
+		if !replay {
+			if err := o.checkLeiosPeerOffer(
+				connId, ctx.ConnectionDoneChan, m.Point, m.Size, false,
+			); err != nil {
+				o.logInvalidLeiosOffer(connId, m.Point, err)
+				return err
+			}
+		}
 		// Validate the peer-supplied point before it can touch the shared
 		// cache or its lock.
-		if !o.leiosOfferedPointPlausible(
-			m.Point,
-			leiosOfferBudgetKey(ctx.ConnectionId),
-		) {
-			return nil
+		if !replay {
+			if !o.leiosOfferedPointPlausible(
+				m.Point,
+				leiosOfferBudgetKey(ctx.ConnectionId),
+			) {
+				return nil
+			}
+			o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		}
-		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and
 		// would starve the chain-driven historical backfill for connections. The
 		// ledger fetches the endorser blocks it needs by point as it catches up.
 		if !o.leiosTipPrefetchEnabled() {
+			return nil
+		}
+		// An offer only identifies a serving peer. Fetching needs an election
+		// this node observed; a certified endorser block is fetched by point
+		// from the ledger's apply path instead.
+		if !o.leiosElectionObserved(m.Point) {
+			o.logLeiosOfferWithoutElection(connId, m.Point)
+			o.rememberLeiosOffer(ctx, m, m.Point, false)
 			return nil
 		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
@@ -1721,8 +1950,17 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// same hash can be a live, independently required occurrence at
 		// another slot at the same time, and that other
 		// occurrence being cached must not suppress fetching this one.
-		if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
-			return nil
+		if cachedData, ok := o.lookupLeiosEndorserBlock(
+			point.Slot, point.Hash,
+		); ok {
+			if !o.leiosEndorserBlockNeedsWrite(cachedData) {
+				return nil
+			}
+			// The manifest is held but its write failed: retry the write
+			// instead of fetching it again.
+			return o.dispatchLeiosDurabilityRetry(
+				ctx.ConnectionId, connId, point,
+			)
 		}
 		// Reject an offer that already declares more than the cache's
 		// per-entry byte budget instead of spending a fetch on a body
@@ -1832,15 +2070,25 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
+		if !replay {
+			if err := o.checkLeiosPeerOffer(
+				connId, ctx.ConnectionDoneChan, m.Point, 0, true,
+			); err != nil {
+				o.logInvalidLeiosOffer(connId, m.Point, err)
+				return err
+			}
+		}
 		// Validate the peer-supplied point before it can touch the shared
 		// cache, the backfill-source table, or their locks.
-		if !o.leiosOfferedPointPlausible(
-			m.Point,
-			leiosOfferBudgetKey(ctx.ConnectionId),
-		) {
-			return nil
+		if !replay {
+			if !o.leiosOfferedPointPlausible(
+				m.Point,
+				leiosOfferBudgetKey(ctx.ConnectionId),
+			) {
+				return nil
+			}
+			o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		}
-		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		o.recordLeiosBackfillSource(
 			m.Point,
 			ctx.ConnectionId,
@@ -1868,9 +2116,17 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// empty) at this offer's point. Skip without spawning a fetch. The
 		// lookup is keyed by point, not hash alone, for the same reason as
 		// MsgBlockOffer above: a different, unrelated occurrence of this hash
-		// being complete must not satisfy this offer's point.
-		if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok &&
-			(data.txCount == 0 || data.completeTxCache()) {
+		// being complete must not satisfy this offer's point. An entry whose
+		// write failed is not skipped: the dispatched fetch retries it without
+		// requesting the bodies again.
+		data, cached := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if cached && (data.txCount == 0 || data.completeTxCache()) &&
+			!o.leiosEndorserBlockNeedsWrite(data) {
+			return nil
+		}
+		if (!cached || !data.slotVerified) && !o.leiosElectionObserved(point) {
+			o.logLeiosOfferWithoutElection(connId, point)
+			o.rememberLeiosOffer(ctx, m, point, true)
 			return nil
 		}
 		// The relay offers each EB on every connection; claim it so it is
@@ -1886,15 +2142,22 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			return errors.New("missing leios fetch guard")
 		}
 		if !admitted {
+			launch := func() {
+				o.dispatchLeiosTxOfferFetch(
+					guard, client, ctx.ConnectionId, connId, point,
+					ctx.ConnectionDoneChan,
+				)
+			}
+			if replay {
+				// The offer's backfill source is recorded above, so a replay
+				// dropped by a full queue still leaves this peer to the
+				// chain-driven fetch.
+				return guard.deferLeiosFetchWaiting(
+					hashKey, ctx.ConnectionDoneChan, launch, false,
+				)
+			}
 			return guard.deferLeiosFetch(
-				hashKey,
-				ctx.ConnectionDoneChan,
-				func() {
-					o.dispatchLeiosTxOfferFetch(
-						guard, client, ctx.ConnectionId, connId, point,
-						ctx.ConnectionDoneChan,
-					)
-				},
+				hashKey, ctx.ConnectionDoneChan, launch,
 			)
 		}
 		o.dispatchLeiosTxOfferFetch(
@@ -2233,6 +2496,20 @@ func (g *leiosFetchGuard) deferLeiosFetch(
 	done <-chan any,
 	fn func(),
 ) error {
+	return g.deferLeiosFetchWaiting(key, done, fn, true)
+}
+
+// deferLeiosFetchWaiting implements deferLeiosFetch. With wait false it drops
+// fn instead of waiting for room in a full queue: a caller other than this
+// connection's own notify handler, such as an offer replay inside the
+// announcement or chain-validation path, must not be held by this
+// connection's backlog.
+func (g *leiosFetchGuard) deferLeiosFetchWaiting(
+	key string,
+	done <-chan any,
+	fn func(),
+	wait bool,
+) error {
 	for {
 		g.pendingMu.Lock()
 		if g.closed || connectionDone(done) {
@@ -2268,6 +2545,10 @@ func (g *leiosFetchGuard) deferLeiosFetch(
 					}
 				}()
 			}
+			g.pendingMu.Unlock()
+			return nil
+		}
+		if !wait {
 			g.pendingMu.Unlock()
 			return nil
 		}
@@ -2763,6 +3044,29 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
+	// The peer's own announcement is what lets its offers for this endorser
+	// block through. It counts unless the message itself was found invalid: a
+	// header this node could not judge for a local reason (budget, clock skew,
+	// missing ledger state, deferred verification) must not turn the peer's
+	// next offer into a disconnect.
+	announced := func() {
+		o.recordLeiosPeerAnnouncement(
+			source, done, header.SlotNumber(), ebHash.Bytes(),
+		)
+	}
+	// A peer announcing behind the immutable tip is unsolicited: anything the
+	// ledger needs is fetched by point, and a retry of a local announcement
+	// never passes deferVerification.
+	if deferVerification && o.leiosBehindImmutableTip(header.SlotNumber()) {
+		o.config.Logger.Debug(
+			"dropping leios announcement behind the immutable tip",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", source,
+			"slot", header.SlotNumber(),
+		)
+		return nil
+	}
 	announcementKey := string(header.Hash().Bytes())
 	alreadyKnown, releaseValidation, err := o.reserveLeiosAnnouncementValidation(
 		announcementKey,
@@ -2771,14 +3075,19 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		headerRaw,
 	)
 	if err != nil {
+		if errors.Is(err, errLeiosAnnouncementValidationBudget) {
+			announced()
+		}
 		return err
 	}
 	if alreadyKnown {
+		announced()
 		return nil
 	}
 	defer releaseValidation()
 	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
+		announced()
 		return fmt.Errorf(
 			"%w: read current slot for announcement validation: %w",
 			errLeiosAnnouncementLocalState,
@@ -2789,6 +3098,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		header.SlotNumber(),
 	)
 	if timeErr != nil {
+		announced()
 		return fmt.Errorf(
 			"%w: read announcement slot time: %w",
 			errLeiosAnnouncementLocalState,
@@ -2798,6 +3108,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if header.SlotNumber() > currentSlot {
 		earlyBy := time.Until(announcementStart)
 		if earlyBy >= 0 && earlyBy <= leiosAnnouncementClockSkew {
+			announced()
 			return fmt.Errorf(
 				"%w: announcement slot %d is ahead of current slot %d by %s",
 				errLeiosAnnouncementClockSkew,
@@ -2815,6 +3126,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	age := time.Since(announcementStart)
 	if age < 0 {
 		if -age <= leiosAnnouncementClockSkew {
+			announced()
 			return fmt.Errorf(
 				"%w: announcement slot %d begins in %s",
 				errLeiosAnnouncementClockSkew,
@@ -2834,12 +3146,16 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		header,
 	)
 	if err != nil {
-		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
-			o.deferLeiosAnnouncement(header, raw, source, done)
+		if ledger.IsHeaderVerificationDeferred(err) {
+			announced()
+			if deferVerification {
+				o.deferLeiosAnnouncement(header, raw, source, done)
+			}
 		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
 	}
 	if staleness == ledger.LeiosAnnouncementStaleOCIN {
+		announced()
 		o.config.Logger.Debug(
 			"ignoring leios announcement with stale opcert counter",
 			"component", "network",
@@ -2865,7 +3181,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyRelayAnnouncementAge {
 		// The announcement is still valid for the receiver, but the w31
 		// relay bound prevents an old message from propagating indefinitely.
-		return o.recordLeiosAnnouncement(
+		err = o.recordLeiosAnnouncement(
 			raw,
 			headerRaw,
 			ebHash,
@@ -2874,16 +3190,21 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			source,
 			false,
 		)
+	} else {
+		err = o.recordLeiosAnnouncement(
+			raw,
+			headerRaw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			true,
+		)
 	}
-	return o.recordLeiosAnnouncement(
-		raw,
-		headerRaw,
-		ebHash,
-		ebSize,
-		header,
-		source,
-		true,
-	)
+	if err == nil {
+		announced()
+	}
+	return err
 }
 
 func (o *Ouroboros) deferLeiosAnnouncement(
@@ -3130,6 +3451,11 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	if publish != nil {
 		publish()
 	}
+	if err == nil {
+		o.replayLeiosPendingOffers(
+			ocommon.NewPoint(header.SlotNumber(), ebHash.Bytes()),
+		)
+	}
 	if err == nil && relay && persisted &&
 		o.leiosRelayAnnouncementPending(
 			header.SlotNumber(),
@@ -3268,7 +3594,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		if cached, available := o.cachedLeiosEndorserBlockManifest(
 			slot,
 			ebHash.Bytes(),
-		); !available || !cached.completeTxCache() {
+		); !available || !o.leiosRelayContentReady(cached) {
 			o.leiosMu.Lock()
 			if o.leiosRelayPendingAnnouncements == nil {
 				o.leiosRelayPendingAnnouncements = make(
@@ -3287,7 +3613,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 			// A persistent reload can populate the cache while the lookup above
 			// misses. Recheck under the cache lock before parking the header.
 			if current := o.leiosEndorserBlocks[pointKey]; current != nil &&
-				current.completeTxCache() {
+				o.leiosRelayContentReady(current) {
 				o.publishPendingLeiosRelayAnnouncementsLocked(pointKey)
 			}
 			o.leiosMu.Unlock()
@@ -3384,7 +3710,8 @@ func (o *Ouroboros) leiosAnnouncementWireLocked(
 // EnqueueLeiosBlockAnnouncement validates and queues a locally forged
 // ranking-block header for LeiosNotify diffusion.
 func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
-	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
+	err := o.acceptLeiosAnnouncement(raw, leiosLocalAnnouncementSource)
+	if err != nil {
 		o.config.Logger.Debug(
 			"suppressing local leios announcement",
 			"error",
@@ -3393,8 +3720,60 @@ func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
 	}
 }
 
-// The caller holds leiosMu. This path also runs during persistent cache reload,
-// which can already hold leiosAnnouncementsMu, so it never takes that mutex.
+// leiosRelayContentReady reports whether data may be offered downstream: its
+// transactions are all present and its content needs no write. A header
+// released earlier prompts the receiver to request the closure, so an entry
+// that would not survive a restart is held back until a write succeeds.
+func (o *Ouroboros) leiosRelayContentReady(
+	data *leiosEndorserBlockData,
+) bool {
+	return data.completeTxCache() && !o.leiosEndorserBlockNeedsWrite(data)
+}
+
+// dispatchLeiosDurabilityRetry retries the write of a cached endorser block
+// off the offering handler, deduped across connections by the manifest claim.
+func (o *Ouroboros) dispatchLeiosDurabilityRetry(
+	connectionID ouroboros.ConnectionId,
+	connKey string,
+	point ocommon.Point,
+) error {
+	guard, admitted := o.reserveLeiosFetch(connectionID)
+	if guard == nil {
+		return errors.New("missing leios fetch guard")
+	}
+	if !admitted {
+		return nil
+	}
+	manifestKey := leiosBlockKey(point.Slot, point.Hash)
+	claim := &leiosManifestFetchClaim{done: make(chan struct{})}
+	if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
+		manifestKey, claim,
+	); loaded {
+		o.releaseLeiosFetch(guard)
+		return nil
+	}
+	o.dispatchLeiosFetchReserved(guard, func() {
+		defer o.finishLeiosManifestFetch(manifestKey, claim)
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if !ok {
+			return
+		}
+		//nolint:contextcheck // Persistence is node-owned and must outlive this peer request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			o.config.Logger.Debug(
+				"failed to persist cached leios EB on manifest offer",
+				"error", err,
+				"connection_id", connKey,
+				"slot", point.Slot,
+			)
+		}
+	})
+	return nil
+}
+
+// The caller holds leiosMu, and recordLeiosAnnouncementLocked also holds
+// leiosAnnouncementsMu, which is ordered before leiosMu, so this never takes
+// that mutex.
 func (o *Ouroboros) publishPendingLeiosRelayAnnouncementsLocked(
 	key string,
 	uncached ...*leiosEndorserBlockData,
@@ -3403,7 +3782,7 @@ func (o *Ouroboros) publishPendingLeiosRelayAnnouncementsLocked(
 	if len(uncached) > 0 {
 		current = uncached[0]
 	}
-	if current == nil || !current.completeTxCache() {
+	if current == nil || !o.leiosRelayContentReady(current) {
 		return
 	}
 	for _, announcement := range o.leiosRelayPendingAnnouncements[key] {
@@ -3462,6 +3841,15 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		if entry != nil {
 			if entry.deliveryError != nil {
 				return nil, entry.deliveryError
+			}
+			// Decided here, as the offer is about to go out, because the
+			// immutable tip keeps advancing while an entry waits in the log.
+			// A refused offer is dropped rather than retried: the tip never
+			// moves back, so it can never become relayable again.
+			if offered := entry.offeredEndorserBlockSlot(); offered != nil &&
+				!o.leiosOfferRelayAllowed(*offered) {
+				o.leiosEBLog.discardReservation(connKey, ctx.Server)
+				continue
 			}
 			point := entry.dependencyPoint
 			if point == nil && len(entry.dependencyHeader) > 0 {

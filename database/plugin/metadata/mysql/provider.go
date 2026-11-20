@@ -78,9 +78,10 @@ func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
 		plugin.Descriptor{
-			Capability:  plugin.CapabilityStorageMetadata,
-			Name:        "mysql",
-			Description: "MySQL relational database",
+			Capability:   plugin.CapabilityStorageMetadata,
+			Name:         "mysql",
+			Description:  "MySQL relational database",
+			DurableClose: true,
 		},
 		func() Config {
 			return Config{
@@ -101,7 +102,13 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, err
 			}
 			return store, plugin.Lifecycle{
-				StartFunc: store.Start,
+				StartFunc: func(ctx context.Context) error {
+					err := store.Start(ctx)
+					if namespace := store.Namespace(); err != nil && namespace != "" {
+						return describeCorePrivilegeError(err, configuredUser(cfg), namespace)
+					}
+					return err
+				},
 				StopFunc: func(ctx context.Context) error {
 					return store.CloseContext(ctx)
 				},
@@ -222,6 +229,14 @@ func openStore(
 			return nil, err
 		}
 	}
+	if deps.CoreNamespace {
+		var err error
+		dsn, cfg.Database, err = coreDSN(dsn)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Explicit DSNs without a configured database are commonly supplied by
 	// tests or connection brokers that provision schemas themselves; retain the
 	// lazy sql.Open behavior for those callers. Provider-generated DSNs (and
@@ -240,10 +255,25 @@ func openStore(
 	}
 	if provisionDatabase {
 		if err := ensureDatabaseExists(ctx, dsn, cfg.Database); err != nil {
+			if deps.CoreNamespace {
+				return nil, describeCorePrivilegeError(
+					err, configuredUser(cfg), cfg.Database,
+				)
+			}
 			return nil, err
 		}
 	}
-	db, err := sqlstore.OpenDB("mysql", dsn, "mysql", deps.TracingEnabled)
+	namespace := ""
+	if deps.CoreNamespace {
+		namespace = cfg.Database
+	}
+	db, err := sqlstore.OpenGuardedDB(
+		"mysql",
+		dsn,
+		"mysql",
+		deps.TracingEnabled,
+		deps.StatementGuard,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +307,7 @@ func openStore(
 		Dialect:             sqlstore.MySQLDialect(),
 		Logger:              deps.Logger,
 		StorageMode:         deps.StorageMode,
+		Namespace:           namespace,
 		Migrations:          registry,
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"mysql",
@@ -295,6 +326,22 @@ func openStore(
 				return err
 			}
 			return resetDatabase(ctx, db, database)
+		},
+		CheckRestoreTarget: func(ctx context.Context) error {
+			_, _, database, err := connArgs(dsn)
+			if err != nil {
+				return err
+			}
+			_, err = tablesForReset(ctx, db, database)
+			if err != nil && namespace != "" {
+				return fmt.Errorf(
+					"the consensus database %q beside the IndexerDB is not empty; drop it with DROP DATABASE %s to restore into it: %w",
+					namespace,
+					"`"+strings.ReplaceAll(namespace, "`", "``")+"`",
+					err,
+				)
+			}
+			return err
 		},
 		ValidateBackup: validateMySQLBackup,
 	})

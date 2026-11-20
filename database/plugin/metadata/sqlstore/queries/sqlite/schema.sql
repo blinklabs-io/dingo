@@ -463,10 +463,15 @@ CREATE TABLE asset (
 CREATE TABLE utxo_address (
     utxo_id INTEGER PRIMARY KEY,
     address BLOB NOT NULL,
+    tx_id INTEGER,
+    output_idx INTEGER,
+    slot INTEGER,
+    block_index INTEGER,
     FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_utxo_address_address ON utxo_address(address);
+CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (
     id INTEGER PRIMARY KEY,

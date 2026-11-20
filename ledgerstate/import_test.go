@@ -31,7 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -154,6 +153,7 @@ func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
 				}
 			}
 			err = ImportLedgerState(context.Background(), ImportConfig{
+				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				Logger: slog.New(
 					slog.NewTextHandler(io.Discard, nil),
@@ -177,95 +177,6 @@ func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
 			require.NoError(t, err)
 			require.Empty(t, epochs)
 		})
-	}
-}
-
-// TestImportLedgerStateRebuildsDeferredRewardLiveStake covers the invariant
-// the deferred per-batch refresh depends on: importUTxOs skips the aggregate
-// refresh on every batch, so ImportLedgerState's own
-// RebuildRewardLiveStake is the only thing that leaves reward_live_stake
-// correct. A return added between the two phases, or a rebuild removed,
-// ships an empty aggregate on a bootstrapped node.
-//
-// It runs against the real metadata store, which implements
-// deferredRewardLiveStakeImporter; the assertion below is meaningless
-// against a store that does not, so that is checked first.
-func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-
-	_, ok := db.Metadata().(deferredRewardLiveStakeImporter)
-	require.True(
-		t, ok,
-		"the metadata store must take the deferred import path for this "+
-			"test to cover the rebuild it depends on",
-	)
-
-	stakeHash := bytes.Repeat([]byte{0x22}, 28)
-	addr := buildShelleyAddr(
-		0,
-		1,
-		bytes.Repeat([]byte{0x11}, 28),
-		stakeHash,
-	)
-	nonce := make([]byte, 32)
-	eraBounds := make([]EraBound, EraConway+1)
-
-	require.NoError(t, ImportLedgerState(
-		context.Background(),
-		ImportConfig{
-			Database: db,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-			State: &RawLedgerState{
-				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000, 2_000_000}),
-				Epoch:               1,
-				EraIndex:            EraConway,
-				EraBounds:           eraBounds,
-				EpochNonce:          nonce,
-				EvolvingNonce:       nonce,
-				CandidateNonce:      nonce,
-				LastEpochBlockNonce: nonce,
-				Tip: &SnapshotTip{
-					Slot:      1_000,
-					BlockHash: make([]byte, 32),
-				},
-			},
-			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
-			},
-		},
-	))
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var utxoStake string
-	require.NoError(t, raw.QueryRow(
-		"SELECT utxo_stake FROM reward_live_stake "+
-			"WHERE credential_tag = 0 AND staking_key = ?",
-		stakeHash,
-	).Scan(&utxoStake))
-	require.Equal(
-		t, "3000000", utxoStake,
-		"the post-import rebuild must aggregate every deferred batch",
-	)
-
-	blobTxn := db.BlobTxn(false)
-	defer blobTxn.Release()
-	for i, amount := range []uint64{1_000_000, 2_000_000} {
-		txHash := bytes.Repeat([]byte{byte(0x40 + i)}, 32)
-		utxoCbor, err := db.Blob().GetUtxo(
-			blobTxn.Blob(), txHash, 0,
-		)
-		require.NoError(t, err,
-			"imported live UTxO %x#0 must remain replayable after repair",
-			txHash,
-		)
-		output, err := ledger.NewTransactionOutputFromCbor(utxoCbor)
-		require.NoError(t, err)
-		require.Equal(t, amount, output.Amount().Uint64())
 	}
 }
 
@@ -308,6 +219,7 @@ func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
 	}
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -494,7 +406,7 @@ func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
 
 	seedPreviewRewardBases(t, db)
 	current, previous := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg := previewPParamsImportConfig(t, db, current, previous)
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 
@@ -528,7 +440,7 @@ func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 
 	seedPreviewRewardBases(t, db)
 	current, _ := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, current, nil)
+	cfg := previewPParamsImportConfig(t, db, current, nil)
 
 	for range 2 {
 		require.NoError(t, importPParams(context.Background(), cfg))
@@ -572,7 +484,7 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 	require.NoError(t, db.Metadata().SetPParams(
 		storedPrevious, 99_999, 1396, EraBabbage, nil,
 	))
-	cfg := previewPParamsImportConfig(db, current, translatedPrevious)
+	cfg := previewPParamsImportConfig(t, db, current, translatedPrevious)
 	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
 	cfg.State.EraBounds[EraConway] = EraBound{
 		Slot:  100_000,
@@ -609,7 +521,7 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 
 	seedPreviewRewardBases(t, db)
 	current, previous := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg := previewPParamsImportConfig(t, db, current, previous)
 	// Model an import at the first Conway epoch. GovState's previous payload
 	// is translated to the current-era shape, but the performance epoch is
 	// still Babbage. Recover its parameters with the ledger downgrade.
@@ -661,6 +573,7 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
 	state.EraBoundSlot = state.Tip.Slot
 	state.EraBounds = previewEraBounds()
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -749,6 +662,7 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 	state, err := ParseSnapshot(testdataLedgerSnapshot)
 	require.NoError(t, err)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -824,11 +738,13 @@ func distinctConwayPParams(t *testing.T) (current, previous []byte) {
 }
 
 func previewPParamsImportConfig(
+	t *testing.T,
 	db *database.Database,
 	current []byte,
 	previous []byte,
 ) ImportConfig {
 	return ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -889,6 +805,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	require.NotNil(t, state.Tip)
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		State:    state,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -980,6 +897,7 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 
 	recorder := &messageRecorder{}
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		State:    state,
 		Logger:   slog.New(recorder),
@@ -1219,6 +1137,7 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 	require.NotNil(t, state.Tip)
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		State:    state,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1453,6 +1372,7 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	err = persistImportedSnapshot(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
@@ -1522,6 +1442,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 		persistImportedActivePoolDistribution(
 			context.Background(),
 			ImportConfig{
+				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				State:    &RawLedgerState{Epoch: 298},
 			},
@@ -1572,6 +1493,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	require.NoError(t, persistImportedSnapshot(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State:    &RawLedgerState{Epoch: 102},
 		},
@@ -1689,6 +1611,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 			err := persistImportedSnapshot(
 				context.Background(),
 				ImportConfig{
+					UtxoSet:  importSetFor(t, db),
 					Database: db,
 					State: &RawLedgerState{
 						Epoch:      102,
@@ -1752,6 +1675,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	err = persistImportedSnapshot(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
@@ -1880,6 +1804,7 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 			require.NoError(t, persistImportedSnapshot(
 				context.Background(),
 				ImportConfig{
+					UtxoSet:  importSetFor(t, db),
 					Database: db,
 					State: &RawLedgerState{
 						Epoch:      102,
@@ -1955,6 +1880,7 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 	err = persistImportedSnapshot(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
@@ -2074,6 +2000,7 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := ImportConfig{
+		UtxoSet:       importSetFor(t, db),
 		Database:      db,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:         &RawLedgerState{Epoch: 2, SnapShotsData: data},
@@ -2114,6 +2041,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 	}))
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -2147,6 +2075,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 	require.NoError(t, persistImportedSnapshot(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
@@ -2184,6 +2113,7 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -2222,6 +2152,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	scriptDeposit := uint64(3_000_000)
 	zeroDeposit := uint64(0)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -2353,6 +2284,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 	vrfKeyHash := bytes.Repeat([]byte{0x52}, 32)
 	rewardAccount := bytes.Repeat([]byte{0x53}, 28)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -2407,6 +2339,7 @@ func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
 	poolKeyHash := bytes.Repeat([]byte{0x61}, 28)
 	deposit := uint64(500_000_000)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
@@ -2452,6 +2385,7 @@ func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
 	poolKeyHash := bytes.Repeat([]byte{0x64}, 28)
 	missingKeyHash := bytes.Repeat([]byte{0x65}, 28)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
@@ -2494,6 +2428,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 
 	poolKeyHash := bytes.Repeat([]byte{0x67}, 28)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
@@ -2633,6 +2568,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 	const slot = uint64(130267768)
 
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -2723,6 +2659,7 @@ func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 
 	txHash := bytes.Repeat([]byte{0x91}, 32)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -3171,6 +3108,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 
 			var logOutput bytes.Buffer
 			err = ImportLedgerState(context.Background(), ImportConfig{
+				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				Logger:   slog.New(slog.NewTextHandler(&logOutput, nil)),
 				State:    state,
@@ -3179,12 +3117,13 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				},
 			})
 
-			raw, rawErr := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, rawErr)
 			var utxos int
-			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*) FROM utxo",
-			).Scan(&utxos))
+			require.NoError(t, importSetFor(t, db).EachUtxo(
+				func([]byte, uint32, []byte) error {
+					utxos++
+					return nil
+				},
+			))
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				require.Equal(t, 1, utxos)
@@ -3205,7 +3144,7 @@ func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 	current, previous := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg := previewPParamsImportConfig(t, db, current, previous)
 	cfg.State.Tip = &SnapshotTip{BlockHash: make([]byte, 32)}
 	require.NoError(t, importPParams(t.Context(), cfg))
 	cfg.State.PrevPParamsData = cbor.RawMessage{0xff}
@@ -3231,6 +3170,7 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	newAccount := bytes.Repeat([]byte{0x83}, 28)
 	deposit := uint64(500_000_000)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 659},

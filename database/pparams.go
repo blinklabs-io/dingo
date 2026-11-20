@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -37,17 +38,7 @@ func (d *Database) GetPParams(
 	decodeFunc func([]byte) (lcommon.ProtocolParameters, error),
 	txn *Txn,
 ) (lcommon.ProtocolParameters, error) {
-	var (
-		pparams []models.PParams
-		ppErr   error
-	)
-	if txn == nil {
-		pparams, ppErr = d.metadata.GetPParams(epoch, eraId, nil)
-	} else {
-		pparams, ppErr = d.metadata.GetPParams(
-			epoch, eraId, txn.Metadata(),
-		)
-	}
+	pparams, ppErr := d.GetPParamRows(epoch, eraId, txn)
 	if ppErr != nil {
 		return nil, ppErr
 	}
@@ -63,6 +54,9 @@ func (d *Database) SetPParams(
 	era uint,
 	txn *Txn,
 ) error {
+	if d.pparamsDrained() {
+		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	}
 	if txn == nil {
 		err := d.metadata.SetPParams(params, slot, epoch, era, nil)
 		if err != nil {
@@ -113,7 +107,7 @@ func (d *Database) ApplyPParamUpdates(
 	// Fetch proposals submitted in the prior epoch; they are what gets enacted
 	// as epoch's parameters.
 	submissionEpoch := epoch - 1
-	pparamUpdates, err := d.metadata.GetPParamUpdates(
+	pparamUpdates, err := d.getPParamUpdates(
 		submissionEpoch, txn.Metadata(),
 	)
 	if err != nil {
@@ -172,6 +166,9 @@ func (d *Database) ApplyPParamUpdates(
 	if err != nil {
 		return fmt.Errorf("encode updated pparams: %w", err)
 	}
+	if d.pparamsDrained() {
+		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	}
 	// Store params for the target epoch (epoch) where they take effect
 	return d.metadata.SetPParams(
 		pparamsCbor,
@@ -206,7 +203,7 @@ func (d *Database) pparamEnactmentPending(
 		uniqueCount int
 	)
 	if err := d.MetadataTxn(ctx, false).Do(func(txn *Txn) error {
-		pparamUpdates, err := d.metadata.GetPParamUpdates(
+		pparamUpdates, err := d.getPParamUpdates(
 			submissionEpoch, txn.Metadata(),
 		)
 		if err != nil {
@@ -316,10 +313,8 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		// No prior (submission) epoch, so nothing to enact.
 		return currentPParams, false, nil
 	}
-	// Fetch proposals submitted in the prior epoch; they are what gets enacted
-	// as epoch's parameters.
 	submissionEpoch := epoch - 1
-	pparamUpdates, err := d.metadata.GetPParamUpdates(
+	pparamUpdates, err := d.getPParamUpdates(
 		submissionEpoch, txn.Metadata(),
 	)
 	if err != nil {
@@ -329,15 +324,12 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 			err,
 		)
 	}
-	submissionStart, err := d.classicSubmissionEpochStart(
-		pparamUpdates, epoch, decodeFunc, txn.Metadata(),
-	)
-	if err != nil {
-		return nil, false, err
-	}
-	enactment, err := selectClassicPParamUpdate(
-		pparamUpdates, epoch, submissionStart, quorum,
-		currentPParams, decodeFunc,
+	enactment, err := ComputeClassicPParamEnactmentFromRows(
+		pparamUpdates, epoch, quorum, currentPParams,
+		decodeFunc, updateFunc, hasPlutusV2CostModelFunc,
+		func(id uint64) (*models.Epoch, error) {
+			return d.epochRecord(id, txn.Metadata())
+		},
 	)
 	if err != nil {
 		return nil, false, err
@@ -352,37 +344,20 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		)
 		return currentPParams, false, nil
 	}
-	// Compute updated pparams
-	if currentPParams == nil {
-		return nil, false, fmt.Errorf(
-			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
-			epoch,
-		)
-	}
-	tmpPParamUpdate := enactment.update
-	newPParams, err := updateFunc(
-		currentPParams,
-		tmpPParamUpdate,
-	)
-	if err != nil {
-		return nil, false, fmt.Errorf("apply pparam update: %w", err)
-	}
 	d.logger.Debug(
 		"computed updated protocol params",
 		"enact_epoch", epoch,
 		"submission_epoch", submissionEpoch,
-		"votes", enactment.votes,
+		"votes", enactment.Votes,
 		"quorum", quorum,
-		"pparams", fmt.Sprintf("%#v", newPParams),
+		"pparams", fmt.Sprintf("%#v", enactment.PParams),
 	)
-	// Write pparams update to DB
-	pparamsCbor, err := cbor.Encode(newPParams)
-	if err != nil {
-		return nil, false, fmt.Errorf("encode updated pparams: %w", err)
+	if d.pparamsDrained() {
+		return nil, false, drainedWrite(nodesettings.FamilyPParamsUpdates)
 	}
 	// Store params for the target epoch (epoch) where they take effect
 	err = d.metadata.SetPParams(
-		pparamsCbor,
+		enactment.Cbor,
 		slot,
 		epoch,
 		era,
@@ -391,9 +366,85 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 	if err != nil {
 		return nil, false, fmt.Errorf("set pparams: %w", err)
 	}
-	plutusV2CostModelWritten := hasPlutusV2CostModelFunc != nil &&
-		hasPlutusV2CostModelFunc(tmpPParamUpdate)
-	return newPParams, plutusV2CostModelWritten, nil
+	return enactment.PParams, enactment.PlutusV2CostModelWritten, nil
+}
+
+// ClassicPParamEnactment is the update the Shelley update system enacts at an
+// epoch boundary, applied to the parameters in force.
+type ClassicPParamEnactment struct {
+	// PParams is the updated parameters.
+	PParams lcommon.ProtocolParameters
+	// Cbor is PParams encoded, as stored for the enacting epoch.
+	Cbor []byte
+	// PlutusV2CostModelWritten reports whether the enacted update itself
+	// carried a PlutusV2 cost model.
+	PlutusV2CostModelWritten bool
+	// Votes is the number of genesis keys that proposed the update.
+	Votes int
+}
+
+// ComputeClassicPParamEnactmentFromRows selects the update enacted at the
+// boundary into epoch from the proposals that target epoch-1 or the epoch
+// before it, and applies it to currentPParams. It returns nil when nothing is
+// enacted. updateFunc may mutate currentPParams in place, so the caller passes
+// parameters it owns. The rows' IDs give their order within a slot, so they
+// must increase in the order the proposals were stored. getEpoch reads the
+// epoch record of the submission epoch, only when a proposal carries a
+// protocol version update. It is the one implementation of enactment: the
+// metadata store's write and the live UTxO set's both run it.
+func ComputeClassicPParamEnactmentFromRows(
+	pparamUpdates []models.PParamUpdate,
+	epoch uint64,
+	quorum int,
+	currentPParams lcommon.ProtocolParameters,
+	decodeFunc func([]byte) (any, error),
+	updateFunc func(
+		lcommon.ProtocolParameters,
+		any,
+	) (lcommon.ProtocolParameters, error),
+	hasPlutusV2CostModelFunc func(any) bool,
+	getEpoch func(uint64) (*models.Epoch, error),
+) (*ClassicPParamEnactment, error) {
+	if epoch == 0 {
+		return nil, nil
+	}
+	submissionStart, err := classicSubmissionEpochStartFrom(
+		pparamUpdates, epoch, decodeFunc, getEpoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	selected, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if selected == nil {
+		return nil, nil
+	}
+	if currentPParams == nil {
+		return nil, fmt.Errorf(
+			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
+			epoch,
+		)
+	}
+	newPParams, err := updateFunc(currentPParams, selected.update)
+	if err != nil {
+		return nil, fmt.Errorf("apply pparam update: %w", err)
+	}
+	pparamsCbor, err := cbor.Encode(newPParams)
+	if err != nil {
+		return nil, fmt.Errorf("encode updated pparams: %w", err)
+	}
+	return &ClassicPParamEnactment{
+		PParams: newPParams,
+		Cbor:    pparamsCbor,
+		PlutusV2CostModelWritten: hasPlutusV2CostModelFunc != nil &&
+			hasPlutusV2CostModelFunc(selected.update),
+		Votes: selected.votes,
+	}, nil
 }
 
 // ForecastPParamUpdates computes the protocol parameters that the epoch
@@ -433,17 +484,7 @@ func (d *Database) ForecastPParamUpdates(
 	// Fetch proposals submitted in the prior epoch; they are what will be
 	// enacted as epoch's parameters.
 	submissionEpoch := epoch - 1
-	var (
-		pparamUpdates []models.PParamUpdate
-		err           error
-	)
-	if txn == nil {
-		pparamUpdates, err = d.metadata.GetPParamUpdates(submissionEpoch, nil)
-	} else {
-		pparamUpdates, err = d.metadata.GetPParamUpdates(
-			submissionEpoch, txn.Metadata(),
-		)
-	}
+	pparamUpdates, err := d.getPParamUpdates(submissionEpoch, metadataOf(txn))
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get pparam updates for epoch %d: %w",
@@ -455,8 +496,43 @@ func (d *Database) ForecastPParamUpdates(
 	if txn != nil {
 		metadataTxn = txn.Metadata()
 	}
-	submissionStart, err := d.classicSubmissionEpochStart(
-		pparamUpdates, epoch, decodeFunc, metadataTxn,
+	return ForecastPParamUpdatesFromRows(
+		pparamUpdates, epoch, quorum, currentPParams,
+		decodeFunc, updateFunc, cloneFunc,
+		func(id uint64) (*models.Epoch, error) {
+			return d.epochRecord(id, metadataTxn)
+		},
+	)
+}
+
+// ForecastPParamUpdatesFromRows is ForecastPParamUpdates over the proposals
+// that target epoch-1 or the epoch before it, however read. The rows' IDs
+// give their order within a slot, so they must increase in the order the
+// proposals were stored. getEpoch reads the epoch record of a submission
+// epoch, which is read only when a proposal carries a protocol version
+// update.
+func ForecastPParamUpdatesFromRows(
+	pparamUpdates []models.PParamUpdate,
+	epoch uint64,
+	quorum int,
+	currentPParams lcommon.ProtocolParameters,
+	decodeFunc func([]byte) (any, error),
+	updateFunc func(
+		lcommon.ProtocolParameters,
+		any,
+	) (lcommon.ProtocolParameters, error),
+	cloneFunc func(lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error),
+	getEpoch func(uint64) (*models.Epoch, error),
+) (lcommon.ProtocolParameters, error) {
+	if currentPParams == nil ||
+		decodeFunc == nil ||
+		updateFunc == nil ||
+		cloneFunc == nil ||
+		epoch == 0 {
+		return currentPParams, nil
+	}
+	submissionStart, err := classicSubmissionEpochStartFrom(
+		pparamUpdates, epoch, decodeFunc, getEpoch,
 	)
 	if err != nil {
 		return nil, err
@@ -495,6 +571,9 @@ func (d *Database) DeletePParamsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.pparamsDrained() {
+		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamsAfterSlot(
 			slot,
@@ -517,6 +596,9 @@ func (d *Database) DeletePParamUpdatesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.pparamsDrained() {
+		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamUpdatesAfterSlot(
 			slot,
@@ -537,6 +619,9 @@ func (d *Database) SetPParamUpdate(
 	slot, epoch uint64,
 	txn *Txn,
 ) error {
+	if d.pparamsDrained() {
+		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	}
 	if txn == nil {
 		err := d.metadata.SetPParamUpdate(genesis, params, slot, epoch, nil)
 		if err != nil {

@@ -131,7 +131,7 @@ func (a *NodeAdapter) AddressExtended(
 				err,
 			)
 		}
-		entry, err := a.ledgerState.Database().Metadata().
+		entry, err := a.db().Metadata().
 			GetTokenRegistryEntry(
 				tokenRegistrySubjectFor(policyID, assetName),
 				nil,
@@ -182,7 +182,7 @@ func (a *NodeAdapter) assetHasOnchainMetadata(
 	if err != nil {
 		return false, fmt.Errorf("asset policy ID %q: %w", policyID, err)
 	}
-	mintTxHash, _, err := a.ledgerState.Database().Metadata().
+	mintTxHash, _, err := a.db().Metadata().
 		GetAssetMintBurnInfo(policyHash, assetName, nil)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -283,7 +283,7 @@ func (a *NodeAdapter) AddressTotal(
 		}
 	}
 
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 

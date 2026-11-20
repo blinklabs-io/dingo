@@ -95,6 +95,33 @@ func BlockByHashStats() (hits, misses uint64) {
 }
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
+	return d.blockCreate(block, block.Cbor, txn)
+}
+
+// ErrImmutableNotEnabled reports an operation that needs an ImmutableDB state
+// record on a database without one.
+var ErrImmutableNotEnabled = errors.New("the ImmutableDB is not enabled")
+
+// BlockCreateImmutable stores a block whose body already sits in a chunk file:
+// the index, hash index and metadata are written as BlockCreate writes them
+// and the body value is the marker for that chunk location. block.Cbor is not
+// stored. The chunk bytes must be durable before the transaction commits.
+func (d *Database) BlockCreateImmutable(
+	block models.Block,
+	marker types.ImmutableMarker,
+	txn *Txn,
+) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	return d.blockCreate(block, marker.Encode(), txn)
+}
+
+func (d *Database) blockCreate(
+	block models.Block,
+	body []byte,
+	txn *Txn,
+) error {
 	owned := false
 	if txn == nil {
 		txn = d.BlockBlobTxn()
@@ -130,7 +157,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 		}
 	}
 	// Use the new SetBlock method
-	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, block.Cbor, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
+	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, body, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
 		return err
 	}
 	if !retained {
@@ -227,7 +254,11 @@ func retainedBlockExists(
 	txn types.Txn,
 	key []byte,
 ) (bool, error) {
-	_, err := store.Get(txn, key)
+	raw := rawBlobStore(store)
+	if raw == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	_, err := raw.Get(txn, key)
 	if err == nil {
 		return true, nil
 	}
@@ -249,7 +280,7 @@ func (d *Database) HasGenesisCbor(slot uint64, hash []byte) (bool, error) {
 		return false, types.ErrBlobStoreUnavailable
 	}
 	key := types.BlockBlobKey(slot, hash)
-	_, err := blob.Get(txn.Blob(), key)
+	_, err := rawBlobStore(blob).Get(txn.Blob(), key)
 	if errors.Is(err, types.ErrBlobKeyNotFound) {
 		return false, nil
 	}
@@ -312,10 +343,33 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
+	if txn.db != nil {
+		if err := txn.db.CheckImmutableFloor(block.ID); err != nil {
+			return err
+		}
+	}
 	if err := txn.holdBlockInventory(); err != nil {
 		return err
 	}
-	_, existingErr := blob.Get(blobTxn, types.BlockBlobKey(block.Slot, block.Hash))
+	if txn.db != nil && txn.db.immutable != nil {
+		// The check above reads the in-memory tip, which promotion advances
+		// only after its markers commit. The recorded tip commits with the
+		// markers, so reading it here closes that window. A truncate lowers
+		// it before deleting, so the markers above it stay deletable.
+		floor, ok, err := recordedImmutableFloor(blob, blobTxn)
+		if err != nil {
+			return fmt.Errorf("read immutable state: %w", err)
+		}
+		if ok && block.ID <= floor {
+			return fmt.Errorf(
+				"%w: block index %d is at or below immutable tip index %d",
+				ErrRollbackBelowImmutableTip, block.ID, floor,
+			)
+		}
+	}
+	_, existingErr := rawBlobStore(blob).Get(
+		blobTxn, types.BlockBlobKey(block.Slot, block.Hash),
+	)
 	retained := existingErr == nil
 	if existingErr != nil &&
 		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
@@ -351,12 +405,22 @@ func (d *Database) tombstoneBlockTxn(
 	if err := txn.holdBlockInventory(); err != nil {
 		return err
 	}
-	_, existingErr := store.Get(txn.Blob(), types.BlockBlobKey(slot, hash))
+	existing, existingErr := rawBlobStore(store).Get(
+		txn.Blob(), types.BlockBlobKey(slot, hash),
+	)
 	retained := existingErr == nil
 	if existingErr != nil &&
 		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
 		!errors.Is(existingErr, types.ErrHistoryExpired) {
 		return fmt.Errorf("check tombstoned block for inventory: %w", existingErr)
+	}
+	if retained && types.IsImmutableMarker(existing) {
+		// A promoted body lives in the chunk files; overwriting its marker
+		// would orphan those bytes and lose the block.
+		return fmt.Errorf(
+			"%w: block at slot %d is stored in the ImmutableDB",
+			ErrRollbackBelowImmutableTip, slot,
+		)
 	}
 	if err := store.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 		return err
@@ -1676,6 +1740,32 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// IsCanonicalBlock reports whether the block is the primary-chain entry at its
+// own index. A block the database no longer stores, as after a rollback that
+// deleted it, is not canonical, and neither is a stored block with no index
+// entry.
+func IsCanonicalBlock(
+	ctx context.Context,
+	db *Database,
+	hash []byte,
+) (bool, error) {
+	blk, err := BlockByHash(ctx, db, hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	point, err := db.BlockPointByIndex(blk.ID, nil)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read block index entry: %w", err)
+	}
+	return point.Slot == blk.Slot && bytes.Equal(point.Hash, hash), nil
+}
+
 func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
 	if txn == nil {
 		return models.Block{}, types.ErrNilTxn
@@ -2179,61 +2269,88 @@ func FirstBlockAtOrAfterSlot(
 	db *Database,
 	slotNumber uint64,
 ) (models.Block, error) {
-	var ret models.Block
 	txn := db.Transaction(ctx, false)
+	var ret models.Block
 	err := txn.Do(func(txn *Txn) error {
-		blobTxn := txn.Blob()
-		if blobTxn == nil {
-			return types.ErrNilTxn
-		}
-		blob := txn.BlobStore()
-		if blob == nil {
-			return types.ErrBlobStoreUnavailable
-		}
-		it := blob.NewIterator(
-			blobTxn,
-			types.BlobIteratorOptions{Prefix: []byte(types.BlockBlobKeyPrefix)},
-		)
-		if it == nil {
-			return errors.New("blob iterator is nil")
-		}
-		defer it.Close()
-		seek := slices.Concat(
-			[]byte(types.BlockBlobKeyPrefix),
-			types.BlockBlobKeyUint64ToBytes(slotNumber),
-		)
-		for it.Seek(seek); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-			item := it.Item()
-			if item == nil {
-				continue
-			}
-			k := item.Key()
-			if k == nil ||
-				strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
-				continue
-			}
-			blk, err := blockByKey(txn, k)
-			if err != nil {
-				return err
-			}
-			// Synthetic blobs (genesis CBOR, Leios endorser blocks) carry
-			// ID 0 and are not ranking blocks; see BlockBeforeSlotTxn.
-			if blk.ID == 0 {
-				continue
-			}
-			ret = blk
-			return nil
-		}
-		if err := it.Err(); err != nil {
-			return err
-		}
-		return models.ErrBlockNotFound
+		var err error
+		ret, err = FirstBlockAtOrAfterSlotTxn(txn, slotNumber)
+		return err
 	})
 	return ret, err
 }
 
+// FirstBlockAtOrAfterSlotTxn is FirstBlockAtOrAfterSlot inside the caller's
+// transaction, so the read sees that transaction's snapshot.
+func FirstBlockAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.BlobStore()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	seek := slices.Concat(
+		prefix, types.BlockBlobKeyUint64ToBytes(slotNumber),
+	)
+	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		k := item.Key()
+		if k == nil ||
+			strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		blk, err := blockByKey(txn, k)
+		if err != nil {
+			return models.Block{}, err
+		}
+		// Synthetic blobs (genesis CBOR, Leios endorser blocks) carry
+		// ID 0 and are not ranking blocks; see BlockBeforeSlotTxn.
+		if blk.ID == 0 {
+			continue
+		}
+		return blk, nil
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 // BlocksAfterSlotTxn returns all blocks after the specified slot; keep txn valid until results are consumed.
 func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
+	return blocksAtOrAfterSlotTxn(txn, slotNumber, false)
+}
+
+// BlocksAtOrAfterSlotTxn returns all blocks at or after the specified slot;
+// keep txn valid until results are consumed.
+func BlocksAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+) ([]models.Block, error) {
+	return blocksAtOrAfterSlotTxn(txn, slotNumber, true)
+}
+
+func blocksAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+	inclusive bool,
+) ([]models.Block, error) {
 	if txn == nil {
 		return nil, types.ErrNilTxn
 	}
@@ -2263,7 +2380,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	var tmpBlock models.Block
 	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
-		if it.ValidForPrefix(keyPrefix) {
+		if !inclusive && it.ValidForPrefix(keyPrefix) {
 			continue
 		}
 		item := it.Item()

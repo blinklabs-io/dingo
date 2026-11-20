@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -33,10 +34,15 @@ type ProviderConfig struct {
 
 // ProviderDependencies are supplied by node composition.
 type ProviderDependencies struct {
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen             func(string, string) (net.Listener, error)
 	Node               KupoNode
 	Logger             *slog.Logger
 	Host               string
 	CORSAllowedOrigins []string
+	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// every route.
+	Ready apiready.Check
 }
 
 // RegisterProvider registers the built-in Kupo-compatible provider.
@@ -59,6 +65,7 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, fmt.Errorf("kupo: %w", err)
 			}
 			server := New(Config{
+				Listen: deps.Listen,
 				ListenAddress: net.JoinHostPort(
 					deps.Host,
 					strconv.FormatUint(uint64(cfg.Port), 10),
@@ -66,6 +73,7 @@ func RegisterProvider(host *plugin.Host) error {
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 				TLS:                tls,
 			}, deps.Node, deps.Logger)
+			server.ready = deps.Ready
 			return server, server, nil
 		},
 	)

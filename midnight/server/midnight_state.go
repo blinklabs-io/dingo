@@ -456,16 +456,20 @@ func (s *service) GetUtxoEvents(
 		if err != nil {
 			return nil, s.internalError("resolve end_block_hash", err)
 		}
-		if found {
-			cut := len(items)
-			for i, item := range items {
-				if item.blockNumber > boundary {
-					cut = i
-					break
-				}
-			}
-			items = items[:cut]
+		// A block above the IndexerDB tip resolves as not found, like the
+		// block RPCs: no cut would be applied, and the response would run
+		// to the tip instead of stopping at the requested block.
+		if !found {
+			return nil, status.Error(codes.NotFound, "block not found")
 		}
+		cut := len(items)
+		for i, item := range items {
+			if item.blockNumber > boundary {
+				cut = i
+				break
+			}
+		}
+		items = items[:cut]
 	}
 
 	if limit > 0 && len(items) > limit {

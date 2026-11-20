@@ -434,9 +434,9 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 	srv := newMithrilTestServer(t, ServerConfig{Store: store})
 
 	result, err := Sync(context.Background(), SyncConfig{
+		UtxoSet:           newSyncTestSet(t),
 		Network:           "preprod",
 		DataDir:           t.TempDir(),
-		StorageMode:       "core",
 		Backend:           BackendV2,
 		AggregatorURL:     srv.URL,
 		AllowInsecureHTTP: true,

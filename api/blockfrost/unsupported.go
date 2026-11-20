@@ -49,7 +49,7 @@ var unsupportedOperations = []string{
 	"GET /api/v0/nutlink/tickers/{ticker}",
 }
 
-func (b *Blockfrost) registerUnsupportedLiterals(mux *http.ServeMux) {
+func (b *Blockfrost) registerUnsupportedLiterals(mux *routeMux) {
 	for _, operation := range unsupportedOperations {
 		_, path, _ := strings.Cut(operation, " ")
 		// Reserved literals must outrank implemented parameter routes, such as

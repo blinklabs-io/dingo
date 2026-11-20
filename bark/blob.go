@@ -318,6 +318,10 @@ type BlobStoreBark struct {
 	upstream             blob.BlobStore
 }
 
+// Unwrap returns the store this one reads through to, so callers that need the
+// underlying store can look past the archive layer.
+func (b *BlobStoreBark) Unwrap() blob.BlobStore { return b.upstream }
+
 func NewBarkBlobStore(
 	config BlobStoreBarkConfig,
 	upstream blob.BlobStore,
@@ -465,8 +469,7 @@ func (b *BlobStoreBark) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return value, nil
@@ -565,6 +568,19 @@ func (i *barkItem) ValueCopy(dst []byte) ([]byte, error) {
 	return cbor, nil
 }
 
+// RawValueCopy returns the value as stored when the upstream item can, so a
+// caller classifying a promoted block reads its marker rather than its body.
+// Otherwise, or when the raw read fails, it reads like ValueCopy, which still
+// resolves expired history from the archive.
+func (i *barkItem) RawValueCopy(dst []byte) ([]byte, error) {
+	if raw, ok := i.upstream.(types.RawValueItem); ok {
+		if val, err := raw.RawValueCopy(dst); err == nil {
+			return val, nil
+		}
+	}
+	return i.ValueCopy(dst)
+}
+
 func (b *BlobStoreBark) GetCommitTimestamp() (int64, error) {
 	return b.upstream.GetCommitTimestamp()
 }
@@ -652,6 +668,14 @@ func (b *BlobStoreBark) RemainingTxnEntries(
 		return 0, false
 	}
 	return budget.RemainingTxnEntries(txn, entryBytes)
+}
+
+// ReclaimSpace forwards to the upstream store, where the local data lives.
+func (b *BlobStoreBark) ReclaimSpace() error {
+	if r, ok := b.upstream.(blob.SpaceReclaimer); ok {
+		return r.ReclaimSpace()
+	}
+	return nil
 }
 
 // DetectsWriteConflicts forwards the upstream transaction capability.

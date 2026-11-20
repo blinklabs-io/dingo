@@ -29,8 +29,11 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	_ "modernc.org/sqlite"
@@ -97,6 +100,42 @@ func RawSQLiteMetadata(
 	return raw, nil
 }
 
+// RefreshPoolCurrentState recomputes the stored pool state of every pool in
+// raw, the SQLite handle of RawSQLiteMetadata or one of its transactions. A
+// test that seeds pool certificates, or the keys they are ranked by, with raw
+// SQL calls it afterwards, as the store's own writers do after each change.
+func RefreshPoolCurrentState(
+	tb testing.TB,
+	raw sqlstore.PoolCurrentStateDB,
+) {
+	tb.Helper()
+	ctx := context.Background()
+	// The rows are closed before the refresh runs: a server connection cannot
+	// run a statement while a result is open.
+	hashes := func() [][]byte {
+		rows, err := raw.QueryContext(ctx, "SELECT pool_key_hash FROM pool")
+		if err != nil {
+			tb.Fatalf("list pools: %v", err)
+		}
+		defer rows.Close()
+		var ret [][]byte
+		for rows.Next() {
+			var hash []byte
+			if err := rows.Scan(&hash); err != nil {
+				tb.Fatalf("scan pool: %v", err)
+			}
+			ret = append(ret, hash)
+		}
+		if err := rows.Err(); err != nil {
+			tb.Fatalf("list pools: %v", err)
+		}
+		return ret
+	}()
+	if err := sqlstore.RefreshPoolCurrentState(ctx, raw, hashes); err != nil {
+		tb.Fatalf("refresh pool current state: %v", err)
+	}
+}
+
 // Options configures a test database. The zero value composes the badger blob
 // store and the sqlite metadata store with an unset run mode, matching
 // NewDatabase.
@@ -118,6 +157,15 @@ type Options struct {
 	// does not disable it: with a DataDir the template is seeded into
 	// that directory instead.
 	InMemoryMetadata bool
+
+	// StatementGuard, when set, vets every SQL statement the metadata
+	// store's connections run.
+	StatementGuard metadata.StatementGuard
+
+	// WrapImmutable, when set, passes the resolved ImmutableDB provider
+	// through itself before it is injected into the database. Returning nil
+	// injects none.
+	WrapImmutable func(immplugin.ImmutableDB) immplugin.ImmutableDB
 }
 
 // NewDatabase composes Badger and SQLite for a test. The database is closed
@@ -207,6 +255,9 @@ func newDatabaseWithOptions(
 	if err := metadataRegister(host); err != nil {
 		return nil, err
 	}
+	if err := chunkfile.RegisterProvider(host); err != nil {
+		return nil, err
+	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
 		plugin.CapabilityStorageBlob, blobName, blobConfig,
@@ -260,6 +311,7 @@ func newDatabaseWithOptions(
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
 			MaxConnections: opts.MaxConnections,
 			Logger:         config.Logger, PromRegistry: config.PromRegistry,
+			StatementGuard: opts.StatementGuard,
 		},
 	)
 	if err != nil {
@@ -269,10 +321,28 @@ func newDatabaseWithOptions(
 	if wrap != nil {
 		metadataStore = wrap(metadataStore)
 	}
+	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
+		context.Background(), host,
+		plugin.CapabilityStorageImmutable, chunkfile.ProviderName, nil,
+		immplugin.ProviderDependencies{
+			DataDir: config.DataDir, Logger: config.Logger,
+		},
+	)
+	if err != nil {
+		_ = host.Stop(context.Background())
+		return nil, err
+	}
+	if opts.WrapImmutable != nil {
+		immutableStore = opts.WrapImmutable(immutableStore)
+	}
 	db, err := database.New(
 		context.Background(),
 		config,
-		database.Stores{Blob: blobStore, Metadata: metadataStore},
+		database.Stores{
+			Blob:      blobStore,
+			Metadata:  metadataStore,
+			Immutable: immutableStore,
+		},
 	)
 	if db == nil {
 		_ = host.Stop(context.Background())

@@ -166,6 +166,22 @@ type TxValidator interface {
 	) error
 }
 
+// SubmittedTxTranslator optionally injects a transaction from an older era
+// into the current ledger era before mempool validation. The translated type
+// and bytes are what the pool retains for forging and transaction relay.
+type SubmittedTxTranslator interface {
+	TranslateSubmittedTx(gledger.Transaction) (gledger.Transaction, error)
+}
+
+type submittedTxValidationError struct {
+	era uint
+	err error
+}
+
+func (e *submittedTxValidationError) Error() string       { return e.err.Error() }
+func (e *submittedTxValidationError) Unwrap() error       { return e.err }
+func (e *submittedTxValidationError) SubmissionEra() uint { return e.era }
+
 // CertifiedClosureProvider optionally resolves the certified endorser-block
 // closure a Leios certifying ranking block applies. Such a block carries no
 // transactions of its own, but the ledger applies its parent's announced
@@ -211,11 +227,21 @@ type TxSizeLimitProvider interface {
 }
 
 type MempoolConfig struct {
-	PromRegistry         prometheus.Registerer
-	Validator            TxValidator
-	Logger               *slog.Logger
-	EventBus             *event.EventBus
-	MempoolCapacity      int64
+	PromRegistry    prometheus.Registerer
+	Validator       TxValidator
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	MempoolCapacity int64
+	// CapacityFunc, when set, returns the capacity in bytes currently in
+	// force. MempoolCapacity is the capacity until the first call, and the
+	// one kept whenever the function reports zero or less. The function is
+	// called without any pool lock held, as often as admission, chain updates
+	// and the cleanup interval need a fresh value, so it must be cheap once
+	// warm. Calls never overlap: while one is in progress, other callers use
+	// the capacity last returned. Only admission follows it: MempoolCapacity stays the bound on the
+	// bodies relay consumers retain and the base of their derived cache
+	// budget, because transactions admitted under a larger capacity remain.
+	CapacityFunc         func() int64
 	TransactionTTL       time.Duration
 	CleanupInterval      time.Duration
 	EvictionWatermark    float64
@@ -273,6 +299,11 @@ type Mempool struct {
 	revalidationDeltaCap   int
 	revalidationJournalCap int
 	stopped                bool
+	// capacity is the capacity in force, in bytes. It is only ever written by
+	// refreshCapacity, under capacityMu, so the paths that hold the pool lock
+	// read it without calling CapacityFunc.
+	capacity   atomic.Int64
+	capacityMu sync.Mutex
 	sync.RWMutex
 	doneOnce      sync.Once
 	mutationMutex sync.Mutex
@@ -785,6 +816,7 @@ func newMempool(
 		m.dag = newTransactionDAG()
 	}
 	m.headroomChanged = make(chan struct{})
+	m.capacity.Store(config.MempoolCapacity)
 	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
@@ -850,13 +882,13 @@ func newMempool(
 		},
 	)
 	m.metrics.implementation.Set(1)
-	// Capacity is fixed for the life of the pool, so the gauge is set once.
-	promautoFactory.NewGauge(
+	promautoFactory.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "dingo_mempool_capacity_bytes",
-			Help: "configured mempool capacity in bytes",
+			Help: "mempool capacity in force in bytes",
 		},
-	).Set(float64(config.MempoolCapacity))
+		func() float64 { return float64(m.capacity.Load()) },
+	)
 	return m, nil
 }
 
@@ -868,6 +900,9 @@ func (m *Mempool) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Settled before the pool takes traffic, so the exported capacity gauge
+	// does not report the configured capacity until the first admission.
+	m.refreshCapacity()
 	m.Lock()
 	defer m.Unlock()
 	if m.stopped {
@@ -1093,6 +1128,8 @@ type ProviderDependencies struct {
 	Logger          *slog.Logger
 	EventBus        *event.EventBus
 	CurrentSlotFunc func() uint64
+	// CapacityFunc supplies MempoolConfig.CapacityFunc.
+	CapacityFunc func() int64
 }
 
 // RegisterProvider registers the FIFO compatibility alias as mempool/default.
@@ -1143,6 +1180,7 @@ func registerProvider(
 				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
 				MaxAPISubmissions:    cfg.MaxAPISubmissions,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
+				CapacityFunc:         deps.CapacityFunc,
 			}
 			var (
 				service  Service
@@ -1188,6 +1226,7 @@ func (m *Mempool) processChainEvents(
 		30*time.Second,
 		func(evt event.Event) {
 			m.noteChainUpdateContext(ctx, evt)
+			m.refreshCapacity()
 			// Eviction does not depend on the overlay rebuild, which may be
 			// skipped while a failed rebuild waits for its retry.
 			m.evictConfirmed()
@@ -1957,6 +1996,7 @@ func (m *Mempool) expireTransactions() {
 	for {
 		select {
 		case <-ticker.C:
+			m.refreshCapacity()
 			m.removeExpiredTransactions()
 		case <-m.done:
 			return
@@ -2103,6 +2143,40 @@ func (m *Mempool) AddTransaction(
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
+	if translator, ok := m.validator.(SubmittedTxTranslator); ok {
+		originalHash := tmpTx.Hash()
+		originalType := txType
+		tmpTx, err = translator.TranslateSubmittedTx(tmpTx)
+		if err != nil {
+			return fmt.Errorf("translate transaction: %w", err)
+		}
+		if tmpTx == nil {
+			return errors.New("translate transaction: translator returned nil")
+		}
+		if tmpTx.Type() < 0 {
+			return fmt.Errorf(
+				"translate transaction: invalid transaction type %d",
+				tmpTx.Type(),
+			)
+		}
+		if tmpTx.Hash() != originalHash {
+			return errors.New(
+				"translate transaction: transaction ID changed",
+			)
+		}
+		txType = uint(tmpTx.Type()) // #nosec G115 -- checked non-negative above
+		txBytes = tmpTx.Cbor()
+		if len(txBytes) == 0 {
+			return errors.New(
+				"translate transaction: empty transaction encoding",
+			)
+		}
+		if txType != originalType {
+			if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+				return &submittedTxValidationError{era: txType, err: err}
+			}
+		}
+	}
 	txHashRaw := tmpTx.Hash()
 	ctx, span = tracing.StartTx(
 		ctx,
@@ -2233,6 +2307,7 @@ func (m *Mempool) addTransactionAttempt(
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
+	m.refreshCapacity()
 	outputAddrs := outputAddresses(tmpTx)
 	err := m.withResolvingTxValidationSession(ctx, func(
 		validate func(
@@ -2280,7 +2355,7 @@ func (m *Mempool) addTransactionAttempt(
 			retErr := &MempoolFullError{
 				CurrentSize: int(m.currentSizeBytes),
 				TxSize:      int(txSize),
-				Capacity:    m.config.MempoolCapacity,
+				Capacity:    m.capacity.Load(),
 			}
 			m.Unlock()
 			return retErr
@@ -2292,7 +2367,7 @@ func (m *Mempool) addTransactionAttempt(
 		var needsEviction bool
 		var targetBytes int64
 		evictionThreshold := int64(
-			float64(m.config.MempoolCapacity) * m.evictionWatermark,
+			float64(m.capacity.Load()) * m.evictionWatermark,
 		)
 		if m.dag == nil && m.evictionWatermark > 0 &&
 			newSize > evictionThreshold {
@@ -2326,7 +2401,10 @@ func (m *Mempool) addTransactionAttempt(
 			return ErrPendingStateMoved
 		}
 		if validateErr != nil {
-			return fmt.Errorf("validate transaction: %w", validateErr)
+			return fmt.Errorf(
+				"validate transaction: %w",
+				&submittedTxValidationError{era: txType, err: validateErr},
+			)
 		}
 
 		// Resolved after validation, under the gate and in the same
@@ -2624,12 +2702,14 @@ func boundedSnapshot(
 }
 
 func (m *Mempool) AdmissionHeadroomBytes() int64 {
+	m.refreshCapacity()
 	m.RLock()
 	defer m.RUnlock()
 	return m.admissionHeadroomBytesLocked()
 }
 
 func (m *Mempool) MaxAdmissionHeadroomBytes() int64 {
+	m.refreshCapacity()
 	m.RLock()
 	defer m.RUnlock()
 	return m.maxAdmissionHeadroomBytesLocked()
@@ -2661,6 +2741,7 @@ func (m *Mempool) waitForAdmissionHeadroom(
 		return true
 	}
 	for {
+		m.refreshCapacity()
 		m.RLock()
 		if m.stopped {
 			m.RUnlock()
@@ -2696,9 +2777,50 @@ func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
 	return &ret
 }
 
-// CapacityBytes returns the configured maximum mempool size in bytes.
+// CapacityBytes returns the maximum mempool size in bytes currently in force.
 func (m *Mempool) CapacityBytes() int64 {
-	return m.config.MempoolCapacity
+	m.refreshCapacity()
+	return m.capacity.Load()
+}
+
+// refreshCapacity asks CapacityFunc for the capacity in force and, when it
+// grew, wakes the admission waiters: no removal announces the headroom a
+// larger capacity opens. A capacity that shrinks evicts nothing; the pool
+// refuses admissions until its contents drain below the new capacity. It must
+// be called without the pool lock held.
+//
+// Only one call reads CapacityFunc at a time, so results land in order. A
+// call that finds a read in progress returns at once and its caller uses the
+// capacity last read: the function may wait on ledger and database reads,
+// and admission, eviction and cleanup must not queue behind one that stalls.
+func (m *Mempool) refreshCapacity() {
+	if m.config.CapacityFunc == nil {
+		return
+	}
+	if !m.capacityMu.TryLock() {
+		return
+	}
+	next := m.config.CapacityFunc()
+	if next <= 0 {
+		m.capacityMu.Unlock()
+		return
+	}
+	previous := m.capacity.Swap(next)
+	m.capacityMu.Unlock()
+	if next == previous {
+		return
+	}
+	m.logger.Info(
+		"mempool capacity changed",
+		"component", "mempool",
+		"previous_bytes", previous,
+		"capacity_bytes", next,
+	)
+	if next > previous {
+		m.Lock()
+		m.notifyHeadroomChangedLocked()
+		m.Unlock()
+	}
 }
 
 // SizeBytes returns the bytes currently retained by pending transactions.
@@ -2710,7 +2832,7 @@ func (m *Mempool) SizeBytes() int64 {
 
 func (m *Mempool) admissionLimitBytes() int64 {
 	return int64(
-		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+		float64(m.capacity.Load()) * m.rejectionWatermark,
 	)
 }
 

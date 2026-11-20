@@ -2284,6 +2284,7 @@ func BenchmarkTransactionValidation(b *testing.B) {
 	ledgerCfg := LedgerStateConfig{
 		Database:     db,
 		ChainManager: chainManager,
+		UtxoSet:      NewMemLiveSetForTest(),
 	}
 	ledgerState, err := NewLedgerState(ledgerCfg)
 	if err != nil {
@@ -2789,6 +2790,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	}
 	ledgerState, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
+		UtxoSet:            NewMemLiveSetForTest(),
 		ChainManager:       chainManager,
 		CardanoNodeConfig:  newTestShelleyGenesisCfg(b),
 		ValidateHistorical: true,
@@ -3181,6 +3183,7 @@ func newBatchBenchmarkLedgerState(
 	}
 	ledgerState, err := NewLedgerState(LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      NewMemLiveSetForTest(),
 		ChainManager: chainManager,
 	})
 	if err != nil {
@@ -3222,6 +3225,7 @@ func newBlockProcessingBenchmarkLedgerState(
 	}
 	ledgerState, err := NewLedgerState(LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      NewMemLiveSetForTest(),
 		ChainManager: chainManager,
 	})
 	if err != nil {

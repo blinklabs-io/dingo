@@ -544,6 +544,7 @@ func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
+		UtxoSet:            NewMemLiveSetForTest(),
 		ChainManager:       cm,
 		CardanoNodeConfig:  nodeConfig,
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -551,6 +552,7 @@ func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	ls.slotClock = NewSlotClock(
 		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
 		DefaultSlotClockConfig(),

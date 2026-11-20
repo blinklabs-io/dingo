@@ -112,7 +112,7 @@ func setLeiosCertificationEnv(
 	encoded, err := cbor.Encode(f.pparams)
 	require.NoError(f.t, err)
 	for _, epoch := range cache {
-		require.NoError(f.t, f.db.SetPParams(
+		require.NoError(f.t, f.ls.ledgerDB().SetPParams(
 			encoded,
 			epoch.StartSlot,
 			epoch.EpochId,
@@ -265,4 +265,37 @@ func TestLeiosCertifyingBlockTimingIsEnforcedOnApply(t *testing.T) {
 			)
 		})
 	}
+}
+
+// The gap reported for an announcement is the one its epoch's parameters
+// give, and it is unknown rather than zero when those cannot be resolved.
+func TestLeiosCertificationGapForAnnouncement(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	setLeiosCertificationEnv(f, []uint64{100, 200}, 1000, 4000, 7000)
+
+	gap, err := f.ls.LeiosCertificationGap(80)
+	require.NoError(t, err)
+	require.Equal(t, uint64(14), gap)
+
+	// The current parameters do not decide the gap of an earlier epoch.
+	current := *f.pparams
+	current.LeiosAnnouncementPeriodLength = 0
+	current.LeiosVotePeriodLength = 0
+	current.LeiosDiffusionPeriodLength = 0
+	f.ls.currentPParams = &current
+	f.ls.publishSnapshotsLocked()
+	gap, err = f.ls.LeiosCertificationGap(80)
+	require.NoError(t, err)
+	require.Equal(t, uint64(14), gap)
+
+	var pparams *dijkstra.DijkstraProtocolParameters
+	f.ls.currentPParams = pparams
+	f.ls.publishSnapshotsLocked()
+	_, err = f.ls.LeiosCertificationGap(150)
+	require.ErrorContains(
+		t,
+		err,
+		"dijkstra protocol parameters are unavailable",
+	)
 }

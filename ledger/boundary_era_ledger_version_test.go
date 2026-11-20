@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -184,6 +186,10 @@ type boundaryEraCase struct {
 	// configure may schedule a hard fork with a TestXHardForkAtEpoch
 	// override.
 	configure func(cfg *cardano.CardanoNodeConfig)
+	// utxoSet, when set, is attached to the ledger as its live UTxO set.
+	utxoSet UtxoSetWriter
+	// db, when set, is the database the ledger runs on.
+	db *database.Database
 	// classicUpdateMajor, when set, is the major of a classic
 	// protocol-parameter update proposed in epoch 0 by enough genesis
 	// delegates to meet the Shelley genesis updateQuorum. The boundary enacts
@@ -248,6 +254,9 @@ func newBoundaryEraLedger(
 ) (*LedgerState, gledger.Block) {
 	t.Helper()
 	ls, blocks := newBoundaryEraLedgerChain(t, tc)
+	if tc.utxoSet == nil {
+		attachTestLiveSet(t, ls)
+	}
 	return ls, blocks[0]
 }
 
@@ -312,7 +321,10 @@ func newBoundaryEraLedgerChain(
 		)
 	}
 
-	db := newTestDB(t)
+	db := tc.db
+	if db == nil {
+		db = newTestDB(t)
+	}
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	var raw []chain.RawBlock
@@ -382,6 +394,7 @@ func newBoundaryEraLedgerChain(
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -393,12 +406,25 @@ func newBoundaryEraLedgerChain(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	// The snapshot manager reads through the ledger's LedgerDB, as a node's
+	// does, so a drained family is served from the set it reads.
+	var snapshotDB ledgerdb.LedgerDB = dbadapter.New(db)
+	if tc.utxoSet != nil {
+		ls.config.UtxoSet = tc.utxoSet
+		ls.installEpochSource()
+		ls.installPParamsSource()
+		snapshotDB = ls.LedgerDB()
+	}
 	// A rollover that enacts a HardForkInitiation ratifies at the boundary,
 	// which a production node serves from the snapshot manager's rows.
-	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	snapshotMgr := snapshot.NewManager(
+		snapshotDB,
+		newTestEventBus(t, nil),
+		nil,
+	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -435,6 +461,9 @@ func newBoundaryEraLedgerChain(
 	}
 	if tc.classicUpdateMajor != 0 {
 		seedClassicVersionUpdate(t, db, tc.classicUpdateMajor)
+	}
+	if tc.utxoSet == nil {
+		attachTestLiveSet(t, ls)
 	}
 	return ls, blocks
 }
