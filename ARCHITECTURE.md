@@ -8217,16 +8217,19 @@ registrations, retirements (`GetRetiringPoolsAtSlot`) and deposits
 containing it. Reward provenance (`GetRewardProvenance`) answers the constant
 cardano-node sends, the ledger's zero-valued provenance with every scalar zero,
 both rationals 0/1 and every map empty, whatever the point. Non-myopic member
-rewards (`GetNonMyopicMemberRewards`), reward info (`GetRewardInfoPools`) and
-the debug epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) are not
-answered. The first two rank pools by a performance estimate the ledger derives
-from a decayed per-pool likelihood history carried across epoch boundaries (100
-single-precision log weights per pool) and report the reward pot of the last
-boundary; neither is tracked, and an estimate computed from a partial history
-would rank pools wrongly, so the query fails rather than answer. The debug
-queries return the whole epoch or new-epoch state in the ledger's encoding,
-which is not held in that form. Each fails with `ErrQueryNotAnswered`, which
-names the query and what is missing. The LocalStateQuery state machine has no
+rewards (`GetNonMyopicMemberRewards`) and reward info (`GetRewardInfoPools`)
+use the current stake and pool parameters at the acquired point together with
+the last installed reward-boundary state. That state retains the reward pot and
+each active pool's decayed 100-sample single-precision log-likelihood history;
+rollback removes states installed above the rollback point, and a Mithril
+import seeds the history carried by its `EpochState`. The member query follows
+the reference top-pool desirability, non-myopic stake, pledge, cost, margin and
+performance calculations for both coin and credential inputs. The debug
+epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) remain deliberately
+unanswered: they return the whole epoch or new-epoch state in the ledger's
+encoding, which Dingo does not hold in that form. Each fails with
+`ErrQueryNotAnswered`, which names the query and what is missing. The
+LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
 it at warn level with that reason. At node-to-client versions 21 to 23 the

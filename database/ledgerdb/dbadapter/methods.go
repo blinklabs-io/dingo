@@ -791,6 +791,35 @@ func (a Adapter) GetRewardAdaPots(
 	return a.db.Metadata().GetRewardAdaPots(epoch, metaTxn(txn))
 }
 
+func (a Adapter) SaveRewardLikelihoodState(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+	txn ledgerdb.Txn,
+) error {
+	return a.db.Metadata().SaveRewardLikelihoodState(state, pools, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateBeforeEpoch(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateBeforeEpoch(epoch, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateAtSlot(
+	slot uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateAtSlot(slot, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardPoolLikelihoods(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) ([]*models.RewardPoolLikelihood, error) {
+	return a.db.Metadata().GetRewardPoolLikelihoods(epoch, metaTxn(txn))
+}
+
 func (a Adapter) GetRewardPoolInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
