@@ -686,11 +686,15 @@ func (s *Store) applyLedgerTxn(
 		return err
 	}
 	// A batch with no tip written into a set with none is the baseline:
-	// the state a rollback to the empty point restores. The batch's chunks
-	// share the verdict, so it is carried in chain once a record is written.
+	// the state a rollback to the empty point restores. A set bootstrapped
+	// before the first block records the empty point as its tip, and is as
+	// much without one: the genesis outputs written next would otherwise be
+	// undone by a read as of the empty point. The batch's chunks share the
+	// verdict, so it is carried in chain once a record is written.
 	baseline := chain.baseline
 	if !chain.has {
-		baseline = !chain.advances && !rec.hadTip
+		baseline = !chain.advances &&
+			(!rec.hadTip || samePoint(rec.prevTip, ocommon.Point{}))
 	}
 	rec.advancesTip, rec.baseline = chain.advances, baseline
 	open := false
