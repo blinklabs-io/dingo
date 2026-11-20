@@ -23,8 +23,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,6 +161,67 @@ func TestBackfillReadAheadPrefetchesNextBlockWhileFirstWaits(t *testing.T) {
 	second := <-readAhead.results
 	require.NoError(t, second.err)
 	require.Equal(t, raw[1].Slot, second.raw.Slot)
+}
+
+func TestBackfillReadAheadPrefetchesConsumedInputsOfRealBlocks(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+	require.NoError(t, err)
+	raw := make([]database.BlobBlockResult, len(blocks))
+	want := make([][]models.UtxoId, len(blocks))
+	for i, block := range blocks {
+		raw[i] = database.BlobBlockResult{
+			Index:     uint64(i),
+			Slot:      block.SlotNumber(),
+			Hash:      block.Hash().Bytes(),
+			Cbor:      block.Cbor(),
+			BlockType: uint(block.Type()),
+		}
+		for _, tx := range block.Transactions() {
+			for _, input := range tx.Consumed() {
+				want[i] = append(want[i], models.UtxoId{
+					Hash: input.Id().Bytes(),
+					Idx:  input.Index(),
+				})
+			}
+		}
+		require.NotEmpty(t, want[i], "fixture block %d must consume inputs", i)
+	}
+
+	var nextIndex int
+	next := func() (*database.BlobBlockResult, error) {
+		if nextIndex >= len(raw) {
+			return nil, nil
+		}
+		nextIndex++
+		return &raw[nextIndex-1], nil
+	}
+	var (
+		mu  sync.Mutex
+		got [][]models.UtxoId
+	)
+	backfill := &Backfill{prefetchInputs: func(
+		_ context.Context,
+		refs []models.UtxoId,
+	) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, slices.Clone(refs))
+		return nil
+	}}
+
+	readAhead := backfill.startBackfillReadAhead(t.Context(), next)
+	defer readAhead.Close()
+	for i := range raw {
+		result := <-readAhead.results
+		require.NoError(t, result.err)
+		require.Equal(t, raw[i].Slot, result.raw.Slot)
+		require.Equal(t, len(want[i]), result.prefetchedInputs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, want, got)
 }
 
 func TestRunPrefetchesEachDecodedBlock(t *testing.T) {

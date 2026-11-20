@@ -16720,7 +16720,10 @@ are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
 
-The historical replay reader has a one-block handoff buffer. It decodes the
+The historical replay reader has a one-block handoff channel. The channel does
+not bound decoded-block memory: the reader decodes and prefetches one more block
+while the channel is full, so up to three decoded blocks can be live (the block
+being applied, the buffered block, and the block waiting to send). It decodes the
 next canonical block and, for file-backed SQLite, reads that block's distinct
 consumed UTxO references across the metadata read pool while the replay loop
 writes the preceding block. Those read snapshots are advisory cache warming:
