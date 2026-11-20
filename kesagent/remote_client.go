@@ -52,6 +52,12 @@ const (
 	// rather than risk a request on a connection the agent is about to drop.
 	DefaultSessionFreshFor = 8 * time.Second
 
+	// prepareStayFreshFor is how much longer than the moment of a Prepare an
+	// open session must stay fresh for Prepare to keep it. Prepare runs
+	// shortly before the leader slot's sign, so a session that goes stale in
+	// between would be dropped and redialled inside SignTimeout.
+	prepareStayFreshFor = 5 * time.Second
+
 	attestationNonceSize = 32
 	// maxAttestationFrameLen bounds the attestation_response. It carries the
 	// operational certificate and, for an enclave provider, its evidence.
@@ -348,9 +354,11 @@ func (c *RemoteClient) verifyServerPin(cs tls.ConnectionState) error {
 	return nil
 }
 
-// Prepare opens and admits a session ahead of a leader slot, unless a fresh
-// one is already open, so that Sign does not pay for the dial, handshake and
-// admission inside its timeout. A failure here is reported early, before the
+// Prepare opens and admits a session ahead of a leader slot, unless one is
+// already open that stays fresh for prepareStayFreshFor more, so that Sign
+// does not pay for the dial, handshake and admission inside its timeout. A
+// session that is fresh now but would go stale before the slot is replaced,
+// and kept if the replacement fails. A failure here is reported early, before the
 // slot; Sign retries the connection itself. Prepare honours the reconnect
 // backoff; Sign does not.
 func (c *RemoteClient) Prepare() error {
@@ -363,7 +371,7 @@ func (c *RemoteClient) Prepare() error {
 		return err
 	}
 	defer c.release()
-	return c.ensureSession(ctx, true)
+	return c.ensureSession(ctx, true, prepareStayFreshFor)
 }
 
 // CheckReady reports whether the agent was reachable and admitted this node
@@ -404,27 +412,39 @@ func (c *RemoteClient) release() { <-c.turn }
 // freshLocked reports whether an admitted session is open and was last used
 // within SessionFreshFor. Caller holds c.mu.
 func (c *RemoteClient) freshLocked() bool {
-	return c.conn != nil && time.Since(c.lastUsed) < c.cfg.SessionFreshFor
+	return c.freshForLocked(0)
 }
 
-// ensureSession leaves a fresh admitted session open, dropping an older one
-// and dialling a new one. The caller holds the turn; the dial runs without
-// c.mu, so Close and CheckReady never wait on the network. respectBackoff
-// skips the dial while the reconnect backoff is active.
+// freshForLocked reports whether an admitted session is open that is still
+// fresh stay from now. Caller holds c.mu.
+func (c *RemoteClient) freshForLocked(stay time.Duration) bool {
+	return c.conn != nil &&
+		time.Since(c.lastUsed)+stay < c.cfg.SessionFreshFor
+}
+
+// ensureSession leaves an admitted session open that stays fresh for stay
+// more, dropping an older one and dialling a new one. A session that is fresh
+// now but not for stay is kept until its replacement is admitted. The caller
+// holds the turn; the dial runs without c.mu, so Close and CheckReady never
+// wait on the network. respectBackoff skips the dial while the reconnect
+// backoff is active.
 func (c *RemoteClient) ensureSession(
 	ctx context.Context,
 	respectBackoff bool,
+	stay time.Duration,
 ) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.freshLocked() {
+	if c.freshForLocked(stay) {
 		c.mu.Unlock()
 		return nil
 	}
-	c.dropLocked()
+	if !c.freshLocked() {
+		c.dropLocked()
+	}
 	if respectBackoff && !c.nextDialAfter.IsZero() &&
 		time.Now().Before(c.nextDialAfter) {
 		until := c.nextDialAfter
@@ -448,6 +468,9 @@ func (c *RemoteClient) ensureSession(
 	if c.closed {
 		_ = conn.Close()
 		return ErrClosed
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
 	}
 	c.conn = conn
 	c.setConnected(true)
@@ -731,7 +754,7 @@ func (c *RemoteClient) signOnce(
 	req SignRequest,
 ) (_ []byte, resend bool, _ error) {
 	// A sign ignores the reconnect backoff: a leader slot is worth a dial.
-	if err := c.ensureSession(ctx, false); err != nil {
+	if err := c.ensureSession(ctx, false, 0); err != nil {
 		return nil, false, err
 	}
 	c.mu.Lock()

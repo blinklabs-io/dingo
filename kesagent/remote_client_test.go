@@ -962,3 +962,76 @@ func TestRemoteClientDropsSessionOnAnOpCertMismatchRefusal(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteClientPrepareReplacesASessionThatGoesStaleBeforeTheSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	// A readiness probe opened a session that has been idle for 5s: fresh
+	// now (SessionFreshFor is 8s) but stale by the leader slot.
+	require.NoError(t, c.Prepare())
+	require.Equal(t, int32(1), a.accepts.Load())
+	age := func(d time.Duration) {
+		c.mu.Lock()
+		c.lastUsed = c.lastUsed.Add(-d)
+		c.mu.Unlock()
+	}
+	age(5 * time.Second)
+
+	require.NoError(t, c.Prepare())
+	prepared := a.accepts.Load()
+	// The leader slot's sign comes about 3.5s after the prepare.
+	age(3500 * time.Millisecond)
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t, prepared, a.accepts.Load(),
+		"Sign must reuse the session Prepare admitted, not dial a new one")
+}
+
+func TestRemoteClientPrepareKeepsASessionThatStaysFreshThroughTheSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	c.lastUsed = c.lastUsed.Add(-time.Second)
+	c.mu.Unlock()
+	require.NoError(t, c.Prepare())
+	require.Equal(t, int32(1), a.accepts.Load(),
+		"a session fresh through the slot needs no new admission")
+}
+
+func TestRemoteClientPrepareKeepsAFreshSessionWhenTheReplacementFails(
+	t *testing.T,
+) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+	// Point the dial at a closed port so the replacement fails.
+	c.cfg.Address = "127.0.0.1:1"
+
+	require.Error(t, c.Prepare())
+	c.mu.Lock()
+	kept := c.conn != nil
+	c.mu.Unlock()
+	require.True(t, kept,
+		"a failed replacement must not drop a session that is still fresh")
+}
