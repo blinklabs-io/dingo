@@ -1655,6 +1655,9 @@ type LedgerState struct {
 	// database connection.
 	txValidationCommitMutex sync.RWMutex
 	txValidationTransitions atomic.Int64
+	leiosSelectionMu        sync.Mutex
+	leiosSelections         map[*leiosSelectionCancellation]struct{}
+
 	queuedBlockfetchFlushMu sync.Mutex
 	queuedBlockfetchFlush   *queuedBlockfetchFlush
 	// queuedBlockfetchSchedule substitutes only timer delivery in tests.
@@ -17121,6 +17124,8 @@ func (ls *LedgerState) beginTxValidationTransition() func() {
 	ls.txValidationCommitMutex.Lock()
 	ls.txValidationTransitions.Add(1)
 	ls.txValidationCommitMutex.Unlock()
+	ls.cancelLeiosSelectionsForTransition()
+
 	var once sync.Once
 	return func() {
 		once.Do(func() {
