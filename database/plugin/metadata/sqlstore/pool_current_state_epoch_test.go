@@ -349,6 +349,7 @@ func TestPoolCurrentStateWritersRefresh(t *testing.T) {
 	// Each statement and the function that refreshes the pools it touches.
 	want := []string{
 		"certificates.go DELETE FROM certs: DeleteCertificatesAfterSlot",
+		"genesis_remove.go DELETE FROM applied_transaction: genesis transaction, which carries no certificate",
 		"pool.go INSERT INTO pool_registration: insertPoolRegistration callers ImportPool, applyPoolRegistrationCertificate",
 		"pool.go INSERT INTO pool_retirement: RetirePools",
 		"transaction_certificates.go INSERT INTO certs: certificate rows hold no pool ranking key until a registration or retirement row refers to them",
