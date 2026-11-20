@@ -3676,6 +3676,13 @@ type UtxoSpendStateReader interface {
 	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
 }
 
+// BackfillInputPrefetcher optionally warms metadata pages for the consumed
+// inputs of upcoming historical blocks. The operation is advisory only: it
+// must not mutate state or change the result of the ordered backfill writer.
+type BackfillInputPrefetcher interface {
+	PrefetchBackfillInputs(context.Context, []models.UtxoId) error
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.

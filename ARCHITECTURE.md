@@ -3620,10 +3620,11 @@ and hands the set to the ledger. Before the ledger starts it runs
 `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish a
 pending import into the set, move a released database's SQL UTxO set into the
 set (first reverting such a database `k` blocks below its tip, as the node
-does, with the kept blocks replayed before any is appended, then
-rebuilding from its SQL history any reward stake inputs a deferred write left
-partial), mark a database at origin as set-only, reconcile the set with the ledger,
-and drain the graduated families. While it replays, a goroutine feeds the set
+does, then rebuilding from its SQL history any reward stake inputs a deferred
+write left partial, then moving its SQL UTxO rows into the set), mark a database
+at origin as set-only, reconcile the set with the ledger, and drain the graduated
+families. `LoadWithDB` replays the kept blocks after reconciliation returns and
+before the ledger appends any. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through
 `LedgerState.LedgerDB`. A loaded database is therefore one a node opens with
@@ -11425,7 +11426,16 @@ gossip or ledger peer becomes sharable only after an outbound connection to it
 succeeds, as the reference node shares only peers it has connected to. An
 inbound connection never makes its remote address sharable: a duplex handshake
 does not prove the source port is a listening port, since Dingo negotiates
-duplex mode whether or not it dials from its listening port. Valid candidates
+duplex mode whether or not it dials from its listening port. An operator can
+set `advertiseAddress` (`--advertise-address`, `DINGO_ADVERTISE_ADDRESS`) to the
+public IP:port at which peers can reach the node over NtN. It is independent of
+the local socket endpoint and may differ from it behind NAT. When set, replies
+lead with it, it counts toward
+the reply cap and is not repeated if a peer shares the same address, and it
+passes the same routability check; configuration rejects a hostname, a zero
+port, or a non-routable address, and the server drops an invalid value rather
+than share it. The programmatic node and Ouroboros constructors enforce the
+same validation before startup. Valid candidates
 are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different
@@ -16721,6 +16731,18 @@ cumulative threshold also controls row flushes. Rows are drained while they
 are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
+
+The historical replay reader has a one-block handoff channel. The channel does
+not bound decoded-block memory: the reader decodes and prefetches one more block
+while the channel is full, so up to three decoded blocks can be live (the block
+being applied, the buffered block, and the block waiting to send). It decodes the
+next canonical block and, for file-backed SQLite, reads that block's distinct
+consumed UTxO references across the metadata read pool while the replay loop
+writes the preceding block. Those read snapshots are advisory cache warming:
+their results never enter ledger state or the write transaction. Application,
+governance effects, checkpoints, flushes, and commits remain serial and ordered
+by the canonical iterator. A prefetch error stops replay before the affected
+block is applied, and cancellation joins the reader before `Run` returns.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

@@ -288,6 +288,7 @@ type Config struct {
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
+	advertiseAddress                                                                    string
 	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
@@ -629,6 +630,13 @@ func (n *Node) configValidate() error {
 	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
 		return err
 	}
+	if n.config.cfg.AdvertiseAddress != "" {
+		if err := internalconfig.ValidateAdvertiseAddress(
+			n.config.cfg.AdvertiseAddress,
+		); err != nil {
+			return fmt.Errorf("invalid advertise address: %w", err)
+		}
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -944,6 +952,7 @@ func (c *Config) syncCompatFields() {
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
+	c.advertiseAddress = c.cfg.AdvertiseAddress
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
 	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
 	// storageMode is the ledger's own store's mode, which is core when the
@@ -1448,6 +1457,14 @@ func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		ps := peerSharing
 		c.cfg.PeerSharing = &ps
+	}
+}
+
+// WithAdvertiseAddress sets the public "IP:port" shared with peers as this
+// node's own address in PeerSharing replies. Empty advertises nothing.
+func WithAdvertiseAddress(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.AdvertiseAddress = addr
 	}
 }
 
@@ -3313,6 +3330,11 @@ func (c *Config) LeiosPersistenceRetentionSlots() uint64 {
 // PeerSharing returns the peer sharing configuration.
 func (c *Config) PeerSharing() *bool {
 	return c.cfg.PeerSharing
+}
+
+// AdvertiseAddress returns the address shared with peers as this node's own.
+func (c *Config) AdvertiseAddress() string {
+	return c.cfg.AdvertiseAddress
 }
 
 // Mithril returns the Mithril bootstrap configuration.

@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -64,6 +65,13 @@ func isNilInterface(v any) bool {
 // partially-wired instance unrepresentable in production: the constructor is
 // the only way to obtain one, and it refuses to build without the full set.
 func (cfg OuroborosConfig) validateDependencies() error {
+	if cfg.AdvertiseAddress != "" {
+		if err := internalconfig.ValidateAdvertiseAddress(
+			cfg.AdvertiseAddress,
+		); err != nil {
+			return fmt.Errorf("invalid advertise address: %w", err)
+		}
+	}
 	if cfg.EnableLeios && isNilInterface(cfg.LeiosAnnouncementLedger) {
 		return fmt.Errorf("%w: LeiosAnnouncementLedger", ErrMissingDependency)
 	}

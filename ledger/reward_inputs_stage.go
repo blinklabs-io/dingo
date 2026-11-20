@@ -488,16 +488,16 @@ func (s stagingLedgerDB) setPendingStakeInputs(
 	value string,
 	txn ledgerdb.Txn,
 ) error {
+	entries, err := ParseRewardStakeInputsPending(value)
+	if err != nil {
+		return err
+	}
 	if !s.rewardInputsDrained() {
 		if err := s.LedgerDB.SetSyncState(
 			models.RewardStakeInputsPendingKey, value, txn,
 		); err != nil {
 			return err
 		}
-	}
-	entries, err := ParseRewardStakeInputsPending(value)
-	if err != nil {
-		return err
 	}
 	s.stageRewardInput(txn, RewardInputChange{
 		Kind: RewardInputPending, Pending: slices.Clone(entries),
