@@ -43,7 +43,7 @@ func TestRewardLikelihoodReferenceArithmetic(t *testing.T) {
 	combined, err := combineRewardLikelihood(previous, current)
 	require.NoError(t, err)
 	require.Equal(t, float32(0), combined[0])
-	require.Equal(t, uint32(0x418f9bc8), math.Float32bits(combined[49]))
+	require.Equal(t, uint32(0x418f9bc7), math.Float32bits(combined[49]))
 	require.Equal(t, uint32(0x41c25ec6), math.Float32bits(combined[99]))
 
 	estimate, err := rewardPerformanceEstimate(combined)
@@ -61,8 +61,14 @@ func TestRewardLikelihoodEncodingRejectsWrongShape(t *testing.T) {
 func TestRewardLikelihoodHistoryCompleteness(t *testing.T) {
 	bootstrap := stakeRewardEpochs{snapshot: 4, pots: 4, bootstrap: true}
 	require.True(t, rewardLikelihoodHistoryComplete(nil, 5, bootstrap))
-	require.True(t, rewardLikelihoodHistoryComplete(nil, 1, stakeRewardEpochs{}))
-	require.False(t, rewardLikelihoodHistoryComplete(nil, 5, stakeRewardEpochs{}))
+	require.True(
+		t,
+		rewardLikelihoodHistoryComplete(nil, 1, stakeRewardEpochs{}),
+	)
+	require.False(
+		t,
+		rewardLikelihoodHistoryComplete(nil, 5, stakeRewardEpochs{}),
+	)
 	require.False(t, rewardLikelihoodHistoryComplete(
 		&models.RewardLikelihoodState{Complete: false},
 		6,

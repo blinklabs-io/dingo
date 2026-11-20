@@ -53,13 +53,17 @@ func Decode(data []byte) ([]float32, error) {
 	for i := range ret {
 		ret[i] = math.Float32frombits(binary.BigEndian.Uint32(data[i*4:]))
 		if math.IsNaN(float64(ret[i])) || math.IsInf(float64(ret[i]), 0) {
-			return nil, errors.New("reward likelihood contains a non-finite sample")
+			return nil, errors.New(
+				"reward likelihood contains a non-finite sample",
+			)
 		}
 	}
 	return ret, nil
 }
 
-func LeaderProbability(activeSlotsCoeff, relativeStake, decentralization float64) float64 {
+func LeaderProbability(
+	activeSlotsCoeff, relativeStake, decentralization float64,
+) float64 {
 	return (1 - math.Pow(1-activeSlotsCoeff, relativeStake)) *
 		(1 - decentralization)
 }
@@ -68,22 +72,31 @@ func Pool(blocks, slots uint64, leaderProbability float64) []float32 {
 	ret := make([]float32, SampleCount)
 	for i := range ret {
 		x := (float64(i) + 0.5) / SampleCount
-		ret[i] = float32(
-			float64(blocks)*math.Log(x) +
-				float64(slots-blocks)*math.Log1p(-leaderProbability*x),
+		// The reference computes n*log(x) + m*log(1-t*x) in binary64. The
+		// float64 conversions round each product before the sum, which a
+		// target with fused multiply-add would otherwise skip.
+		hit := float64(float64(blocks) * math.Log(x))
+		miss := float64(
+			float64(slots-blocks) * math.Log(1-float64(leaderProbability*x)),
 		)
+		ret[i] = float32(hit + miss)
 	}
 	return ret
 }
 
 func Combine(previous, current []float32) ([]float32, error) {
 	if len(previous) != SampleCount || len(current) != SampleCount {
-		return nil, errors.New("combine reward likelihood: invalid sample count")
+		return nil, errors.New(
+			"combine reward likelihood: invalid sample count",
+		)
 	}
 	ret := make([]float32, SampleCount)
 	minimum := float32(math.Inf(1))
 	for i := range ret {
-		ret[i] = decay*previous[i] + current[i]
+		// The reference rounds the decayed likelihood to binary32 before the
+		// addition; the conversion keeps a fused multiply-add from skipping
+		// that rounding.
+		ret[i] = float32(decay*previous[i]) + current[i]
 		if ret[i] < minimum {
 			minimum = ret[i]
 		}
@@ -96,7 +109,9 @@ func Combine(previous, current []float32) ([]float32, error) {
 
 func Performance(likelihood []float32) (float64, error) {
 	if len(likelihood) != SampleCount {
-		return 0, errors.New("reward performance estimate: invalid sample count")
+		return 0, errors.New(
+			"reward performance estimate: invalid sample count",
+		)
 	}
 	prior := make([]float32, len(likelihood))
 	for i := range prior {
@@ -136,10 +151,12 @@ func normalize(values []float32) ([]float32, error) {
 	area := 0.0
 	for i, value := range values {
 		normalized[i] = value - maximum
-		area += math.Exp(float64(normalized[i])) / SampleCount
+		area += float64(0.01 * math.Exp(float64(normalized[i])))
 	}
 	if area <= 0 || math.IsInf(area, 0) || math.IsNaN(area) {
-		return nil, errors.New("reward performance estimate: invalid histogram area")
+		return nil, errors.New(
+			"reward performance estimate: invalid histogram area",
+		)
 	}
 	logArea := float32(math.Log(area))
 	for i := range normalized {
