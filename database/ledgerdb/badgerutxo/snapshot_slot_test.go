@@ -244,6 +244,39 @@ func TestIndexSnapshotSlotsBackfillsRowsOfAnOlderStore(t *testing.T) {
 	))
 }
 
+// A row rewritten while the backfill converts it keeps the newer value: the
+// backfill reads each row in the transaction that rewrites it, so it never
+// writes back what it read before the change.
+func TestIndexSnapshotSlotsKeepsARowWrittenDuringTheBackfill(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	old := snap(1, "go", 'a').Row
+	old.Value = []byte{11}
+	require.NoError(t, s.PutLegacySnapshotRowForTest(old))
+
+	newer := snapAt(1, "go", 'a', 99)
+	newer.Row.Value = []byte{0x63}
+	rewrote := false
+	slotOf := func(badgerutxo.SnapshotRow) (uint64, error) {
+		if !rewrote {
+			rewrote = true
+			applyEpochState(t, s, point(30, 0x1e), nil, newer)
+		}
+		return 10, nil
+	}
+	// The first run may fail on the conflict; the next one finishes.
+	_ = s.IndexSnapshotSlots(slotOf)
+	require.NoError(t, s.IndexSnapshotSlots(slotOf))
+
+	require.Equal(t, []string{"1goa@99"}, capturedIn(t, s, 0, 1000))
+	rows, err := s.Snapshots(1, "go")
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x63}, rows[0].Value)
+	requireSnapshotIndexAgrees(t, s, "after the backfill")
+}
+
 // The store keeps a snapshot's slot ahead of its value, so a value that
 // starts like the slot is refused rather than misread.
 func TestSnapshotValueStartingWithTheSlotMarkIsRefused(t *testing.T) {

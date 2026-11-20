@@ -16,13 +16,17 @@ package utxoset_test
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,4 +83,61 @@ func TestPoolStakeSnapshotsCapturedInReadsOnlyTheRange(t *testing.T) {
 	}
 	require.Equal(t, []string{"go", "set", "mark"}, keys,
 		"in key order: epoch 1 go, epoch 1 set, epoch 3 mark")
+}
+
+// A set written before the capture index stored each snapshot row as its
+// CBOR alone. The backfill reads the captured slot out of that CBOR, so the
+// indexed read finds the rows by the slots they were captured at.
+func TestSnapshotSlotBackfillReadsTheSlotFromStoredRows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	set, err := utxoset.Open(utxoset.Config{Dir: dir})
+	require.NoError(t, err)
+	tip := snapshotPoint(1)
+	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{}))
+	require.NoError(t, set.Close())
+
+	pool := bytes.Repeat([]byte{0x62}, 28)
+	legacy := func(epoch uint64, typ string, captured uint64) ([]byte, []byte) {
+		v, err := cbor.Encode(models.PoolStakeSnapshot{
+			Epoch: epoch, SnapshotType: typ, PoolKeyHash: pool,
+			TotalStake: 7, CapturedSlot: captured,
+		})
+		require.NoError(t, err)
+		k := binary.BigEndian.AppendUint64([]byte{badgerutxo.SnapshotTag}, epoch)
+		k = append(k, byte(len(typ)))
+		k = append(k, typ...)
+		return append(k, pool...), v
+	}
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		for _, r := range []struct {
+			epoch    uint64
+			typ      string
+			captured uint64
+		}{{1, "mark", 120}, {2, "set", 250}, {2, "go", 260}} {
+			k, v := legacy(r.epoch, r.typ, r.captured)
+			if err := txn.Set(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, db.Close())
+
+	set, err = utxoset.Open(utxoset.Config{Dir: dir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	require.NoError(t, set.IndexSnapshotSlotsForTest())
+
+	got, err := set.PoolStakeSnapshotsCapturedIn(200, 299)
+	require.NoError(t, err)
+	var keys []string
+	for _, sn := range got {
+		keys = append(keys, fmt.Sprintf("%d%s@%d", sn.Epoch, sn.SnapshotType, sn.CapturedSlot))
+		require.EqualValues(t, 7, sn.TotalStake)
+		require.Equal(t, pool, sn.PoolKeyHash)
+	}
+	require.Equal(t, []string{"2go@260", "2set@250"}, keys)
 }
