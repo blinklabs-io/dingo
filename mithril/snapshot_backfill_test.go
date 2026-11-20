@@ -124,6 +124,7 @@ func (f snapshotFixture) config(
 	bcfg := f.bootstrapConfig("")
 	bcfg.Logger = slog.New(slog.DiscardHandler)
 	return SnapshotConfig{
+		UtxoSet: newSyncTestSet(t),
 		Feed: ChunkFeedConfig{
 			Bootstrap:    bcfg,
 			WindowChunks: 2,
@@ -576,6 +577,8 @@ func TestSnapshotBackfillPrunedPinAfterLedgerImportIsUnrecoverable(
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	cfg := a.config(t, db, 150)
+	set := newSyncTestSet(t)
+	cfg.UtxoSet = set
 	interrupted := false
 	cfg.OnProgress = func(p SyncProgress) {
 		if !interrupted && p.Phase == PhaseLedgerImport && p.Active &&
@@ -588,12 +591,13 @@ func TestSnapshotBackfillPrunedPinAfterLedgerImportIsUnrecoverable(
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, interrupted)
 	oldTx := bytes.Repeat([]byte{0x40}, 32)
-	before, err := db.Metadata().GetUtxo(oldTx, 0, nil)
+	_, before, err := set.Get(oldTx, 0)
 	require.NoError(t, err)
-	require.NotNil(t, before, "the interrupted import wrote no output")
+	require.True(t, before, "the interrupted import wrote no output")
 
 	b := newLaterSnapshotFixture(t, 11, 0x41)
 	cfg = b.config(t, db, 150)
+	cfg.UtxoSet = set
 	imported := false
 	cfg.OnProgress = func(p SyncProgress) {
 		if p.Phase == PhaseLedgerImport {
@@ -607,9 +611,9 @@ func TestSnapshotBackfillPrunedPinAfterLedgerImportIsUnrecoverable(
 	phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
 	require.NoError(t, err)
 	assert.Equal(t, restorePhaseLedger, phase)
-	after, err := db.Metadata().GetUtxo(oldTx, 0, nil)
+	_, after, err := set.Get(oldTx, 0)
 	require.NoError(t, err)
-	assert.NotNil(t, after, "the partial import was touched")
+	assert.True(t, after, "the partial import was touched")
 }
 
 // A resume against its own artifact keeps stored blocks only once they are

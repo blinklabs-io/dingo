@@ -21,23 +21,20 @@ import (
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/blake2b"
 )
 
 // seedCompleteDB creates a database at dataDir that looks like a finished sync:
@@ -86,9 +83,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		seedCompleteDB(t, dataDir, "core", 5, true)
 
 		res, err := Sync(context.Background(), SyncConfig{
+			UtxoSet:           newSyncTestSet(t),
 			Network:           "preview",
 			DataDir:           dataDir,
-			StorageMode:       "core",
 			Backend:           BackendV2,
 			AggregatorURL:     fix.server.URL,
 			AllowInsecureHTTP: true,
@@ -100,7 +97,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.Nil(t, res.Snapshot, "up-to-date catch-up should not sync")
 	})
 
-	t.Run("api mode rejects a divergent chain before mutation", func(t *testing.T) {
+	t.Run("a divergent chain is rejected before mutation", func(t *testing.T) {
 		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
@@ -113,7 +110,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		dataDir := t.TempDir()
 		db, err := dbtest.NewDatabase(t, &database.Config{
 			DataDir:     dataDir,
-			StorageMode: "api",
+			StorageMode: "core",
 			Logger:      discard,
 		})
 		require.NoError(t, err)
@@ -131,9 +128,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		_, err = Sync(context.Background(), SyncConfig{
+			UtxoSet:           newSyncTestSet(t),
 			Network:           "preprod",
 			DataDir:           dataDir,
-			StorageMode:       "api",
 			Backend:           BackendV2,
 			AggregatorURL:     fixture.server.URL,
 			AllowInsecureHTTP: true,
@@ -145,7 +142,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.ErrorContains(t, err, "diverg")
 		db, err = dbtest.NewDatabase(t, &database.Config{
 			DataDir:     dataDir,
-			StorageMode: "api",
+			StorageMode: "core",
 			Logger:      discard,
 		})
 		require.NoError(t, err)
@@ -198,9 +195,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		result, err := Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			AggregatorURL:           fixture.server.URL,
@@ -289,9 +286,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		result, err := Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			AggregatorURL:           fixture.server.URL,
@@ -374,9 +371,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		_, err = Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			AggregatorURL:           fixture.server.URL,
@@ -451,9 +448,9 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		result, err := Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			AggregatorURL:           fixture.server.URL,
@@ -475,139 +472,6 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		require.NoError(t, dbtest.CloseDatabase(db))
-	})
-
-	t.Run("legacy reward repair rebuilds api metadata in place", func(t *testing.T) {
-		t.Parallel()
-		fixture := newV2Fixture(t, v2FixtureOptions{
-			immutableFileNumber: 0,
-			validImmutable:      true,
-			validLedgerState:    true,
-		})
-		files, _ := validImmutableFiles(t, 1000)
-		firstHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
-		// The imported ledger state is Conway, so the backfill derives the
-		// block nonce with the Conway rule and needs a Conway block whose
-		// header commits to its body.
-		bodyParts := make([][]byte, 0, 4)
-		var bodyHashes []byte
-		bodyTotal := 0
-		for _, part := range []any{
-			[]any{}, []any{}, map[uint]any{}, []any{},
-		} {
-			enc, err := cbor.Encode(part)
-			require.NoError(t, err)
-			bodyParts = append(bodyParts, enc)
-			sum := blake2b.Sum256(enc)
-			bodyHashes = append(bodyHashes, sum[:]...)
-			bodyTotal += len(enc)
-		}
-		bodyHash := blake2b.Sum256(bodyHashes)
-		headerCBOR, err := cbor.Encode(babbage.BabbageBlockHeader{
-			Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber:   1,
-				Slot:          999,
-				BlockBodySize: uint64(bodyTotal), //nolint:gosec
-				BlockBodyHash: lcommon.NewBlake2b256(bodyHash[:]),
-				VrfKey:        bytes.Repeat([]byte{1}, 32),
-				VrfResult: lcommon.VrfResult{
-					Output: bytes.Repeat([]byte{2}, 64),
-					Proof:  bytes.Repeat([]byte{3}, 80),
-				},
-				OpCert: babbage.BabbageOpCert{
-					HotVkey:   bytes.Repeat([]byte{4}, 32),
-					Signature: bytes.Repeat([]byte{5}, 64),
-				},
-			},
-			Signature: bytes.Repeat([]byte{6}, 448),
-		})
-		require.NoError(t, err)
-		blockBodyCBOR, err := cbor.Encode([]any{
-			cbor.RawMessage(headerCBOR),
-			cbor.RawMessage(bodyParts[0]),
-			cbor.RawMessage(bodyParts[1]),
-			cbor.RawMessage(bodyParts[2]),
-			cbor.RawMessage(bodyParts[3]),
-		})
-		require.NoError(t, err)
-		dataDir := t.TempDir()
-		db, err := dbtest.NewDatabase(t, &database.Config{
-			DataDir:     dataDir,
-			StorageMode: "api",
-			Logger:      discard,
-		})
-		require.NoError(t, err)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:     999,
-			Hash:     firstHash,
-			PrevHash: bytes.Repeat([]byte{0}, 32),
-			Cbor:     blockBodyCBOR,
-			Number:   1,
-			Type:     uint(conway.BlockTypeConway),
-		}, nil))
-		require.NoError(t, setImmutableImportMarker(db, 0))
-		require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-			&models.BackfillCheckpoint{
-				Phase:     "metadata",
-				LastSlot:  999,
-				StartedAt: time.Now().Add(-time.Hour),
-				UpdatedAt: time.Now().Add(-time.Minute),
-				Completed: true,
-			},
-			nil,
-		))
-		require.NoError(t, db.SetSyncState(
-			RewardStateRepairPendingKey, "1", nil,
-		))
-		require.NoError(t, dbtest.CloseDatabase(db))
-
-		firstBackfilledSlot := ^uint64(0)
-		_, err = Sync(context.Background(), SyncConfig{
-			Network:                 "preprod",
-			DataDir:                 dataDir,
-			StorageMode:             "api",
-			Backend:                 BackendV2,
-			AggregatorURL:           fixture.server.URL,
-			AllowInsecureHTTP:       true,
-			StoragePlugins:          testStoragePlugins(),
-			DatabaseWorkers:         1,
-			BackfillBatchSize:       100,
-			Logger:                  discard,
-			RepairLegacyRewardState: true,
-			OnProgress: func(progress SyncProgress) {
-				if progress.Phase == PhaseBackfill &&
-					progress.Active && progress.CurrentSlot > 0 &&
-					progress.CurrentSlot < firstBackfilledSlot {
-					firstBackfilledSlot = progress.CurrentSlot
-				}
-			},
-		})
-		require.NoError(t, err)
-		require.EqualValues(t, 1000, firstBackfilledSlot,
-			"API repair must run historical metadata backfill")
-
-		db, err = dbtest.NewDatabase(t, &database.Config{
-			DataDir:     dataDir,
-			StorageMode: "api",
-			Logger:      discard,
-		})
-		require.NoError(t, err)
-		pending, err := RewardStateRepairPending(db)
-		require.NoError(t, err)
-		require.False(t, pending)
-		block, err := database.BlockByHash(context.Background(), db, firstHash)
-		require.NoError(t, err)
-		require.EqualValues(t, 999, block.Slot)
-		checkpoint, err := db.Metadata().GetBackfillCheckpoint("metadata", nil)
-		require.NoError(t, err)
-		require.NotNil(t, checkpoint)
-		require.True(t, checkpoint.Completed)
-		require.GreaterOrEqual(t, checkpoint.LastSlot, uint64(1000))
-		nonces, err := db.Metadata().GetBlockNoncesInSlotRange(0, 1_000_000, nil)
-		require.NoError(t, err)
-		require.Len(t, nonces, 1,
-			"the backfill must write the block_nonce row the epoch block lists read")
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 }
@@ -676,10 +540,11 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	gapBlocksIdle := false
+	set := newSyncTestSet(t)
 	_, err = Sync(ctx, SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "core",
+		UtxoSet: set,
+		Network: "preprod",
+		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t, fixture.genesisVKey, fixture.ancillaryVKey,
 		),
@@ -714,7 +579,7 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
+	_, exists, err := set.Get(txID, 0)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"post-import cleanup must preserve UTxOs carried by the signed state")
@@ -728,6 +593,7 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 // happens after the cleanup and the import.
 type rejectedTailSync struct {
 	dataDir   string
+	set       *utxoset.Set
 	txID      []byte
 	staleFork models.Block
 	syncErr   error
@@ -825,10 +691,11 @@ func runRejectedTailSync(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	set := newSyncTestSet(t)
 	_, syncErr := Sync(ctx, SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "core",
+		UtxoSet: set,
+		Network: "preprod",
+		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t, fixture.genesisVKey, fixture.ancillaryVKey,
 		),
@@ -851,6 +718,7 @@ func runRejectedTailSync(
 	})
 	return rejectedTailSync{
 		dataDir:   dataDir,
+		set:       set,
 		txID:      txID,
 		staleFork: staleFork,
 		syncErr:   syncErr,
@@ -879,7 +747,7 @@ func TestSyncCatchUpResumeKeepsSnapshotUTxOsWhenStoredTailIsRejected(
 	run := runRejectedTailSync(t, rejectedTailOptions{catchUpMarker: true})
 	require.ErrorContains(t, run.syncErr, "fetching volatile blocks")
 	db := run.reopen(t)
-	exists, err := db.UtxoExists(context.Background(), run.txID, 0, nil)
+	_, exists, err := run.set.Get(run.txID, 0)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"cleanup of a rejected stored tail must preserve UTxOs carried by the imported state")
@@ -896,7 +764,7 @@ func TestSyncResumeKeepsSnapshotUTxOsWhenStoredTailIsRejected(t *testing.T) {
 	run := runRejectedTailSync(t, rejectedTailOptions{})
 	require.ErrorContains(t, run.syncErr, "fetching volatile blocks")
 	db := run.reopen(t)
-	exists, err := db.UtxoExists(context.Background(), run.txID, 0, nil)
+	_, exists, err := run.set.Get(run.txID, 0)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"cleanup of a rejected stored tail must preserve UTxOs carried by the imported state")
@@ -1052,9 +920,9 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	result, err := Sync(context.Background(), SyncConfig{
+		UtxoSet:                 newSyncTestSet(t),
 		Network:                 "preprod",
 		DataDir:                 dataDir,
-		StorageMode:             "core",
 		Backend:                 BackendV2,
 		PinnedDigest:            "original-bootstrap-pin",
 		AggregatorURL:           fixture.server.URL,
@@ -1172,9 +1040,9 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	_, err = Sync(context.Background(), SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "core",
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t, fixture.genesisVKey, fixture.ancillaryVKey,
 		),
@@ -1287,9 +1155,9 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 		dataDir := t.TempDir()
 		seedCompleteDB(t, dataDir, "core", 0, false)
 		_, err := Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			RepairLegacyRewardState: true,
@@ -1317,9 +1185,9 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		_, err = Sync(context.Background(), SyncConfig{
+			UtxoSet:                 newSyncTestSet(t),
 			Network:                 "preprod",
 			DataDir:                 dataDir,
-			StorageMode:             "core",
 			Backend:                 BackendV2,
 			PinnedDigest:            "original-bootstrap-pin",
 			RepairLegacyRewardState: true,
@@ -1381,7 +1249,7 @@ func TestDecideCatchUp(t *testing.T) {
 		mode := modeOf(t)
 		require.Equal(t, syncModeBootstrap, mode)
 		dec, err := decideCatchUp(
-			ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
+			ctx, db, mode, BackendV2, noAggregator, true, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)
@@ -1404,7 +1272,7 @@ func TestDecideCatchUp(t *testing.T) {
 			mode := modeOf(t)
 			require.Equal(t, syncModeCatchUp, mode)
 			dec, err := decideCatchUp(
-				ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
+				ctx, db, mode, BackendV2, noAggregator, true, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage,
@@ -1413,36 +1281,10 @@ func TestDecideCatchUp(t *testing.T) {
 				"no marker means the full artifact range")
 		})
 
-	t.Run("markerless complete api database keeps the ordinary sync path",
-		func(t *testing.T) {
-			setState(t, "", 0, false)
-			dec, err := decideCatchUp(
-				ctx,
-				db,
-				modeOf(t),
-				BackendV2,
-				"api",
-				noAggregator,
-				true,
-				discard,
-			)
-			require.NoError(t, err)
-			require.False(t, dec.engage)
-			require.False(t, dec.upToDate)
-		})
-
-	t.Run("api catch-up with marker is rejected without reward repair", func(t *testing.T) {
-		setState(t, "", 1, true)
-		_, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV2, "api", noAggregator, true, discard,
-		)
-		require.ErrorContains(t, err, "API-mode metadata replacement")
-	})
-
 	t.Run("unsupported backend never engages", func(t *testing.T) {
 		setState(t, "", 2, true)
 		dec, err := decideCatchUp(
-			ctx, db, modeOf(t), "v0", "core", noAggregator, true, discard,
+			ctx, db, modeOf(t), "v0", noAggregator, true, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)
@@ -1454,7 +1296,7 @@ func TestDecideCatchUp(t *testing.T) {
 			fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 			setState(t, "", 2, true)
 			dec, err := decideCatchUp(
-				ctx, db, modeOf(t), BackendV2, "core", fix.server.URL,
+				ctx, db, modeOf(t), BackendV2, fix.server.URL,
 				true, discard,
 			)
 			require.NoError(t, err)
@@ -1470,7 +1312,6 @@ func TestDecideCatchUp(t *testing.T) {
 			db,
 			modeOf(t),
 			BackendV2,
-			"core",
 			fix.server.URL,
 			true,
 			discard,
@@ -1480,54 +1321,18 @@ func TestDecideCatchUp(t *testing.T) {
 		require.True(t, dec.upToDate)
 	})
 
-	t.Run("api mode with a newer target engages catch-up", func(t *testing.T) {
-		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
-		setState(t, "", 1, true)
-		require.NoError(t, db.SetSyncState(
-			RewardStateRepairPendingKey, "1", nil,
-		))
-		dec, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV2, "api", fix.server.URL, true, discard,
-		)
-		require.NoError(t, err)
-		require.True(t, dec.engage)
-		require.EqualValues(t, 1, dec.start)
-	})
-
 	t.Run("interrupted sync with marker re-runs as catch-up",
 		func(t *testing.T) {
 			setState(t, syncStatusInProgress, 7, true)
 			mode := modeOf(t)
 			require.Equal(t, syncModeResume, mode)
 			dec, err := decideCatchUp(
-				ctx, db, mode, BackendV2, "core", noAggregator, true, discard,
+				ctx, db, mode, BackendV2, noAggregator, true, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, dec.engage,
 				"interrupted catch-up must re-run with reconcile")
 			require.EqualValues(t, 7, dec.start)
-		})
-
-	t.Run("interrupted api sync with marker resumes repair from marker",
-		func(t *testing.T) {
-			setState(t, syncStatusInProgress, 7, true)
-			require.NoError(t, db.SetSyncState(
-				RewardStateRepairPendingKey, "1", nil,
-			))
-			dec, err := decideCatchUp(
-				ctx,
-				db,
-				modeOf(t),
-				BackendV2,
-				"api",
-				noAggregator,
-				true,
-				discard,
-			)
-			require.NoError(t, err)
-			require.True(t, dec.engage)
-			require.EqualValues(t, 7, dec.start)
-			require.False(t, dec.upToDate)
 		})
 
 	t.Run("interrupted sync without marker resumes normally",
@@ -1538,7 +1343,6 @@ func TestDecideCatchUp(t *testing.T) {
 				db,
 				modeOf(t),
 				BackendV2,
-				"core",
 				noAggregator,
 				true,
 				discard,
@@ -1559,7 +1363,6 @@ func TestDecideCatchUp(t *testing.T) {
 				db,
 				modeOf(t),
 				BackendV2,
-				"core",
 				noAggregator,
 				true,
 				discard,

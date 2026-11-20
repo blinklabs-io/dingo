@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
@@ -86,8 +85,6 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 		nil,
 		30,
 		ledgerStateHash,
-		"",
-		true,
 	))
 
 	pending, err = manager.HasDeferredIndexesPending()
@@ -152,8 +149,6 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		nil,
 		30,
 		ledgerStateHash,
-		"",
-		true,
 	))
 
 	gotIdentity, err := db.GetSyncState(
@@ -233,7 +228,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 	}, nil))
 	require.NoError(t, updateMithrilReadyState(
 		context.Background(),
-		db, logger, nil, 30, ledgerStateHash, "", true,
+		db, logger, nil, 30, ledgerStateHash,
 	))
 
 	// The first serve on a core-mode node.
@@ -308,8 +303,6 @@ func TestUpdateMithrilReadyStateLeavesForgeFenceUntouched(t *testing.T) {
 			nil,
 			30,
 			hash,
-			"",
-			true,
 		),
 	)
 	status, err := base.GetSyncState("sync_status", nil)
@@ -331,152 +324,6 @@ func newMithrilTestDB(t *testing.T) *database.Database {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 	return db
-}
-
-func TestEnsureMithrilBackfillCheckpointCreatesMissing(t *testing.T) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-
-	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
-
-	cp, err := db.Metadata().GetBackfillCheckpoint(
-		node.BackfillPhase, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, cp)
-	require.Equal(t, uint64(0), cp.LastSlot)
-	require.False(t, cp.Completed)
-	require.False(t, cp.StartedAt.IsZero())
-	require.False(t, cp.UpdatedAt.IsZero())
-}
-
-func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-	startedAt := time.Now().Add(-time.Hour)
-	updatedAt := time.Now().Add(-time.Minute)
-	lastIndexID := uint64(42)
-	lastBlockHash := bytes.Repeat([]byte{0x42}, 32)
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:         node.BackfillPhase,
-			LastSlot:      1042527,
-			LastIndexID:   &lastIndexID,
-			LastBlockHash: lastBlockHash,
-			TotalSlots:    2000000,
-			StartedAt:     startedAt,
-			UpdatedAt:     updatedAt,
-			Completed:     false,
-		},
-		nil,
-	))
-
-	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
-
-	cp, err := db.Metadata().GetBackfillCheckpoint(
-		node.BackfillPhase, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, cp)
-	require.Equal(t, uint64(1042527), cp.LastSlot)
-	require.Equal(t, uint64(2000000), cp.TotalSlots)
-	require.NotNil(t, cp.LastIndexID)
-	require.Equal(t, lastIndexID, *cp.LastIndexID)
-	require.Equal(t, lastBlockHash, cp.LastBlockHash)
-	require.False(t, cp.Completed)
-	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
-	require.Equal(t, updatedAt.UnixNano(), cp.UpdatedAt.UnixNano())
-}
-
-func TestEnsureMithrilBackfillCheckpointResetsLegacyIncomplete(t *testing.T) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      node.BackfillPhase,
-			LastSlot:   1042527,
-			TotalSlots: 2000000,
-			StartedAt:  time.Now().Add(-time.Hour),
-			UpdatedAt:  time.Now().Add(-time.Minute),
-		},
-		nil,
-	))
-
-	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
-	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
-	require.NoError(t, err)
-	require.NotNil(t, cp)
-	require.Zero(t, cp.LastSlot)
-	require.Zero(t, cp.TotalSlots)
-	require.Nil(t, cp.LastIndexID)
-	require.Empty(t, cp.LastBlockHash)
-	require.False(t, cp.Completed)
-}
-
-func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-	startedAt := time.Now().Add(-time.Hour)
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      node.BackfillPhase,
-			LastSlot:   5000,
-			TotalSlots: 5000,
-			StartedAt:  startedAt,
-			UpdatedAt:  startedAt,
-			Completed:  true,
-		},
-		nil,
-	))
-
-	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
-
-	cp, err := db.Metadata().GetBackfillCheckpoint(
-		node.BackfillPhase, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, cp)
-	require.Zero(t, cp.LastSlot)
-	require.Zero(t, cp.TotalSlots)
-	require.Nil(t, cp.LastIndexID)
-	require.Empty(t, cp.LastBlockHash)
-	require.False(t, cp.Completed)
-	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
-	require.True(t, cp.UpdatedAt.After(startedAt))
-}
-
-func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-	lastIndexID := uint64(42)
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:         node.BackfillPhase,
-			LastSlot:      1042527,
-			LastIndexID:   &lastIndexID,
-			LastBlockHash: bytes.Repeat([]byte{0x42}, 32),
-			TotalSlots:    2000000,
-			StartedAt:     time.Now().Add(-time.Hour),
-			UpdatedAt:     time.Now().Add(-time.Minute),
-			Completed:     true,
-		},
-		nil,
-	))
-
-	require.NoError(t, resetMithrilBackfillCheckpoint(db))
-	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
-	require.NoError(t, err)
-	require.NotNil(t, cp)
-	require.Zero(t, cp.LastSlot)
-	require.Zero(t, cp.TotalSlots)
-	require.Nil(t, cp.LastIndexID)
-	require.Empty(t, cp.LastBlockHash)
-	require.False(t, cp.Completed)
 }
 
 func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
@@ -507,8 +354,6 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 		nil,
 		30,
 		ledgerStateHash,
-		"",
-		true,
 	))
 
 	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
@@ -601,8 +446,6 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 		nil,
 		30,
 		nil,
-		"",
-		true,
 	))
 
 	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
@@ -633,8 +476,6 @@ func TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark(t *testing.T) {
 		nil,
 		30,
 		ledgerStateHash,
-		"",
-		true,
 	))
 	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
 	require.NoError(t, err)
@@ -642,4 +483,25 @@ func TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark(t *testing.T) {
 	status, err := db.GetSyncState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status, "sync_status must still be cleared")
+}
+
+func TestUpdateMithrilReadyStateKeepsHistoryExpiryCursor(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	hash := bytes.Repeat([]byte{0x55}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, hash),
+	}, nil))
+	require.NoError(t, db.SetSyncState(database.HistoryExpiryCursorSyncKey, "8640", nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(t, updateMithrilReadyState(
+		t.Context(), db, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil, 30, hash,
+	))
+	cursor, err := db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "8640", cursor)
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status)
 }

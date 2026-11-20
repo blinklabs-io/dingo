@@ -40,19 +40,15 @@ func (s stagingLedgerDB) rewardOutputsDrained() bool {
 	return s.ls.familyDrained(nodesettings.FamilyRewardOutputs)
 }
 
-// rewardOutputsServed returns the reader the pending credit reads are
-// answered from, nil when they stay on the metadata store. A drained family
-// with no serving set has no answer to give.
+// rewardOutputsServed returns the configured set reader or an error when the
+// set cannot serve reward outputs.
 func (s stagingLedgerDB) rewardOutputsServed(
 	txn ledgerdb.Txn,
 ) (RewardOutputReader, error) {
 	if r := s.ls.rewardOutputServing(txn); r != nil {
 		return r, nil
 	}
-	if s.rewardOutputsDrained() {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
-	}
-	return nil, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardOutputs)
 }
 
 func (s stagingLedgerDB) stageDerived(
@@ -123,8 +119,7 @@ func (s stagingLedgerDB) SaveRewardPoolOutputs(
 	return nil
 }
 
-// derivedServed returns the view the derived reads are answered from, nil
-// when they stay on the metadata store.
+// derivedServed returns the set view for derived reward output reads.
 func (s stagingLedgerDB) derivedServed(
 	txn ledgerdb.Txn,
 ) (*rewardDerivedView, error) {
@@ -132,29 +127,7 @@ func (s stagingLedgerDB) derivedServed(
 		v := s.ls.newRewardDerivedView(r, txn)
 		return &v, nil
 	}
-	if s.rewardOutputsDrained() {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
-	}
-	return nil, nil
-}
-
-// derivedCompared returns the view to compare a store read with, in verify
-// mode when the set holds the rows.
-func (s stagingLedgerDB) derivedCompared(
-	txn ledgerdb.Txn,
-) *rewardDerivedView {
-	if !s.ls.verifying() {
-		return nil
-	}
-	r := s.ls.rewardDerivedReader(txn)
-	if r == nil {
-		return nil
-	}
-	if loaded, err := r.RewardDerivedLoaded(); err != nil || !loaded {
-		return nil
-	}
-	v := s.ls.newRewardDerivedView(r, txn)
-	return &v
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardOutputs)
 }
 
 func samePoolOutput(a, b *models.RewardPoolOutput) bool {
@@ -179,22 +152,7 @@ func (s stagingLedgerDB) GetRewardPoolOutputs(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.pools(epoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardPoolOutputs(epoch, txn)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.derivedCompared(txn); cv != nil {
-		got, gerr := cv.pools(epoch)
-		s.ls.compareComputed(
-			g, computedRewardPoolOutputs,
-			gerr == nil && slices.EqualFunc(want, got, samePoolOutput), gerr,
-		)
-	}
-	return want, nil
+	return v.pools(epoch)
 }
 
 func (s stagingLedgerDB) GetRewardAccountOutputs(
@@ -205,22 +163,7 @@ func (s stagingLedgerDB) GetRewardAccountOutputs(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.accounts(epoch, nil)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardAccountOutputs(epoch, txn)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.derivedCompared(txn); cv != nil {
-		got, gerr := cv.accounts(epoch, nil)
-		s.ls.compareComputed(
-			g, computedRewardAccountOutputs,
-			gerr == nil && slices.EqualFunc(want, got, sameRewardOutput), gerr,
-		)
-	}
-	return want, nil
+	return v.accounts(epoch, nil)
 }
 
 // GetRewardAccountOutputsForEligibility returns every output of the
@@ -258,24 +201,7 @@ func (s stagingLedgerDB) GetRewardAccountOutputsForEligibility(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return read(v)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardAccountOutputsForEligibility(
-		epochs, credentialTag, stakingKey, txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.derivedCompared(txn); cv != nil {
-		got, gerr := read(cv)
-		s.ls.compareComputed(
-			g, computedRewardAccountOutputs,
-			gerr == nil && slices.EqualFunc(want, got, sameRewardOutput), gerr,
-		)
-	}
-	return want, nil
+	return read(v)
 }
 
 // TakeRewardEligibilityRecheck is empty once the family is drained: the
@@ -482,8 +408,8 @@ func (ls *LedgerState) epochRewardOutputRefs(
 	return out, nil
 }
 
-// getCursor reads a precompute cursor from the set when the set serves the
-// family, and compares the store's with the set's in verify mode.
+// getCursor reads a precompute cursor from the set when available; cursor
+// metadata otherwise remains in the metadata store.
 func (s stagingLedgerDB) getCursor(
 	key string,
 	txn ledgerdb.Txn,
@@ -491,17 +417,9 @@ func (s stagingLedgerDB) getCursor(
 	if raw, served, err := s.cursorRead(key, txn); served || err != nil {
 		return raw, err
 	}
-	g := s.ls.verifyGuard(txn)
 	want, err := s.LedgerDB.GetSyncState(key, txn)
 	if err != nil {
 		return want, err
-	}
-	if cv := s.derivedCompared(txn); cv != nil {
-		epoch, _ := cursorEpochOfKey(key)
-		got, gerr := cv.cursor(epoch)
-		s.ls.compareComputed(
-			g, computedRewardCursor, gerr == nil && string(got) == want, gerr,
-		)
 	}
 	return want, nil
 }

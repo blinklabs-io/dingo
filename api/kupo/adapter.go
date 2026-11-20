@@ -67,25 +67,16 @@ func metadataBlockAtOrAfterSlot(
 // LedgerState and coordinated database calls.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
-	// indexer is the IndexerDB on a split layout and nil on the shared one.
+	// indexer is the IndexerDB the API rows are read from.
 	indexer *indexerdb.Store
 	// pageSizeOverride replaces matchPageSize when positive, so tests can
 	// cross page boundaries without seeding hundreds of rows.
 	pageSizeOverride int
 }
 
-// SetIndexerStore points API reads at the IndexerDB. Without it the adapter
-// reads the ledger database, which holds the API rows on the shared layout.
-func (a *NodeAdapter) SetIndexerStore(store *indexerdb.Store) {
-	a.indexer = store
-}
-
 // db is the database API rows are read from.
 func (a *NodeAdapter) db() *database.Database {
-	if a.indexer != nil {
-		return a.indexer.Database()
-	}
-	return a.ledgerState.Database()
+	return a.indexer.Database()
 }
 
 func (a *NodeAdapter) matchPageLimit() int {
@@ -95,28 +86,31 @@ func (a *NodeAdapter) matchPageLimit() int {
 	return matchPageSize
 }
 
-// NewNodeAdapter builds a Kupo node adapter.
-func NewNodeAdapter(ls *ledger.LedgerState) (*NodeAdapter, error) {
+// NewNodeAdapter builds a Kupo node adapter that reads API rows from indexer.
+func NewNodeAdapter(
+	ls *ledger.LedgerState,
+	indexer *indexerdb.Store,
+) (*NodeAdapter, error) {
 	if ls == nil {
 		return nil, errors.New(
 			"new Kupo node adapter: ledger state must not be nil",
 		)
 	}
-	return &NodeAdapter{ledgerState: ls}, nil
+	if indexer == nil {
+		return nil, errors.New(
+			"new Kupo node adapter: IndexerDB store must not be nil",
+		)
+	}
+	return &NodeAdapter{ledgerState: ls, indexer: indexer}, nil
 }
 
-// dataTip is the chain position the served rows cover: the IndexerDB's tip on
-// a split layout, the ledger tip otherwise.
+// dataTip is the chain position the served rows cover: the IndexerDB's tip.
 func (a *NodeAdapter) dataTip() (slot, blockNumber uint64, hash []byte, err error) {
-	if a.indexer != nil {
-		tip, err := a.indexer.Tip(nil)
-		if err != nil {
-			return 0, 0, nil, err
-		}
-		return tip.Slot, tip.BlockNumber, tip.Hash, nil
+	tip, err := a.indexer.Tip(nil)
+	if err != nil {
+		return 0, 0, nil, err
 	}
-	tip := a.ledgerState.Tip()
-	return tip.Point.Slot, tip.BlockNumber, tip.Point.Hash, nil
+	return tip.Slot, tip.BlockNumber, tip.Hash, nil
 }
 
 func (a *NodeAdapter) Tip() (Point, error) {

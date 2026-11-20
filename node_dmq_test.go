@@ -182,13 +182,13 @@ func TestDMQStakeAuthorityReadsElectingStake(t *testing.T) {
 		// The next epoch's distribution elects nobody yet.
 		{praos.StakeSnapshotEpoch(epoch.EpochId) + 1, unknown, 900},
 	} {
-		require.NoError(t, n.ledgerState.Database().Metadata().
-			SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+		require.NoError(t, n.ledgerState.LedgerDB().
+			SavePoolStakeSnapshots([]*models.PoolStakeSnapshot{{
 				Epoch:        row.epoch,
 				SnapshotType: models.PoolStakeSnapshotTypeMark,
 				PoolKeyHash:  row.pool[:],
 				TotalStake:   types.Uint64(row.stake),
-			}, nil))
+			}}, nil))
 	}
 
 	stake, err := dmqPoolStakeAt(auth, slot, staked)

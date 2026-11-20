@@ -28,7 +28,9 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -62,6 +64,9 @@ func preprodParams(t *testing.T) dingo.MithrilCatchUpParams {
 		Network:           "preprod",
 		DataDir:           "/data/dir",
 		Logger:            slog.New(slog.DiscardHandler),
+		UtxoSet: func() ledgerstate.UtxoSetLoader {
+			return livesettest.Open(t)
+		},
 	}
 }
 

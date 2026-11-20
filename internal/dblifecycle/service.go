@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	"github.com/blinklabs-io/dingo/internal/version"
 )
 
@@ -158,11 +159,6 @@ func (s *Service) Snapshot(
 		if err := s.checkSplitSupported(); err != nil {
 			return lifecycle.Manifest{}, err
 		}
-		if err := CheckIndexerSnapshotDestination(
-			s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
-		); err != nil {
-			return lifecycle.Manifest{}, err
-		}
 	}
 	db, err := s.openDatabase(ctx)
 	if err != nil {
@@ -200,6 +196,9 @@ func (s *Service) Snapshot(
 		}
 		defer cleanup()
 	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
+	}
 	manifest, err := lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
@@ -217,16 +216,7 @@ func (s *Service) Snapshot(
 		description,
 		manifestOpts...,
 	)
-	if err != nil || stagedIndexer == "" {
-		return manifest, err
-	}
-	if err := InstallIndexerPayload(
-		destDir, stagedIndexer, indexerMeta,
-	); err != nil {
-		_ = lifecycle.RemoveSnapshotContext(context.WithoutCancel(ctx), destDir)
-		return lifecycle.Manifest{}, err
-	}
-	return manifest, nil
+	return manifest, err
 }
 
 // Restore populates the configured database's data directory from the
@@ -251,20 +241,6 @@ func (s *Service) Restore(
 	if storageMode == "" {
 		storageMode = types.StorageModeCore
 	}
-	// Refused before anything changes: a ledger restored onto a split data
-	// directory without its IndexerDB would leave the API rows behind.
-	var indexerRestoreState *indexerRestore
-	if s.cfg.SplitIndexer() {
-		if err := s.checkSplitSupported(); err != nil {
-			return lifecycle.Manifest{}, err
-		}
-		payload, err := ReadIndexerPayload(snapshotDir)
-		if err != nil {
-			return lifecycle.Manifest{}, err
-		}
-		indexerRestoreState = &indexerRestore{ctx: ctx, service: s, payload: payload}
-		defer indexerRestoreState.cleanup()
-	}
 	// A fresh, single-use plugin host built just for this restore, per
 	// lifecycle.RestoreValidated's doc comment on why database/lifecycle
 	// never builds one itself.
@@ -279,18 +255,17 @@ func (s *Service) Restore(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
-	var installIndexer func(string) error
-	if indexerRestoreState != nil {
-		installIndexer = indexerRestoreState.install
-	}
-	manifest, err := lifecycle.RestoreValidatedWithStaged(
+
+	restoreStorage := s.RestoreStorageConfig()
+	manifest, err := lifecycle.RestoreValidated(
 		ctx,
 		host,
 		s.destinationRegistry,
 		snapshotDir,
 		s.cfg.DatabasePath,
 		func(m lifecycle.Manifest) error {
-			if err := m.CheckCompatibility(
+			if err := restoreStorage.CheckCompatibility(
+				m,
 				s.cfg.Plugins.Storage.Blob.Provider,
 				s.cfg.Plugins.Storage.Metadata.Provider,
 				storageMode,
@@ -302,13 +277,10 @@ func (s *Service) Restore(
 					err,
 				)
 			}
-			if indexerRestoreState != nil {
-				return indexerRestoreState.stageFor(snapshotDir, m)
-			}
+
 			return nil
 		},
-		s.RestoreStorageConfig(),
-		installIndexer,
+		restoreStorage,
 		manifestOpts...,
 	)
 	if err != nil {
@@ -337,7 +309,7 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 	if s == nil || s.cfg == nil {
 		return lifecycle.RestoreStorageConfig{}
 	}
-	return lifecycle.RestoreStorageConfig{
+	restoreStorage := lifecycle.RestoreStorageConfig{
 		Blob:     s.cfg.Plugins.Storage.Blob.Config,
 		Metadata: s.cfg.Plugins.Storage.Metadata.Config,
 		Logger:   s.logger,
@@ -345,6 +317,19 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 			nil, s.cfg.CardanoConfig, s.cfg.Network,
 		),
 	}
+	if s.cfg.SplitIndexer() {
+		switch s.cfg.Plugins.Storage.Metadata.Provider {
+		case "sqlite":
+			restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
+				return storageadopt.AdoptStagedAPI(
+					ctx, *s.cfg, s.logger, nil, stagingDir,
+				)
+			}
+		case "postgres", "mysql":
+			restoreStorage.DeferLegacyServerAdoption = true
+		}
+	}
+	return restoreStorage
 }
 
 // intendedGateValues builds the subset of database/nodesettings.Gates that
@@ -367,6 +352,9 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 // dingo.
 func intendedGateValues(cfg *config.Config) nodesettings.Values {
 	values := make(nodesettings.Values, 7)
+	if cfg.SplitIndexer() {
+		values["indexer_layout"] = config.IndexerLayoutSplit
+	}
 	// A zero NetworkMagic means "not known yet" (the same convention
 	// database/commit_timestamp.go's phase1GateValues and
 	// internal/settingsresolve use), not a meaningful configured value of
@@ -435,7 +423,7 @@ func (s *Service) Truncate(
 
 	if s.cfg.SplitIndexer() && s.rollbackFactory == nil {
 		return 0, errors.New(
-			"truncate with indexer.layout split needs the IndexerDB rolled " +
+			"truncate of an API node's database needs the IndexerDB rolled " +
 				"back first and this build wires no indexer writer",
 		)
 	}

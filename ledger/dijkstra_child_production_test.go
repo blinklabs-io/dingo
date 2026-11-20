@@ -246,6 +246,7 @@ func newChildProdFixture(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.publishSnapshotsLocked()
@@ -308,11 +309,15 @@ func (f *childProdFixture) importBlock() error {
 	})
 }
 
-func (f *childProdFixture) live(t *testing.T, id []byte, index uint32) bool {
+// outputLiveIn reports whether ls's live UTxO set holds id#index.
+func outputLiveIn(t *testing.T, ls *LedgerState, id []byte, index uint32) bool {
 	t.Helper()
-	utxo, err := f.db.Metadata().GetUtxo(id, index, nil)
+	_, err := ls.UtxoByRef(id, index)
+	if errors.Is(err, database.ErrUtxoNotFound) {
+		return false
+	}
 	require.NoError(t, err)
-	return utxo != nil
+	return true
 }
 
 func childProdChildID(tx *gdijkstra.DijkstraTransaction) []byte {
@@ -636,8 +641,8 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 				tip, err := f.db.GetTip(nil)
 				require.NoError(t, err)
 				require.Equal(t, f.startTip, tip)
-				require.True(t, f.live(t, childProdTopInput, 0))
-				require.True(t, f.live(t, childProdChildInput, 0))
+				require.True(t, outputLiveIn(t, f.ls, childProdTopInput, 0))
+				require.True(t, outputLiveIn(t, f.ls, childProdChildInput, 0))
 
 				// The replay ledger starts at the origin, so the durable tip
 				// must match it or block applies are rejected as stale.
@@ -671,8 +676,8 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 				replayRejects("replay")
 				if tc.replayRecovers {
 					// The recovery was the rollback; the inputs stay put.
-					require.True(t, f.live(t, childProdTopInput, 0))
-					require.True(t, f.live(t, childProdChildInput, 0))
+					require.True(t, outputLiveIn(t, replay, childProdTopInput, 0))
+					require.True(t, outputLiveIn(t, replay, childProdChildInput, 0))
 					return
 				}
 				require.NoError(t, replay.chain.Rollback(context.Background(), ocommon.Point{}))
@@ -685,8 +690,8 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 					Cbor:        f.block.Cbor(),
 				}}))
 				replayRejects("replay after rollback")
-				require.True(t, f.live(t, childProdTopInput, 0))
-				require.True(t, f.live(t, childProdChildInput, 0))
+				require.True(t, outputLiveIn(t, replay, childProdTopInput, 0))
+				require.True(t, outputLiveIn(t, replay, childProdChildInput, 0))
 			})
 		}
 	}
@@ -723,10 +728,10 @@ func TestDijkstraChildBatchAcceptedOnEveryProductionPath(t *testing.T) {
 				eras.DijkstraEraDesc, childProdParams(),
 			)
 			require.NoError(t, replayTestBlock(replay, f.block))
-			require.False(t, f.live(t, childProdTopInput, 0))
-			require.False(t, f.live(t, childProdChildInput, 0))
-			require.True(t, f.live(t, childProdChildID(tx), 0))
-			require.True(t, f.live(t, tx.Hash().Bytes(), 0))
+			require.False(t, outputLiveIn(t, replay, childProdTopInput, 0))
+			require.False(t, outputLiveIn(t, replay, childProdChildInput, 0))
+			require.True(t, outputLiveIn(t, replay, childProdChildID(tx), 0))
+			require.True(t, outputLiveIn(t, replay, tx.Hash().Bytes(), 0))
 		})
 	}
 }

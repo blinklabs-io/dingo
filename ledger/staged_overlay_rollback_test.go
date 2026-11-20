@@ -182,9 +182,8 @@ func TestOpCertViewDropsByCurrentRollbackTarget(t *testing.T) {
 		&utxoSetBatch{opCerts: []OpCertChange{{Slot: 60, State: OpCertState{Pool: pool, Slot: 60}}}},
 		rollbackBatch(100),
 	)
-	st, ok, err := ls.opCertView(overlayOpCertReader{}, nil, pool, nil)
+	st, err := ls.opCertView(overlayOpCertReader{}, nil, pool, nil)
 	require.NoError(t, err)
-	require.True(t, ok)
 	require.NotNil(t, st, "the counter staged at slot 60 survives a rollback to 100")
 }
 

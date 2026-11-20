@@ -285,29 +285,7 @@ func (s stagingLedgerDB) rewardInputsServed(
 		v := s.ls.newRewardInputsView(r, txn)
 		return &v, nil
 	}
-	if s.rewardInputsDrained() {
-		return nil, drainedUnserved(nodesettings.FamilyRewardInputs)
-	}
-	return nil, nil
-}
-
-// rewardInputsCompared returns the view to compare a store read with, in
-// verify mode when the set holds the rows.
-func (s stagingLedgerDB) rewardInputsCompared(
-	txn ledgerdb.Txn,
-) *rewardInputsView {
-	if !s.ls.verifying() {
-		return nil
-	}
-	r := s.ls.rewardInputsReader(txn)
-	if r == nil {
-		return nil
-	}
-	if loaded, err := r.RewardInputsLoaded(); err != nil || !loaded {
-		return nil
-	}
-	v := s.ls.newRewardInputsView(r, txn)
-	return &v
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardInputs)
 }
 
 func (s stagingLedgerDB) GetRewardAdaPots(
@@ -318,21 +296,7 @@ func (s stagingLedgerDB) GetRewardAdaPots(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.pots(epoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardAdaPots(epoch, txn)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.rewardInputsCompared(txn); cv != nil {
-		got, gerr := cv.pots(epoch)
-		s.ls.compareComputed(
-			g, computedRewardPots, gerr == nil && samePots(want, got), gerr,
-		)
-	}
-	return want, nil
+	return v.pots(epoch)
 }
 
 func samePots(a, b *models.RewardAdaPots) bool {
@@ -358,24 +322,7 @@ func (s stagingLedgerDB) GetRewardSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.snapshot(epoch, snapshotType)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardSnapshot(epoch, snapshotType, txn)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.rewardInputsCompared(txn); cv != nil {
-		got, gerr := cv.snapshot(epoch, snapshotType)
-		s.ls.compareComputed(
-			g,
-			computedRewardSnapshot,
-			gerr == nil && sameSnapshot(want, got),
-			gerr,
-		)
-	}
-	return want, nil
+	return v.snapshot(epoch, snapshotType)
 }
 
 func sameSnapshot(a, b *models.RewardSnapshot) bool {
@@ -404,21 +351,7 @@ func (s stagingLedgerDB) GetRewardSeedFailure(
 	if err != nil {
 		return "", err
 	}
-	if v != nil {
-		return v.failure(epoch, snapshotType)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardSeedFailure(epoch, snapshotType, txn)
-	if err != nil {
-		return "", err
-	}
-	if cv := s.rewardInputsCompared(txn); cv != nil {
-		got, gerr := cv.failure(epoch, snapshotType)
-		s.ls.compareComputed(
-			g, computedRewardFailure, gerr == nil && got == want, gerr,
-		)
-	}
-	return want, nil
+	return v.failure(epoch, snapshotType)
 }
 
 func (s stagingLedgerDB) GetRewardPoolInputs(
@@ -429,24 +362,7 @@ func (s stagingLedgerDB) GetRewardPoolInputs(
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.pools(epoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetRewardPoolInputs(epoch, txn)
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.rewardInputsCompared(txn); cv != nil {
-		got, gerr := cv.pools(epoch)
-		s.ls.compareComputed(
-			g,
-			computedRewardPools,
-			gerr == nil && samePoolInputs(want, got),
-			gerr,
-		)
-	}
-	return want, nil
+	return v.pools(epoch)
 }
 
 func samePoolInputs(a, b []*models.RewardPoolInput) bool {
@@ -487,15 +403,7 @@ func (s stagingLedgerDB) GetRewardStakeInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	return s.stakeInputs(
-		epoch,
-		nil,
-		nil,
-		txn,
-		func() ([]*models.RewardStakeInput, error) {
-			return s.LedgerDB.GetRewardStakeInputs(epoch, txn)
-		},
-	)
+	return s.stakeInputs(epoch, nil, nil, txn)
 }
 
 func (s stagingLedgerDB) GetRewardStakeInputsInPoolKeyHashRange(
@@ -504,51 +412,19 @@ func (s stagingLedgerDB) GetRewardStakeInputsInPoolKeyHashRange(
 	poolKeyHashHi []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	return s.stakeInputs(
-		epoch, poolKeyHashLo, poolKeyHashHi, txn,
-		func() ([]*models.RewardStakeInput, error) {
-			return s.LedgerDB.GetRewardStakeInputsInPoolKeyHashRange(
-				epoch, poolKeyHashLo, poolKeyHashHi, txn,
-			)
-		},
-	)
+	return s.stakeInputs(epoch, poolKeyHashLo, poolKeyHashHi, txn)
 }
 
 func (s stagingLedgerDB) stakeInputs(
 	epoch uint64,
 	lo, hi []byte,
 	txn ledgerdb.Txn,
-	fromStore func() ([]*models.RewardStakeInput, error),
 ) ([]*models.RewardStakeInput, error) {
 	v, err := s.rewardInputsServed(txn)
 	if err != nil {
 		return nil, err
 	}
-	if v != nil {
-		return v.stakes(epoch, lo, hi)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := fromStore()
-	if err != nil {
-		return nil, err
-	}
-	if cv := s.rewardInputsCompared(txn); cv != nil {
-		got, gerr := cv.stakes(epoch, lo, hi)
-		same := gerr == nil && sameStakeInputs(want, got)
-		if gerr == nil && !same && len(got) == 0 && s.stakeEpochPruned(epoch) {
-			// An epoch below the set's window: the store may still hold
-			// its stake rows, as it does in API storage mode.
-			return want, nil
-		}
-		s.ls.compareComputed(g, computedRewardStakes, same, gerr)
-	}
-	return want, nil
-}
-
-func (s stagingLedgerDB) stakeEpochPruned(epoch uint64) bool {
-	snapshot := s.ls.loadConsensusSnapshot()
-	return snapshot != nil &&
-		epoch+RewardInputEpochWindow < snapshot.currentEpoch.EpochId
+	return v.stakes(epoch, lo, hi)
 }
 
 func sameStakeInputs(a, b []*models.RewardStakeInput) bool {

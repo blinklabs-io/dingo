@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -186,7 +185,7 @@ func TestStateDrainRunsAgainstTheDatabase(t *testing.T) {
 		Tables: []statedrain.Table{{Name: "drain_scratch", Key: "id"}},
 		Loaded: func() (bool, error) { return true, nil },
 	}
-	interrupt := &interruptingStore{drainStore: drainStore{db}, after: 2}
+	interrupt := &interruptingStore{drainStore: drainStore{Database: db}, after: 2}
 	env := statedrain.Env{
 		Store: interrupt, Set: setTip{tip}, ChunkRows: 4,
 	}
@@ -200,7 +199,7 @@ func TestStateDrainRunsAgainstTheDatabase(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, mask)
 
-	env.Store = drainStore{db}
+	env.Store = drainStore{Database: db}
 	require.NoError(t, statedrain.Run(ctx, env, []statedrain.Entry{entry}))
 	require.Zero(t, scratchRows(t, raw))
 	marker, err = db.GetSyncState(statedrain.MarkerPrefix+"nonces", nil)
@@ -212,7 +211,7 @@ func TestStateDrainRunsAgainstTheDatabase(t *testing.T) {
 	mask, err = reopened.DrainedFamilies(ctx)
 	require.NoError(t, err)
 	require.True(t, mask.Has(nodesettings.FamilyNonces))
-	env.Store = drainStore{reopened}
+	env.Store = drainStore{Database: reopened}
 	require.NoError(t, statedrain.Run(ctx, env, []statedrain.Entry{entry}))
 }
 
@@ -266,107 +265,44 @@ func TestStatementGuardTripsOnADrainedFamilyRead(t *testing.T) {
 	require.Len(t, guard.Trips(), 1)
 }
 
-func TestDrainLedgerStateDoesNothingWhenNoFamilyGraduates(t *testing.T) {
+func TestDrainLedgerStateRequiresTheLiveSet(t *testing.T) {
 	t.Parallel()
 	db := newDrainDatabase(t, t.TempDir())
 	n := &Node{db: db}
-	require.NoError(t, n.drainLedgerState(context.Background()), "switch off")
+	require.ErrorContains(t, n.drainLedgerState(context.Background()), "live UTxO set")
 
-	n.config.ledgerStateSetOnly = true
+	n.config.dataDir = t.TempDir()
 	require.ErrorContains(
 		t, n.drainLedgerState(context.Background()), "live UTxO set",
 	)
 }
 
-func TestLedgerStateSetOnlyNeedsAFreshOrMarkedDatabase(t *testing.T) {
+// A database synced past origin with a metadata UTxO set needs the move of
+// the UTxO set, which reconcileUtxoSet starts with, and the move needs the live
+// UTxO set this node does not have. It names the set rather than a resync.
+func TestReconcileNeedsTheSetToMoveASyncedDatabase(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	node := func(db *database.Database, switchOn bool) *Node {
-		n := &Node{db: db}
-		n.config.ledgerUtxoBadgerOnly = true
-		n.config.ledgerStateSetOnly = switchOn
-		return n
-	}
-	tipAt10 := ochainsync.Tip{
-		Point: ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
-	}
-
 	synced := newDrainDatabase(t, t.TempDir())
-	require.NoError(t, synced.SetTip(tipAt10, nil))
-	err := node(synced, true).checkLedgerStateSetOnly(ctx)
-	require.ErrorContains(t, err, "ledgerStateSetOnly needs the UTxO set moved")
+	require.NoError(t, synced.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
+	}, nil))
+	n := &Node{db: synced}
+	n.config.dataDir = t.TempDir()
+	err := n.reconcileUtxoSet(context.Background())
+	require.ErrorContains(t, err, "live UTxO set")
 	require.NotContains(t, err.Error(), "resync")
-	require.NoError(
-		t,
-		node(synced, false).checkLedgerStateSetOnly(ctx),
-		"without the switch the database is not this check's concern",
-	)
-
-	fresh := newDrainDatabase(t, t.TempDir())
-	require.NoError(t, node(fresh, true).checkLedgerStateSetOnly(ctx))
-
-	marked := newDrainDatabase(t, t.TempDir())
-	require.NoError(
-		t, marked.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil),
-	)
-	require.NoError(t, marked.SetTip(tipAt10, nil))
-	require.NoError(
-		t,
-		node(marked, true).checkLedgerStateSetOnly(ctx),
-		"a database already synced set-only may take the switch",
-	)
-
-	// reconcileUtxoSet starts with the move of the UTxO set, which needs the
-	// live UTxO set this node does not have.
-	err = node(synced, true).reconcileUtxoSet(ctx)
-	require.ErrorContains(t, err, "needs the live UTxO set")
-}
-
-func TestADrainedDatabaseRefusesToStartWithoutTheSwitch(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db := newDrainDatabase(t, t.TempDir())
-	require.NoError(
-		t, db.RecordDrainedFamily(ctx, nodesettings.FamilyEpochs),
-	)
-	n := &Node{db: db}
-	n.config.ledgerUtxoBadgerOnly = true
-	err := n.checkLedgerStateSetOnly(ctx)
-	require.ErrorContains(t, err, "start with ledgerStateSetOnly")
-	require.ErrorContains(t, err, "epochs")
-	require.ErrorContains(
-		t, n.reconcileUtxoSet(ctx), "start with ledgerStateSetOnly",
-	)
-
-	n.config.ledgerStateSetOnly = true
-	require.NoError(t, n.checkLedgerStateSetOnly(ctx))
-}
-
-func TestLedgerStateConfigCarriesTheSwitch(t *testing.T) {
-	t.Parallel()
-	for _, on := range []bool{true, false} {
-		n := &Node{
-			config:  Config{cfg: &internalconfig.Config{}},
-			utxoSet: &utxoset.Set{},
-		}
-		n.config.ledgerStateSetOnly = on
-		require.Equal(t, on, n.ledgerStateConfig().LedgerStateSetOnly)
-	}
 }
 
 // TestReconcileUtxoSetRunsTheDrain requires the startup reconcile to end in
-// the drain: with the switch on and no open set it fails there rather than
-// returning with the SQL rows undrained.
+// the drain: with no open set it fails there rather than returning with the
+// SQL rows undrained.
 func TestReconcileUtxoSetRunsTheDrain(t *testing.T) {
 	t.Parallel()
 	db := newDrainDatabase(t, t.TempDir())
 	n := &Node{db: db}
-	require.NoError(t, n.reconcileUtxoSet(context.Background()))
-	require.True(t, n.utxoSetReconciled)
-
-	n.config.ledgerStateSetOnly = true
+	n.config.dataDir = t.TempDir()
 	err := n.reconcileUtxoSet(context.Background())
-	require.ErrorContains(t, err, "needs the live UTxO set")
+	require.ErrorContains(t, err, "live UTxO set is not open")
 }
 
 // TestReconcileUtxoSetPublishesTheLatchBeforeTheLedgerStarts requires the
@@ -383,8 +319,7 @@ func TestReconcileUtxoSetPublishesTheLatchBeforeTheLedgerStarts(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	n := &Node{db: db, utxoSet: set, ledgerState: &ledger.LedgerState{}}
-	n.config.ledgerUtxoBadgerOnly = true
-	n.config.ledgerStateSetOnly = true
+	n.config.dataDir = t.TempDir()
 
 	err = n.reconcileUtxoSet(ctx)
 	require.ErrorContains(t, err, "drained ledger-state families")
@@ -403,8 +338,8 @@ func TestDrainPublishesEachFamilyItLatches(t *testing.T) {
 	db := newDrainDatabase(t, t.TempDir())
 	var seen []nodesettings.FamilyMask
 	store := publishingStore{
-		drainStore: drainStore{db},
-		publish:    func(m nodesettings.FamilyMask) { seen = append(seen, m) },
+		DrainStore: drainStore{Database: db},
+		Publish:    func(m nodesettings.FamilyMask) { seen = append(seen, m) },
 	}
 	require.NoError(
 		t, store.RecordDrainedFamily(ctx, nodesettings.FamilyNonces),

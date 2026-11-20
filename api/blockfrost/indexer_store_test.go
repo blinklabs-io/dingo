@@ -64,7 +64,7 @@ func TestAdapterReadsFromIndexerStore(t *testing.T) {
 	require.NoError(t, err)
 
 	a := &NodeAdapter{}
-	a.SetIndexerStore(store)
+	a.indexer = store
 	require.Same(t, idxDB, a.db())
 }
 
@@ -88,7 +88,7 @@ func TestDataTipIsTheIndexerTipOnSplit(t *testing.T) {
 	require.NoError(t, err)
 
 	a := &NodeAdapter{}
-	a.SetIndexerStore(store)
+	a.indexer = store
 	tip, err := a.dataTip()
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), tip.Point.Slot)
@@ -120,7 +120,7 @@ func TestBlockAtSlotHidesBlocksAboveTheIndexerTip(t *testing.T) {
 	)
 	require.NoError(t, err)
 	a := &NodeAdapter{}
-	a.SetIndexerStore(store)
+	a.indexer = store
 
 	got, err := a.blockAtSlot(t.Context(), indexed.Slot)
 	require.NoError(t, err)

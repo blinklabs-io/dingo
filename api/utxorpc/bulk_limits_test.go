@@ -178,6 +178,7 @@ func TestBulkRequests_ConcurrencyBudget(t *testing.T) {
 		Logger:                    discardLogger(),
 		Mempool:                   mp,
 		MaxConcurrentBulkRequests: budget,
+		QueryDatabase:             stubQueryDB(nil),
 	})
 	submitSrv := &submitServiceServer{utxorpc: u}
 	querySrv := &queryServiceServer{utxorpc: u}
@@ -260,9 +261,10 @@ func TestBulkRequests_LogFixedSizeMetadata(t *testing.T) {
 				return logBuf.Write(p)
 			}), nil,
 		)),
-		EventBus:    h.EB,
-		LedgerState: h.LS,
-		Mempool:     h.MP,
+		EventBus:      h.EB,
+		LedgerState:   h.LS,
+		QueryDatabase: h.U.config.QueryDatabase,
+		Mempool:       h.MP,
 	})
 	querySrv := &queryServiceServer{utxorpc: u}
 	syncSrv := &syncServiceServer{utxorpc: u}
@@ -320,6 +322,7 @@ func TestReadUtxos_ResponseByteBudget(t *testing.T) {
 
 	open := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 		Logger: discardLogger(), EventBus: h.EB, LedgerState: h.LS,
+		QueryDatabase: h.U.config.QueryDatabase,
 	})}
 	search, err := open.SearchUtxos(ctx, connect.NewRequest(
 		&query.SearchUtxosRequest{MaxItems: 3}))
@@ -336,6 +339,7 @@ func TestReadUtxos_ResponseByteBudget(t *testing.T) {
 	srvWith := func(budget int64) *queryServiceServer {
 		return &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 			Logger: discardLogger(), EventBus: h.EB, LedgerState: h.LS,
+			QueryDatabase:    h.U.config.QueryDatabase,
 			MaxResponseBytes: budget,
 		})}
 	}
@@ -358,6 +362,7 @@ func TestSearchUtxos_PassesStorageWorkAndByteBounds(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:           discardLogger(),
 		LedgerState:      stub,
+		QueryDatabase:    stubQueryDB(stub),
 		MaxHistoryItems:  7,
 		MaxResponseBytes: 1234,
 	})
@@ -434,6 +439,7 @@ func TestSearchUtxos_PageByteBudget(t *testing.T) {
 	srvWith := func(budget int64) *queryServiceServer {
 		return &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 			Logger: discardLogger(), EventBus: h.EB, LedgerState: h.LS,
+			QueryDatabase:    h.U.config.QueryDatabase,
 			MaxResponseBytes: budget,
 		})}
 	}
@@ -521,6 +527,7 @@ func TestReadData_ResponseByteBudget(t *testing.T) {
 		srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 			Logger:           discardLogger(),
 			LedgerState:      stub,
+			QueryDatabase:    stubQueryDB(stub),
 			MaxResponseBytes: budget,
 		})}
 		out, err := srv.ReadData(context.Background(),
@@ -576,8 +583,9 @@ func TestReadData_DuplicateKeysLookedUpOnce(t *testing.T) {
 		}},
 	}
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: stub,
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 	keys := make([][]byte, 100)
 	for i := range keys {
@@ -602,8 +610,9 @@ func TestReadData_CanceledContextStopsLookups(t *testing.T) {
 		datumBudgetStub: datumBudgetStub{datums: map[string]*models.Datum{}},
 	}
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: stub,
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -635,6 +644,7 @@ func TestFetchBlock_ResponseByteBudget(t *testing.T) {
 			Logger:           discardLogger(),
 			EventBus:         h.EB,
 			LedgerState:      h.LS,
+			QueryDatabase:    h.U.config.QueryDatabase,
 			MaxResponseBytes: budget,
 		})}
 		out, err := srv.FetchBlock(context.Background(),

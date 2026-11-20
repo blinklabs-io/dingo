@@ -68,10 +68,6 @@ type Entry struct {
 	SyncKeyPrefixes []string
 	// Loaded reports whether every set marker the family reads is loaded.
 	Loaded func() (bool, error)
-	// Verify compares the set's copy of the family with the SQL rows and
-	// returns an error on any difference. It runs only when the operator
-	// asked to verify before draining.
-	Verify func(ctx context.Context) error
 }
 
 // Store is the metadata store as the drain uses it.
@@ -116,8 +112,6 @@ type Env struct {
 	Set   SetState
 	// Guard, when non-nil, is armed for every drained family.
 	Guard Guard
-	// VerifyBeforeDrain runs each entry's Verify before its first delete.
-	VerifyBeforeDrain bool
 	// ChunkRows overrides DefaultChunkRows.
 	ChunkRows int
 	// Known is the set of families this binary understands; a latch bit
@@ -126,13 +120,11 @@ type Env struct {
 	Logger *slog.Logger
 }
 
-// Source is what the graduated entries read: the set's tip, whether it holds
-// a family's markers, and a comparison of a family's rows in the set with the
-// SQL rows.
+// Source is what the graduated entries read: the set's tip and whether it
+// holds a family's markers.
 type Source interface {
 	SetState
 	Loaded(family nodesettings.Family) (bool, error)
-	Verify(ctx context.Context, family nodesettings.Family) error
 }
 
 // graduated lists the families this release drains, in drain order, with the
@@ -184,9 +176,7 @@ var graduated = []struct {
 	{nodesettings.FamilyMIRGenesis, []Table{{"genesis_delegation", "id"}}, nil},
 	// Neither table has a unique column, so each is ordered by epoch, and one
 	// delete statement removes every row of the epochs it reaches, which is
-	// bounded by the epochs a bootstrap imports. The family drains before
-	// reward-inputs and op-certs: its Verify rebuilds the window from the
-	// imported ADA pots and the op-cert rows.
+	// bounded by the epochs a bootstrap imports.
 	{
 		nodesettings.FamilyRewardBlocksFees,
 		[]Table{
@@ -266,9 +256,7 @@ var graduated = []struct {
 		},
 		[]string{RewardEligibilityRecheckSyncKey},
 	},
-	// The two drain last. Summaries go first because their Verify bounds its
-	// scan by the newest epoch row of the metadata store, which a drained
-	// epochs family would answer from the set it is being compared with.
+	// The two drain last, summaries first.
 	{nodesettings.FamilySummaries, []Table{{"epoch_summary", "id"}}, nil},
 	{nodesettings.FamilyEpochs, []Table{{"epoch", "id"}}, nil},
 }
@@ -318,9 +306,6 @@ func entryFor(
 		SyncKeys:        syncKeys,
 		SyncKeyPrefixes: slices.Clone(syncKeyPrefixes[f]),
 		Loaded:          func() (bool, error) { return src.Loaded(f) },
-		Verify: func(ctx context.Context) error {
-			return src.Verify(ctx, f)
-		},
 	}
 }
 
@@ -625,14 +610,6 @@ func checkGate(ctx context.Context, env Env, entry Entry) error {
 			"%w: set tip %d differs from SQL tip %d",
 			ErrGateRefused, setTip.Slot, sqlTip.Slot,
 		)
-	}
-	if env.VerifyBeforeDrain {
-		if entry.Verify == nil {
-			return fmt.Errorf("%w: no verification declared", ErrGateRefused)
-		}
-		if err := entry.Verify(ctx); err != nil {
-			return fmt.Errorf("%w: verification: %w", ErrGateRefused, err)
-		}
 	}
 	return nil
 }

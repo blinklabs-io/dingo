@@ -155,6 +155,7 @@ func (f *MetadataFacts) RefreshFacts(
 	dst *database.Txn,
 	through uint64,
 ) error {
+	f.through = through
 	if err := f.copyDeferredStakeInputs(ctx, dst); err != nil {
 		return err
 	}

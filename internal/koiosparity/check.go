@@ -1761,10 +1761,48 @@ func aggregateAccountLifecycleMismatchCount(
 	}
 }
 
+// transactionHistoryPoll and transactionHistoryWait bound how long a check
+// waits for the IndexerDB to index the epoch it samples. At an epoch boundary
+// the IndexerDB usually trails the ledger by seconds to minutes; waiting here
+// keeps the epoch's other checks from being deferred and reported as an error
+// on every boundary. Tests shorten them.
+var (
+	transactionHistoryPoll = 5 * time.Second
+	transactionHistoryWait = 10 * time.Minute
+)
+
+// waitForHistory calls read, retrying while the history it reads has not
+// reached the epoch, up to transactionHistoryWait. It returns
+// ErrTransactionHistoryPending when the history is still behind after that,
+// and ctx's error when ctx ends first.
+func waitForHistory[T any](
+	ctx context.Context,
+	read func() (T, error),
+) (T, error) {
+	deadline := time.Now().Add(transactionHistoryWait)
+	for {
+		v, err := read()
+		if !errors.Is(err, ErrTransactionHistoryPending) ||
+			!time.Now().Before(deadline) {
+			return v, err
+		}
+		timer := time.NewTimer(transactionHistoryPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			var zero T
+			return zero, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // checkEpochTransactions loads the sampled transactions and their cached
 // Koios rows and compares them. A failure to read the Dingo sample is a
 // recorded dingo_db_error rather than an aborted check, like the other Dingo
-// reads in checkEpoch.
+// reads in checkEpoch. ErrTransactionHistoryPending aborts the check instead:
+// the sample does not exist yet, and a recorded dingo_db_error would stop
+// strict validation for an epoch the history database has yet to reach.
 func checkEpochTransactions(
 	ctx context.Context,
 	cache *Cache,
@@ -1773,9 +1811,14 @@ func checkEpochTransactions(
 	epoch uint64,
 	now time.Time,
 ) ([]CheckMismatch, error) {
-	sample, err := source.GetEpochTransactionSample(
-		ctx, epoch, EpochTransactionSampleSize,
-	)
+	sample, err := waitForHistory(ctx, func() ([]DingoTransaction, error) {
+		return source.GetEpochTransactionSample(
+			ctx, epoch, EpochTransactionSampleSize,
+		)
+	})
+	if errors.Is(err, ErrTransactionHistoryPending) {
+		return nil, err
+	}
 	if err != nil {
 		return []CheckMismatch{{
 			Network:    network,

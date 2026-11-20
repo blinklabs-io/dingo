@@ -61,6 +61,10 @@ const ManifestFormatVersion = 2
 // reads.
 const ManifestFormatVersionImmutable = 3
 
+// ManifestFormatVersionIndexer authenticates a provider-native IndexerDB
+// backup as part of the same snapshot as the ledger stores.
+const ManifestFormatVersionIndexer = 4
+
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
 const ManifestFileName = "manifest.json"
@@ -95,7 +99,8 @@ type manifestConfig struct {
 	// catalog has been rebuilt.
 	catalogReconcile func(context.Context, string) error
 	// utxoSet is consumed only by Snapshot.
-	utxoSet UtxoSetBackuper
+	utxoSet       UtxoSetBackuper
+	indexerBackup *indexerBackupSource
 }
 
 // UtxoSetBackuper is a live UTxO set that can stream a consistent copy of
@@ -337,6 +342,11 @@ const (
 // data. It is written as JSON (not CBOR) since it is operator/tooling
 // facing metadata, not chain data.
 type Manifest struct {
+	IndexerBytes   int64  `json:"indexerBytes,omitempty"`
+	IndexerSHA256  string `json:"indexerSha256,omitempty"`
+	IndexerTipSlot uint64 `json:"indexerTipSlot,omitempty"`
+	IndexerTipHash string `json:"indexerTipHash,omitempty"`
+
 	FormatVersion int `json:"formatVersion"`
 
 	// ID is the snapshot ID, the base name of the snapshot directory or cloud
@@ -627,6 +637,9 @@ func (m Manifest) CheckCompatibility(
 	blobPlugin, metadataPlugin, storageMode, network string,
 	gates nodesettings.Values,
 ) error {
+	if gates["indexer_layout"] == "split" && m.StorageMode == "core" && m.IndexerSHA256 == "" {
+		return errors.New("snapshot has no IndexerDB payload for the split layout")
+	}
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err
 	}
@@ -646,6 +659,17 @@ func (m Manifest) CheckCompatibility(
 	}
 	if err := m.CheckGateMatch(gates); err != nil {
 		return err
+	}
+	// History expiry tombstones block bodies in the blob store, which chunk
+	// files cannot hold, so a node that expires history refuses to start on
+	// a database with an ImmutableDB. Refuse the restore before it replaces
+	// the running database with one.
+	if m.ImmutableIndexBytes > 0 &&
+		strings.HasPrefix(gates["history_expiry_active"], nodesettings.LatchOn) {
+		return errors.New(
+			"snapshot keeps block bodies in ImmutableDB chunk files, which " +
+				"history expiry cannot use: restore it with historyExpiry off",
+		)
 	}
 	return nil
 }
@@ -721,6 +745,9 @@ func prepareManifest(
 	m.FormatVersion = ManifestFormatVersion
 	if m.ImmutableIndexSHA256 != "" {
 		m.FormatVersion = ManifestFormatVersionImmutable
+	}
+	if m.IndexerSHA256 != "" {
+		m.FormatVersion = ManifestFormatVersionIndexer
 	}
 	m.ID = snapshotIDForDir(dir)
 	m.Authentication = ""
@@ -875,12 +902,15 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parse manifest: %w", err)
 	}
-	if m.FormatVersion > ManifestFormatVersionImmutable {
+	if m.FormatVersion > ManifestFormatVersionIndexer {
 		return Manifest{}, fmt.Errorf(
 			"manifest has format version %d, newest supported is %d",
 			m.FormatVersion,
-			ManifestFormatVersionImmutable,
+			ManifestFormatVersionIndexer,
 		)
+	}
+	if err := m.validateIndexerPayload(); err != nil {
+		return Manifest{}, err
 	}
 	wantSum := m.Checksum
 	gotSum, err := m.checksum()

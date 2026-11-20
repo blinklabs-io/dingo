@@ -130,8 +130,13 @@ func (s *Set) MigrateFromSQL(
 	// checked against; before it, a commit recorded by an earlier run says
 	// nothing of what the metadata store has been given since.
 	if progress != migrationCommitted || !marked {
+		tip, err := env.Store.SQLTip(ctx)
+		if err != nil {
+			return fmt.Errorf("utxoset: read metadata tip: %w", err)
+		}
 		if err := s.buildAndVerify(
-			ctx, ldb, env, log, hook,
+			ctx, ldb, tip, env.FreeBytes, log, hook,
+			func(marker string) error { return env.Store.SetSyncState(ctx, MigrationSyncKey, marker) },
 		); err != nil {
 			return err
 		}
@@ -163,14 +168,12 @@ func (s *Set) MigrateFromSQL(
 func (s *Set) buildAndVerify(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
-	env MigrationEnv,
+	sqlTip ocommon.Point,
+	freeBytes func() (uint64, error),
 	log *slog.Logger,
 	hook func(string) error,
+	recordBootstrap func(string) error,
 ) error {
-	sqlTip, err := env.Store.SQLTip(ctx)
-	if err != nil {
-		return fmt.Errorf("utxoset: read metadata tip: %w", err)
-	}
 	log.Info("scanning the metadata store's live UTxO set",
 		"slot", sqlTip.Slot)
 	want, err := scanSQLUtxos(ctx, ldb)
@@ -196,8 +199,8 @@ func (s *Set) buildAndVerify(
 	// is rebuilt.
 	reuse := hadTip && !stale && samePoint(setTip, sqlTip)
 	build := func() error {
-		if env.FreeBytes != nil {
-			free, err := env.FreeBytes()
+		if freeBytes != nil {
+			free, err := freeBytes()
 			if err != nil {
 				return fmt.Errorf("utxoset: read free disk space: %w", err)
 			}
@@ -210,7 +213,10 @@ func (s *Set) buildAndVerify(
 			if free < need {
 				return fmt.Errorf(
 					"utxoset: %w: %d bytes free, about %d needed for %d outputs",
-					ErrMigrationInsufficientSpace, free, need, want.count,
+					ErrMigrationInsufficientSpace,
+					free,
+					need,
+					want.count,
 				)
 			}
 		}
@@ -219,10 +225,10 @@ func (s *Set) buildAndVerify(
 		if err := s.rebuild(ctx, ldb, nil, sqlTip, hadTip, setTip); err != nil {
 			return err
 		}
-		if err := env.Store.SetSyncState(
-			ctx, MigrationSyncKey, marker,
-		); err != nil {
-			return fmt.Errorf("utxoset: record migration progress: %w", err)
+		if recordBootstrap != nil {
+			if err := recordBootstrap(marker); err != nil {
+				return fmt.Errorf("utxoset: record migration progress: %w", err)
+			}
 		}
 		return hook("bootstrapped")
 	}
@@ -238,7 +244,9 @@ func (s *Set) buildAndVerify(
 	if got != want && reuse {
 		// A set kept from an earlier run that no longer matches is
 		// rebuilt once; the metadata store is still the authority.
-		log.Warn("the kept live UTxO set differs from the metadata store; rebuilding it")
+		log.Warn(
+			"the kept live UTxO set differs from the metadata store; rebuilding it",
+		)
 		setTip, hadTip, err = s.store.Tip()
 		if err != nil {
 			return fmt.Errorf("utxoset: read tip: %w", err)
@@ -253,7 +261,10 @@ func (s *Set) buildAndVerify(
 	if got != want {
 		return fmt.Errorf(
 			"utxoset: the live UTxO set built from the metadata store does not match it: %d outputs against %d, digest %s against %s",
-			got.count, want.count, got.hex(), want.hex(),
+			got.count,
+			want.count,
+			got.hex(),
+			want.hex(),
 		)
 	}
 	log.Info("verified the live UTxO set against the metadata store",
@@ -310,7 +321,10 @@ func (d *utxoDigest) add(txID []byte, idx uint32, cbor []byte) {
 	h.Write(txID)
 	var n [8]byte
 	binary.BigEndian.PutUint32(n[:4], idx)
-	binary.BigEndian.PutUint32(n[4:], uint32(len(cbor))) //nolint:gosec // output CBOR is far below 4 GiB
+	binary.BigEndian.PutUint32(
+		n[4:],
+		uint32(len(cbor)), //nolint:gosec // output CBOR is far below 4 GiB
+	)
 	h.Write(n[:])
 	h.Write(cbor)
 	sum := h.Sum(nil)

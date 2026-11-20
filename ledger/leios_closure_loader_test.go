@@ -17,7 +17,10 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/leiosclosurefixture"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -28,7 +31,7 @@ func TestLoadCertifiedClosureFromDatabase(t *testing.T) {
 	t.Parallel()
 	scenario, err := leiosclosurefixture.New()
 	require.NoError(t, err)
-	_, db, _, _ := newLeiosAPIApplyTestLedger(t)
+	db := newLeiosClosureLoaderDB(t)
 	scenario.StoreChain(t, db)
 	src := NewDatabaseClosureSource(db)
 
@@ -65,7 +68,7 @@ func TestLoadCertifiedClosureRejectsInvalidData(t *testing.T) {
 
 	t.Run("unstored endorser block", func(t *testing.T) {
 		t.Parallel()
-		_, db, _, _ := newLeiosAPIApplyTestLedger(t)
+		db := newLeiosClosureLoaderDB(t)
 		require.NoError(
 			t,
 			db.BlockCreate(leiosclosurefixture.Model(scenario.Announcing), nil),
@@ -77,7 +80,7 @@ func TestLoadCertifiedClosureRejectsInvalidData(t *testing.T) {
 	})
 	t.Run("transaction count differs from manifest", func(t *testing.T) {
 		t.Parallel()
-		_, db, _, _ := newLeiosAPIApplyTestLedger(t)
+		db := newLeiosClosureLoaderDB(t)
 		require.NoError(
 			t,
 			db.BlockCreate(leiosclosurefixture.Model(scenario.Announcing), nil),
@@ -93,7 +96,7 @@ func TestLoadCertifiedClosureRejectsInvalidData(t *testing.T) {
 	})
 	t.Run("manifest does not hash to the announcement", func(t *testing.T) {
 		t.Parallel()
-		_, db, _, _ := newLeiosAPIApplyTestLedger(t)
+		db := newLeiosClosureLoaderDB(t)
 		require.NoError(
 			t,
 			db.BlockCreate(leiosclosurefixture.Model(scenario.Announcing), nil),
@@ -121,7 +124,7 @@ func TestLoadCertifiedClosureRejectsInvalidData(t *testing.T) {
 		"transaction differs from its manifest reference",
 		func(t *testing.T) {
 			t.Parallel()
-			_, db, _, _ := newLeiosAPIApplyTestLedger(t)
+			db := newLeiosClosureLoaderDB(t)
 			require.NoError(
 				t,
 				db.BlockCreate(
@@ -146,4 +149,14 @@ func TestLoadCertifiedClosureRejectsInvalidData(t *testing.T) {
 			require.NoError(t, err, "the transactions themselves decode")
 		},
 	)
+}
+
+func newLeiosClosureLoaderDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeAPI,
+	})
+	require.NoError(t, err)
+	return db
 }

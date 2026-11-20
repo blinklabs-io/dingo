@@ -179,8 +179,9 @@ func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := SyncConfig{
-		Network: "preview", DataDir: t.TempDir(), StorageMode: "core",
+		Network: "preview", DataDir: t.TempDir(),
 		IndexerLayout: "split", Logger: logger,
+		UtxoSet: newSyncTestSet(t),
 		// Nothing listens here: a run that gets past the refusal fails
 		// quickly at the aggregator rather than waiting on the network.
 		AggregatorURL: "http://127.0.0.1:1", AllowInsecureHTTP: true,

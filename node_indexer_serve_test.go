@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,14 +61,16 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 	var slotTime atomic.Pointer[func(uint64) (time.Time, error)]
 	dbPath := t.TempDir()
 	n, err := New(NewConfig(
+		WithPluginSelection(plugin.CapabilityStorageBlob, plugin.Selection{
+			Provider: "badger", Config: map[string]any{"memTableSize": int64(8 << 20)},
+		}),
 		WithDatabasePath(dbPath),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
-		// The CLI path hands the split layout's consensus store a core
-		// storage mode (nodeStorageMode); the API servers must still start.
-		WithStorageMode(StorageModeCore),
-		WithIndexerLayout("split"),
+		// API storage mode keeps the consensus store in core mode; the API
+		// servers must still start.
+		WithStorageMode(StorageModeAPI),
 		WithIndexerWriterFactory(
 			func(deps IndexerWriterDeps) (IndexerWriter, error) {
 				indexerDB.Store(deps.Indexer)
@@ -205,12 +209,14 @@ func runSplitNode(t *testing.T, dbPath string) func() {
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	writer := &fakeIndexerWriter{wakes: make(chan struct{}, 8)}
 	n, err := New(NewConfig(
+		WithPluginSelection(plugin.CapabilityStorageBlob, plugin.Selection{
+			Provider: "badger", Config: map[string]any{"memTableSize": int64(8 << 20)},
+		}),
 		WithDatabasePath(dbPath),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
-		WithStorageMode(StorageModeCore),
-		WithIndexerLayout("split"),
+		WithStorageMode(StorageModeAPI),
 		WithIndexerWriterFactory(
 			func(IndexerWriterDeps) (IndexerWriter, error) {
 				return writer, nil
@@ -226,7 +232,22 @@ func runSplitNode(t *testing.T, dbPath string) func() {
 	require.NoError(t, err)
 	n.config.listeners = nil
 	runErr := make(chan error, 1)
-	go func() { runErr <- n.Run(context.Background()) }()
+	runDone := make(chan struct{})
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	go func() {
+		defer close(runDone)
+		runErr <- n.Run(runCtx)
+	}()
+	var stopOnce sync.Once
+	stop := func() {
+		t.Helper()
+		stopOnce.Do(func() {
+			cancelRun()
+			assert.NoError(t, n.Stop())
+			testutil.RequireReceive(t, runDone, 30*time.Second, "node run returned")
+		})
+	}
+	t.Cleanup(stop)
 	require.Eventually(t, func() bool {
 		select {
 		case err := <-runErr:
@@ -236,10 +257,7 @@ func runSplitNode(t *testing.T, dbPath string) func() {
 		return writer.started.Load()
 	}, 20*time.Second, 10*time.Millisecond, "the IndexerDB writer starts")
 	requireStartupComplete(t, n)
-	return func() {
-		require.NoError(t, n.Stop())
-		testutil.RequireReceive(t, runErr, 30*time.Second, "node run returned")
-	}
+	return stop
 }
 
 // requireStartupComplete waits for Run to finish starting. The writer starts

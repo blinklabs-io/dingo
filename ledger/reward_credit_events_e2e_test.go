@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,7 +48,7 @@ func creditEventRows(
 // them, before and after a rollback that removes the later slot's credit.
 func TestPostSnapshotCreditEventsAreServedFromTheSetOnceDrained(t *testing.T) {
 	t.Parallel()
-	h := newRewardOutputHarnessReads(t, nil, ledger.UtxoSetReadsSet)
+	h := newRewardOutputHarnessReads(t, nil, "set")
 	h.creditPostSnapshot(t)
 	h.creditLater(t)
 	slots := []uint64{h.start, h.start + 3}
@@ -71,7 +70,7 @@ func TestPostSnapshotCreditEventsAreServedFromTheSetOnceDrained(t *testing.T) {
 	require.Zero(t, reached(), "a read reached the metadata store")
 }
 
-// Until a family is drained the store's own rows answer, so a verify-mode
+// Until a family is drained the store's own rows answer, so a live-set
 // ledger reads them unchanged.
 func TestPostSnapshotCreditEventsStayOnTheStoreUntilDrained(t *testing.T) {
 	t.Parallel()

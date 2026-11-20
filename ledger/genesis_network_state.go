@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -102,7 +101,6 @@ func genesisReserveBalance(
 // nor the genesis baseline is the translated reserves then, so the boundary
 // fails rather than commit the first Shelley epoch from an unverified supply.
 func (ls *LedgerState) applyByronTranslationReserves(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -112,7 +110,7 @@ func (ls *LedgerState) applyByronTranslationReserves(
 		return errors.New("missing Shelley genesis")
 	}
 	ldb := ls.ledgerDB()
-	live, err := ls.liveUtxoLovelace(ctx, txn)
+	live, err := ls.liveUtxoLovelace(txn)
 	if err != nil {
 		return fmt.Errorf("sum live UTxO balance: %w", err)
 	}

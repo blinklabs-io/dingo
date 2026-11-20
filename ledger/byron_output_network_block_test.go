@@ -271,6 +271,7 @@ func TestLedgerProcessBlockRejectsOutputNetworkMismatch(t *testing.T) {
 		},
 	}
 
+	attachTestLiveSet(t, ls)
 	wrongMagicValue := uint32(wrongMagic)
 	mismatchedAddr, err := lcommon.NewByronAddressFromParts(
 		lcommon.ByronAddressTypePubkey,

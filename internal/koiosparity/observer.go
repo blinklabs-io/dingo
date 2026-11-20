@@ -734,6 +734,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, false, err) {
+			return
+		}
 		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
@@ -759,6 +762,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, false, err) {
 			return
 		}
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
@@ -809,6 +815,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, true, err) {
+			return
+		}
 		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
@@ -823,6 +832,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
@@ -850,6 +862,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
@@ -914,6 +929,39 @@ func cancelled(ctx context.Context, err error) bool {
 	}
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
+}
+
+// deferForHistory handles a fetch or check that stopped on
+// ErrTransactionHistoryPending: the IndexerDB an API node samples from trails
+// the ledger, so at an epoch boundary it has usually not indexed the epoch
+// that just closed. That is neither a parity result nor a failure, so nothing
+// is emitted and strict validation continues. The queue's ERROR status is
+// persisted and the epoch retried on the ERROR schedule, as reportError does,
+// so a restart before the retry still selects it. It reports false, leaving
+// err to reportError, for any other error and when the status cannot be
+// persisted.
+func (o *Observer) deferForHistory(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) bool {
+	if !errors.Is(err, ErrTransactionHistoryPending) {
+		return false
+	}
+	if persistErr := o.cache.RecordObserverError(
+		o.cfg.Network, epoch, accountsChecked,
+	); persistErr != nil {
+		return false
+	}
+	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
+	o.cfg.Logger.Info(
+		"koiosparity observer: transaction history not indexed yet, epoch deferred",
+		"network", o.cfg.Network,
+		"epoch", epoch,
+		"retry_in", o.cfg.ErrorRetryDelay,
+		"reason", err,
+	)
+	return true
 }
 
 // reportError records a genuine (non-shutdown) per-epoch fetch/check

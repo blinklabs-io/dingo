@@ -327,10 +327,10 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 	policy := bytes.Repeat([]byte{0x93}, lcommon.AddressHashSize)
 	datumHash := bytes.Repeat([]byte{0xd1}, 32)
 
-	firstTx := seedAssetTransaction(t, raw, db, fill32(0x01), 1, 10, 0)
-	secondTx := seedAssetTransaction(t, raw, db, fill32(0x02), 2, 20, 0)
-	spentTx := seedAssetTransaction(t, raw, db, fill32(0x03), 3, 30, 0)
-	otherTx := seedAssetTransaction(t, raw, db, fill32(0x04), 4, 40, 0)
+	firstTx := seedAssetTransaction(t, raw, adapter, fill32(0x01), 1, 10, 0)
+	secondTx := seedAssetTransaction(t, raw, adapter, fill32(0x02), 2, 20, 0)
+	spentTx := seedAssetTransaction(t, raw, adapter, fill32(0x03), 3, 30, 0)
+	otherTx := seedAssetTransaction(t, raw, adapter, fill32(0x04), 4, 40, 0)
 	spender := &models.Transaction{Hash: fill32(0x05), Slot: 50, Valid: true}
 	insertAdapterTransaction(t, raw, spender)
 	for i, tx := range []*models.Transaction{firstTx, secondTx, spentTx, otherTx} {

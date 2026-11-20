@@ -73,12 +73,9 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	cfg := n.ledgerStateConfigBase()
 	// Assigned only when open: a nil *utxoset.Set in the interface field
-	// would read as configured.
+	// would read as configured, where NewLedgerState refuses a nil one.
 	if n.utxoSet != nil {
 		cfg.UtxoSet = n.utxoSet
-		cfg.UtxoSetReads = n.config.ledgerUtxoReads
-		cfg.UtxoSetOnly = n.config.ledgerUtxoBadgerOnly
-		cfg.LedgerStateSetOnly = n.config.ledgerStateSetOnly
 	}
 	return cfg
 }
@@ -313,7 +310,10 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 				if timeoutPenalty > 0 && len(excluded) > 0 {
 					state.RecordBlockfetchLatency(excluded[0], timeoutPenalty)
 				}
-				selected, found = state.SelectBlockfetchRetryPeer(excluded, rangeEnd)
+				selected, found = state.SelectBlockfetchRetryPeer(
+					excluded,
+					rangeEnd,
+				)
 			})
 			return selected, found, available
 		},
@@ -481,7 +481,11 @@ func (n *Node) publishChainsyncState(state *chainsync.State) {
 func leiosCommitteeQueryError(err error) error {
 	if errors.Is(err, leios.ErrEmptyStakeDistribution) ||
 		errors.Is(err, leios.ErrZeroTotalActiveStake) {
-		return fmt.Errorf("%w: %w", ledger.ErrLeiosCommitteeNotYetAvailable, err)
+		return fmt.Errorf(
+			"%w: %w",
+			ledger.ErrLeiosCommitteeNotYetAvailable,
+			err,
+		)
 	}
 	return err
 }

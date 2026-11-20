@@ -17,49 +17,38 @@ package dingo
 import (
 	"testing"
 
-	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
-// The split layout runs the consensus store in core mode and serves the API
-// from the IndexerDB, so the API servers must be gated on the layout, not on
-// the consensus store's storage mode.
+// API storage mode always serves the API from the IndexerDB while the
+// consensus store runs in core mode, so API servers gate on the layout.
 func TestAPIStorageModeOnSplitLayout(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		mode   StorageMode
-		layout string
-		want   StorageMode
+		name         string
+		mode         StorageMode
+		databasePath string
+		want         StorageMode
 	}{
-		{"core shared", StorageModeCore, "", StorageModeCore},
-		{
-			"core shared explicit",
-			StorageModeCore,
-			internalconfig.IndexerLayoutShared,
-			StorageModeCore,
-		},
-		{
-			"api shared",
-			StorageModeAPI,
-			internalconfig.IndexerLayoutShared,
-			StorageModeAPI,
-		},
-		{
-			"core consensus split",
-			StorageModeCore,
-			internalconfig.IndexerLayoutSplit,
-			StorageModeAPI,
-		},
+		{"core on disk", StorageModeCore, "/data", StorageModeCore},
+		{"api on disk", StorageModeAPI, "/data", StorageModeAPI},
+		{"api in memory", StorageModeAPI, "", StorageModeAPI},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			n := &Node{config: Config{
-				storageMode:   tt.mode,
-				indexerLayout: tt.layout,
-			}}
+			c := NewConfig(
+				WithDatabasePath(tt.databasePath),
+				WithStorageMode(tt.mode),
+			)
+			n := &Node{config: c}
 			require.Equal(t, tt.want, n.apiStorageMode())
+			split := tt.mode == StorageModeAPI
+			require.Equal(t, split, n.splitIndexer())
+			if split {
+				require.Equal(t, StorageModeCore, c.storageMode,
+					"the ledger's own store holds no API rows")
+			}
 		})
 	}
 }

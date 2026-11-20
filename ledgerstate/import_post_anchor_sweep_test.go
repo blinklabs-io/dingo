@@ -70,6 +70,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	require.NoError(t, ImportLedgerState(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -153,6 +154,7 @@ func TestImportLedgerStateSweepsPostAnchorOpCertSequences(t *testing.T) {
 	require.NoError(t, ImportLedgerState(
 		context.Background(),
 		ImportConfig{
+			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
@@ -248,6 +250,7 @@ func TestImportLedgerStateSweepsPostAnchorLedgerState(t *testing.T) {
 
 	nonce := make([]byte, 32)
 	require.NoError(t, ImportLedgerState(ctx, ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
@@ -338,6 +341,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 	require.NoError(t, err)
 
 	err = ImportLedgerState(context.Background(), ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{

@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +27,7 @@ import (
 // rollback leaves.
 func TestStagedRollbackRestoresReapedDelegationsToAccountListReads(t *testing.T) {
 	t.Parallel()
-	h := newLiveStakeHarnessWithReads(t, false, ledger.UtxoSetReadsSet)
+	h := newLiveStakeHarnessWithReads(t, false, "set")
 	h.scenario.ApplyBoundary()
 	drep := bytes.Repeat([]byte{0x5d}, 28)
 	before := h.scenario.CommittedAccountReads(h.pool, drep)

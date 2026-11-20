@@ -381,24 +381,3 @@ func TestLedgerProcessBlockOpCertRejectsBoundaryCounterConflict(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, uint64(0), stored)
 }
-
-// TestLedgerProcessBlockOpCertMithrilWithoutCertifiedCounterMapFailsClosed
-// covers a Mithril-restored ledger that holds no certified counter at its
-// trust boundary at all: a database imported before the HeaderState counter
-// map was persisted. The pool's real counter is unknown there, and zero is
-// not a substitute for it -- a pool several rotations in would have its next
-// valid block rejected. Block application must refuse rather than guess.
-func TestLedgerProcessBlockOpCertMithrilWithoutCertifiedCounterMapFailsClosed(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const boundarySlot = uint64(100)
-	ls := newOpCertBaselineLedgerState(t, boundarySlot)
-
-	err := applyOpCertBaselineBlock(t, ls, true, boundarySlot+10, 1)
-
-	require.ErrorIs(t, err, errOpCertBaselineNotImported)
-	_, found := opCertBaselineRecorded(t, ls)
-	require.False(t, found)
-}

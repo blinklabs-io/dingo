@@ -89,6 +89,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	fixture.ls.currentEra = validationEra
 	fixture.ls.activeEras = []eras.EraDesc{validationEra}
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
@@ -147,6 +148,7 @@ func TestValidateBlockReferenceScriptsUsesTickedSession(t *testing.T) {
 		fixture.currentPParams,
 	)
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
@@ -212,6 +214,7 @@ func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
 		},
 	})
 	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	phases := testutil.CollectAndCount(ls.metrics.epochRolloverPhaseDuration)
 
@@ -277,6 +280,7 @@ func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
 		t.Context(), proposal, nil,
 	))
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 
@@ -405,6 +409,7 @@ func TestTxValidationSessionTickLeavesBoundaryStateUntouched(t *testing.T) {
 				t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
 			)
 			ls.epochCache = []models.Epoch{fixture.currentEpoch}
+			attachTestLiveSet(t, ls)
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			var calls boundaryHookCalls
@@ -477,6 +482,7 @@ func slotSessionFixture(t *testing.T) *treasuryRolloverFixture {
 		t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
 	)
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	attachTestLiveSet(t, fixture.ls)
 	fixture.ls.metrics.init(prometheus.NewRegistry())
 	fixture.ls.publishSnapshotsLocked()
 	return fixture

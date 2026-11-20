@@ -64,6 +64,7 @@ func TestBackfillRewardLiveStakeLeavesADrainedFamilyAlone(t *testing.T) {
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	n.utxoSetReconciled = true
 	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	require.Empty(t, guard.Trips())

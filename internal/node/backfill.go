@@ -182,14 +182,9 @@ type Backfill struct {
 	// (ledger/delta.go): !delegatorInactivityEnabled skips the write.
 	//
 	// The zero value (false, skip) is NOT a safety guarantee about this
-	// path's callers -- it is just what "unset" happens to mean. Both current
-	// callers always call SetDelegatorInactivityEnabled explicitly instead of
-	// relying on it: mithril/sync.go hardcodes false (SyncConfig has no gate
-	// field, and the gate can never be on for that path -- see its call site's
-	// comment), while cmd/dingo/serve.go's resumeBackfill passes the real
-	// cfg.DelegatorInactivityEnabled, which CAN be true (it resumes any
-	// pending API-mode backfill checkpoint, not only a Mithril-originated
-	// one, and does not itself check the gate). A future caller that skips
+	// path's callers -- it is just what "unset" happens to mean. The IndexerDB
+	// writer calls SetDelegatorInactivityEnabled explicitly with the node's
+	// setting, which can be true. A future caller that skips
 	// SetDelegatorInactivityEnabled and relies on this default would silently
 	// drop withdrawal-witness rows if the gate happens to be on for it --
 	// always call the setter explicitly rather than assuming the default is
@@ -1107,7 +1102,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 	var resolveThrough uint64
 	if resumePoint != nil {
-		resolveThrough, _ = b.slotToEpoch(cp.LastSlot)
+		resolveThrough, _ = b.slotToEpoch(resumePoint.Slot)
 	} else if len(b.epochs) > 0 {
 		resolveThrough = b.epochs[0].EpochId
 	}

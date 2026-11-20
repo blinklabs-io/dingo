@@ -97,13 +97,6 @@ func (s drainTestSource) Loaded(f nodesettings.Family) (bool, error) {
 	return ledger.FamilyLoaded(f, s.set)
 }
 
-func (s drainTestSource) Verify(
-	ctx context.Context,
-	f nodesettings.Family,
-) error {
-	return ledger.VerifyFamily(ctx, f, dbadapter.New(s.db), s.set)
-}
-
 func tableRows(t *testing.T, raw *sql.DB, table string) int {
 	t.Helper()
 	var n int
@@ -129,7 +122,7 @@ func p1DrainRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -184,7 +177,6 @@ func p1DrainRun(
 		}
 		runErr = statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src, Guard: guard,
-			VerifyBeforeDrain: true,
 		}, entries)
 		if runErr != nil {
 			return out, guard, scenario.DB, runErr
@@ -266,53 +258,6 @@ func TestNetworkDonationsDrainMatchesAnUndrainedRun(t *testing.T) {
 	)
 }
 
-// A set that differs from the metadata store refuses the drain and leaves
-// the rows.
-func TestDrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		family  nodesettings.Family
-		table   string
-		corrupt func(*database.Database)
-	}{
-		{nodesettings.FamilyNonces, "block_nonce", func(db *database.Database) {
-			require.NoError(t, db.SetBlockNonce(
-				bytes.Repeat([]byte{0xee}, 32), 3, bytes.Repeat([]byte{1}, 32), false, nil,
-			))
-		}},
-		{nodesettings.FamilyNetworkDonations, "network_donation", func(db *database.Database) {
-			require.NoError(t, db.Metadata().AddNetworkDonation(9, 0, 99, nil))
-		}},
-		{nodesettings.FamilyEpochs, "epoch", func(db *database.Database) {
-			require.NoError(t, db.SetEpoch(
-				9_000, 99, nil, nil, nil, nil, 1, 1_000, 10, nil,
-			))
-		}},
-		{nodesettings.FamilySummaries, "epoch_summary", func(db *database.Database) {
-			require.NoError(t, db.Metadata().SaveEpochSummary(
-				&models.EpochSummary{Epoch: 5, TotalActiveStake: 1}, nil,
-			))
-		}},
-	} {
-		t.Run(tc.family.String(), func(t *testing.T) {
-			t.Parallel()
-			_, _, db, err := p1DrainRun(
-				t,
-				[]nodesettings.Family{tc.family},
-				tc.corrupt,
-			)
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, err, "differ")
-			mask, err := db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(tc.family))
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, tc.table))
-		})
-	}
-}
-
 // With the family drained and the set not holding it, the LedgerDB fails the
 // read rather than answer from the empty SQL tables.
 func TestDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
@@ -321,7 +266,7 @@ func TestDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's rows.
 	for _, f := range []nodesettings.Family{
@@ -356,7 +301,7 @@ func TestDrainedNoncePruneChecksTheSetAgainstTheTip(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -445,7 +390,7 @@ func p1EraSwitchRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedMidEpochEraSwitchScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	run := eraSwitchRun{
 		reads: map[string][]string{}, guard: guard, db: scenario.DB,
@@ -467,7 +412,7 @@ func p1EraSwitchRun(
 		require.Len(t, entries, 1)
 		if err := statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard, VerifyBeforeDrain: true,
+			Guard: guard,
 		}, entries); err != nil {
 			return run, err
 		}
@@ -529,25 +474,6 @@ func TestEraSwitchDrainMatchesAnUndrainedRun(t *testing.T) {
 	require.Empty(t, marker, "the drain marker is cleared")
 }
 
-// A recorded switch the set does not hold refuses the drain and leaves the
-// key.
-func TestEraSwitchDrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	run, err := p1EraSwitchRun(t, true, func(db *database.Database) {
-		require.NoError(t, db.SetSyncState(
-			database.MidEpochEraSwitchSyncKey, "3:99:1:2", nil,
-		))
-	})
-	require.ErrorIs(t, err, statedrain.ErrGateRefused)
-	require.ErrorContains(t, err, "differs")
-	mask, err := run.db.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.False(t, mask.Has(nodesettings.FamilyEraSwitch))
-	key, err := run.db.GetSyncState(database.MidEpochEraSwitchSyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, "3:99:1:2", key)
-}
-
 // With the epochs or summaries family drained and the set not holding it, the
 // LedgerDB and the database fail the read rather than answer from the empty
 // SQL tables.
@@ -557,7 +483,7 @@ func TestDrainedEpochReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	for _, f := range []nodesettings.Family{
 		nodesettings.FamilyEpochs, nodesettings.FamilySummaries,

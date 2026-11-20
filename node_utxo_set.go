@@ -19,64 +19,36 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
-	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/ledgerstate"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// openUtxoSet opens the live UTxO set when it is enabled. It needs an on-disk
-// database: an in-memory node logs that and runs without it. It stays open
-// across a live restore or truncate, which reconcile it again.
+// openUtxoSet opens the live UTxO set, which holds the UTxO set and the ledger
+// state. An in-memory node uses a temporary directory. It stays open across a live
+// restore or truncate, which reconcile it again.
 func (n *Node) openUtxoSet() error {
-	if !n.config.ledgerUtxoBadger || n.utxoSet != nil {
+	if n.utxoSet != nil {
 		return nil
 	}
-	if n.config.dataDir == "" {
-		n.config.logger.Warn(
-			"live UTxO set needs an on-disk database; not opening it",
-		)
-		return nil
-	}
-	// The Shelley window, 3k/f, is longer than Byron's 2k, so it covers
-	// every era's rollbacks.
-	history, err := ledger.ShelleyStabilityWindow(
-		n.config.cardanoNodeConfig.ShelleyGenesis(),
-	)
-	if err != nil {
-		n.config.logger.Warn(
-			"no stability window for the live UTxO set; keeping its whole rollback journal",
-			"error",
-			err,
-		)
-		history = 0
-	}
-	cfg := utxoset.Config{
-		Dir:                 utxoset.DirFor(n.config.dataDir),
+	set, tempDir, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
+		DataDir:             n.config.dataDir,
 		Logger:              n.config.logger,
 		Registerer:          n.config.promRegistry,
-		HistorySlots:        history,
-		Only:                n.config.ledgerUtxoBadgerOnly,
+		CardanoNodeConfig:   n.config.cardanoNodeConfig,
 		RetainRewardRecords: n.splitIndexer(),
-		Authoritative: n.config.ledgerUtxoReads ==
-			ledger.UtxoSetReadsSet,
-	}
-	// Only a database whose set is the only copy of the ledger state needs
-	// a checkpoint to recover from; one that keeps the SQL rows rebuilds.
-	if n.config.ledgerStateSetOnly {
-		cfg.CheckpointDir = utxoset.CheckpointDirFor(n.config.dataDir)
-		cfg.CheckpointKeep = n.config.ledgerUtxoCheckpointKeep
-	}
-	set, err := utxoset.Open(cfg)
+		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
+	})
 	if err != nil {
-		return fmt.Errorf("open live UTxO set: %w", err)
+		return err
 	}
+	n.utxoSetTempDir = tempDir
 	n.utxoSet = set
 	n.anchoredUtxoSet.Store(set)
 	n.installLedgerReimport(set)
@@ -88,40 +60,35 @@ func (n *Node) openUtxoSet() error {
 }
 
 // reconcileUtxoSet makes the live UTxO set equal to the ledger's live set,
-// rolling the ledger back to the set's tip when the set trails it. It runs
-// after database recovery and before the ledger starts applying blocks.
+// rolling the ledger back to the set's tip when the set trails it, and drains
+// the graduated ledger-state families. It runs after database recovery and
+// before the ledger starts applying blocks.
 func (n *Node) reconcileUtxoSet(ctx context.Context) error {
-	if err := n.finishDrainedImport(ctx); err != nil {
-		return err
+	r := nodestorage.Reconcile{
+		DB:                         n.db,
+		Set:                        n.utxoSet,
+		DataDir:                    n.config.dataDir,
+		Logger:                     n.config.logger,
+		FinishImport:               n.finishDrainedImport,
+		Publish:                    n.setDrainedFamilies,
+		Resume:                     n.ledgerState.ResumeUtxoSetFrom,
+		RewindBlocks:               n.shelleySecurityParam(),
+		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+		DelegatorInactivity:        n.config.delegatorInactivity,
+		Reconciled: func(ctx context.Context) error {
+			n.utxoSetReconciled = true
+			if err := n.backfillRewardLiveStake(ctx); err != nil {
+				return fmt.Errorf(
+					"failed to backfill reward live stake: %w", err,
+				)
+			}
+			return nil
+		},
 	}
-	if err := n.migrateUtxoRows(ctx); err != nil {
-		return err
+	if n.statementGuard() != nil {
+		r.Guard = n.drainGuard
 	}
-	if err := n.checkLedgerStateSetOnly(ctx); err != nil {
-		return err
-	}
-	if err := n.checkUtxoSetOnly(); err != nil {
-		return err
-	}
-	if err := n.publishDrainedFamilies(ctx); err != nil {
-		return err
-	}
-	if n.utxoSet != nil {
-		if err := n.utxoSet.Reconcile(
-			ctx,
-			dbadapter.New(n.db),
-			n.ledgerState.ResumeUtxoSetFrom,
-		); err != nil {
-			return fmt.Errorf("reconcile live UTxO set: %w", err)
-		}
-	}
-	n.utxoSetReconciled = true
-	if n.config.ledgerUtxoBadgerOnly {
-		if err := n.backfillRewardLiveStake(ctx); err != nil {
-			return fmt.Errorf("failed to backfill reward live stake: %w", err)
-		}
-	}
-	return n.drainLedgerState(ctx)
+	return r.Run(ctx)
 }
 
 // utxoSetBackuper returns the live UTxO set for a snapshot, nil when the node
@@ -153,6 +120,12 @@ func (n *Node) closeUtxoSet() error {
 		return set.Close()
 	})
 	n.utxoSet = nil
+	if n.utxoSetTempDir != "" {
+		if removeErr := os.RemoveAll(n.utxoSetTempDir); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove temporary storage directory: %w", removeErr))
+		}
+		n.utxoSetTempDir = ""
+	}
 	return err
 }
 
@@ -189,147 +162,20 @@ func (n *Node) closeDurable(resource string, closeFn func() error) error {
 	<-stopped
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if err != nil {
-		logger.Error("durable store close failed", "elapsed", elapsed, "error", err)
+		logger.Error(
+			"durable store close failed",
+			"elapsed",
+			elapsed,
+			"error",
+			err,
+		)
 		return err
 	}
 	logger.Info("durable store closed", "elapsed", elapsed)
 	return nil
 }
 
-// migrateUtxoRows moves a database that holds its UTxO set in the metadata
-// store into the live UTxO set when ledgerUtxoBadgerOnly is on, or finishes a
-// move an earlier start began. It runs before the mode checks, which find the
-// database marked once it has finished.
-func (n *Node) migrateUtxoRows(ctx context.Context) error {
-	if !n.config.ledgerUtxoBadgerOnly {
-		return nil
-	}
-	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	progress, err := n.db.GetSyncState(utxoset.MigrationSyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set migration progress: %w", err)
-	}
-	if progress == "" {
-		if marked != "" {
-			return nil
-		}
-		tip, err := n.db.GetTip(nil)
-		if err != nil {
-			return fmt.Errorf("read tip: %w", err)
-		}
-		if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
-			return nil
-		}
-	}
-	if n.utxoSet == nil {
-		return errors.New(
-			"ledgerUtxoBadgerOnly needs the live UTxO set to move this database's UTxO set into, and it is not open",
-		)
-	}
-	n.config.logger.Info(
-		"moving the UTxO set from the metadata store into the live UTxO set",
-		"component", "node",
-	)
-	return n.utxoSet.MigrateFromSQL(
-		ctx,
-		dbadapter.New(n.db),
-		utxoset.MigrationEnv{
-			Store: drainStore{n.db},
-			Mark: func(context.Context) error {
-				return n.db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil)
-			},
-			Marked: func(context.Context) (bool, error) {
-				v, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-				return v != "", err
-			},
-			FreeBytes: func() (uint64, error) {
-				return utxoset.AvailableDiskBytes(n.config.dataDir)
-			},
-			Logger: n.config.logger,
-		},
-	)
-}
-
-// checkUtxoSetOnly keeps a database in the mode it was synced in. A database
-// synced with the live UTxO set as the only copy has no UTxO set in its
-// metadata store to fall back to, so it refuses to start without
-// ledgerUtxoBadgerOnly. A database with a metadata UTxO set is marked by
-// migrateUtxoRows, which runs first.
-func (n *Node) checkUtxoSetOnly() error {
-	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	only := n.config.ledgerUtxoBadgerOnly
-	switch {
-	case !only && marked != "":
-		return errors.New(
-			"this database keeps its UTxO set only in the live UTxO set; start with ledgerUtxoBadgerOnly",
-		)
-	case only && marked == "":
-		tip, err := n.db.GetTip(nil)
-		if err != nil {
-			return fmt.Errorf("read tip: %w", err)
-		}
-		if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
-			return errors.New(
-				"ledgerUtxoBadgerOnly found a metadata UTxO set that was not moved into the live UTxO set",
-			)
-		}
-		if err := n.db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil); err != nil {
-			return fmt.Errorf("record UTxO set mode: %w", err)
-		}
-	}
-	return nil
-}
-
-// checkLedgerStateSetOnly keeps a database in the ledger-state mode it was
-// drained in. A database that has drained, or begun draining, any family has no SQL rows for it,
-// so it refuses to start without ledgerStateSetOnly; and the switch is
-// accepted only for a database that holds no UTxO rows to begin with: one
-// marked set-only, or still at origin.
-func (n *Node) checkLedgerStateSetOnly(ctx context.Context) error {
-	drained, err := n.db.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	if !n.config.ledgerStateSetOnly {
-		if drained != 0 {
-			return fmt.Errorf(
-				"this database no longer holds the SQL rows of ledger-state "+
-					"families %v; start with ledgerStateSetOnly",
-				drained.Families(),
-			)
-		}
-		return nil
-	}
-	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	if marked != "" {
-		return nil
-	}
-	tip, err := n.db.GetTip(nil)
-	if err != nil {
-		return fmt.Errorf("read tip: %w", err)
-	}
-	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
-		return errors.New(
-			"ledgerStateSetOnly needs the UTxO set moved out of the " +
-				"metadata store first, and this database has not finished " +
-				"that move",
-		)
-	}
-	return nil
-}
-
-// utxoSetAnchorInterval is how often the live UTxO set's anchor is refreshed.
-// The anchor is k blocks deep, so a few seconds of staleness cannot matter.
-const utxoSetAnchorInterval = 5 * time.Second
+const utxoSetAnchorInterval = nodestorage.AnchorInterval
 
 // startUtxoSetAnchorUpdater keeps the live UTxO set's anchor at the ledger's
 // immutable point until the node's context ends. ImmutablePoint takes the
@@ -348,11 +194,7 @@ func (n *Node) startUtxoSetAnchorUpdater() {
 		if ls == nil || set == nil {
 			return
 		}
-		point, found, err := ls.ImmutablePoint(ctx)
-		if err != nil || !found {
-			return
-		}
-		set.UpdateAnchor(point)
+		nodestorage.UpdateAnchor(ctx, ls, set)
 	}
 	checkpoint := n.utxoSetCheckpointer()
 	go func() {
@@ -417,10 +259,12 @@ func (p *checkpointPolicy) due(
 // checkpoint only widens what recovery can use.
 func (n *Node) utxoSetCheckpointer() func(context.Context) {
 	every := n.config.ledgerUtxoCheckpointEpochs
-	if !n.config.ledgerStateSetOnly || every <= 0 {
+	if every <= 0 {
 		return func(context.Context) {}
 	}
-	policy := checkpointPolicy{every: uint64(every)} // #nosec G115 -- validated non-negative
+	policy := checkpointPolicy{
+		every: uint64(every),
+	} // #nosec G115 -- validated non-negative
 	var writing atomic.Bool
 	return func(ctx context.Context) {
 		ls := n.wallClockLedger.Load()
@@ -438,7 +282,11 @@ func (n *Node) utxoSetCheckpointer() func(context.Context) {
 		if !writing.CompareAndSwap(false, true) {
 			return
 		}
-		if !n.launchUtxoSetCheckpoint(ctx, set, func() { writing.Store(false) }) {
+		if !n.launchUtxoSetCheckpoint(
+			ctx,
+			set,
+			func() { writing.Store(false) },
+		) {
 			writing.Store(false)
 		}
 	}
@@ -522,16 +370,9 @@ func (n *Node) finishDrainedImport(ctx context.Context) error {
 		_, err := n.utxoSet.Reimport(ctx, tip.Point)
 		return err
 	}
-	if n.utxoSet == nil {
-		return errors.New(
-			"an import of ledger state into the live UTxO set is pending and the set is not open",
-		)
-	}
-	n.config.logger.Info(
-		"finishing an import of ledger state into the live UTxO set",
-		"component", "dingo",
+	return nodestorage.FinishDrainedImport(
+		ctx, n.db, n.utxoSet, n.config.logger,
 	)
-	return ledgerstate.FinishDrainedImport(ctx, n.db, n.utxoSet)
 }
 
 // resumeLedgerReimport finishes a ledger-state re-import the node began and
@@ -573,7 +414,10 @@ func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, fmt.Errorf("read live UTxO set tip: %w", err)
 	}
-	swapped, err := n.db.GetSyncState(database.LedgerReimportSwappedSyncKey, nil)
+	swapped, err := n.db.GetSyncState(
+		database.LedgerReimportSwappedSyncKey,
+		nil,
+	)
 	if err != nil {
 		return true, fmt.Errorf("read re-import swap mark: %w", err)
 	}
@@ -595,11 +439,10 @@ func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
 }
 
 // installLedgerReimport gives the set the Mithril re-import it falls back to
-// when no checkpoint brings it to the ledger. It is installed only for a
-// database whose set is the only copy of the ledger state.
+// when no checkpoint brings it to the ledger.
 func (n *Node) installLedgerReimport(set *utxoset.Set) {
 	factory := n.config.mithrilLedgerReimport
-	if factory == nil || !n.config.ledgerStateSetOnly {
+	if factory == nil {
 		return
 	}
 	storageMode := n.config.storageMode

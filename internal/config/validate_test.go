@@ -347,43 +347,6 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid storageMode",
 		},
 		{
-			name: "invalid ledger UTxO read mode",
-			modify: func(c *Config) {
-				c.LedgerUtxoBadger = true
-				c.LedgerUtxoReads = "badger"
-			},
-			wantErr: "invalid ledgerUtxoReads",
-		},
-		{
-			name: "shadow with the Badger set as the only copy",
-			modify: func(c *Config) {
-				c.LedgerUtxoBadger = true
-				c.LedgerUtxoBadgerOnly = true
-				c.LedgerUtxoShadow = true
-			},
-			wantErr: "ledgerUtxoShadow cannot run",
-		},
-		{
-			name:    "ledger UTxO reads without the Badger set",
-			modify:  func(c *Config) { c.LedgerUtxoReads = "set" },
-			wantErr: "needs ledgerUtxoBadger",
-		},
-		{
-			name: "keep mithril chunks without the immutable db",
-			modify: func(c *Config) {
-				c.ImmutableDB.KeepMithrilChunks = true
-			},
-			wantErr: "immutableDb.keepMithrilChunks requires immutableDb.enabled",
-		},
-		{
-			name: "immutable db with history expiry",
-			modify: func(c *Config) {
-				c.ImmutableDB.Enabled = true
-				c.HistoryExpiry.Enabled = true
-			},
-			wantErr: "immutableDb.enabled cannot be combined with historyExpiry.enabled",
-		},
-		{
 			name: "immutable db promote batch above the limit",
 			modify: func(c *Config) {
 				c.ImmutableDB.PromoteBatch = MaxImmutableDBPromoteBatch + 1
@@ -1186,6 +1149,13 @@ func TestValidate(t *testing.T) {
 		{
 			name:   "empty mithril backend",
 			modify: func(c *Config) { c.Mithril.Backend = "" },
+		},
+		{
+			name: "history expiry in api storage mode",
+			modify: func(c *Config) {
+				c.StorageMode = "api"
+				c.HistoryExpiry.Enabled = true
+			},
 		},
 	}
 	for _, tt := range tests {

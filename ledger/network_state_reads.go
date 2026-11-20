@@ -39,22 +39,22 @@ type NetworkStateReader interface {
 }
 
 // networkStateReader returns the set's network state reader and the read
-// mode, or UtxoSetReadsOff when these reads stay on the metadata store.
+// mode, or false when these reads stay on the metadata store.
 func (ls *LedgerState) networkStateReader(
 	txn ledgerdb.Txn,
-) (NetworkStateReader, string) {
+) (NetworkStateReader, bool) {
 	_, mode := ls.utxoSetReader()
-	if mode == UtxoSetReadsOff {
-		return nil, UtxoSetReadsOff
+	if !mode {
+		return nil, false
 	}
 	r, ok := ls.readSet(txn).(NetworkStateReader)
 	if !ok {
-		return nil, UtxoSetReadsOff
+		return nil, false
 	}
 	if !ls.networkStateSetLoaded.Load() {
 		loaded, err := r.NetworkStateLoaded()
 		if err != nil || !loaded {
-			return nil, UtxoSetReadsOff
+			return nil, false
 		}
 		ls.networkStateSetLoaded.Store(true)
 	}
@@ -189,81 +189,29 @@ func sameNetworkState(a, b *models.NetworkState) bool {
 		a.Reserves == b.Reserves
 }
 
-func (ls *LedgerState) compareNetworkStateRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.networkStateReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.networkStateReadMismatches.Add(1)
-	ls.metrics.networkStateReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set network state read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
 func (s stagingLedgerDB) GetNetworkState(
 	txn ledgerdb.Txn,
 ) (*models.NetworkState, error) {
-	return s.networkStateAt(txn, "network state", math.MaxUint64,
-		func() (*models.NetworkState, error) {
-			return s.LedgerDB.GetNetworkState(txn)
-		},
-	)
+	return s.networkStateAt(txn, math.MaxUint64)
 }
 
 func (s stagingLedgerDB) GetNetworkStateAsOfSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (*models.NetworkState, error) {
-	return s.networkStateAt(txn, fmt.Sprintf("network state at %d", slot), slot,
-		func() (*models.NetworkState, error) {
-			return s.LedgerDB.GetNetworkStateAsOfSlot(slot, txn)
-		},
-	)
+	return s.networkStateAt(txn, slot)
 }
 
 func (s stagingLedgerDB) networkStateAt(
 	txn ledgerdb.Txn,
-	what string,
 	slot uint64,
-	stored func() (*models.NetworkState, error),
 ) (*models.NetworkState, error) {
 	r, mode := s.ls.networkStateReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.ls.familyDrained(nodesettings.FamilyNetworkDonations) {
-			return nil, drainedUnserved(nodesettings.FamilyNetworkDonations)
-		}
-		return stored()
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyNetworkDonations)
 	}
-	g := s.ls.beginVerifyRead(txn)
 	fromSet, setErr := s.ls.networkStateAt(r, txn, slot)
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := stored()
-	if err != nil {
-		return nil, err
-	}
-	s.ls.compareNetworkStateRead(g, what, sameNetworkState(want, fromSet), setErr)
-	return want, nil
+	return fromSet, setErr
 }
 
 func (s stagingLedgerDB) SumNetworkDonationsForEpoch(
@@ -271,38 +219,20 @@ func (s stagingLedgerDB) SumNetworkDonationsForEpoch(
 	txn ledgerdb.Txn,
 ) (uint64, error) {
 	r, mode := s.ls.networkStateReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.ls.familyDrained(nodesettings.FamilyNetworkDonations) {
-			return 0, drainedUnserved(nodesettings.FamilyNetworkDonations)
-		}
-		return s.LedgerDB.SumNetworkDonationsForEpoch(epoch, txn)
+	if !mode || r == nil {
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilyNetworkDonations)
 	}
-	g := s.ls.beginVerifyRead(txn)
 	fromSet, setErr := s.ls.donationsForEpoch(r, txn, epoch)
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := s.LedgerDB.SumNetworkDonationsForEpoch(epoch, txn)
-	if err != nil {
-		return 0, err
-	}
-	s.ls.compareNetworkStateRead(
-		g, fmt.Sprintf("donations of epoch %d", epoch), want == fromSet, setErr,
-	)
-	return want, nil
+	return fromSet, setErr
 }
 
-// ListNetworkDonations lists the set's donations, as txn sees them, when the
-// family is drained; it is otherwise the metadata store's.
+// ListNetworkDonations lists the set's network donations as txn sees them.
 func (s stagingLedgerDB) ListNetworkDonations(
 	txn ledgerdb.Txn,
 ) ([]models.NetworkDonation, error) {
-	if !s.ls.familyDrained(nodesettings.FamilyNetworkDonations) {
-		return s.LedgerDB.ListNetworkDonations(txn)
-	}
 	r, _ := s.ls.networkStateReader(txn)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyNetworkDonations)
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyNetworkDonations)
 	}
 	return s.ls.donationList(r, txn)
 }

@@ -15,16 +15,11 @@
 package ledger_test
 
 import (
-	"bytes"
 	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,31 +76,3 @@ func TestLatestCommitteeReadsAreServedFromTheSet(t *testing.T) {
 }
 
 // Verify mode answers from the store and counts a difference from the set.
-func TestLatestCommitteeReadsMatchTheStoreInVerifyMode(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	scenario.Committee()
-	verifiedBefore, before := scenario.CommitteeReads()
-	got := latestCommitteeRows(t, scenario.LedgerDB(), "verify")
-	require.Equal(t, latestCommitteeRows(t, store, "store"), got)
-	verified, mismatches := scenario.CommitteeReads()
-	require.Equal(t, verifiedBefore+2, verified, "both reads were compared")
-	require.Equal(t, before, mismatches)
-	// Written around the ledger, so the set never sees it.
-	raw, err := dbtest.RawSQLiteMetadata(t, scenario.DB)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO resign_committee_cold (cold_credential, cold_credential_tag, added_slot)
-VALUES (?, 0, 3)`, bytes.Repeat([]byte{0x6e}, 28))
-	require.NoError(t, err)
-	_ = latestCommitteeRows(t, scenario.LedgerDB(), "verify")
-	_, after := scenario.CommitteeReads()
-	require.Equal(t, before+1, after, "the set's resignations differ")
-}

@@ -71,6 +71,7 @@ func TestGenesisStartEraHonoursScheduledDijkstraFork(t *testing.T) {
 			require.NoError(t, err)
 			ls, err := NewLedgerState(LedgerStateConfig{
 				Database:              db,
+				UtxoSet:               NewMemLiveSetForTest(),
 				ChainManager:          cm,
 				CardanoNodeConfig:     cfg,
 				Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),

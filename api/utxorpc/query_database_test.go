@@ -73,6 +73,61 @@ func (d *recordingQueryDB) Ready(kind indexerdb.Kind) (bool, error) {
 	return d.ready[kind], nil
 }
 
+// stubQueryDatabase serves the QueryService reads from the rows a ledger stub
+// answers itself, always ready and at the stub's tip.
+type stubQueryDatabase struct{ ls UtxorpcLedgerState }
+
+func stubQueryDB(ls UtxorpcLedgerState) QueryDatabase {
+	return stubQueryDatabase{ls: ls}
+}
+
+func (s stubQueryDatabase) Datums(
+	ctx context.Context, hashes [][]byte,
+) ([]*models.Datum, error) {
+	return s.ls.(interface {
+		Datums(context.Context, [][]byte) ([]*models.Datum, error)
+	}).Datums(ctx, hashes)
+}
+
+func (s stubQueryDatabase) TransactionByHash(
+	ctx context.Context, hash []byte,
+) (*models.Transaction, error) {
+	return s.ls.(interface {
+		TransactionByHash(context.Context, []byte) (*models.Transaction, error)
+	}).TransactionByHash(ctx, hash)
+}
+
+func (s stubQueryDatabase) UtxosByRefsBounded(
+	ctx context.Context, refs []models.UtxoId, maxBytes int64,
+) ([]models.Utxo, error) {
+	return s.ls.(interface {
+		UtxosByRefsBounded(
+			context.Context, []models.UtxoId, int64,
+		) ([]models.Utxo, error)
+	}).UtxosByRefsBounded(ctx, refs, maxBytes)
+}
+
+func (s stubQueryDatabase) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return s.ls.(interface {
+		UtxosByAddressBoundedPage(
+			context.Context, *models.UtxoWithOrderingQuery, int, int64,
+		) (models.UtxoAddressPage, error)
+	}).UtxosByAddressBoundedPage(ctx, q, maxCandidates, maxBytes)
+}
+
+func (s stubQueryDatabase) Tip() (ochainsync.Tip, error) {
+	return s.ls.Tip(), nil
+}
+
+func (stubQueryDatabase) Ready(indexerdb.Kind) (bool, error) {
+	return true, nil
+}
+
 // panicLedger fails the test, by nil dereference, if a query reaches the
 // ledger instead of the query database.
 type panicLedger struct{ UtxorpcLedgerState }

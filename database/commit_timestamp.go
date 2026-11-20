@@ -196,7 +196,9 @@ func (d *Database) phase1GateValues() (nodesettings.Values, error) {
 // Reversing this order (copying the legacy row on top of the gate table)
 // would let that stale legacy column shadow a correctly-latched gate
 // value forever, which is exactly the bug this ordering fixes.
-func (d *Database) persistedGateValues(ctx context.Context) (nodesettings.Values, error) {
+func (d *Database) persistedGateValues(
+	ctx context.Context,
+) (nodesettings.Values, error) {
 	legacy, err := d.Metadata().GetNodeSettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -251,7 +253,10 @@ func (d *Database) persistedGateValues(ctx context.Context) (nodesettings.Values
 // ever touches network -- so this mirror can never contradict
 // node_settings_gate, which remains the only thing persistedGateValues
 // treats as authoritative for storage_mode.
-func (d *Database) writeGateValues(ctx context.Context, writes nodesettings.Values) error {
+func (d *Database) writeGateValues(
+	ctx context.Context,
+	writes nodesettings.Values,
+) error {
 	if len(writes) == 0 {
 		return nil
 	}
@@ -320,7 +325,9 @@ func (d *Database) writeDBInfoSidecar() {
 // that function's doc comment for the two guards and the fatal/non-fatal
 // split between callers.
 func (d *Database) writeDBInfoSidecarErr() error {
-	if d.config.MetadataPlugin == "" {
+	// An in-memory database has no directory a later start could reopen, so
+	// there is nothing for the sidecar to protect.
+	if d.config.MetadataPlugin == "" || d.config.DataDir == "" {
 		return nil
 	}
 	existing, err := dbinfo.Read(d.config.DataDir)
@@ -344,7 +351,9 @@ func (d *Database) writeDBInfoSidecarErr() error {
 // writes with when they were recorded. It returns zeros when there is no
 // tip yet, which is the normal state for a database open that precedes the
 // first block being processed.
-func (d *Database) currentEpochSlot(ctx context.Context) (epoch uint64, slot uint64) {
+func (d *Database) currentEpochSlot(
+	ctx context.Context,
+) (epoch uint64, slot uint64) {
 	txn := d.MetadataTxn(ctx, false)
 	defer txn.Release()
 	tip, err := d.GetTip(txn)
@@ -422,8 +431,7 @@ func (d *Database) evaluateAndPersistGates(ctx context.Context,
 			return NodeSettingsError{Mismatches: []string{
 				"indexer layout: configured \"split\" but this database " +
 					"already holds chain state without an IndexerDB, and " +
-					"only an API-mode sqlite store is migrated into one " +
-					"at startup",
+					"startup migration must complete before opening the consensus store",
 			}}
 		}
 	}

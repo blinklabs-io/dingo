@@ -119,7 +119,7 @@ func (ls *LedgerState) rewardOutputReader(txn ledgerdb.Txn) RewardOutputReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(RewardOutputReader)
@@ -137,12 +137,11 @@ func (ls *LedgerState) rewardOutputReader(txn ledgerdb.Txn) RewardOutputReader {
 }
 
 // rewardOutputServing returns the set's reward output reader when the reward
-// reads are answered from it: reads are in set mode and the set holds the
-// rows.
+// reads are answered from it and the set holds the rows.
 func (ls *LedgerState) rewardOutputServing(
 	txn ledgerdb.Txn,
 ) RewardOutputReader {
-	if _, mode := ls.utxoSetReader(); mode != UtxoSetReadsSet {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	return ls.rewardOutputReader(txn)
@@ -732,51 +731,6 @@ func (s stagingLedgerDB) ClaimUnfoldedRewardCredits(
 	return out, nil
 }
 
-func (ls *LedgerState) compareRewardOutputRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.rewardOutputReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.rewardOutputReadMismatches.Add(1)
-	ls.metrics.rewardOutputReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set reward output read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// verifyRewardOutputs compares a read with the answer the set's reward rows
-// give. A set without its rows, or reads off, are not compared.
-func (s stagingLedgerDB) verifyRewardOutputs(
-	g verifyReadGuard,
-	what string,
-	same func(r RewardOutputReader) (bool, error),
-) {
-	r := s.ls.rewardOutputReader(g.txn)
-	if r == nil {
-		return
-	}
-	ok, err := same(r)
-	s.ls.compareRewardOutputRead(g, what, err == nil && ok, err)
-}
-
 func sameRewardRound(a, b models.RewardCreditRound) bool {
 	return a.SnapshotEpoch == b.SnapshotEpoch && a.BoundarySlot == b.BoundarySlot
 }
@@ -794,47 +748,21 @@ func (s stagingLedgerDB) HasAppliedRewardCreditRound(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return false, serr
-	}
-	if r != nil {
-		return s.ls.rewardRoundSeenBy(r, txn, epoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.HasAppliedRewardCreditRound(epoch, txn)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return false, err
 	}
-	s.verifyRewardOutputs(g, fmt.Sprintf("applied round %d", epoch),
-		func(r RewardOutputReader) (bool, error) {
-			ok, err := s.ls.rewardRoundSeenBy(r, txn, epoch)
-			return ok == res, err
-		})
-	return res, nil
+	return s.ls.rewardRoundSeenBy(r, txn, epoch)
 }
 
 func (s stagingLedgerDB) GetPendingRewardCreditRounds(
 	txn ledgerdb.Txn,
 ) ([]models.RewardCreditRound, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return nil, serr
-	}
-	if r != nil {
-		return s.ls.rewardRoundsView(r, txn)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetPendingRewardCreditRounds(txn)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	s.verifyRewardOutputs(g, "credited rounds",
-		func(r RewardOutputReader) (bool, error) {
-			got, err := s.ls.rewardRoundsView(r, txn)
-			return slices.EqualFunc(got, res, sameRewardRound), err
-		})
-	return res, nil
+	return s.ls.rewardRoundsView(r, txn)
 }
 
 func (s stagingLedgerDB) GetPendingRewardAccountOutputsForCredential(
@@ -842,88 +770,43 @@ func (s stagingLedgerDB) GetPendingRewardAccountOutputsForCredential(
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return nil, serr
-	}
-	if r != nil {
-		if len(stakingKey) == 0 {
-			return nil, nil
-		}
-		rows, err := s.ls.pendingRewardOutputsView(
-			r, txn, credentialTag, stakingKey,
-		)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]*models.RewardAccountOutput, len(rows))
-		for i := range rows {
-			out[i] = &rows[i]
-		}
-		return out, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetPendingRewardAccountOutputsForCredential(
-		credentialTag, stakingKey, txn,
-	)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	s.verifyRewardOutputs(g, fmt.Sprintf("pending outputs of %d:%x", credentialTag, stakingKey),
-		func(r RewardOutputReader) (bool, error) {
-			got, err := s.ls.pendingRewardOutputsView(r, txn, credentialTag, stakingKey)
-			return slices.EqualFunc(got, res, func(a models.RewardAccountOutput, b *models.RewardAccountOutput) bool {
-				return sameRewardOutput(&a, b)
-			}), err
-		})
-	return res, nil
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	rows, err := s.ls.pendingRewardOutputsView(r, txn, credentialTag, stakingKey)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.RewardAccountOutput, len(rows))
+	for i := range rows {
+		out[i] = &rows[i]
+	}
+	return out, nil
 }
 
 func (s stagingLedgerDB) HasPendingRewardCreditRounds(
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return false, serr
-	}
-	if r != nil {
-		return s.ls.hasCreditedRewardOutputs(r, txn, nil)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.HasPendingRewardCreditRounds(txn)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return false, err
 	}
-	s.verifyRewardOutputs(g, "pending credit rounds",
-		func(r RewardOutputReader) (bool, error) {
-			has, err := s.ls.hasCreditedRewardOutputs(r, txn, nil)
-			return has == res, err
-		})
-	return res, nil
+	return s.ls.hasCreditedRewardOutputs(r, txn, nil)
 }
 
 func (s stagingLedgerDB) HasUnfoldedRewardCreditsThroughEpoch(
 	snapshotEpoch uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return false, serr
-	}
-	if r != nil {
-		return s.ls.hasCreditedRewardOutputs(r, txn, &snapshotEpoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.HasUnfoldedRewardCreditsThroughEpoch(snapshotEpoch, txn)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return false, err
 	}
-	s.verifyRewardOutputs(g, fmt.Sprintf("unfolded credits through epoch %d", snapshotEpoch),
-		func(r RewardOutputReader) (bool, error) {
-			has, err := s.ls.hasCreditedRewardOutputs(r, txn, &snapshotEpoch)
-			return has == res, err
-		})
-	return res, nil
+	return s.ls.hasCreditedRewardOutputs(r, txn, &snapshotEpoch)
 }
 
 // GetPostSnapshotRewardCreditEvents is the store's own read until the accounts
@@ -934,16 +817,12 @@ func (s stagingLedgerDB) GetPostSnapshotRewardCreditEvents(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	accounts := s.ls.familyDrained(nodesettings.FamilyAccounts)
-	if !accounts && !s.rewardOutputsDrained() {
-		return s.LedgerDB.GetPostSnapshotRewardCreditEvents(slot, txn)
-	}
 	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
 		return nil, err
 	}
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	credits, err := s.ls.postSnapshotCreditRows(r, txn, slot)
 	if err != nil {
@@ -956,33 +835,17 @@ func (s stagingLedgerDB) GetPostSnapshotRewardCredits(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	r, serr := s.rewardOutputsServed(txn)
-	if serr != nil {
-		return nil, serr
-	}
-	if r != nil {
-		rows, err := s.ls.postSnapshotCreditsView(r, txn, slot)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]*models.AccountRewardDelta, len(rows))
-		for i := range rows {
-			out[i] = &rows[i]
-		}
-		return out, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetPostSnapshotRewardCredits(slot, txn)
+	r, err := s.rewardOutputsServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	s.verifyRewardOutputs(g, fmt.Sprintf("post-snapshot credits at slot %d", slot),
-		func(r RewardOutputReader) (bool, error) {
-			got, err := s.ls.postSnapshotCreditsView(r, txn, slot)
-			return slices.EqualFunc(got, res, func(a models.AccountRewardDelta, b *models.AccountRewardDelta) bool {
-				return a.CredentialTag == b.CredentialTag &&
-					bytes.Equal(a.StakingKey, b.StakingKey) && a.Amount == b.Amount
-			}), err
-		})
-	return res, nil
+	rows, err := s.ls.postSnapshotCreditsView(r, txn, slot)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.AccountRewardDelta, len(rows))
+	for i := range rows {
+		out[i] = &rows[i]
+	}
+	return out, nil
 }

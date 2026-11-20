@@ -1387,6 +1387,19 @@ func (m *Manager) captureMarkSnapshot(
 	return nil
 }
 
+// ErrGenesisMarkUnavailable reports a database whose ledger state as of slot 0
+// could not be read to capture the epoch 0 mark snapshot and which does not
+// record what stands in for it: that mark while still in epoch 0, or the
+// marks of the current epoch and the two before it afterwards. A start in
+// epoch 0 records the mark, so a database past its first block lacks it only
+// when an earlier capture failed; one moved into the live UTxO set there has
+// no journal reaching slot 0 to capture it from.
+var ErrGenesisMarkUnavailable = errors.New(
+	"the ledger state as of slot 0 cannot be read to capture the epoch 0 " +
+		"mark snapshot, and the database does not record the mark " +
+		"snapshots that stand in for it",
+)
+
 // HandleGenesisSnapshotError applies the standard policy for a failed genesis
 // (epoch 0) mark-snapshot capture: it is fatal for a block producer (which
 // cannot elect leaders without the snapshot) and a warning for a relay or
@@ -1448,13 +1461,37 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		ctx, 0, 0, m.expiryEpoch(0),
 	)
 	if err != nil {
+		// A database past its first block answers this from the ledger state
+		// as of slot 0, which one whose history starts later cannot give: a
+		// released database moved into the live UTxO set inside epoch 0 has
+		// no journal below the block it was moved at. The mark it captured
+		// at genesis is still recorded, and the genesis state it describes
+		// cannot have changed.
+		recorded, recErr := m.genesisMarkRecorded()
+		if recErr == nil && recorded {
+			m.logger.Info(
+				"epoch 0 mark snapshot already recorded; skipping genesis snapshot capture",
+				"component", "snapshot",
+				"reason", err,
+			)
+			return nil
+		}
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
 			m.metrics.captureDurationSeconds.Observe(
 				time.Since(start).Seconds(),
 			)
 		}
-		return fmt.Errorf("calculate genesis distribution: %w", err)
+		if recErr != nil {
+			return fmt.Errorf(
+				"calculate genesis distribution: %w",
+				errors.Join(err, recErr),
+			)
+		}
+		return fmt.Errorf(
+			"%w: calculate genesis distribution: %w",
+			ErrGenesisMarkUnavailable, err,
+		)
 	}
 
 	// After Mithril import, slot 0 has no pool data. Fall back to
@@ -1683,6 +1720,35 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		m.metrics.lastSuccessfulEpoch.Set(float64(lastSuccessfulEpoch))
 	}
 	return nil
+}
+
+// genesisMarkRecorded reports whether a database still in epoch 0 holds the
+// epoch 0 mark snapshot: its ready epoch summary, with the totals of the pool
+// rows recorded beside it. A summary alone is not enough, since summaries
+// survive the pruning of the pool rows.
+func (m *Manager) genesisMarkRecorded() (bool, error) {
+	epochs, err := m.db.GetEpochs(nil)
+	if err != nil {
+		return false, fmt.Errorf("load epochs: %w", err)
+	}
+	if len(epochs) == 0 || epochs[len(epochs)-1].EpochId != 0 {
+		return false, nil
+	}
+	snapshots, err := m.db.GetPoolStakeSnapshotsByEpoch(0, "mark", nil)
+	if err != nil {
+		return false, fmt.Errorf("load mark snapshots for epoch 0: %w", err)
+	}
+	var totalStake uint64
+	for _, snapshot := range snapshots {
+		totalStake += uint64(snapshot.TotalStake)
+	}
+	summary, err := m.db.GetEpochSummary(0, nil)
+	if err != nil {
+		return false, fmt.Errorf("load epoch summary for epoch 0: %w", err)
+	}
+	return summary != nil && summary.SnapshotReady &&
+		uint64(summary.TotalActiveStake) == totalStake &&
+		summary.TotalPoolCount == uint64(len(snapshots)), nil
 }
 
 func (m *Manager) hasExistingPostMithrilSnapshotWindow() (

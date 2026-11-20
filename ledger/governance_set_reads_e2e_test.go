@@ -291,7 +291,7 @@ func requireProposalVoteReads(
 }
 
 // TestGovernanceReadsFromTheLiveUtxoSet reads every proposal and vote read
-// through the ledger's LedgerDB in set mode with the metadata store's reads
+// through the ledger's LedgerDB from the live set with the metadata store's reads
 // failing, after each write of the proposal scenario (submissions, votes,
 // re-votes, ratification and its clearing, a DRep's votes deleted, an
 // expiry, an era translation of the action CBOR, a drop and an enactment),
@@ -335,8 +335,6 @@ func TestGovernanceReadsFromTheLiveUtxoSet(t *testing.T) {
 	// from before it, where the store keeps the translated bytes.
 	requireProposalVoteReads(t, ldb, store, "after the rollback", false)
 	require.Zero(t, reached(), "a read reached the metadata store")
-	_, mismatches := scenario.GovernanceReads()
-	require.Zero(t, mismatches)
 }
 
 func updateCommitteeCbor(
@@ -358,7 +356,7 @@ func updateCommitteeCbor(
 
 // TestGovernanceTallyAndCommitteeLineageFromTheLiveUtxoSet tallies a
 // proposal and resolves pending committee members through the ledger's
-// LedgerDB in set mode with the metadata store's governance reads failing,
+// LedgerDB from the live set with the metadata store's governance reads failing,
 // and requires the results to be the ones the store gives. The tally reads
 // the proposal's votes by its row ID. The lineage walk tracks visited
 // proposals by row ID, and two proposals that add a credential in one slot
