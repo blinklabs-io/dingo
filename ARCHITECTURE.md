@@ -7819,11 +7819,10 @@ dependency across two points in the pipeline:
   reference's `VRFKeyUnknown`. A Mithril restore imports the certified Praos
   HeaderState counter map at its trusted tip, so each included pool has an
   authoritative baseline before the first replayed block and a pool absent from
-  that map is absent from the reference state too. A Mithril-restored database
-  with no certified row at its boundary never imported the map, so the counter
-  of a pool not observed since the boundary is unknown rather than zero; the
-  read fails with a rebootstrap error instead of rejecting that pool's next
-  valid block. Rollback safety is inherited from the per-`(pool, slot)`
+  that map is absent from the reference state too. The loaded map is the
+  ledger's counter state from then on: block application reads a pool's
+  current counter the same way whether the state was loaded at a tip or built
+  block by block. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back. The SQL store flips the counter's sign bit on write and
@@ -13684,16 +13683,11 @@ therefore share the reference's full counter range.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
-resolves the "latest observed" counter via the same Mithril-boundary-aware
-path as block application (`latestOpCertCounterForValidation`, both now
-backed by the shared `latestOpCertCounterAfterMithril`), instead of a plain
-`MAX` over the whole table. A Mithril-restored node's per-pool opcert
-history is only trustworthy after the certified boundary; a plain MAX could
-return a stale pre-boundary row that block application itself does not
-trust as a baseline. Neither caller otherwise holds a lock across
-`mithrilLedgerSlot`, so both resolve it through the existing lock-safe
-`mithrilLedgerSlotSnapshot` accessor before calling the shared resolver,
-rather than reading the field directly.
+returns the pool's current counter, the same read block application makes
+(`latestOpCertCounterForValidation`). A ledger loaded at a tip holds that
+tip's counter map, so no caller distinguishes a loaded state from one built
+block by block. The live UTxO set answers a counter read as of a slot before
+its record from the oldest counter it holds, the baseline it was loaded with.
 
 Startup's `PoolCredentials.ValidateAgainstLedger` deliberately stays on the
 staleness-only half of this rule and does not apply the era-scoped no-gap

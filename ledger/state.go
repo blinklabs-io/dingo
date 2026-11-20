@@ -4009,11 +4009,8 @@ func (ls *LedgerState) electingVrfKeyHashAtSlot(
 }
 
 // LatestOpCertSequence returns the highest opcert issue-number counter
-// observed for poolID, honoring the same Mithril trust boundary block
-// application enforces (see latestOpCertCounterAfterMithril): a plain MAX
-// over the whole table would trust rows a Mithril import left below the
-// certified boundary, giving startup and forge-loop credential checks a
-// baseline block application itself does not use.
+// observed for poolID, the counter block application checks the pool's next
+// block against.
 func (ls *LedgerState) LatestOpCertSequence(
 	poolID [28]byte,
 ) (sequence uint64, found bool, err error) {
@@ -4025,12 +4022,8 @@ func (ls *LedgerState) LatestOpCertSequence(
 	if !status.Active {
 		return 0, false, nil
 	}
-	return ls.latestOpCertCounterAfterMithril(
-		context.Background(),
-		pkh,
-		ls.mithrilLedgerSlotSnapshot(),
-		nil,
-		nil,
+	return ls.ledgerDB().LatestPoolOpCertSequence(
+		context.Background(), pkh, nil,
 	)
 }
 
@@ -9554,13 +9547,11 @@ func (ls *LedgerState) processBlocksFromSource(
 	var delta *LedgerDelta
 	var deltaBatch *LedgerDeltaBatch
 	var trustedReplayOpCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
-	var trustedReplayBoundaryCounters *trustedReplayBoundaryCounterState
 	var trustedReplayUtxos map[utxoref.Key]lcommon.Utxo
 	if trustedReplay {
 		trustedReplayOpCertCounters = make(
 			map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 		)
-		trustedReplayBoundaryCounters = &trustedReplayBoundaryCounterState{}
 	}
 	completeReadResult := func() {
 		if currentReadResultDone != nil {
@@ -10604,7 +10595,6 @@ func (ls *LedgerState) processBlocksFromSource(
 					if trustedReplayOpCertCounters != nil {
 						transactionOpCertCounters = &trustedReplayOpCertCounterCache{
 							committed: trustedReplayOpCertCounters,
-							boundary:  trustedReplayBoundaryCounters,
 							staged: make(
 								map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 							),
@@ -12083,33 +12073,24 @@ func (ls *LedgerState) ledgerProcessBlock(
 	return delta, nil
 }
 
-// latestOpCertCounterForValidation returns the highest observed counter after
-// the Mithril boundary, or the certified counter at the boundary when no later
-// row exists. Rows before the boundary are not part of the certified state.
-// Reads mithrilLedgerSlot through the lock-safe mithrilLedgerSlotSnapshot,
-// since the block-apply transaction this runs inside does not itself hold
-// a lock across that field (the snapshot taken before the transaction,
-// e.g. ledgerProcessBlocksFromSource's snapshotMithrilSlot, is not
-// threaded down to this call).
+// latestOpCertCounterForValidation returns the pool's current counter: the
+// entry of the ledger's counter map, which holds the highest counter a block
+// of the pool was accepted with. A ledger loaded at a tip holds that tip's
+// map, so the read is the same one whether the state was loaded or built
+// block by block.
 func (ls *LedgerState) latestOpCertCounterForValidation(
 	ctx context.Context,
 	poolKeyHash lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
 	cache := trustedReplayOpCertCounterCacheFrom(ctx)
-	var boundaryCounters *trustedReplayBoundaryCounterState
 	if cache != nil {
-		boundaryCounters = cache.boundary
 		if counter, ok := cache.lookup(poolKeyHash); ok {
 			return counter.sequence, counter.found, nil
 		}
 	}
-	sequence, found, err := ls.latestOpCertCounterAfterMithril(
-		ctx,
-		poolKeyHash,
-		ls.mithrilLedgerSlotSnapshot(),
-		txn,
-		boundaryCounters,
+	sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequence(
+		ctx, poolKeyHash, txn,
 	)
 	if err == nil && cache != nil {
 		cache.staged[poolKeyHash] = opCertCounterSnapshot{
@@ -12128,36 +12109,9 @@ type opCertCounterSnapshot struct {
 type trustedReplayOpCertCounterCache struct {
 	committed map[lcommon.PoolKeyHash]opCertCounterSnapshot
 	staged    map[lcommon.PoolKeyHash]opCertCounterSnapshot
-	boundary  *trustedReplayBoundaryCounterState
 }
 
 const trustedReplayOpCertCounterCacheLimit = 65_536
-
-type trustedReplayBoundaryCounterState struct {
-	slot     uint64
-	checked  bool
-	imported bool
-}
-
-func (c *trustedReplayBoundaryCounterState) hasCountersAtSlot(
-	slot uint64,
-	check func() (bool, error),
-) (bool, error) {
-	if c == nil {
-		return check()
-	}
-	if c.checked && c.slot == slot {
-		return c.imported, nil
-	}
-	imported, err := check()
-	if err != nil {
-		return false, err
-	}
-	c.slot = slot
-	c.imported = imported
-	c.checked = true
-	return imported, nil
-}
 
 type trustedReplayOpCertCounterCacheContextKey struct{}
 
@@ -12230,78 +12184,6 @@ func trimTrustedReplayOpCertCounters(
 		}
 		delete(counters, poolKeyHash)
 	}
-}
-
-// latestOpCertCounterAfterMithril is the Mithril-boundary-aware resolver
-// shared by latestOpCertCounterForValidation (block application) and
-// LatestOpCertSequence (startup and forge-loop credential checks), so both
-// paths agree on which counter is "the latest observed" for a pool instead
-// of one trusting a plain MAX over rows a Mithril import may have left
-// stale relative to the certified boundary. mithrilLedgerSlot is passed in
-// rather than read from ls directly so each caller controls how it is
-// obtained (a lock-safe snapshot, or a value already captured under one).
-//
-// found is false only when the pool is absent from a counter state this node
-// actually holds, which the counter rule reads as the reference's zero
-// baseline. A Mithril-restored database without the certified counter map at
-// its boundary (one imported before that map was persisted) does not hold that
-// state: the pool may have rotated many times before the boundary, so zero
-// would reject its next valid block. That case returns
-// errOpCertBaselineNotImported instead.
-func (ls *LedgerState) latestOpCertCounterAfterMithril(
-	ctx context.Context,
-	poolKeyHash lcommon.PoolKeyHash,
-	mithrilLedgerSlot uint64,
-	txn ledgerdb.Txn,
-	boundaryCounters *trustedReplayBoundaryCounterState,
-) (uint64, bool, error) {
-	if mithrilLedgerSlot > 0 {
-		sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequenceAfter(
-			ctx,
-			poolKeyHash,
-			mithrilLedgerSlot,
-			txn,
-		)
-		if err != nil || found {
-			return sequence, found, err
-		}
-		sequence, found, err = ls.ledgerDB().LatestPoolOpCertSequenceAfter(
-			ctx,
-			poolKeyHash,
-			mithrilLedgerSlot-1,
-			txn,
-		)
-		if err != nil || found {
-			return sequence, found, err
-		}
-		imported, err := boundaryCounters.hasCountersAtSlot(
-			mithrilLedgerSlot,
-			func() (bool, error) {
-				return ls.ledgerDB().PoolOpCertSequencesExistAtSlot(
-					ctx,
-					mithrilLedgerSlot,
-					txn,
-				)
-			},
-		)
-		if err != nil {
-			return 0, false, fmt.Errorf(
-				"read certified opcert counters at Mithril boundary slot %d: %w",
-				mithrilLedgerSlot,
-				err,
-			)
-		}
-		if !imported {
-			return 0, false, fmt.Errorf(
-				"%w: slot %d has no certified counters, so pool %x has no known counter; rebootstrap from a current Mithril snapshot",
-				errOpCertBaselineNotImported,
-				mithrilLedgerSlot,
-				poolKeyHash.Bytes(),
-			)
-		}
-		return 0, false, nil
-	}
-	return ls.ledgerDB().LatestPoolOpCertSequence(ctx, poolKeyHash, txn)
 }
 
 func (ls *LedgerState) logLeiosEndorserBlockApplyResult(

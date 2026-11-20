@@ -97,9 +97,10 @@ func TestOpCertExistenceReadSeesItsTransactionsStagedObservation(t *testing.T) {
 	require.True(t, scenario.OpCertObservedInsideTxn(pool, 3, 77))
 }
 
-// TestOpCertExistenceReadFailsBeforeTheSetsRecord requires a historical
-// slot outside the set's record to fail without a metadata fallback.
-func TestOpCertExistenceReadFailsBeforeTheSetsRecord(t *testing.T) {
+// TestOpCertExistenceReadBeforeTheSetsRecordUsesItsBaseline requires a slot
+// before the set's record to be answered from the counters the set was
+// loaded with, which were last observed after it.
+func TestOpCertExistenceReadBeforeTheSetsRecordUsesItsBaseline(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -117,8 +118,9 @@ func TestOpCertExistenceReadFailsBeforeTheSetsRecord(t *testing.T) {
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	ldb := scenario.LedgerDB()
 
-	_, err = ldb.PoolOpCertSequencesExistAtSlot(t.Context(), 100, nil)
-	require.Error(t, err)
+	ok, err := ldb.PoolOpCertSequencesExistAtSlot(t.Context(), 100, nil)
+	require.NoError(t, err)
+	require.False(t, ok)
 	require.True(t, existsAt(t, ldb, store, 200))
 	require.False(t, existsAt(t, ldb, store, 250))
 }

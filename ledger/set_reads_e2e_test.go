@@ -642,9 +642,10 @@ func TestOpCertReadsFromTheLiveUtxoSet(t *testing.T) {
 	)
 }
 
-// TestOpCertReadsFailOutsideTheSetsRecord requires historical reads before
-// the set's recorded observations to fail without a metadata fallback.
-func TestOpCertReadsFailOutsideTheSetsRecord(t *testing.T) {
+// TestOpCertReadsBeforeTheSetsRecordUseItsBaseline requires reads of slots
+// before the set's recorded observations to be answered from the counters it
+// was loaded with, without a metadata fallback.
+func TestOpCertReadsBeforeTheSetsRecordUseItsBaseline(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -685,10 +686,18 @@ func TestOpCertReadsFailOutsideTheSetsRecord(t *testing.T) {
 	require.False(t, found, "no observation after the latest")
 	require.Zero(t, reached())
 
-	_, _, err = ldb.LatestPoolOpCertSequenceAtOrBefore(ctx, poolA, 150, nil)
-	require.Error(t, err, "slot 150 is before the set's record")
-	_, _, err = ldb.LatestPoolOpCertSequenceAfter(ctx, poolA, 100, nil)
-	require.Error(t, err, "the set cannot say what was observed after slot 100")
+	at150, found, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
+		ctx, poolA, 150, nil,
+	)
+	require.NoError(t, err, "slot 150 is before the set's record")
+	require.True(t, found)
+	require.Equal(t, uint64(6), at150)
+	after100, found, err := ldb.LatestPoolOpCertSequenceAfter(
+		ctx, poolA, 100, nil,
+	)
+	require.NoError(t, err, "the latest observation repeats the highest")
+	require.True(t, found)
+	require.Equal(t, uint64(6), after100)
 	require.Zero(t, reached(), "historical reads did not use the metadata store")
 }
 

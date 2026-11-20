@@ -444,6 +444,10 @@ type BoundaryEpochStateScenario struct {
 	// lower counter and a batched raise at slots the rollback undoes, and
 	// one for a pool that is not registered.
 	OpCerts func() OpCertSlots
+	// CheckOpCertCounter judges counter as block validation would for a
+	// block of pool, on a ledger whose state was delivered at loadedTip
+	// (zero when it was built block by block).
+	CheckOpCertCounter func(pool []byte, loadedTip, counter uint64) error
 	// AnchorOpCertCounters is the ledger's export of the counters observed
 	// at exactly slot.
 	AnchorOpCertCounters func(slot uint64) ([]metadata.OpCertCounter, error)
@@ -1888,6 +1892,16 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				"network %d %d %d", state.Slot, state.Treasury, state.Reserves,
 			)}
 			return out
+		},
+		CheckOpCertCounter: func(pool []byte, loadedTip, counter uint64) error {
+			h.ls.mithrilLedgerSlot = loadedTip
+			stored, found, err := h.ls.latestOpCertCounterForValidation(
+				t.Context(), lcommon.PoolKeyHash(pool), nil,
+			)
+			if err != nil {
+				return err
+			}
+			return validateOpCertCounter(stored, found, counter, true)
 		},
 		AnchorOpCertCounters: func(slot uint64) ([]metadata.OpCertCounter, error) {
 			return h.ls.AnchorOpCertCounters(t.Context(), slot)

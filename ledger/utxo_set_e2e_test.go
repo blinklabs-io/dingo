@@ -1446,8 +1446,8 @@ func requireOpCertReads(
 
 // TestLiveUtxoSetOpCertsLoadFromTheMetadataStore requires a set from before it
 // kept op-cert counters to load each pool's highest sequence and latest slot
-// from the metadata store, and the live-set history reads to leave alone
-// the slots the set has no record of.
+// from the metadata store, and a read of a slot before the set's record to
+// be answered from the loaded counter.
 func TestLiveUtxoSetOpCertsLoadFromTheMetadataStore(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -1477,13 +1477,14 @@ func TestLiveUtxoSetOpCertsLoadFromTheMetadataStore(t *testing.T) {
 	require.Equal(t, uint64(6), st.Sequence)
 	require.Equal(t, uint64(200), st.Slot)
 
-	// The set has no record of poolA at slot 150, so that historical read
-	// fails closed instead of consulting metadata.
+	// The set has no record of poolA at slot 150, so the counter it was
+	// loaded with answers.
 	ldb := scenario.LedgerDB()
-	_, _, err = ldb.LatestPoolOpCertSequenceAtOrBefore(
+	at150, _, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
 		t.Context(), poolA, 150, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrUtxoSetUnserved)
+	require.NoError(t, err)
+	require.Equal(t, uint64(6), at150)
 	at250, _, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
 		t.Context(), poolA, 250, nil,
 	)

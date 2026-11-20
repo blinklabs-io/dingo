@@ -62,11 +62,12 @@ func (ls *LedgerState) AnchorOpCertCounters(
 	var out []metadata.OpCertCounter
 	var lost int
 	for _, p := range pools {
-		st, known, err := ls.opCertView(r, nil, p, &anchor)
+		st, err := ls.opCertView(r, nil, p, &anchor)
 		if err != nil {
 			return nil, err
 		}
-		if !known {
+		// The oldest counter held is from after the anchor.
+		if st != nil && st.Slot > anchor {
 			lost++
 			continue
 		}
