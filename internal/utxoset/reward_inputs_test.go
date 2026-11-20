@@ -148,3 +148,36 @@ func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
 	require.NoError(t, err)
 	require.Equal(t, []uint64{4, 7}, none)
 }
+
+// Listing the epochs the set holds reward inputs of steps once per epoch and
+// tag, not once per stored row, so the cost of a listing does not grow with
+// the stake rows an epoch holds.
+func TestRewardInputEpochsDoesNotStepOverEveryRow(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+
+	const perEpoch = 500
+	epochs := []uint64{5, 6, 7}
+	var changes []ledger.RewardInputChange
+	for _, e := range epochs {
+		changes = append(changes, ledger.RewardInputChange{
+			Kind: ledger.RewardInputStakes, Epoch: e,
+			Stakes: stakeRows(e, perEpoch, 10),
+		})
+	}
+	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{10}, 32))
+	require.NoError(t, set.ApplyLedgerChanges(
+		&tip, ledger.LedgerChanges{RewardInputs: changes},
+	))
+
+	before := set.RangeRowsVisited()
+	snaps, _, err := set.RewardInputEpochs()
+	require.NoError(t, err)
+	visited := set.RangeRowsVisited() - before
+
+	require.Equal(t, epochs, snaps)
+	require.LessOrEqual(t, visited, uint64(3*len(epochs)+3),
+		"the listing stepped over stored rows, not one row per epoch")
+}

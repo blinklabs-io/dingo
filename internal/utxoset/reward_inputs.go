@@ -893,14 +893,8 @@ func (s *Set) RewardInputEpochs() (snapshots, pots []uint64, err error) {
 		badgerutxo.RewardStakeInputTag, badgerutxo.RewardPoolInputTag,
 		badgerutxo.RewardSnapshotTag,
 	} {
-		var last uint64
-		first := true
-		err = s.store.Rows([]byte{tag}, func(k, _ []byte) error {
-			e := binary.BigEndian.Uint64(k[1:9])
-			if first || e != last {
-				seen[e] = struct{}{}
-				last, first = e, false
-			}
+		err = s.store.EachDistinctEpoch(tag, func(e uint64) error {
+			seen[e] = struct{}{}
 			return nil
 		})
 		if err != nil {

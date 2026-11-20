@@ -600,7 +600,43 @@ func (s *Store) RowKeysChangedAfter(
 // order.
 func (s *Store) Rows(prefix []byte, fn func(k, v []byte) error) error {
 	return s.view(func(txn *badger.Txn) error {
-		return eachPrefix(txn, prefix, fn)
+		return eachPrefix(txn, prefix, func(k, v []byte) error {
+			s.rangeRowsVisited.Add(1)
+			return fn(k, v)
+		})
+	})
+}
+
+// EachDistinctEpoch calls fn with each distinct epoch among the keys under
+// tag, whose keys lead with the epoch as eight big-endian bytes, in order. It
+// reads keys only and seeks past each epoch's rows, so it steps once per
+// epoch however many rows an epoch holds.
+func (s *Store) EachDistinctEpoch(tag byte, fn func(epoch uint64) error) error {
+	return s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{tag}
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		for it.Valid() {
+			s.rangeRowsVisited.Add(1)
+			k := it.Item().Key()
+			if len(k) < 9 {
+				it.Next()
+				continue
+			}
+			epoch := binary.BigEndian.Uint64(k[1:9])
+			if err := fn(epoch); err != nil {
+				return err
+			}
+			next := KeyAfter(k[:9])
+			if next == nil {
+				return nil
+			}
+			it.Seek(next)
+		}
+		return nil
 	})
 }
 
@@ -685,8 +721,9 @@ func (s *Store) EachRowFrom(
 	})
 }
 
-// RangeRowsVisited returns how many rows RowsInRange and EachRowAfter have
-// stepped over since the store opened, including the one that ended a range. It exists to show
+// RangeRowsVisited returns how many rows Rows, RowsInRange and EachRowAfter
+// have stepped over, and how many epochs EachDistinctEpoch has listed, since
+// the store opened, including the row that ended a range. It exists to show
 // that a ranged read does not touch the rows outside its range.
 func (s *Store) RangeRowsVisited() uint64 {
 	return s.rangeRowsVisited.Load()

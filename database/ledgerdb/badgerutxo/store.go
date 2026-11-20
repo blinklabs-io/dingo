@@ -110,7 +110,7 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
-	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	// rangeRowsVisited counts the rows the range and prefix readers stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
 	rewardIndexVisited atomic.Uint64
