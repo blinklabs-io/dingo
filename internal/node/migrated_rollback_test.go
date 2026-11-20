@@ -17,6 +17,7 @@ package node
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
@@ -336,4 +338,42 @@ func TestMigrationRewindRunsOnce(t *testing.T) {
 	again, err := db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, rewound, again)
+}
+
+// The pending reward stake inputs are resolved from the metadata store before
+// the move into the live UTxO set deletes its UTxO rows and drains its reward
+// families, and a failure to resolve stops the start.
+func TestReconcileResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
+	t.Parallel()
+	dir := unpackLegacyDatabase(t, legacyParityArchive)
+	require.NoError(t, MigrateToSplit(
+		t.Context(), parityConfig(dir),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	db, _ := openConsensus(t, dir)
+	k := previewSecurityParam(t)
+	calls := 0
+	boom := errors.New("cannot resolve")
+	run := func(resolve func(context.Context, ledgerdb.LedgerDB) error) error {
+		return nodestorage.Reconcile{
+			DB: db, RewindBlocks: k, ResolveRewardInputs: resolve,
+		}.Run(t.Context())
+	}
+
+	// No set is open, so the run stops where the UTxO rows would move.
+	err := run(func(ctx context.Context, _ ledgerdb.LedgerDB) error {
+		calls++
+		marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+		require.NoError(t, err)
+		require.Empty(t, marked, "the UTxO rows have not moved yet")
+		drained, err := db.EffectiveDrainedFamilies(ctx)
+		require.NoError(t, err)
+		require.Zero(t, drained, "no family has drained yet")
+		return nil
+	})
+	require.ErrorContains(t, err, "is not open")
+	require.Equal(t, 1, calls, "the rewards are resolved before the move")
+
+	err = run(func(context.Context, ledgerdb.LedgerDB) error { return boom })
+	require.ErrorIs(t, err, boom)
 }
