@@ -366,6 +366,20 @@ func (s *Store) Snapshots(epoch uint64, typ string) ([]SnapshotRow, error) {
 	return out, err
 }
 
+// EachSnapshot calls fn with the snapshot row of every epoch and type, in
+// key order, from one read transaction.
+func (s *Store) EachSnapshot(fn func(SnapshotRow) error) error {
+	return s.view(func(txn *badger.Txn) error {
+		return eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
+			r, err := decodeSnapshotKey(k, v)
+			if err != nil {
+				return err
+			}
+			return fn(r)
+		})
+	})
+}
+
 // LoadEpochState replaces the store's epoch and snapshot rows and its era
 // switch record with the given ones and marks them loaded, for a store from
 // before it kept them.

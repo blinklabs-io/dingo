@@ -249,6 +249,25 @@ func DecodeEpochRows(rows []badgerutxo.EpochRow) ([]models.Epoch, error) {
 	return out, nil
 }
 
+// PoolStakeSnapshotsCapturedIn returns the snapshot rows of every epoch and
+// type captured in [from, through], from one read of the store.
+func (s *Set) PoolStakeSnapshotsCapturedIn(
+	from, through uint64,
+) ([]*models.PoolStakeSnapshot, error) {
+	var out []*models.PoolStakeSnapshot
+	err := s.store.EachSnapshot(func(r badgerutxo.SnapshotRow) error {
+		sn, err := decodeSnapshot(r)
+		if err != nil {
+			return err
+		}
+		if sn.CapturedSlot >= from && sn.CapturedSlot <= through {
+			out = append(out, sn)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // PoolStakeSnapshots returns epoch's snapshot rows of typ, every type when
 // typ is empty.
 func (s *Set) PoolStakeSnapshots(
