@@ -358,8 +358,8 @@ func (c *RemoteClient) verifyServerPin(cs tls.ConnectionState) error {
 // already open that stays fresh for prepareStayFreshFor more, so that Sign
 // does not pay for the dial, handshake and admission inside its timeout. A
 // session that is fresh now but would go stale before the slot is replaced,
-// and kept if the replacement fails. A failure here is reported early, before the
-// slot; Sign retries the connection itself. Prepare honours the reconnect
+// and kept if the replacement fails. A failure here is reported early, before
+// the slot; Sign retries the connection itself. Prepare honours the reconnect
 // backoff; Sign does not.
 func (c *RemoteClient) Prepare() error {
 	ctx, cancel := context.WithTimeout(
@@ -415,8 +415,8 @@ func (c *RemoteClient) freshLocked() bool {
 	return c.freshForLocked(0)
 }
 
-// freshForLocked reports whether an admitted session is open that is still
-// fresh stay from now. Caller holds c.mu.
+// freshForLocked reports whether an admitted session is open and will still
+// be fresh after stay more. Caller holds c.mu.
 func (c *RemoteClient) freshForLocked(stay time.Duration) bool {
 	return c.conn != nil &&
 		time.Since(c.lastUsed)+stay < c.cfg.SessionFreshFor
