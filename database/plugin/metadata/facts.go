@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
 // FactTable describes a table of ledger facts: rows the ledger derives at
@@ -569,14 +570,14 @@ func NewUtxoDigester() *UtxoDigester {
 
 // Add folds in one output: its transaction hash, index, lovelace as a decimal
 // string, payment and staking credentials and datum hash, and, when withCbor,
-// its stored CBOR.
+// its stored CBOR in the post-Alonzo map form (see canonicalOutputCbor).
 func (d *UtxoDigester) Add(
 	txHash []byte,
 	index uint32,
 	amount string,
 	payment, staking, datum []byte,
 	withCbor bool,
-	cbor []byte,
+	outCbor []byte,
 ) {
 	var buf [8]byte
 	write := func(field []byte) {
@@ -592,9 +593,45 @@ func (d *UtxoDigester) Add(
 	binary.BigEndian.PutUint64(buf[:], uint64(index))
 	d.h.Write(buf[:])
 	if withCbor {
-		write(cbor)
+		write(canonicalOutputCbor(outCbor))
 	}
 	d.count++
+}
+
+// canonicalOutputCbor returns an output's CBOR in the map form
+// {0: address, 1: value, 2: datum, 3: script ref}. A snapshot import stores
+// every output in that form, while an output created as the legacy array
+// [address, value] or [address, value, datum hash] keeps the array in its
+// block, so the same output would otherwise digest differently on the two
+// sides. Anything that is not such an array is returned unchanged.
+func canonicalOutputCbor(raw []byte) []byte {
+	if len(raw) == 0 || raw[0]>>5 != 4 {
+		return raw
+	}
+	var items []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &items); err != nil {
+		return raw
+	}
+	if len(items) < 2 || len(items) > 3 {
+		return raw
+	}
+	fields := map[uint64]cbor.RawMessage{0: items[0], 1: items[1]}
+	if len(items) == 3 {
+		var dh []byte
+		if _, err := cbor.Decode(items[2], &dh); err != nil {
+			return raw
+		}
+		dat, err := cbor.Encode([]any{uint64(0), dh})
+		if err != nil {
+			return raw
+		}
+		fields[2] = cbor.RawMessage(dat)
+	}
+	out, err := cbor.Encode(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // Sum returns the digest of the outputs added so far.
