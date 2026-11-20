@@ -133,6 +133,10 @@ type liveNodeSeed struct {
 	legacy  bool
 }
 
+// withLegacyStorageFixture leaves the database as a released version left it,
+// with its UTxO set and ledger state in the metadata store. The harness
+// neither moves it into the live UTxO set nor starts the ledger: the test
+// runs the startup sequence itself.
 func withLegacyStorageFixture(seed *liveNodeSeed) { seed.legacy = true }
 
 // withLivedInUtxoSet seeds the live UTxO set as one a node holds after it
@@ -322,7 +326,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
 	n.setLedgerState(ledgerState)
-	if storageMode == StorageModeCore {
+	if storageMode == StorageModeCore && !seed.legacy {
 		require.NoError(t, n.reconcileUtxoSet(t.Context()))
 	}
 	// Build the harness ouroboros the way Run() does: every dependency up
@@ -359,8 +363,14 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// Run() does.
 	n.ouroborosConfig = ouroborosCfg
 	n.ouroborosRef.Store(ouro)
-	require.NoError(t, ledgerState.Start(context.Background()))
-	n.publishStartedLedgerState()
+	// A legacy fixture is handed over as the released version left it. The
+	// move into the live UTxO set reverts the ledger below its tip, and a
+	// started ledger applies the reverted blocks again, so starting it here
+	// would race a test that reads the reverted state.
+	if !seed.legacy {
+		require.NoError(t, ledgerState.Start(context.Background()))
+		n.publishStartedLedgerState()
+	}
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
