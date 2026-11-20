@@ -1367,6 +1367,10 @@ func (a *slotClockAdapter) PrimaryChainTipRelationAndHeader(
 	return a.ledgerState.PrimaryChainTipRelationAndHeader(point)
 }
 
+func (a *slotClockAdapter) SlotToTime(slot uint64) (time.Time, error) {
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1405,6 +1409,14 @@ type leiosParentChain interface {
 		ocommon.Point,
 		*database.Txn,
 	) (models.Block, error)
+}
+
+func (a *leiosPipelineAdapter) MayPrepareEndorserBlock(slot uint64) (bool, string, error) {
+	if a.endorserBlockQuorumRefusal == nil {
+		return false, leiosEBSkipQuorumUnresolved, nil
+	}
+	reason := a.endorserBlockQuorumRefusal(slot)
+	return reason == "", reason, nil
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
