@@ -9789,7 +9789,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   publication that makes it stale removes the candidate from corroboration and
   triggers recovery. A verified winning fork releases its old generation pin
   before rolling back, then re-intersects so the fork suffix is verified against
-  the generation the rollback publishes. Genesis-overlay parameters remain
+  the generation the rollback publishes. If the peer's ordered protocol cursor
+  has already rolled back to the same point and is streaming descendants, local
+  rollback recovery preserves that cursor: re-intersecting it would discard the
+  pipelined competing suffix until the old request window drained.
+  Re-intersections caused only by a changed or deferred verification context
+  likewise keep verifying their already-requested ordered replies while the
+  mini-protocol drains; a later rollback or cursor-gap recovery condemns them.
+  Genesis-overlay parameters remain
   authoritative for later slots within the applied epoch and era, so a tip
   earlier within that epoch does not by itself defer the overlay decision;
   headers requiring a different epoch or era's parameters remain deferred until
@@ -24475,16 +24482,20 @@ applied ledger tip by more than the security parameter `k` in block number,
 while the peer's advertised tip does not, holds a stale cursor and is resynced
 the same way, but only while chain selection has no best peer (`GetBestPeer()`
 is nil, read through `ChainsyncHasBestPeer`), with
-`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a connection can
-never contribute: the ledger discards its headers as stale and chain selection
-skips the peer, while it holds an ingress slot that a peer at the tip could use.
-The check runs in the callback after `reconcileChainsyncIngressAdmission`, so an
-observer promoted with a cursor left far behind is resynced on its first header.
+`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Re-intersection can
+move a stale cursor closer, while an honest peer whose chain left the local
+chain at an older intersection must still be allowed to stream its competing
+candidate forward. The check runs in the callback after
+`reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor left
+far behind is resynced on its first header.
 The shared per-connection timer marker allows one resync per connection until it
 reconnects. At most one such recycle is requested across all connections per 30
 seconds (`claimBehindTipRecycle`), so a gap with many lagging honest peers does
 not recycle all of them at once and leave only a near-tip peer; over a sustained
-gap they are still recycled one window at a time. A connection whose
+gap they are still recycled one window at a time. A header whose connection
+cannot take that shared window continues through verification and candidate
+observation, so the churn bound cannot freeze a competing peer's delivered
+frontier. A connection whose
 re-intersection has fired or is already due does not take that window; a
 future-header timer with a later onset is replaced by an immediate one, since it
 withholds every header until it fires. A claim that schedules nothing (the
