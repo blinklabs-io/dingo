@@ -1290,11 +1290,11 @@ type Config struct {
 	// cardano-node config.json PeerSharing value, or true when that is unset.
 	PeerSharing *bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
-	// AdvertiseAddress is the public "IP:port" other nodes can reach this
-	// node's NtN listener at. When set and peer sharing is enabled, it is
+	// AdvertiseAddress is the public "IP:port" other nodes can use to reach
+	// this node over NtN. When set and peer sharing is enabled, it is
 	// included in PeerSharing replies as this node's own address. It is
-	// separate from bindAddr and relayPort, which only choose what the node
-	// listens on; behind NAT or a load balancer the two differ. It must be an
+	// independent of the local socket endpoint; behind NAT or a load balancer
+	// the two differ. It must be an
 	// IP literal because the PeerSharing wire format carries no hostnames.
 	AdvertiseAddress string `yaml:"advertiseAddress" envconfig:"DINGO_ADVERTISE_ADDRESS"`
 
