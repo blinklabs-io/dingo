@@ -92,6 +92,12 @@ func setRow(txn *badger.Txn, pk, value []byte, present bool) error {
 		}
 		return setAccount(txn, cred[0], cred[1:], &r)
 	}
+	if len(pk) > 0 && pk[0] == SnapshotTag {
+		if !present {
+			return deleteSnapshotRows(txn, [][]byte{pk})
+		}
+		return setSnapshotRow(txn, pk, value)
+	}
 	if !present {
 		return txn.Delete(pk)
 	}

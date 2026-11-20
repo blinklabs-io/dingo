@@ -67,6 +67,7 @@ func encodeSnapshot(s *models.PoolStakeSnapshot) (badgerutxo.SnapshotRow, error)
 	}
 	return badgerutxo.SnapshotRow{
 		Epoch: s.Epoch, Type: s.SnapshotType, Pool: s.PoolKeyHash, Value: v,
+		CapturedSlot: s.CapturedSlot,
 	}, nil
 }
 
@@ -136,6 +137,30 @@ func epochStateBatch(lc ledger.LedgerChanges) (
 // ensureEpochState loads the metadata store's epoch and pool stake snapshot
 // rows into a set from before it kept them.
 func (s *Set) ensureEpochState(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+) error {
+	if err := s.loadEpochStateIfMissing(ctx, ldb); err != nil {
+		return err
+	}
+	return s.indexSnapshotSlots()
+}
+
+// indexSnapshotSlots indexes the pool stake snapshot rows a store wrote
+// before it kept their capture slots.
+func (s *Set) indexSnapshotSlots() error {
+	return s.store.IndexSnapshotSlots(
+		func(r badgerutxo.SnapshotRow) (uint64, error) {
+			sn, err := decodeSnapshot(r)
+			if err != nil {
+				return 0, err
+			}
+			return sn.CapturedSlot, nil
+		},
+	)
+}
+
+func (s *Set) loadEpochStateIfMissing(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
 ) error {
@@ -250,12 +275,28 @@ func DecodeEpochRows(rows []badgerutxo.EpochRow) ([]models.Epoch, error) {
 }
 
 // PoolStakeSnapshotsCapturedIn returns the snapshot rows of every epoch and
-// type captured in [from, through], from one read of the store.
+// type captured in [from, through]. It reads only those rows through the
+// store's capture index, and every row when the store has not indexed them
+// yet.
 func (s *Set) PoolStakeSnapshotsCapturedIn(
 	from, through uint64,
 ) ([]*models.PoolStakeSnapshot, error) {
+	rows, indexed, err := s.store.SnapshotsCapturedIn(from, through)
+	if err != nil {
+		return nil, err
+	}
 	var out []*models.PoolStakeSnapshot
-	err := s.store.EachSnapshot(func(r badgerutxo.SnapshotRow) error {
+	if indexed {
+		for _, r := range rows {
+			sn, err := decodeSnapshot(r)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, sn)
+		}
+		return out, nil
+	}
+	err = s.store.EachSnapshot(func(r badgerutxo.SnapshotRow) error {
 		sn, err := decodeSnapshot(r)
 		if err != nil {
 			return err
