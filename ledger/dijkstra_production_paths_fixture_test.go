@@ -166,7 +166,7 @@ func newPathFixture(
 	pending ...pathTx,
 ) *pathFixture {
 	t.Helper()
-	db := newTestDB(t)
+	db := newCoreTestDB(t)
 	key := pathSigner()
 	paymentHash := lcommon.Blake2b224Hash(key.Public().(ed25519.PublicKey))
 	address := append([]byte{0x60}, paymentHash[:]...)
@@ -395,6 +395,7 @@ func newPathFixture(
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil,
 	))
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	f.ls = ls

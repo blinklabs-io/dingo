@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -36,20 +35,20 @@ type PParamsReader interface {
 }
 
 // pparamsReader returns the set's protocol parameter reader and the read
-// mode, or UtxoSetReadsOff when these reads stay on the metadata store.
-func (ls *LedgerState) pparamsReader(txn ledgerdb.Txn) (PParamsReader, string) {
+// mode, or false when these reads stay on the metadata store.
+func (ls *LedgerState) pparamsReader(txn ledgerdb.Txn) (PParamsReader, bool) {
 	_, mode := ls.utxoSetReader()
-	if mode == UtxoSetReadsOff {
-		return nil, UtxoSetReadsOff
+	if !mode {
+		return nil, false
 	}
 	r, ok := ls.readSet(txn).(PParamsReader)
 	if !ok {
-		return nil, UtxoSetReadsOff
+		return nil, false
 	}
 	if !ls.pparamsSetLoaded.Load() {
 		loaded, err := r.PParamsLoaded()
 		if err != nil || !loaded {
-			return nil, UtxoSetReadsOff
+			return nil, false
 		}
 		ls.pparamsSetLoaded.Store(true)
 	}
@@ -106,36 +105,6 @@ func samePParamsRows(a, b []models.PParams) bool {
 	})
 }
 
-func (ls *LedgerState) comparePParamsRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.pparamsReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.pparamsReadMismatches.Add(1)
-	ls.metrics.pparamsReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set protocol parameter read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
 func (s stagingLedgerDB) GetPParams(
 	epoch uint64,
 	eraId uint,
@@ -143,13 +112,9 @@ func (s stagingLedgerDB) GetPParams(
 	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, error) {
 	r, mode := s.ls.pparamsReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.pparamsDrained() {
-			return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
-		}
-		return s.LedgerDB.GetPParams(epoch, eraId, decodeFunc, txn)
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
 	}
-	g := s.ls.beginVerifyRead(txn)
 	view, setErr := s.ls.pparamsView(r, txn, eraId)
 	var fromSet []byte
 	if setErr == nil {
@@ -157,31 +122,10 @@ func (s stagingLedgerDB) GetPParams(
 			fromSet = best.Cbor
 		}
 	}
-	if mode == UtxoSetReadsSet {
-		if setErr != nil || fromSet == nil {
-			return nil, setErr
-		}
-		return decodeFunc(fromSet)
+	if setErr != nil || fromSet == nil {
+		return nil, setErr
 	}
-	// The metadata store decodes the row it picks; capture its bytes to
-	// compare with the set's pick.
-	var stored []byte
-	want, err := s.LedgerDB.GetPParams(epoch, eraId,
-		func(b []byte) (lcommon.ProtocolParameters, error) {
-			stored = b
-			return decodeFunc(b)
-		},
-		txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	s.ls.comparePParamsRead(
-		g, fmt.Sprintf("pparams of era %d at epoch %d", eraId, epoch),
-		(stored == nil) == (fromSet == nil) && bytes.Equal(stored, fromSet),
-		setErr,
-	)
-	return want, nil
+	return decodeFunc(fromSet)
 }
 
 func (s stagingLedgerDB) ListPParamsForEra(
@@ -189,24 +133,9 @@ func (s stagingLedgerDB) ListPParamsForEra(
 	txn ledgerdb.Txn,
 ) ([]models.PParams, error) {
 	r, mode := s.ls.pparamsReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.pparamsDrained() {
-			return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
-		}
-		return s.LedgerDB.ListPParamsForEra(eraID, txn)
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
 	}
-	g := s.ls.beginVerifyRead(txn)
 	fromSet, setErr := s.ls.pparamsView(r, txn, eraID)
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := s.LedgerDB.ListPParamsForEra(eraID, txn)
-	if err != nil {
-		return nil, err
-	}
-	s.ls.comparePParamsRead(
-		g, fmt.Sprintf("pparams of era %d", eraID),
-		samePParamsRows(want, fromSet), setErr,
-	)
-	return want, nil
+	return fromSet, setErr
 }

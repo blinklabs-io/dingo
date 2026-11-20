@@ -177,7 +177,7 @@ WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSE
 	cancel()
 	require.ErrorIs(
 		t,
-		FinalizeBackfillPlannerStats(ctx, db, logger),
+		FinalizeMithrilBackfillPlannerStats(ctx, db, logger, false),
 		context.Canceled,
 	)
 	require.Equal(t, "1 1", stat())
@@ -187,7 +187,7 @@ WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSE
 	require.NoError(t, err)
 	require.ErrorContains(
 		t,
-		FinalizeBackfillPlannerStats(t.Context(), db, logger),
+		FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false),
 		"marker interrupted",
 	)
 	marker, err := db.GetSyncState(metadata.PlannerStatsBackfillSyncKey, nil)
@@ -196,7 +196,7 @@ WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSE
 	require.Equal(t, "1000 1", stat())
 	_, err = raw.Exec("DROP TRIGGER fail_stats_marker")
 	require.NoError(t, err)
-	require.NoError(t, FinalizeBackfillPlannerStats(t.Context(), db, logger))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false))
 	marker, err = db.GetSyncState(metadata.PlannerStatsBackfillSyncKey, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, marker)
@@ -205,11 +205,11 @@ WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSE
 		`UPDATE sqlite_stat1 SET stat='17 1' WHERE idx='idx_transaction_hash'`,
 	)
 	require.NoError(t, err)
-	require.NoError(t, FinalizeBackfillPlannerStats(t.Context(), db, logger))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false))
 	require.Equal(t, "17 1", stat())
 	cp.UpdatedAt = cp.UpdatedAt.Add(time.Second)
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
-	require.NoError(t, FinalizeBackfillPlannerStats(t.Context(), db, logger))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false))
 	require.Equal(t, "1000 1", stat())
 }
 
@@ -217,13 +217,13 @@ func TestFinalizeBackfillPlannerStatsSkipsIncompleteBackfill(t *testing.T) {
 	t.Parallel()
 	db := newFileTestDB(t)
 	logger := slog.New(slog.DiscardHandler)
-	require.NoError(t, FinalizeBackfillPlannerStats(t.Context(), db, logger))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false))
 	require.NoError(
 		t,
 		db.Metadata().
 			SetBackfillCheckpoint(&models.BackfillCheckpoint{Phase: BackfillPhase, LastSlot: 1, TotalSlots: 2, UpdatedAt: time.Now()}, nil),
 	)
-	require.NoError(t, FinalizeBackfillPlannerStats(t.Context(), db, logger))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(t.Context(), db, logger, false))
 	marker, err := db.GetSyncState(metadata.PlannerStatsBackfillSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, marker)

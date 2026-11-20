@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -43,9 +42,8 @@ import (
 
 func splitConfig(dataDir string) *config.Config {
 	cfg := testConfig(dataDir)
-	cfg.Indexer = config.IndexerConfig{
-		Layout: config.IndexerLayoutSplit, MaxReadyLagBlocks: 10,
-	}
+	cfg.StorageMode = "api"
+	cfg.Indexer = config.IndexerConfig{MaxReadyLagBlocks: 10}
 	return cfg
 }
 
@@ -204,21 +202,16 @@ func TestServiceSnapshotAndRestoreCarryTheIndexerDBOnSplit(t *testing.T) {
 func forgedPayloadSnapshot(
 	t *testing.T,
 	snapDir string,
-	forge func(*dblifecycle.IndexerPayload),
+	forge func(*lifecycle.Manifest),
 ) string {
 	t.Helper()
 	dir := filepath.Join(testutil.OwnerOnlyTempDir(t), "forged")
 	require.NoError(t, os.CopyFS(dir, os.DirFS(snapDir)))
 	require.NoError(t, os.Chmod(dir, 0o700))
-	path := filepath.Join(dir, dblifecycle.IndexerPayloadManifestName)
-	raw, err := os.ReadFile(path)
+	manifest, err := lifecycle.ReadManifest(dir)
 	require.NoError(t, err)
-	var payload dblifecycle.IndexerPayload
-	require.NoError(t, json.Unmarshal(raw, &payload))
-	forge(&payload)
-	raw, err = json.Marshal(payload)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	forge(&manifest)
+	require.NoError(t, lifecycle.WriteManifest(dir, manifest))
 	return dir
 }
 
@@ -237,8 +230,8 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 	t.Run("a tip that is not on the ledger's chain", func(t *testing.T) {
 		t.Parallel()
 		forged := forgedPayloadSnapshot(
-			t, snapDir, func(p *dblifecycle.IndexerPayload) {
-				p.TipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
+			t, snapDir, func(p *lifecycle.Manifest) {
+				p.IndexerTipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
 			},
 		)
 		parent := testutil.OwnerOnlyTempDir(t)
@@ -255,8 +248,8 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 	t.Run("a canonical tip recorded at another slot", func(t *testing.T) {
 		t.Parallel()
 		forged := forgedPayloadSnapshot(
-			t, snapDir, func(p *dblifecycle.IndexerPayload) {
-				p.TipSlot = points[2].Slot
+			t, snapDir, func(p *lifecycle.Manifest) {
+				p.IndexerTipSlot = points[2].Slot
 			},
 		)
 		parent := testutil.OwnerOnlyTempDir(t)
@@ -269,22 +262,16 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 	})
 	t.Run("a payload whose IndexerDB had no tip", func(t *testing.T) {
 		t.Parallel()
-		forged := forgedPayloadSnapshot(
-			t, snapDir, func(p *dblifecycle.IndexerPayload) {
-				p.TipSlot, p.TipHash = 0, ""
-			},
-		)
-		dstCfg := splitConfig(
-			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
-		)
-		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
-			t.Context(), forged,
-		)
+		empty := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+		seedSplitDir(t, empty, 6, -1)
+		require.True(t, indexerTipOf(t, empty).IsZero())
+		snapshot := filepath.Join(testutil.OwnerOnlyTempDir(t), "empty-indexer")
+		_, err := dblifecycle.NewService(empty, nil, nil).Snapshot(t.Context(), snapshot, "", "")
 		require.NoError(t, err)
-		require.FileExists(t, filepath.Join(
-			dstCfg.DatabasePath, internalplugins.IndexerDirName,
-			"metadata.sqlite",
-		))
+		dstCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"))
+		_, err = dblifecycle.NewService(dstCfg, nil, nil).Restore(t.Context(), snapshot)
+		require.NoError(t, err)
+		require.Zero(t, indexerTipOf(t, dstCfg).Slot)
 	})
 	t.Run("a tip on the ledger's chain", func(t *testing.T) {
 		t.Parallel()
@@ -411,7 +398,7 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
 			t.Context(), "s3://bucket/snap",
 		)
-		require.ErrorContains(t, err, "local snapshot directory")
+		require.ErrorContains(t, err, "snapshot trust key")
 		require.NoDirExists(t, dstCfg.DatabasePath)
 	})
 }
@@ -510,7 +497,10 @@ func TestServiceTruncateOnSplitChecksTheUtxoSetBeforeTheIndexerRollsBack(
 		_, err := store.Apply(
 			ocommon.NewPoint(p.Slot, p.Hash),
 			[]badgerutxo.Output{{
-				Ref:  badgerutxo.NewRef(bytes.Repeat([]byte{byte(i + 1)}, 32), 0),
+				Ref: badgerutxo.NewRef(
+					bytes.Repeat([]byte{byte(i + 1)}, 32),
+					0,
+				),
 				Cbor: []byte{0x80, byte(i)},
 			}},
 			nil,
@@ -535,7 +525,11 @@ func TestServiceTruncateOnSplitChecksTheUtxoSetBeforeTheIndexerRollsBack(
 	)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 	require.ErrorContains(t, err, "journal floor")
-	require.False(t, rolled.Load(), "the IndexerDB rolled back before the refusal")
+	require.False(
+		t,
+		rolled.Load(),
+		"the IndexerDB rolled back before the refusal",
+	)
 	requireLedgerTip(t, cfg, points[7].Slot)
 }
 

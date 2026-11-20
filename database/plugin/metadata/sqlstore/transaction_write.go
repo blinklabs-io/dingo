@@ -1696,12 +1696,10 @@ func (s *Store) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	txn types.Txn,
 	protocolMajor uint64,
-	historyOnly bool,
 ) error {
-	// Gap ingestion intentionally has no available input state, so this is
-	// equivalent to SetTransaction with the consumed-input update suppressed.
-	// The transaction, its certificates, and its produced outputs are all
-	// persisted.
+	// Gap ingestion stores the transaction and its certificates only: the
+	// UTxO set and its stake are the LedgerDB UTxO set's, already at or past
+	// this block.
 	//
 	// certDeposits may be partial or nil: the caller calculates it from the
 	// era's CertDepositFunc, which has no entry for a certificate whose
@@ -1742,10 +1740,8 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				var err error
-				certificateRefs, err = s.applyTransactionCertificates(
+				if _, err := s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -1756,95 +1752,11 @@ func (s *Store) SetGapBlockTransaction(
 					allowUnknownDeposits,
 					false,
 					protocolMajor,
-				)
-				if err != nil {
+				); err != nil {
 					return err
 				}
 			}
-			if historyOnly {
-				// The UTxO set and its stake are the live set's, already
-				// at or past this block.
-				return nil
-			}
-			collateralReturn := transaction.CollateralReturn()
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
-			for _, produced := range transaction.Produced() {
-				model, err := models.UtxoLedgerToModel(produced, point.Slot)
-				if err != nil {
-					return fmt.Errorf(
-						"convert output %d: %w",
-						produced.Id.Index(),
-						err,
-					)
-				}
-				id := uint(transactionID)
-				if collateralReturn != nil &&
-					produced.Output == collateralReturn {
-					model.CollateralReturnForTxID = &id
-				} else {
-					model.TransactionID = &id
-				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return err
-				}
-				if len(model.StakingKey) > 0 {
-					gain, err := producedStakeCredentialDelta(
-						model.CredentialTag,
-						model.StakingKey,
-						model.Amount,
-						inserted,
-					)
-					if err != nil {
-						return err
-					}
-					producedStakeDeltas = append(producedStakeDeltas, gain)
-				}
-			}
-			// Merge as setTransactionWithAccumulator does: certificateRefs
-			// and producedStakeDeltas are each already deduped/summed
-			// against themselves, but not against each other, and a
-			// certificate touching the same credential as one of this gap
-			// block's produced outputs would otherwise apply that
-			// credential's delta twice instead of once net.
-			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					producedStakeDeltas,
-				),
-				point.Slot,
-			)
-		},
-	)
-}
-
-func (s *Store) RecomputeGapCollateralFee(
-	transaction lcommon.Transaction,
-	_ ocommon.Point,
-	txn types.Txn,
-) error {
-	if transaction.IsValid() {
-		return nil
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			fee, err := s.collateralFeeForTransaction(ctx, db, transaction)
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(
-				ctx,
-				`-- name: UpdateTransactionCollateralFee :exec
-UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
-				decimalUint64(types.Uint64(fee)),
-				transaction.Hash().Bytes(),
-			)
-			return err
+			return nil
 		},
 	)
 }

@@ -25,24 +25,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMithrilSyncRefusesUtxoSetOnlyWithoutDatabasePath requires the sync to
-// refuse before opening the live UTxO set, which would otherwise land in the
-// working directory.
+// TestMithrilSyncRefusesWithoutDatabasePath requires the sync to refuse before
+// opening the live UTxO set, which would otherwise land in the working
+// directory.
 // Not t.Parallel: it changes the working directory to catch a stray set.
-func TestMithrilSyncRefusesUtxoSetOnlyWithoutDatabasePath(t *testing.T) {
+func TestMithrilSyncRefusesWithoutDatabasePath(t *testing.T) {
 	t.Chdir(t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	err := runMithrilSyncWithRepair(
 		ctx,
-		&config.Config{LedgerUtxoBadgerOnly: true},
+		&config.Config{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		"preview",
 		nil,
 		false,
 	)
-	require.ErrorContains(t, err, "ledgerUtxoBadgerOnly needs databasePath")
+	require.ErrorContains(t, err, "mithril sync needs databasePath")
 	_, statErr := os.Stat("ledger")
 	require.ErrorIs(t, statErr, os.ErrNotExist, "no set was opened")
 }

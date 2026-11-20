@@ -275,34 +275,6 @@ func (ls *LedgerState) peerForkAncestorOpCertCounter(
 				mithrilSlot,
 			)
 		}
-		sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequenceInRange(
-			ctx,
-			poolKeyHash,
-			mithrilSlot,
-			ancestorSlot,
-			txn,
-		)
-		if err != nil {
-			return opCertCounterSnapshot{}, err
-		}
-		if found {
-			return opCertCounterSnapshot{
-				sequence: sequence,
-				found:    true,
-			}, nil
-		}
-		imported, err := ls.ledgerDB().PoolOpCertSequencesExistAtSlot(
-			ctx,
-			mithrilSlot,
-			txn,
-		)
-		if err != nil {
-			return opCertCounterSnapshot{}, err
-		}
-		if !imported {
-			return opCertCounterSnapshot{}, errOpCertBaselineNotImported
-		}
-		return opCertCounterSnapshot{}, nil
 	}
 
 	sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequenceAtOrBefore(

@@ -40,6 +40,10 @@ type PrunerConfig struct {
 	DB          *database.Database
 	Logger      *slog.Logger
 	Frequency   time.Duration
+	// Ceiling, when set, bounds the highest slot a round may expire, for a
+	// reader such as the IndexerDB writer that has yet to read older block
+	// bodies. ok false means no block may be expired yet.
+	Ceiling func(ctx context.Context) (slot uint64, ok bool, err error)
 }
 
 type Pruner struct {
@@ -139,6 +143,25 @@ func (p *Pruner) prune(ctx context.Context) {
 			"history expiry: skipped because current slot is not high enough")
 		return
 	}
+	end := currentSlot - stabilityWindow - 1
+	if p.config.Ceiling != nil {
+		ceiling, ok, err := p.config.Ceiling(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				p.logger.Error(
+					"history expiry: failed to read the expiry ceiling",
+					"error", err,
+				)
+			}
+			return
+		}
+		if !ok {
+			p.logger.Debug(
+				"history expiry: skipped because no block may be expired yet")
+			return
+		}
+		end = min(end, ceiling)
+	}
 	// cursor is the slot every block before has been expired through. It
 	// stops advancing at the first block whose expiry fails so that block
 	// stays inside the next round's range. The scan restarts at the cursor
@@ -150,11 +173,7 @@ func (p *Pruner) prune(ctx context.Context) {
 			p.saveCursor(cursor)
 		}
 	}()
-	iter := p.db.BlocksInRangeContext(
-		ctx,
-		start,
-		currentSlot-stabilityWindow-1,
-	)
+	iter := p.db.BlocksInRangeContext(ctx, start, end)
 	defer iter.Close()
 
 	for {

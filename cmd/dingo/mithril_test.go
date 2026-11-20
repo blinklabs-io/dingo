@@ -165,8 +165,8 @@ func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
 // Not t.Parallel: swaps the package-level runMithrilSyncForCommand seam.
 //
 // TestMithrilSyncRunsOnTheSplitLayout pins that `mithril sync` reaches the
-// bootstrap with indexer.layout split instead of refusing, and that the
-// bootstrap opens the ledger's store in core mode with the layout gate.
+// bootstrap for an API node instead of refusing, and that the bootstrap
+// records the layout gate.
 func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
 	origRun := runMithrilSyncForCommand
 	t.Cleanup(func() { runMithrilSyncForCommand = origRun })
@@ -178,19 +178,13 @@ func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
 		ran = true
 		return nil
 	}
-	cfg := &config.Config{StorageMode: "api"}
-	cfg.Indexer.Layout = config.IndexerLayoutSplit
+	cfg := &config.Config{StorageMode: "api", DatabasePath: "/data"}
 	cmd := &cobra.Command{}
 	cmd.SetContext(config.WithContext(context.Background(), cfg))
 
 	require.NoError(t, mithrilSyncRunE(cmd, nil))
 	require.True(t, ran, "the split layout must not stop mithril sync")
 
-	storageMode, layout := mithrilSyncStorage(cfg)
-	require.Equal(t, "core", storageMode)
-	require.Equal(t, "split", layout)
-	shared := &config.Config{StorageMode: "api"}
-	storageMode, layout = mithrilSyncStorage(shared)
-	require.Equal(t, "api", storageMode)
-	require.Empty(t, layout)
+	require.Equal(t, "split", mithrilSyncIndexerLayout(cfg))
+	require.Empty(t, mithrilSyncIndexerLayout(&config.Config{StorageMode: "core"}))
 }

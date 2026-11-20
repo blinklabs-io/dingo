@@ -65,9 +65,10 @@ func TestStreamingIntersectionLimit(t *testing.T) {
 					lookupErr := errors.New("intersection lookup reached")
 					state := &intersectionLimitLedger{err: lookupErr}
 					u := NewUtxorpc(UtxorpcConfig{
-						Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
-						LedgerState:  state,
-						MaxBlockRefs: limit,
+						Logger:        slog.New(slog.NewTextHandler(&logs, nil)),
+						LedgerState:   state,
+						QueryDatabase: stubQueryDB(state),
+						MaxBlockRefs:  limit,
 					})
 					// Duplicate valid points count toward the cap before any deduplication.
 					point := state.Tip().Point

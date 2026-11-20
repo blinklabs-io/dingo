@@ -23,9 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/ledger"
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -72,7 +73,7 @@ func historicalSpendTxCbor(
 
 func seedHistoricalSubmissionUtxo(
 	t *testing.T,
-	db *database.Database,
+	set *livesettest.Mem,
 	txID []byte,
 ) {
 	t.Helper()
@@ -82,15 +83,12 @@ func seedHistoricalSubmissionUtxo(
 		lcommon.Blake2b224Hash(key.Public().(ed25519.PublicKey)).Bytes()...)
 	output, err := cbor.Encode([]any{address, uint64(10_000_000)})
 	require.NoError(t, err)
-	require.NoError(
-		t,
-		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: txID, AddedSlot: 1}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), txID, 0, output)
-		}),
-	)
+	require.NoError(t, set.ApplyUtxoChanges(nil, []ledger.UtxoEvent{{
+		Added: []ledger.UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txID},
+			Cbor: output,
+		}},
+	}}))
 }
 
 func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
@@ -101,7 +99,7 @@ func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
 	f := newMithrilTestLedger(t)
 
 	rootID := bytes.Repeat([]byte{0x5a}, 32)
-	seedHistoricalSubmissionUtxo(t, f.db, rootID)
+	seedHistoricalSubmissionUtxo(t, f.utxos, rootID)
 	raw := historicalSpendTxCbor(t, rootID, 0, 9_800_000)
 	previous, err := gledger.NewTransactionFromCbor(
 		uint(mary.EraIdMary),

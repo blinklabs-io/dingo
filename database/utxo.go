@@ -2273,55 +2273,6 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 	})
 }
 
-// UtxoRollbackChanges reports what a rollback to slot does to the live UTxO
-// set, read before the rollback runs: removed are live outputs created after
-// slot, and restored are outputs created at or before slot but spent after
-// it, with their CBOR. Outputs both created and spent after slot are in
-// neither, because they are not live on either side of the rollback.
-func (d *Database) UtxoRollbackChanges(
-	ctx context.Context,
-	slot uint64,
-	txn *Txn,
-) ([]models.UtxoId, []models.Utxo, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	added, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"read UTxOs added after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-	removed := make([]models.UtxoId, 0, len(added))
-	for _, u := range added {
-		if u.DeletedSlot != 0 {
-			continue
-		}
-		removed = append(removed, models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})
-	}
-	restored, err := d.utxoStore().GetUtxosRestoredByRollback(
-		slot,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"read UTxOs restored by rollback to slot %d: %w", slot, err,
-		)
-	}
-	for i := range restored {
-		if err := loadCbor(&restored[i], txn); err != nil {
-			return nil, nil, fmt.Errorf(
-				"load CBOR of restored UTxO %x#%d: %w",
-				restored[i].TxId, restored[i].OutputIdx, err,
-			)
-		}
-	}
-	return removed, restored, nil
-}
-
 // UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
 // holds no UTxO set because the ledger's live UTxO set is its only copy.
 const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
@@ -2346,21 +2297,6 @@ func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
 	setter.SetLiveUtxoSource(src)
 	d.liveUtxo = src != nil
 	return nil
-}
-
-// utxoSetOnly reports whether the metadata store holds no UTxO set: a live
-// source is attached, or the database is marked set-only. A Mithril import
-// detaches its live source before the gap blocks are ingested, so the mark is
-// what tells the gap path.
-func (d *Database) utxoSetOnly(txn *Txn) (bool, error) {
-	if d.liveUtxo {
-		return true, nil
-	}
-	marked, err := d.GetSyncState(UtxoSetOnlySyncKey, txn)
-	if err != nil {
-		return false, fmt.Errorf("read the UTxO-set-only mark: %w", err)
-	}
-	return marked != "", nil
 }
 
 // LiveUtxo reports whether the ledger holds the live UTxO set outside the

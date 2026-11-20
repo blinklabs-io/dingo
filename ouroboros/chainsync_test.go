@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -3199,6 +3200,7 @@ func newTestLedgerStateWithChainAtAndConfig(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           livesettest.New(),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -5898,6 +5900,7 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: cm,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),

@@ -261,18 +261,20 @@ func asOfScenario(
 	reads string,
 ) (ledger.BoundaryEpochStateScenario, uint64, ledgerdb.LedgerDB) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), HistorySlots: 1_000})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	txn := store.Begin(t.Context(), false)
 	tip, err := store.GetTip(txn)
 	txn.Release()
 	require.NoError(t, err)
 	point := ocommon.Point{Slot: tip.Point.Slot, Hash: tip.Point.Hash}
-	require.NoError(t, set.ApplyUtxoChanges(&point, nil))
+	// The families load at the scenario's rollback target, below the tip, so
+	// the set's journal reaches back to it.
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	require.NoError(t, set.ApplyUtxoChanges(&point, nil))
 	return scenario, point.Slot, store
 }
 
@@ -286,12 +288,12 @@ func slotsFrom(from, to uint64) []uint64 {
 
 // TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet reads DReps, their delegators
 // and deposits, and accounts as of every slot a scenario of registrations,
-// vote delegations, activity and a deregistration wrote, in set mode with the
+// vote delegations, activity and a deregistration wrote, from the live set with the
 // metadata store's as-of reads failing, and requires the answers to be the
 // store's, before and after a rollback.
 func TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, ledger.UtxoSetReadsSet)
+	scenario, tipSlot, store := asOfScenario(t, "set")
 	reached, _ := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	start := scenario.EpochStartSlot()
@@ -310,7 +312,6 @@ func TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet(t *testing.T) {
 	)
 	require.NotNil(t, ref.Key)
 	drepKey := bytes.Repeat([]byte{0x5e}, 28)
-	scenario.ApplyBoundary()
 	scenario.VoteDelegate(ref, drepKey, 0, 3)
 	scenario.Governance(ref, 9)
 	slots := scenario.Registrations()
@@ -346,7 +347,7 @@ func TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet(t *testing.T) {
 // store's, before and after a rollback.
 func TestAsOfVoteReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, ledger.UtxoSetReadsSet)
+	scenario, tipSlot, store := asOfScenario(t, "set")
 	reached, _ := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	slots := scenario.Proposals()
@@ -414,12 +415,12 @@ func TestAsOfVoteReadsFromTheLiveUtxoSet(t *testing.T) {
 
 // TestAsOfPoolReadsFromTheLiveUtxoSet reads pool registrations, deposits and
 // retirements as of the slots of a pool that registers and re-registers and
-// of a pool that retires, in set mode with the metadata store's as-of reads
+// of a pool that retires, from the live set with the metadata store's as-of reads
 // failing, and requires the answers to be the store's, before and after a
 // rollback.
 func TestAsOfPoolReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, ledger.UtxoSetReadsSet)
+	scenario, tipSlot, store := asOfScenario(t, "set")
 	reached, _ := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	start := max(scenario.EpochStartSlot(), tipSlot)
@@ -465,13 +466,11 @@ func TestAsOfPoolReadsFromTheLiveUtxoSet(t *testing.T) {
 	require.Zero(t, reached(), "an as-of read reached the metadata store")
 }
 
-// TestAsOfReadsOutsideTheJournalWindow requires a read as of a slot before
-// the set's history to be the metadata store's in set mode, and a clear
-// ErrLedgerStateAsOfUnavailable, never the store, when the set is the only
-// copy; a slot the set reaches is still the set's.
+// TestAsOfReadsOutsideTheJournalWindow requires reads before the set's
+// journal history to fail closed, while a slot it reaches remains readable.
 func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := asOfScenario(t, ledger.UtxoSetReadsSet)
+	scenario, _, store := asOfScenario(t, "set")
 	reached, hide := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	slots := scenario.Proposals()
@@ -484,25 +483,7 @@ func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 	require.ElementsMatch(t, asOfReadNames, names)
 	const outside = 0
 	inside := slots.Vote
-	for _, name := range names {
-		// Set mode: a slot before the set's history is the store's.
-		hide(true)
-		before := reached()
-		err := reads[name](outside)
-		require.Error(t, err, name)
-		require.NotErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable, name)
-		require.Greater(
-			t,
-			reached(),
-			before,
-			"%s did not fall back to the store",
-			name,
-		)
-		hide(false)
-		require.NoError(t, reads[name](outside), name)
-	}
 	hide(true)
-	scenario.LedgerStateSetOnly(true)
 	before := reached()
 	for _, name := range names {
 		require.ErrorIs(
@@ -514,15 +495,14 @@ func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 		t,
 		before,
 		reached(),
-		"a set-only read reached the metadata store",
+		"an as-of read reached the metadata store",
 	)
+
 }
 
-// TestAsOfReadsFailClosedOnlyForADrainedFamily turns the set-only switch on
-// and requires a read outside the journal window to keep falling back to the
-// metadata store until a family the read needs is drained, and to fail with
-// ErrLedgerStateAsOfUnavailable, never reaching the store, once one is.
-func TestAsOfReadsFailClosedOnlyForADrainedFamily(t *testing.T) {
+// TestAsOfReadsFailClosedOutsideTheSetJournal requires as-of reads outside
+// an attached set's journal to fail without consulting metadata.
+func TestAsOfReadsFailClosedOutsideTheSetJournal(t *testing.T) {
 	t.Parallel()
 	needs := map[string]nodesettings.FamilyMask{
 		"GetDrepsAtSlot": nodesettings.FamilyMask(0).
@@ -547,41 +527,17 @@ func TestAsOfReadsFailClosedOnlyForADrainedFamily(t *testing.T) {
 	for _, name := range asOfReadNames {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			scenario, _, store := asOfScenario(t, ledger.UtxoSetReadsSet)
+			scenario, _, store := asOfScenario(t, "set")
 			reached, hide := scenario.HideStoreReads(asOfReadNames...)
 			scenario.Proposals()
 			read := asOfReadFuncs(t, scenario.LedgerDB(), store)[name]
 			hide(true)
-			scenario.SetOnlySwitch(true)
 
-			// The switch alone, and a family the read does not need,
-			// leave the metadata store's rows in place.
-			for _, drained := range []nodesettings.FamilyMask{
-				0,
-				nodesettings.FamilyMask(0).With(nodesettings.FamilyNonces),
-			} {
-				scenario.DrainFamilies(drained)
-				before := reached()
-				err := read(outside)
-				require.Error(t, err)
-				require.NotErrorIs(
-					t, err, ledger.ErrLedgerStateAsOfUnavailable,
-				)
-				require.Greater(
-					t, reached(), before,
-					"the read did not fall back to the store",
-				)
-			}
-
-			scenario.DrainFamilies(needs[name])
 			before := reached()
 			require.ErrorIs(
 				t, read(outside), ledger.ErrLedgerStateAsOfUnavailable,
 			)
-			require.Equal(
-				t, before, reached(),
-				"a read of a drained family reached the metadata store",
-			)
+			require.Equal(t, before, reached(), "the read reached the metadata store")
 		})
 	}
 }
@@ -650,35 +606,20 @@ func asOfReadFuncs(
 	}
 }
 
-// TestAsOfReadsAreComparedInVerifyMode runs the as-of reads in verify mode:
-// every read the set reaches is compared, agreeing reads add to the verified
-// count alone, a read outside the window is not compared, and a DRep the
-// metadata store holds that the set never saw is counted as a mismatch while
-// the store's answer is the one returned.
-func TestAsOfReadsAreComparedInVerifyMode(t *testing.T) {
+// TestAsOfReadsUseTheLiveUtxoSet reads as-of state within the set's journal
+// and excludes a DRep written only to metadata.
+func TestAsOfReadsUseTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := asOfScenario(t, ledger.UtxoSetReadsVerify)
+	scenario, tipSlot, store := asOfScenario(t, "set")
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
-	start := scenario.EpochStartSlot()
 	slots := scenario.Registrations()
 	gov := scenario.Proposals()
 	stored, err := store.GetAllGovernanceProposals(ctx, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, stored)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x9a}, 28))
-	counts := func() (verified, mismatches float64) {
-		var v, m float64
-		for _, f := range []func() (float64, float64){
-			scenario.DrepReads, scenario.RegistrationReads, scenario.GovernanceReads,
-			scenario.PoolReads, scenario.AccountReads,
-		} {
-			dv, dm := f()
-			v += dv
-			m += dm
-		}
-		return v, m
-	}
+
 	readAll := func(slot uint64) {
 		_, err := ldb.GetDrepsAtSlot(ctx, nil, slot, nil)
 		require.NoError(t, err)
@@ -712,28 +653,12 @@ func TestAsOfReadsAreComparedInVerifyMode(t *testing.T) {
 		)
 		require.NoError(t, err)
 	}
-	verified0, mismatches0 := counts()
-	for _, slot := range []uint64{start, slots.DReReg, gov.Vote, gov.Enact} {
-		readAll(slot)
-	}
-	verified1, mismatches1 := counts()
-	require.Greater(t, verified1, verified0, "no as-of read was compared")
-	require.Equal(
-		t,
-		mismatches0,
-		mismatches1,
-		"agreeing reads were counted as mismatches",
-	)
 
-	readAll(0)
-	verified2, mismatches2 := counts()
-	require.Equal(
-		t,
-		verified1,
-		verified2,
-		"a read outside the window was compared",
-	)
-	require.Equal(t, mismatches1, mismatches2)
+	for _, slot := range []uint64{slots.DReReg, gov.Vote, gov.Enact} {
+		if slot >= tipSlot {
+			readAll(slot)
+		}
+	}
 
 	// A DRep written around the ledger exists for the store alone.
 	around := bytes.Repeat([]byte{0xe3}, 28)
@@ -742,16 +667,9 @@ func TestAsOfReadsAreComparedInVerifyMode(t *testing.T) {
 	))
 	dreps, err := ldb.GetDrepsAtSlot(ctx, nil, gov.Enact+1, nil)
 	require.NoError(t, err)
-	require.Contains(t, drepAtRows(dreps), fmt.Sprintf(
+	require.NotContains(t, drepAtRows(dreps), fmt.Sprintf(
 		"0/%x active=true added=%d last=0 expiry=0 anchor=/",
 		around,
 		gov.Enact+1,
-	), "the store's answer is returned")
-	_, mismatches3 := counts()
-	require.Equal(
-		t,
-		mismatches2+1,
-		mismatches3,
-		"the divergence was not counted",
-	)
+	), "the set has no such DRep")
 }

@@ -2272,6 +2272,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      NewMemLiveSetForTest(),
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2296,13 +2297,9 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       bytes.Repeat([]byte{0x44}, 32),
-		OutputIdx:  0,
-		StakingKey: drepStakeCred,
-		AddedSlot:  1,
-		Amount:     100,
-	}))
+	seedTestStakedOutput(
+		t, ls, bytes.Repeat([]byte{0x44}, 32), 0, drepStakeCred, 100,
+	)
 
 	require.NoError(
 		t,
@@ -3691,6 +3688,9 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 		return err
 	}, nil)
 
+	set := newQuerySetHistory()
+	set.readErr = database.ErrUtxoCborUnavailable
+	ls.config.UtxoSet = set
 	err := ls.WithTxValidationSession(t.Context(), func(
 		validate func(
 			lcommon.Transaction,
@@ -4213,8 +4213,8 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 	require.NoError(t, err)
 	nonce := make([]byte, 32)
 	const treasury = uint64(87_920_693_660_807)
-	require.NoError(t, ledgerstate.ImportLedgerState(
-		context.Background(),
+	require.NoError(t, importLedgerStateForTest(
+		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
 			Logger: slog.New(

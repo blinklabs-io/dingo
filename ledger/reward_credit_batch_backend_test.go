@@ -995,6 +995,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newRewardCalculationTestNodeConfig(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),

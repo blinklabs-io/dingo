@@ -171,16 +171,6 @@ func (m *Manager) Start(ctx context.Context) error {
 				)
 			}
 		}
-		if err := CheckIndexerSnapshotDestination(
-			m.cfg.SnapshotCloudDestination,
-		); err != nil {
-			return fmt.Errorf(
-				"automatic snapshots: %w; disable "+
-					"databaseLifecycle.snapshotEnabled or the cloud "+
-					"destination",
-				err,
-			)
-		}
 	}
 	if m.blobPluginName == "s3" || m.blobPluginName == "gcs" {
 		return fmt.Errorf(
@@ -543,6 +533,9 @@ func (m *Manager) handleEpochTransition(
 		}
 		defer cleanup()
 	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
+	}
 	_, err = lifecycle.SnapshotToCloud(
 		ctx,
 		m.destinationRegistry,
@@ -559,16 +552,6 @@ func (m *Manager) handleEpochTransition(
 	)
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
-	}
-	if stagedIndexer != "" {
-		if err := InstallIndexerPayload(
-			destDir, stagedIndexer, indexerMeta,
-		); err != nil {
-			_ = lifecycle.RemoveSnapshotContext(
-				context.WithoutCancel(ctx), destDir,
-			)
-			return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
-		}
 	}
 
 	m.logger.Info(

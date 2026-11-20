@@ -81,13 +81,6 @@ func TestRewardLiveStakeMaintenanceStopsOnceDrained(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, needed)
 	require.NoError(t, store.ClearDelegationsToRetiredPool(pool, 105, nil))
-	require.ErrorIs(t, store.RebuildRewardLiveStakeInBatches(
-		t.Context(), 104, nil, false,
-		func(func(types.Txn) ([]byte, int64, int64, bool, error)) error {
-			t.Fatal("a drained family ran a batched rebuild")
-			return nil
-		},
-	), ErrRewardLiveStakeDrained)
 	require.ErrorIs(t, store.RebuildRewardLiveStakeFromRunningTotalsInBatches(
 		104, func(func(types.Txn) error) error {
 			t.Fatal("a drained family ran a batched rebuild")

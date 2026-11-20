@@ -18,29 +18,13 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
-
-// accountReadSource returns the source for comparing a read of the metadata
-// store's account table, or false when reads do not compare or the set
-// cannot answer.
-func (ls *LedgerState) accountReadSource(
-	txn ledgerdb.Txn,
-) (accountSource, bool) {
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return accountSource{}, false
-	}
-	ar := ls.accountReader(txn)
-	if ar == nil || ls.utxoSetFailed.Load() {
-		return accountSource{}, false
-	}
-	return accountSource{ls: ls, ar: ar, txn: txn}, true
-}
 
 // accountListSource returns the source answering a list read from the set,
 // or false when the read stays on the metadata store: reads are not in set
@@ -143,12 +127,6 @@ func compareRefsScriptFirst(a, b models.StakeCredentialRef) int {
 	return bytes.Compare(a.Key, b.Key)
 }
 
-func sameRefs(a, b []models.StakeCredentialRef) bool {
-	return slices.EqualFunc(a, b, func(x, y models.StakeCredentialRef) bool {
-		return x.Tag == y.Tag && bytes.Equal(x.Key, y.Key)
-	})
-}
-
 func (s stagingLedgerDB) GetActiveAccountCredentials(
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
@@ -160,29 +138,7 @@ func (s stagingLedgerDB) GetActiveAccountCredentials(
 		slices.SortFunc(got, compareRefs)
 		return got, nil
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActiveAccountCredentials(txn)
-	if err != nil {
-		return want, err
-	}
-	src, ok := s.ls.accountReadSource(txn)
-	if !ok {
-		return want, nil
-	}
-	got, setErr := src.activeRefs()
-	// The store gives no order.
-	slices.SortFunc(got, compareRefs)
-	s.ls.compareAccountRead(
-		g,
-		"active account credentials",
-		setErr == nil &&
-			sameRefs(slices.SortedFunc(slices.Values(want), compareRefs), got),
-		setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
 func (s stagingLedgerDB) GetActiveDelegatorCountsByPool(
@@ -200,29 +156,11 @@ func (s stagingLedgerDB) GetActiveDelegatorCountsByPool(
 		}
 		return out, nil
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActiveDelegatorCountsByPool(poolKeyHashes, txn)
-	if err != nil {
-		return want, err
-	}
-	src, ok := s.ls.accountReadSource(txn)
-	if !ok {
-		return want, nil
-	}
-	got, setErr := src.poolDelegators(poolKeyHashes)
-	same := setErr == nil && len(got) == len(want)
-	for pool, refs := range got {
-		same = same && want[pool] == uint64(len(refs))
-	}
-	s.ls.compareAccountRead(g, "active delegator counts by pool", same, setErr)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetActiveDelegatorCredentialsByPool is compared in the order the store
-// gives, which is the ledger's credential order.
+// GetActiveDelegatorCredentialsByPool returns delegators in ledger credential
+// order for each pool.
 func (s stagingLedgerDB) GetActiveDelegatorCredentialsByPool(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
@@ -237,83 +175,28 @@ func (s stagingLedgerDB) GetActiveDelegatorCredentialsByPool(
 		}
 		return out, nil
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActiveDelegatorCredentialsByPool(
-		poolKeyHashes,
-		txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	src, ok := s.ls.accountReadSource(txn)
-	if !ok {
-		return want, nil
-	}
-	got, setErr := src.poolDelegators(poolKeyHashes)
-	same := setErr == nil && len(got) == len(want)
-	for pool, refs := range got {
-		slices.SortFunc(refs, compareRefsScriptFirst)
-		same = same && sameRefs(want[pool], refs)
-	}
-	s.ls.compareAccountRead(
-		g,
-		"active delegator credentials by pool",
-		same,
-		setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetDRepDelegators is not answered from the set, nor compared, for an empty
-// credential: the store's DRep column holds no value for a predefined DRep,
-// which an empty credential cannot be matched against in the set.
+// GetDRepDelegators returns delegators for a credential tracked by the set.
+// An empty credential cannot be answered from set state.
 func (s stagingLedgerDB) GetDRepDelegators(
 	ctx context.Context,
 	credentialTag uint8,
 	drepCredential []byte,
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if len(drepCredential) > 0 {
-		if src, ok := s.ls.accountListSource(txn); ok {
-			got, err := src.drepDelegators(
-				uint64(credentialTag),
-				drepCredential,
-			)
-			if err != nil {
-				return nil, err
-			}
-			slices.SortFunc(got, compareRefs)
-			return got, nil
-		}
+	if len(drepCredential) == 0 {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetDRepDelegators(
-		ctx,
-		credentialTag,
-		drepCredential,
-		txn,
-	)
-	if err != nil || len(drepCredential) == 0 {
-		return want, err
-	}
-	src, ok := s.ls.accountReadSource(txn)
+	src, ok := s.ls.accountListSource(txn)
 	if !ok {
-		return want, nil
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 	}
-	got, setErr := src.drepDelegators(uint64(credentialTag), drepCredential)
-	// The store orders by credential tag, then staking key.
+	got, err := src.drepDelegators(uint64(credentialTag), drepCredential)
+	if err != nil {
+		return nil, err
+	}
 	slices.SortFunc(got, compareRefs)
-	s.ls.compareAccountRead(
-		g,
-		fmt.Sprintf("delegators of DRep %d/%x", credentialTag, drepCredential),
-		setErr == nil && sameRefs(want, got),
-		setErr,
-	)
-	return want, nil
+	return got, nil
 }

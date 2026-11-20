@@ -18,9 +18,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"errors"
-	"fmt"
-	"maps"
 	"math/big"
 	"slices"
 
@@ -288,26 +285,24 @@ func (ls *LedgerState) committeeView(
 	return st, nil
 }
 
-// committeeServed returns the committee rows as txn sees the set when
-// committee reads are answered from it, or false when they stay on the
-// metadata store. Row IDs are left zero: no committee read consumes one
+// committeeServed returns the committee rows as txn sees the set, or an
+// error when the set cannot serve them. Row IDs are left zero: no committee read consumes one
 // except as a tie-break between rows of one credential that the set never
 // holds at once, and the set orders member rows by (added slot, tag, hash)
 // where the store orders them by insertion, which no consumer depends on.
 func (ls *LedgerState) committeeServed(
 	txn ledgerdb.Txn,
-) (*CommitteeState, bool, error) {
+) (*CommitteeState, error) {
 	r := ls.committeeReader(txn)
 	if r == nil || !ls.setServes(&ls.committeeSetLoaded, r.CommitteeLoaded) {
 		if ls.familyDrained(nodesettings.FamilyCommitteeConstitution) {
-			return &CommitteeState{}, true, drainedUnserved(
+			return &CommitteeState{}, drainedUnserved(
 				nodesettings.FamilyCommitteeConstitution,
 			)
 		}
-		return &CommitteeState{}, false, nil
+		return &CommitteeState{}, ls.setFamilyUnserved(nodesettings.FamilyCommitteeConstitution)
 	}
-	st, err := ls.committeeView(r, txn)
-	return st, true, err
+	return ls.committeeView(r, txn)
 }
 
 func pointersTo[T any](rows []T) []*T {
@@ -574,54 +569,6 @@ func (ls *LedgerState) stageCommitteeCertificate(
 	return true, nil
 }
 
-func (ls *LedgerState) compareCommitteeRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.committeeReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.committeeReadMismatches.Add(1)
-	ls.metrics.committeeReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set committee read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// verifyCommittee compares a read of the committee rows with the set's.
-func (s stagingLedgerDB) verifyCommittee(
-	g verifyReadGuard,
-	what string,
-	txn ledgerdb.Txn,
-	same func(*CommitteeState) bool,
-) {
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return
-	}
-	r := s.ls.committeeReader(txn)
-	if r == nil {
-		return
-	}
-	st, err := s.ls.committeeView(r, txn)
-	s.ls.compareCommitteeRead(g, what, err == nil && same(st), err)
-}
-
 func sameRat(a, b *big.Rat) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -649,7 +596,7 @@ func sameConstitution(a, b *models.Constitution) bool {
 
 // sameMembers compares member rows without their IDs. The metadata store
 // orders them by insertion; the set by (added slot, tag, hash), so both are
-// compared in the set's order.
+// ordered as the set records them.
 func sameMembers(want []*models.CommitteeMember, got []models.CommitteeMember) bool {
 	rows := make([]models.CommitteeMember, 0, len(want))
 	for _, m := range want {
@@ -699,42 +646,22 @@ func sameAuths(want []*models.AuthCommitteeHot, got []models.AuthCommitteeHot) b
 func (s stagingLedgerDB) GetConstitution(
 	txn ledgerdb.Txn,
 ) (*models.Constitution, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		return st.CurrentConstitution(), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetConstitution(txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "constitution", txn, func(st *CommitteeState) bool {
-		return sameConstitution(want, st.CurrentConstitution())
-	})
-	return want, nil
+	return st.CurrentConstitution(), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeQuorum(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (*big.Rat, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		return st.LatestQuorum(), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeQuorum(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "committee quorum", txn, func(st *CommitteeState) bool {
-		return sameRat(want, st.LatestQuorum())
-	})
-	return want, nil
+	return st.LatestQuorum(), nil
 }
 
 // latestQuorumRow is the row LatestCommitteeQuorum reports for the set's
@@ -751,118 +678,53 @@ func (st *CommitteeState) latestQuorumRow() *models.CommitteeQuorum {
 	return row
 }
 
-func sameQuorumRow(a, b *models.CommitteeQuorum) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	if a.AddedSlot != b.AddedSlot || (a.Quorum == nil) != (b.Quorum == nil) {
-		return false
-	}
-	return a.Quorum == nil || sameRat(a.Quorum.Rat, b.Quorum.Rat)
-}
-
-// LatestCommitteeQuorum is compared on the highest-slot quorum row, a
-// cleared quorum included.
+// LatestCommitteeQuorum returns the highest-slot quorum row, including a
+// cleared quorum.
 func (s stagingLedgerDB) LatestCommitteeQuorum(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (*models.CommitteeQuorum, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		return st.latestQuorumRow(), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.LatestCommitteeQuorum(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "latest committee quorum", txn,
-		func(st *CommitteeState) bool {
-			return sameQuorumRow(want, st.latestQuorumRow())
-		})
-	return want, nil
+	return st.latestQuorumRow(), nil
 }
 
-func resignationSlots(rows []*models.ResignCommitteeCold) map[string]uint64 {
-	out := make(map[string]uint64, len(rows))
-	for _, r := range rows {
-		out[models.CommitteeCredential{
-			CredentialTag: r.ColdCredentialTag,
-			Credential:    r.ColdCredential,
-		}.Key()] = r.AddedSlot
-	}
-	return out
-}
-
-// LatestCommitteeResignations is compared on each cold credential's
+// LatestCommitteeResignations returns each cold credential's latest
 // resignation slot.
 func (s stagingLedgerDB) LatestCommitteeResignations(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.ResignCommitteeCold, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		return pointersTo(slices.Clone(st.Resigns)), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.LatestCommitteeResignations(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "latest committee resignations", txn,
-		func(st *CommitteeState) bool {
-			return maps.Equal(
-				resignationSlots(want),
-				resignationSlots(pointersTo(slices.Clone(st.Resigns))),
-			)
-		})
-	return want, nil
+	return pointersTo(slices.Clone(st.Resigns)), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeMembers(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.CommitteeMember, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		seated := st.SeatedMembers()
-		return pointersTo(seated), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeMembers(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "committee members", txn, func(st *CommitteeState) bool {
-		return sameMembers(want, st.SeatedMembers())
-	})
-	return want, nil
+	seated := st.SeatedMembers()
+	return pointersTo(seated), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeMembersIncludeDeleted(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.CommitteeMember, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		return pointersTo(st.Members), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeMembersIncludeDeleted(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "committee members including deleted", txn,
-		func(st *CommitteeState) bool { return sameMembers(want, st.Members) })
-	return want, nil
+	return pointersTo(st.Members), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeMember(
@@ -872,29 +734,15 @@ func (s stagingLedgerDB) GetCommitteeMember(
 	termStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.AuthCommitteeHot, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		a := st.AuthSince(coldCredentialTag, coldKey, termStartSlot)
-		if a == nil {
-			return nil, models.ErrCommitteeMemberNotFound
-		}
-		return a, nil
+	st, err := s.ls.committeeServed(txn)
+	if err != nil {
+		return nil, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeMember(
-		ctx, coldCredentialTag, coldKey, termStartSlot, txn,
-	)
-	// A missing authorization is an answer too, and the set must agree.
-	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
-		return want, err
+	a := st.AuthSince(coldCredentialTag, coldKey, termStartSlot)
+	if a == nil {
+		return nil, models.ErrCommitteeMemberNotFound
 	}
-	s.verifyCommittee(g, fmt.Sprintf("committee member %x", coldKey), txn,
-		func(st *CommitteeState) bool {
-			return sameAuth(want, st.AuthSince(coldCredentialTag, coldKey, termStartSlot))
-		})
-	return want, err
+	return a, nil
 }
 
 func (s stagingLedgerDB) IsCommitteeMemberResigned(
@@ -904,24 +752,11 @@ func (s stagingLedgerDB) IsCommitteeMemberResigned(
 	termStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return false, err
-		}
-		return st.ResignedSince(coldCredentialTag, coldKey, termStartSlot), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.IsCommitteeMemberResigned(
-		ctx, coldCredentialTag, coldKey, termStartSlot, txn,
-	)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return false, err
 	}
-	s.verifyCommittee(g, fmt.Sprintf("committee member %x resigned", coldKey), txn,
-		func(st *CommitteeState) bool {
-			return want == st.ResignedSince(coldCredentialTag, coldKey, termStartSlot)
-		})
-	return want, nil
+	return st.ResignedSince(coldCredentialTag, coldKey, termStartSlot), nil
 }
 
 func (s stagingLedgerDB) GetResignedCommitteeMembers(
@@ -929,75 +764,40 @@ func (s stagingLedgerDB) GetResignedCommitteeMembers(
 	coldCredentials []models.CommitteeCredential,
 	txn ledgerdb.Txn,
 ) (map[string]bool, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		got := make(map[string]bool)
-		for _, c := range coldCredentials {
-			if st.ResignedSince(c.CredentialTag, c.Credential, c.TermStartSlot) {
-				got[c.Key()] = true
-			}
-		}
-		return got, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetResignedCommitteeMembers(ctx, coldCredentials, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "resigned committee members", txn,
-		func(st *CommitteeState) bool {
-			got := make(map[string]bool)
-			for _, c := range coldCredentials {
-				if st.ResignedSince(c.CredentialTag, c.Credential, c.TermStartSlot) {
-					got[c.Key()] = true
-				}
-			}
-			return maps.Equal(want, got)
-		})
-	return want, nil
+	got := make(map[string]bool)
+	for _, c := range coldCredentials {
+		if st.ResignedSince(c.CredentialTag, c.Credential, c.TermStartSlot) {
+			got[c.Key()] = true
+		}
+	}
+	return got, nil
 }
 
 func (s stagingLedgerDB) GetActiveCommitteeMembers(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.AuthCommitteeHot, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		active := st.ActiveMembers()
-		return pointersTo(active), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActiveCommitteeMembers(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, "active committee members", txn,
-		func(st *CommitteeState) bool { return sameAuths(want, st.ActiveMembers()) })
-	return want, nil
+	active := st.ActiveMembers()
+	return pointersTo(active), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeAuthorizedCount(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return 0, err
-		}
-		return len(st.ActiveMembers()), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeAuthorizedCount(ctx, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return 0, err
 	}
-	s.verifyCommittee(g, "committee authorized count", txn,
-		func(st *CommitteeState) bool { return want == len(st.ActiveMembers()) })
-	return want, nil
+	return len(st.ActiveMembers()), nil
 }
 
 func (s stagingLedgerDB) GetCommitteeHotAuthorizationsSince(
@@ -1005,19 +805,10 @@ func (s stagingLedgerDB) GetCommitteeHotAuthorizationsSince(
 	minSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.AuthCommitteeHot, error) {
-	if st, ok, err := s.ls.committeeServed(txn); ok {
-		if err != nil {
-			return nil, err
-		}
-		auths := st.AuthsSince(minSlot)
-		return pointersTo(auths), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetCommitteeHotAuthorizationsSince(ctx, minSlot, txn)
+	st, err := s.ls.committeeServed(txn)
 	if err != nil {
-		return want, err
+		return nil, err
 	}
-	s.verifyCommittee(g, fmt.Sprintf("hot authorizations since slot %d", minSlot), txn,
-		func(st *CommitteeState) bool { return sameAuths(want, st.AuthsSince(minSlot)) })
-	return want, nil
+	auths := st.AuthsSince(minSlot)
+	return pointersTo(auths), nil
 }

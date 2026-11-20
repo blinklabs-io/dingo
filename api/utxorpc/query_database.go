@@ -19,16 +19,17 @@ import (
 	"errors"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // QueryDatabase is the store the QueryService reads UTxOs, datums and
-// transaction records from. On the shared layout that is the ledger's own
-// database; on the split layout it is the IndexerDB, whose tip and readiness
-// the service reports and honors. Sync, watch, submit and evaluation always
-// stay on the ledger.
+// transaction records from: the IndexerDB, whose tip and readiness the service
+// reports and honors. Sync, watch, submit and evaluation stay on the ledger.
 type QueryDatabase interface {
 	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	TransactionByHash(
@@ -52,25 +53,72 @@ type QueryDatabase interface {
 	Ready(kind indexerdb.Kind) (bool, error)
 }
 
-// ledgerQueryDatabase serves queries from the ledger, which is always ready
-// and whose tip is the position its rows cover.
-type ledgerQueryDatabase struct {
-	UtxorpcLedgerState
+// indexerQueryDatabase reads UTxOs, datums and transactions from the
+// IndexerDB and reports its tip.
+type indexerQueryDatabase struct {
+	db    *database.Database
+	store *indexerdb.Store
+	ready apiready.Check
 }
 
-func (l ledgerQueryDatabase) Tip() (ochainsync.Tip, error) {
-	return l.UtxorpcLedgerState.Tip(), nil
+// NewIndexerQueryDatabase returns the QueryDatabase over the IndexerDB db,
+// whose tip store reports and whose readiness ready decides.
+func NewIndexerQueryDatabase(
+	db *database.Database,
+	store *indexerdb.Store,
+	ready apiready.Check,
+) QueryDatabase {
+	return &indexerQueryDatabase{db: db, store: store, ready: ready}
 }
 
-func (ledgerQueryDatabase) Ready(indexerdb.Kind) (bool, error) {
-	return true, nil
+func (q *indexerQueryDatabase) Datums(
+	ctx context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	return q.db.GetDatums(ctx, hashes)
+}
+
+func (q *indexerQueryDatabase) TransactionByHash(
+	ctx context.Context,
+	hash []byte,
+) (*models.Transaction, error) {
+	return q.db.GetTransactionByHash(ctx, hash, nil)
+}
+
+func (q *indexerQueryDatabase) UtxosByRefsBounded(
+	ctx context.Context,
+	refs []models.UtxoId,
+	maxBytes int64,
+) ([]models.Utxo, error) {
+	return q.db.UtxosByRefsBounded(ctx, refs, maxBytes, nil)
+}
+
+func (q *indexerQueryDatabase) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	query *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return q.db.UtxosByAddressBoundedPage(ctx, query, maxCandidates, maxBytes)
+}
+
+func (q *indexerQueryDatabase) Tip() (ochainsync.Tip, error) {
+	tip, err := q.store.Tip(nil)
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(tip.Slot, tip.Hash),
+		BlockNumber: tip.BlockNumber,
+	}, nil
+}
+
+func (q *indexerQueryDatabase) Ready(kind indexerdb.Kind) (bool, error) {
+	return q.ready(kind)
 }
 
 func (u *Utxorpc) queryDB() QueryDatabase {
-	if u.config.QueryDatabase != nil {
-		return u.config.QueryDatabase
-	}
-	return ledgerQueryDatabase{u.config.LedgerState}
+	return u.config.QueryDatabase
 }
 
 // requireReady refuses a query the IndexerDB cannot yet answer. A store whose

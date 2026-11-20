@@ -247,6 +247,7 @@ func TestLeiosSelectionSessionMeasuresStoredReferenceScripts(t *testing.T) {
 		TxIsValid: true,
 	}
 
+	attachQueryLiveUtxoSet(t, ls, db)
 	var stored, consumed uint64
 	var consumedErr error
 	require.NoError(t, ls.WithLeiosSelectionSession(

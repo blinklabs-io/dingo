@@ -20,9 +20,12 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -40,11 +43,23 @@ import (
 // block its parent announced.
 type certifiedEndorserLedger struct {
 	*ledger.LedgerState
-	fixture *testfixtures.CertifiedEndorserBlock
-	txHash  []byte
+	indexerDB *database.Database
+	fixture   *testfixtures.CertifiedEndorserBlock
+	txHash    []byte
 }
 
 func (l *certifiedEndorserLedger) SecurityParam() int { return 2 }
+
+// queryDatabase is the IndexerDB the fixture's transaction rows are in.
+func (l *certifiedEndorserLedger) queryDatabase(t *testing.T) QueryDatabase {
+	t.Helper()
+	store, err := indexerdb.NewStore(l.indexerDB, l.indexerDB, 0)
+	require.NoError(t, err)
+	return NewIndexerQueryDatabase(
+		l.indexerDB, store,
+		func(indexerdb.Kind) (bool, error) { return true, nil },
+	)
+}
 
 func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	t.Helper()
@@ -54,6 +69,7 @@ func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -80,7 +96,11 @@ func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	require.NoError(t, err)
 	// Transactions of a certified endorser block are indexed under the
 	// certifying ranking block.
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, db, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, indexerDB)
 	require.NoError(t, err)
 	_, err = testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction" (hash, block_hash, slot, fee, collateral_fee, ttl, block_index, valid) VALUES (?, ?, ?, '0', '0', '0', 0, TRUE)`,
@@ -91,6 +111,7 @@ func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	require.NoError(t, err)
 	return &certifiedEndorserLedger{
 		LedgerState: ls,
+		indexerDB:   indexerDB,
 		fixture:     f,
 		txHash:      tx.Hash().Bytes(),
 	}
@@ -100,8 +121,9 @@ func TestReadTxFindsCertifiedEndorserTransaction(t *testing.T) {
 	t.Parallel()
 	ls := newCertifiedEndorserLedger(t)
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: ls.queryDatabase(t),
 	})}
 
 	resp, err := srv.ReadTx(context.Background(), connect.NewRequest(
@@ -120,8 +142,9 @@ func TestWatchTxRollbackUndoesCertifiedEndorserTransaction(t *testing.T) {
 	t.Parallel()
 	ls := newCertifiedEndorserLedger(t)
 	srv := &watchServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: ls.queryDatabase(t),
 	})}
 
 	// Rolling back to the announcing block undoes the certifying block, whose

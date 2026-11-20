@@ -382,6 +382,11 @@ func (d *Database) writeImmutableState(st ImmutableState) error {
 // configuration enables the feature; New records a created state once the
 // open's startup checks pass. It runs before anything reads blocks.
 func (d *Database) initImmutable() error {
+	// An IndexerDB reads block bodies through the ledger database's blob
+	// store, which already resolves the markers of promoted blocks.
+	if d.isIndexer() {
+		return nil
+	}
 	cfg := d.config.Immutable
 	st, found, err := d.loadImmutableState()
 	if err != nil {
@@ -390,9 +395,8 @@ func (d *Database) initImmutable() error {
 	if !found && !cfg.Enabled {
 		return nil
 	}
-	if d.config.DataDir == "" {
-		return errors.New("the ImmutableDB requires a data directory")
-	}
+	// Without a data directory the provider keeps the chunk files in a
+	// temporary directory of its own.
 	if d.immutableDB == nil {
 		return errors.New(
 			"the ImmutableDB requires a storage.immutable provider",
@@ -674,8 +678,11 @@ func (d *Database) promoteBatch(
 		}
 		body, md, err := raw.GetBlock(read.Blob(), point.Slot, point.Hash)
 		if err != nil {
-			if errors.Is(err, types.ErrHistoryExpired) {
-				// No body survives to write; the index is still covered.
+			// A tombstoned body, or a bp entry an older release removed
+			// while leaving the bi entry, has nothing to write; the index
+			// is still covered.
+			if errors.Is(err, types.ErrHistoryExpired) ||
+				errors.Is(err, types.ErrBlobKeyNotFound) {
 				lastIndex = idx
 				continue
 			}

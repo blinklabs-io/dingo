@@ -60,8 +60,19 @@ func RegisterProvider(host *hostplugin.Host) error {
 			_ Config,
 			deps immplugin.ProviderDependencies,
 		) (immplugin.ImmutableDB, hostplugin.Instance, error) {
+			dataDir := deps.DataDir
+			var temporary string
+			if dataDir == "" {
+				var err error
+				temporary, err = os.MkdirTemp("", "dingo-immutable-")
+				if err != nil {
+					return nil, nil, fmt.Errorf("create ephemeral ImmutableDB: %w", err)
+				}
+				dataDir = temporary
+			}
 			svc := &service{
-				dir: filepath.Join(deps.DataDir, immplugin.DirName),
+				dir:       filepath.Join(dataDir, immplugin.DirName),
+				temporary: temporary,
 			}
 			return svc, hostplugin.Lifecycle{StopFunc: svc.stop}, nil
 		},
@@ -69,7 +80,8 @@ func RegisterProvider(host *hostplugin.Host) error {
 }
 
 type service struct {
-	dir string
+	dir       string
+	temporary string
 
 	mu      sync.Mutex
 	open    *store
@@ -127,12 +139,16 @@ func (s *service) stop(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopped = true
-	if s.open == nil {
-		return nil
+	var err error
+	if s.open != nil {
+		st := s.open
+		s.open = nil
+		err = st.Store.Close()
 	}
-	st := s.open
-	s.open = nil
-	return st.Store.Close()
+	if s.temporary != "" {
+		err = errors.Join(err, os.RemoveAll(s.temporary))
+	}
+	return err
 }
 
 // release forgets st once its holder closed it, so Open can hand out the

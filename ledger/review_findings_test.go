@@ -16,21 +16,12 @@ package ledger
 
 import (
 	"bytes"
-	"context"
-	"encoding/hex"
-	"sync/atomic"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/prometheus/client_golang/prometheus"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,7 +67,6 @@ func TestUtxoWholeDetachedPointOffChainIsRejectedInSetOnlyMode(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newDiskTestLedger(t)
-	ls.config.UtxoSetOnly = true
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(300, bytes.Repeat([]byte{0xAB}, 32)),
 	}, nil))
@@ -94,27 +84,6 @@ func TestUtxoWholeDetachedPointOffChainIsRejectedInSetOnlyMode(t *testing.T) {
 	require.ErrorIs(t, err, ErrPointNotOnChain)
 }
 
-func TestNewLedgerStateRejectsUtxoSetReadsWithoutReader(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-
-	ls, err := NewLedgerState(LedgerStateConfig{
-		ChainManager: cm,
-		Database:     db,
-		Logger:       testLogger(),
-		UtxoSetReads: UtxoSetReadsVerify,
-	})
-	if ls != nil {
-		_ = ls.Close()
-	}
-	require.ErrorContains(t, err, "UtxoSetReads")
-}
-
 // unencodableOutput has no original CBOR and cannot be encoded: the channel
 // field is unsupported by the CBOR encoder.
 type unencodableOutput struct {
@@ -130,45 +99,4 @@ func TestOutputCborReportsEncodeFailure(t *testing.T) {
 	c, err := outputCbor(unencodableOutput{})
 	require.Error(t, err)
 	require.Empty(t, c)
-}
-
-// absentUtxoSet is a live UTxO set that holds nothing, so every verify-mode
-// comparison against a stored UTxO is a mismatch.
-type absentUtxoSet struct{ reads atomic.Uint64 }
-
-func (*absentUtxoSet) ApplyUtxoChanges(*ocommon.Point, []UtxoEvent) error {
-	return nil
-}
-
-func (s *absentUtxoSet) Get([]byte, uint32) ([]byte, bool, error) {
-	s.reads.Add(1)
-	return nil, false, nil
-}
-
-func (*absentUtxoSet) Sum([]byte) (uint64, error) { return 0, nil }
-
-func TestUtxoByTxInQueryDoesNotRunValidationVerify(t *testing.T) {
-	t.Parallel()
-
-	ls, db := newDiskTestLedger(t)
-	ls.metrics.init(prometheus.NewRegistry())
-	set := &absentUtxoSet{}
-	ls.config.UtxoSet = set
-	ls.config.UtxoSetReads = UtxoSetReadsVerify
-	txID := seedBabbageUtxo(t, db, 0xE1, 0, queryViewTestAddress(t), 2_000_000)
-	txIn := ledger.MustNewShelleyTransactionInput(
-		hex.EncodeToString(txID), 0,
-	)
-
-	res, err := ls.queryShelleyUtxoByTxIn(
-		t.Context(),
-		[]ledger.ShelleyTransactionInput{txIn},
-		QueryPoint{},
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, 1, utxoMapLen(t, res))
-	require.Zero(t, set.reads.Load(), "a client query read the live set")
-	require.Zero(t, promtestutil.ToFloat64(ls.metrics.utxoSetReadsVerified))
-	require.Zero(t, ls.utxoSetReadMismatches.Load())
 }

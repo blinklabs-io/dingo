@@ -15,7 +15,6 @@
 package statedrain_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -49,7 +48,6 @@ func pairEntry(f nodesettings.Family, table string) statedrain.Entry {
 		Family: f,
 		Tables: []statedrain.Table{{Name: table, Key: "id"}},
 		Loaded: func() (bool, error) { return true, nil },
-		Verify: func(context.Context) error { return nil },
 	}
 }
 
@@ -71,7 +69,6 @@ func TestRunFinishesAPairSplitByAStop(t *testing.T) {
 				}
 				env := statedrain.Env{
 					Store: store, Set: currentSet(), ChunkRows: 5,
-					VerifyBeforeDrain: true,
 				}
 				require.NoError(t, statedrain.Run(
 					t.Context(), env, []statedrain.Entry{

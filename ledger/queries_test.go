@@ -1271,7 +1271,7 @@ func utxoByTxInAsOf(
 		hex.EncodeToString(txId),
 		int(outputIdx),
 	)
-	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
+	result, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
 		QueryPoint{Slot: atSlot},
 		nil,
 	)
@@ -1320,6 +1320,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_LiveBetweenCreationAndSpend(
 		500,
 	))
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 300)
 	require.Len(
 		t, m, 1,
@@ -1356,6 +1357,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_BeforeCreation_Absent(t *testing.T) {
 		500,
 	))
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 50)
 	require.Empty(t, m, "utxo must not exist before its own creation slot")
 }
@@ -1389,6 +1391,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_SpentAtExactSlot_Absent(t *testing.T) {
 		500,
 	))
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 500)
 	require.Empty(t, m, "utxo spent at slot 500 must be absent as of slot 500")
 }
@@ -1420,6 +1423,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent(t *testing.T) {
 		500,
 	))
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 700)
 	require.Empty(
 		t,
@@ -1450,6 +1454,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_NeverSpent_StillLive(t *testing.T) {
 	require.NoError(t, err)
 	txId := seedBabbageUtxo(t, db, 0xC5, 0, addr, 1_000_000)
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 0)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 99_000)
 	require.Len(
 		t,
@@ -1459,14 +1464,14 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_NeverSpent_StillLive(t *testing.T) {
 	)
 }
 
-// TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected covers the
+// TestCheckUtxoRetentionWindowTooOldRejected covers the
 // retention-window boundary: a pinned point older than this node's
 // spent-UTxO retention floor (tip - stability window, the same threshold
 // UtxosDeleteConsumed prunes by) must reject cleanly with
 // ErrHistoricalStateUnavailable rather than risk answering "absent" for a
 // ref that may have been live at that point but whose spend record has
 // since been hard-deleted.
-func TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected(t *testing.T) {
+func TestCheckUtxoRetentionWindowTooOldRejected(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -1480,14 +1485,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected(t *testing.T) {
 	}, nil))
 
 	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	txIn := ledger.MustNewShelleyTransactionInput(
-		hex.EncodeToString(repeatedBytes(32, 0xEE)),
-		0,
-	)
-	_, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
-		QueryPoint{Slot: 149_999},
-		nil,
-	)
+	err := ls.checkUtxoRetentionWindow(nil, QueryPoint{Slot: 149_999})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -1511,7 +1509,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
-	_, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
+	_, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
 		QueryPoint{Slot: 150_000},
 		nil,
 	)
@@ -1539,7 +1537,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
-	_, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
+	_, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
 		// Far below what would be the core-mode floor (150_000).
 		QueryPoint{Slot: 1},
 		nil,
@@ -1547,7 +1545,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
 	require.NoError(t, err)
 }
 
-// TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLiveWindow
+// TestCheckUtxoRetentionWindowPersistedFloorOverridesLenientLiveWindow
 // covers the gap a retention floor derived from only the CURRENT tip and
 // era's own stability window leaves open: a rollback lowering the tip, or
 // an era transition widening the window (Byron's small 2k vs every
@@ -1556,7 +1554,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
 // pruned against -- see persistConsumedUtxoPruneFloor's doc comment.
 // checkUtxoRetentionWindow must reject using the durably persisted floor
 // even when the live tip/window alone would compute a smaller one.
-func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLiveWindow(
+func TestCheckUtxoRetentionWindowPersistedFloorOverridesLenientLiveWindow(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1576,14 +1574,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLi
 	// compute (100_000 - 50_000 = 50_000).
 	require.NoError(t, ls.persistConsumedUtxoPruneFloor(99_500, nil))
 
-	txIn := ledger.MustNewShelleyTransactionInput(
-		hex.EncodeToString(repeatedBytes(32, 0xEE)),
-		0,
-	)
-	_, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
-		QueryPoint{Slot: 60_000},
-		nil,
-	)
+	err := ls.checkUtxoRetentionWindow(nil, QueryPoint{Slot: 60_000})
 	require.Error(
 		t,
 		err,
@@ -1639,7 +1630,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
-	_, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{txIn},
+	_, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
 		QueryPoint{Slot: 1},
 		nil,
 	)
@@ -1683,6 +1674,7 @@ func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 		Point: ocommon.NewPoint(300, pointHash),
 	}, nil))
 
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
@@ -1907,7 +1899,7 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByAddress(context.Background(), nil, QueryPoint{}, nil)
+	result, err := ls.queryShelleyUtxoByAddress(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -1931,10 +1923,13 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 		txId []byte,
 		amount uint64,
 	) {
+		addressBytes, err := addr.Bytes()
+		require.NoError(t, err)
 		require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 			TxId:       txId,
 			OutputIdx:  0,
 			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			Address:    addressBytes,
 			AddedSlot:  1,
 			Amount:     types.Uint64(amount),
 		}))
@@ -1969,8 +1964,8 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	seedAddressUtxo(addr2, txId2, 2_000_000)
 
 	ls := &LedgerState{db: db}
+	attachQueryLiveUtxoSet(t, ls, db)
 	result, err := ls.queryShelleyUtxoByAddress(
-		context.Background(),
 		[]ledger.Address{addr1, addr2},
 		QueryPoint{},
 		nil,
@@ -1994,7 +1989,7 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), nil, QueryPoint{}, nil)
+	result, err := ls.queryShelleyUtxoByTxIn(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -2080,7 +2075,8 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	)
 
 	ls := &LedgerState{db: db}
-	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), txIns, QueryPoint{}, nil)
+	attachQueryLiveUtxoSet(t, ls, db)
+	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)

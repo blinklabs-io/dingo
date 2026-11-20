@@ -34,6 +34,7 @@ func TestNewLedgerStateSharesPhase2ResultCache(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

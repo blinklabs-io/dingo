@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -208,24 +209,30 @@ func TestIndexerMetadataSelection(t *testing.T) {
 	require.Equal(t, filepath.Join("/data", IndexerDirName), dir)
 	require.NotContains(t, sel.Config, "dataDir",
 		"the consensus store's directory override must not be inherited")
-
-	base.IndexerMetadataConfig = map[string]any{"dataDir": "/indexer-disk"}
-	sel, _, err = IndexerMetadataSelection(base, "/data")
+	_, dir, err = IndexerMetadataSelection(base, "")
 	require.NoError(t, err)
-	require.Equal(t, "/indexer-disk", sel.Config["dataDir"])
+	require.Empty(t, dir, "an ephemeral IndexerDB must not create a relative directory")
 
 	pg := StorageSelections{Metadata: plugin.Selection{
 		Provider: "postgres", Config: map[string]any{"dsn": "postgres://a/ledger"},
 	}}
 	_, _, err = IndexerMetadataSelection(pg, "/data")
-	require.ErrorContains(t, err, "separate postgres database",
-		"a client/server store with no override would share the consensus tables")
-	pg.IndexerMetadataConfig = map[string]any{"dsn": "postgres://a/ledger"}
-	_, _, err = IndexerMetadataSelection(pg, "/data")
-	require.ErrorContains(t, err, "separate postgres database",
-		"an override naming the same database is no override")
-	pg.IndexerMetadataConfig = map[string]any{"dsn": "postgres://a/indexer"}
+	require.ErrorContains(t, err, "its own namespace",
+		"a server store without the consensus namespace would share its tables")
+	pg.SplitIndexer = true
 	sel, _, err = IndexerMetadataSelection(pg, "/data")
 	require.NoError(t, err)
-	require.Equal(t, "postgres://a/indexer", sel.Config["dsn"])
+	require.Equal(t, "postgres://a/ledger", sel.Config["dsn"],
+		"the released database is the IndexerDB")
+}
+
+func TestConfiguredStorageSelectionsSelectsTheConsensusNamespace(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{StorageMode: "api"}
+	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "postgres"}
+	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	cfg.StorageMode = "core"
+	require.False(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	cfg.ServerCoreNamespace = true
+	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
 }

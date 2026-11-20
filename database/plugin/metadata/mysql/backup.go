@@ -346,32 +346,12 @@ func databaseIsEmpty(
 // later restore recreating that view then fails because it already
 // exists) instead of failing loudly or actually clearing it.
 func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
-	rows, err := db.QueryContext(
-		ctx,
-		"SELECT table_name FROM information_schema.tables "+
-			"WHERE table_schema = ? AND table_type = 'BASE TABLE'",
-		database,
-	)
+	tables, err := tablesForReset(ctx, db, database)
 	if err != nil {
-		return fmt.Errorf("list tables: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("scan table name: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list tables: %w", err)
+		return err
 	}
 	if len(tables) == 0 {
 		return nil
-	}
-	if err := refuseIfTargetHasData(ctx, db, database, tables); err != nil {
-		return err
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -395,6 +375,37 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 		}
 	}
 	return nil
+}
+
+func tablesForReset(ctx context.Context, db *sql.DB, database string) ([]string, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		"SELECT table_name FROM information_schema.tables "+
+			"WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+		database,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	if len(tables) == 0 {
+		return nil, nil
+	}
+	if err := refuseIfTargetHasData(ctx, db, database, tables); err != nil {
+		return nil, err
+	}
+	return tables, nil
 }
 
 const (
