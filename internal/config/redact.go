@@ -146,6 +146,7 @@ var logPlainConfigFields = []string{
 	"BarkLifecycleOperatorCertificateFingerprints",
 	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
+	"AdvertiseAddress",
 	"BindAddr",
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
