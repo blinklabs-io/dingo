@@ -148,3 +148,49 @@ func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
 	require.NoError(t, err)
 	require.Equal(t, []uint64{4, 7}, none)
 }
+
+// The pending stake-input record is replaced as a whole by each change, read
+// back oldest first, and a rollback below a snapshot's boundary drops its
+// entry.
+func TestPendingStakeInputsAreReplacedAndRolledBack(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	apply := func(slot uint64, entries ...ledger.RewardStakeInputsPendingEntry) {
+		tip := ocommon.NewPoint(slot, bytes.Repeat([]byte{byte(slot)}, 32))
+		require.NoError(t, set.ApplyLedgerChanges(
+			&tip, ledger.LedgerChanges{RewardInputs: []ledger.RewardInputChange{{
+				Kind: ledger.RewardInputPending, Pending: entries,
+			}}},
+		))
+	}
+	entry := func(epoch, slot uint64) ledger.RewardStakeInputsPendingEntry {
+		return ledger.RewardStakeInputsPendingEntry{
+			Epoch: epoch, BoundarySlot: slot,
+		}
+	}
+	apply(10, entry(5, 10), entry(4, 5))
+	got, err := set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.RewardStakeInputsPendingEntry{
+		entry(4, 5), entry(5, 10),
+	}, got)
+
+	apply(20, entry(5, 10))
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.RewardStakeInputsPendingEntry{entry(5, 10)}, got)
+
+	apply(30)
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	apply(40, entry(6, 40))
+	_, err = set.Rollback(ocommon.NewPoint(30, bytes.Repeat([]byte{30}, 32)))
+	require.NoError(t, err)
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Empty(t, got, "a rollback below the boundary drops the entry")
+}

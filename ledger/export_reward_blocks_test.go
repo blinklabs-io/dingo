@@ -116,6 +116,8 @@ type RewardBlocksScenario struct {
 	StageNoncesInSet func(rows []models.BlockNonce)
 	// WaitDeferred waits for the writer of a boundary's stake inputs.
 	WaitDeferred func()
+	// StakeInputsIncomplete is LedgerState.RewardStakeInputsIncompleteCommitted.
+	StakeInputsIncomplete func(from, through uint64) (bool, error)
 	// PotsFees is the fee total the boundary stored for epoch.
 	PotsFees func(epoch uint64) uint64
 	// Boundary applies the rollover into epoch 6.
@@ -670,7 +672,8 @@ func NewRewardBlocksScenarioForTest(
 		StageNoncesInSet: func(rows []models.BlockNonce) {
 			h.ls.stageBlockNonces(nil, rows, 0)
 		},
-		WaitDeferred: h.ls.deferredStakeInputsWG.Wait,
+		WaitDeferred:          h.ls.deferredStakeInputsWG.Wait,
+		StakeInputsIncomplete: h.ls.RewardStakeInputsIncompleteCommitted,
 		PotsFees: func(epoch uint64) uint64 {
 			pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
 			require.NoError(t, err)

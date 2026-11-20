@@ -1499,6 +1499,38 @@ func verifyRewardInputs(
 			return fmt.Errorf("reward inputs of epoch %d: %w", e.EpochId, err)
 		}
 	}
+	return verifyPendingStakeInputs(ldb, txn, r)
+}
+
+// verifyPendingStakeInputs compares the pending stake-input record, which a
+// drain of the family deletes from the metadata store.
+func verifyPendingStakeInputs(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	r RewardInputsReader,
+) error {
+	raw, err := ldb.GetSyncState(rewardStakeInputsPendingKey, txn)
+	if err != nil {
+		return err
+	}
+	want, err := ParseRewardStakeInputsPending(raw)
+	if err != nil {
+		return err
+	}
+	got, err := r.RewardStakePending(nil)
+	if err != nil {
+		return err
+	}
+	byEpoch := func(a, b RewardStakeInputsPendingEntry) int {
+		return cmp.Compare(a.Epoch, b.Epoch)
+	}
+	slices.SortFunc(want, byEpoch)
+	slices.SortFunc(got, byEpoch)
+	if !slices.Equal(want, got) {
+		return fmt.Errorf(
+			"pending stake inputs differ: store %+v, set %+v", want, got,
+		)
+	}
 	return nil
 }
 

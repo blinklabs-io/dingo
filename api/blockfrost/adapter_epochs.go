@@ -217,7 +217,13 @@ func (a *NodeAdapter) Epoch(
 
 // currentEpochNumber is the epoch containing the synced tip.
 func (a *NodeAdapter) currentEpochNumber() (uint64, error) {
-	tip, err := a.dataTip()
+	return a.currentEpochNumberAt(nil)
+}
+
+func (a *NodeAdapter) currentEpochNumberAt(
+	txn *database.Txn,
+) (uint64, error) {
+	tip, err := a.dataTipAt(txn)
 	if err != nil {
 		return 0, err
 	}

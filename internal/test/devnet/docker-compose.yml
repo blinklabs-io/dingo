@@ -287,6 +287,9 @@ services:
       TXPUMP_COOLDOWN_MIN: "5000"
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
+      # Empty keeps every genesis key. run-tests.sh leaves the accelerated
+      # governance scenario's funding key out of this set.
+      TXPUMP_USERS: "${DEVNET_TXPUMP_USERS:-}"
       TXPUMP_TRANSACTION_ERA: "${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}"
       TXPUMP_LOG_DIR: "/logs"
       # The configurator writes the effective system start here. txpump waits
