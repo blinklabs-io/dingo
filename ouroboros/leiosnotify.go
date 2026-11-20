@@ -3006,6 +3006,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	deferVerification bool,
 	done <-chan any,
 ) error {
+	// receivedAt is when this header reached the node. It is reported to
+	// the vote manager only after the header's cryptography verifies below.
+	receivedAt := time.Now()
 	if isNilInterface(o.leiosAnnouncementLedger) {
 		return fmt.Errorf(
 			"%w: cannot accept leios announcement without announcement ledger",
@@ -3203,8 +3206,33 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	}
 	if err == nil {
 		announced()
+		o.observeLeiosAnnouncementArrival(header, ebHash, receivedAt)
 	}
 	return err
+}
+
+// observeLeiosAnnouncementArrival tells the vote manager when an accepted
+// announcement's ranking-block header reached this node, so the CIP-164
+// L_hdr check is timed from that arrival rather than from the later chainsync
+// admission of the same header. It must only be called once
+// ValidateLeiosAnnouncementHeader has verified the header's cryptography and
+// classified its op-cert counter as fresh: that is the same authentication
+// the chain requires before a header can arm a vote (chain.AddBlockHeader).
+// The vote manager never arms a vote from this call.
+func (o *Ouroboros) observeLeiosAnnouncementArrival(
+	header *gdijkstra.DijkstraBlockHeader,
+	ebHash lcommon.Blake2b256,
+	receivedAt time.Time,
+) {
+	if o.leiosVotes == nil {
+		return
+	}
+	o.leiosVotes.ObserveAnnouncementArrival(
+		header.SlotNumber(),
+		lcommon.NewBlake2b256(header.Hash().Bytes()),
+		ebHash,
+		receivedAt,
+	)
 }
 
 func (o *Ouroboros) deferLeiosAnnouncement(
