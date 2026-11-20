@@ -49,6 +49,22 @@ func NewIndexerService(
 	if deps.Consensus == nil || deps.Indexer == nil {
 		return nil, errors.New("indexer service needs both databases")
 	}
+	// An IndexerDB a release seeded from genesis holds the zero-coin Byron
+	// outputs the reference translation drops, which a replay toward a
+	// Mithril anchor would then disagree with. They go before the writer
+	// reads the IndexerDB.
+	zero, err := ledger.ZeroValueByronGenesisOutputs(deps.NodeConfig)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"derive zero-value Byron genesis outputs: %w",
+			err,
+		)
+	}
+	if err := ledger.RepairZeroValueByronGenesis(
+		context.Background(), deps.Indexer, zero, deps.Logger,
+	); err != nil {
+		return nil, fmt.Errorf("repair indexer genesis outputs: %w", err)
+	}
 	w, store, err := newIndexerWriter(
 		deps, indexer.NewDatabaseSource(deps.Consensus),
 		indexer.DefaultBatchBlocks,

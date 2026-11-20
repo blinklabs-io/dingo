@@ -2273,6 +2273,69 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 	})
 }
 
+// genesisUtxoRemover is the metadata store hook RemoveGenesisUtxos drives.
+type genesisUtxoRemover interface {
+	DeleteUnspentGenesisUtxos(
+		[]models.UtxoId, [][]byte, types.Txn,
+	) ([]models.UtxoId, error)
+}
+
+// RemoveGenesisUtxos removes the outputs named by refs that are unspent, with
+// their address, pointer and reference-script rows, and then the genesis
+// transaction rows named by txHashes that no output, spend or edge refers to.
+// It returns the references it removed. An output that is spent, referenced
+// by a transaction or carrying an asset is left alone.
+func (d *Database) RemoveGenesisUtxos(
+	ctx context.Context,
+	refs []models.UtxoId,
+	txHashes [][]byte,
+	txn *Txn,
+) ([]models.UtxoId, error) {
+	remover, ok := d.metadata.(genesisUtxoRemover)
+	if !ok {
+		return nil, errors.New(
+			"the metadata store cannot remove genesis outputs",
+		)
+	}
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(ctx, true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	removed, err := remover.DeleteUnspentGenesisUtxos(
+		refs, txHashes, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// A store that keeps output offsets in the blob store holds one per
+	// output; the live UTxO set a core store reads instead has none.
+	if !d.liveUtxo && len(removed) > 0 {
+		blobStore := txn.BlobStore()
+		blobTxn := txn.Blob()
+		if blobStore == nil || blobTxn == nil {
+			return nil, types.ErrBlobStoreUnavailable
+		}
+		for _, ref := range removed {
+			if err := blobStore.DeleteUtxo(
+				blobTxn, ref.Hash, ref.Idx,
+			); err != nil {
+				return nil, fmt.Errorf(
+					"delete genesis utxo offset %x#%d: %w",
+					bytePrefix(ref.Hash), ref.Idx, err,
+				)
+			}
+		}
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return nil, fmt.Errorf("commit transaction: %w", err)
+		}
+	}
+	return removed, nil
+}
+
 // UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
 // holds no UTxO set because the ledger's live UTxO set is its only copy.
 const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
