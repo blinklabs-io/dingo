@@ -98,28 +98,6 @@ func TestQueryShelleyGovStateAssemblesLedgerGovernanceState(t *testing.T) {
 		AddedSlot:     10,
 	}
 	require.NoError(t, db.SetGovernanceProposal(ctx, enacted, nil))
-	pending := &models.GovernanceProposal{
-		TxHash:        repeatedBytes(32, 0x67),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ExpiresEpoch:  10,
-		AnchorURL:     "https://example.com/pending.json",
-		AnchorHash:    repeatedBytes(32, 0x68),
-		Deposit:       100_000_000,
-		ReturnAddress: returnAddress,
-		GovActionCbor: govAction,
-		AddedSlot:     100,
-	}
-	require.NoError(t, db.SetGovernanceProposal(ctx, pending, nil))
-	require.NoError(t, db.SetGovernanceVote(ctx, &models.GovernanceVote{
-		ProposalID:         pending.ID,
-		VoterType:          models.VoterTypeDRep,
-		VoterCredentialTag: 0,
-		VoterCredential:    stakeCred28(0x69),
-		Vote:               models.VoteYes,
-		AddedSlot:          101,
-	}, nil))
-
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)
@@ -139,11 +117,7 @@ func TestQueryShelleyGovStateAssemblesLedgerGovernanceState(t *testing.T) {
 	assert.Nil(t, state.ProposalRoots.Committee)
 	assert.Nil(t, state.ProposalRoots.Constitution)
 
-	var pendingIDs [][]byte
-	for _, proposal := range state.Proposals {
-		pendingIDs = append(pendingIDs, proposal.Id.TransactionId[:])
-	}
-	assert.Contains(t, pendingIDs, pending.TxHash)
+	assert.Empty(t, state.Proposals)
 
 	committee, err := state.DecodeCommittee()
 	require.NoError(t, err)
@@ -276,8 +250,16 @@ func TestQueryShelleyGovStateCarriesDRepAndPoolStake(t *testing.T) {
 	for _, entry := range pulsing.Snapshot.DRepDistr {
 		stakeByDRep[entry.Drep.Type] += entry.Stake
 	}
-	assert.Equal(t, uint64(5_000_000), stakeByDRep[int(models.DrepTypeAddrKeyHash)])
-	assert.Equal(t, uint64(2_000_000), stakeByDRep[int(models.DrepTypeAlwaysAbstain)])
+	assert.Equal(
+		t,
+		uint64(5_000_000),
+		stakeByDRep[int(models.DrepTypeAddrKeyHash)],
+	)
+	assert.Equal(
+		t,
+		uint64(2_000_000),
+		stakeByDRep[int(models.DrepTypeAlwaysAbstain)],
+	)
 	assert.NotContains(
 		t, stakeByDRep, int(models.DrepTypeAlwaysNoConfidence),
 		"an option holding no stake is not in the distribution",
@@ -357,30 +339,69 @@ func TestQueryShelleyGovStateAnswersPinnedPointAtTheTip(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-func TestQueryShelleyGovStateSnapshotHoldsOnlyBoundaryProposals(t *testing.T) {
+// seedGovStateProposal records an Info proposal added at slot, optionally
+// enacted at enactedSlot.
+func seedGovStateProposal(
+	t *testing.T,
+	db *database.Database,
+	hash byte,
+	slot uint64,
+	enactedSlot *uint64,
+) {
+	t.Helper()
+	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        repeatedBytes(32, hash),
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ExpiresEpoch:  10,
+		AnchorURL:     "https://example.com/proposal.json",
+		AnchorHash:    repeatedBytes(32, 0x68),
+		ReturnAddress: append([]byte{0xe0}, repeatedBytes(28, 0x64)...),
+		GovActionCbor: govAction,
+		AddedSlot:     slot,
+		EnactedSlot:   enactedSlot,
+	}
+	if enactedSlot != nil {
+		epoch := uint64(0)
+		proposal.EnactedEpoch = &epoch
+	}
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
+}
+
+func TestQueryShelleyGovStateRefusesWhileAnActionIsPending(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 1, StartSlot: 100})
+	seedGovStateProposal(t, db, 0x72, 150, nil)
+
+	_, err := ls.queryShelleyGovState(context.Background(), QueryPoint{}, nil)
+	require.ErrorIs(t, err, ErrQueryNotAnswered)
+}
+
+func TestQueryShelleyGovStateRefusesWhenAnActionStoodAtTheBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 1, StartSlot: 100})
+	// Proposed before the epoch began and enacted after, so no action is
+	// pending now but the epoch-start snapshot held it.
+	enactedSlot := uint64(150)
+	seedGovStateProposal(t, db, 0x71, 50, &enactedSlot)
+
+	_, err := ls.queryShelleyGovState(context.Background(), QueryPoint{}, nil)
+	require.ErrorIs(t, err, ErrQueryNotAnswered)
+}
+
+func TestQueryShelleyGovStateSnapshotHoldsOnlyBoundaryDReps(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 1, StartSlot: 100})
-	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
-	require.NoError(t, err)
-	returnAddress := append([]byte{0xe0}, repeatedBytes(28, 0x64)...)
-	propose := func(hash byte, slot uint64) *models.GovernanceProposal {
-		proposal := &models.GovernanceProposal{
-			TxHash:        repeatedBytes(32, hash),
-			ActionType:    uint8(lcommon.GovActionTypeInfo),
-			ExpiresEpoch:  10,
-			AnchorURL:     "https://example.com/proposal.json",
-			AnchorHash:    repeatedBytes(32, 0x68),
-			ReturnAddress: returnAddress,
-			GovActionCbor: govAction,
-			AddedSlot:     slot,
-		}
-		require.NoError(t, db.SetGovernanceProposal(ctx, proposal, nil))
-		return proposal
-	}
-	before := propose(0x71, 50)
-	after := propose(0x72, 150)
 	for _, drep := range []struct {
 		key  byte
 		slot uint64
@@ -399,15 +420,8 @@ func TestQueryShelleyGovStateSnapshotHoldsOnlyBoundaryProposals(t *testing.T) {
 	pulsing, err := state.DecodeDRepPulsingState()
 	require.NoError(t, err)
 
-	ids := func(proposals []olocalstatequery.GovActionState) [][]byte {
-		var out [][]byte
-		for _, proposal := range proposals {
-			out = append(out, proposal.Id.TransactionId[:])
-		}
-		return out
-	}
-	assert.ElementsMatch(t, [][]byte{before.TxHash, after.TxHash}, ids(state.Proposals))
-	assert.Equal(t, [][]byte{before.TxHash}, ids(pulsing.Snapshot.Proposals))
+	assert.Empty(t, state.Proposals)
+	assert.Empty(t, pulsing.Snapshot.Proposals)
 	require.Len(t, pulsing.Snapshot.DRepState, 1)
 	for credential := range pulsing.Snapshot.DRepState {
 		assert.Equal(t, stakeCred28(0xc1), credential.Bytes[:])
@@ -481,7 +495,16 @@ func TestQueryShelleyGovStateConvertsPreviousParametersToTheCurrentEra(
 		1900, 19, nil, nil, nil, nil, uint(eras.ConwayEraDesc.Id), 1, 100, nil,
 	))
 	require.NoError(t, db.SetEpoch(
-		2000, 20, nil, nil, nil, nil, uint(eras.DijkstraEraDesc.Id), 1, 100, nil,
+		2000,
+		20,
+		nil,
+		nil,
+		nil,
+		nil,
+		uint(eras.DijkstraEraDesc.Id),
+		1,
+		100,
+		nil,
 	))
 	previous, err := cbor.Encode(conwayParams)
 	require.NoError(t, err)

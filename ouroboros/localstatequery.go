@@ -205,8 +205,9 @@ func (o *Ouroboros) localstatequeryViewMaxLifetime() time.Duration {
 //
 // A specific point is rejected here, before anything is recorded, unless
 // LedgerState.AcquireQueryView confirms every point-aware query type can
-// answer for it (GetGovState is tip-only and not covered). The wire protocol has no way to fail a query after a
-// successful Acquire, so this is the only protocol-legal place to refuse a
+// answer for it (GetGovState is tip-only and not covered). The wire protocol
+// has no way to fail a query after a successful Acquire, so this is the only
+// protocol-legal place to refuse a
 // point this node cannot honor. The two ways that can fail map to the two
 // AcquireFailure reasons the protocol defines: a point that has left this
 // node's chain (ErrPointNotOnChain) fails the same way an unknown point

@@ -322,14 +322,14 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // windows here, upfront, gives Dingo that same guarantee instead of
 // discovering the gap mid-query. ShelleyGovStateQuery is the exception: it
 // answers only the current tip, so a point that acquires can still fail it, and
-// the failure cannot be checked here because the query is not known yet. The cost is symmetric: a connection that
-// only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
-// at a point older than UTxO's or stake distribution's own floor is now
-// also refused at Acquire, even though that specific query alone could
-// have answered -- accepted deliberately, since the protocol gives no way
-// to know in advance which query type a session will ask, and refusing a
-// point upfront is a well-defined, protocol-legal AcquireFailure, unlike
-// discovering the same gap mid-query.
+// the failure cannot be checked here because the query is not known yet.
+// The cost is symmetric: a connection that only ever intended to ask a
+// genuinely unbounded query (queryShelleyEpochNo) at a point older than UTxO's
+// or stake distribution's own floor is now also refused at Acquire, even
+// though that specific query alone could have answered -- accepted
+// deliberately, since the protocol gives no way to know in advance which query
+// type a session will ask, and refusing a point upfront is a well-defined,
+// protocol-legal AcquireFailure, unlike discovering the same gap mid-query.
 //
 // Unpinned (at.pinned() false) always succeeds: the live tip trivially
 // satisfies every retention window.
@@ -1364,20 +1364,24 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // Answers only the tip: ShelleyGovStateQuery (queryShelleyGovState). A pinned
 // point is answered when it is the current tip, which is what a reopened view
 // names while the chain has not advanced, and any other point is refused with
-// ErrHistoricalStateUnavailable. The DRep distribution and the ratification
-// outcome of the epoch boundary are not stored, so the state at an earlier
-// slot cannot be rebuilt; the reply is never read from the tip for a point
-// that is not the tip.
+// ErrHistoricalStateUnavailable. The DRep distribution of the epoch boundary
+// is not stored, so the state at an earlier slot cannot be rebuilt; the reply
+// is never read from the tip for a point that is not the tip. Even at the tip
+// it fails with ErrQueryNotAnswered while a governance action exists, now or
+// in the epoch-start snapshot, because the ratification outcome is not stored.
 //
 // Not answered, so the call fails with ErrQueryNotAnswered:
 // ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
 // rank pools by a performance estimate derived from a per-pool likelihood
 // history and the last boundary's reward pot, neither of which is tracked;
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which return
-// the whole epoch state in the ledger's encoding. Also not answered, with an
-// unsupported-query error: ShelleyStakePoolStateQuery on every network but
-// the Leios prototype's (LedgerStateConfig.StakePoolStateQuery), because
-// released nodes do not support it.
+// the whole epoch state in the ledger's encoding; and ShelleyGovStateQuery,
+// but only while a governance action exists, now or in the epoch-start
+// snapshot, because the ratification outcome is not stored. Also not
+// answered, with an unsupported-query error: ShelleyStakePoolStateQuery on
+// every network but the Leios prototype's
+// (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
+// support it.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).

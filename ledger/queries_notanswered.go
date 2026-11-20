@@ -38,6 +38,11 @@ const (
 	missingPoolPerformance = "each pool's performance estimate, derived from a " +
 		"per-pool likelihood history and the reward pot of the last epoch " +
 		"boundary, neither of which is tracked"
+	// missingRatificationOutcome is what GetGovState reports for the ratify
+	// state while a governance action is pending.
+	missingRatificationOutcome = "the completed ratification outcome of the " +
+		"epoch boundary, which is not stored, while a governance action is " +
+		"pending"
 	// missingEpochState is the whole ledger state the debug queries return.
 	missingEpochState = "the whole epoch state in the ledger's encoding, " +
 		"which is not held in that form"

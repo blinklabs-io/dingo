@@ -8188,7 +8188,8 @@ boundary; neither is tracked, and an estimate computed from a partial history
 would rank pools wrongly, so the query fails rather than answer. The debug
 queries return the whole epoch or new-epoch state in the ledger's encoding,
 which is not held in that form. Each fails with `ErrQueryNotAnswered`, which
-names the query and what is missing. The LocalStateQuery state machine has no
+names the query and what is missing; `GetGovState` fails the same way only
+while a governance action is pending. The LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
 it at warn level with that reason. At node-to-client versions 21 to 23 the
@@ -20771,26 +20772,30 @@ expiry, and any other reports 0 (unset). Rollback applies the same rule.
 `GetGovState` (`queryShelleyGovState`) answers at the tip. A pinned point is
 answered only when it is the current tip, which is what a reopened view names
 while the chain has not advanced; any other point is refused with
-`ErrHistoricalStateUnavailable`. The proposals come from
-`queryShelleyGetProposals`, the roots from the latest enacted proposal of each
-purpose, the committee from the enacted members with the enacted quorum or
-the Conway genesis threshold (none after a NoConfidence), the constitution
-from `GetConstitution`, and the protocol parameters from the epoch the view
-answers for and the epoch before it, falling back to the current ones when that
-epoch has no stored row. A previous epoch in another era is converted with the
-current era's `HardForkFunc`. FuturePParams is always "no update", so a
-parameter change scheduled for the next epoch is not reported.
+`ErrHistoricalStateUnavailable`. The reply carries the roots (the latest
+enacted proposal of each purpose), the committee (the enacted members with the
+enacted quorum or the Conway genesis threshold, none after a NoConfidence), the
+constitution from `GetConstitution`, and the protocol parameters of the epoch
+the view answers for and the epoch before it, falling back to the current ones
+when that epoch has no stored row. A previous epoch in another era is
+converted with the current era's `HardForkFunc`.
 
-The DRep pulsing state is the part the reference node freezes at the boundary
-that opened the epoch, and Dingo stores no such snapshot. Its proposals and
-DRep state are read as of the last slot before the epoch began, and the
-top-level proposals stay live. Its DRep distribution (registered DReps and the
-two predefined options that hold stake) and pool distribution are read live,
-without proposal deposits or the delegator-inactivity gate, so they can differ
-from the node's once stake moves within an epoch. The ratify state carries the
-current enact state with a zero treasury, as the reference node reports, and
-no enacted or expired actions and no delay, because the ratification outcome
-of the boundary is not stored either.
+The reference node also returns a ratification outcome (the enacted and
+expired actions, the delay flag, and the enact state after enactment) and a
+scheduled parameter change, computed from a snapshot it freezes at the boundary
+that opened the epoch. Dingo stores neither the snapshot nor the outcome, and
+decides ratification at the boundary from live tables, so the outcome cannot be
+rebuilt. It is empty exactly when no governance action exists to ratify, expire
+or enact, so the query is answered only when the proposal set is empty both now
+and as of the last slot before the epoch began. It then carries empty
+proposals, no enacted or expired actions, no delay, a zero treasury as the
+reference node reports, and no scheduled parameter change. While an action is
+pending the query fails with `ErrQueryNotAnswered`, which ends the session,
+instead of reporting no outcome. The DRep pulsing snapshot's DRep state is read
+as of the last slot before the epoch began; its DRep distribution (registered
+DReps and the two predefined options that hold stake) and its pool distribution
+are read live, without the delegator-inactivity gate, so they can differ from
+the node's once stake moves within an epoch.
 
 `DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
 acquired block instead of the tip: its slot as the last slot, the epoch rows
