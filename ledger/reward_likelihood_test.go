@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"math"
 	"math/big"
@@ -139,4 +140,40 @@ func TestNonMyopicMemberRewardUsesReferenceStakeChoice(t *testing.T) {
 	reward, err = nonMyopicMemberReward(pool, 10_000_000, state)
 	require.NoError(t, err)
 	require.Equal(t, uint64(10_000_000), reward)
+}
+
+func TestRewardLikelihoodStakeShareUsesCirculation(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	pool := bytes.Repeat([]byte{0x31}, 28)
+	app := &stakeRewardApplication{
+		params: rewards.Parameters{
+			Decentralization: big.NewRat(0, 1),
+			ActiveSlotsCoeff: big.NewRat(1, 10),
+			EpochLength:      100,
+		},
+		pots:                     &models.RewardAdaPots{},
+		epochs:                   stakeRewardEpochs{pots: 0},
+		snapshotTotalActiveStake: 100_000,
+		totalCirculation:         1_000_000,
+		likelihoodPoolInputs: []*models.RewardPoolInput{{
+			PoolKeyHash:    pool,
+			DelegatedStake: 10_000,
+		}},
+		likelihoodBlockCounts: map[string]uint64{string(pool): 1},
+	}
+	require.NoError(t, ls.saveRewardLikelihoodForApplication(app, 10, nil))
+
+	rows, err := ls.ledgerDB().GetRewardPoolLikelihoods(1, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	got, err := decodeRewardLikelihood(rows[0].LogWeights)
+	require.NoError(t, err)
+	want, err := combineRewardLikelihood(
+		make([]float32, rewardLikelihoodSampleCount),
+		rewardPoolLikelihood(1, 100, rewardLeaderProbability(0.1, 0.01, 0)),
+	)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }

@@ -394,6 +394,19 @@ func (ls *LedgerState) nonMyopicState(
 		totalStake:      totalStake,
 		minPoolCost:     minPoolCost,
 	}
+	// Index stake inputs by pool once so each registration only walks its
+	// own delegators.
+	inputsByPool := make(map[string][]*snapshot.StakeInput)
+	for i := range distribution.StakeInputs {
+		input := &distribution.StakeInputs[i]
+		if !input.Registered || input.CredentialTag != 0 {
+			continue
+		}
+		inputsByPool[string(input.PoolKeyHash)] = append(
+			inputsByPool[string(input.PoolKeyHash)],
+			input,
+		)
+	}
 	for i := range registrations {
 		reg := &registrations[i]
 		key := lcommon.PoolKeyHash(lcommon.NewBlake2b224(reg.PoolKeyHash))
@@ -402,11 +415,7 @@ func (ls *LedgerState) nonMyopicState(
 		for _, owner := range reg.Owners {
 			owners[string(owner.KeyHash)] = struct{}{}
 		}
-		for _, input := range distribution.StakeInputs {
-			if !input.Registered || input.CredentialTag != 0 ||
-				!bytes.Equal(input.PoolKeyHash, reg.PoolKeyHash) {
-				continue
-			}
+		for _, input := range inputsByPool[string(reg.PoolKeyHash)] {
 			if _, ok := owners[string(input.StakingKey)]; ok {
 				if ownerStake > ^uint64(0)-input.Stake {
 					return nil, errors.New("non-myopic owner stake overflow")
@@ -451,19 +460,16 @@ func (ls *LedgerState) nonMyopicState(
 	}
 	//nolint:gosec // bounded by math.MaxInt above
 	limit := int(state.params.OptimalPoolCount)
-	if limit == 0 {
-		limit = 1
-	}
 	limit = min(limit, len(state.pools))
 	state.topPools = make(map[lcommon.PoolKeyHash]struct{}, limit)
 	for _, pool := range state.pools {
+		if len(state.topPools) == limit {
+			break
+		}
 		if !pool.hasLikelihood {
 			continue
 		}
 		state.topPools[pool.key] = struct{}{}
-		if len(state.topPools) == limit {
-			break
-		}
 	}
 	return state, nil
 }

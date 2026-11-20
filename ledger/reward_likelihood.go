@@ -111,9 +111,9 @@ func (ls *LedgerState) saveRewardLikelihoodForApplication(
 			continue
 		}
 		relativeStake := 0.0
-		if app.snapshotTotalActiveStake != 0 {
+		if app.totalCirculation != 0 {
 			relativeStake = float64(pool.DelegatedStake) /
-				float64(app.snapshotTotalActiveStake)
+				float64(app.totalCirculation)
 		}
 		probability := rewardLeaderProbability(
 			activeSlotsCoeff,

@@ -147,6 +147,18 @@ func (s *Store) SaveRewardLikelihoodState(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
+			for _, pool := range pools {
+				if pool == nil {
+					return errors.New("save reward pool likelihood: pool is nil")
+				}
+				if pool.Epoch != state.Epoch {
+					return fmt.Errorf(
+						"save reward pool likelihood: pool epoch %d does not match state epoch %d",
+						pool.Epoch,
+						state.Epoch,
+					)
+				}
+			}
 			epoch, err := checkedInt64(state.Epoch)
 			if err != nil {
 				return err
@@ -177,16 +189,6 @@ func (s *Store) SaveRewardLikelihoodState(
 				return fmt.Errorf("replace reward pool likelihoods: %w", err)
 			}
 			for _, pool := range pools {
-				if pool == nil {
-					return errors.New("save reward pool likelihood: pool is nil")
-				}
-				if pool.Epoch != state.Epoch {
-					return fmt.Errorf(
-						"save reward pool likelihood: pool epoch %d does not match state epoch %d",
-						pool.Epoch,
-						state.Epoch,
-					)
-				}
 				poolID, err := q.SaveRewardPoolLikelihood(
 					ctx,
 					sqlitequery.SaveRewardPoolLikelihoodParams{

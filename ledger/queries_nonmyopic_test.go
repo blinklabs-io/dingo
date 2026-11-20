@@ -286,3 +286,43 @@ func TestQueryNonMyopicMemberRewardsRanksPoolsByStoredPerformance(
 	_, err = f2.ls.Query(t.Context(), query, QueryPoint{})
 	require.ErrorIs(t, err, ErrQueryNotAnswered)
 }
+
+func TestQueryRewardInfoPoolsViaGetCBORReturnsBareContent(t *testing.T) {
+	t.Parallel()
+	f := newNonMyopicFixture(t, true)
+
+	direct, err := f.ls.Query(t.Context(), rewardInfoPoolsQuery(), QueryPoint{})
+	require.NoError(t, err)
+	info := decodeRewardInfoPools(t, direct)
+
+	result, err := f.ls.Query(
+		t.Context(),
+		&olocalstatequery.BlockQuery{
+			Query: &olocalstatequery.ShelleyQuery{
+				Query: &olocalstatequery.ShelleyCborQuery{
+					Query: &olocalstatequery.ShelleyRewardInfoPoolsQuery{},
+				},
+			},
+		},
+		QueryPoint{},
+	)
+	require.NoError(t, err)
+	values, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, values, 1)
+	tag, ok := values[0].(cbor.Tag)
+	require.True(t, ok)
+	require.Equal(t, uint64(cbor.CborTagCbor), tag.Number)
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok)
+
+	var bare struct {
+		cbor.StructAsArray
+		Params olocalstatequery.RewardParams
+		Pools  map[lcommon.Blake2b224]olocalstatequery.RewardInfoPool
+	}
+	_, err = cbor.Decode(content, &bare)
+	require.NoError(t, err)
+	require.Equal(t, info.Params.RPot, bare.Params.RPot)
+	require.Len(t, bare.Pools, len(info.Pools))
+}
