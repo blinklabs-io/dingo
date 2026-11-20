@@ -228,18 +228,12 @@ fi
 export DEVNET_NETWORK_MAGIC
 # The accelerated all-Dingo governance scenario funds deposits from a genesis
 # key that txpump never spends, so the timeline scenario's payments cannot
-# exhaust it first. txpump numbers keys by sorted file name, where genesis.1
-# is always position 0 (genesis.10 sorts before genesis.2), so it gets every
-# position after that.
+# exhaust it first.
 unset DEVNET_TXPUMP_USERS DEVNET_GOVERNANCE_PAYMENT_KEY
 if [[ "${MODE}" != "conformance" && "${ACCELERATED}" == "true" &&
   "${TACHYS}" != "true" && "${LEIOS}" != "true" ]]; then
-  DEVNET_POOL_COUNT="$(sed -n 's/^poolCount:[[:space:]]*\([0-9][0-9]*\)\([[:space:]]\{1,\}#.*\)\{0,1\}[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
-  if [[ -z "${DEVNET_POOL_COUNT}" || "${DEVNET_POOL_COUNT}" -lt 2 ]]; then
-    echo "[run-tests] ERROR: ${DEVNET_TESTNET_YAML} needs poolCount >= 2 to reserve a governance funding key" >&2
-    exit 1
-  fi
-  export DEVNET_TXPUMP_USERS="1-$((DEVNET_POOL_COUNT - 1))"
+  DEVNET_TXPUMP_USERS="$(devnet_txpump_users "${DEVNET_TESTNET_YAML}")" || exit 1
+  export DEVNET_TXPUMP_USERS
   export DEVNET_GOVERNANCE_PAYMENT_KEY="genesis.1"
 fi
 # The scenario stops and starts containers, and captures compose logs and

@@ -12,6 +12,23 @@ devnet_compose_project() {
   export COMPOSE_PROJECT_NAME="dingo-devnet-${project_hash}"
 }
 
+# Prints the TXPUMP_USERS value for the spec at $1: every genesis key but
+# genesis.1, which the accelerated governance scenario keeps for itself.
+# txpump numbers genesis.<n>.skey files by sorted name, so genesis.1 is
+# always position 0 (genesis.10 sorts before genesis.2). A YAML comment may
+# follow the count. Fails when the spec has fewer than two pools, which would
+# leave txpump no key.
+devnet_txpump_users() {
+  local spec="$1" pool_count
+  pool_count="$(sed -n 's/^poolCount:[[:space:]]*\([0-9][0-9]*\)\([[:space:]]\{1,\}#.*\)\{0,1\}[[:space:]]*$/\1/p' "${spec}")"
+  # Base 10 explicitly: bash reads a leading zero as octal, so 08 would fail.
+  if [[ -z "${pool_count}" ]] || (( 10#${pool_count} < 2 )); then
+    echo "[devnet] ERROR: ${spec} needs poolCount >= 2 to reserve a governance funding key" >&2
+    return 1
+  fi
+  printf '1-%d\n' "$(( 10#${pool_count} - 1 ))"
+}
+
 # --- IPv4 CIDR helpers, used to check a candidate subnet against every
 # --- network Docker already knows about (see devnet_net_base). --------
 
