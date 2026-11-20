@@ -226,7 +226,7 @@ func newMalformedHashAdapter(
 	seed func(db *database.Database),
 ) *NodeAdapter {
 	t.Helper()
-	adapter, _, db := newDBBackedAdapterWithIndexer(
+	adapter, raw, db := newDBBackedAdapterWithIndexer(
 		t,
 		dbtest.IndexerOptions{
 			WrapMetadata: func(
@@ -237,10 +237,7 @@ func newMalformedHashAdapter(
 			},
 		},
 	)
-	// Account resolves its active epoch from the IndexerDB's epoch rows.
-	require.NoError(t, db.Metadata().SetEpoch(
-		0, 0, nil, nil, nil, nil, 6, 1, 1000, nil,
-	))
+	seedEpochs(t, adapter, raw, 0, 1)
 	if seed != nil {
 		seed(db)
 	}
