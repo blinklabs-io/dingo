@@ -15,6 +15,7 @@
 package node
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -22,6 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
+	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -112,4 +115,70 @@ func TestIndexerServiceRemovesLegacyZeroValueByronGenesis(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, marker)
+}
+
+// TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor stops a Mithril
+// bootstrap replay after its genesis seed, adds what a released seed also
+// wrote there (the zero-coin Byron genesis outputs, their genesis
+// transactions, and those transactions in the replay's count), and requires
+// the IndexerDB built by the service to pass the anchor check: the repair
+// removes the transactions' application rows, so the count the check compares
+// them with has to lose them too.
+func TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor(t *testing.T) {
+	t.Parallel()
+	f := newAnchorFixture(t)
+	ctx := context.Background()
+
+	stopCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	src := &cancelingSource{
+		ChainSource: f.cappedAtAnchor(), cancel: stop, afterCalls: 3,
+	}
+	w, store := f.writer(t, src, 7)
+	require.Error(t, w.CatchUp(stopCtx))
+	phase, err := store.Bootstrap(nil)
+	require.NoError(t, err)
+	require.Equal(t, indexerdb.PhaseReplay, phase)
+
+	nodeCfg := f.deps.NodeConfig
+	genesisHash, err := ledger.GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+	byronUtxos, err := nodeCfg.ByronGenesis().GenesisUtxos()
+	require.NoError(t, err)
+	var zero []lcommon.Utxo
+	for _, u := range byronUtxos {
+		if u.Output.Amount().Sign() == 0 {
+			zero = append(zero, u)
+		}
+	}
+	require.Len(t, zero, 7)
+	txn := f.indexerDB.Transaction(ctx, true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		for _, u := range zero {
+			data, err := cbor.Encode(u.Output)
+			if err != nil {
+				return err
+			}
+			output := u.Output.(byron.ByronTransactionOutput)
+			(&output).SetCbor(data)
+			id := u.Id.Id()
+			ref := database.UtxoRef{TxId: id, OutputIdx: u.Id.Index()}
+			if err := f.indexerDB.SetGenesisTransaction(
+				ctx, id.Bytes(), genesisHash[:],
+				[]lcommon.Utxo{{Id: u.Id, Output: output}},
+				map[database.UtxoRef]database.CborOffset{ref: {}}, txn,
+			); err != nil {
+				return err
+			}
+		}
+		return store.AddReplayTransactions(uint64(len(zero)), txn)
+	}))
+
+	_, err = NewIndexerService(f.deps)
+	require.NoError(t, err)
+	w, store = f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
+	require.NoError(t, w.CatchUp(ctx))
+	phase, err = store.Bootstrap(nil)
+	require.NoError(t, err)
+	require.Equal(t, indexerdb.PhaseDone, phase)
 }

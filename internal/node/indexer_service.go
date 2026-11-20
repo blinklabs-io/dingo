@@ -52,7 +52,9 @@ func NewIndexerService(
 	// An IndexerDB a release seeded from genesis holds the zero-coin Byron
 	// outputs the reference translation drops, which a replay toward a
 	// Mithril anchor would then disagree with. They go before the writer
-	// reads the IndexerDB.
+	// reads the IndexerDB. The seed counted their genesis transactions into
+	// the replay's count, which the anchor check compares with the
+	// applied_transaction rows, so the count loses them with the rows.
 	zero, err := ledger.ZeroValueByronGenesisOutputs(deps.NodeConfig)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -60,8 +62,15 @@ func NewIndexerService(
 			err,
 		)
 	}
+	replayState, err := indexerdb.NewStore(
+		deps.Indexer, deps.Indexer, deps.MaxReadyLagBlocks,
+	)
+	if err != nil {
+		return nil, err
+	}
 	if err := ledger.RepairZeroValueByronGenesis(
 		context.Background(), deps.Indexer, zero, deps.Logger,
+		replayState.RemoveReplayTransactions,
 	); err != nil {
 		return nil, fmt.Errorf("repair indexer genesis outputs: %w", err)
 	}

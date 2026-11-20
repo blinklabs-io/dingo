@@ -161,7 +161,7 @@ func (r Reconcile) Run(ctx context.Context) error {
 	// Before anything copies the metadata store's outputs into the live UTxO
 	// set.
 	if err := ledger.RepairZeroValueByronGenesis(
-		ctx, r.DB, zero, r.Logger,
+		ctx, r.DB, zero, r.Logger, nil,
 	); err != nil {
 		return err
 	}

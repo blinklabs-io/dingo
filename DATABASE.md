@@ -3464,7 +3464,11 @@ network with none of them does nothing.
   has its own `sync_state` key, before the writer reads it. That covers an
   IndexerDB seeded from genesis by a release and an API store copied by the
   move to the split layout; both would otherwise disagree with a Mithril-imported
-  state when the replay reaches its anchor.
+  state when the replay reaches its anchor. The seed of a replay toward a
+  Mithril anchor counted the genesis transactions it wrote into
+  `indexer_replay_txs`, which the anchor check compares with the
+  `applied_transaction` rows, so the same transaction takes the removed
+  application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
 - Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
   `Set.RemoveOutputs` (`badgerutxo.Store.RemoveOutputs`) on every start. It
   deletes the listed outputs the set holds and adjusts the output count and the
@@ -3482,8 +3486,9 @@ the amount is zero, so no `reward_live_stake` row or stake sum includes them.
 `TestRepairZeroValueByronGenesisAPIStore` and
 `TestReconcileRemovesGenesisFromLiveSetOnlyStore` pin the store shapes,
 `TestReconcileRemovesLegacyZeroValueByronGenesis` and
-`TestReconcileResumesInterruptedGenesisRepair` the live set and the resume, and
-`TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
+`TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
+`TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
+repaired IndexerDB, and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
 statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
 run on SQLite.
 

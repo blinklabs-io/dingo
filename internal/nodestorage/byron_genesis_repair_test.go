@@ -266,7 +266,7 @@ func TestReconcileResumesInterruptedGenesisRepair(t *testing.T) {
 	zero, err := ledger.ZeroValueByronGenesisOutputs(g.nodeCfg)
 	require.NoError(t, err)
 	require.NoError(t, ledger.RepairZeroValueByronGenesis(
-		t.Context(), db, zero, nil,
+		t.Context(), db, zero, nil, nil,
 	))
 	set, dir := newLegacyLiveSet(t, g)
 	seedLiveSet(t, set, g.nodeCfg, g.all())

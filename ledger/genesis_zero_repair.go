@@ -131,11 +131,16 @@ func isZeroCoin(u lcommon.Utxo) bool {
 // interrupted repair leaves the store as it was and the next start repeats
 // it. A store with the key set, and a network with no such output, are not
 // touched.
+//
+// removedTransactions, when non-nil, is called inside that transaction with
+// how many applied_transaction rows the repair removed, for a store that
+// keeps a count of them elsewhere.
 func RepairZeroValueByronGenesis(
 	ctx context.Context,
 	db *database.Database,
 	zero ZeroValueByronOutputs,
 	logger *slog.Logger,
+	removedTransactions func(*database.Txn, uint64) error,
 ) error {
 	if len(zero.Refs) == 0 {
 		return nil
@@ -152,9 +157,16 @@ func RepairZeroValueByronGenesis(
 	}
 	txn := db.Transaction(ctx, true)
 	defer txn.Rollback() //nolint:errcheck
-	removed, err := db.RemoveGenesisUtxos(ctx, zero.Refs, zero.TxHashes, txn)
+	removed, applied, err := db.RemoveGenesisUtxos(
+		ctx, zero.Refs, zero.TxHashes, txn,
+	)
 	if err != nil {
 		return fmt.Errorf("remove zero-value Byron genesis outputs: %w", err)
+	}
+	if removedTransactions != nil {
+		if err := removedTransactions(txn, applied); err != nil {
+			return err
+		}
 	}
 	if err := db.SetSyncState(ByronGenesisZeroRepairSyncKey, "1", txn); err != nil {
 		return fmt.Errorf("record zero-value Byron genesis repair: %w", err)

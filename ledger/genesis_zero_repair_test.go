@@ -218,6 +218,7 @@ func repairFixture(
 	require.NoError(t, err)
 	require.NoError(t, RepairZeroValueByronGenesis(
 		t.Context(), db, zero, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
 	))
 }
 
@@ -308,7 +309,7 @@ func TestRemoveGenesisUtxosRollsBackWithItsTransaction(t *testing.T) {
 	require.Len(t, zero.Refs, 2)
 
 	txn := db.Transaction(t.Context(), true)
-	removed, err := db.RemoveGenesisUtxos(
+	removed, _, err := db.RemoveGenesisUtxos(
 		context.Background(), zero.Refs, zero.TxHashes, txn,
 	)
 	require.NoError(t, err)

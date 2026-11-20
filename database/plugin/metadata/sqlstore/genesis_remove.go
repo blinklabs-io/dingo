@@ -58,8 +58,9 @@ WHERE t.hash = ?
 // are unspent, with their address, pointer and reference-script rows, and then
 // the genesis transactions named by txHashes that nothing refers to any more:
 // their address-index, application and identity rows. It returns the
-// references it removed. An output that is spent, referenced by a transaction
-// or carrying an asset stays, and so does the transaction of an output that
+// references it removed and how many application rows went with the
+// transactions. An output that is spent, referenced by a transaction or
+// carrying an asset stays, and so does the transaction of an output that
 // stays.
 //
 // A store that keeps its UTxO set outside the metadata store has no utxo
@@ -68,12 +69,14 @@ func (s *Store) DeleteUnspentGenesisUtxos(
 	refs []models.UtxoId,
 	txHashes [][]byte,
 	txn types.Txn,
-) ([]models.UtxoId, error) {
+) ([]models.UtxoId, uint64, error) {
 	var removed []models.UtxoId
+	var applied uint64
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			removed = removed[:0]
+			applied = 0
 			for _, ref := range refs {
 				id, found, err := queryOneID(
 					ctx, db, unspentGenesisUtxoQuery, ref.Hash, int64(ref.Idx),
@@ -112,23 +115,37 @@ func (s *Store) DeleteUnspentGenesisUtxos(
 				}
 				// The application row goes before the identity row it
 				// references.
-				for _, query := range []string{
+				if _, err := db.ExecContext(
+					ctx,
 					"DELETE FROM address_transaction WHERE transaction_id = ?",
-					"DELETE FROM applied_transaction WHERE tx_id = ?",
-					`DELETE FROM "transaction" WHERE id = ?`,
-				} {
-					if _, err := db.ExecContext(ctx, query, id); err != nil {
-						return fmt.Errorf("delete genesis transaction: %w", err)
-					}
+					id,
+				); err != nil {
+					return fmt.Errorf("delete genesis transaction: %w", err)
+				}
+				result, err := db.ExecContext(
+					ctx, "DELETE FROM applied_transaction WHERE tx_id = ?", id,
+				)
+				if err != nil {
+					return fmt.Errorf("delete genesis transaction: %w", err)
+				}
+				n, err := result.RowsAffected()
+				if err != nil {
+					return fmt.Errorf("delete genesis transaction: %w", err)
+				}
+				applied += uint64(n) //nolint:gosec // a row count
+				if _, err := db.ExecContext(
+					ctx, `DELETE FROM "transaction" WHERE id = ?`, id,
+				); err != nil {
+					return fmt.Errorf("delete genesis transaction: %w", err)
 				}
 			}
 			return nil
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return removed, nil
+	return removed, applied, nil
 }
 
 // queryOneID returns the first id the query selects.

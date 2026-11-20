@@ -2277,23 +2277,24 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 type genesisUtxoRemover interface {
 	DeleteUnspentGenesisUtxos(
 		[]models.UtxoId, [][]byte, types.Txn,
-	) ([]models.UtxoId, error)
+	) ([]models.UtxoId, uint64, error)
 }
 
 // RemoveGenesisUtxos removes the outputs named by refs that are unspent, with
 // their address, pointer and reference-script rows, and then the genesis
 // transaction rows named by txHashes that no output, spend or edge refers to.
-// It returns the references it removed. An output that is spent, referenced
-// by a transaction or carrying an asset is left alone.
+// It returns the references it removed and how many applied_transaction rows
+// it removed. An output that is spent, referenced by a transaction or
+// carrying an asset is left alone.
 func (d *Database) RemoveGenesisUtxos(
 	ctx context.Context,
 	refs []models.UtxoId,
 	txHashes [][]byte,
 	txn *Txn,
-) ([]models.UtxoId, error) {
+) ([]models.UtxoId, uint64, error) {
 	remover, ok := d.metadata.(genesisUtxoRemover)
 	if !ok {
-		return nil, errors.New(
+		return nil, 0, errors.New(
 			"the metadata store cannot remove genesis outputs",
 		)
 	}
@@ -2303,11 +2304,11 @@ func (d *Database) RemoveGenesisUtxos(
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
-	removed, err := remover.DeleteUnspentGenesisUtxos(
+	removed, applied, err := remover.DeleteUnspentGenesisUtxos(
 		refs, txHashes, txn.Metadata(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// A store that keeps output offsets in the blob store holds one per
 	// output; the live UTxO set a core store reads instead has none.
@@ -2315,13 +2316,13 @@ func (d *Database) RemoveGenesisUtxos(
 		blobStore := txn.BlobStore()
 		blobTxn := txn.Blob()
 		if blobStore == nil || blobTxn == nil {
-			return nil, types.ErrBlobStoreUnavailable
+			return nil, 0, types.ErrBlobStoreUnavailable
 		}
 		for _, ref := range removed {
 			if err := blobStore.DeleteUtxo(
 				blobTxn, ref.Hash, ref.Idx,
 			); err != nil {
-				return nil, fmt.Errorf(
+				return nil, 0, fmt.Errorf(
 					"delete genesis utxo offset %x#%d: %w",
 					bytePrefix(ref.Hash), ref.Idx, err,
 				)
@@ -2330,10 +2331,10 @@ func (d *Database) RemoveGenesisUtxos(
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
-			return nil, fmt.Errorf("commit transaction: %w", err)
+			return nil, 0, fmt.Errorf("commit transaction: %w", err)
 		}
 	}
-	return removed, nil
+	return removed, applied, nil
 }
 
 // UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
