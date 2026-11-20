@@ -194,6 +194,7 @@ func (s *Store) SaveRewardLikelihoodState(
 						PoolKeyHash:         pool.PoolKeyHash,
 						LogWeights:          pool.LogWeights,
 						PerformanceEstimate: pool.PerformanceEstimate,
+						BoundarySlot:        boundarySlot,
 					},
 				)
 				if err != nil {

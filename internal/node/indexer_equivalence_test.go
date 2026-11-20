@@ -203,6 +203,16 @@ func dumpTables(t *testing.T, raw *sql.DB) map[string][]string {
 	}
 	require.NoError(t, rs.Err())
 	require.NoError(t, rs.Close())
+	return dumpNamedTables(t, raw, names)
+}
+
+// dumpNamedTables is dumpTables over the named tables.
+func dumpNamedTables(
+	t *testing.T,
+	raw *sql.DB,
+	names []string,
+) map[string][]string {
+	t.Helper()
 	out := make(map[string][]string, len(names))
 	for _, n := range names {
 		rows, err := raw.Query("SELECT * FROM `" + n + "`")
@@ -232,6 +242,24 @@ func dumpTables(t *testing.T, raw *sql.DB) map[string][]string {
 		out[n] = lines
 	}
 	return out
+}
+
+// likelihoodTables are the reward-likelihood tables, which the consensus store
+// owns and the IndexerDB receives as ledger facts.
+var likelihoodTables = []string{
+	"reward_likelihood_state", "reward_pool_likelihood",
+}
+
+// dumpConsensusLikelihood dumps the likelihood tables of the consensus store
+// itself. The IndexerDB dumps are compared with each other everywhere else,
+// which cannot notice a table the writer never copies.
+func dumpConsensusLikelihood(
+	t *testing.T,
+	consensus *database.Database,
+) map[string][]string {
+	t.Helper()
+	raw := openRaw(t, filepath.Join(consensus.DataDir(), "metadata.sqlite"))
+	return dumpNamedTables(t, raw, likelihoodTables)
 }
 
 func requireSameTables(t *testing.T, want, got map[string][]string) {
@@ -322,6 +350,12 @@ func TestIndexerWriterRollbackMatchesAFreshIndex(t *testing.T) {
 	require.Equal(t, ledgerTip.Point.Hash, tip.Hash)
 
 	want := dumpTables(t, idxRaw)
+	liveLikelihood := dumpConsensusLikelihood(t, consensus)
+	for _, n := range likelihoodTables {
+		require.NotEmpty(t, liveLikelihood[n],
+			"the loaded chain must hold %s rows, or the copy checks nothing", n)
+	}
+	requireSameTables(t, liveLikelihood, want)
 	for _, n := range slices.Sorted(maps.Keys(want)) {
 		if len(want[n]) > 0 {
 			t.Logf("compared %s: %d rows", n, len(want[n]))

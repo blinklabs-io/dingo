@@ -685,11 +685,12 @@ RETURNING id;
 
 -- name: SaveRewardPoolLikelihood :one
 INSERT INTO reward_pool_likelihood (
-    epoch, pool_key_hash, log_weights, performance_estimate
-) VALUES (?, ?, ?, ?)
+    epoch, pool_key_hash, log_weights, performance_estimate, boundary_slot
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
     log_weights = excluded.log_weights,
-    performance_estimate = excluded.performance_estimate
+    performance_estimate = excluded.performance_estimate,
+    boundary_slot = excluded.boundary_slot
 RETURNING id;
 
 -- name: DeleteRewardPoolLikelihoodsForEpoch :exec
@@ -710,7 +711,8 @@ ORDER BY boundary_slot DESC, epoch DESC
 LIMIT 1;
 
 -- name: GetRewardPoolLikelihoods :many
-SELECT id, epoch, pool_key_hash, log_weights, performance_estimate
+SELECT id, epoch, pool_key_hash, log_weights, performance_estimate,
+       boundary_slot
 FROM reward_pool_likelihood
 WHERE epoch = ?
 ORDER BY pool_key_hash ASC;

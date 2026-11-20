@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS `reward_pool_likelihood` (
     `epoch` integer NOT NULL,
     `pool_key_hash` blob NOT NULL,
     `log_weights` blob NOT NULL,
-    `performance_estimate` real NOT NULL
+    `performance_estimate` real NOT NULL,
+    `boundary_slot` integer NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_reward_pool_likelihood_epoch_pool`
     ON `reward_pool_likelihood` (`epoch`, `pool_key_hash`);
+CREATE INDEX IF NOT EXISTS `idx_reward_pool_likelihood_boundary`
+    ON `reward_pool_likelihood` (`boundary_slot`);

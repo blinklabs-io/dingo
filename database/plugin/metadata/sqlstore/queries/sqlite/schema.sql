@@ -287,6 +287,7 @@ CREATE TABLE reward_pool_likelihood (
     pool_key_hash BLOB NOT NULL,
     log_weights BLOB NOT NULL,
     performance_estimate REAL NOT NULL,
+    boundary_slot INTEGER NOT NULL,
     UNIQUE (epoch, pool_key_hash)
 );
 

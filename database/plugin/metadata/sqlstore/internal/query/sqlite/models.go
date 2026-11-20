@@ -474,6 +474,7 @@ type RewardPoolLikelihood struct {
 	PoolKeyHash         []byte
 	LogWeights          []byte
 	PerformanceEstimate float64
+	BoundarySlot        int64
 }
 
 type RewardPoolOutput struct {
