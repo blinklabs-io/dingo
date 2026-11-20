@@ -21079,7 +21079,9 @@ EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
 converts each to a registry event with a typed payload; a rollback travelling on
 `chain.update` stays on `chain.update` and is reported in the payload's
 `rollback` field. A subscription filter selects by registered event type or
-category pattern (`peergov.*`) and optionally by `origin_node_ids`. The bus
+category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
+node's `origin_node_id` is `barkEventNodeId`; unset, it is a random identifier
+drawn once per run, never the host name, because every subscriber sees it. The bus
 handlers only enqueue onto a bounded
 channel; one goroutine converts and appends to a ring buffer of
 `barkEventBufferSize` events that carries the delivery sequence. Subscribers

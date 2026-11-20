@@ -145,6 +145,7 @@ var logPlainConfigFields = []string{
 	"BarkEventEnabled",
 	"BarkEventMaxSubscribers",
 	"BarkEventMaxSubscribersPerClient",
+	"BarkEventNodeID",
 	"BarkEventPublishEnabled",
 	"BarkHost",
 	"BarkLifecycleEnabled",

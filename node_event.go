@@ -15,20 +15,29 @@
 package dingo
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
-// eventNodeID names this node in Event.origin_node_id. The hostname is stable
-// across restarts, which a subscriber de-duplicating on origin relies on.
+// eventNodeID names this node in Event.origin_node_id. Every subscriber sees
+// it, so it comes from configuration and never from the host. Unconfigured, a
+// random identifier is drawn once per Node, so it is still unique, which
+// Publish relies on to refuse events that originated here.
 func (n *Node) eventNodeID() string {
-	if host, err := os.Hostname(); err == nil && host != "" {
-		return host
-	}
-	return "dingo"
+	n.eventNodeIDOnce.Do(func() {
+		n.eventNodeIDValue = n.config.cfg.BarkEventNodeID
+		if n.eventNodeIDValue != "" {
+			return
+		}
+		var b [8]byte
+		_, _ = rand.Read(b[:])
+		n.eventNodeIDValue = "dingo-" + hex.EncodeToString(b[:])
+	})
+	return n.eventNodeIDValue
 }
 
 var errEventLedgerUnavailable = errors.New("ledger state is not available")

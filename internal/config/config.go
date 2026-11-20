@@ -887,6 +887,10 @@ type Config struct {
 	// BarkEventPublishEnabled additionally lets EventService accept Publish
 	// and PublishBatch. It requires BarkEventEnabled and defaults to false.
 	BarkEventPublishEnabled bool `yaml:"barkEventPublishEnabled" envconfig:"DINGO_BARK_EVENT_PUBLISH_ENABLED"`
+	// BarkEventNodeID is the origin_node_id EventService puts on this
+	// node's events. Empty selects a random identifier for each process
+	// run, so no host or infrastructure name is published.
+	BarkEventNodeID string `yaml:"barkEventNodeId" envconfig:"DINGO_BARK_EVENT_NODE_ID"`
 	// BarkEventBufferSize is how many delivered events EventService keeps for
 	// resuming subscribers. Zero selects the default.
 	BarkEventBufferSize int `yaml:"barkEventBufferSize" envconfig:"DINGO_BARK_EVENT_BUFFER_SIZE"`

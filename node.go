@@ -152,6 +152,8 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	leiosAdaptiveEb         *leios.AdaptiveEbController
 	bark                    *bark.Bark
+	eventNodeIDOnce         sync.Once
+	eventNodeIDValue        string
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer

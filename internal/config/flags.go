@@ -583,6 +583,12 @@ var flagSpecs = []flagSpec{
 		"bark-event-publish-enabled",
 		"let Bark EventService accept Publish and PublishBatch",
 	),
+	stringFlag(
+		"BarkEventNodeID",
+		"bark-event-node-id",
+		"",
+		"origin node ID on Bark EventService events (empty = random per run)",
+	),
 	intFlag(
 		"BarkEventBufferSize",
 		"bark-event-buffer-size",

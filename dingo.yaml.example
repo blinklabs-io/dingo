@@ -419,6 +419,14 @@
 # CLI: --bark-event-publish-enabled
 # barkEventPublishEnabled: false
 
+# Optional: the origin_node_id the EventService puts on this node's events,
+# which every subscriber sees. Empty (the default) selects a random identifier
+# for each run, so no host name is published; set it for an origin that stays
+# the same across restarts.
+# Can be overridden with DINGO_BARK_EVENT_NODE_ID
+# CLI: --bark-event-node-id
+# barkEventNodeId: ""
+
 # Optional: events the EventService keeps so a subscriber can resume after a
 # disconnect (0 selects the built-in size). A subscriber that falls further
 # behind than the buffer is detached. The two limits cap concurrent streams
