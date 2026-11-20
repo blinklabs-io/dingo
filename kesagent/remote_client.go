@@ -171,6 +171,9 @@ type RemoteClient struct {
 	conn     net.Conn
 	lastUsed time.Time
 	closed   bool
+	// replacing is the replacement Prepare is admitting for a retained
+	// session without holding the turn; nil when there is none.
+	replacing *replacement
 	// lastErr is the result of the last dial and admission, which
 	// CheckReady reports; lastCheckDial is when CheckReady last started one.
 	lastErr       error
@@ -361,6 +364,12 @@ func (c *RemoteClient) verifyServerPin(cs tls.ConnectionState) error {
 // and kept if the replacement fails. A failure here is reported early, before
 // the slot; Sign retries the connection itself. Prepare honours the reconnect
 // backoff; Sign does not.
+//
+// While it admits a replacement for a session that is still fresh, Prepare
+// does not hold the turn, so a Sign can use that session meanwhile. It takes
+// the turn again only to swap, which therefore never closes a session under a
+// Sign. A Prepare that finds such a replacement in flight waits for it and
+// returns its outcome.
 func (c *RemoteClient) Prepare() error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -370,8 +379,78 @@ func (c *RemoteClient) Prepare() error {
 	if err := c.acquire(ctx); err != nil {
 		return err
 	}
+	plan, r, err := c.beginSession(true, prepareStayFreshFor)
+	if err != nil || plan == planKeep {
+		c.release()
+		return err
+	}
+	if r == nil {
+		defer c.release()
+		conn, err := c.admit(ctx)
+		if err != nil {
+			return c.recordAdmitFailure(err)
+		}
+		return c.installSession(conn, time.Now())
+	}
+	c.release()
+	if plan == planAwait {
+		select {
+		case <-r.done:
+			return r.err
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"kesagent: remote agent session replacement in flight: %w",
+				ctx.Err(),
+			)
+		}
+	}
+	return c.replace(ctx, r)
+}
+
+// replacement is a successor to a retained session being admitted without the
+// turn. done is closed when it ends, and err is then its outcome.
+type replacement struct {
+	done chan struct{}
+	err  error
+}
+
+// errReplacementUnfinished is the outcome of a replacement that ended without
+// reaching one, which only a panic does.
+var errReplacementUnfinished = errors.New(
+	"kesagent: remote agent session replacement did not finish",
+)
+
+// replace admits r, the successor to the retained session, while a Sign may
+// use that session, and takes the turn only to swap. It ends r on every exit.
+func (c *RemoteClient) replace(ctx context.Context, r *replacement) error {
+	defer func() {
+		c.mu.Lock()
+		c.replacing = nil
+		c.mu.Unlock()
+		close(r.done)
+	}()
+	conn, err := c.admit(ctx)
+	admitted := time.Now()
+	if err != nil {
+		// Recording a failure needs only c.mu, not the turn a sign may hold.
+		r.err = c.recordAdmitFailure(err)
+		return r.err
+	}
+	// A sign holds the turn for at most SignTimeout. The swap waits that
+	// long, which the admission's own deadline must not cut short.
+	swapCtx, swapCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		c.cfg.SignTimeout,
+	)
+	defer swapCancel()
+	if err := c.acquire(swapCtx); err != nil {
+		_ = conn.Close()
+		r.err = err
+		return err
+	}
 	defer c.release()
-	return c.ensureSession(ctx, true, prepareStayFreshFor)
+	r.err = c.installSession(conn, admitted)
+	return r.err
 }
 
 // CheckReady reports whether the agent was reachable and admitted this node
@@ -422,49 +501,94 @@ func (c *RemoteClient) freshForLocked(stay time.Duration) bool {
 		time.Since(c.lastUsed)+stay < c.cfg.SessionFreshFor
 }
 
-// ensureSession leaves an admitted session open that stays fresh for stay
-// more, dropping an older one and dialling a new one. A session that is fresh
-// now but not for stay is kept until its replacement is admitted. The caller
-// holds the turn; the dial runs without c.mu, so Close and CheckReady never
-// wait on the network. respectBackoff skips the dial while the reconnect
-// backoff is active.
-func (c *RemoteClient) ensureSession(
-	ctx context.Context,
+// ensureSession leaves an admitted session open, dropping a stale one and
+// dialling a new one. The caller holds the turn; the dial runs without c.mu,
+// so Close and CheckReady never wait on the network. It ignores the reconnect
+// backoff and any replacement in flight: a leader slot is worth a dial.
+func (c *RemoteClient) ensureSession(ctx context.Context) error {
+	plan, _, err := c.beginSession(false, 0)
+	if err != nil || plan != planDial {
+		return err
+	}
+	conn, err := c.admit(ctx)
+	if err != nil {
+		return c.recordAdmitFailure(err)
+	}
+	return c.installSession(conn, time.Now())
+}
+
+// sessionPlan is what beginSession leaves its caller to do.
+type sessionPlan int
+
+const (
+	// planKeep: the open session stays fresh for long enough.
+	planKeep sessionPlan = iota
+	// planDial: admit a session under the turn.
+	planDial
+	// planReplace: admit the returned replacement without the turn, while
+	// the retained session stays usable.
+	planReplace
+	// planAwait: wait for the returned replacement another Prepare admits.
+	planAwait
+)
+
+// beginSession decides how to leave an admitted session open that stays fresh
+// for stay more. It drops a stale session. With stay positive, a session that
+// is fresh now but not for stay is retained and replaced, and a replacement
+// already in flight is awaited instead of started twice. respectBackoff
+// refuses to dial while the reconnect backoff is active. The caller holds the
+// turn.
+func (c *RemoteClient) beginSession(
 	respectBackoff bool,
 	stay time.Duration,
-) error {
+) (sessionPlan, *replacement, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
-		c.mu.Unlock()
-		return ErrClosed
+		return planKeep, nil, ErrClosed
 	}
 	if c.freshForLocked(stay) {
-		c.mu.Unlock()
-		return nil
+		return planKeep, nil, nil
 	}
 	if !c.freshLocked() {
 		c.dropLocked()
 	}
+	if stay > 0 && c.replacing != nil {
+		return planAwait, c.replacing, nil
+	}
 	if respectBackoff && !c.nextDialAfter.IsZero() &&
 		time.Now().Before(c.nextDialAfter) {
-		until := c.nextDialAfter
-		c.mu.Unlock()
-		return fmt.Errorf(
+		return planKeep, nil, fmt.Errorf(
 			"kesagent: remote agent reconnect backoff active until %s",
-			until.Format(time.RFC3339),
+			c.nextDialAfter.Format(time.RFC3339),
 		)
 	}
-	c.mu.Unlock()
+	if stay > 0 && c.conn != nil {
+		c.replacing = &replacement{
+			done: make(chan struct{}),
+			err:  errReplacementUnfinished,
+		}
+		return planReplace, c.replacing, nil
+	}
+	return planDial, nil, nil
+}
 
-	conn, err := c.admit(ctx)
-
+// recordAdmitFailure records err, a failed dial or admission, and starts the
+// reconnect backoff. It needs only c.mu, not the turn.
+func (c *RemoteClient) recordAdmitFailure(err error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err != nil {
-		c.recordDialFailureLocked()
-		c.lastErr = err
-		return err
-	}
+	c.recordDialFailureLocked()
+	c.lastErr = err
+	return err
+}
+
+// installSession installs conn, admitted at admitted, as the session, closing
+// the one it replaces. The caller holds the turn, so no sign is using the
+// session it closes.
+func (c *RemoteClient) installSession(conn net.Conn, admitted time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
 		_ = conn.Close()
 		return ErrClosed
@@ -474,7 +598,7 @@ func (c *RemoteClient) ensureSession(
 	}
 	c.conn = conn
 	c.setConnected(true)
-	c.lastUsed = time.Now()
+	c.lastUsed = admitted
 	c.lastErr = nil
 	c.backoff = 0
 	c.nextDialAfter = time.Time{}
@@ -754,7 +878,7 @@ func (c *RemoteClient) signOnce(
 	req SignRequest,
 ) (_ []byte, resend bool, _ error) {
 	// A sign ignores the reconnect backoff: a leader slot is worth a dial.
-	if err := c.ensureSession(ctx, false, 0); err != nil {
+	if err := c.ensureSession(ctx); err != nil {
 		return nil, false, err
 	}
 	c.mu.Lock()

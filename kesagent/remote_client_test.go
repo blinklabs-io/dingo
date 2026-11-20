@@ -102,6 +102,9 @@ type fakeRemoteAgent struct {
 	accepts  atomic.Int32
 	signs    atomic.Int32
 	admitFix func(*attestationResponse)
+	// beforeSign, when set, runs after a sign request is read and before it
+	// is answered.
+	beforeSign func()
 	// dropAfterRequest closes the connection after reading a sign request
 	// without answering it.
 	dropAfterRequest atomic.Bool
@@ -257,6 +260,9 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		a.mu.Lock()
 		a.messages = append(a.messages, append([]byte(nil), sreq.Message...))
 		a.mu.Unlock()
+		if a.beforeSign != nil {
+			a.beforeSign()
+		}
 		if a.dropAfterRequest.Load() || take(&a.dropRequests) {
 			return
 		}
@@ -1059,4 +1065,307 @@ func TestRemoteClientPrepareClosesTheSessionItReplaces(t *testing.T) {
 	require.True(t, replaced)
 	require.ErrorIs(t, old.SetDeadline(time.Time{}), net.ErrClosed,
 		"the replaced session must be closed once its successor is admitted")
+}
+
+// slowSecondAdmission makes the agent hold every admission after the first
+// until the returned release is called, and reports when one is held.
+func slowSecondAdmission(
+	t *testing.T,
+	a *fakeRemoteAgent,
+) (held <-chan struct{}, release func()) {
+	t.Helper()
+	heldCh := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(gate) }) }
+	a.admitFix = func(*attestationResponse) {
+		if a.accepts.Load() < 2 {
+			return
+		}
+		select {
+		case heldCh <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	return heldCh, rel
+}
+
+// A slow replacement admission must not keep Sign off a retained session that
+// is still fresh at the leader slot.
+func TestRemoteClientSignUsesTheRetainedSessionDuringReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	held, release := slowSecondAdmission(t, a)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	// Release before the client's Close cleanup, so a failing run ends.
+	t.Cleanup(release)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	old := c.conn
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- c.Prepare() }()
+	testutil.RequireReceive(t, held, 5*time.Second,
+		"replacement admission never started")
+
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err,
+		"Sign must use the retained fresh session while a replacement is admitted")
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t, int32(2), a.accepts.Load(),
+		"Sign must not dial while a replacement is being admitted")
+
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t, prepared, 5*time.Second, "Prepare returned"))
+	c.mu.Lock()
+	replaced := c.conn != old
+	c.mu.Unlock()
+	require.True(t, replaced)
+	require.ErrorIs(t, old.SetDeadline(time.Time{}), net.ErrClosed,
+		"the replaced session must be closed once its successor is admitted")
+}
+
+// The swap waits for a Sign using the retained session: that session is not
+// closed under it, even when the replacement is admitted first.
+func TestRemoteClientReplacementWaitsForASignInFlight(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	held, releaseAdmission := slowSecondAdmission(t, a)
+	signing := make(chan struct{}, 1)
+	signGate := make(chan struct{})
+	var once sync.Once
+	releaseSign := func() { once.Do(func() { close(signGate) }) }
+	a.beforeSign = func() {
+		select {
+		case signing <- struct{}{}:
+		default:
+		}
+		<-signGate
+	}
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	t.Cleanup(releaseAdmission)
+	t.Cleanup(releaseSign)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	old := c.conn
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- c.Prepare() }()
+	testutil.RequireReceive(t, held, 5*time.Second,
+		"replacement admission never started")
+	signed := make(chan error, 1)
+	go func() {
+		_, err := c.Sign(0, []byte("header"))
+		signed <- err
+	}()
+	testutil.RequireReceive(t, signing, 5*time.Second,
+		"agent never read the sign request")
+
+	releaseAdmission()
+	// Not arriving is the claim: Prepare has its replacement but must not
+	// swap while the sign holds the session.
+	require.Never(t, func() bool { return len(prepared) != 0 },
+		300*time.Millisecond, 10*time.Millisecond,
+		"the swap must wait for the sign in flight")
+	c.mu.Lock()
+	same := c.conn == old
+	c.mu.Unlock()
+	require.True(t, same, "the session must stay while a sign uses it")
+	require.NoError(t, old.SetDeadline(time.Time{}),
+		"the session must stay open while a sign uses it")
+
+	releaseSign()
+	require.NoError(t, testutil.RequireReceive(
+		t, signed, 5*time.Second, "Sign returned"))
+	require.NoError(t, testutil.RequireReceive(
+		t, prepared, 5*time.Second, "Prepare returned"))
+	c.mu.Lock()
+	replaced := c.conn != old
+	c.mu.Unlock()
+	require.True(t, replaced)
+	require.ErrorIs(t, old.SetDeadline(time.Time{}), net.ErrClosed)
+}
+
+// failingSecondAdmission is slowSecondAdmission, except that every admission
+// after the first is refused once released.
+func failingSecondAdmission(
+	t *testing.T,
+	a *fakeRemoteAgent,
+) (held <-chan struct{}, release func()) {
+	t.Helper()
+	held, release = slowSecondAdmission(t, a)
+	slow := a.admitFix
+	a.admitFix = func(r *attestationResponse) {
+		slow(r)
+		if a.accepts.Load() >= 2 {
+			r.Error = "admission refused"
+		}
+	}
+	return held, release
+}
+
+// gateSigns makes the agent hold every sign request until the returned
+// release is called, and reports when one is held.
+func gateSigns(a *fakeRemoteAgent) (signing <-chan struct{}, release func()) {
+	signingCh := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	var once sync.Once
+	a.beforeSign = func() {
+		select {
+		case signingCh <- struct{}{}:
+		default:
+		}
+		<-gate
+	}
+	return signingCh, func() { once.Do(func() { close(gate) }) }
+}
+
+// A Prepare that finds a replacement in flight reports that replacement's
+// outcome: the retained session does not stay fresh through the slot, so it
+// is not a success to report.
+func TestRemoteClientPrepareWaitsForAReplacementInFlight(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	held, release := failingSecondAdmission(t, a)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	t.Cleanup(release)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	first := make(chan error, 1)
+	go func() { first <- c.Prepare() }()
+	testutil.RequireReceive(t, held, 5*time.Second,
+		"replacement admission never started")
+	second := make(chan error, 1)
+	go func() { second <- c.Prepare() }()
+	// Not arriving is the claim: the replacement is still being admitted.
+	require.Never(t, func() bool { return len(second) != 0 },
+		300*time.Millisecond, 10*time.Millisecond,
+		"a Prepare must wait for the replacement in flight")
+
+	release()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, first, 5*time.Second, "first Prepare returned"), ErrRemoteAdmission)
+	require.Error(t, testutil.RequireReceive(
+		t, second, 5*time.Second, "second Prepare returned"),
+		"the waiting Prepare must report the failed replacement")
+	require.Equal(t, int32(2), a.accepts.Load(),
+		"the waiting Prepare must not admit a session of its own")
+}
+
+// A failed replacement is recorded when the admission fails, not once a sign
+// using the retained session lets go of it.
+func TestRemoteClientFailedReplacementDoesNotWaitForASign(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	held, releaseAdmission := failingSecondAdmission(t, a)
+	signing, releaseSign := gateSigns(a)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	t.Cleanup(releaseAdmission)
+	t.Cleanup(releaseSign)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- c.Prepare() }()
+	testutil.RequireReceive(t, held, 5*time.Second,
+		"replacement admission never started")
+	signed := make(chan error, 1)
+	go func() {
+		_, err := c.Sign(0, []byte("header"))
+		signed <- err
+	}()
+	testutil.RequireReceive(t, signing, 5*time.Second,
+		"agent never read the sign request")
+
+	releaseAdmission()
+	require.ErrorIs(t, testutil.RequireReceive(t, prepared, time.Second,
+		"Prepare must report the failure while the sign holds the session"),
+		ErrRemoteAdmission)
+	c.mu.Lock()
+	backoff := !c.nextDialAfter.IsZero()
+	kept := c.conn != nil
+	c.mu.Unlock()
+	require.True(t, backoff, "the failed replacement must start the backoff")
+	require.True(t, kept, "the failed replacement must keep the session")
+
+	releaseSign()
+	require.NoError(t, testutil.RequireReceive(
+		t, signed, 5*time.Second, "Sign returned"))
+}
+
+// The successor's freshness counts from its admission, as the agent's idle
+// bound does, not from a swap that waited behind a sign.
+func TestRemoteClientReplacementKeepsItsAdmissionTime(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	held, releaseAdmission := slowSecondAdmission(t, a)
+	signing, releaseSign := gateSigns(a)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	t.Cleanup(releaseAdmission)
+	t.Cleanup(releaseSign)
+
+	require.NoError(t, c.Prepare())
+	c.mu.Lock()
+	old := c.conn
+	c.lastUsed = c.lastUsed.Add(-5 * time.Second)
+	c.mu.Unlock()
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- c.Prepare() }()
+	testutil.RequireReceive(t, held, 5*time.Second,
+		"replacement admission never started")
+	signed := make(chan error, 1)
+	go func() {
+		_, err := c.Sign(0, []byte("header"))
+		signed <- err
+	}()
+	testutil.RequireReceive(t, signing, 5*time.Second,
+		"agent never read the sign request")
+
+	releaseAdmission()
+	// The admission completes while the sign holds the session, so the swap
+	// waits for the sign.
+	require.Never(t, func() bool { return len(prepared) != 0 },
+		500*time.Millisecond, 10*time.Millisecond,
+		"the swap must wait for the sign in flight")
+	beforeSwap := time.Now()
+	releaseSign()
+	require.NoError(t, testutil.RequireReceive(
+		t, signed, 5*time.Second, "Sign returned"))
+	require.NoError(t, testutil.RequireReceive(
+		t, prepared, 5*time.Second, "Prepare returned"))
+	c.mu.Lock()
+	replaced := c.conn != old
+	lastUsed := c.lastUsed
+	c.mu.Unlock()
+	require.True(t, replaced)
+	require.True(t, lastUsed.Before(beforeSwap),
+		"the successor's freshness must count from its admission")
 }
