@@ -17,6 +17,7 @@ package forging
 import (
 	"context"
 	"errors"
+	"io"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -31,19 +32,22 @@ var errLeiosPreparationExpired = errors.New(
 )
 
 type preparedLeiosCandidate struct {
-	mempool MempoolTransaction
-	tx      lcommon.Transaction
-	blockTx []byte
-	err     error
+	mempool  MempoolTransaction
+	tx       lcommon.Transaction
+	prepared PreparedLeiosTransaction
+	blockTx  []byte
+	err      error
 }
 
 type leiosCandidatePreparation struct {
-	txs     []MempoolTransaction
-	workers int
-	index   int
-	window  []preparedLeiosCandidate
-	prepare func(MempoolTransaction) preparedLeiosCandidate
-	expired func() bool
+	txs      []MempoolTransaction
+	workers  int
+	index    int
+	batch    *leiosPreparationBatch
+	position int
+	prepare  func(MempoolTransaction) preparedLeiosCandidate
+	expired  func() bool
+	clock    sync.Mutex
 }
 
 func newLeiosCandidatePreparation(
@@ -61,6 +65,14 @@ func newLeiosCandidatePreparation(
 }
 
 func prepareLeiosCandidate(tx MempoolTransaction) preparedLeiosCandidate {
+	result := prepareLeiosCandidateBytes(tx)
+	if result.err == nil {
+		result.tx, result.err = decodeMempoolTx(tx)
+	}
+	return result
+}
+
+func prepareLeiosCandidateBytes(tx MempoolTransaction) preparedLeiosCandidate {
 	result := preparedLeiosCandidate{mempool: tx}
 	if !validLeiosTransactionReference(tx) {
 		result.err = errors.New("unrepresentable Leios transaction reference")
@@ -74,75 +86,132 @@ func prepareLeiosCandidate(tx MempoolTransaction) preparedLeiosCandidate {
 		result.err = errors.New("unrepresentable Leios block transaction size")
 		return result
 	}
-	result.tx, result.err = decodeMempoolTx(tx)
 	return result
 }
 
-// next joins each bounded window before exposing its decoded transactions.
-// Ledger validation exclusively owns them afterward; no database session or
-// mutable validation overlay is shared with preparation workers.
+type leiosPreparationBatch struct {
+	results []preparedLeiosCandidate
+	ready   []chan struct{}
+	done    chan struct{}
+	cancel  context.CancelFunc
+}
+
+// next exposes the prepared prefix in mempool order without waiting for later
+// candidates. Workers own distinct slots and never access the ledger overlay.
 func (p *leiosCandidatePreparation) next(
 	ctx context.Context,
 ) (preparedLeiosCandidate, error) {
 	if err := ctx.Err(); err != nil {
+		p.close()
 		return preparedLeiosCandidate{}, err
 	}
-	if len(p.window) == 0 {
-		size := min(leiosPreparationWindow, len(p.txs)-p.index)
-		p.window = make([]preparedLeiosCandidate, size)
-		if err := p.fill(ctx, p.txs[p.index:p.index+size]); err != nil {
-			p.window = nil
+	if p.batch != nil && p.position == len(p.batch.results) {
+		p.close()
+	}
+	if p.batch == nil {
+		if p.index == len(p.txs) {
+			return preparedLeiosCandidate{}, io.EOF
+		}
+		if p.isExpired() {
+			return preparedLeiosCandidate{}, errLeiosPreparationExpired
+		}
+		p.start(ctx)
+	}
+	batch := p.batch
+	ready := batch.ready[p.position]
+	consume := func() (preparedLeiosCandidate, error) {
+		if err := ctx.Err(); err != nil {
+			p.close()
 			return preparedLeiosCandidate{}, err
 		}
+		result := batch.results[p.position]
+		batch.results[p.position] = preparedLeiosCandidate{}
+		p.position++
+		p.index++
+		return result, nil
 	}
-	result := p.window[0]
-	p.window[0] = preparedLeiosCandidate{}
-	p.window = p.window[1:]
-	p.index++
-	return result, nil
+	select {
+	case <-ready:
+		return consume()
+	default:
+	}
+	if p.isExpired() {
+		select {
+		case <-ready:
+			return consume()
+		default:
+		}
+		p.close()
+		return preparedLeiosCandidate{}, errLeiosPreparationExpired
+	}
+	select {
+	case <-ctx.Done():
+		p.close()
+		return preparedLeiosCandidate{}, ctx.Err()
+	case <-ready:
+		return consume()
+	case <-batch.done:
+		select {
+		case <-ready:
+			return consume()
+		default:
+		}
+		p.close()
+		return preparedLeiosCandidate{}, errLeiosPreparationExpired
+	}
 }
 
-func (p *leiosCandidatePreparation) fill(
-	ctx context.Context,
-	txs []MempoolTransaction,
-) error {
+func (p *leiosCandidatePreparation) isExpired() bool {
+	p.clock.Lock()
+	defer p.clock.Unlock()
+	return p.expired != nil && p.expired()
+}
+
+func (p *leiosCandidatePreparation) close() {
+	if p.batch == nil {
+		return
+	}
+	p.batch.cancel()
+	<-p.batch.done
+	p.batch = nil
+	p.position = 0
+}
+
+func (p *leiosCandidatePreparation) start(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	size := min(leiosPreparationWindow, len(p.txs)-p.index)
+	batch := &leiosPreparationBatch{
+		results: make(
+			[]preparedLeiosCandidate,
+			size,
+		), ready: make([]chan struct{}, size),
+		done: make(chan struct{}), cancel: cancel,
+	}
+	for i := range batch.ready {
+		batch.ready[i] = make(chan struct{})
+	}
+	p.batch = batch
+	txs := p.txs[p.index : p.index+size]
 	var next atomic.Int64
-	var expired atomic.Bool
-	var clock sync.Mutex
 	var workers sync.WaitGroup
 	run := func() {
 		defer workers.Done()
 		for ctx.Err() == nil {
-			if p.expired != nil {
-				clock.Lock()
-				stop := p.expired()
-				clock.Unlock()
-				if stop {
-					expired.Store(true)
-					return
-				}
+			if p.isExpired() {
+				return
 			}
 			i := int(next.Add(1) - 1)
 			if i >= len(txs) {
 				return
 			}
-			p.window[i] = p.prepare(txs[i])
+			batch.results[i] = p.prepare(txs[i])
+			close(batch.ready[i])
 		}
 	}
-	count := min(p.workers, len(txs))
+	count := min(p.workers, size)
 	workers.Add(count)
-	for i := 1; i < count; i++ {
+	for range count {
 		go run()
 	}
-	if count > 0 {
-		run()
-	}
-	workers.Wait()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if expired.Load() {
-		return errLeiosPreparationExpired
-	}
-	return nil
+	go func() { workers.Wait(); close(batch.done) }()
 }
