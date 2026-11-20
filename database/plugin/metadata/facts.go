@@ -15,11 +15,14 @@
 package metadata
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"hash"
+	"math"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -570,7 +573,7 @@ func NewUtxoDigester() *UtxoDigester {
 
 // Add folds in one output: its transaction hash, index, lovelace as a decimal
 // string, payment and staking credentials and datum hash, and, when withCbor,
-// its stored CBOR in the post-Alonzo map form (see canonicalOutputCbor).
+// its stored CBOR as a snapshot import writes it (see canonicalOutputCbor).
 func (d *UtxoDigester) Add(
 	txHash []byte,
 	index uint32,
@@ -598,22 +601,57 @@ func (d *UtxoDigester) Add(
 	d.count++
 }
 
-// canonicalOutputCbor returns an output's CBOR in the map form
-// {0: address, 1: value, 2: datum, 3: script ref}. A snapshot import stores
-// every output in that form, while an output created as the legacy array
-// [address, value] or [address, value, datum hash] keeps the array in its
-// block, so the same output would otherwise digest differently on the two
-// sides. Anything that is not such an array is returned unchanged.
+// canonicalOutputCbor returns an output's CBOR as a snapshot import stores
+// it: the map form {0: address, 1: value, 2: datum, 3: script ref} with the
+// value in the MemPack form (see canonicalValueCbor). An output created as the
+// legacy array [address, value] or [address, value, datum hash] keeps the
+// array in its block, and a block keeps the value's own ordering and integer
+// heads, so the same output would otherwise digest differently from its
+// imported copy. The result is a fixed point of this function. Anything that
+// does not decode as such an output is returned unchanged.
 func canonicalOutputCbor(raw []byte) []byte {
-	if len(raw) == 0 || raw[0]>>5 != 4 {
+	if len(raw) == 0 {
 		return raw
 	}
+	var fields map[uint64]cbor.RawMessage
+	switch raw[0] >> 5 {
+	case 4:
+		var ok bool
+		if fields, ok = legacyOutputFields(raw); !ok {
+			return raw
+		}
+	case 5:
+		if _, err := cbor.Decode(raw, &fields); err != nil {
+			return raw
+		}
+	default:
+		return raw
+	}
+	value, ok := fields[1]
+	if !ok {
+		return raw
+	}
+	canonValue, ok := canonicalValueCbor(value)
+	if !ok {
+		return raw
+	}
+	fields[1] = canonValue
+	out, err := cbor.Encode(fields)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// legacyOutputFields maps a legacy array output onto the fields of the map
+// form.
+func legacyOutputFields(raw []byte) (map[uint64]cbor.RawMessage, bool) {
 	var items []cbor.RawMessage
 	if _, err := cbor.Decode(raw, &items); err != nil {
-		return raw
+		return nil, false
 	}
 	if len(items) < 2 || len(items) > 3 {
-		return raw
+		return nil, false
 	}
 	addr := items[0]
 	if len(addr) > 0 && addr[0]>>5 == 4 {
@@ -621,7 +659,7 @@ func canonicalOutputCbor(raw []byte) []byte {
 		// form carries those same bytes inside a byte string.
 		wrapped, err := cbor.Encode([]byte(addr))
 		if err != nil {
-			return raw
+			return nil, false
 		}
 		addr = wrapped
 	}
@@ -629,19 +667,111 @@ func canonicalOutputCbor(raw []byte) []byte {
 	if len(items) == 3 {
 		var dh []byte
 		if _, err := cbor.Decode(items[2], &dh); err != nil {
-			return raw
+			return nil, false
 		}
 		dat, err := cbor.Encode([]any{uint64(0), dh})
 		if err != nil {
-			return raw
+			return nil, false
 		}
 		fields[2] = cbor.RawMessage(dat)
 	}
-	out, err := cbor.Encode(fields)
-	if err != nil {
-		return raw
+	return fields, true
+}
+
+// canonicalValueCbor re-encodes an output value the way the snapshot import
+// does (ledgerstate encodeMempackValue): zero quantities, then policies left
+// empty, are dropped; a value with no assets left is its bare coin;
+// otherwise [coin, {policy: {name: quantity}}] with policies and names in
+// plain bytewise order (not CBOR's length-first order) and every integer and
+// map length in its shortest form. The ledgerstate tests pin the two to the
+// same bytes.
+func canonicalValueCbor(raw []byte) (cbor.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
 	}
-	return out
+	var coin uint64
+	var assets map[cbor.ByteString]map[cbor.ByteString]uint64
+	switch raw[0] >> 5 {
+	case 0:
+		if _, err := cbor.Decode(raw, &coin); err != nil {
+			return nil, false
+		}
+	case 4:
+		var pair []cbor.RawMessage
+		if _, err := cbor.Decode(raw, &pair); err != nil || len(pair) != 2 {
+			return nil, false
+		}
+		if _, err := cbor.Decode(pair[0], &coin); err != nil {
+			return nil, false
+		}
+		if _, err := cbor.Decode(pair[1], &assets); err != nil {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	type namedQty struct {
+		name []byte
+		qty  uint64
+	}
+	type policyAssets struct {
+		policy []byte
+		assets []namedQty
+	}
+	var policies []policyAssets
+	for policy, byName := range assets {
+		pa := policyAssets{policy: policy.Bytes()}
+		for name, qty := range byName {
+			if qty != 0 {
+				pa.assets = append(pa.assets, namedQty{name.Bytes(), qty})
+			}
+		}
+		if len(pa.assets) == 0 {
+			continue
+		}
+		slices.SortFunc(pa.assets, func(a, b namedQty) int {
+			return bytes.Compare(a.name, b.name)
+		})
+		policies = append(policies, pa)
+	}
+	if len(policies) == 0 {
+		return appendCborHead(nil, 0, coin), true
+	}
+	slices.SortFunc(policies, func(a, b policyAssets) int {
+		return bytes.Compare(a.policy, b.policy)
+	})
+	out := appendCborHead(nil, 4, 2)
+	out = appendCborHead(out, 0, coin)
+	out = appendCborHead(out, 5, uint64(len(policies)))
+	for _, pa := range policies {
+		out = appendCborHead(out, 2, uint64(len(pa.policy)))
+		out = append(out, pa.policy...)
+		out = appendCborHead(out, 5, uint64(len(pa.assets)))
+		for _, a := range pa.assets {
+			out = appendCborHead(out, 2, uint64(len(a.name)))
+			out = append(out, a.name...)
+			out = appendCborHead(out, 0, a.qty)
+		}
+	}
+	return out, true
+}
+
+// appendCborHead appends a CBOR item head of the given major type with its
+// argument in the shortest form.
+func appendCborHead(dst []byte, major byte, n uint64) []byte {
+	m := major << 5
+	switch {
+	case n < 24:
+		return append(dst, m|byte(n))
+	case n <= math.MaxUint8:
+		return append(dst, m|24, byte(n))
+	case n <= math.MaxUint16:
+		return binary.BigEndian.AppendUint16(append(dst, m|25), uint16(n))
+	case n <= math.MaxUint32:
+		return binary.BigEndian.AppendUint32(append(dst, m|26), uint32(n))
+	default:
+		return binary.BigEndian.AppendUint64(append(dst, m|27), n)
+	}
 }
 
 // Sum returns the digest of the outputs added so far.
