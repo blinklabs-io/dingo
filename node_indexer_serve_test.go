@@ -142,10 +142,14 @@ func TestNodeServesEveryAPIFromTheIndexerDB(t *testing.T) {
 	}
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- n.Run(context.Background()) }()
+	runDone := make(chan struct{})
+	go func() {
+		runErr <- n.Run(context.Background())
+		close(runDone)
+	}()
 	t.Cleanup(func() {
 		require.NoError(t, n.Stop())
-		testutil.RequireReceive(t, runErr, 30*time.Second, "node run returned")
+		testutil.RequireReceive(t, runDone, 30*time.Second, "node run returned")
 	})
 	requireWriterStarted(t, writer, runErr)
 	requireStartupComplete(t, n)

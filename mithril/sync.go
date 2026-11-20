@@ -1188,20 +1188,7 @@ func Sync(
 					if artifact == "" {
 						artifact = "unknown"
 					}
-					logger.Info(
-						"download progress",
-						"component", "mithril",
-						"network", network,
-						"phase", "download",
-						"artifact", artifact,
-						"snapshot_hash", p.SnapshotHash,
-						"bytes_downloaded", p.BytesDownloaded,
-						"total_bytes", p.TotalBytes,
-						"percent", p.Percent,
-						"bytes_per_second", p.BytesPerSecond,
-						"artifacts_completed", p.ArtifactsCompleted,
-						"artifacts_total", p.ArtifactsTotal,
-					)
+					logDownloadProgress(logger, network, artifact, p)
 					lastLogTime = now
 					lastLoggedPercent = p.Percent
 				}

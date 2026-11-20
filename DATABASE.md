@@ -5913,6 +5913,17 @@ rows and writes them before it returns. UTxO spends and certificate rows stay
 per statement: a later transaction in the same window reads them for
 double-spend detection, live-stake deltas, and certificate state.
 
+File-backed SQLite backfill reads and decodes one block ahead of the ordered
+writer. Before that block enters the write path, its distinct consumed UTxO
+references are divided across the metadata read pool and read through
+independent snapshots. The results are discarded: the write transaction still
+performs every authoritative lookup and mutation in canonical block and
+transaction order. The read-ahead only warms the transaction and UTxO pages
+while the preceding block is being written, raises disk queue depth when those
+pages have fallen out of cache, and holds at most one decoded block in the
+handoff buffer. In-memory SQLite and other metadata providers keep the ordered
+path without this prefetch.
+
 Indexes used by per-transaction cleanup remain resident during import.
 Critical API-query and rollback indexes are rebuilt before the node serves
 traffic. The unused mint/burn fingerprint, datum-slot, certificate-query, and
