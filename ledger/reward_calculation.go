@@ -27,7 +27,6 @@ import (
 	"sort"
 	"sync/atomic"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -1402,16 +1401,38 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 		return nil, fmt.Errorf("load delegator-inactivity activation: %w", err)
 	}
 	activationApplies := activated && activationEpoch <= app.epochs.snapshot
-	var activationMembership map[string]struct{}
+	activationFloors := make(map[string]uint64)
 	if activationApplies {
-		activationMembership, err = ls.ledgerDB().
-			AccountInactivityActivationMembership(
-				ctx,
-				refs,
-				txn,
-			)
-		if err != nil {
-			return nil, fmt.Errorf("load activation membership: %w", err)
+		if r := ls.accountServing(txn); r != nil {
+			activationReader, ok := r.(AccountInactivityActivationReader)
+			if !ok {
+				return nil, errors.New("set account activation provenance is unavailable")
+			}
+			loaded, err := activationReader.AccountInactivityActivationLoaded()
+			if err != nil {
+				return nil, fmt.Errorf("load set account activation provenance: %w", err)
+			}
+			if !loaded {
+				return nil, errors.New("set account activation provenance is not loaded")
+			}
+			for _, ref := range refs {
+				a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
+				if err != nil {
+					return nil, fmt.Errorf("load set account activation membership: %w", err)
+				}
+				if a != nil && a.InactivityActivation {
+					activationFloors[ref.MapKey()] = a.InactivityActivationEpoch
+				}
+			}
+		} else {
+			activationMembership, err := ls.ledgerDB().
+				AccountInactivityActivationMembership(ctx, refs, txn)
+			if err != nil {
+				return nil, fmt.Errorf("load activation membership: %w", err)
+			}
+			for key := range activationMembership {
+				activationFloors[key] = activationEpoch
+			}
 		}
 	}
 	var guarded map[string]struct{}
@@ -1435,16 +1456,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 			expiration = epoch.EpochId + ls.config.DelegatorInactivity
 		}
 		if activationApplies {
-			floor, applies := database.RollbackActivationFloor(
-				models.NewStakeCredentialRef(
-					account.CredentialTag,
-					account.StakingKey,
-				),
-				true,
-				activationEpoch,
-				activationMembership,
-			)
-			if applies {
+			if floor, applies := activationFloors[key]; applies {
 				expiration = max(
 					expiration,
 					floor+ls.config.DelegatorInactivity,

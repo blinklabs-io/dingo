@@ -22,6 +22,14 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
+// DecodeLegacyAccountForTest decodes r through the account encoding that
+// predates CIP-0163 activation provenance.
+func DecodeLegacyAccountForTest(r AccountRow) (AccountRow, error) {
+	v := encodeAccount(r)
+	v = v[:len(v)-9]
+	return decodeAccount(credKey(r.Tag, r.Key), v)
+}
+
 // DeleteFormatForTest removes the format mark, as a store written before it
 // existed lacks it.
 func (s *Store) DeleteFormatForTest() error {
@@ -337,4 +345,28 @@ func (s *Store) SnapshotIndexMismatchForTest() ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// AddedIndexFloorForTest returns the floor the family's index of rows below
+// the floor was built at, and whether one is held.
+func (s *Store) AddedIndexFloorForTest(family byte) (uint64, bool) {
+	s.added.mu.Lock()
+	defer s.added.mu.Unlock()
+	idx := s.added.fam[family]
+	if idx == nil {
+		return 0, false
+	}
+	return idx.floor, true
+}
+
+// SetAfterRowsGenerationForTest sets fn to run when EachRowChangedIn has read
+// the rows' generation and not yet begun its transaction.
+func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
+	s.added.afterGen = fn
+}
+
+// SetBeforeAddedIndexForTest sets fn to run inside the transaction of a read
+// below the floor, before it looks up the family's index.
+func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
+	s.added.beforeIndex = fn
 }

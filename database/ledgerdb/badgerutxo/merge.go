@@ -42,7 +42,7 @@ import (
 var loadedMarkers = [][]byte{
 	noncesKey, legacyNoncesKey, epochStateKey, summaryKey,
 	legacyEpochStateKey, networkStateKey, pparamsKey, accountsKey,
-	legacyAccountsKey, syncMarkersKey, drepsKey, poolsKey, poolHistoryKey,
+	legacyAccountsKey, accountInactivityActivationKey, syncMarkersKey, drepsKey, poolsKey, poolHistoryKey,
 	legacyPoolHistoryKey, registrationHistoryKey,
 	legacyRegistrationHistoryKey, genesisMIRKey, opCertsKey, legacyOpCertsKey,
 	committeeKey, governanceKey, legacyGovernanceKey, pparamUpdatesKey,
@@ -159,6 +159,10 @@ func (s *Store) BeginMerge() error {
 	if s.merging.Swap(true) {
 		return errors.New("badgerutxo: a merge is already running")
 	}
+	// The reconcile that ends a merge rewrites rows below the floor the
+	// merge raised, outside any load, so the whole merge is one rewrite.
+	end := s.rewriteRows()
+	s.added.endMerge.Store(&end)
 	if err := s.update(func(txn *badger.Txn) error {
 		for _, k := range loadedMarkers {
 			if err := txn.Delete(k); err != nil {
@@ -167,6 +171,7 @@ func (s *Store) BeginMerge() error {
 		}
 		return nil
 	}); err != nil {
+		s.endMergeRewrite()
 		s.merging.Store(false)
 		return fmt.Errorf("badgerutxo: begin merge: %w", err)
 	}
@@ -177,12 +182,20 @@ func (s *Store) BeginMerge() error {
 // only stops the merge mode, leaving the mark for the run that finishes it.
 func (s *Store) EndMerge(complete bool) error {
 	s.merging.Store(false)
+	s.endMergeRewrite()
 	if !complete {
 		return nil
 	}
 	return s.update(func(txn *badger.Txn) error {
 		return txn.Delete(mergeKey)
 	})
+}
+
+// endMergeRewrite ends the rewrite BeginMerge began, once.
+func (s *Store) endMergeRewrite() {
+	if end := s.added.endMerge.Swap(nil); end != nil {
+		(*end)()
+	}
 }
 
 // Merging reports whether family loads are merging.
@@ -202,6 +215,8 @@ type loadSink struct {
 	err   error
 	buf   []sinkRow
 	bytes int
+	// end ends the rewrite the load is, at its Flush or Cancel.
+	end func()
 	// mu is held only to satisfy the race detector's view of a feed that
 	// calls put from another goroutine; a load is sequential.
 	mu sync.Mutex
@@ -215,10 +230,11 @@ const (
 )
 
 func (s *Store) newLoadSink() *loadSink {
+	end := sync.OnceFunc(s.rewriteRows())
 	if !s.merging.Load() {
-		return &loadSink{wb: s.newWriteBatch(), s: s}
+		return &loadSink{wb: s.newWriteBatch(), s: s, end: end}
 	}
-	l := &loadSink{s: s}
+	l := &loadSink{s: s, end: end}
 	// A failed read leaves the sink failing every write: journaling a row at
 	// slot zero would let a rollback to the real tip keep it.
 	l.err = s.view(func(txn *badger.Txn) error {
@@ -264,6 +280,7 @@ func (l *loadSink) Delete(k []byte) error {
 
 // Flush writes what is buffered.
 func (l *loadSink) Flush() error {
+	defer l.end()
 	if l.wb != nil {
 		return l.wb.Flush()
 	}
@@ -274,6 +291,7 @@ func (l *loadSink) Flush() error {
 
 // Cancel discards the sink.
 func (l *loadSink) Cancel() {
+	defer l.end()
 	if l.wb != nil {
 		l.wb.Cancel()
 	}
@@ -350,5 +368,6 @@ func (s *Store) dropWindowed(prefixes [][]byte) error {
 	if s.snap != nil {
 		return ErrSnapshotReadOnly
 	}
+	defer s.rewriteRows()()
 	return s.db.DropPrefix(drop...)
 }

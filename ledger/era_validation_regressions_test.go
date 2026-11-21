@@ -326,7 +326,6 @@ func depositRuleRejected(err error) bool {
 func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newBlockValidationLedger(t)
 	pp := conwayBlockTestPparams()
 	pp.KeyDeposit = 0
 	pp.DRepDeposit = 0
@@ -335,8 +334,14 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 	drep := stakeRefundTestCredential(0xe3)
 	freshDrep := stakeRefundTestCredential(0xe4)
 	zero := uint64(0)
-	seedStakeRegistration(t, db, registered, &zero, 100, 0xe1)
-	seedImportedDrep(t, db, drep, 0, 100, true)
+	// Each subtest owns its ledger: validation attaches a live set to it, and
+	// parallel subtests must not rewrite one another's.
+	newSeededLedger := func(t *testing.T) *LedgerState {
+		ls, db := newBlockValidationLedger(t)
+		seedStakeRegistration(t, db, registered, &zero, 100, 0xe1)
+		seedImportedDrep(t, db, drep, 0, 100, true)
+		return ls
+	}
 	pool := lcommon.PoolKeyHash(
 		bytes.Repeat([]byte{0xe5}, lcommon.Blake2b224Size),
 	)
@@ -402,6 +407,7 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ls := newSeededLedger(t)
 			run := func(amount uint64) error {
 				return validateTxInBlock(
 					t, ls, conway.EraConway, eras.ConwayEraDesc, pp,

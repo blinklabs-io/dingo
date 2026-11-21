@@ -99,7 +99,7 @@ var stagingPromoted = map[string]string{
 	"AccountsWitnessedAfterSlot":              databaseServes,
 	"AccountInactivityActivationMembership":   databaseServes,
 	"ConsumedUtxoPruneFloor":                  databaseServes,
-	"MithrilTrustBoundarySlotStrict":          databaseServes,
+	"ImportedLedgerStateBoundarySlotStrict":   databaseServes,
 	"UtxosDeleteConsumed":                     databaseServes,
 	"GetPParamsRows":                          databaseServes,
 	"GetRewardLikelihoodStateAtSlot":          noFamilyRows,

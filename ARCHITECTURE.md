@@ -820,7 +820,9 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting.
+rejected without waiting. A competing header that verifies after the wait is
+admitted on the same ChainSync session, so its descendants can make that fork
+long enough to replace the incumbent through ordinary chain selection.
 Queue admission has the same tolerance: a verdict that a tip publication expires
 between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
@@ -2008,6 +2010,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
+├── sdk/                 # Plugin SDK, a separate Go module
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -2557,6 +2560,7 @@ Phase 1: Stop accepting new work
   Chainsync stall recycler and chain-selected-to-none worker (both
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
+  legacy SQL UTxO row cleanup worker (first quiesce stop),
   block forger, leader election, Leios pipeline and vote managers,
   snapshot manager, database lifecycle manager
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
@@ -2590,6 +2594,17 @@ storage. Ouroboros is not in this list: an NtC client can acquire a
 LocalStateQuery snapshot until its connection drains, so shutdown closes
 Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
 there skips the phase-3 storage closes like an unfinished phase-1 wait.
+The legacy SQL UTxO row cleanup worker finishes a set-only migration that
+`reconcileUtxoSet` committed and marked with `DeferUtxoRowCleanup`: the cutover
+returns once the mark is durable, and the worker deletes the redundant SQL rows
+in bounded batches, clearing the migration progress record only after the last
+batch so a restart resumes it. `Run` starts it after every other service
+(`startInitialUtxoMigrationCleanup`, under `liveLifecycleMu` so it serializes
+with live restore and truncate). It has its own context, because restore and
+truncate stop storage users without cancelling the node context. It is the
+first quiesce stop, so it is cancelled and joined before storage closes during
+shutdown, restore and truncate; `reinitializeAndResume` starts it again against
+the reopened storage. A cancelled run leaves the progress record in place.
 Each wait is routed through `stopWithDeadline` with whatever remains of the
 one shutdown deadline, not a fresh timeout per component, so a goroutine that
 never observes
@@ -3393,6 +3408,8 @@ configures a certificate validator, so the era decides). A drained
 pools-history family answers it from the certificate history, whose events
 keep the effective slot. Otherwise, and for any
 other snapshot slot, the certificate history supplies the answer after migration.
+The live pool registration carries the Leios key registration epoch with its
+key material, so the key age follows the same state transition and rollback.
 The op-cert counter reads (`LatestPoolOpCertSequence`, `...After`,
 `...AtOrBefore`, `...InRange` and `LatestPoolOpCertSequences`) are
 answered from the set once it reports the counters loaded.
@@ -3434,8 +3451,8 @@ and come in (added slot, tag, hash) order where the store's come in
 insertion order; no consumer depends on either: the lookups match by
 credential, take the latest term by slot, or count, and the store's active
 members and hot authorizations have no order at all.
-The Mithril import and gap-block paths write these tables around the
-decorator; they rebuild the set through its bootstrap, which clears the
+The Mithril import writes these tables around the
+decorator; it rebuilds the set through its bootstrap, which clears the
 rows and their marker.
 
 Governance proposals and votes follow the same pattern, keyed by transaction
@@ -3532,7 +3549,7 @@ truncates the set with the databases (`WithUtxoSetBackup`,
 `WithTruncateUtxoSet`), and the live node closes the set around a restore or
 truncate and reopens it before the rebuilt ledger is built. See the live UTxO
 set sections of DATABASE.md for the marker, the manifest fields and the
-Mithril gap invalidation.
+Mithril import's governance invalidation.
 
 The set is always present and is the only copy: `LedgerStateConfig.UtxoSet`
 is required, and `NewLedgerState` refuses a ledger without one. The ledger
@@ -3736,7 +3753,7 @@ the metadata store whether live stake is drained
 (`Store.SetRewardLiveStakeDrained`): the store then no longer refreshes,
 rebuilds or probes `reward_live_stake`, so no account or UTxO write, rollback,
 resume or startup check touches the table. A Mithril
-import or catch-up, a backfill and a gap replay into a database with a latch
+import or catch-up and a backfill into a database with a latch
 bit or a drain marker are refused (`Database.RefuseLedgerStateRewrite`), the
 MCP raw-SQL tools refuse a table of a drained family, and the standalone
 Koios parity reader refuses a database drained of a family it reads.
@@ -3828,14 +3845,19 @@ stake inputs without replaying blocks, so an idle chain does not delay their
 publication until another block arrives. The ledger journals a round's credits lazily, so credits dated
 before the writer's segment are re-read at the boundary slot of every round
 that still holds unfolded outputs, and each applied credit marks its output
-folded. With the
+folded. Each bounded journal page is ordered by credential, slot and source
+before it is applied, matching the reward journal's credential-leading unique
+index without retaining a whole reward round in memory. With the
 accounts family drained the journal is the live UTxO set's reward records,
 which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The
 account and DRep facts of a batch's slot range are read from the set's state
 journal, so the export costs the rows the range changed and holds
-`utxoSetApplyMu` for bounded steps; only a range below the journal's floor, such
-as the first export from slot zero, reads the whole table in key order. A split
+`utxoSetApplyMu` for bounded steps. A range that ends below the journal's
+floor, as every segment of a replay over a set loaded from a snapshot, is
+served from an in-memory index of the family's rows by `AddedSlot`
+(`badgerutxo.Store.EachRowChangedIn`), so it costs the rows added in the range;
+only a range that crosses the floor reads the whole table in key order. A split
 node's set keeps what the writer has not acknowledged
 (`utxoset.Config.RetainRewardRecords`), including the reward stake and derived
 rows of epochs it has not copied. The writer acknowledges a batch only after
@@ -5020,7 +5042,8 @@ the context deadline (a `DurableClose` store closes to completion instead),
 `quiesceForLiveLifecycleOp`'s call to
 `ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp` (which wraps its own
 `ouroboros.ErrLeiosPersistDrainUnconfirmed`), and `quiesceForLiveLifecycleOp`'s
-own component stops. Those stops — the block forger, leader election, both Leios
+own component stops. Those stops — the legacy SQL UTxO row cleanup worker, the
+block forger, leader election, both Leios
 managers, the snapshot manager, and the database lifecycle manager, enumerated
 in one place by `quiesceComponentStops` so the set is visible and testable
 rather than spread across inline call sites — each cancel their own context and
@@ -5588,8 +5611,8 @@ registrations include the accumulated count when computing their initial
 expiry, while PV10 and later use the already-adjusted expiry model. Processing
 a governance proposal resets the consecutive dormant count, and both boundary
 increments and resets are slot-journaled for rollback.
-Backfill and gap replay of blocks at or below a Mithril anchor do not run
-these rules: they record each DRep's activity epoch but keep the imported
+Backfill of blocks at or below a Mithril anchor does not run
+these rules: it records each DRep's activity epoch but keeps the imported
 expiry and dormancy counter, which already account for every epoch the replay
 covers.
 
@@ -7397,21 +7420,21 @@ and governance updates run in that same order inside the block's single
 database transaction. Direct-deposit credits use the body hash in the reward
 rollback journal, so rollback and replay restore the account balance with the
 rest of the block. An invalid batch applies only the enclosing transaction's
-collateral outcome. Historical backfill and Mithril gap indexing also persist
-the child and enclosing body hashes and process governance per body; they do
+collateral outcome. Historical backfill also persists
+the child and enclosing body hashes and processes governance per body; it does
 not reapply direct deposits to account balances already represented by their
 imported state.
 
 Persisting a ParameterChange proposal re-applies the era's proposal rule to the
 whole enclosing transaction once, under the protocol parameters transaction
 validation used for it: the previous era's for a block of that era applied
-after the ledger advanced. Historical backfill and Mithril gap indexing select
+after the ledger advanced. Historical backfill selects
 parameters by epoch, and the epoch that starts an era is recorded with the
-successor era, so for a block of an earlier era than its epoch they take the
+successor era, so for a block of an earlier era than its epoch it takes the
 parameters, and the era, of that block's era's last epoch
 (`ledger.PreviousEraEpoch`); its certificate deposits use them too. Live
-application, replay with or without validation,
-historical backfill and Mithril gap indexing therefore fail a block that
+application, replay with or without validation
+and historical backfill therefore fail a block that
 carries a proposal the rule refuses, and no `governance_proposal` row is
 written for it. Ledger-state snapshot import is the exception: it stores the
 proposals the snapshot holds without running the rule.
@@ -7421,9 +7444,9 @@ block's slot and select one parameter set for the block's era. Proposal expiry
 and live DRep activity therefore use that same selection as proposal validation
 when an era-1 block is applied after the ledger has advanced. Rollback restores
 the current- and previous-era parameter snapshots before blocks re-enter this
-same replay path. Historical backfill and Mithril gap indexing also keep the
-block-slot epoch, but use the selected block-era parameters only for proposal
-validation, proposal lifetime, and certificate deposits: their DRep processing
+same replay path. Historical backfill also keeps the
+block-slot epoch, but uses the selected block-era parameters only for proposal
+validation, proposal lifetime, and certificate deposits: its DRep processing
 records historical activity while preserving the expiry imported in the
 ledger-state snapshot.
 
@@ -9803,7 +9826,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   publication that makes it stale removes the candidate from corroboration and
   triggers recovery. A verified winning fork releases its old generation pin
   before rolling back, then re-intersects so the fork suffix is verified against
-  the generation the rollback publishes. Genesis-overlay parameters remain
+  the generation the rollback publishes. If the peer's ordered protocol cursor
+  has already rolled back to the same point and is streaming descendants, local
+  rollback recovery preserves that cursor: re-intersecting it would discard the
+  pipelined competing suffix until the old request window drained.
+  Re-intersections caused only by a changed or deferred verification context
+  likewise keep verifying their already-requested ordered replies while the
+  mini-protocol drains; a later rollback or cursor-gap recovery condemns them.
+  Genesis-overlay parameters remain
   authoritative for later slots within the applied epoch and era, so a tip
   earlier within that epoch does not by itself defer the overlay decision;
   headers requiring a different epoch or era's parameters remain deferred until
@@ -15169,8 +15199,9 @@ immutable import marker only while the pending repair marker remains; ordinary
 API-mode metadata replacement is rejected. A certified artifact may trail the
 local tip. Repair verifies that the artifact's immutable tip is an ancestor of
 the local chain and that the selected state is not earlier than the database's
-existing stable Mithril ledger point. A selected state beyond the local tip
-goes through the existing gap validation.
+existing stable Mithril ledger point. The state is selected at or below the
+last block of the artifact's immutable files, the signed ancillary chunk
+included, as for any import.
 Before replay, every repair rolls metadata back to the selected state slot,
 including restoring UTxOs spent afterward. When the local tip is beyond the
 certified tip, repair also verifies that state point on the local chain and
@@ -15615,7 +15646,7 @@ Every read of a bootstrapped tree goes through one of them:
 | tree | opened by | read by |
 |---|---|---|
 | immutable | `chunkDirIn` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
-| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore` bounded by the ImmutableDB tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | held for cleanup; the immutable lookup derives its handle from it |
 
 The v2 pipelined copy reads through the same handle extraction is writing
@@ -15847,18 +15878,34 @@ signed (`AncillaryVerified`) that yields no usable state at any slot fails the
 import, since emptying a signed tree is destruction rather than planting and
 nothing else vouches for a replacement.
 
-A verified ancillary tree holding only states newer than the certified
-ImmutableDB tip is the one case that is not treated as "yields no usable
-state": `selectLedgerStateSnapshot` (`mithril/sync_import.go`) retries such a
-tree with `ledgerstate.OpenNewestSnapshot`, which runs the same
-symlink/substitution-safe search. The selected slot and the parsed state's own
-tip must both remain within one Shelley stability window (3k/f) of the
-certified tip. That artifact-relative ceiling keeps the separately signed
-ancillary archive from selecting an unrelated future state. The relay gap
-fetch also stops after twice the Shelley security parameter in blocks, before
-retaining another block's CBOR, so its memory use is bounded. The ancillary
-manifest still authenticates the state bytes, while these two bounds establish
-their permitted relationship to the certified artifact.
+A ledger state is loaded only at or below the tip of the ImmutableDB the
+import builds, as the reference node discards a ledger snapshot more recent
+than its ImmutableDB tip. That ImmutableDB holds two things. The certified
+immutable files end at the certified tip. The ancillary archive also carries
+the immutable file after them, which the aggregator's node was still appending
+to, and its chunk, primary and secondary are covered by the signed ancillary
+manifest. `readAncillaryChunk` (`mithril/ancillary_chunk.go`) reads that file
+against the manifest digests, keeping the blocks up to the first that does not
+read back, since the file is copied while it is written. `landAncillaryChunk`
+stores those blocks after the certified ones through the same raw-block copy
+(`node.CopyImmutableBlocks`). An import that moved the certified chunk files
+into the database's ImmutableDB also appends them through the database's own
+chunk writer (`Database.PromoteThroughLocked`), so the recorded tip is the
+chunk's last block. Any database that records an ImmutableDB tip is promoted
+the same way, including a catch-up or repair that copied block bodies, so no
+state loads above the recorded tip; `requireStateInImmutableDB` refuses one
+that would. A chunk that does not continue the stored chain is an error.
+
+`selectLedgerStateSnapshot` (`mithril/sync_import.go`) then picks the newest
+state at or before that tip, and `requireStateInImmutableDB` checks the
+state's point is a stored block before anything is loaded. A state later than
+the tip is passed over for an older one in the tree; when there is none the
+import fails with `ErrLedgerStateTooRecent`. The ancillary signature
+authenticates the state bytes and does not widen this bound. An artifact
+whose ancillary tree was not verified against a signed manifest contributes no
+chunk, so its bound is the certified tip. Blocks after the selected state, in
+the ImmutableDB or beyond it, go through ordinary ledger replay and chain
+sync; the import fetches nothing from a relay.
 
 A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
@@ -16258,10 +16305,9 @@ contacted.
   file holding the history-expiry cutoff, `ledger slot − StabilityWindow` (3k/f
   from the Shelley genesis, `ledger.ShelleyStabilityWindow`, which the pruner's
   `StabilityWindow` also uses from Shelley on), downloads the ancillary archive
-  and verifies its Ed25519 manifest, parses the ledger state, and fetches any
-  blocks between the certified tip and a ledger state beyond it from a relay.
-  The same stability-window slot ceiling and security-parameter block limit used
-  by full sync apply here. No file below the cutoff's is requested. Probing
+  and verifies its Ed25519 manifest, reads the signed immutable file after the
+  certified tip from it, and parses the newest ledger state at or before that
+  file's last block. No file below the cutoff's is requested. Probing
   stops after `maxCutoffProbes` (16) files; the files below the lowest probe
   then come through a windowed feed from file 0, and that is logged. All of that
   is read-only; the restore's first write then records, in one metadata
@@ -16269,8 +16315,9 @@ contacted.
   `sync_status=in_progress` (a fresh database first has stray copies of the
   first two deleted), and does what `dingo mithril sync` does, through shared
   helpers: bulk-load pragmas and deferred indexes, block load
-  (`node.CopyImmutableBlocks`), ledger import (`importPreparedLedgerState`,
-  checkpointed by `"{digest}:{slot}"`), gap blocks, the stable ledger tip,
+  (`node.CopyImmutableBlocks`, then the signed ancillary chunk's blocks),
+  ledger import (`importPreparedLedgerState`,
+  checkpointed by `"{digest}:{slot}"`), the stable ledger tip,
   `finishMithrilImport` (critical index rebuild, planner statistics, the
   completion clear and the `mithril_ledger_slot`/`mithril_ledger_hash` trust
   boundary), then `mithril_immutable_max`, which makes `WasBootstrapped` true.
@@ -16388,11 +16435,11 @@ confirms either that the local chain tip is an ancestor of the target artifact's
 chain, or that the local chain is already ahead and its tip descends from the
 artifact tip; divergence aborts untouched. An ahead local chain short-circuits
 as up-to-date (advancing the marker) only when no sync is in progress. While
-resuming an interrupted catch-up, an ahead local chain is expected — the
-interrupted run's volatile gap-fill stored blocks past the artifact's sealed
-range — so the import proceeds instead of returning early, letting the
-idempotent pipeline finish gap-block transaction processing, the deferred index
-rebuild, and the sync-state cleanup that the interrupted run never reached. It
+resuming an interrupted catch-up, an ahead local chain is expected (the
+interrupted run stored the signed ancillary chunk's blocks past the artifact's
+certified range), so the import proceeds instead of returning early, letting
+the idempotent pipeline finish the deferred index rebuild and the sync-state
+cleanup that the interrupted run never reached. It
 then forward-copies the missing blocks and imports the new ledger state as a
 replacement boundary. The ledger import reconciles stale live rows
 (`ImportConfig.Reconcile`): the new snapshot is the complete ledger state at its
@@ -16655,18 +16702,19 @@ catching up), and only an explicit `SkipLeaderStakeThresholdCheck` test or
 embedder override skips the check.
 
 Mithril sync only uses a ledger state as the local trust anchor when its point
-is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
-contain a newer ledger state and volatile blocks signed by the ancillary
-publisher, but that signature authenticates the archive; it does not establish
-Ouroboros consensus validity for the volatile suffix. State-file selection is
-therefore capped at the certified immutable tip, the selected point is checked
-against the copied immutable chain, and sync fails closed when no such state is
-available.
+is a block at or below the tip of the ImmutableDB the import builds: the
+certified immutable files followed by the signed ancillary chunk. State-file
+selection is capped at that tip, the selected point is checked against the
+stored chain, and sync fails closed when no such state is available. Once the
+state is loaded the node is in the position of one that synced to that
+ImmutableDB tip: it replays the immutable blocks after the state, and a
+rollback is refused only below the immutable tip.
 
-The ledger refuses any rollback below the selected stable ledger slot
-(`mithrilLedgerSlot`), since intermediate UTxO states before that imported
-state cannot be reconstructed. Mithril sync persists the full boundary point in
-`sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
+The ledger refuses any rollback below the selected stable ledger slot, since
+intermediate UTxO states before an imported state cannot be reconstructed.
+Every ledger-state loader records that point through
+`SetImportedLedgerStateBoundary`; the persisted `mithril_ledger_slot` and
+`mithril_ledger_hash` names remain for database compatibility. Outbound
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
@@ -16693,9 +16741,7 @@ consumed UTxO it cannot find or reconstruct from the blob store. By default
 for an unrecoverable input, because a normal from-origin node is expected to
 hold complete producer history. A non-genesis chainsync intersection without a
 Mithril snapshot may explicitly set `StrictUtxoValidation: false` when
-pre-intersect UTxOs are intentionally absent. Gap-block ingestion, which
-closes the range between the snapshot and the chain tip, consumes no inputs
-from the metadata store: the live UTxO set is already at or past that range.
+pre-intersect UTxOs are intentionally absent.
 
 That default recovery is deliberately one-sided: it only fires when the produced
 `utxo` row is *absent* from the metadata store, and it rebuilds it from the
@@ -16723,12 +16769,11 @@ and Leios endorser-block apply, where an absent producer is legitimately
 recovered, so this remains the primary prevention of that wedge while the
 K-guard and the non-convergence recovery hold remain as backstops.
 
-Certified immutable blocks after the selected anchor remain in the primary
+Immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
 node startup therefore replays that stable suffix through the ordinary ledger
-path. Blocks beyond the ImmutableDB tip are not imported from ancillary
-volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
-validates them normally. API-mode historical metadata backfill is capped at the
+path. Blocks beyond the ImmutableDB tip are not imported or pre-processed;
+chainsync/blockfetch obtains and validates them normally. API-mode historical metadata backfill is capped at the
 anchor so it cannot pre-apply and thereby bypass the ledger path for either
 suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
 resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
@@ -16745,7 +16790,7 @@ finalization, while allowing native PV10 cleanup of dangling replay-only
 targets. The global HARDFORK operation retains its cleared-account count and
 existing semantics. Protocol version 9 keeps its historical reverse set.
 Replayed DRep activity
-(backfill and gap blocks) records only the activity epoch and keeps the
+(backfill) records only the activity epoch and keeps the
 snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are
 resolved per epoch as replay reaches it, enacting the boundary's classic updates
@@ -16780,28 +16825,22 @@ aggregate `MaxBlockExUnits`, and operational-certificate counter checks;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 
-`processGapBlocks`, `SetGapBlockTransaction`, and
-`LedgerState.healMithrilGapBlockNonces` remain compatibility/recovery machinery
-for databases produced by older releases that advanced
-`mithril_ledger_slot` across an unvalidated gap. New imports do not create that
-shape: nonce folding and transaction effects after the stable anchor are
-produced by ordinary ledger replay. Compatibility gap fetches accept a relay
-batch only when it is non-empty, hash-linked from the requested start point,
-and terminates at the exact requested end point; a mismatch falls through to
-the next bootstrap peer before any block is stored.
+`LedgerState.healMithrilGapBlockNonces` remains recovery machinery for
+databases produced by older releases that advanced `mithril_ledger_slot`
+across blocks fetched from a relay. Imports no longer create that shape: nonce
+folding and transaction effects after the stable anchor are produced by
+ordinary ledger replay. `SetGapBlockTransaction`, which stored those blocks'
+transactions, has no caller in the import.
 
-When that compatibility path replays a gap transaction, it applies governance
-effects in ledger order: votes, DRep registration/update activity, proposals,
-then DRep deregistration cleanup. A deregistration-only transaction still clears
-that DRep's votes on active proposals. Conway certificate-state import also
-preserves the dormant-epoch count from both nested VState and historical
-flattened committee-state encodings, applying it to active DRep expiries. Once
-the flattened parser selects a DRep map, a decode error in any DRep key, expiry,
-anchor (URL, or a hash that is not 32 bytes), deposit or delegator fails the
-import; it must not checkpoint partial governance state as complete. Live
-application, backfill and gap replay require Conway protocol parameters only for
-transactions that read them (`governance.TransactionRequiresConwayParameters`);
-a transaction that only deregisters DReps applies without them.
+Conway certificate-state import preserves the dormant-epoch count from both
+nested VState and historical flattened committee-state encodings, applying it
+to active DRep expiries. Once the flattened parser selects a DRep map, a decode
+error in any DRep key, expiry, anchor (URL, or a hash that is not 32 bytes),
+deposit or delegator fails the import; it must not checkpoint partial
+governance state as complete. Live application and backfill require Conway
+protocol parameters only for transactions that read them
+(`governance.TransactionRequiresConwayParameters`); a transaction that only
+deregisters DReps applies without them.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,
@@ -16857,8 +16896,10 @@ before startup and runs the full lazy rebuild as background maintenance; the
 rebuild paths clear the marker only after the full manifest has been rebuilt.
 Mithril completion cleanup leaves the deferred-index marker, post-backfill
 statistics marker, and forge fences untouched, and deletes transient keys
-individually. It writes `mithril_ledger_slot` and `mithril_ledger_hash` after
-cleanup. This preserves the pending marker set by `BuildCritical` so a
+individually. It records the generic imported-ledger-state boundary after
+cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
+remain for database compatibility. This preserves the pending marker set by
+`BuildCritical` so a
 bootstrapped database still builds the lazy manifest. Core-mode startup still
 repairs the full manifest synchronously before serving. Both repair entry points
 also restore any missing critical index when no cycle is pending at all: the
@@ -16882,11 +16923,15 @@ including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
-primary and secondary file each. Production digests every file with SHA-256,
+primary and secondary file each. The newest trio is treated as the unfinished
+immutable file: it and the newest ledger state are placed in the signed
+ancillary archive, while only the preceding complete trios are certified.
+Production digests every certified file with SHA-256,
 derives the digest-list merkle root and artifact hash with the same
 `computeMMRRoot`/`ComputeHash` the client verifies against, then writes one
-`NNNNN.tar.zst` per file trio, `digests.tar.zst`, and `ancillary.tar.zst`
-holding the newest ledger state and an Ed25519-signed manifest
+`NNNNN.tar.zst` per certified file trio, `digests.tar.zst`, and
+`ancillary.tar.zst` holding the unfinished trio, newest ledger state and an
+Ed25519-signed manifest
 (`mithril.server.ancillarySigningKeyFile`). The beacon epoch is the epoch of
 that ledger state. The archives are re-hashed as they are written, so a file
 rewritten after its digest was taken fails the run. `artifact.json` is written
@@ -21516,6 +21561,13 @@ Package isolation is enforced by direction, ownership, and composition:
   should expose server logic through local interfaces. Concrete adapters to
   `ledger`, `database`, and `mempool` are integration boundaries and should
   remain narrow.
+- `sdk/` is the plugin SDK, a separate Go module
+  (`github.com/blinklabs-io/dingo/sdk`) that plugins build against without
+  depending on the node. No SDK package imports the node module or any of its
+  `internal/` packages, and only packages under `sdk/cardano/` import
+  gouroboros, so every other contract stays chain-neutral. The module is
+  released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
+  contract versioned `v0` and experimental, until a 1.0 is declared.
 
 ### Import Boundary Check
 
@@ -21525,6 +21577,10 @@ Reviewed critical package boundaries are enforced by
 ```shell
 make import-boundaries
 ```
+
+The same check enforces the `sdk/` module's two import rules
+(`internal/architecture/sdk_boundary_test.go`). It reads the files directly,
+because the root module's `./...` stops at `sdk/go.mod`.
 
 `make lint` also runs the boundary check before the standard linters, so local
 pre-commit and CI quality paths catch forbidden local imports automatically.
@@ -23014,6 +23070,14 @@ witness was orphaned would be mis-restored to a far-past registration epoch or
 reset to 0. Explicit membership is required because a deregistered account row
 may exist at activation without being stamped. Because the marker gates the
 whole stamp, later rollovers never repeat it.
+When the accounts family is served by the live set, the activation write also
+stores membership and `A` in each stamped account record. The account journal
+therefore restores both fields with the expiration on rollback, and the reward
+application guard reads the floor from the same set-owned state as the account
+and witness history instead of consulting the drained SQL relation. Startup
+adds this provenance to legacy account encodings from the SQL membership, or
+from the exact pre-boundary journal view when activation occurred after drain;
+it does not continue with an unavailable, inexact floor.
 Rolling back before epoch `A` clears expiration for the exact membership set,
 returns its credentials, deletes the membership rows, and unions those
 credentials with credentials witnessed after the rollback point. The ledger then
@@ -24503,16 +24567,20 @@ applied ledger tip by more than the security parameter `k` in block number,
 while the peer's advertised tip does not, holds a stale cursor and is resynced
 the same way, but only while chain selection has no best peer (`GetBestPeer()`
 is nil, read through `ChainsyncHasBestPeer`), with
-`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a connection can
-never contribute: the ledger discards its headers as stale and chain selection
-skips the peer, while it holds an ingress slot that a peer at the tip could use.
-The check runs in the callback after `reconcileChainsyncIngressAdmission`, so an
-observer promoted with a cursor left far behind is resynced on its first header.
+`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Re-intersection can
+move a stale cursor closer, while an honest peer whose chain left the local
+chain at an older intersection must still be allowed to stream its competing
+candidate forward. The check runs in the callback after
+`reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor left
+far behind is resynced on its first header.
 The shared per-connection timer marker allows one resync per connection until it
 reconnects. At most one such recycle is requested across all connections per 30
 seconds (`claimBehindTipRecycle`), so a gap with many lagging honest peers does
 not recycle all of them at once and leave only a near-tip peer; over a sustained
-gap they are still recycled one window at a time. A connection whose
+gap they are still recycled one window at a time. A header whose connection
+cannot take that shared window continues through verification and candidate
+observation, so the churn bound cannot freeze a competing peer's delivered
+frontier. A connection whose
 re-intersection has fired or is already due does not take that window; a
 future-header timer with a later onset is replaced by an immediate one, since it
 withholds every header until it fires. A claim that schedules nothing (the

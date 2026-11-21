@@ -116,6 +116,13 @@ func CreateSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	// cardano-node keeps the newest trio open for appends. Mithril certifies
+	// only the preceding complete trios and carries the open trio in the
+	// separately signed ancillary archive.
+	if trios < 2 {
+		return nil, errors.New("immutable directory holds no completed immutable trios")
+	}
+	certifiedTrios := trios - 1
 	// The ledger state is read first: it fixes the beacon epoch, and a
 	// directory without one is rejected before any archive is uploaded.
 	ancillary, epoch, err := readAncillary(root)
@@ -123,10 +130,16 @@ func CreateSnapshot(
 		return nil, err
 	}
 	defer ancillary.close()
+	if err := ancillary.addImmutableTrio(
+		root,
+		uint64(certifiedTrios), // #nosec G115 -- count is non-negative
+	); err != nil {
+		return nil, err
+	}
 
-	lastNum := uint64(trios - 1) // #nosec G115 -- len is non-negative
+	lastNum := uint64(certifiedTrios - 1) // #nosec G115 -- count is positive
 	digests, digestByName, immutableBytes, err := digestImmutables(
-		root, trios,
+		root, certifiedTrios,
 	)
 	if err != nil {
 		return nil, err
@@ -166,7 +179,7 @@ func CreateSnapshot(
 			SizeUncompressed: int64(len(digestJSON)),
 		},
 		Immutables: CardanoDatabaseImmutables{
-			AverageSizeUncompressed: immutableBytes / int64(trios),
+			AverageSizeUncompressed: immutableBytes / int64(certifiedTrios),
 		},
 		Ancillary: CardanoDatabaseAncillary{
 			SizeUncompressed: ancillary.size,
@@ -708,6 +721,28 @@ type ancillaryState struct {
 
 func (a *ancillaryState) close() { a.handles.Close() }
 
+// addImmutableTrio adds cardano-node's newest, still-open immutable trio to
+// the ancillary archive and its signed manifest. The entries retain digesting
+// hashers so checkArchived also catches a source file changing after the
+// manifest was signed.
+func (a *ancillaryState) addImmutableTrio(root *os.Root, num uint64) error {
+	for _, ext := range immutableFileExtensions {
+		rel := immutableDirName + "/" + fmt.Sprintf("%05d.%s", num, ext)
+		entry, err := rootEntry(root, rel)
+		if err != nil {
+			return fmt.Errorf("reading ancillary %s: %w", rel, err)
+		}
+		digest, _, err := sha256FileInRoot(root, rel)
+		if err != nil {
+			return fmt.Errorf("digesting ancillary %s: %w", rel, err)
+		}
+		a.files = append(a.files, entry)
+		a.digests[rel] = digest
+		a.size += entry.size
+	}
+	return nil
+}
+
 // readAncillary selects the newest ledger state under root and returns it with
 // the epoch it was taken in. Only the state file and the UTxO table the
 // importer reads are archived.
@@ -795,6 +830,9 @@ func openFileEntry(name string, file *os.File) (tarEntry, error) {
 func (a *ancillaryState) entries(
 	key ed25519.PrivateKey,
 ) ([]tarEntry, map[string]string, error) {
+	slices.SortFunc(a.files, func(left, right tarEntry) int {
+		return strings.Compare(left.name, right.name)
+	})
 	manifest := ancillaryManifest{Data: a.digests}
 	manifest.Signature = hex.EncodeToString(
 		ed25519.Sign(key, manifest.computeHash()),

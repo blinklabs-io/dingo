@@ -15,6 +15,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -520,6 +521,27 @@ func (f *MetadataFacts) applyJournalRange(
 			if len(batch) == 0 {
 				return nil
 			}
+			// The journal's unique index is credential-leading. Ordering one source
+			// page before the bounded store writes keeps its leaf visits
+			// monotonic without retaining an unbounded reward round in memory.
+			slices.SortFunc(batch, func(a, b models.AccountRewardCredit) int {
+				if a.CredentialTag < b.CredentialTag {
+					return -1
+				}
+				if a.CredentialTag > b.CredentialTag {
+					return 1
+				}
+				if order := bytes.Compare(a.StakingKey, b.StakingKey); order != 0 {
+					return order
+				}
+				if a.Slot < b.Slot {
+					return -1
+				}
+				if a.Slot > b.Slot {
+					return 1
+				}
+				return bytes.Compare(a.SourceHash, b.SourceHash)
+			})
 			err := store.AddAccountRewardsByCredential(batch, dst.Metadata())
 			batch = batch[:0]
 			return err

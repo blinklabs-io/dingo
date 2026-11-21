@@ -51,6 +51,7 @@ func setModeScenario(
 func accountRow(a *models.Account) string {
 	c := *a
 	c.ID, c.CertificateID, c.ImportDeposit = 0, 0, nil
+	c.InactivityActivation, c.InactivityActivationEpoch = false, 0
 	if len(c.Pool) == 0 {
 		c.Pool = nil
 	}

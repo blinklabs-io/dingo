@@ -608,7 +608,7 @@ func checkTruncateTarget(
 	// read must fail the truncate closed rather than being silently
 	// treated as "no boundary recorded" and letting an unverifiable
 	// truncate through.
-	mithrilFloor, err = db.MithrilTrustBoundarySlotStrict(nil)
+	mithrilFloor, err = db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: could not verify Mithril trust boundary: %w",
@@ -888,7 +888,7 @@ func checkPendingMithrilFloor(
 				"finish it before resuming the pending truncate",
 		)
 	}
-	floor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	floor, err := db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return fmt.Errorf(
 			"truncate: could not verify Mithril trust boundary: %w", err,

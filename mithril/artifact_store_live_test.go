@@ -46,7 +46,7 @@ import (
 // syncs from a handler over it.
 func requireStoreCycle(t *testing.T, store ArtifactStore) {
 	t.Helper()
-	hashes := createSnapshots(t, store, 1, 3)
+	hashes := createSnapshots(t, store, 2, 3)
 	removed, err := PruneSnapshots(context.Background(), store, 1)
 	require.NoError(t, err)
 	require.Equal(t, hashes[:1], removed)

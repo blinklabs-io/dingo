@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -117,6 +118,87 @@ func TestMigrateUtxoRowsNeedsTheSet(t *testing.T) {
 	err = n.migrateUtxoRows(t.Context())
 	require.ErrorContains(t, err, "live UTxO set")
 	require.NotContains(t, err.Error(), "resync")
+}
+
+func TestUtxoMigrationCleanupJoinsBeforeStorageClose(t *testing.T) {
+	original := cleanupMigratedUtxoRows
+	t.Cleanup(func() { cleanupMigratedUtxoRows = original })
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	cleanupMigratedUtxoRows = func(
+		ctx context.Context,
+		_ *database.Database,
+		_ *utxoset.Set,
+		_ *slog.Logger,
+	) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	n := &Node{ctx: ctx}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := n.startUtxoMigrationCleanup(ctx)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start")
+	}
+	stop()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not stop")
+	}
+	n.utxoMigrationCleanupMu.Lock()
+	require.Nil(t, n.utxoMigrationCleanupCancel)
+	require.Nil(t, n.utxoMigrationCleanupDone)
+	n.utxoMigrationCleanupMu.Unlock()
+}
+
+func TestInitialUtxoMigrationCleanupWaitsForLiveLifecycle(t *testing.T) {
+	original := cleanupMigratedUtxoRows
+	t.Cleanup(func() { cleanupMigratedUtxoRows = original })
+	started := make(chan *database.Database, 1)
+	cleanupMigratedUtxoRows = func(
+		ctx context.Context,
+		db *database.Database,
+		_ *utxoset.Set,
+		_ *slog.Logger,
+	) error {
+		started <- db
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	oldDB := &database.Database{}
+	newDB := &database.Database{}
+	n := &Node{ctx: ctx, db: oldDB}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	n.liveLifecycleMu.Lock()
+	calling := make(chan struct{})
+	stopReady := make(chan func(), 1)
+	go func() {
+		close(calling)
+		stopReady <- n.startInitialUtxoMigrationCleanup(ctx)
+	}()
+	<-calling
+	select {
+	case <-stopReady:
+		t.Fatal("cleanup registration did not wait for the live lifecycle")
+	case <-time.After(50 * time.Millisecond):
+	}
+	n.db = newDB
+	n.liveLifecycleMu.Unlock()
+
+	stop := <-stopReady
+	require.Same(t, newDB, <-started)
+	stop()
 }
 
 // TestUtxoSetOnlyStakeRebuildWaitsForTheSet requires the startup
