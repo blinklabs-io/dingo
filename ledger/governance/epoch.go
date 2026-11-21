@@ -567,7 +567,13 @@ func (p *RatificationPlan) Decide(
 	}
 	in.Txn = txn
 	out := p.out
-	return decideRatification(ctx, &in, &out, p.conwayPParams, p.treasuryRemaining)
+	return decideRatification(
+		ctx,
+		&in,
+		&out,
+		p.conwayPParams,
+		p.treasuryRemaining,
+	)
 }
 
 // Apply writes a decision's ratified and expired marks at the plan's boundary
@@ -589,6 +595,7 @@ type RatificationDecision struct {
 	Ratified            []*models.GovernanceProposal
 	Expired             []*models.GovernanceProposal
 	ActiveProposalCount int
+	BoundarySnapshot    *models.GovernanceBoundarySnapshot
 	activeProposals     []models.GovernanceProposal
 }
 
@@ -705,6 +712,20 @@ func decideRatification(
 	// RATIFY loop below never calls TallyProposal, so this heavy read
 	// would be pure overhead (and a needless failure surface) on a no-op
 	// epoch boundary.
+	drepDistribution, err := loadDRepStakeDistribution(
+		ctx,
+		in.DB,
+		in.Txn,
+		in.PrevEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load boundary drep stake distribution: %w", err)
+	}
+	verdicts.BoundarySnapshot = &models.GovernanceBoundarySnapshot{
+		Epoch:            in.NewEpoch,
+		BoundarySlot:     in.BoundarySlot,
+		DRepDistribution: drepDistribution,
+	}
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
@@ -807,6 +828,20 @@ func decideRatification(
 	if err != nil {
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
+	committee, err := in.DB.GetCommitteeMembers(ctx, in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("get post-enactment committee: %w", err)
+	}
+	constitution, err := in.DB.GetConstitution(in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("get post-enactment constitution: %w", err)
+	}
+	verdicts.BoundarySnapshot.Committee = governanceCommitteeMembers(committee)
+	verdicts.BoundarySnapshot.CommitteeQuorum = ccQuorum.RatString()
+	verdicts.BoundarySnapshot.Constitution = cloneConstitution(constitution)
+	verdicts.BoundarySnapshot.PurposeRoots = governancePurposeRoots(
+		rootsByPurpose,
+	)
 
 	// Accepted withdrawals consume this budget immediately, even though they
 	// are not enacted until a later boundary.
@@ -1027,6 +1062,7 @@ func decideRatification(
 		// UpdateCommittee, NewConstitution, HardForkInitiation) in the same
 		// pass; only non-delaying actions keep the pass going.
 		if isDelayingActionPurpose(purpose) {
+			verdicts.BoundarySnapshot.Delayed = true
 			break
 		}
 	}
@@ -1053,6 +1089,9 @@ func decideRatification(
 		}
 		verdicts.Expired = append(verdicts.Expired, p)
 	}
+	verdicts.BoundarySnapshot.RatificationTreasury = ratificationTreasuryRemaining
+	verdicts.BoundarySnapshot.Ratified = governanceActionRefs(verdicts.Ratified)
+	verdicts.BoundarySnapshot.Expired = governanceActionRefs(verdicts.Expired)
 
 	if in.Logger != nil && len(stillActive) > 0 {
 		elapsed := time.Since(tallyStart)
@@ -1132,7 +1171,8 @@ func applyRatification(
 		if _, expired := expiredNow[proposalIdentityKey(&proposal)]; expired {
 			continue
 		}
-		if proposal.ExpiresEpoch >= in.NewEpoch && proposal.EnactedEpoch == nil &&
+		if proposal.ExpiresEpoch >= in.NewEpoch &&
+			proposal.EnactedEpoch == nil &&
 			proposal.ExpiredEpoch == nil &&
 			proposal.DeletedSlot == nil {
 			// The sweep writes lifecycle fields; keep the decision reusable.
@@ -1155,7 +1195,79 @@ func applyRatification(
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
 	}
+	if decision.BoundarySnapshot != nil {
+		if err := in.DB.SaveGovernanceBoundarySnapshot(
+			ctx,
+			decision.BoundarySnapshot,
+			in.Txn,
+		); err != nil {
+			return 0, fmt.Errorf("save governance boundary snapshot: %w", err)
+		}
+	}
 	return expiredOrphanCount, nil
+}
+
+func governanceActionRefs(
+	proposals []*models.GovernanceProposal,
+) []models.GovernanceActionRef {
+	refs := make([]models.GovernanceActionRef, 0, len(proposals))
+	for _, proposal := range proposals {
+		if proposal == nil {
+			continue
+		}
+		refs = append(refs, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), proposal.TxHash...),
+			ActionIndex: proposal.ActionIndex,
+		})
+	}
+	return refs
+}
+
+func governanceCommitteeMembers(
+	members []*models.CommitteeMember,
+) []models.GovernanceCommitteeMember {
+	ret := make([]models.GovernanceCommitteeMember, 0, len(members))
+	for _, member := range members {
+		ret = append(ret, models.GovernanceCommitteeMember{
+			ColdCredentialTag: member.ColdCredentialTag,
+			ColdCredential:    append([]byte(nil), member.ColdCredHash...),
+			ExpiresEpoch:      member.ExpiresEpoch,
+		})
+	}
+	return ret
+}
+
+func cloneConstitution(
+	constitution *models.Constitution,
+) *models.GovernanceConstitution {
+	if constitution == nil {
+		return nil
+	}
+	return &models.GovernanceConstitution{
+		AnchorURL:  constitution.AnchorURL,
+		AnchorHash: append([]byte(nil), constitution.AnchorHash...),
+		PolicyHash: append([]byte(nil), constitution.PolicyHash...),
+	}
+}
+
+// governancePurposeRoots records parameter, hard-fork, committee, and
+// constitution roots in that order. Nil entries preserve a missing root.
+func governancePurposeRoots(
+	roots map[govActionPurpose]*models.GovernanceProposal,
+) []*models.GovernanceActionRef {
+	ret := make([]*models.GovernanceActionRef, 0, len(chainedPurposes))
+	for _, purpose := range chainedPurposes {
+		proposal := roots[purpose]
+		if proposal == nil {
+			ret = append(ret, nil)
+			continue
+		}
+		ret = append(ret, &models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), proposal.TxHash...),
+			ActionIndex: proposal.ActionIndex,
+		})
+	}
+	return ret
 }
 
 // orderParameterChangeChains keeps the candidate order, except that a

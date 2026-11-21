@@ -1254,9 +1254,10 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 		drepPulsingStateWithEnactCommittee(t, committee),
 	)
 
+	cfg := govImportConfigForTest(db, govStateData)
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		cfg,
 		func(ImportProgress) {},
 	))
 
@@ -1265,6 +1266,15 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 	require.Len(t, members, 1)
 	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
 	assert.Equal(t, hash, members[0].ColdCredHash)
+	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		context.Background(),
+		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, cfg.State.Epoch, snapshot.Epoch)
+	assert.NotEmpty(t, snapshot.ImportedRatifyState)
 }
 
 func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {

@@ -303,6 +303,16 @@ func (d *Database) rollbackAfterSlot(
 			)
 		}
 	}
+	if err := d.DeleteGovernanceBoundarySnapshotsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"delete governance boundary snapshots after rollback: %w",
+			err,
+		)
+	}
 	// Delete rolled-back governance proposals and votes. A drained family
 	// has no rows, and the set drops its own in the same rollback.
 	if !d.FamilyDrained(nodesettings.FamilyGovernance) {

@@ -15,10 +15,12 @@
 package governance
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -250,6 +252,107 @@ type DRepVotingState struct {
 	NoConfidencePower uint64
 }
 
+// loadDRepStakeDistribution freezes the complete boundary distribution before
+// DRep and delegator inactivity filters are applied. The completed Conway
+// pulser carries this distribution alongside the separately frozen DRep state;
+// applying either inactivity gate here would change the public ledger state.
+func loadDRepStakeDistribution(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	activeProposalEpoch uint64,
+) ([]models.DRepStakeDistributionEntry, error) {
+	if db == nil {
+		return nil, errors.New("nil database")
+	}
+	dreps, err := db.GetActiveDreps(ctx, txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active dreps: %w", err)
+	}
+	refs := make([]models.StakeCredentialRef, len(dreps))
+	for i, drep := range dreps {
+		refs[i] = models.StakeCredentialRef{
+			Tag: drep.CredentialTag,
+			Key: drep.Credential,
+		}
+	}
+	powers := make(map[string]uint64)
+	if len(refs) > 0 {
+		powers, err = db.GetDRepVotingPowerBatch(ctx, refs, 0, txn)
+		if err != nil {
+			return nil, fmt.Errorf("batch drep stake distribution: %w", err)
+		}
+	}
+	virtual, err := db.GetDRepVotingPowerByType(ctx, []uint64{
+		models.DrepTypeAlwaysAbstain,
+		models.DrepTypeAlwaysNoConfidence,
+	}, 0, txn)
+	if err != nil {
+		return nil, fmt.Errorf("predefined drep stake distribution: %w", err)
+	}
+	deposits, err := activeProposalDepositDRepPowerAtEpochs(
+		ctx, db, txn, activeProposalEpoch, 0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("active proposal deposit stake distribution: %w", err)
+	}
+	for key, amount := range deposits.Credential {
+		powers[key], err = addUint64(powers[key], amount)
+		if err != nil {
+			return nil, fmt.Errorf("drep stake distribution deposits: %w", err)
+		}
+	}
+	virtual[models.DrepTypeAlwaysAbstain], err = addUint64(
+		virtual[models.DrepTypeAlwaysAbstain], deposits.Abstain,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("abstain stake distribution deposits: %w", err)
+	}
+	virtual[models.DrepTypeAlwaysNoConfidence], err = addUint64(
+		virtual[models.DrepTypeAlwaysNoConfidence], deposits.NoConfidence,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("no-confidence stake distribution deposits: %w", err)
+	}
+
+	ret := make([]models.DRepStakeDistributionEntry, 0, len(dreps)+2)
+	for _, drep := range dreps {
+		ref := models.NewStakeCredentialRef(
+			drep.CredentialTag,
+			drep.Credential,
+		)
+		stake := powers[ref.MapKey()]
+		if stake == 0 {
+			continue
+		}
+		ret = append(ret, models.DRepStakeDistributionEntry{
+			Credential:    append([]byte(nil), drep.Credential...),
+			Stake:         stake,
+			DRepType:      drep.CredentialTag,
+			CredentialTag: drep.CredentialTag,
+		})
+	}
+	sort.Slice(ret, func(i, j int) bool {
+		if ret[i].DRepType != ret[j].DRepType {
+			return ret[i].DRepType < ret[j].DRepType
+		}
+		return bytes.Compare(ret[i].Credential, ret[j].Credential) < 0
+	})
+	if stake := virtual[models.DrepTypeAlwaysAbstain]; stake > 0 {
+		ret = append(ret, models.DRepStakeDistributionEntry{
+			DRepType: uint8(models.DrepTypeAlwaysAbstain), //nolint:gosec // protocol enum is 2
+			Stake:    stake,
+		})
+	}
+	if stake := virtual[models.DrepTypeAlwaysNoConfidence]; stake > 0 {
+		ret = append(ret, models.DRepStakeDistributionEntry{
+			DRepType: uint8(models.DrepTypeAlwaysNoConfidence), //nolint:gosec // protocol enum is 3
+			Stake:    stake,
+		})
+	}
+	return ret, nil
+}
+
 // LoadDRepVotingState computes the DRep voting denominators for the
 // given epoch. It is the single heavy query (active DReps + batched
 // voting power) hoisted out of the per-proposal tally path.
@@ -339,13 +442,13 @@ func loadDRepVotingState(
 	// part of the depositor's active voting stake, so it must be folded into
 	// its return account's delegated DRep voting power here (see
 	// ActiveProposalDepositDRepPower's doc comment).
-	drepDepositPower, noConfidenceDepositPower, err := activeProposalDepositDRepPowerAtEpochs(ctx,
+	depositPower, err := activeProposalDepositDRepPowerAtEpochs(ctx,
 		db, txn, activeProposalEpoch, expiryEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("active proposal deposit voting power: %w", err)
 	}
-	for key, amount := range drepDepositPower {
+	for key, amount := range depositPower.Credential {
 		sum, err := addUint64(powers[key], amount)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -356,7 +459,7 @@ func loadDRepVotingState(
 	}
 	noConfidencePower, err := addUint64(
 		virtualPowers[models.DrepTypeAlwaysNoConfidence],
-		noConfidenceDepositPower,
+		depositPower.NoConfidence,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -364,7 +467,6 @@ func loadDRepVotingState(
 			err,
 		)
 	}
-
 	return &DRepVotingState{
 		Dreps:             dreps,
 		Powers:            powers,

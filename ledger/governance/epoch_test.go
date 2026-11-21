@@ -57,6 +57,12 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 		ExpiryEpoch:   20,
 		Active:        true,
 	}))
+	seedDRepStake(t, store, testBytes(28, 0x72), credential,
+		models.DrepTypeAddrKeyHash, 60, 0x73)
+	seedDRepStake(t, store, testBytes(28, 0x74), nil,
+		models.DrepTypeAlwaysAbstain, 40, 0x75)
+	seedDRepStake(t, store, testBytes(28, 0x76), nil,
+		models.DrepTypeAlwaysNoConfidence, 20, 0x77)
 
 	processBoundary := func() {
 		txn := db.MetadataTxn(context.Background(), true)
@@ -84,6 +90,22 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		t.Context(),
+		500,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Equal(t, uint64(5), snapshot.Epoch)
+	require.Equal(t, uint64(500), snapshot.BoundarySlot)
+	require.Len(t, snapshot.DRepDistribution, 3)
+	require.Equal(t, credential, snapshot.DRepDistribution[0].Credential)
+	require.Equal(t, uint64(60), snapshot.DRepDistribution[0].Stake)
+	require.Equal(t, uint8(models.DrepTypeAlwaysAbstain), snapshot.DRepDistribution[1].DRepType)
+	require.Equal(t, uint64(40), snapshot.DRepDistribution[1].Stake)
+	require.Equal(t, uint8(models.DrepTypeAlwaysNoConfidence), snapshot.DRepDistribution[2].DRepType)
+	require.Equal(t, uint64(20), snapshot.DRepDistribution[2].Stake)
 }
 
 func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {

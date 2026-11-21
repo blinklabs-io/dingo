@@ -23,6 +23,53 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
+// SaveGovernanceBoundarySnapshot stores the completed Conway pulser input and
+// RATIFY outcome at an epoch boundary.
+func (d *Database) SaveGovernanceBoundarySnapshot(
+	ctx context.Context,
+	snapshot *models.GovernanceBoundarySnapshot,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		return d.governanceStore().SaveGovernanceBoundarySnapshot(
+			snapshot,
+			txn.Metadata(),
+		)
+	})
+}
+
+// GetGovernanceBoundarySnapshotAtSlot returns the newest retained governance
+// boundary at or before slot.
+func (d *Database) GetGovernanceBoundarySnapshotAtSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) (*models.GovernanceBoundarySnapshot, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetGovernanceBoundarySnapshotAtSlot(
+		slot,
+		txn.Metadata(),
+	)
+}
+
+// DeleteGovernanceBoundarySnapshotsAfterSlot removes boundary state discarded
+// by a rollback or a ledger-state import reconciliation.
+func (d *Database) DeleteGovernanceBoundarySnapshotsAfterSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		return d.governanceStore().DeleteGovernanceBoundarySnapshotsAfterSlot(
+			slot,
+			txn.Metadata(),
+		)
+	})
+}
+
 // DeleteGovernanceProposalsAfterSlot removes governance proposals added after
 // the given slot and clears deleted_slot for any that were soft-deleted after
 // that slot. This is used during chain rollbacks.
