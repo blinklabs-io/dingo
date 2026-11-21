@@ -928,7 +928,7 @@ blockfrost/mesh API adapters, only their indexes back no predicate.
 so only MySQL's translated `DROP INDEX <name> ON <table>` form reaches the
 runner's existing, already-generic "already applied" guard.
 
-Migration `v66` (`asset-identity-holdings`, integer version 66) replaces the
+Migration `v73` (`asset-identity-holdings`, integer version 73) replaces the
 per-output `asset` table with `asset_identity` (one row per distinct
 `(policy_id, name)`) and `asset_holding` (one row per output and asset,
 `WITHOUT ROWID` on SQLite; the clause is SQLite-only and is stripped for
@@ -4707,8 +4707,11 @@ between any two leaves a node that starts and continues:
       cursor and is copied in one transaction, read and written 500 rows at
       a time. The copy carries every table of the schema except the API-only
       tables (`address_transaction`, `address_transaction_rebuild_source`,
-      `redeemer_script`, `transaction_metadata_label`) and any table whose
-      foreign keys reference one of those. That includes the `utxo` rows and
+      `asset_holding`, `asset_identity`, `redeemer_script`,
+      `transaction_metadata_label`) and any table whose foreign keys
+      reference one of those. Core mode writes no asset holdings, so the
+      namespace holds none, as the store of a node that ran in core mode from
+      its first block holds none. That includes the `utxo` rows and
       the tables and `sync_state` keys of the ledger-state families: the
       namespace is left as a released SQLite consensus store is, so steps 2
       to 4 below revert it and move its state into the LedgerDB. On
@@ -5890,7 +5893,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
 | `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index: it is dropped only by a node-managed Mithril stream catch-up and rebuilt before ingest resumes, never by ordinary sync. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows there. |
-| `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
+| `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset_holding` (holdings of retained outputs), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot`, `idx_transaction_metadata_label_label_slot` `(label, slot, transaction_id)` (schema version 58) | API-mode per-label metadata index. Join to `transaction.id`. `GetTransactionsByMetadataLabel` drives from the label rows through the `(label, slot, transaction_id)` index and joins `transaction` and `applied_transaction`, so a page reads its first rows in slot order and sorts only ties within a slot (by `block_index`, `id`) instead of every transaction carrying the label. A label row's `slot` equals its transaction's `slot`. The label, slot and label-slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
@@ -11442,16 +11445,13 @@ PostgreSQL and MySQL keep the per-row writes described above.
   batch spends again is never written, but its id stays reserved, so surviving
   rows, the foreign keys that point at them and the `utxo` `sqlite_sequence`
   entry end as the per-row path leaves them. `FlushBatch` raises the sequence
-  when it ends on an unwritten id. Holdings carry no reserved id and an
-  elided output writes neither a holding nor an identity.
+  when it ends on an unwritten id.
 - **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
   multi-row `BatchOverlayInsertUtxos` statements and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
-  deletes before commit, and queues holdings for the surviving outputs into
-  the accumulator's row batch, which resolves each distinct asset to its
-  identity (creating missing identities) when it flushes. It writes no `utxo_address` rows, since the
-  overlay runs only in core storage mode. None of these statements
+  deletes before commit. It writes no `utxo_address` or `asset_holding`
+  rows, since the overlay runs only in core storage mode. None of these statements
   carries a conflict clause; a `UNIQUE` failure is returned as
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a

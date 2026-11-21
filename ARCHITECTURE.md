@@ -24788,10 +24788,8 @@ not incremented in place from dingo's side.
 `--ledger-apply-row-batching-enabled`; default off; honoured by serve mode and
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
-batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset holdings to multi-row inserts that resolve each distinct asset to
-its `asset_identity` row at flush, reuses one prepared transaction-row
-upsert, and coalesces each block's live-stake deltas, which
+batches whether or not it is set. In core mode the accumulator reuses one
+prepared transaction-row upsert and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next
 validated block runs, so stored state is identical to the per-row path. A reward
