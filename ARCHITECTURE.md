@@ -2559,6 +2559,7 @@ Phase 1: Stop accepting new work
   Chainsync stall recycler and chain-selected-to-none worker (both
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
+  legacy SQL UTxO row cleanup worker (first quiesce stop),
   block forger, leader election, Leios pipeline and vote managers,
   snapshot manager, database lifecycle manager
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
@@ -2592,6 +2593,17 @@ storage. Ouroboros is not in this list: an NtC client can acquire a
 LocalStateQuery snapshot until its connection drains, so shutdown closes
 Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
 there skips the phase-3 storage closes like an unfinished phase-1 wait.
+The legacy SQL UTxO row cleanup worker finishes a set-only migration that
+`reconcileUtxoSet` committed and marked with `DeferUtxoRowCleanup`: the cutover
+returns once the mark is durable, and the worker deletes the redundant SQL rows
+in bounded batches, clearing the migration progress record only after the last
+batch so a restart resumes it. `Run` starts it after every other service
+(`startInitialUtxoMigrationCleanup`, under `liveLifecycleMu` so it serializes
+with live restore and truncate). It has its own context, because restore and
+truncate stop storage users without cancelling the node context. It is the
+first quiesce stop, so it is cancelled and joined before storage closes during
+shutdown, restore and truncate; `reinitializeAndResume` starts it again against
+the reopened storage. A cancelled run leaves the progress record in place.
 Each wait is routed through `stopWithDeadline` with whatever remains of the
 one shutdown deadline, not a fresh timeout per component, so a goroutine that
 never observes
@@ -5029,7 +5041,8 @@ the context deadline (a `DurableClose` store closes to completion instead),
 `quiesceForLiveLifecycleOp`'s call to
 `ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp` (which wraps its own
 `ouroboros.ErrLeiosPersistDrainUnconfirmed`), and `quiesceForLiveLifecycleOp`'s
-own component stops. Those stops — the block forger, leader election, both Leios
+own component stops. Those stops — the legacy SQL UTxO row cleanup worker, the
+block forger, leader election, both Leios
 managers, the snapshot manager, and the database lifecycle manager, enumerated
 in one place by `quiesceComponentStops` so the set is visible and testable
 rather than spread across inline call sites — each cancel their own context and
