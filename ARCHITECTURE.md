@@ -3834,8 +3834,11 @@ which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The
 account and DRep facts of a batch's slot range are read from the set's state
 journal, so the export costs the rows the range changed and holds
-`utxoSetApplyMu` for bounded steps; only a range below the journal's floor, such
-as the first export from slot zero, reads the whole table in key order. A split
+`utxoSetApplyMu` for bounded steps. A range that ends below the journal's
+floor, as every segment of a replay over a set loaded from a snapshot, is
+served from an in-memory index of the family's rows by `AddedSlot`
+(`badgerutxo.Store.EachRowChangedIn`), so it costs the rows added in the range;
+only a range that crosses the floor reads the whole table in key order. A split
 node's set keeps what the writer has not acknowledged
 (`utxoset.Config.RetainRewardRecords`), including the reward stake and derived
 rows of epochs it has not copied. The writer acknowledges a batch only after

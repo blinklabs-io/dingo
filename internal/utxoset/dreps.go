@@ -273,7 +273,7 @@ func (s *Set) DrepsChangedIn(
 	maxVisit int,
 	fn func(d *models.Drep, slot uint64, pos []byte) error,
 ) (next []byte, covered, done bool, err error) {
-	return s.store.EachRowChangedIn(badgerutxo.DRepTag, from, through, after,
+	return s.store.EachRowChangedIn(badgerutxo.DRepTag, drepAddedSlot, from, through, after,
 		maxVisit, func(slot uint64, key, value, pos []byte) error {
 			d, err := decodeDrep(key, value)
 			if err != nil {
@@ -350,4 +350,12 @@ func (s *Set) DormantEpochsAt(slot uint64) (uint64, error) {
 		return 0, errors.New("utxoset: malformed dormancy counter")
 	}
 	return binary.BigEndian.Uint64(v), nil
+}
+
+// drepAddedSlot reads the AddedSlot out of a DRep's value.
+func drepAddedSlot(v []byte) (uint64, error) {
+	if len(v) < 25 {
+		return 0, errMalformedDrep
+	}
+	return binary.BigEndian.Uint64(v[1:]), nil
 }
