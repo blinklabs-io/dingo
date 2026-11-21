@@ -109,6 +109,14 @@ func encodeAccount(r AccountRow) []byte {
 	return appendBytes(b, r.Drep)
 }
 
+// accountAddedSlot reads the AddedSlot out of an account's value.
+func accountAddedSlot(v []byte) (uint64, error) {
+	if len(v) < 34 {
+		return 0, errMalformedAccount
+	}
+	return binary.BigEndian.Uint64(v[10:]), nil
+}
+
 var errMalformedAccount = errors.New("badgerutxo: malformed account entry")
 
 func readBytes(v []byte) ([]byte, []byte, error) {

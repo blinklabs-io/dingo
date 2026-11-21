@@ -271,3 +271,27 @@ func (s *Store) DeleteExportFloorForTest() error {
 		return txn.Delete(exportFloorKey)
 	})
 }
+
+// AddedIndexFloorForTest returns the floor the family's index of rows below
+// the floor was built at, and whether one is held.
+func (s *Store) AddedIndexFloorForTest(family byte) (uint64, bool) {
+	s.added.mu.Lock()
+	defer s.added.mu.Unlock()
+	idx := s.added.fam[family]
+	if idx == nil {
+		return 0, false
+	}
+	return idx.floor, true
+}
+
+// SetAfterRowsGenerationForTest sets fn to run when EachRowChangedIn has read
+// the rows' generation and not yet begun its transaction.
+func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
+	s.added.afterGen = fn
+}
+
+// SetBeforeAddedIndexForTest sets fn to run inside the transaction of a read
+// below the floor, before it looks up the family's index.
+func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
+	s.added.beforeIndex = fn
+}

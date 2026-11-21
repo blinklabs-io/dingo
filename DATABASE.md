@@ -4876,9 +4876,21 @@ served. The journal names every row only from `max(mjfloor, mexportfloor)`
 on: `mjfloor` is raised by pruning and by every row load, and `mexportfloor`
 (the tip slot plus one, set when a store opens without it and raised by a
 catch-up merge, whose rows keep older `AddedSlot` values than their entries)
-covers rows with no entry at their `AddedSlot`. A range that starts below it,
-such as the first export from slot zero, reads the table in key order from the
-Badger key of the last row served (`Store.EachRowAfter`). If pruning raises
+covers rows with no entry at their `AddedSlot`. A range that ends below it,
+as every segment of a replay over a set loaded from a snapshot, is served
+from an in-memory index of the family's rows by `(AddedSlot, key)`, built on
+first use (`Store.eachRowAddedIn`): the rows are the loaded ones, which a
+later write can only move out of the range, and an entry whose row has since
+changed is skipped. An index serves every range below the floor it was
+built at, so a prune that raises the floor keeps it; a range above that floor
+builds it again, and a rollback, load, merge, restore or reset drops it. A read
+reuses the index only when its transaction began no earlier than the one the
+index was built from, since a block between them may have moved a row out of
+the range, and no rewrite began, ended or is running since the read began;
+otherwise it builds one from its own transaction. A
+range that crosses the floor reads the table
+in key order from the Badger key of the last row served
+(`Store.EachRowAfter`). If pruning raises
 the floor past a journal position held by an export in progress, the cursor
 fails with `metadata.ErrFactCursorLost` and the copy starts the table again.
 Both reads take `utxoSetApplyMu` for at most 4096 entries or rows at a time.
