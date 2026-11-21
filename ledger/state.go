@@ -3345,6 +3345,12 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.resumePendingRatification(ctx); err != nil {
 		return err
 	}
+	// A Conway-or-later boundary that passed without a retained snapshot
+	// row, as on a database upgraded mid-window, is rebuilt from the stored
+	// chain before block processing resumes.
+	if err := ls.rebuildGovernanceBoundarySnapshots(ctx); err != nil {
+		return fmt.Errorf("rebuild governance boundary snapshots: %w", err)
+	}
 	// The subscription above cannot fire for an epoch that began before this
 	// process did, so catch up the in-progress epoch's reward round here.
 	// Without it, a node started mid-epoch calculates that round inline inside
@@ -5641,7 +5647,7 @@ func (ls *LedgerState) truncateLedgerStateInTxn(
 	// own journal after the commit and its net change is published.
 	if liveSet {
 		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
-	} else if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil {
+	} else if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil { //nolint:contextcheck // the change is never applied: the caller discards txn
 		return ochainsync.Tip{}, nil, err
 	}
 	var (
@@ -17328,6 +17334,7 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		true,
+		nil,
 	)
 	if err != nil {
 		return err
