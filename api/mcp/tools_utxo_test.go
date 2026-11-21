@@ -632,7 +632,7 @@ func TestGetUtxosWithMetadataSchema(t *testing.T) {
 }
 
 // TestGetUtxosByAssetOrdersAcrossSharedHoldings requires newest UTxO first and,
-// within one UTxO, the later-recorded holding first, with an asset shared by
+// within one UTxO, descending asset name, with an asset shared by
 // several UTxOs listed once per holding and spent holdings left out.
 func TestGetUtxosByAssetOrdersAcrossSharedHoldings(t *testing.T) {
 	t.Parallel()
@@ -680,4 +680,48 @@ VALUES(?,?,0,zeroblob(28),'1',?)`,
 		"policy_id": hex.EncodeToString(policy), "asset_name": "A",
 	}, false)
 	require.Contains(t, text, "Found 2 UTxOs")
+}
+
+// TestGetUtxosByAssetOrdersNamesWithinUtxo requires the holdings of one UTxO
+// in descending asset-name order even when the identities were first seen in
+// the opposite order, since identity ids record first sight of an asset, not
+// its position within an output.
+func TestGetUtxosByAssetOrdersNamesWithinUtxo(t *testing.T) {
+	t.Parallel()
+	db := newSchemaDB(t)
+	policy := bytes.Repeat([]byte{0xa2}, 28)
+	for id := int64(1); id <= 2; id++ {
+		_, err := db.Exec(
+			`INSERT INTO "transaction"(id,hash) VALUES(?,?)`,
+			id, bytes.Repeat([]byte{byte(0x10 * id)}, 32),
+		)
+		require.NoError(t, err)
+		_, err = db.Exec(
+			`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot)
+VALUES(?,?,0,zeroblob(28),'1',0)`,
+			id, id,
+		)
+		require.NoError(t, err)
+	}
+	// Identity C is created first, then B, then A.
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("C"), "1")
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("B"), "2")
+	testutil.InsertAssetHolding(t, db, 2, policy, []byte("A"), "3")
+	testutil.InsertAssetHolding(t, db, 2, policy, []byte("B"), "4")
+	testutil.InsertAssetHolding(t, db, 2, policy, []byte("C"), "5")
+	cs := newToolSession(t, db, 100)
+
+	var rows []string
+	text := callTool(t, cs, "get_utxos_by_asset",
+		map[string]any{"policy_id": hex.EncodeToString(policy)}, false)
+	for line := range strings.SplitSeq(text, "\n") {
+		if !strings.HasPrefix(line, "| ") || !strings.Contains(line, "#0") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		rows = append(rows, strings.TrimSpace(cells[1])[:2]+" "+
+			strings.TrimSpace(cells[4])+" "+strings.TrimSpace(cells[6]))
+	}
+	require.Equal(t,
+		[]string{"20 C 5", "20 B 4", "20 A 3", "10 C 1", "10 B 2"}, rows)
 }

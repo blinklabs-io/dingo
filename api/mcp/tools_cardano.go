@@ -1215,6 +1215,9 @@ func registerCardanoTools(
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
+		// Within one UTxO the policy is fixed, so name order is canonical
+		// asset order. asset_id is not: it records when an identity was
+		// first seen, not the asset's position in the output.
 		var q string
 		var args []any
 		if input.AssetName != "" {
@@ -1228,7 +1231,7 @@ func registerCardanoTools(
 				 JOIN utxo u ON h.utxo_id = u.id
 				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
-				 ORDER BY u.id DESC, h.asset_id DESC
+				 ORDER BY u.id DESC, i.name DESC
 				 LIMIT ? OFFSET ?`
 			args = []any{
 				policyBytes,
@@ -1243,7 +1246,7 @@ func registerCardanoTools(
 				 JOIN utxo u ON h.utxo_id = u.id
 				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE i.policy_id = ? AND u.deleted_slot = 0
-				 ORDER BY u.id DESC, h.asset_id DESC
+				 ORDER BY u.id DESC, i.name DESC
 				 LIMIT ? OFFSET ?`
 			args = []any{policyBytes, limit, offset}
 		}
