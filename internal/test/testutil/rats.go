@@ -33,15 +33,15 @@ func CompleteRats[T any](params T) T {
 				fill(v.Elem())
 			}
 		case reflect.Struct:
-			if r, ok := v.Addr().Interface().(*cbor.Rat); ok {
+			if r, ok := reflect.TypeAssert[*cbor.Rat](v.Addr()); ok {
 				if r.Rat == nil {
 					r.Rat = big.NewRat(0, 1)
 				}
 				return
 			}
-			for i := range v.NumField() {
-				if v.Field(i).CanSet() {
-					fill(v.Field(i))
+			for _, field := range v.Fields() {
+				if field.CanSet() {
+					fill(field)
 				}
 			}
 		}
