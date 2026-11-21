@@ -18287,6 +18287,18 @@ list rather than registered as conflicting Go `ServeMux` patterns. The IPFS path
 parameter matches the remaining path segments, so an object inside an IPFS
 directory is recognized as the same operation.
 
+The operations still unsupported are the IPFS, account metrics and Nut.link
+groups. The root, health and clock operations are served under the `/api/v0`
+prefix as well as unprefixed; the bare prefix `/api/v0` redirects to the root
+operation `/api/v0/`. `GET /metadata/txs/labels` lists every metadata label in
+use with its transaction count in numeric label order, naming the labels in
+Blockfrost's CIP-10 list and reporting `cip10: null` for the rest.
+`GET /utils/addresses/xpub/{xpub}/{role}/{index}` derives addresses as
+Blockfrost does: role 2 yields the reward address of staking key `2/index`, and
+any other role yields the base address pairing key `role/index` with staking
+key `2/0`, on the node's network. Public derivation cannot reach a hardened
+index, so a role or index of 2^31 or more is rejected with HTTP 400.
+
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
