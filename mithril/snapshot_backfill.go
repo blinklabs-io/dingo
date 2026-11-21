@@ -539,6 +539,29 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
+	// The ancillary trio is as authoritative as the certified immutable
+	// archives: its manifest signs every byte. A local tail that forks within
+	// that trio cannot be extended by the signed blocks, so discard the partial
+	// restore before copying the artifact again instead of failing every retry
+	// on the same conflict.
+	if storedTip != nil && storedTip.Slot > certifiedTip.Slot &&
+		storedTip.Slot <= immutableTip.Slot &&
+		!blocksContain(ancillaryBlocks, *storedTip) {
+		logger.Warn(
+			"mithril: discarding local tail that conflicts with signed ancillary blocks",
+			"component", "mithril",
+			"stored_tip_slot", storedTip.Slot,
+			"certified_tip_slot", certifiedTip.Slot,
+			"ancillary_tip_slot", immutableTip.Slot,
+		)
+		if err := discardStoredVolatileTail(ctx, db, logger); err != nil {
+			return ocommon.Point{}, err
+		}
+		storedTip, err = storedChainTip(ctx, db)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+	}
 	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
 	defer func() {
 		if err := cleanupBulkLoadPragmas(); err != nil {
@@ -689,6 +712,53 @@ func discardStoredBlocks(
 			"blocks", deleted,
 		)
 	}
+	if err := db.SetSyncState(
+		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
+	); err != nil {
+		return fmt.Errorf("marking mithril snapshot restore active: %w", err)
+	}
+	return nil
+}
+
+// discardStoredVolatileTail removes a conflicting restore tail without
+// crossing the database's immutable floor. The retained floor becomes the
+// resume point and is checked against the certified chain by the caller's
+// normal continuation path.
+func discardStoredVolatileTail(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	recent, err := database.BlocksRecent(ctx, db, 1)
+	if err != nil {
+		return fmt.Errorf("reading chain tip: %w", err)
+	}
+	if len(recent) == 0 {
+		return nil
+	}
+	tip := recent[0]
+	floor, ok := db.ImmutableFloorIndex()
+	if !ok {
+		return discardStoredBlocks(ctx, db, logger)
+	}
+	if tip.ID <= floor {
+		return fmt.Errorf(
+			"%w: conflicting stored tip index %d is at or below immutable tip index %d",
+			database.ErrRollbackBelowImmutableTip, tip.ID, floor,
+		)
+	}
+	deleted, err := lifecycle.DeleteBlocksAfter(
+		ctx, db, floor, tip.ID, 0,
+	)
+	if err != nil {
+		return fmt.Errorf("discarding stored volatile tail: %w", err)
+	}
+	logger.Info(
+		"mithril: discarded conflicting volatile restore tail",
+		"component", "mithril",
+		"blocks", deleted,
+		"immutable_floor_index", floor,
+	)
 	if err := db.SetSyncState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	); err != nil {
