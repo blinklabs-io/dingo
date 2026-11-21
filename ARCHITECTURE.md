@@ -3243,7 +3243,11 @@ wait for the certifying block, so a rollback that discards the pending
 closure removes outputs every consumer saw added. A failed update stops
 further updates. The node reconciles the set after database recovery and
 before the ledger starts, both at startup and after a live restore or
-truncate: a set behind the ledger is resumed by
+truncate. That reconcile also removes the zero-coin Byron genesis outputs a
+database seeded by an earlier release holds, from the metadata store before any
+row moves into the set and from the set itself after it is reconciled (see
+DATABASE.md, "Zero-coin Byron genesis outputs"). A set behind the ledger is
+resumed by
 `LedgerState.ResumeUtxoSetFrom`, which rolls the ledger back to the set's
 tip so the blocks after it are applied again, or rebuilt from the metadata
 store when that rollback is not possible. With the set as the only copy, the
