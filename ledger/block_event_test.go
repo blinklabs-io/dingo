@@ -760,7 +760,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 				},
 			}),
 		)
-		require.NoError(t, ls.db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, ls.db,
 			raceTip.Point.Hash,
 			raceTip.Point.Slot,
 			raceNonce,
@@ -1405,7 +1405,7 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 			},
 		}),
 	)
-	require.NoError(t, ls.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, ls.db,
 		byronLikeHash,
 		fixture.currentTip.Point.Slot+5,
 		nil,
@@ -1635,7 +1635,7 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,

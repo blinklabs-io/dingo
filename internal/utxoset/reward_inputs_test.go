@@ -108,11 +108,11 @@ func TestStakeInputsLargerThanAStoreTransactionAreChunkedAndRolledBack(
 	require.Empty(t, gone, "one tombstone drops every chunk's rows")
 }
 
-// A drained reward-inputs family leaves the set the only holder of the mark
-// snapshots' calculation versions, so the set names the epochs whose mark
-// snapshot was produced by another version. A set or go row of that version
-// is not a mark snapshot and is not named.
-func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
+// The set names the epochs whose mark reward snapshot, or whose mark, set or
+// go pool stake snapshot, was produced by another calculation version. A set
+// or go reward snapshot header is not a mark snapshot and is not named, nor
+// is a pool stake snapshot of the imported active distribution.
+func TestStaleStakeSnapshotEpochsNamesSnapshotsOfAnotherVersion(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -130,6 +130,15 @@ func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
 			},
 		}
 	}
+	pool := func(epoch uint64, typ string, version uint) ledger.SnapshotChange {
+		return ledger.SnapshotChange{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch: epoch, SnapshotType: typ, CalculationVersion: version,
+				PoolKeyHash: bytes.Repeat([]byte{0x44}, 28),
+			},
+		}
+	}
 	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{10}, 32))
 	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
 		RewardInputs: []ledger.RewardInputChange{
@@ -138,13 +147,18 @@ func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
 			snap(6, "set", current-1),
 			snap(7, "mark", current+1),
 		},
+		Snapshots: []ledger.SnapshotChange{
+			pool(4, models.PoolStakeSnapshotTypeMark, current),
+			pool(8, models.PoolStakeSnapshotTypeGo, current-1),
+			pool(9, models.PoolStakeSnapshotTypeActive, current-1),
+		},
 	}))
 
-	stale, err := set.StaleRewardSnapshotEpochs(current)
+	stale, err := set.StaleStakeSnapshotEpochs(current)
 	require.NoError(t, err)
-	require.Equal(t, []uint64{5, 7}, stale)
+	require.Equal(t, []uint64{5, 7, 8}, stale)
 
-	none, err := set.StaleRewardSnapshotEpochs(current - 1)
+	none, err := set.StaleStakeSnapshotEpochs(current - 1)
 	require.NoError(t, err)
 	require.Equal(t, []uint64{4, 7}, none)
 }

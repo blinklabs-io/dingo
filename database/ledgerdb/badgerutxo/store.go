@@ -108,8 +108,6 @@ type Store struct {
 	// loadsRefused holds the families whose source tables have lost rows; see
 	// RefuseLoadsFor.
 	loadsRefused atomic.Uint64
-	// merging makes family loads upsert; see BeginMerge.
-	merging atomic.Bool
 	// added holds, for each family, the index of rows below the export floor
 	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
 	// put a row below the floor, each of which invalidates it.
@@ -357,26 +355,14 @@ func (s *Store) Bootstrap(
 	point ocommon.Point,
 	feed func(put func(Output) error) error,
 ) error {
-	return s.bootstrap(point, feed, false)
-}
-
-// BootstrapCatchUp replaces the live outputs, their running sums and the UTxO
-// journal with the ones feed supplies, as of point, and keeps every other
-// family's rows and loaded markers, so the families hold the history the
-// catch-up's snapshot does not. It marks a merge pending, which only
-// BeginMerge and EndMerge clear: the rows of the families the snapshot
-// carries still have to be merged in.
-func (s *Store) BootstrapCatchUp(
-	point ocommon.Point,
-	feed func(put func(Output) error) error,
-) error {
-	return s.bootstrap(point, feed, true)
+	return s.bootstrap(point, feed, false, false)
 }
 
 func (s *Store) bootstrap(
 	point ocommon.Point,
 	feed func(put func(Output) error) error,
 	catchUp bool,
+	importing bool,
 ) error {
 	// Clear the markers first, in one transaction: until the final commit
 	// below the contents are partial, and a store with no tip and no format
@@ -390,10 +376,15 @@ func (s *Store) bootstrap(
 		if err := txn.Set(bootstrapKey, []byte{1}); err != nil {
 			return err
 		}
-		if catchUp {
-			if err := txn.Set(mergeKey, []byte{1}); err != nil {
+		// An import marks the set before anything of it changes; any other
+		// bootstrap replaces what a stopped import left.
+		if importing {
+			err := txn.Set(importKey, importValue(point, false))
+			if err != nil {
 				return err
 			}
+		} else if err := txn.Delete(importKey); err != nil {
+			return err
 		}
 		for _, key := range markers {
 			if err := txn.Delete(key); err != nil {
@@ -451,6 +442,11 @@ func (s *Store) bootstrap(
 		}
 		if err := txn.Set(formatKey, []byte{formatVersion}); err != nil {
 			return err
+		}
+		if importing {
+			if err := txn.Set(importKey, importValue(point, true)); err != nil {
+				return err
+			}
 		}
 		return txn.Set(tipKey, encodePoint(point))
 	})

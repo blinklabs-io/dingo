@@ -16,15 +16,12 @@ package ledger_test
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -74,19 +71,15 @@ func requireOutputs(t *testing.T, a ledger.RewardOutputsAnswer) {
 }
 
 // The set answers every read of the round's derived rows, with the store's
-// reads of them failing, and its answer is the rows the store holds.
+// reads of them failing: the one pool's output and the reward of its owner
+// and of its member.
 func TestRewardOutputsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
 	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
-	want := s.StoreOutputs(3)
-	requireOutputs(t, want)
 	reached, _ := s.HideStoreReads(rewardDerivedReadNames...)
-	got := s.Outputs(3)
-	want.Rounds = nil
-	got.Rounds = nil
-	require.Equal(t, want, got)
+	requireOutputs(t, s.Outputs(3))
 	require.Zero(t, reached(), "a read reached the metadata store")
 }
 
@@ -189,92 +182,6 @@ func TestRewardOutputsRecheckIsSkippedWithoutARollback(t *testing.T) {
 	for _, o := range s.Outputs(3).Accounts {
 		require.True(t, o.Spendable, o.RewardType)
 	}
-}
-
-func rewardOutputEntries(
-	t *testing.T,
-	src statedrain.Source,
-) []statedrain.Entry {
-	t.Helper()
-	var entries []statedrain.Entry
-	for _, e := range statedrain.Graduated(src) {
-		if e.Family == nodesettings.FamilyRewardOutputs {
-			entries = append(entries, e)
-		}
-	}
-	require.Len(t, entries, 1)
-	return entries
-}
-
-// The same run with the family drained, its tables and sync keys gone and the
-// statement guard armed gives the same rewards as the undrained run, across a
-// precompute, a boundary, a rollback and a replay, and no statement reaches a
-// drained table.
-func TestRewardOutputsDrainMatchesAnUndrainedRun(t *testing.T) {
-	t.Parallel()
-	run := func(t *testing.T, drain bool) (map[string]string, *statedrain.TripGuard, *rewardBlocksRun) {
-		guard := statedrain.NewTripGuard()
-		r := newRewardOutputsRun(t, "set", guard)
-		s := r.scenario
-		out := map[string]string{}
-		owner, member := bytes.Repeat(
-			[]byte{0x71},
-			28,
-		), bytes.Repeat(
-			[]byte{0x72},
-			28,
-		)
-		if drain {
-			src := rewardBlocksDrainSource{r: r}
-			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard,
-			}, rewardOutputEntries(t, src)))
-		}
-		require.NoError(t, s.PrecomputeRound())
-		read := func(name string) {
-			a := s.Outputs(3)
-			require.NoError(t, a.Err, name)
-			ob, op := s.Balance(owner)
-			mb, mp := s.Balance(member)
-			raw, err := json.Marshal(a)
-			require.NoError(t, err, name)
-			out[name] = string(raw) + fmt.Sprint(ob, op, mb, mp)
-		}
-		read("precompute")
-		s.Boundary()
-		read("boundary")
-		s.RollbackBeforeBoundary()
-		read("rollback")
-		s.Tip(11)
-		s.Boundary()
-		read("replay")
-		return out, guard, r
-	}
-	undrained, _, plain := run(t, false)
-	drained, guard, r := run(t, true)
-	require.Empty(t, guard.Trips(), "a drained table was touched")
-	rawPlain, err := dbtest.RawSQLiteMetadata(t, plain.scenario.DB)
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, r.scenario.DB)
-	require.NoError(t, err)
-	for _, table := range []string{
-		"reward_pool_output", "reward_account_output", "reward_credit_round",
-	} {
-		require.Positive(
-			t,
-			tableRows(t, rawPlain, table),
-			"undrained %s",
-			table,
-		)
-		require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-	}
-	mask, err := r.scenario.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.True(t, mask.Has(nodesettings.FamilyRewardOutputs))
-	require.Equal(t, undrained, drained)
-	require.Equal(t, drained["boundary"], drained["replay"])
-	require.Contains(t, drained["boundary"], "336")
 }
 
 // With the family drained and the set serving nothing, the reward reads fail

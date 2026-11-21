@@ -41,6 +41,7 @@ func (*memSummarySet) EraSwitch() (*database.MidEpochEraSwitch, error) {
 func (*memSummarySet) PoolStakeSnapshots(
 	uint64,
 	string,
+	int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	return nil, nil
 }

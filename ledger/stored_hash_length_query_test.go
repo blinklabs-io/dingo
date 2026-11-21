@@ -21,9 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -33,112 +31,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// storedQueryRowsStore returns malformed rows from the reads behind the
-// LocalStateQuery results that carry stored hashes as result keys.
-type storedQueryRowsStore struct {
-	metadata.MetadataStore
-	activeCredentials []models.StakeCredentialRef
-	accounts          map[string]*models.Account
-	drepDelegators    []models.StakeCredentialRef
-	votes             []*models.GovernanceVote
-	utxos             []models.Utxo
-	opCertSequences   map[string]uint64
-}
-
-func (s *storedQueryRowsStore) LatestPoolOpCertSequences(
-	txn types.Txn,
-) (map[string]uint64, error) {
-	if s.opCertSequences == nil {
-		return s.MetadataStore.LatestPoolOpCertSequences(txn)
-	}
-	return s.opCertSequences, nil
-}
-
-func (s *storedQueryRowsStore) GetActiveAccountCredentials(
-	types.Txn,
-) ([]models.StakeCredentialRef, error) {
-	return s.activeCredentials, nil
-}
-
-func (s *storedQueryRowsStore) GetAccountsByCredential(
-	[]models.StakeCredentialRef,
-	bool,
-	types.Txn,
-) (map[string]*models.Account, error) {
-	return s.accounts, nil
-}
-
-func (s *storedQueryRowsStore) GetDRepDelegators(
-	uint8,
-	[]byte,
-	types.Txn,
-) ([]models.StakeCredentialRef, error) {
-	return s.drepDelegators, nil
-}
-
-func (s *storedQueryRowsStore) GetGovernanceVotes(
-	uint,
-	types.Txn,
-) ([]*models.GovernanceVote, error) {
-	return s.votes, nil
-}
-
-func (s *storedQueryRowsStore) GetUtxosByRefs(
-	[]models.UtxoId,
-	types.Txn,
-) ([]models.Utxo, error) {
-	return s.utxos, nil
-}
-
-func (s *storedQueryRowsStore) GetUtxosByAddress(
-	[]models.UtxoAddressPattern,
-	int,
-	types.Txn,
-) ([]models.Utxo, error) {
-	return s.utxos, nil
-}
-
+// newStoredQueryRowsLedger is a ledger over a LedgerDB set holding changes,
+// for a row the set stores as given and a LocalStateQuery result must reject.
 func newStoredQueryRowsLedger(
 	t *testing.T,
-	configure func(*database.Database, *storedQueryRowsStore),
+	changes LedgerChanges,
 ) *LedgerState {
 	t.Helper()
-	store := &storedQueryRowsStore{}
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			return store
-		},
-	)
-	require.NoError(t, err)
-	configure(db, store)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
-	if len(store.utxos) != 0 {
-		set := newQuerySetHistory()
-		set.rawRows = store.utxos
-		_, set.readErr = lcommon.NewBlake2b256Checked(store.utxos[0].TxId)
-		ls.config.UtxoSet = set
-	}
+	fxSeed(t, db, changes)
 	return ls
+}
+
+// newShortTxIDLedger is a ledger whose live UTxO set holds one output under
+// a 31-byte transaction id, paying the returned address.
+func newShortTxIDLedger(t *testing.T) (*LedgerState, lcommon.Address) {
+	t.Helper()
+	db := fxOpenDB(t)
+	addr, row := seedShortTxIDUtxo(t, db)
+	ls := newPoolDistr2Ledger(t, db)
+	set := newQuerySetHistory()
+	set.rawRows = []models.Utxo{row}
+	_, set.readErr = lcommon.NewBlake2b256Checked(row.TxId)
+	ls.config.UtxoSet = set
+	return ls, addr
 }
 
 func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 	t.Parallel()
 	short := shortStoredHash(lcommon.Blake2b224Size, 0x71)
-	ls := newStoredQueryRowsLedger(t, func(
-		_ *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		ref := models.StakeCredentialRef{Tag: 0, Key: short}
-		s.activeCredentials = []models.StakeCredentialRef{ref}
-		s.accounts = map[string]*models.Account{
-			ref.MapKey(): {
-				StakingKey: short,
-				Drep:       bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size),
-			},
-		}
+	ls := newStoredQueryRowsLedger(t, LedgerChanges{
+		Accounts: []AccountChange{{Slot: 1, Account: models.Account{
+			StakingKey: short,
+			Drep:       bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size),
+			Active:     true,
+			AddedSlot:  1,
+		}}},
 	})
 	delegators, err := ls.allDRepDelegators(context.Background(), nil)
 	require.ErrorContains(t, err, "drep delegator")
@@ -148,17 +77,24 @@ func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 
 func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 	t.Parallel()
-	ls := newStoredQueryRowsLedger(t, func(
-		_ *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		s.drepDelegators = []models.StakeCredentialRef{{
-			Tag: 0,
-			Key: shortStoredHash(lcommon.Blake2b224Size, 0x73),
-		}}
+	short := shortStoredHash(lcommon.Blake2b224Size, 0x73)
+	drep := bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size)
+	ls := newStoredQueryRowsLedger(t, LedgerChanges{
+		Accounts: []AccountChange{{Slot: 1, Account: models.Account{
+			StakingKey: short,
+			Drep:       drep,
+			Active:     true,
+			AddedSlot:  1,
+		}}},
+		DRepLinks: []DRepLinkChange{{
+			Slot:  1,
+			Drep:  models.NewStakeCredentialRef(0, drep),
+			Stake: models.NewStakeCredentialRef(0, short),
+			Live:  true,
+		}},
 	})
 	delegators, err := ls.drepDelegators(t.Context(), &models.Drep{
-		Credential: bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size),
+		Credential: drep,
 	}, nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -168,18 +104,13 @@ func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 	t.Parallel()
 	cred := bytes.Repeat([]byte{0x75}, lcommon.Blake2b224Size)
-	ls := newStoredQueryRowsLedger(t, func(
-		_ *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		ref := models.StakeCredentialRef{Tag: 0, Key: cred}
-		s.accounts = map[string]*models.Account{
-			ref.MapKey(): {
-				StakingKey: cred,
-				Pool:       shortStoredHash(lcommon.Blake2b224Size, 0x76),
-				Active:     true,
-			},
-		}
+	ls := newStoredQueryRowsLedger(t, LedgerChanges{
+		Accounts: []AccountChange{{Slot: 1, Account: models.Account{
+			StakingKey: cred,
+			Pool:       shortStoredHash(lcommon.Blake2b224Size, 0x76),
+			Active:     true,
+			AddedSlot:  1,
+		}}},
 	})
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
@@ -197,21 +128,30 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 
 func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 	t.Parallel()
-	ls := newStoredQueryRowsLedger(t, func(
-		_ *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		s.votes = []*models.GovernanceVote{{
-			VoterType:       models.VoterTypeSPO,
-			VoterCredential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
-		}}
-	})
-	state, err := ls.governanceProposalState(t.Context(), &models.GovernanceProposal{
+	proposal := models.GovernanceProposal{
+		ID:            1,
+		TxHash:        bytes.Repeat([]byte{0x7E}, lcommon.Blake2b256Size),
 		AnchorURL:     "https://example.invalid/proposal.json",
 		AnchorHash:    bytes.Repeat([]byte{0x78}, lcommon.Blake2b256Size),
 		ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
 		GovActionCbor: []byte{0x80},
-	},
+		AddedSlot:     1,
+	}
+	ls := newStoredQueryRowsLedger(t, LedgerChanges{
+		Proposals: []ProposalChange{{Slot: 1, Proposal: proposal}},
+		Votes: []VoteChange{{
+			Slot:   1,
+			TxHash: proposal.TxHash,
+			Vote: models.GovernanceVote{
+				ID:              1,
+				ProposalID:      1,
+				VoterType:       models.VoterTypeSPO,
+				VoterCredential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
+				AddedSlot:       1,
+			},
+		}},
+	})
+	state, err := ls.governanceProposalState(t.Context(), &proposal,
 		lcommon.GovActionId{},
 		QueryPoint{},
 		nil,
@@ -228,8 +168,7 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 func seedShortTxIDUtxo(
 	t *testing.T,
 	db *database.Database,
-	s *storedQueryRowsStore,
-) lcommon.Address {
+) (lcommon.Address, models.Utxo) {
 	t.Helper()
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -249,23 +188,17 @@ func seedShortTxIDUtxo(
 	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), shortTxID, 0, cborBytes))
 	require.NoError(t, txn.Commit())
 	paymentKey := addr.PaymentKeyHash()
-	s.utxos = []models.Utxo{{
+	return addr, models.Utxo{
 		TxId:       shortTxID,
 		OutputIdx:  0,
 		PaymentKey: paymentKey[:],
 		Cbor:       cborBytes,
-	}}
-	return addr
+	}
 }
 
 func TestQueryUtxoByTxInPropagatesMalformedLiveSetKey(t *testing.T) {
 	t.Parallel()
-	ls := newStoredQueryRowsLedger(t, func(
-		db *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		seedShortTxIDUtxo(t, db, s)
-	})
+	ls, _ := newShortTxIDLedger(t)
 	result, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{
 		{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
 	},
@@ -278,13 +211,7 @@ func TestQueryUtxoByTxInPropagatesMalformedLiveSetKey(t *testing.T) {
 
 func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 	t.Parallel()
-	var addr lcommon.Address
-	ls := newStoredQueryRowsLedger(t, func(
-		db *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		addr = seedShortTxIDUtxo(t, db, s)
-	})
+	ls, addr := newShortTxIDLedger(t)
 	result, err := ls.queryShelleyUtxoByAddress(
 		[]ledger.Address{addr},
 		QueryPoint{},
@@ -300,17 +227,14 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 // distribution cardano-cli computes a leadership schedule from.
 func TestQueryPoolDistr2RejectsMalformedSnapshotPoolKey(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        0,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  shortStoredHash(lcommon.Blake2b224Size, 0x7C),
-			TotalStake:   types.Uint64(1_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	db := fxOpenDB(t)
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  shortStoredHash(lcommon.Blake2b224Size, 0x7C),
+		TotalStake:   types.Uint64(1_000_000),
+		CapturedSlot: 1,
+	}))
 	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
@@ -324,13 +248,12 @@ func TestQueryPoolDistr2RejectsMalformedSnapshotPoolKey(t *testing.T) {
 // accepted yet" for a cold key the chain enforces a counter against.
 func TestChainDepStateRejectsMalformedStoredOpCertIssuer(t *testing.T) {
 	t.Parallel()
-	ls := newStoredQueryRowsLedger(t, func(
-		db *database.Database,
-		s *storedQueryRowsStore,
-	) {
-		s.opCertSequences = map[string]uint64{
-			string(shortStoredHash(lcommon.Blake2b224Size, 0x7D)): 3,
-		}
+	ls := newStoredQueryRowsLedger(t, LedgerChanges{
+		OpCerts: []OpCertChange{{Slot: 1, State: OpCertState{
+			Pool:     shortStoredHash(lcommon.Blake2b224Size, 0x7D),
+			Sequence: 3,
+			Slot:     1,
+		}}},
 	})
 	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()

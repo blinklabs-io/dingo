@@ -17,7 +17,6 @@ package ledger_test
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,7 +34,7 @@ func p5ExpireDrive(t *testing.T) p5Drive {
 // TestExpiryRollbackMatchesAFreshRunStoppedAtTheRollbackPoint requires the
 // account and DRep reads after a rollback across the CIP-0163 activation to
 // equal those of a run that applied the chain to the rollback point and
-// stopped, from the metadata store and from the drained set alike.
+// stopped.
 func TestExpiryRollbackMatchesAFreshRunStoppedAtTheRollbackPoint(t *testing.T) {
 	t.Parallel()
 	expire := p5ExpireDrive(t)
@@ -49,18 +48,7 @@ func TestExpiryRollbackMatchesAFreshRunStoppedAtTheRollbackPoint(t *testing.T) {
 	want := fresh["applied"]
 	require.NotEmpty(t, want)
 
-	t.Run("metadata store", func(t *testing.T) {
-		t.Parallel()
-		got, _ := p5AccountsRun(t, nil, nil, expire)
-		require.Equal(t, want, got["rolled back"])
-	})
-	t.Run("drained set", func(t *testing.T) {
-		t.Parallel()
-		families := []nodesettings.Family{
-			nodesettings.FamilyDReps, nodesettings.FamilyAccounts,
-		}
-		got, h := p5AccountsRun(t, families, nil, expire)
-		h.requireDrained(t, families, p5AccountTables)
-		require.Equal(t, want, got["rolled back"])
-	})
+	got, _ := p5AccountsRun(t, nil, nil, expire)
+	require.NotEqual(t, want, got["applied"], "the expiry changes the reads")
+	require.Equal(t, want, got["rolled back"])
 }

@@ -87,7 +87,7 @@ func TestGetIntersectPointNonexistentPointsSkipRemoteCapableReads(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -165,7 +165,7 @@ func TestGetIntersectPointSkipsBlockBodyReads(t *testing.T) {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

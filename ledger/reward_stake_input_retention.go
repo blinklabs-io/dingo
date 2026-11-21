@@ -34,12 +34,18 @@ func pendingRewardStakeInputHistoryFloor(
 			"pending reward retention requires a read snapshot",
 		)
 	}
+	// The record of a deferred SNAP is read before the incomplete stake
+	// input snapshots: the write that finishes a SNAP deletes its record
+	// and may mark its stake inputs incomplete, so a reader that sees the
+	// record gone sees the mark that replaced it.
+	floor, protected, err := pendingBoundarySnapshotHistoryFloor(meta, txn)
+	if err != nil {
+		return 0, false, err
+	}
 	pending, err := loadRewardStakeInputsPending(meta, txn)
 	if err != nil {
 		return 0, false, err
 	}
-	var floor uint64
-	protected := false
 	for _, entry := range pending.Entries {
 		if entry.BoundarySlot == 0 {
 			return 0, false, fmt.Errorf(
@@ -65,22 +71,10 @@ func pendingRewardStakeInputHistoryFloor(
 			protected = true
 		}
 	}
-	snapshotFloor, snapshotPending, err := pendingBoundarySnapshotHistoryFloor(
-		meta,
-		txn,
-	)
-	if err != nil {
-		return 0, false, err
-	}
-	if snapshotPending && (!protected || snapshotFloor < floor) {
-		floor = snapshotFloor
-		protected = true
-	}
 	return floor, protected, nil
 }
 
 // A deferred SNAP owns history before it can create the stake-input marker.
-// Both markers must be read through one transaction across their handoff.
 func pendingBoundarySnapshotHistoryFloor(
 	meta ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,

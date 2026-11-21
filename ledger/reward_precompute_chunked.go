@@ -378,7 +378,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 			reconstructedStakeInputs = rebuilt
 		}
 	}
-	_, params, performanceDecentralization, err := ls.rewardParameters(
+	_, params, err := ls.rewardParameters(
 		txn,
 		epochs.performance,
 		epochs.pots,
@@ -398,7 +398,6 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		txn,
 		epochs.performance,
 		poolInputs,
-		performanceDecentralization,
 	)
 	if err != nil {
 		return nil, false, err

@@ -1,0 +1,210 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledgerstate
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/stretchr/testify/require"
+)
+
+// openFixtureSetAt opens a LedgerDB set in dir, closed with the test.
+func openFixtureSetAt(t *testing.T, dir string) *utxoset.Set {
+	t.Helper()
+	set, err := utxoset.Open(utxoset.Config{
+		Dir: dir, Only: true, Authoritative: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	return set
+}
+
+// setRows closes set and returns every row of the store in dir, as
+// "key=value" in key order.
+func setRows(t *testing.T, set *utxoset.Set, dir string) []string {
+	t.Helper()
+	require.NoError(t, set.Close())
+	st, err := badgerutxo.Open(dir)
+	require.NoError(t, err)
+	defer st.Close()
+	var rows []string
+	for tag := range 256 {
+		require.NoError(t, st.Rows([]byte{byte(tag)}, func(k, v []byte) error {
+			rows = append(rows, fmt.Sprintf("%x=%x", k, v))
+			return nil
+		}))
+	}
+	return rows
+}
+
+// sqlLedgerRows counts the rows of every SQL table a ledger-state family
+// owns.
+func sqlLedgerRows(t *testing.T, db *database.Database) map[string]int {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	out := map[string]int{}
+	for _, f := range nodesettings.Families() {
+		for _, table := range statedrain.TableNames(f) {
+			var n int
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM "+table,
+			).Scan(&n))
+			if n > 0 {
+				out[table] = n
+			}
+		}
+	}
+	return out
+}
+
+// TestImportWritesEveryFamilyToTheLedgerDB requires an import to leave the
+// whole ledger state in the LedgerDB set, every family loaded and the import
+// finished, and none of it in the metadata store's ledger-state tables.
+func TestImportWritesEveryFamilyToTheLedgerDB(t *testing.T) {
+	t.Parallel()
+	db := newFixtureDB(t)
+	set := openFixtureSet(t)
+	// The schema seeds some singleton rows; the import must add none.
+	before := sqlLedgerRows(t, db)
+	require.NoError(t, importLedgerStateForTest(
+		t.Context(), richConfig(t, db, fixtureAnchorSlot, true, false, set),
+	))
+
+	require.Equal(t, before, sqlLedgerRows(t, db),
+		"the import must write no ledger state to the metadata store")
+	_, pending, err := set.ImportPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	for _, f := range nodesettings.Families() {
+		if statedrain.Tables(f) == nil {
+			continue
+		}
+		loaded, err := ledger.FamilyLoaded(f, set)
+		require.NoError(t, err, f.String())
+		require.True(t, loaded, "family %s", f)
+	}
+	ldb := withImportLedgerDB(ImportConfig{Database: db, UtxoSet: set}).LedgerDB
+	account, err := ldb.GetAccountByCredential(
+		t.Context(), 0, fixtureAnchorKey, true, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.True(t, account.Active)
+	require.Equal(t, richPool1, account.Pool)
+	for _, pool := range [][]byte{richPool1, richPool2} {
+		p, err := ldb.GetPool(t.Context(), [28]byte(pool), false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, p, "pool %x", pool)
+	}
+	drep, err := ldb.GetDrepByCredential(t.Context(), 0, richDrep1, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	dormant, err := ldb.GetDormantDRepEpochs(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, richAnchorDormant, dormant)
+	state, err := ldb.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, fixtureAnchorSlot, state.Slot)
+	nonce, ok, err := ldb.GetLatestBlockNonce(nil)
+	require.NoError(t, err)
+	require.True(t, ok, "the snapshot tip's nonce")
+	require.Equal(t, fixtureAnchorSlot, nonce.Slot)
+	count, err := set.Count()
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), count)
+}
+
+var errStopped = errors.New("stopped")
+
+// TestImportResumesAfterAStopAtEachPhase stops an import after each phase, as
+// a crash there would, and requires the set to refuse to serve the partial
+// state and the same import run again to leave the set row for row as an
+// import that never stopped does, for a fresh import and for a catch-up.
+func TestImportResumesAfterAStopAtEachPhase(t *testing.T) {
+	t.Parallel()
+	phases := []string{
+		models.ImportPhaseUTxO,
+		models.ImportPhaseCertState,
+		models.ImportPhaseSnapshots,
+		models.ImportPhasePParams,
+		models.ImportPhaseGovState,
+		models.ImportPhaseTip,
+	}
+	for _, catchUp := range []bool{false, true} {
+		run := func(t *testing.T, stopAt string) []string {
+			t.Helper()
+			db := newFixtureDB(t)
+			dir := t.TempDir()
+			set := openFixtureSetAt(t, dir)
+			slot := fixtureAnchorSlot
+			if catchUp {
+				require.NoError(t, importLedgerStateForTest(
+					t.Context(),
+					richConfig(t, db, fixtureAnchorSlot, true, false, set),
+				))
+				slot = fixtureCatchUpSlot
+			}
+			cfg := richConfig(t, db, slot, !catchUp, catchUp, set)
+			if stopAt != "" {
+				stopped := cfg
+				stopped.afterPhase = func(phase string) error {
+					if phase == stopAt {
+						return errStopped
+					}
+					return nil
+				}
+				err := importLedgerStateForTest(t.Context(), stopped)
+				require.ErrorIs(t, err, errStopped)
+				_, pending, err := set.ImportPending()
+				require.NoError(t, err)
+				require.True(t, pending, "a stopped import stays marked")
+				err = set.Reconcile(t.Context(), withImportLedgerDB(ImportConfig{Database: db, UtxoSet: set}).LedgerDB, nil)
+				require.ErrorIs(t, err, badgerutxo.ErrImportPending,
+					"a set holding a partial import must not be served")
+			}
+			require.NoError(t, importLedgerStateForTest(t.Context(), cfg))
+			_, pending, err := set.ImportPending()
+			require.NoError(t, err)
+			require.False(t, pending)
+			return setRows(t, set, dir)
+		}
+		name := "fresh"
+		if catchUp {
+			name = "catch-up"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			want := run(t, "")
+			for _, phase := range phases {
+				t.Run(phase, func(t *testing.T) {
+					t.Parallel()
+					require.Equal(t, want, run(t, phase))
+				})
+			}
+		})
+	}
+}

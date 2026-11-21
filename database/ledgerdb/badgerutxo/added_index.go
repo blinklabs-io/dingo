@@ -45,7 +45,7 @@ func compareAdded(a, b addedEntry) int {
 // raised the floor further. A transaction before readTs may hold a row at the
 // slot a later block moved it from, which the index does not name. What can
 // bring a row back below the floor, or add one there, is a rollback, a load, a
-// merge, a restore or a reset: each runs inside rewriteRows, and an index is
+// restore or a reset: each runs inside rewriteRows, and an index is
 // shared only at the generation it was built at, with no rewrite running.
 type addedIndex struct {
 	floor, gen, readTs uint64
@@ -59,8 +59,6 @@ type addedIndexes struct {
 	// floor across several transactions between its two moves of the
 	// generation, so a read during one cannot share an index.
 	rewriting atomic.Int64
-	// endMerge ends the rewrite BeginMerge began.
-	endMerge atomic.Pointer[func()]
 	// afterGen and beforeIndex pause a read between taking the generation
 	// and beginning its transaction, and inside the transaction before the
 	// index is looked up. Only tests set them.

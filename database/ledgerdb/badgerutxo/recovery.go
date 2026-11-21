@@ -390,7 +390,7 @@ func checkCheckpointable(txn *badger.Txn) error {
 		key  []byte
 		what string
 	}{
-		{mergeKey, "a ledger-state merge is pending"},
+		{importKey, "a ledger-state import is pending"},
 		{rollbackPendingKey, "a rollback is pending"},
 	} {
 		_, err := txn.Get(m.key)

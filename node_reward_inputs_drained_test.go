@@ -31,10 +31,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// With the reward-inputs family drained the startup provenance gate reads the
-// mark snapshots' calculation versions from the live UTxO set, not from the
-// emptied reward_snapshot table: a stale snapshot still stops the node and a
-// current one does not.
+// openTestUtxoSet opens an empty live UTxO set that closes with the test.
+func openTestUtxoSet(t *testing.T) *utxoset.Set {
+	t.Helper()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	return set
+}
+
+// The startup provenance gate reads the mark snapshots' calculation versions
+// from the live UTxO set: a stale snapshot stops the node and a current one
+// does not.
 func TestBackfillRewardLiveStakeChecksDrainedSnapshotProvenanceInTheSet(
 	t *testing.T,
 ) {

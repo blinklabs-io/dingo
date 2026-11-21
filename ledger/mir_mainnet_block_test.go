@@ -109,7 +109,7 @@ func mainnetMIRView(
 			return db.Blob().SetUtxo(txn.Blob(), inputTxId, 0, encoded)
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		0, mainnetEpoch209Reserves, 4_492_800, nil,
 	))
 
@@ -128,7 +128,7 @@ func mainnetMIRView(
 			Logger:            testLogger(),
 		},
 	}
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls, pp
 }

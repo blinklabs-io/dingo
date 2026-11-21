@@ -45,7 +45,7 @@ func newGapHealTestLedgerState(
 	tipHash []byte,
 ) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		db:                db,
 		mithrilLedgerSlot: boundary,
 		currentTip: ochainsync.Tip{
@@ -56,12 +56,14 @@ func newGapHealTestLedgerState(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
+	return ls
 }
 
 func countBlockNonces(t *testing.T, db *database.Database) int {
 	t.Helper()
 	// A slot range wide enough to cover every row written in these tests.
-	rows, err := db.GetBlockNoncesInSlotRange(0, 1_000_000, nil)
+	rows, err := seedDB(t, db).GetBlockNoncesInSlotRange(0, 1_000_000, nil)
 	require.NoError(t, err)
 	return len(rows)
 }
@@ -74,6 +76,7 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	const (
 		anchorSlot uint64 = 100
@@ -95,7 +98,7 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	tipSlot := tipBlock.SlotNumber()
 	tipHash := tipBlock.Hash().Bytes()
 
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorHash,
 		anchorSlot,
 		anchorNonce,
@@ -120,7 +123,7 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 			Type:     conway.BlockTypeConway,
 		}, nil))
 	}
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		tipHash,
 		tipSlot,
 		staleTipNonce,
@@ -151,7 +154,7 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	require.NoError(t, ls.healMithrilGapBlockNonces(t.Context()))
 
 	require.Equal(t, 4, countBlockNonces(t, db))
-	byronNonce, err := db.GetBlockNonce(
+	byronNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: byronSlot, Hash: byronHash},
 		nil,
 	)
@@ -163,14 +166,14 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	)
 
 	for _, block := range blocks {
-		got, err := db.GetBlockNonce(
+		got, err := seedDB(t, db).GetBlockNonce(
 			ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()},
 			nil,
 		)
 		require.NoError(t, err)
 		require.Equal(t, expectedBySlot[block.SlotNumber()], got)
 	}
-	tipNonce, err := db.GetBlockNonce(
+	tipNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: tipSlot, Hash: tipHash},
 		nil,
 	)
@@ -178,7 +181,7 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	require.Equal(t, expected, tipNonce)
 	require.NotEqual(t, staleTipNonce, tipNonce)
 
-	rows, err := db.GetBlockNoncesInSlotRange(anchorSlot, tipSlot+1, nil)
+	rows, err := seedDB(t, db).GetBlockNoncesInSlotRange(anchorSlot, tipSlot+1, nil)
 	require.NoError(t, err)
 	rowsBySlot := map[uint64]models.BlockNonce{}
 	for _, row := range rows {
@@ -206,6 +209,7 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -239,7 +243,7 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 	}, nil))
 
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorBlock.Hash().Bytes(),
 		anchorBlock.SlotNumber(),
 		anchorNonce,
@@ -269,14 +273,14 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 
 	// Anchor + the two canonical blocks; the fork blob gets no row.
 	require.Equal(t, 3, countBlockNonces(t, db))
-	forkNonce, err := db.GetBlockNonce(
+	forkNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: 105, Hash: forkHash},
 		nil,
 	)
 	require.NoError(t, err)
 	require.Nil(t, forkNonce, "fork blob must not be folded or given a row")
 	for _, block := range blocks[1:] {
-		got, err := db.GetBlockNonce(
+		got, err := seedDB(t, db).GetBlockNonce(
 			ocommon.Point{
 				Slot: block.SlotNumber(),
 				Hash: block.Hash().Bytes(),
@@ -301,6 +305,7 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -323,14 +328,14 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
 	forkBoundaryHash := bytes.Repeat([]byte{0xfb}, 32)
 	forkBoundaryNonce := bytes.Repeat([]byte{0xbb}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorBlock.Hash().Bytes(),
 		anchorBlock.SlotNumber(),
 		anchorNonce,
 		true,
 		nil,
 	))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		forkBoundaryHash,
 		boundaryBlock.SlotNumber(),
 		forkBoundaryNonce,
@@ -363,7 +368,7 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 
 	require.NoError(t, ls.healMithrilGapBlockNonces(t.Context()))
 
-	gotBoundary, err := db.GetBlockNonce(
+	gotBoundary, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: boundaryBlock.SlotNumber(),
 			Hash: boundaryBlock.Hash().Bytes(),
@@ -372,7 +377,7 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	)
 	require.NoError(t, err)
 	require.Equal(t, expectedBySlot[boundaryBlock.SlotNumber()], gotBoundary)
-	gotTip, err := db.GetBlockNonce(
+	gotTip, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: tipBlock.SlotNumber(),
 			Hash: tipBlock.Hash().Bytes(),
@@ -381,7 +386,7 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	)
 	require.NoError(t, err)
 	require.Equal(t, expected, gotTip)
-	gotFork, err := db.GetBlockNonce(
+	gotFork, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: boundaryBlock.SlotNumber(),
 			Hash: forkBoundaryHash,
@@ -403,6 +408,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -423,7 +429,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	tipBlock := blocks[2]
 
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorBlock.Hash().Bytes(),
 		anchorBlock.SlotNumber(),
 		anchorNonce,
@@ -441,7 +447,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 		Number:   99,
 		Type:     conway.BlockTypeConway,
 	}, nil))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		forkHash,
 		anchorBlock.SlotNumber()+5,
 		bytes.Repeat([]byte{0xff}, 32),
@@ -473,7 +479,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 
 	require.NoError(t, ls.healMithrilGapBlockNonces(t.Context()))
 
-	gotBoundary, err := db.GetBlockNonce(
+	gotBoundary, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: boundaryBlock.SlotNumber(),
 			Hash: boundaryBlock.Hash().Bytes(),
@@ -482,7 +488,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	)
 	require.NoError(t, err)
 	require.Equal(t, expectedBySlot[boundaryBlock.SlotNumber()], gotBoundary)
-	gotTip, err := db.GetBlockNonce(
+	gotTip, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: tipBlock.SlotNumber(),
 			Hash: tipBlock.Hash().Bytes(),
@@ -505,6 +511,7 @@ func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	var origin lcommon.Blake2b256
 	blocks, err := fixtures.GenerateConwayChain(1, origin, 120, 10, 1)
@@ -525,10 +532,10 @@ func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
 	require.NoError(
 		t,
-		db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil),
+		seedBlockNonce(t, db, anchorHash, 100, anchorNonce, true, nil),
 	)
 	// Malformed row at a higher slot below the boundary.
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		bytes.Repeat([]byte{0x0b}, 32), 110, []byte{0x01, 0x02}, false, nil))
 
 	ls := newGapHealTestLedgerState(
@@ -543,7 +550,7 @@ func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 		tipBlock,
 	)
 	require.NoError(t, err)
-	got, err := db.GetBlockNonce(
+	got, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{
 			Slot: tipBlock.SlotNumber(),
 			Hash: tipBlock.Hash().Bytes(),
@@ -568,6 +575,7 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	var origin lcommon.Blake2b256
 	blocks, err := fixtures.GenerateConwayChain(1, origin, 120, 10, 1)
@@ -588,11 +596,11 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
 	require.NoError(
 		t,
-		db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil),
+		seedBlockNonce(t, db, anchorHash, 100, anchorNonce, true, nil),
 	)
 	// Malformed nonce already stored AT the boundary slot (a block imported
 	// without folding its VRF). It must not be mistaken for a completion marker.
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		tipBlock.Hash().Bytes(), boundary, []byte{0x01, 0x02}, false, nil))
 
 	ls := newGapHealTestLedgerState(
@@ -607,7 +615,7 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 		tipBlock,
 	)
 	require.NoError(t, err)
-	got, err := db.GetBlockNonce(
+	got, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: boundary, Hash: tipBlock.Hash().Bytes()},
 		nil,
 	)
@@ -630,6 +638,7 @@ func TestHealMithrilGapBlockNonces_NoBoundaryNoOp(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	ls := newGapHealTestLedgerState(
 		t,
@@ -658,6 +667,7 @@ func TestHealMithrilGapBlockNonces_AlreadyHealedNoOp(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	const boundary = 200
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
@@ -665,9 +675,9 @@ func TestHealMithrilGapBlockNonces_AlreadyHealedNoOp(t *testing.T) {
 	// Anchor below the boundary and a nonce present AT the boundary slot: the
 	// completion signal.
 	boundaryHash := bytes.Repeat([]byte{0x0b}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		bytes.Repeat([]byte{0x0a}, 32), 150, anchorNonce, true, nil))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		boundaryHash, boundary, boundaryNonce, true, nil))
 
 	ls := newGapHealTestLedgerState(
@@ -676,7 +686,7 @@ func TestHealMithrilGapBlockNonces_AlreadyHealedNoOp(t *testing.T) {
 
 	// Both rows must be untouched and no new rows created.
 	require.Equal(t, 2, countBlockNonces(t, db))
-	got, err := db.GetBlockNonce(
+	got, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: boundary, Hash: boundaryHash}, nil)
 	require.NoError(t, err)
 	require.Equal(t, boundaryNonce, got,
@@ -693,6 +703,7 @@ func TestHealMithrilGapBlockNonces_NoAnchorSkips(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	ls := newGapHealTestLedgerState(
 		t, db, 200, 300, bytes.Repeat([]byte{0x0c}, 32))
@@ -710,8 +721,9 @@ func TestHealMithrilGapBlockNonces_TipBelowBoundaryNoOp(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		bytes.Repeat([]byte{0x0a}, 32), 150,
 		bytes.Repeat([]byte{0xaa}, 32), true, nil))
 

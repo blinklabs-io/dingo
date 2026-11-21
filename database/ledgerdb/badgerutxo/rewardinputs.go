@@ -31,7 +31,7 @@ import (
 //	S <epoch> 0 <type>                            a snapshot's header
 //	S <epoch> 1 <type>                            an imported basis failure
 //	S <epoch> 2                                   the epoch's stake inputs
-//	                                              are still being written
+//	                                              are only partly written
 //	A <epoch>                                     the epoch's ADA pots
 //
 // The stake rows of an epoch are written under a range tombstone and carry
@@ -158,6 +158,62 @@ func DecodeRewardPotsKey(k []byte) (uint64, error) {
 		return 0, errors.New("badgerutxo: malformed reward pots key")
 	}
 	return binary.BigEndian.Uint64(k[1:]), nil
+}
+
+// Reward likelihood rows. The states sit apart from the pools, so a read of
+// the states does not scan every pool row of every epoch:
+//
+//	2 's' <epoch>          the state a reward update installed for epoch
+//	2 'p' <epoch> <pool>   one pool's likelihood in that state
+const (
+	rewardLikelihoodStateKind byte = 0x73
+	rewardLikelihoodPoolKind  byte = 0x70
+)
+
+// RewardLikelihoodStatePrefix is the prefix of every likelihood state row.
+func RewardLikelihoodStatePrefix() []byte {
+	return []byte{RewardLikelihoodTag, rewardLikelihoodStateKind}
+}
+
+// RewardLikelihoodStateKey keys the likelihood state of epoch.
+func RewardLikelihoodStateKey(epoch uint64) []byte {
+	return binary.BigEndian.AppendUint64(RewardLikelihoodStatePrefix(), epoch)
+}
+
+// RewardLikelihoodPoolPrefix is the prefix of every pool likelihood row of
+// epoch.
+func RewardLikelihoodPoolPrefix(epoch uint64) []byte {
+	return binary.BigEndian.AppendUint64(
+		[]byte{RewardLikelihoodTag, rewardLikelihoodPoolKind}, epoch,
+	)
+}
+
+// RewardLikelihoodPoolKey keys pool's likelihood in the state of epoch. It
+// fails when pool is not RewardHashLen bytes.
+func RewardLikelihoodPoolKey(epoch uint64, pool []byte) ([]byte, error) {
+	if len(pool) != RewardHashLen {
+		return nil, fmt.Errorf(
+			"badgerutxo: reward likelihood key needs a %d-byte pool hash, "+
+				"got %d", RewardHashLen, len(pool),
+		)
+	}
+	return append(RewardLikelihoodPoolPrefix(epoch), pool...), nil
+}
+
+// DecodeRewardLikelihoodKey splits a likelihood row key: the epoch, and the
+// pool hash, nil for a state row.
+func DecodeRewardLikelihoodKey(k []byte) (uint64, []byte, error) {
+	if len(k) < 10 || k[0] != RewardLikelihoodTag {
+		return 0, nil, errors.New("badgerutxo: malformed reward likelihood key")
+	}
+	epoch := binary.BigEndian.Uint64(k[2:10])
+	switch {
+	case k[1] == rewardLikelihoodStateKind && len(k) == 10:
+		return epoch, nil, nil
+	case k[1] == rewardLikelihoodPoolKind && len(k) == 10+RewardHashLen:
+		return epoch, k[10:], nil
+	}
+	return 0, nil, errors.New("badgerutxo: malformed reward likelihood key")
 }
 
 // LoadRewardInputs replaces the store's reward input rows with the ones feed

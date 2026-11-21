@@ -159,3 +159,33 @@ func (s *Store) ImportedBlocksLoaded() (bool, error) {
 func (s *Store) ImportedBlocksLost() (bool, error) {
 	return s.markerLost(importedBlocksKey)
 }
+
+// ReplaceImportedBlocks replaces the imported block rows of epoch with the
+// per-pool counts, keyed by pool key hash, and their total, as captured at
+// slot. A rollback past slot deletes them, as it would a loaded epoch's.
+func (s *Store) ReplaceImportedBlocks(
+	epoch uint64,
+	pools map[string]uint64,
+	total, slot uint64,
+) error {
+	prefix := ImportedBlocksEpochPrefix(epoch)
+	rows := make([]RowPut, 0, 3+len(pools))
+	rows = append(rows,
+		RowPut{Slot: slot, Key: prefix, WipePrefix: true},
+		RowPut{Slot: slot, Key: prefix, TombstonePrefix: true},
+		RowPut{
+			Slot:  slot,
+			Key:   ImportedBlockTotalKey(epoch),
+			Value: EncodeImportedBlockValue(total, slot),
+		},
+	)
+	for pool, n := range pools {
+		rows = append(rows, RowPut{
+			Slot:  slot,
+			Key:   ImportedBlockPoolKey(epoch, []byte(pool)),
+			Value: EncodeImportedBlockValue(n, slot),
+		})
+	}
+	_, err := s.ApplyLedgerBatch(nil, LedgerBatch{Rows: rows})
+	return err
+}

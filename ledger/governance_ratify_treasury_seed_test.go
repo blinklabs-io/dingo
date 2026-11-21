@@ -42,7 +42,7 @@ func TestProcessEpochRolloverRatifiesWithdrawalAgainstDonatedTreasury(
 	destination, destinationReturn, destinationCredential := f.rewardAddress(
 		t, 0x91,
 	)
-	require.NoError(t, f.db.Metadata().AddNetworkDonation(
+	require.NoError(t, seedDB(t, f.db).AddNetworkDonation(
 		f.currentEpoch.StartSlot+10, f.currentEpoch.EpochId, 50*ada, nil,
 	))
 	withdrawal := f.addProposal(
@@ -53,7 +53,7 @@ func TestProcessEpochRolloverRatifiesWithdrawalAgainstDonatedTreasury(
 	_, reservesBefore, _ := networkState(t, f.db)
 
 	first := f.rollover(t, f.currentEpoch, f.currentPParams)
-	ratified := f.proposal(t, withdrawal)
+	ratified := treasuryRolloverProposal(t, f, withdrawal)
 	require.NotNil(
 		t,
 		ratified.RatifiedEpoch,
@@ -66,7 +66,7 @@ func TestProcessEpochRolloverRatifiesWithdrawalAgainstDonatedTreasury(
 	assert.Zero(t, f.accountReward(t, destinationCredential))
 
 	f.rollover(t, first.NewCurrentEpoch, first.NewCurrentPParams)
-	assert.NotNil(t, f.proposal(t, withdrawal).EnactedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, withdrawal).EnactedEpoch)
 	treasury, reserves, _ = networkState(t, f.db)
 	assert.Equal(t, 30*ada, treasury)
 	assert.Equal(t, reservesBefore, reserves)

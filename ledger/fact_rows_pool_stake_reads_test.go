@@ -48,6 +48,7 @@ func (s *countingEpochSet) Epochs() ([]models.Epoch, error) {
 func (s *countingEpochSet) PoolStakeSnapshots(
 	epoch uint64,
 	typ string,
+	_ int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	return []*models.PoolStakeSnapshot{{
 		Epoch: epoch, SnapshotType: typ, PoolKeyHash: []byte{byte(epoch)},

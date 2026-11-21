@@ -129,7 +129,6 @@ func runDelegatorInactivityLifecycleScenario(
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.config.DelegatorInactivityEnabled = gateEnabled
 	ls.config.DelegatorInactivity = delegatorInactivityE2EInactivity
-	meta := db.Metadata()
 
 	poolKey := rewardCalcHash(0x91)
 	cred := renewTestCred(0x92)
@@ -140,7 +139,7 @@ func runDelegatorInactivityLifecycleScenario(
 	pool := models.Pool{PoolKeyHash: poolKey}
 	require.NoError(
 		t,
-		db.ImportPool(
+		seedImportPool(t, db,
 			context.Background(),
 			nil,
 			&pool,
@@ -155,20 +154,16 @@ func runDelegatorInactivityLifecycleScenario(
 	// ---- Stage 1: register + delegate (witness) ----
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Pool:          poolKey,
 			Active:        true,
 		}),
 	)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       bytes.Repeat([]byte{0x71}, 32),
-		OutputIdx:  0,
-		StakingKey: cred,
-		Amount:     1_000_000,
-		AddedSlot:  0,
-	}))
+	seedTestStakedOutput(
+		t, ls, bytes.Repeat([]byte{0x71}, 32), 0, cred, 1_000_000,
+	)
 
 	regDelegCred := lcommon.Credential{
 		CredType:   0,
@@ -182,7 +177,7 @@ func runDelegatorInactivityLifecycleScenario(
 	})
 	runRenew(t, ls, db, delegatorInactivityE2ERegisterEpoch, regDelegTx)
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -192,9 +187,11 @@ func runDelegatorInactivityLifecycleScenario(
 	require.NoError(t, err)
 	res.expirationAfterRegister = acct.ExpirationEpoch
 
-	stakes, delegators, err := meta.GetStakeByPoolsAtSlot(
+	stakes, delegators, err := ls.ledgerDB().GetEpochBoundaryStakeByPools(
 		[][]byte{poolKey},
 		delegatorInactivityE2EQuerySlot,
+		0,
+		nil,
 		e2eExpiryArg(gateEnabled, delegatorInactivityE2EIncludeEpoch),
 		delegatorInactivityE2EInactivity,
 		nil,
@@ -204,9 +201,11 @@ func runDelegatorInactivityLifecycleScenario(
 	res.delegatorsAtInclude = delegators[string(poolKey)]
 
 	// ---- Stage 2: advance with no further witness past expiration ----
-	stakes, delegators, err = meta.GetStakeByPoolsAtSlot(
+	stakes, delegators, err = ls.ledgerDB().GetEpochBoundaryStakeByPools(
 		[][]byte{poolKey},
 		delegatorInactivityE2EQuerySlot,
+		0,
+		nil,
 		e2eExpiryArg(gateEnabled, delegatorInactivityE2EExcludeEpoch),
 		delegatorInactivityE2EInactivity,
 		nil,
@@ -219,14 +218,11 @@ func runDelegatorInactivityLifecycleScenario(
 	// expiration res.expirationAfterRegister just observed on cred, plays the
 	// pool's own reward (leader) account for the Task 10 reward-crediting
 	// guard via applyStakeRewards, at a snapshot epoch matching excludeEpoch.
-	// It must be a separate credential rather than reusing cred: seeding a
-	// StakeRegistration certificate below (rewardCalcSeedStakeCert) gives the
-	// credential real certificate history, which would make the Task 8
-	// account-fallback CTE's "no certificate history" guard in
-	// stakequery.go's delegationFallbackBlockTables exclude cred from its own
-	// later stake-snapshot queries (stage 3's reinclusion check) -- an
-	// artifact of this test harness, not of the CIP-0163 mechanism under
-	// test. This is otherwise the same scaffolding shape as
+	// It is a separate credential, and neither it nor the member is
+	// delegated to the pool: the round pays them from the reward inputs
+	// seeded below, and a delegation would add their rewards to the pool
+	// stake stage 3 reads for cred alone. This is otherwise the same
+	// scaffolding shape as
 	// TestApplyStakeRewardsGuardsExpiredRewardAccount's
 	// applyGuardExpiredLeaderScenario helper (reused pattern, not a new
 	// mechanism): pparams, performance/pots epochs, ADA pots, the reward
@@ -235,10 +231,9 @@ func runDelegatorInactivityLifecycleScenario(
 	leaderCred := rewardCalcHash(0x94)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:      leaderCred,
 			CredentialTag:   0,
-			Pool:            poolKey,
 			Active:          true,
 			ExpirationEpoch: res.expirationAfterRegister,
 		}),
@@ -255,30 +250,30 @@ func runDelegatorInactivityLifecycleScenario(
 	}
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		100, delegatorInactivityE2EPerformanceEpoch,
 		nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200, delegatorInactivityE2EPotsEpoch,
 		nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
-			context.Background(),
+		require.NoError(t, fxMintBlock(
+			t, db, context.Background(),
 			poolID, i+1, 140+i, nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 100, delegatorInactivityE2EPerformanceEpoch,
 		eras.ShelleyEraDesc.Id, nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        delegatorInactivityE2EPotsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            delegatorInactivityE2ERewardSnapshotEp,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -288,7 +283,7 @@ func runDelegatorInactivityLifecycleScenario(
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      delegatorInactivityE2ERewardSnapshotEp,
 			PoolKeyHash:                poolKey,
@@ -304,7 +299,7 @@ func runDelegatorInactivityLifecycleScenario(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         delegatorInactivityE2ERewardSnapshotEp,
 			PoolKeyHash:   poolKey,
@@ -329,10 +324,9 @@ func runDelegatorInactivityLifecycleScenario(
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    member,
 			CredentialTag: 0,
-			Pool:          poolKey,
 			Active:        true,
 		}),
 	)
@@ -366,7 +360,7 @@ func runDelegatorInactivityLifecycleScenario(
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		leaderCred,
@@ -375,7 +369,7 @@ func runDelegatorInactivityLifecycleScenario(
 	)
 	require.NoError(t, err)
 	res.leaderRewardAfterGuard = uint64(rewardOwner.Reward)
-	rewardMember, err := db.GetAccountByCredential(
+	rewardMember, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -396,7 +390,7 @@ func runDelegatorInactivityLifecycleScenario(
 	withdrawTx.WithWithdrawals(map[*lcommon.Address]uint64{rewardAddr: 1})
 	runRenew(t, ls, db, delegatorInactivityE2ERewitnessEpoch, withdrawTx)
 
-	acct, err = db.GetAccountByCredential(
+	acct, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -406,9 +400,11 @@ func runDelegatorInactivityLifecycleScenario(
 	require.NoError(t, err)
 	res.expirationAfterRewitness = acct.ExpirationEpoch
 
-	stakes, delegators, err = meta.GetStakeByPoolsAtSlot(
+	stakes, delegators, err = ls.ledgerDB().GetEpochBoundaryStakeByPools(
 		[][]byte{poolKey},
 		delegatorInactivityE2EQuerySlot,
+		0,
+		nil,
 		e2eExpiryArg(gateEnabled, delegatorInactivityE2EReincludeEpoch),
 		delegatorInactivityE2EInactivity,
 		nil,

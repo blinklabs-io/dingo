@@ -19,9 +19,8 @@ import (
 	"crypto/ed25519"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -112,15 +111,18 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 				pp.GovActionDeposit = pledgeLeverageProposalDeposit
 				pp.GovActionValidityPeriod = 6
 				fx.ls.publishSnapshotsLocked()
-				deposit := uint64(2_000_000)
 				rewardCred := lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.NewBlake2b224(
 						bytes.Repeat([]byte{0xc7}, lcommon.AddressHashSize),
 					),
 				}
-				seedStakeRegistration(t, fx.db, rewardCred, &deposit, 1, 0xc7)
-				require.NoError(t, fx.db.SetConstitution(&models.Constitution{
+				require.NoError(t, seedCreateAccount(t, fx.db, t.Context(), nil, &models.Account{
+					StakingKey: rewardCred.Credential.Bytes(),
+					AddedSlot:  1,
+					Active:     true,
+				}))
+				require.NoError(t, seedDB(t, fx.db).SetConstitution(&models.Constitution{
 					AnchorURL:  "https://example.invalid/constitution",
 					AnchorHash: bytes.Repeat([]byte{0xc1}, 32),
 				}, nil))
@@ -180,6 +182,10 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 					defer delta.Release()
 					return delta.apply(t.Context(), fx.ls, txn)
 				}
+				blockPoint := ocommon.NewPoint(
+					dijkstraCollateralReturnTestSlot,
+					block.Hash().Bytes(),
+				)
 				// Backfill persists proposals through the same function as
 				// block application, without applying the block.
 				backfill := func(txn *database.Txn) error {
@@ -193,8 +199,8 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 						0,
 						pp.GovActionValidityPeriod,
 						pp,
-						dbadapter.New(fx.db),
-						txn,
+						fx.ls.ledgerDB(),
+						dbadapter.Txn(txn),
 						nil,
 					)
 				}
@@ -202,12 +208,21 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 				if mode == "backfilled" {
 					apply = backfill
 				}
+				// The set journals the block under its point, so the rollback
+				// below returns to the tip the fixture started from.
+				fx.ls.stageUtxoSet(nil, &fx.startTip.Point)
 				require.NoError(
 					t,
-					fx.db.Transaction(t.Context(), true).Do(apply),
+					fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+						if err := apply(txn); err != nil {
+							return err
+						}
+						fx.ls.stageUtxoSet(dbadapter.Txn(txn), &blockPoint)
+						return nil
+					}),
 				)
 
-				stored, err := fx.db.GetGovernanceProposal(t.Context(),
+				stored, err := fx.ls.ledgerDB().GetGovernanceProposal(t.Context(),
 					tx.Hash().Bytes(),
 					0,
 					nil,
@@ -229,24 +244,16 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 				require.True(t, update.MaxPledgeLeverageSet)
 				require.Nil(t, update.MaxPledgeLeverage)
 
-				require.NoError(
-					t,
-					fx.db.Transaction(t.Context(), true).
-						Do(func(txn *database.Txn) error {
-							return fx.db.DeleteGovernanceProposalsAfterSlot(
-								t.Context(),
-								0,
-								txn,
-							)
-						}),
-				)
-				_, err = fx.db.GetGovernanceProposal(
+				fx.ls.stageUtxoSetRollback(nil, fx.startTip.Point)
+				require.False(t, fx.ls.utxoSetFailed.Load())
+				_, err = fx.ls.ledgerDB().GetGovernanceProposal(
 					t.Context(),
 					tx.Hash().Bytes(),
 					0,
 					nil,
 				)
-				require.Error(t, err, "rollback must drop the proposal")
+				require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound,
+					"rollback must drop the proposal")
 			})
 		}
 	}

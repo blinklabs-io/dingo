@@ -44,11 +44,11 @@ func seedBehindPeerShelleyEpoch(t *testing.T, f *behindPeerFixture) {
 	}
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, f.ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, f.ls.db).SetEpoch(
 		0, 0, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1_000, 432_000, nil,
 	))
-	require.NoError(t, f.ls.db.SetPParams(
+	require.NoError(t, seedDB(t, f.ls.db).SetPParams(
 		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
 	))
 	epochs, err := f.ls.db.GetEpochs(nil)

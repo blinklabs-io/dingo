@@ -307,14 +307,6 @@ func (a Adapter) AccountLastWitnessSlots(
 	return a.db.AccountLastWitnessSlots(ctx, refs, maxSlot, dbTxn(txn))
 }
 
-func (a Adapter) AccountsWitnessedAfterSlot(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) ([]models.StakeCredentialRef, error) {
-	return a.db.AccountsWitnessedAfterSlot(ctx, slot, dbTxn(txn))
-}
-
 func (a Adapter) GetAccountByCredential(
 	ctx context.Context,
 	credentialTag uint8,
@@ -478,18 +470,6 @@ func (a Adapter) GetStakeRegistrationsByCredential(
 	)
 }
 
-func (a Adapter) RenewAccountExpirations(
-	ctx context.Context,
-	refs []models.StakeCredentialRef,
-	expirationEpoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
-	return a.db.RenewAccountExpirations(ctx, refs, expirationEpoch, dbTxn(txn))
-}
-
 func (a Adapter) SetGenesisStakingWithDeposits(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
@@ -505,21 +485,6 @@ func (a Adapter) SetGenesisStakingWithDeposits(
 		keyDeposit,
 		poolDeposit,
 		blockHash,
-		dbTxn(txn),
-	)
-}
-
-func (a Adapter) StampAllActiveAccountExpirations(
-	ctx context.Context,
-	expirationEpoch uint64,
-	txn ledgerdb.Txn,
-) (int64, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return 0, err
-	}
-	return a.db.StampAllActiveAccountExpirations(
-		ctx,
-		expirationEpoch,
 		dbTxn(txn),
 	)
 }
@@ -591,28 +556,6 @@ func (a Adapter) AddPostSnapshotAccountRewardByCredential(
 	)
 }
 
-func (a Adapter) ClaimFallbackRewardSnapshot(
-	snapshot *models.RewardSnapshot,
-	txn ledgerdb.Txn,
-) (bool, error) {
-	if err := a.rewardInputsDrained(); err != nil {
-		return false, err
-	}
-	return a.db.Metadata().ClaimFallbackRewardSnapshot(snapshot, metaTxn(txn))
-}
-
-func (a Adapter) ClaimFallbackRewardSnapshotGuard(
-	epoch uint64,
-	snapshotType string,
-	txn ledgerdb.Txn,
-) (bool, uint, error) {
-	if err := a.rewardInputsDrained(); err != nil {
-		return false, 0, err
-	}
-	return a.db.Metadata().
-		ClaimFallbackRewardSnapshotGuard(epoch, snapshotType, metaTxn(txn))
-}
-
 func (a Adapter) ClaimPendingRewardCreditsForCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -667,14 +610,6 @@ func (a Adapter) DeleteRewardStakeInputBeforeEpoch(
 	}
 	return a.db.Metadata().
 		DeleteRewardStakeInputBeforeEpoch(ctx, epoch, metaTxn(txn))
-}
-
-func (a Adapter) DeleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.DeleteRewardAccountOutputsBeforeEpoch(ctx, epoch, dbTxn(txn))
 }
 
 func (a Adapter) DeleteRewardStateBeforeEpoch(
@@ -791,35 +726,6 @@ func (a Adapter) GetRewardAdaPots(
 	return a.db.Metadata().GetRewardAdaPots(epoch, metaTxn(txn))
 }
 
-func (a Adapter) SaveRewardLikelihoodState(
-	state *models.RewardLikelihoodState,
-	pools []*models.RewardPoolLikelihood,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.Metadata().SaveRewardLikelihoodState(state, pools, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardLikelihoodStateBeforeEpoch(
-	epoch uint64,
-	txn ledgerdb.Txn,
-) (*models.RewardLikelihoodState, error) {
-	return a.db.Metadata().GetRewardLikelihoodStateBeforeEpoch(epoch, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardLikelihoodStateAtSlot(
-	slot uint64,
-	txn ledgerdb.Txn,
-) (*models.RewardLikelihoodState, error) {
-	return a.db.Metadata().GetRewardLikelihoodStateAtSlot(slot, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardPoolLikelihoods(
-	epoch uint64,
-	txn ledgerdb.Txn,
-) ([]*models.RewardPoolLikelihood, error) {
-	return a.db.Metadata().GetRewardPoolLikelihoods(epoch, metaTxn(txn))
-}
-
 func (a Adapter) GetRewardPoolInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
@@ -932,17 +838,6 @@ func (a Adapter) HasUnfoldedRewardCreditsThroughEpoch(
 	}
 	return a.db.Metadata().
 		HasUnfoldedRewardCreditsThroughEpoch(snapshotEpoch, metaTxn(txn))
-}
-
-func (a Adapter) ReleaseFallbackRewardSnapshotGuard(
-	guardID uint,
-	txn ledgerdb.Txn,
-) error {
-	if err := a.rewardInputsDrained(); err != nil {
-		return err
-	}
-	return a.db.Metadata().
-		ReleaseFallbackRewardSnapshotGuard(guardID, metaTxn(txn))
 }
 
 func (a Adapter) SaveRewardAccountOutputs(
@@ -1879,17 +1774,6 @@ func (a Adapter) GetExpiredAwaitingDropGovernanceProposals(
 	)
 }
 
-func (a Adapter) GetExpiredDReps(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) ([]*models.Drep, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
-		return nil, err
-	}
-	return a.db.GetExpiredDReps(ctx, epoch, dbTxn(txn))
-}
-
 func (a Adapter) GetExpiredGovernanceProposalsAt(
 	ctx context.Context,
 	epoch uint64,
@@ -2323,12 +2207,6 @@ func (a Adapter) GetPParamUpdates(
 	txn ledgerdb.Txn,
 ) ([]models.PParamUpdate, error) {
 	return a.db.GetPParamUpdates(epoch, dbTxn(txn))
-}
-
-func (a Adapter) ReconcileAlonzoPParamsUnitAfterRecovery(
-	ctx context.Context,
-) error {
-	return a.db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx)
 }
 
 func (a Adapter) SaveEpochSummary(
@@ -2884,14 +2762,6 @@ func (a Adapter) GetAccountsActiveAtSlot(
 		GetAccountsActiveAtSlot(stakeCredentials, slot, metaTxn(txn))
 }
 
-func (a Adapter) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.RefreshRewardLiveStakeRefs(refs, slot, dbTxn(txn))
-}
-
 // EachRewardLiveStake lists the metadata store's reward_live_stake rows for
 // the drain's comparison.
 func (a Adapter) EachRewardLiveStake(
@@ -2899,13 +2769,6 @@ func (a Adapter) EachRewardLiveStake(
 	fn func(*models.RewardLiveStake) error,
 ) error {
 	return a.db.EachRewardLiveStake(dbTxn(txn), fn)
-}
-
-func (a Adapter) RebuildRewardLiveStake(
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.RebuildRewardLiveStake(context.Background(), slot, dbTxn(txn))
 }
 
 func (a Adapter) MergeImportedPoolBlockCounts(

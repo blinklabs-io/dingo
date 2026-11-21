@@ -39,6 +39,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/secretfile"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
@@ -184,6 +185,28 @@ func resolveDingoDataDir() (string, error) {
 		return cfg.DatabasePath, nil
 	}
 	return defaultDingoData, nil
+}
+
+// resolveIndexerDataDir returns the directory holding the SQLite IndexerDB,
+// whose tables koios-parity reads: the indexer directory under the node's data
+// directory. A metadata plugin dataDir override moves the ledger's store only,
+// so it is not consulted.
+func resolveIndexerDataDir() (string, error) {
+	dataDir := globalFlags.dingoData
+	if dataDir == "" {
+		dataDir = os.Getenv("DINGO_DATA_DIR")
+	}
+	if dataDir == "" {
+		cfg, err := loadedDingoConfig()
+		if err != nil {
+			return "", err
+		}
+		dataDir = cfg.DatabasePath
+	}
+	if dataDir == "" {
+		dataDir = defaultDingoData
+	}
+	return filepath.Join(dataDir, internalplugins.IndexerDirName), nil
 }
 
 // stringConfigValue reads a string field out of a plugin Selection.Config map
@@ -641,7 +664,7 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 
 	var dataDir string
 	if plugin == "sqlite" {
-		if dataDir, err = resolveDingoDataDir(); err != nil {
+		if dataDir, err = resolveIndexerDataDir(); err != nil {
 			return koiosparity.DingoDBConfig{}, err
 		}
 	}

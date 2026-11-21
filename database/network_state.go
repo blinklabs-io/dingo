@@ -17,6 +17,9 @@ package database
 import (
 	"context"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 // DeleteNetworkStateAfterSlot removes network state records added
@@ -41,6 +44,28 @@ func (d *Database) DeleteNetworkStateAfterSlot(
 	})
 }
 
+// setKeptSyncFamilies names, for each sync_state key that stands for ledger
+// state the LedgerDB set takes over with a family, that family.
+var setKeptSyncFamilies = map[string]nodesettings.Family{
+	statedrain.RewardStakeInputsPendingSyncKey: nodesettings.FamilyRewardInputs,
+	statedrain.PendingRatificationSyncKey:      nodesettings.FamilyGovernance,
+	statedrain.DelegatorInactivitySyncKey:      nodesettings.FamilyAccounts,
+}
+
+// refuseSetKeptSyncState returns ErrFamilyDrained for a sync_state key whose
+// state the LedgerDB set keeps once it has taken the family: the metadata
+// store holds no value to read, and one written here would be read by
+// nothing.
+func (d *Database) refuseSetKeptSyncState(key string) error {
+	f, ok := setKeptSyncFamilies[key]
+	if !ok || !d.FamilyDrained(f) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %s is kept by the LedgerDB set", ErrFamilyDrained, key,
+	)
+}
+
 // GetSyncState retrieves a sync state value by key.
 // Returns empty string if the key does not exist.
 func (d *Database) GetSyncState(
@@ -51,6 +76,9 @@ func (d *Database) GetSyncState(
 		val string
 		err error
 	)
+	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+		return "", refused
+	}
 	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
 		val, err = d.drainedSyncMarker(key)
 	} else if txn == nil {
@@ -105,6 +133,9 @@ func (d *Database) SetSyncState(
 	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
 		return drainedPParamsSyncError(key)
 	}
+	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+		return refused
+	}
 	var err error
 	if txn == nil {
 		err = d.metadata.SetSyncState(key, value, nil)
@@ -129,6 +160,9 @@ func (d *Database) DeleteSyncState(
 ) error {
 	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
 		return drainedPParamsSyncError(key)
+	}
+	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+		return refused
 	}
 	var err error
 	if txn == nil {

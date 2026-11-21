@@ -21,18 +21,18 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
-// DelegatorInactivityActivatedSyncKey is the durable sync_state marker key
-// guarding the one-time CIP-0163 activation stamp. Its value is the
-// activation epoch A (the epoch entered at the boundary activation ran
-// on), stored as a decimal string; a non-empty value means activation has
-// already run. Shared between ledger (which writes it during forward
-// processing, see ledger.LedgerState.activateDelegatorInactivityIfNeeded)
-// and this package (which reads/clears it during rollback/truncate) so
-// both agree on the exact same marker regardless of which caller performs
-// the delegator-inactivity bookkeeping around a given database mutation.
-const DelegatorInactivityActivatedSyncKey = "delegator_inactivity_activated"
+// DelegatorInactivityActivatedSyncKey names the durable marker guarding the
+// one-time CIP-0163 activation stamp. Its value is the activation epoch A
+// (the epoch entered at the boundary activation ran on), as a decimal
+// string; a non-empty value means activation has already run. The LedgerDB
+// set keeps it with the credentials the activation stamped (see
+// ledger.LedgerState.activateDelegatorInactivityIfNeeded); a store the set
+// has not taken the accounts family from holds it in sync_state, which this
+// package reads and clears during a rollback or truncate of that store.
+const DelegatorInactivityActivatedSyncKey = statedrain.DelegatorInactivitySyncKey
 
 // DelegatorInactivityActivationEpoch reads the durable CIP-0163 activation
 // marker and reports the activation epoch A, whether activation has
@@ -113,7 +113,11 @@ func RecomputeAccountExpirationsAfterTruncate(
 	rollbackSlot uint64,
 	affectedRefs []models.StakeCredentialRef,
 ) error {
-	if !delegatorInactivityEnabled {
+	// An accounts family the LedgerDB set keeps has no SQL rows to
+	// recompute: the set journals each account's expiration, the activation epoch and the
+	// credentials the activation stamped, and its rollback restores them.
+	if !delegatorInactivityEnabled ||
+		d.FamilyDrained(nodesettings.FamilyAccounts) {
 		return nil
 	}
 	rollbackEpoch, err := EpochBySlot(d, rollbackSlot, txn)
@@ -140,18 +144,14 @@ func RecomputeAccountExpirationsAfterTruncate(
 	// remain reset to 0 instead of being reconstructed from its surviving
 	// pre-activation witness.
 	if activated && activationEpoch > rollbackEpoch.EpochId {
-		// A drained accounts family has no SQL rows to reset: the set's
-		// rollback restores each account's expiration from its journal.
-		if !d.FamilyDrained(nodesettings.FamilyAccounts) {
-			resetRefs, resetErr := d.ResetAccountExpirationActivation(ctx, txn)
-			if resetErr != nil {
-				return fmt.Errorf(
-					"reset delegator-inactivity activation stamp: %w",
-					resetErr,
-				)
-			}
-			affectedRefs = mergeStakeCredentialRefs(affectedRefs, resetRefs)
+		resetRefs, resetErr := d.ResetAccountExpirationActivation(ctx, txn)
+		if resetErr != nil {
+			return fmt.Errorf(
+				"reset delegator-inactivity activation stamp: %w",
+				resetErr,
+			)
 		}
+		affectedRefs = mergeStakeCredentialRefs(affectedRefs, resetRefs)
 		if err := d.DeleteSyncState(DelegatorInactivityActivatedSyncKey, txn); err != nil {
 			return fmt.Errorf(
 				"clear delegator-inactivity activation marker: %w",
@@ -160,7 +160,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 		}
 		activated = false
 	}
-	if len(affectedRefs) == 0 || d.FamilyDrained(nodesettings.FamilyAccounts) {
+	if len(affectedRefs) == 0 {
 		return nil
 	}
 	lastWitness, err := d.AccountLastWitnessSlots(

@@ -82,9 +82,10 @@ func accountDrepKey(r AccountRow) []byte {
 }
 
 func accountDrepPrefix(typ uint8, drep []byte) []byte {
-	k := make([]byte, 0, 3+len(drep))
-	k = append(k, AccountDRepTag, typ, byte(len(drep))) //nolint:gosec // a DRep credential
-	return append(k, drep...)
+	return append(
+		[]byte{AccountDRepTag, typ, byte(len(drep))}, //nolint:gosec // a DRep credential
+		drep...,
+	)
 }
 
 // delegatesToPool and delegatesToDrep say which secondary keys r has: an
@@ -359,13 +360,11 @@ func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error 
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
-	if !s.merging.Load() {
-		if err := s.dropAccountJournal(); err != nil {
-			return fmt.Errorf("badgerutxo: drop accounts: %w", err)
-		}
-		if err := s.dropRewardSeqIndex(); err != nil {
-			return fmt.Errorf("badgerutxo: drop accounts: %w", err)
-		}
+	if err := s.dropAccountJournal(); err != nil {
+		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
+	}
+	if err := s.dropRewardSeqIndex(); err != nil {
+		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
 	wb := s.newLoadSink()
 	defer wb.Cancel()
@@ -374,12 +373,6 @@ func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error 
 		n++
 		if err := wb.Set(accountKey(r.Tag, r.Key), encodeAccount(r)); err != nil {
 			return err
-		}
-		if wb.wb == nil {
-			// A merge writes the account through setAccount, which keeps
-			// the secondary keys in step and removes the ones the account
-			// it overwrites held.
-			return nil
 		}
 		if delegatesToPool(r) {
 			if err := wb.Set(accountPoolKey(r), nil); err != nil {

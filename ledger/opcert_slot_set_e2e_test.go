@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -30,78 +31,77 @@ var opCertSlotReadNames = []string{
 }
 
 // TestOpCertSlotReadsFromTheLiveUtxoSet reads whether a counter was observed
-// at a slot, and every pool's counters as of a slot, from the live set with the
-// store's reads failing, over counters that rise, repeat, drop and are
-// batched, and a rollback, and requires the answers to be the store's.
+// at a slot, and every pool's counters as of a slot, over counters that rise,
+// repeat, drop and are batched, and again after a rollback below all but the
+// first of them.
 func TestOpCertSlotReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	reached, _ := scenario.HideStoreReads(opCertSlotReadNames...)
+	scenario, _, _ := setModeScenario(t)
 	ldb := scenario.LedgerDB()
 	slots := scenario.OpCerts()
-	check := func(stage string) {
+	pool, other := string(slots.Pool), string(slots.Other)
+	check := func(
+		stage string,
+		slot uint64,
+		wantExists bool,
+		want map[string]uint64,
+	) {
 		t.Helper()
-		for _, slot := range []uint64{
-			slots.Base - 1, slots.Base, slots.Base + 1, slots.Raised,
-			slots.Repeated, slots.Lowered, slots.Batched, slots.Batched + 1,
-		} {
-			wantE, err := store.PoolOpCertSequencesExistAtSlot(
-				t.Context(),
-				slot,
-				nil,
-			)
-			require.NoError(t, err)
-			gotE, err := ldb.PoolOpCertSequencesExistAtSlot(
-				t.Context(),
-				slot,
-				nil,
-			)
-			require.NoError(t, err, "%s exist at %d", stage, slot)
-			require.Equal(t, wantE, gotE, "%s exist at %d", stage, slot)
-			want, err := store.LatestPoolOpCertSequencesAtOrBefore(
-				t.Context(),
-				slot,
-				nil,
-			)
-			require.NoError(t, err)
-			got, err := ldb.LatestPoolOpCertSequencesAtOrBefore(
-				t.Context(),
-				slot,
-				nil,
-			)
-			require.NoError(t, err, "%s counters at %d", stage, slot)
-			require.Equal(t, want, got, "%s counters at %d", stage, slot)
-		}
+		exists, err := ldb.PoolOpCertSequencesExistAtSlot(t.Context(), slot, nil)
+		require.NoError(t, err, "%s exist at %d", stage, slot)
+		require.Equal(t, wantExists, exists, "%s exist at %d", stage, slot)
+		got, err := ldb.LatestPoolOpCertSequencesAtOrBefore(
+			t.Context(), slot, nil,
+		)
+		require.NoError(t, err, "%s counters at %d", stage, slot)
+		require.Equal(t, want, got, "%s counters at %d", stage, slot)
 	}
-	check("before the rollback")
+	none := map[string]uint64{}
+	first := map[string]uint64{pool: 3}
+	raised := map[string]uint64{pool: 5}
+	both := map[string]uint64{pool: 5, other: 2}
+	batched := map[string]uint64{pool: 6, other: 2}
+	const before = "before the rollback"
+	check(before, slots.Base-1, false, none)
+	check(before, slots.Base, true, first)
+	check(before, slots.Base+1, false, first)
+	check(before, slots.Raised, true, raised)
+	check(before, slots.Repeated, true, both)
+	check(before, slots.Lowered, true, both)
+	check(before, slots.Batched, true, batched)
+	check(before, slots.Batched+1, false, batched)
+
 	scenario.RollbackBeforeBoundary()
-	check("after the rollback")
-	require.Zero(t, reached(), "a slot read reached the metadata store")
+	const after = "after the rollback"
+	check(after, slots.Base-1, false, none)
+	check(after, slots.Base, true, first)
+	for _, slot := range []uint64{
+		slots.Raised, slots.Repeated, slots.Lowered, slots.Batched,
+	} {
+		check(after, slot, false, first)
+	}
 }
 
 // TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline requires the slot
 // reads for a slot before the set's record to be answered from the counters
-// the set was loaded with, each pool's latest observation, without reaching
-// the metadata store.
-func TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline(
-	t *testing.T,
-) {
+// the set was loaded with, each pool's latest observation.
+func TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x44}, 28))
-	for _, w := range []struct{ sequence, slot uint64 }{{4, 100}, {6, 200}} {
-		require.NoError(t, store.UpdatePoolOpCertSequence(
-			t.Context(), pool, w.sequence, w.slot, nil,
-		))
-	}
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	reached, _ := scenario.HideStoreReads(opCertSlotReadNames...)
+	scenario := ledger.NewSeededBoundaryEpochStateScenarioForTest(
+		t, set, nil, func(db *database.Database) {
+			for _, w := range []struct{ sequence, slot uint64 }{
+				{4, 100}, {6, 200},
+			} {
+				require.NoError(t, dbadapter.New(db).UpdatePoolOpCertSequence(
+					t.Context(), pool, w.sequence, w.slot, nil,
+				))
+			}
+		},
+	)
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
 
@@ -114,7 +114,6 @@ func TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline(
 	got, err := ldb.LatestPoolOpCertSequencesAtOrBefore(ctx, 250, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]uint64{string(pool[:]): 6}, got)
-	require.Zero(t, reached())
 
 	ok, err = ldb.PoolOpCertSequencesExistAtSlot(ctx, 100, nil)
 	require.NoError(t, err, "slot 100 is before the set's record")
@@ -122,5 +121,4 @@ func TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline(
 	got, err = ldb.LatestPoolOpCertSequencesAtOrBefore(ctx, 100, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]uint64{string(pool[:]): 6}, got)
-	require.Zero(t, reached(), "historical reads did not use SQL")
 }

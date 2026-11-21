@@ -179,17 +179,10 @@ var installEpochBoundarySnapshotHookForLoad = func(
 // loadCaptureFailureTracker records authoritative epoch-boundary snapshot
 // capture failures so `dingo load` can surface them after replay.
 //
-// Load has no event-driven snapshot fallback: LoadWithDB builds the snapshot
-// manager with a nil EventBus and never starts it, and the load ledger runs
-// without an EventBus, so no EpochTransitionEvents are ever published. The
-// ledger deliberately suppresses a failed authoritative capture (rolling back
-// its savepoint and deferring to the fallback) so an epoch boundary is never
-// wedged. During normal operation the event-driven fallback re-captures the
-// snapshot; during load there is no fallback, so a suppressed capture error
-// would silently drop that epoch's mark/reward snapshot and load would still
-// report success if both capture phases fail. The persist phase has a
-// boundary-aware historical fallback; this tracker surfaces a failure of that
-// complete capture so load cannot finish with an incomplete DB.
+// The boundary capture is the only capture of an epoch's mark/reward
+// snapshot, and a failed one fails the epoch rollover. This tracker names
+// the epochs whose capture failed, so load reports them rather than only the
+// rollover error.
 type loadCaptureFailureTracker struct {
 	mu     sync.Mutex
 	first  error
@@ -217,7 +210,7 @@ func (t *loadCaptureFailureTracker) err() error {
 	}
 	return fmt.Errorf(
 		"epoch-boundary snapshot capture failed for epoch(s) %v during load; "+
-			"load has no event-driven snapshot fallback, so the database is "+
+			"no other capture writes them, so the database is "+
 			"missing mark/reward snapshots and must be re-imported: %w",
 		t.epochs, t.first,
 	)
@@ -1083,10 +1076,8 @@ func LoadWithDB(
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
 		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
-			// The ledger suppresses a failed authoritative capture and defers
-			// to the event-driven fallback, which does not exist in load mode.
-			// Record the failure so LoadWithDB can surface it after replay
-			// instead of completing with a missing mark/reward snapshot.
+			// Record the failure so LoadWithDB can name the epoch whose
+			// mark/reward snapshot is missing.
 			if err := snapshotMgr.CaptureEpochBoundarySnapshot(
 				ctx, txn, evt,
 			); err != nil {

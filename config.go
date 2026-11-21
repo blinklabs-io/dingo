@@ -2599,13 +2599,12 @@ type IndexerWriter interface {
 
 // IndexerWriterDeps are what the node hands an IndexerWriterFactory.
 type IndexerWriterDeps struct {
-	// Consensus is the ledger's database, read for blocks, the tip and the
-	// ledger facts. Indexer is the IndexerDB's own database.
+	// Consensus is the ledger's database, read for blocks and the tip.
+	// Indexer is the IndexerDB's own database.
 	Consensus, Indexer *database.Database
-	// FactRows, when set, supplies the ledger-fact rows the writer copies,
-	// for a ledger that keeps them outside the consensus metadata store. It
-	// defaults to that store.
-	FactRows     metadata.FactRowReader
+	// FactRows supplies the ledger facts the writer copies. A writer that
+	// only rolls the IndexerDB back needs none.
+	FactRows     metadata.LedgerFacts
 	NodeConfig   *cardano.CardanoNodeConfig
 	Logger       *slog.Logger
 	PromRegistry prometheus.Registerer

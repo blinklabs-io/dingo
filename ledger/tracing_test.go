@@ -81,7 +81,7 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 		LengthInSlots: 100,
 		EraId:         eras.DijkstraEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot, currentEpoch.EpochId,
 		nil, nil, nil, nil,
 		currentEpoch.EraId, currentEpoch.SlotLength, currentEpoch.LengthInSlots,
@@ -89,13 +89,13 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 	))
 	for epochID := uint64(3); epochID < currentEpoch.EpochId; epochID++ {
 		startSlot := epochID * 100
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			startSlot, epochID, nil, nil, nil, nil,
 			currentEpoch.EraId, currentEpoch.SlotLength,
 			currentEpoch.LengthInSlots, nil,
 		))
 	}
-	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
 		&models.RewardAdaPots{
 			Epoch:        currentEpoch.EpochId,
 			CapturedSlot: currentEpoch.StartSlot + uint64(currentEpoch.LengthInSlots) - 1,
@@ -105,10 +105,10 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 	pparams := dijkstraRetentionPParams()
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 400, 4, eras.DijkstraEraDesc.Id, nil,
 	))
-	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(
 		&models.RewardSnapshot{
 			Epoch:           3,
 			SnapshotType:    "mark",
@@ -129,6 +129,7 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.processEpochRolloverWithClassicPParamsContext(

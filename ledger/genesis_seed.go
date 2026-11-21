@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -179,8 +180,11 @@ func SeedIndexerGenesis(
 			return fmt.Errorf("set genesis transaction %x: %w", h[:8], err)
 		}
 	}
+	// An IndexerDB keeps these as SQL rows and has no live UTxO set, so the
+	// seed writes through the store's own LedgerDB.
 	ls := &LedgerState{
-		db: db,
+		db:  db,
+		ldb: dbadapter.New(db),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeCfg,
 			Logger:            logger,

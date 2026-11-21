@@ -28,63 +28,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUpdateMithrilReadyStateRefusesADrainedDatabase requires the sync-state
-// clear that ends an import to refuse, and to leave the drain markers and the
-// latch in place, when the database has begun or finished a drain.
-func TestUpdateMithrilReadyStateRefusesADrainedDatabase(t *testing.T) {
+// TestUpdateMithrilReadyStateKeepsTheLedgerStateLatch requires the sync-state
+// clear that ends an import to keep the statedrain markers and the latch: an
+// import writes no SQL ledger state, so the families stay where they were.
+func TestUpdateMithrilReadyStateKeepsTheLedgerStateLatch(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		prepare func(t *testing.T, db *database.Database)
-		key     string
-	}{
-		{
-			"latch bit",
-			func(t *testing.T, db *database.Database) {
-				require.NoError(t, db.RecordDrainedFamily(
-					t.Context(), nodesettings.FamilyNonces,
-				))
-			},
-			"",
-		},
-		{
-			"drain begun",
-			func(t *testing.T, db *database.Database) {
-				require.NoError(t, db.SetSyncState(
-					statedrain.MarkerPrefix+"nonces", "1", nil,
-				))
-			},
-			statedrain.MarkerPrefix + "nonces",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := newMithrilTestDB(t)
-			tc.prepare(t, db)
-			err := updateMithrilReadyState(
-				context.Background(),
-				db,
-				slog.New(slog.NewTextHandler(io.Discard, nil)),
-				nil, 30, nil,
-			)
-			require.ErrorIs(t, err, database.ErrLedgerStateDrained)
-			mask, err := db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			if tc.key == "" {
-				require.True(t, mask.Has(nodesettings.FamilyNonces))
-				return
-			}
-			marker, err := db.GetSyncState(tc.key, nil)
-			require.NoError(t, err)
-			require.Equal(t, "1", marker)
-		})
-	}
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.RecordDrainedFamily(
+		t.Context(), nodesettings.FamilyNonces,
+	))
+	key := statedrain.MarkerPrefix + "nonces"
+	require.NoError(t, db.SetSyncState(key, "1", nil))
+	_ = updateMithrilReadyState(
+		context.Background(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil, 30, nil,
+	)
+	mask, err := db.DrainedFamilies(t.Context())
+	require.NoError(t, err)
+	require.True(t, mask.Has(nodesettings.FamilyNonces))
+	marker, err := db.GetSyncState(key, nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", marker)
 }
 
-// TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt requires a catch-up
-// into a database with a latch bit to get past the dispatch that refuses it
-// without a live UTxO set, to mark the import pending and to keep the latch.
-func TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt(t *testing.T) {
+// TestSyncTakesADatabaseWithALatchedFamily requires a catch-up into a
+// database with a latch bit to get past the dispatch and to keep the latch.
+func TestSyncTakesADatabaseWithALatchedFamily(t *testing.T) {
 	t.Parallel()
 	fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 	dataDir := t.TempDir()
@@ -126,10 +97,6 @@ func TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
-	mask, pending, err := db.DrainedImportPending(t.Context())
-	require.NoError(t, err)
-	require.True(t, pending, "the import is marked before anything is downloaded")
-	require.True(t, mask.Has(nodesettings.FamilyNonces))
 	latch, err := db.DrainedFamilies(t.Context())
 	require.NoError(t, err)
 	require.True(t, latch.Has(nodesettings.FamilyNonces), "the latch is kept")

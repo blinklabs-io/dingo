@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -225,10 +224,10 @@ func seedClassicVersionUpdate(
 	})
 	require.NoError(t, err)
 	for i := range boundaryEraTestUpdateQuorum {
-		require.NoError(t, db.SetPParamUpdate(
-			bytes.Repeat([]byte{byte(0xa0 + i)}, 28),
-			updateCbor, uint64(10+i), 0, nil,
-		))
+		pparamSeedUpdate(
+			t, db, bytes.Repeat([]byte{byte(0xa0 + i)}, 28),
+			updateCbor, uint64(10+i), 0,
+		)
 	}
 }
 
@@ -325,6 +324,13 @@ func newBoundaryEraLedgerChain(
 	if db == nil {
 		db = newTestDB(t)
 	}
+	// The caller's set is the database's LedgerDB set from the start, so
+	// everything seeded below lands in it.
+	if tc.utxoSet != nil {
+		if _, open := LiveSetOfForTest(db); !open {
+			AdoptLiveSetForTest(t, db, tc.utxoSet)
+		}
+	}
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	var raw []chain.RawBlock
@@ -386,7 +392,7 @@ func newBoundaryEraLedgerChain(
 		Nonce:         nonce,
 		EvolvingNonce: nonce,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId,
 		nonce, nonce, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
@@ -394,7 +400,7 @@ func newBoundaryEraLedgerChain(
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -408,13 +414,12 @@ func newBoundaryEraLedgerChain(
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	// The snapshot manager reads through the ledger's LedgerDB, as a node's
 	// does, so a drained family is served from the set it reads.
-	var snapshotDB ledgerdb.LedgerDB = dbadapter.New(db)
 	if tc.utxoSet != nil {
 		ls.config.UtxoSet = tc.utxoSet
 		ls.installEpochSource()
 		ls.installPParamsSource()
-		snapshotDB = ls.LedgerDB()
 	}
+	snapshotDB := ls.LedgerDB()
 	// A rollover that enacts a HardForkInitiation ratifies at the boundary,
 	// which a production node serves from the snapshot manager's rows.
 	snapshotMgr := snapshot.NewManager(
@@ -446,7 +451,8 @@ func newBoundaryEraLedgerChain(
 			BlockNumber: tipBlock.BlockNumber(),
 		}
 		require.NoError(t, db.SetTip(ls.currentTip, nil))
-		require.NoError(t, db.SetBlockNonce(
+		fxJournalChain(t, ls)
+		require.NoError(t, seedBlockNonce(t, db,
 			ls.currentTip.Point.Hash,
 			ls.currentTip.Point.Slot,
 			nonce, false, nil,
@@ -865,7 +871,7 @@ func TestAuthorizeBoundaryEra(t *testing.T) {
 		db := newTestDB(t)
 		cm, err := chain.NewManager(context.Background(), db, nil)
 		require.NoError(t, err)
-		return &LedgerState{
+		ls := &LedgerState{
 			db:         db,
 			chain:      cm.PrimaryChain(),
 			activeEras: eras.ErasWithDijkstra,
@@ -875,6 +881,8 @@ func TestAuthorizeBoundaryEra(t *testing.T) {
 				Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 			},
 		}
+		attachTestLiveSet(t, ls)
+		return ls
 	}
 	// decide runs the decision for the boundary into epoch 10 with voting
 	// blocks at or past the deadline of the epoch that ends.
@@ -1118,7 +1126,7 @@ func TestAuthorizeBoundaryEra(t *testing.T) {
 		rec := pendingRatificationRecord{Epoch: boundaryEpoch - 1, BoundarySlot: 1, ID: 1}
 		raw, err := json.Marshal(rec)
 		require.NoError(t, err)
-		require.NoError(t, ls.db.SetSyncState(pendingRatificationSyncKey, string(raw), nil))
+		require.NoError(t, ls.ledgerDB().SetSyncState(pendingRatificationSyncKey, string(raw), nil))
 		job := &ratificationJob{
 			record:   rec,
 			decided:  make(chan struct{}),
@@ -1164,7 +1172,7 @@ func seedRatifiedHardForkInitiation(
 		actionCbor, err := cbor.Encode(action)
 		require.NoError(t, err)
 		ratifiedEpoch, ratifiedSlot := uint64(0), uint64(500)
-		require.NoError(t, db.SetGovernanceProposal(
+		require.NoError(t, seedDB(t, db).SetGovernanceProposal(
 			context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        bytes.Repeat([]byte{0x49}, 32),
