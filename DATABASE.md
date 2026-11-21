@@ -1158,9 +1158,9 @@ Use the Go APIs when code runs inside Dingo:
   A contended live-set snapshot lock drops the database snapshot and retries
   within the acquisition deadline, and a provider panic releases that lock
   while unwinding. Set-only query views require snapshot and historical-read
-  capabilities before acquisition
-  succeeds. A historical child releases its parent borrow on construction
-  errors and panics as well as on close.
+  capabilities, and acquisition verifies that the snapshot's journal reaches
+  the requested point before it succeeds. A historical child releases its
+  parent borrow on construction errors and panics as well as on close.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.
