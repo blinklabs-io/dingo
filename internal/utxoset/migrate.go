@@ -166,7 +166,11 @@ func (s *Set) MigrateFromSQL(
 		)
 		return hook("ready")
 	}
-	return s.CleanupMigratedSQLRows(ctx, env)
+	inlineEnv := env
+	inlineEnv.Marked = func(context.Context) (bool, error) {
+		return true, nil
+	}
+	return s.CleanupMigratedSQLRows(ctx, inlineEnv)
 }
 
 // CleanupMigratedSQLRows deletes the metadata store's redundant UTxO rows

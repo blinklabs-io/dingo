@@ -159,6 +159,48 @@ func TestUtxoMigrationCleanupJoinsBeforeStorageClose(t *testing.T) {
 	n.utxoMigrationCleanupMu.Unlock()
 }
 
+func TestInitialUtxoMigrationCleanupWaitsForLiveLifecycle(t *testing.T) {
+	original := cleanupMigratedUtxoRows
+	t.Cleanup(func() { cleanupMigratedUtxoRows = original })
+	started := make(chan *database.Database, 1)
+	cleanupMigratedUtxoRows = func(
+		ctx context.Context,
+		db *database.Database,
+		_ *utxoset.Set,
+		_ *slog.Logger,
+	) error {
+		started <- db
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	oldDB := &database.Database{}
+	newDB := &database.Database{}
+	n := &Node{ctx: ctx, db: oldDB}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	n.liveLifecycleMu.Lock()
+	calling := make(chan struct{})
+	stopReady := make(chan func(), 1)
+	go func() {
+		close(calling)
+		stopReady <- n.startInitialUtxoMigrationCleanup(ctx)
+	}()
+	<-calling
+	select {
+	case <-stopReady:
+		t.Fatal("cleanup registration did not wait for the live lifecycle")
+	case <-time.After(50 * time.Millisecond):
+	}
+	n.db = newDB
+	n.liveLifecycleMu.Unlock()
+
+	stop := <-stopReady
+	require.Same(t, newDB, <-started)
+	stop()
+}
+
 // TestUtxoSetOnlyStakeRebuildWaitsForTheSet requires the startup
 // reward_live_stake rebuild to wait until the live UTxO set is reconciled and
 // then to read UTxO stake from the set.

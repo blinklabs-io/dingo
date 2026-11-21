@@ -2093,7 +2093,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		//nolint:contextcheck // n.ctx owns the node lifecycle.
 		n.startMithrilCoordinator(n.ctx),
 	)
-	started = append(started, n.startUtxoMigrationCleanup(n.ctx))
+	started = append(started, n.startInitialUtxoMigrationCleanup(n.ctx))
 
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()

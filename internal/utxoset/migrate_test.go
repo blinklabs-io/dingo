@@ -195,6 +195,19 @@ func TestMigrateFromSQLMovesTheUtxoSet(t *testing.T) {
 	requireMigrated(t, set, f, outputs)
 }
 
+func TestMigrateFromSQLInlineCleanupUsesTheCompletedMark(t *testing.T) {
+	t.Parallel()
+	const outputs = 25
+	f := newSQLFixture(outputs)
+	set := openOnly(t, t.TempDir())
+	t.Cleanup(func() { _ = set.Close() })
+	env := f.env(nil)
+	env.Marked = nil
+
+	require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
+	requireMigrated(t, set, f, outputs)
+}
+
 // A node can finish its cutover before deleting historical SQL rows. The
 // durable commit and set-only mark make the cleanup safe, and its progress
 // record remains until a managed worker completes every batch.

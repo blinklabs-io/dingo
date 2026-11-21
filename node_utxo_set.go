@@ -95,6 +95,19 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 	return r.Run(ctx)
 }
 
+// startInitialUtxoMigrationCleanup serializes the startup registration with
+// live restore and truncate. Those operations can become reachable before
+// Run finishes starting every service; whichever takes the lifecycle gate
+// first either registers the worker before quiesce or starts it against the
+// replacement storage after reinitialization.
+func (n *Node) startInitialUtxoMigrationCleanup(
+	ctx context.Context,
+) func() {
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+	return n.startUtxoMigrationCleanup(ctx)
+}
+
 // startUtxoMigrationCleanup removes legacy SQL UTxO rows after the live set
 // has become authoritative and the rest of node startup has completed. The
 // returned stop joins the worker before storage can close.
