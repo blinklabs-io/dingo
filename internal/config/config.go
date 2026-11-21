@@ -232,6 +232,11 @@ func (c *Config) ApplyRunModeOverrides(effectiveMode RunMode) {
 	}
 	c.StorageMode = storageModeAPI
 	c.BlockProducer = true
+	// The pipeline default follows the storage mode, which was just
+	// overridden, so derive it again unless an operator set it.
+	if !c.Provenance().IsExplicit("BlockPipelineEnabled") {
+		c.BlockPipelineEnabled = BlockPipelineEnabledByDefault(c)
+	}
 }
 
 // RequiresListeners reports whether an (effective) run mode runs as a
