@@ -16,13 +16,18 @@ package ledger
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -75,10 +80,40 @@ type rebuildScenario struct {
 	rows       []*models.GovernanceBoundarySnapshot
 }
 
+// rebuildOptions varies how newRebuildScenarioWith builds the two live
+// boundaries.
+type rebuildOptions struct {
+	// liveSet attaches an in-memory live UTxO set that journals its changes,
+	// so the ledger reads stake from it and a rollback restores spent
+	// outputs from its journal.
+	liveSet bool
+	// prepare runs before the first live boundary.
+	prepare func(
+		t *testing.T, f *treasuryRolloverFixture, withdrawal *models.GovernanceProposal,
+	)
+	// afterBoundary runs once the live boundary i has stored its row and
+	// before the next one runs.
+	afterBoundary func(
+		t *testing.T, f *treasuryRolloverFixture, i int, epoch models.Epoch,
+	)
+}
+
 func newRebuildScenario(t *testing.T) *rebuildScenario {
+	t.Helper()
+	return newRebuildScenarioWith(t, rebuildOptions{})
+}
+
+func newRebuildScenarioWith(
+	t *testing.T,
+	opts rebuildOptions,
+) *rebuildScenario {
 	t.Helper()
 	const ada = uint64(1_000_000)
 	f := newTreasuryRolloverFixture(t, 100*ada)
+	if opts.liveSet {
+		f.ls.config.UtxoSet = NewMemLiveSetForTest()
+		require.NoError(t, f.db.SetLiveUtxoSource(f.ls))
+	}
 	destination, destinationReturn, _ := f.rewardAddress(t, 0x91)
 	require.NoError(t, f.db.Metadata().AddNetworkDonation(
 		f.currentEpoch.StartSlot+10, f.currentEpoch.EpochId, 50*ada, nil,
@@ -113,8 +148,17 @@ func newRebuildScenario(t *testing.T) *rebuildScenario {
 			},
 		))
 	}
+	if opts.prepare != nil {
+		opts.prepare(t, f, withdrawal)
+	}
 	first := f.rollover(t, f.currentEpoch, f.currentPParams)
+	if opts.afterBoundary != nil {
+		opts.afterBoundary(t, f, 0, first.NewCurrentEpoch)
+	}
 	second := f.rollover(t, first.NewCurrentEpoch, first.NewCurrentPParams)
+	if opts.afterBoundary != nil {
+		opts.afterBoundary(t, f, 1, second.NewCurrentEpoch)
+	}
 	sc := &rebuildScenario{
 		f:          f,
 		withdrawal: withdrawal,
@@ -249,4 +293,307 @@ func TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary(
 	require.NoError(t, err)
 	require.Equal(t, string(raw), got)
 	require.False(t, errors.Is(err, errGovernanceBoundaryUnreachable))
+}
+
+// liveSetOutput is a live output staked to a credential, with the outputs
+// the ledger reads its stake from.
+func liveSetOutput(
+	t *testing.T,
+	id byte,
+	stakingKey []byte,
+	amount uint64,
+) (models.UtxoId, []byte) {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
+		repeatByte(lcommon.AddressHashSize, 0x37), stakingKey,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr, OutputAmount: amount,
+	})
+	require.NoError(t, err)
+	return models.UtxoId{Hash: repeatByte(32, id)}, encoded
+}
+
+func applyLiveSetChange(
+	t *testing.T,
+	f *treasuryRolloverFixture,
+	slot uint64,
+	evt UtxoEvent,
+	stakingKey []byte,
+) {
+	t.Helper()
+	evt.Point = ocommon.Point{Slot: slot, Hash: repeatByte(32, byte(slot))}
+	require.NoError(t, f.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{evt}))
+	require.NoError(t, f.db.RefreshRewardLiveStakeRefs(
+		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, stakingKey)},
+		slot, nil,
+	))
+}
+
+// liveSetState is what a rebuild must leave alone in the live UTxO set: its
+// outputs and what its journal would restore at each given point.
+type liveSetState struct {
+	Outputs map[string]string
+	At      []map[string]string
+}
+
+func readLiveSetState(
+	t *testing.T,
+	f *treasuryRolloverFixture,
+	points ...ocommon.Point,
+) liveSetState {
+	t.Helper()
+	collect := func(it UtxoSetIterator) map[string]string {
+		out := map[string]string{}
+		require.NoError(t, it.EachUtxo(
+			func(txID []byte, index uint32, c []byte) error {
+				out[fmt.Sprintf("%x#%d", txID, index)] = hex.EncodeToString(c)
+				return nil
+			},
+		))
+		return out
+	}
+	set := f.ls.config.UtxoSet
+	state := liveSetState{Outputs: collect(set.(UtxoSetIterator))}
+	for _, point := range points {
+		view, err := set.(UtxoSetHistory).UtxoSetAt(point)
+		require.NoError(t, err)
+		state.At = append(state.At, collect(view))
+		view.Close()
+	}
+	return state
+}
+
+// TestRebuildGovernanceBoundarySnapshotRestoresSpentLiveOutput spends, after
+// the first boundary, an output that boundary's DRep stake counts. The live
+// UTxO set no longer holds it at the tip, so the rebuilt first row only
+// matches the stored one when the replay restores it from the set's journal.
+func TestRebuildGovernanceBoundarySnapshotRestoresSpentLiveOutput(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const ada = uint64(1_000_000)
+	stakeKey := repeatByte(28, 0xe1)
+	var spentID models.UtxoId
+	sc := newRebuildScenarioWith(t, rebuildOptions{
+		liveSet: true,
+		prepare: func(
+			t *testing.T, f *treasuryRolloverFixture, _ *models.GovernanceProposal,
+		) {
+			id, encoded := liveSetOutput(t, 0x61, stakeKey, 500*ada)
+			spentID = id
+			applyLiveSetChange(
+				t, f, f.currentEpoch.StartSlot+90,
+				UtxoEvent{Added: []UtxoOutput{{Ref: id, Cbor: encoded}}},
+				stakeKey,
+			)
+		},
+		afterBoundary: func(
+			t *testing.T, f *treasuryRolloverFixture, i int, epoch models.Epoch,
+		) {
+			if i != 0 {
+				return
+			}
+			applyLiveSetChange(
+				t, f, epoch.StartSlot+50,
+				UtxoEvent{Removed: []models.UtxoId{spentID}},
+				stakeKey,
+			)
+		},
+	})
+	_, held, err := sc.f.ls.config.UtxoSet.(UtxoSetReader).Get(
+		spentID.Hash, spentID.Idx,
+	)
+	require.NoError(t, err)
+	require.False(t, held, "the output is spent at the tip")
+	require.NotEqual(
+		t, sc.rows[0].DRepDistribution, sc.rows[1].DRepDistribution,
+		"the spend changes the DRep stake between the boundaries",
+	)
+
+	points := []ocommon.Point{sc.point(0), sc.point(1)}
+	before := sc.f.liveState(t, sc.withdrawal)
+	setBefore := readLiveSetState(t, sc.f, points...)
+	require.Contains(t, setBefore.At[0], fmt.Sprintf("%x#0", spentID.Hash))
+	for _, i := range []int{1, 0} {
+		require.NoError(t, sc.rebuild(i))
+	}
+	for i, epoch := range sc.epochs {
+		got, err := sc.f.boundaryRow(t, epoch)
+		require.NoError(t, err)
+		require.Equal(t, sc.rows[i], got, "epoch %d", epoch.EpochId)
+	}
+	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
+	require.Equal(t, setBefore, readLiveSetState(t, sc.f, points...))
+	require.Empty(t, sc.f.ls.utxoSetBatches)
+	require.False(t, sc.f.ls.utxoSetFailed.Load())
+}
+
+func drepDistributionByCredential(
+	snapshot *models.GovernanceBoundarySnapshot,
+) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, entry := range snapshot.DRepDistribution {
+		out[hex.EncodeToString(entry.Credential)] = entry.Stake
+	}
+	return out
+}
+
+type drepScenarioOptions struct {
+	// moveDelegation moves a delegator between DReps after the first
+	// boundary with a vote delegation certificate.
+	moveDelegation bool
+	// renewLapsed renews a lapsed DRep's activity after the first boundary.
+	renewLapsed bool
+}
+
+var (
+	drepScenarioFirst  = repeatByte(28, 0xd1)
+	drepScenarioSecond = repeatByte(28, 0xd2)
+	drepScenarioLapsed = repeatByte(28, 0xd3)
+	drepScenarioMoved  = repeatByte(28, 0xe3)
+)
+
+func drepOfCredential(credential []byte) lcommon.Drep {
+	return lcommon.Drep{
+		Type:       lcommon.DrepTypeAddrKeyHash,
+		Credential: credential,
+	}
+}
+
+// newDRepRebuildScenario builds two live boundaries where the first
+// boundary's treasury withdrawal ratifies only while the lapsed DRep, which
+// voted against it, stays out of the active stake. Its delegations and
+// expiry come from certificates and an expiry history, as a live chain
+// records them, so rolling the tables back restores the first boundary's
+// view of them.
+func newDRepRebuildScenario(
+	t *testing.T,
+	opts drepScenarioOptions,
+) *rebuildScenario {
+	t.Helper()
+	const ada = uint64(1_000_000)
+	lapsedKey := repeatByte(28, 0xe4)
+	return newRebuildScenarioWith(t, rebuildOptions{
+		prepare: func(
+			t *testing.T,
+			f *treasuryRolloverFixture,
+			withdrawal *models.GovernanceProposal,
+		) {
+			start := f.currentEpoch.StartSlot
+			// The withdrawal needs 70% of the active DRep stake that voted
+			// or abstained against it.
+			f.currentPParams.DRepVotingThresholds.TreasuryWithdrawal =
+				cbor.Rat{Rat: big.NewRat(7, 10)}
+			seedStakeCertAt(t, f.db, drepScenarioMoved, true, start+60, 2*ada)
+			seedVoteDelegationAt(
+				t, f.db, drepScenarioMoved,
+				drepOfCredential(drepScenarioFirst), start+70,
+			)
+			require.NoError(t, f.db.AddAccountRewardByCredential(
+				context.Background(), 0, drepScenarioMoved, 40*ada, start+75,
+				repeatByte(32, 0xc9), nil,
+			))
+			require.NoError(t, f.db.Metadata().CreateDrep(nil, &models.Drep{
+				Credential:        drepScenarioLapsed,
+				AddedSlot:         1,
+				Active:            true,
+				LastActivityEpoch: f.currentEpoch.EpochId - 1,
+				ExpiryEpoch:       f.currentEpoch.EpochId,
+			}))
+			require.NoError(t, f.db.UpdateDRepActivity(
+				context.Background(), 0, drepScenarioLapsed,
+				f.currentEpoch.EpochId-1, 1, start+20, nil,
+			))
+			require.NoError(t, f.db.CreateAccount(
+				context.Background(), nil, &models.Account{
+					StakingKey: lapsedKey,
+					Drep:       drepScenarioLapsed,
+					DrepType:   0,
+					AddedSlot:  1,
+					Reward:     types.Uint64(25 * ada),
+					Active:     true,
+				},
+			))
+			for credential, vote := range map[*[]byte]uint8{
+				&drepScenarioFirst:  models.VoteYes,
+				&drepScenarioLapsed: models.VoteNo,
+			} {
+				require.NoError(t, f.db.SetGovernanceVote(
+					context.Background(), &models.GovernanceVote{
+						ProposalID:      withdrawal.ID,
+						VoterType:       models.VoterTypeDRep,
+						VoterCredential: *credential,
+						Vote:            vote,
+						AddedSlot:       start + 30,
+					}, nil,
+				))
+			}
+		},
+		afterBoundary: func(
+			t *testing.T, f *treasuryRolloverFixture, i int, epoch models.Epoch,
+		) {
+			if i != 0 {
+				return
+			}
+			if opts.moveDelegation {
+				seedVoteDelegationAt(
+					t, f.db, drepScenarioMoved,
+					drepOfCredential(drepScenarioSecond), epoch.StartSlot+30,
+				)
+			}
+			if opts.renewLapsed {
+				require.NoError(t, f.db.UpdateDRepActivity(
+					context.Background(), 0, drepScenarioLapsed,
+					epoch.EpochId, 10, epoch.StartSlot+40, nil,
+				))
+			}
+		},
+	})
+}
+
+func requireRebuiltRowsMatchLive(t *testing.T, sc *rebuildScenario) {
+	t.Helper()
+	before := sc.f.liveState(t, sc.withdrawal)
+	for _, i := range []int{1, 0} {
+		require.NoError(t, sc.rebuild(i))
+	}
+	for i, epoch := range sc.epochs {
+		got, err := sc.f.boundaryRow(t, epoch)
+		require.NoError(t, err)
+		require.Equal(t, sc.rows[i], got, "epoch %d", epoch.EpochId)
+	}
+	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
+}
+
+// TestRebuildGovernanceBoundarySnapshotDRepDelegationMoves moves a delegator
+// to another DRep after the first boundary. The first row must keep the
+// delegator's stake with the first DRep.
+func TestRebuildGovernanceBoundarySnapshotDRepDelegationMoves(t *testing.T) {
+	t.Parallel()
+
+	const ada = uint64(1_000_000)
+	sc := newDRepRebuildScenario(t, drepScenarioOptions{moveDelegation: true})
+	first := drepDistributionByCredential(sc.rows[0])
+	second := drepDistributionByCredential(sc.rows[1])
+	require.Equal(t, 70*ada, first[hex.EncodeToString(drepScenarioFirst)])
+	require.Equal(t, 20*ada, first[hex.EncodeToString(drepScenarioSecond)])
+	require.Equal(t, 30*ada, second[hex.EncodeToString(drepScenarioFirst)])
+	require.Equal(t, 60*ada, second[hex.EncodeToString(drepScenarioSecond)])
+	requireRebuiltRowsMatchLive(t, sc)
+}
+
+// TestRebuildGovernanceBoundarySnapshotDRepExpiryRenewed renews a lapsed
+// DRep's activity after the first boundary. That DRep voted against the
+// withdrawal, so the first boundary ratifies it only while the DRep is still
+// lapsed; a rebuild that kept the renewed expiry would not ratify it.
+func TestRebuildGovernanceBoundarySnapshotDRepExpiryRenewed(t *testing.T) {
+	t.Parallel()
+
+	sc := newDRepRebuildScenario(t, drepScenarioOptions{renewLapsed: true})
+	require.NotEmpty(t, sc.rows[0].Ratified)
+	requireRebuiltRowsMatchLive(t, sc)
 }
