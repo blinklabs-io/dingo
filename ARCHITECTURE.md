@@ -3832,7 +3832,9 @@ stake inputs without replaying blocks, so an idle chain does not delay their
 publication until another block arrives. The ledger journals a round's credits lazily, so credits dated
 before the writer's segment are re-read at the boundary slot of every round
 that still holds unfolded outputs, and each applied credit marks its output
-folded. With the
+folded. Each bounded journal page is ordered by credential, slot and source
+before it is applied, matching the reward journal's credential-leading unique
+index without retaining a whole reward round in memory. With the
 accounts family drained the journal is the live UTxO set's reward records,
 which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The
