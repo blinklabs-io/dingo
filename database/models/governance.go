@@ -155,8 +155,19 @@ type GovernanceConstitution struct {
 	PolicyHash []byte `json:"policy_hash,omitempty"`
 }
 
+// ErrGovernanceBoundarySnapshotNotRetained reports that the epoch containing
+// the requested slot is a Conway-or-later epoch whose boundary snapshot was
+// never stored. Boundaries that passed before the snapshot table existed
+// cannot be reconstructed, so callers must report the state as unavailable
+// rather than substitute another epoch's snapshot or live voting state.
+var ErrGovernanceBoundarySnapshotNotRetained = errors.New(
+	"governance boundary snapshot not retained for epoch",
+)
+
 // GovernanceBoundarySnapshot retains the proposal-independent pulser input
-// and RATIFY outcome produced at a Conway-or-later epoch boundary. The base
+// and RATIFY outcome produced at a Conway-or-later epoch boundary. Epoch is
+// the epoch the boundary opens and BoundarySlot is that epoch's first slot, so
+// the snapshot describes the state every slot of Epoch is validated against. The base
 // enact state is the state after ENACT and before RATIFY stages the ordered
 // Ratified actions; consumers apply those action bodies in order to obtain the
 // completed RatifyState enact state.

@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
 // SaveGovernanceBoundarySnapshot stores the completed Conway pulser input and
@@ -38,8 +39,18 @@ func (d *Database) SaveGovernanceBoundarySnapshot(
 	})
 }
 
-// GetGovernanceBoundarySnapshotAtSlot returns the newest retained governance
-// boundary at or before slot.
+// GetGovernanceBoundarySnapshotAtSlot returns the boundary snapshot of the
+// epoch containing slot, which is the newest retained boundary at or before
+// slot provided it opens that same epoch.
+//
+// A Conway-or-later epoch with no retained row yields
+// models.ErrGovernanceBoundarySnapshotNotRetained instead of the previous
+// epoch's snapshot: databases upgraded from before the snapshot table existed
+// have no row for boundaries that already passed, and that state cannot be
+// rebuilt. A nil snapshot with a nil error means no boundary applies, as for a
+// slot in a pre-Conway epoch. A slot past the last stored epoch is matched
+// against that epoch: the newest row must open it or a later epoch. Without an
+// epoch table to check against, the newest row at or before slot is returned.
 func (d *Database) GetGovernanceBoundarySnapshotAtSlot(
 	ctx context.Context,
 	slot uint64,
@@ -49,9 +60,55 @@ func (d *Database) GetGovernanceBoundarySnapshotAtSlot(
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
-	return d.governanceStore().GetGovernanceBoundarySnapshotAtSlot(
+	snapshot, err := d.governanceStore().GetGovernanceBoundarySnapshotAtSlot(
 		slot,
 		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	epoch, err := d.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return nil, fmt.Errorf("resolve epoch of slot %d: %w", slot, err)
+	}
+	if epoch != nil {
+		if snapshot != nil && snapshot.Epoch == epoch.EpochId {
+			return snapshot, nil
+		}
+		if epoch.EraId < ledger.EraIdConway {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"%w %d (slot %d)",
+			models.ErrGovernanceBoundarySnapshotNotRetained,
+			epoch.EpochId,
+			slot,
+		)
+	}
+	epochs, err := d.GetEpochs(txn)
+	if err != nil {
+		return nil, fmt.Errorf("list epochs for slot %d: %w", slot, err)
+	}
+	var last *models.Epoch
+	for i := range epochs {
+		if last == nil || epochs[i].StartSlot > last.StartSlot {
+			last = &epochs[i]
+		}
+	}
+	if last == nil || slot < last.StartSlot {
+		return snapshot, nil
+	}
+	if snapshot != nil && snapshot.Epoch >= last.EpochId {
+		return snapshot, nil
+	}
+	if last.EraId < ledger.EraIdConway {
+		return nil, nil
+	}
+	return nil, fmt.Errorf(
+		"%w after epoch %d (slot %d)",
+		models.ErrGovernanceBoundarySnapshotNotRetained,
+		last.EpochId,
+		slot,
 	)
 }
 

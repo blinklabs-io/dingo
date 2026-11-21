@@ -4657,10 +4657,12 @@ func resumeCompletedGovState(ctx context.Context, cfg ImportConfig) error {
 		boundarySlot,
 		nil,
 	)
-	if err != nil {
+	// An epoch with no retained row is the case this resume exists to fill.
+	if err != nil &&
+		!errors.Is(err, models.ErrGovernanceBoundarySnapshotNotRetained) {
 		return fmt.Errorf("read imported governance boundary snapshot: %w", err)
 	}
-	if existing != nil &&
+	if err == nil && existing != nil &&
 		existing.Epoch == cfg.State.Epoch &&
 		existing.BoundarySlot == boundarySlot {
 		return nil

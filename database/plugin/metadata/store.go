@@ -207,7 +207,9 @@ type GovernanceStore interface {
 	) error
 
 	// GetGovernanceBoundarySnapshotAtSlot returns the newest retained
-	// boundary at or before slot, or nil when no Conway boundary is retained.
+	// boundary at or before slot, or nil when none is retained. The store
+	// does not check which epoch the row opens; database.Database does, and
+	// is the entry point for consumers.
 	GetGovernanceBoundarySnapshotAtSlot(
 		uint64,
 		types.Txn,

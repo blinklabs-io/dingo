@@ -1279,8 +1279,13 @@ type GovernanceStore interface {
 		snapshot *models.GovernanceBoundarySnapshot,
 		txn Txn,
 	) error
-	// GetGovernanceBoundarySnapshotAtSlot returns the newest boundary at or
-	// before slot.
+	// GetGovernanceBoundarySnapshotAtSlot returns the boundary snapshot of
+	// the epoch containing slot. It returns a nil snapshot only when no
+	// boundary applies (a pre-Conway epoch), and an error wrapping
+	// models.ErrGovernanceBoundarySnapshotNotRetained when the epoch is
+	// Conway or later but its boundary was never stored, as for a boundary
+	// that passed before the snapshot table existed. Callers must surface that
+	// error and must not use an older epoch's snapshot or live voting state.
 	GetGovernanceBoundarySnapshotAtSlot(
 		ctx context.Context,
 		slot uint64,
