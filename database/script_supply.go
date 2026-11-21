@@ -15,33 +15,28 @@
 package database
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// RebuildScriptLockedSupply replaces the running script-locked supply
-// aggregate with a full scan of the live UTxOs, recorded at slot. A bulk load
-// that inserts live outputs without the per-write maintenance (ledger-state
-// import) calls it once the outputs are in place. A nil txn runs in its own
-// read-write transaction; a non-nil txn must be a read-write metadata
-// transaction of this database, so the rebuild cannot commit outside it.
-func (d *Database) RebuildScriptLockedSupply(
-	ctx context.Context,
-	slot uint64,
+// PruneScriptLockedSupplyBefore drops the script-locked supply rows older
+// than the newest row at or below floor, which stays as the base for the
+// slots above it. The caller passes the lowest slot a rollback of this
+// database can still reach; a rollback below the base rebuilds the aggregate
+// by a scan instead of reading a trimmed row. txn must be a read-write
+// metadata transaction of this database, so the trim commits with the writes
+// it follows.
+func (d *Database) PruneScriptLockedSupplyBefore(
+	floor uint64,
 	txn *Txn,
 ) error {
-	if txn == nil {
-		return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
-			return d.utxoStore().RebuildScriptLockedSupply(slot, t.Metadata())
-		})
-	}
-	if txn.db != d || txn.Metadata() == nil || !txn.IsReadWrite() {
+	if txn == nil || txn.db != d || txn.Metadata() == nil ||
+		!txn.IsReadWrite() {
 		return fmt.Errorf(
-			"rebuild script-locked supply: %w",
+			"prune script-locked supply: %w",
 			types.ErrTxnWrongType,
 		)
 	}
-	return d.utxoStore().RebuildScriptLockedSupply(slot, txn.Metadata())
+	return d.utxoStore().PruneScriptLockedSupplyBefore(floor, txn.Metadata())
 }

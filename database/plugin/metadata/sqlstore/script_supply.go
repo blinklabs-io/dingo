@@ -34,8 +34,9 @@ import (
 //
 // The table is written only here, in the transaction that changes the utxo
 // rows, by the primitives that insert an output or move one between live and
-// spent. Snapshot import also calls RebuildScriptLockedSupply when it
-// finishes, so the imported total is a scan at the snapshot slot.
+// spent. Only a store that holds utxo rows has anything to count: the
+// IndexerDB does, while a consensus store keeps its live set in the LedgerDB
+// and leaves the table empty.
 const (
 	scriptSupplyLatestQuery = `-- name: GetLatestScriptLockedSupply :one
 SELECT slot, amount FROM script_locked_supply ORDER BY slot DESC LIMIT 1`
@@ -230,27 +231,6 @@ func (s *Store) GetScriptLockedSupply(txn types.Txn) (uint64, error) {
 		return 0, fmt.Errorf("script-locked supply is negative: %d", amount)
 	}
 	return uint64(amount), nil
-}
-
-// RebuildScriptLockedSupply replaces the aggregate with one row at slot
-// holding a full scan of the live script-locked outputs. Bulk loads that
-// insert live rows outside the maintained primitives call it when done.
-func (s *Store) RebuildScriptLockedSupply(
-	slot uint64,
-	txn types.Txn,
-) error {
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(
-				ctx, `-- name: DeleteAllScriptLockedSupply :exec
-DELETE FROM script_locked_supply`,
-			); err != nil {
-				return err
-			}
-			return s.seedScriptLockedSupply(ctx, db, slot)
-		},
-	)
 }
 
 func (s *Store) seedScriptLockedSupply(

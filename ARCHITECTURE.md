@@ -1146,17 +1146,6 @@ transaction commits, so between commit and refresh it reports a floor lower than
 the database holds — permissive in exactly the direction the check exists to
 prevent. A read or parse failure fails closed and refuses the rollback.
 
-The same transaction trims the script-locked supply aggregate
-(`script_locked_supply`, one cumulative-total row per slot whose commit changed
-the live script-locked lovelace, read by the Blockfrost network-supply endpoint).
-The metadata insert and spend primitives write its deltas in the transaction
-that changes the `utxo` rows, on every apply path including the batch UTxO
-overlay, which credits and debits logically because it elides rows. A rollback
-keeps the rows at or below its slot, so outputs removed by cascade need no
-accounting, and the floor never lets a rollback reach the rows the trim deletes.
-Ledger-state import replaces the aggregate with a scan at the snapshot slot once
-its outputs are in place, unless the import had already completed.
-
 `rollback` and `rollbackChainAndState` refuse a target below the floor with
 `ErrRollbackBelowUtxoPruneFloor` before mutating anything, and
 `rollbackIsAppliable` matches so the loop detector does not classify such a
@@ -3891,6 +3880,17 @@ checkpoint on the chain. A checkpoint left by the former history backfill
 seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
 from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
 the ledger resolve and check a closure through one loader.
+
+The IndexerDB keeps the network's script-locked lovelace as a running aggregate
+(`script_locked_supply`, one cumulative-total row per slot whose commit changed
+it; the Blockfrost network endpoint reads the newest row). The metadata insert
+and spend primitives write its deltas in the transaction that changes the `utxo`
+rows, so a replay from genesis builds it as it indexes. The writer trims it in
+each batch that adds a checkpoint, to the base row at the oldest retained
+checkpoint (`indexerdb.Store.PruneScriptLockedSupply`): a writer rollback never
+lands below that checkpoint, and one to the chain's origin rebuilds the
+aggregate from the restored rows. The consensus store keeps no `utxo` rows, so
+its table stays empty and unread.
 
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the

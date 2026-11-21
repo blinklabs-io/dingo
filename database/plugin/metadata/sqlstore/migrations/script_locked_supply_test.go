@@ -26,11 +26,20 @@ import (
 )
 
 // The migration seeds the aggregate with exactly what the dropped index used
-// to serve, leaves every utxo row alone, and drops the index.
+// to serve, at the newest slot the store's tip and utxo rows record, leaves
+// every utxo row alone, and drops the index.
 func TestScriptLockedSupplyMigrationSeedsAggregate(t *testing.T) {
 	t.Parallel()
-	for _, withScript := range []bool{true, false} {
-		t.Run(fmt.Sprintf("script_outputs=%v", withScript), func(t *testing.T) {
+	for _, tc := range []struct {
+		withScript bool
+		withTip    bool
+	}{
+		{true, true}, {false, true}, {true, false},
+	} {
+		withScript := tc.withScript
+		withTip := tc.withTip
+		name := fmt.Sprintf("script_outputs=%v/tip=%v", withScript, withTip)
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "metadata.sqlite")
 			db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
@@ -50,10 +59,12 @@ func TestScriptLockedSupplyMigrationSeedsAggregate(t *testing.T) {
 			run(registry[:65])
 			_, ok := indexSQL(t, db, "idx_utxo_deleted_payment_script")
 			require.True(t, ok)
-			_, err = db.Exec(
-				"INSERT INTO tip (hash, slot, block_number) VALUES (x'01', 4242, 7)",
-			)
-			require.NoError(t, err)
+			if withTip {
+				_, err = db.Exec(
+					"INSERT INTO tip (hash, slot, block_number) VALUES (x'01', 4242, 7)",
+				)
+				require.NoError(t, err)
+			}
 			type row struct {
 				script  any
 				deleted int
@@ -102,7 +113,15 @@ func TestScriptLockedSupplyMigrationSeedsAggregate(t *testing.T) {
 					"SELECT slot, amount FROM script_locked_supply",
 				).Scan(&slot, &amount))
 				require.Equal(t, 1, count)
-				require.EqualValues(t, 4242, slot)
+				if withTip {
+					require.EqualValues(t, 4242, slot)
+				} else {
+					// With no tip row the seed sits at the newest slot
+					// any utxo row records, so a rollback below it drops
+					// the seed and rebuilds by scan rather than keeping a
+					// total that includes later changes.
+					require.EqualValues(t, 90, slot)
+				}
 				require.Equal(t, want, uint64(amount))
 			}
 			_, ok = indexSQL(t, db, "idx_utxo_deleted_payment_script")

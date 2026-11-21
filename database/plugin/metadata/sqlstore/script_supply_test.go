@@ -54,6 +54,23 @@ func addSupply(t testing.TB, store *Store, slot uint64, delta int64) error {
 	)
 }
 
+// seedSupply replaces the aggregate with a scan stamped at slot, the state
+// the migration seed leaves.
+func seedSupply(t testing.TB, store *Store, slot uint64) {
+	t.Helper()
+	require.NoError(t, store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(
+				ctx, `DELETE FROM script_locked_supply`,
+			); err != nil {
+				return err
+			}
+			return store.seedScriptLockedSupply(ctx, db, slot)
+		},
+	))
+}
+
 func TestScriptLockedSupplyEmptyReadsZero(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -176,7 +193,7 @@ func TestRollbackBelowSeedRowRebuildsFromRestoredRows(t *testing.T) {
 	insertRawUtxo(t, store, 2, 20, 90, "250", true)
 	insertRawUtxo(t, store, 3, 20, 0, "999", false)
 	insertRawUtxo(t, store, 4, 95, 0, "70", true)
-	require.NoError(t, store.RebuildScriptLockedSupply(100, nil))
+	seedSupply(t, store, 100)
 	require.Equal(t, map[int64]int64{100: 470}, supplyRows(t, store))
 
 	require.NoError(t, store.DeleteUtxosAfterSlot(50, nil))

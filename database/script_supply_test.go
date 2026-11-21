@@ -15,7 +15,6 @@
 package database
 
 import (
-	"bytes"
 	"context"
 	"math"
 	"testing"
@@ -104,118 +103,6 @@ func TestTruncateAfterSlotRestoresScriptLockedSupply(t *testing.T) {
 	require.EqualValues(t, 300, scriptSupply(t, db))
 }
 
-// Advancing the consumed-UTxO prune floor drops the supply rows below the
-// base row at the floor.
-func TestConsumedUtxoPruneFloorPrunesScriptLockedSupply(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
-	require.NoError(t, err)
-	for _, u := range []*models.Utxo{
-		supplyTestUtxo(1, 10, 0, 100, true),
-		supplyTestUtxo(2, 20, 0, 200, true),
-		supplyTestUtxo(3, 30, 0, 400, true),
-		supplyTestUtxo(4, 5, 15, 50, false),
-	} {
-		require.NoError(t, db.Metadata().CreateUtxo(nil, u))
-	}
-	count := func() int {
-		var n int
-		raw, err := openMetadataSQLite(dataDir)
-		require.NoError(t, err)
-		defer raw.Close()
-		require.NoError(t, raw.QueryRow(
-			"SELECT COUNT(*) FROM script_locked_supply",
-		).Scan(&n))
-		return n
-	}
-	require.Equal(t, 3, count())
-	pruned, err := db.UtxosDeleteConsumed(context.Background(), 25, 100, nil)
-	require.NoError(t, err)
-	require.Equal(t, 1, pruned)
-	require.Equal(t, 2, count(), "rows at slots 20 and 30 remain")
-	require.EqualValues(t, 700, scriptSupply(t, db))
-}
-
-// A trusted batch raises the prune floor without the periodic sweep, so both
-// of its drop paths have to trim the rows below the base at that floor.
-func TestSpentInBatchPrunesScriptLockedSupply(t *testing.T) {
-	t.Parallel()
-	drops := map[string]func(
-		*Database, []models.UtxoId, uint64, *Txn,
-	) error{
-		"delete rows": (*Database).UtxosDeleteSpentInBatch,
-		"drop blobs":  (*Database).UtxosDropSpentInBatchBlobs,
-	}
-	for name, drop := range drops {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			dataDir := t.TempDir()
-			db, err := newTestDatabase(t, &Config{DataDir: dataDir})
-			require.NoError(t, err)
-			for _, u := range []*models.Utxo{
-				supplyTestUtxo(1, 10, 0, 100, true),
-				supplyTestUtxo(2, 20, 0, 200, true),
-				supplyTestUtxo(3, 30, 0, 400, true),
-			} {
-				require.NoError(t, db.Metadata().CreateUtxo(nil, u))
-			}
-			ids := []models.UtxoId{
-				{Hash: bytes.Repeat([]byte{0x77}, 32), Idx: 0},
-			}
-			txn := db.Transaction(context.Background(), true)
-			require.NoError(t, txn.Do(func(txn *Txn) error {
-				return drop(db, ids, 25, txn)
-			}))
-
-			raw, err := openMetadataSQLite(dataDir)
-			require.NoError(t, err)
-			defer raw.Close()
-			var oldest, rows int
-			require.NoError(t, raw.QueryRow(
-				"SELECT MIN(slot), COUNT(*) FROM script_locked_supply",
-			).Scan(&oldest, &rows))
-			require.Equal(t, 20, oldest, "the base row at the floor stays")
-			require.Equal(t, 2, rows)
-			require.EqualValues(t, 700, scriptSupply(t, db))
-		})
-	}
-}
-
-// RebuildScriptLockedSupply replaces the aggregate with a scan of the live
-// outputs, whatever rows it held before, so it recovers an aggregate that
-// has drifted from the utxo table.
-func TestRebuildScriptLockedSupplyReplacesAggregateWithScan(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
-	require.NoError(t, err)
-	require.NoError(t, db.Metadata().CreateUtxo(
-		nil, supplyTestUtxo(1, 10, 0, 100, true),
-	))
-	require.NoError(t, db.Metadata().CreateUtxo(
-		nil, supplyTestUtxo(2, 20, 0, 50, true),
-	))
-	raw, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	defer raw.Close()
-	_, err = raw.Exec("UPDATE script_locked_supply SET amount = 7")
-	require.NoError(t, err)
-	require.EqualValues(t, 7, scriptSupply(t, db))
-
-	require.NoError(
-		t,
-		db.RebuildScriptLockedSupply(context.Background(), 77, nil),
-	)
-	require.EqualValues(t, 150, scriptSupply(t, db))
-	var slot, rows int64
-	require.NoError(t, raw.QueryRow(
-		"SELECT MIN(slot), COUNT(*) FROM script_locked_supply",
-	).Scan(&slot, &rows))
-	require.EqualValues(t, 77, slot)
-	require.EqualValues(t, 1, rows)
-}
-
 // A recovered consumed input is imported live through ImportUtxos and spent
 // later by the maintained primitives, so the import must credit it or the
 // spend debits lovelace that was never counted.
@@ -300,40 +187,6 @@ func TestImportUtxosClearedSpendRestoresScriptLockedSupply(t *testing.T) {
 	}
 }
 
-// The ledger persists the prune floor before it sweeps, so the sweep finds
-// the floor already at its slot and skips its own floor write; the supply
-// rows below the floor must still be trimmed.
-func TestUtxosDeleteConsumedPrunesSupplyBelowPersistedFloor(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
-	require.NoError(t, err)
-	for _, u := range []*models.Utxo{
-		supplyTestUtxo(1, 10, 0, 100, true),
-		supplyTestUtxo(2, 20, 0, 200, true),
-		supplyTestUtxo(3, 30, 0, 400, true),
-		supplyTestUtxo(4, 5, 15, 50, false),
-	} {
-		require.NoError(t, db.Metadata().CreateUtxo(nil, u))
-	}
-	require.NoError(t, db.SetSyncState(
-		ConsumedUtxoPruneFloorSyncKey, "25", nil,
-	))
-	pruned, err := db.UtxosDeleteConsumed(context.Background(), 25, 100, nil)
-	require.NoError(t, err)
-	require.Equal(t, 1, pruned)
-	raw, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	defer raw.Close()
-	var minSlot, rows int64
-	require.NoError(t, raw.QueryRow(
-		"SELECT MIN(slot), COUNT(*) FROM script_locked_supply",
-	).Scan(&minSlot, &rows))
-	require.EqualValues(t, 20, minSlot, "row at slot 10 is below the base")
-	require.EqualValues(t, 2, rows)
-	require.EqualValues(t, 700, scriptSupply(t, db))
-}
-
 // Contributions are summed per slot before they reach the aggregate, so the
 // sum itself must be range-checked: math.MaxInt64 and 1 would otherwise wrap
 // to a negative delta the aggregate accepts.
@@ -364,21 +217,6 @@ func TestImportUtxosRejectsScriptSupplyOverflow(t *testing.T) {
 				require.ErrorContains(t, err, "out of range")
 				require.EqualValues(t, 0, scriptSupply(t, db))
 			})
-	}
-}
-
-// A caller transaction without a writable metadata handle would let the
-// rebuild commit on its own, outside the caller's rollback.
-func TestRebuildScriptLockedSupplyRejectsWrongTxn(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	for name, txn := range map[string]*Txn{
-		"blob":      db.BlobTxn(true),
-		"read-only": db.MetadataTxn(context.Background(), false),
-	} {
-		err := db.RebuildScriptLockedSupply(context.Background(), 1, txn)
-		require.ErrorIs(t, err, types.ErrTxnWrongType, name)
-		txn.Rollback() //nolint:errcheck
 	}
 }
 
@@ -422,4 +260,47 @@ func TestUtxosDeleteRolledbackRemovesScriptLockedSupply(t *testing.T) {
 		db.Metadata().CreateUtxo(nil, supplyTestUtxo(3, 60, 0, 500, true)),
 	)
 	require.EqualValues(t, 800, scriptSupply(t, db))
+}
+
+// The trim keeps the base row at the floor and drops the rows below it, and
+// refuses a transaction that could commit outside the caller's.
+func TestPruneScriptLockedSupplyBefore(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+	require.NoError(t, err)
+	for _, u := range []*models.Utxo{
+		supplyTestUtxo(1, 10, 0, 100, true),
+		supplyTestUtxo(2, 20, 0, 200, true),
+		supplyTestUtxo(3, 30, 0, 400, true),
+	} {
+		require.NoError(t, db.Metadata().CreateUtxo(nil, u))
+	}
+	require.NoError(t, db.MetadataTxn(context.Background(), true).Do(
+		func(txn *Txn) error {
+			return db.PruneScriptLockedSupplyBefore(25, txn)
+		},
+	))
+	raw, err := openMetadataSQLite(dataDir)
+	require.NoError(t, err)
+	defer raw.Close()
+	var oldest, rows int
+	require.NoError(t, raw.QueryRow(
+		"SELECT MIN(slot), COUNT(*) FROM script_locked_supply",
+	).Scan(&oldest, &rows))
+	require.Equal(t, 20, oldest, "the base row at the floor stays")
+	require.Equal(t, 2, rows)
+	require.EqualValues(t, 700, scriptSupply(t, db))
+
+	for name, txn := range map[string]*Txn{
+		"none":      nil,
+		"blob":      db.BlobTxn(true),
+		"read-only": db.MetadataTxn(context.Background(), false),
+	} {
+		err := db.PruneScriptLockedSupplyBefore(25, txn)
+		require.ErrorIs(t, err, types.ErrTxnWrongType, name)
+		if txn != nil {
+			txn.Rollback() //nolint:errcheck
+		}
+	}
 }
