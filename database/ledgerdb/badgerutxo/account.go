@@ -82,9 +82,10 @@ func accountDrepKey(r AccountRow) []byte {
 }
 
 func accountDrepPrefix(typ uint8, drep []byte) []byte {
-	k := make([]byte, 0, 3+len(drep))
-	k = append(k, AccountDRepTag, typ, byte(len(drep))) //nolint:gosec // a DRep credential
-	return append(k, drep...)
+	return append(
+		[]byte{AccountDRepTag, typ, byte(len(drep))}, //nolint:gosec // a DRep credential
+		drep...,
+	)
 }
 
 // delegatesToPool and delegatesToDrep say which secondary keys r has: an

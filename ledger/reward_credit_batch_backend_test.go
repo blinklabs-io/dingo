@@ -46,7 +46,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -934,8 +933,8 @@ func TestRewardPrecomputeWriteCannotOutliveConcurrentRollback(
 	for _, backend := range backends {
 		t.Run(backend.name, func(t *testing.T) {
 			t.Parallel()
-			db, raw, placeholder := backend.open(t)
-			testRewardPrecomputeWriteRacesRollback(t, db, raw, placeholder)
+			db, _, _ := backend.open(t)
+			testRewardPrecomputeWriteRacesRollback(t, db)
 		})
 	}
 }
@@ -943,9 +942,8 @@ func TestRewardPrecomputeWriteCannotOutliveConcurrentRollback(
 func testRewardPrecomputeWriteRacesRollback(
 	t *testing.T,
 	db *database.Database,
-	raw *sql.DB,
-	dialect string,
 ) {
+	set := OpenLiveSetForTest(t, db)
 	seedRewardPrecomputeTimingInputs(t, db, 6)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -957,7 +955,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           OpenLiveSetForTest(t, db),
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: newRewardCalculationTestNodeConfig(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -965,7 +963,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.metrics.init(prometheus.NewRegistry())
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	epoch, err := db.Metadata().GetEpoch(3, nil)
+	epoch, err := seedDB(t, db).GetEpoch(3, nil)
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
@@ -974,14 +972,8 @@ func testRewardPrecomputeWriteRacesRollback(
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
 	// before the RUPD slot, so its precompute excludes member.
-	seedRewardRaceStakeCert(
-		t, raw, dialect, 21, member, 150,
-		uint(lcommon.CertificateTypeStakeRegistration),
-	)
-	seedRewardRaceStakeCert(
-		t, raw, dialect, 22, member, cutoff-5,
-		uint(lcommon.CertificateTypeStakeDeregistration),
-	)
+	fxStakeCert(t, db, 21, 0, member, 150, true)
+	fxStakeCert(t, db, 22, 0, member, cutoff-5, false)
 	ancestor := chain.RawBlock{
 		Slot: cutoff - 10, Hash: testHashBytes("race-ancestor"),
 		BlockNumber: 1, Type: 1, Cbor: []byte{0x80},
@@ -1005,6 +997,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		BlockNumber: abandoned.BlockNumber,
 	}
 	require.NoError(t, db.SetTip(ls.currentTip, nil))
+	fxJournalChain(t, ls)
 
 	rollbackDone := make(chan error, 1)
 	var hookCalls atomic.Int32
@@ -1040,7 +1033,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	))
 	ls.rewardPrecomputeWG.Wait()
 
-	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	outputs, err := seedDB(t, db).GetRewardAccountOutputs(1, nil)
 	require.NoError(t, err)
 	assert.Empty(t, outputs,
 		"an output from the abandoned chain survived the rollback")
@@ -1077,7 +1070,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
 	}))
 	settleRewardCredits(t, ls)
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -1088,56 +1081,6 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NotNil(t, account)
 	require.Equal(t, wantMember, uint64(account.Reward),
 		"the boundary must credit member from the surviving chain")
-}
-
-func seedRewardRaceStakeCert(
-	t *testing.T,
-	raw *sql.DB,
-	dialect string,
-	id uint,
-	stakingKey []byte,
-	slot uint64,
-	certType uint,
-) {
-	t.Helper()
-	table := `"transaction"`
-	bind := func(n int) string { return fmt.Sprintf("$%d", n) }
-	if dialect == "mysql" {
-		table = "`transaction`"
-		bind = func(int) string { return "?" }
-	} else if dialect == "sqlite" {
-		bind = func(int) string { return "?" }
-	}
-	hash := make([]byte, 32)
-	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	_, err := raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s (id, hash) VALUES (%s, %s)",
-		table, bind(1), bind(2),
-	), id, hash)
-	require.NoError(t, err)
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO applied_transaction (tx_id, slot, block_index) "+
-			"VALUES (%s, %s, 0)",
-		bind(1), bind(2),
-	), id, slot)
-	require.NoError(t, err)
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO certs (id, transaction_id, cert_index, slot, cert_type) "+
-			"VALUES (%s, %s, 0, %s, %s)",
-		bind(1), bind(2), bind(3), bind(4),
-	), id, id, slot, certType)
-	require.NoError(t, err)
-	certTable := "stake_registration"
-	if certType == uint(lcommon.CertificateTypeStakeDeregistration) {
-		certTable = "stake_deregistration"
-	}
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s "+
-			"(id, staking_key, credential_tag, certificate_id, added_slot) "+
-			"VALUES (%s, %s, 0, %s, %s)",
-		certTable, bind(1), bind(2), bind(3), bind(4),
-	), id, stakingKey, id, slot)
-	require.NoError(t, err)
 }
 
 func openSQLiteRewardRaceBackend(
