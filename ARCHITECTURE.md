@@ -1989,6 +1989,7 @@ dingo/
 │   ├── backend.go       # FIFO/DAG backend contract and constructors
 │   ├── dag.go           # Dependency graph and topological ordering
 │   ├── mempool.go       # Shared validation, lifecycle, capacity, providers
+│   ├── selection.go     # Block-production selection order (fee density)
 │   └── consumer.go      # Per-consumer transaction tracking
 ├── ouroboros/            # Ouroboros protocol handlers
 │   ├── ouroboros.go      # N2N and N2C protocol management
@@ -2652,7 +2653,10 @@ context detached from the shutdown deadline, and `Host.Stop` keeps waiting for
 it after the deadline passes, logging the store name and elapsed time at
 start, finish, and periodically while it runs. An overrun is reported as the
 warning `storage close finished after the shutdown deadline`,
-not as an error. Closing a large badger store can take minutes under I/O load
+not as an error. An ordinary provider stopped afterward still receives the
+original context; a successful stop does not turn the durable overrun into a
+shutdown error. Provider errors and cancellation during ordinary teardown remain
+errors. Closing a large badger store can take minutes under I/O load
 because it syncs every table file, and abandoning it risks leaving the store
 needing recovery, as cardano-node always closes its databases fully. `Node.Stop`
 therefore returns after `shutdownTimeout` plus the store close time, and the
@@ -3620,8 +3624,11 @@ and hands the set to the ledger. Before the ledger starts it runs
 `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish a
 pending import into the set, move a released database's SQL UTxO set into the
 set (first reverting such a database `k` blocks below its tip, as the node
-does, with the kept blocks replayed before any is appended), mark a database at origin as set-only, reconcile the set with the ledger,
-and drain the graduated families. While it replays, a goroutine feeds the set
+does, then rebuilding from its SQL history any reward stake inputs a deferred
+write left partial, then moving its SQL UTxO rows into the set), mark a database
+at origin as set-only, reconcile the set with the ledger, and drain the graduated
+families. `LoadWithDB` replays the kept blocks after reconciliation returns and
+before the ledger appends any. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through
 `LedgerState.LedgerDB`. A loaded database is therefore one a node opens with
@@ -3803,7 +3810,11 @@ below).
 `internal/indexer` holds the writer: one goroutine pulls
 canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
 `ChainSource` (`DatabaseSource` over the ledger database), and commits each
-batch's rows, ledger facts and new tip in one transaction. A `FactsSource`
+batch's rows, ledger facts and new tip in one transaction. A batch whose
+blob writes exceed one Badger transaction (`badger.ErrTxnTooBig`) is retried
+at half as many blocks, down to a single block, which fails as an ordinary
+error; each commit doubles the batch back toward its configured size. A
+`FactsSource`
 (`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
 by natural key, and the writer splits a batch at each boundary so a boundary's
 reward credits land between the blocks before and after it. Before each fact
@@ -3889,7 +3900,9 @@ database through one `db()` accessor, Mesh and Midnight read `Node.indexerDB`,
 MCP, off-chain metadata and the token registry take `Node.apiDatabase()` (MCP
 also runs on a core node, where that is the ledger database), and
 Kupo and Blockfrost report the IndexerDB tip (`dataTip`) in latest-block and
-epoch responses and clamp history to it. Block bodies are shared through one
+epoch responses and clamp history to it. Blockfrost's retired and retiring
+pool lists partition retirement epochs using that tip from the same read
+transaction as their pool rows. Block bodies are shared through one
 blob store, so Midnight wraps its database in `NewBoundedDatabase`, which hides
 blocks above the IndexerDB tip. `internal/apiready`
 gates routes on `indexerdb.Store.Ready`: each API classifies its own routes
@@ -8213,16 +8226,19 @@ registrations, retirements (`GetRetiringPoolsAtSlot`) and deposits
 containing it. Reward provenance (`GetRewardProvenance`) answers the constant
 cardano-node sends, the ledger's zero-valued provenance with every scalar zero,
 both rationals 0/1 and every map empty, whatever the point. Non-myopic member
-rewards (`GetNonMyopicMemberRewards`), reward info (`GetRewardInfoPools`) and
-the debug epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) are not
-answered. The first two rank pools by a performance estimate the ledger derives
-from a decayed per-pool likelihood history carried across epoch boundaries (100
-single-precision log weights per pool) and report the reward pot of the last
-boundary; neither is tracked, and an estimate computed from a partial history
-would rank pools wrongly, so the query fails rather than answer. The debug
-queries return the whole epoch or new-epoch state in the ledger's encoding,
-which is not held in that form. Each fails with `ErrQueryNotAnswered`, which
-names the query and what is missing. The LocalStateQuery state machine has no
+rewards (`GetNonMyopicMemberRewards`) and reward info (`GetRewardInfoPools`)
+use the current stake and pool parameters at the acquired point together with
+the last installed reward-boundary state. That state retains the reward pot and
+each active pool's decayed 100-sample single-precision log-likelihood history;
+rollback removes states installed above the rollback point, and a Mithril
+import seeds the history carried by its `EpochState`. The member query follows
+the reference top-pool desirability, non-myopic stake, pledge, cost, margin and
+performance calculations for both coin and credential inputs. The debug
+epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) remain deliberately
+unanswered: they return the whole epoch or new-epoch state in the ledger's
+encoding, which Dingo does not hold in that form. Each fails with
+`ErrQueryNotAnswered`, which names the query and what is missing. The
+LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
 it at warn level with that reason. At node-to-client versions 21 to 23 the
@@ -12255,6 +12271,20 @@ therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+`plugins.mempool.config.selection` sets the order in which block production is
+offered pending transactions, for either provider. The default, `admission`,
+uses the order above. `feeDensity` offers first the transaction paying the
+most fee per serialized CBOR byte among those whose pending parents are
+already placed; equal densities keep admission order. A transaction that
+spends, references, or pledges as collateral the output of another pending
+transaction always follows it, because the block builder validates each
+transaction against the outputs of those selected before it. A high-fee child
+therefore waits for a low-fee parent: parents are not promoted for their
+children's fees. The policy applies only where forging reads the pool through
+`BlockCandidates`. Admission, capacity, eviction, TxSubmission relay, and the
+order `Transactions` reports to LocalTxMonitor and the APIs are unchanged, and
+no transaction is replaced or evicted for paying less.
 
 Pending-transaction overlays in both mempool validation and forging apply the
 consensus UTxO outcome exposed by `Transaction.Consumed()` and

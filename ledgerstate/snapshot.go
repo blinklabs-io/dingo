@@ -694,6 +694,7 @@ func parseCurrentEra(
 		UTxOData:      utxoState[0], // The UTxO map
 		CertStateData: ls[0],        // [VState, PState, DState]
 		SnapShotsData: es[2],        // mark/set/go
+		NonMyopicData: es[3],        // pool likelihoods and reward pot
 		BlocksPrev:    blocksPrev,
 		BlocksCur:     blocksCur,
 	}

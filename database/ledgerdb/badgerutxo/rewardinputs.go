@@ -30,6 +30,8 @@ import (
 //	J <epoch> <pool:28>                           one pool's inputs
 //	S <epoch> 0 <type>                            a snapshot's header
 //	S <epoch> 1 <type>                            an imported basis failure
+//	S <epoch> 2                                   the epoch's stake inputs
+//	                                              are still being written
 //	A <epoch>                                     the epoch's ADA pots
 //
 // The stake rows of an epoch are written under a range tombstone and carry
@@ -41,6 +43,10 @@ const (
 	// S row.
 	RewardSnapshotHeader  byte = 0
 	RewardSnapshotFailure byte = 1
+	// RewardSnapshotPending is the kind byte of an S row that marks the
+	// epoch's stake rows as only partly written. Its value is the boundary
+	// slot of the snapshot, 8 bytes BE.
+	RewardSnapshotPending byte = 2
 
 	// RewardHashLen is the length of a pool key hash and of a stake
 	// credential in a reward input key.
@@ -123,6 +129,12 @@ func DecodeRewardPoolInputKey(k []byte) (uint64, []byte, error) {
 // RewardSnapshotKey keys the snapshot header or failure of epoch and type.
 func RewardSnapshotKey(epoch uint64, kind byte, typ string) []byte {
 	return append(append(RewardSnapshotEpochPrefix(epoch), kind), typ...)
+}
+
+// RewardStakePendingKey keys the marker that the stake rows of epoch are
+// incomplete.
+func RewardStakePendingKey(epoch uint64) []byte {
+	return RewardSnapshotKey(epoch, RewardSnapshotPending, "")
 }
 
 // DecodeRewardSnapshotKey splits an S row key.

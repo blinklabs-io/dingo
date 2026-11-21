@@ -33,11 +33,6 @@ func queryNotAnswered(name, missing string) error {
 }
 
 const (
-	// missingPoolPerformance is what GetNonMyopicMemberRewards and
-	// GetRewardInfoPools both rank pools by.
-	missingPoolPerformance = "each pool's performance estimate, derived from a " +
-		"per-pool likelihood history and the reward pot of the last epoch " +
-		"boundary, neither of which is tracked"
 	// missingEpochState is the whole ledger state the debug queries return.
 	missingEpochState = "the whole epoch state in the ledger's encoding, " +
 		"which is not held in that form"

@@ -1025,3 +1025,64 @@ func TestHostStopWaitsForInFlightDurableStopCapability(t *testing.T) {
 	require.NoError(t, testutil.RequireReceive(t, capDone, 5*time.Second, "StopCapability did not return"))
 	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second, "Host.Stop did not return"))
 }
+
+func TestHostStopAccountsForCancellationAcrossDurableClose(t *testing.T) {
+	t.Parallel()
+	stopErr := errors.New("provider stop failed")
+	for _, tc := range []struct {
+		name                             string
+		durableFirst                     bool
+		ordinaryErr, durableErr, wantErr error
+		wantCancellation                 bool
+	}{
+		{name: "successful ordinary stop after durable close", durableFirst: true},
+		{name: "ordinary error after durable close", durableFirst: true, ordinaryErr: stopErr, wantErr: stopErr},
+		{name: "ordinary cancellation error after durable close", durableFirst: true, ordinaryErr: context.Canceled, wantErr: context.Canceled, wantCancellation: true},
+		{name: "ordinary stop consumes cancellation", wantErr: context.Canceled, wantCancellation: true},
+		{name: "ordinary error before durable close", ordinaryErr: stopErr, wantErr: stopErr, wantCancellation: true},
+		{name: "durable close error", durableFirst: true, durableErr: stopErr, wantErr: stopErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			host := NewHost()
+			host.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var ordinaryCanceled, ordinaryContextPreserved, durableCanceled atomic.Bool
+			registerOrdinary := func() {
+				registerStopFuncProvider(t, host, Descriptor{Capability: CapabilityMempool, Name: "consumer"}, func(stopCtx context.Context) error {
+					ordinaryCanceled.Store(stopCtx.Err() != nil)
+					ordinaryContextPreserved.Store(stopCtx == ctx)
+					if !tc.durableFirst {
+						cancel()
+					}
+					return tc.ordinaryErr
+				})
+			}
+			registerDurable := func() {
+				registerStopFuncProvider(t, host, Descriptor{Capability: CapabilityStorageBlob, Name: "store", DurableClose: true}, func(stopCtx context.Context) error {
+					cancel()
+					durableCanceled.Store(stopCtx.Err() != nil)
+					return tc.durableErr
+				})
+			}
+			if tc.durableFirst {
+				registerOrdinary()
+				registerDurable()
+			} else {
+				registerDurable()
+				registerOrdinary()
+			}
+			err := host.Stop(ctx)
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
+			require.Equal(t, tc.wantCancellation, errors.Is(err, context.Canceled))
+			require.True(t, ordinaryContextPreserved.Load(), "ordinary provider must retain the caller context")
+			require.Equal(t, tc.durableFirst, ordinaryCanceled.Load())
+			require.False(t, durableCanceled.Load(), "durable close must finish without cancellation")
+		})
+	}
+}
