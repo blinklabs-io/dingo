@@ -87,10 +87,11 @@ type ObserverConfig struct {
 	// on the first tool error, local cache error or non-pass parity result,
 	// except an epoch whose only significant mismatches are reference_lag:
 	// Koios's own data had not caught up, so that result is logged and
-	// recorded but never triggers FatalFunc (see Observer.fail). A Koios
-	// request that fails because Koios is unavailable is likewise retried
-	// rather than fatal, up to UnavailableRetryLimit consecutive attempts
-	// (see Observer.reportFetchError). When
+	// recorded but never triggers FatalFunc (see Observer.fail), and so is
+	// a fetch that fails on Koios's daily quota. A Koios request that fails
+	// because Koios is unavailable is likewise retried rather than fatal, up
+	// to UnavailableRetryLimit consecutive attempts (see
+	// Observer.reportFetchError). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -1036,13 +1037,22 @@ func (o *Observer) reportError(
 // is fatal in strict mode, so a lasting outage cannot leave strict mode
 // checking nothing. Every other failure, including any local cache or database
 // error and a permanent Koios error, stays fatal in strict mode, and so does
-// an unavailable Koios when the retry itself cannot be recorded.
+// an unavailable Koios when the retry itself cannot be recorded. Daily-quota
+// exhaustion is reported as reportError reports it, never fatal while its
+// retry persists, and never counts toward the limit.
 func (o *Observer) reportFetchError(
 	epoch uint64,
 	accountsChecked bool,
 	err error,
 ) {
 	err = fmt.Errorf("fetch koios reference: %w", err)
+	if errors.Is(err, ErrKoiosQuotaExceeded) {
+		// Koios answered, so the outage count resets. The quota clears on
+		// Koios's daily reset and is never fatal while its retry persists.
+		o.endKoiosOutage(epoch, accountsChecked)
+		o.reportError(epoch, accountsChecked, err)
+		return
+	}
 	if !koiosUnavailable(err) {
 		o.endKoiosOutage(epoch, accountsChecked)
 		o.reportErrorFatal(epoch, accountsChecked, err, true)
@@ -1103,7 +1113,7 @@ func (o *Observer) endKoiosOutage(epoch uint64, accounts bool) {
 
 // koiosUnavailable reports whether err is a failed Koios request that a later
 // fetch can succeed at: a transport error, timeout or 5xx that outlasted the
-// client's own retries, an exhausted 408 budget, or daily-quota exhaustion.
+// client's own retries, or an exhausted 408 budget.
 // Any other ErrKoiosPermanent failure (auth, bad request, oversized response)
 // is excluded because retrying it cannot succeed.
 func koiosUnavailable(err error) bool {
@@ -1695,7 +1705,8 @@ func (o *Observer) fetchAccountsIfNeeded(
 // unless the epoch's retry could not be persisted (see reportErrorFatal) or
 // the check has reached UnavailableRetryLimit consecutive such failures.
 // Every other non-pass result, including dingo_db_missing and dingo_db_error,
-// and every reportError call stays fatal in strict mode.
+// and every reportError call other than Koios quota exhaustion stays fatal in
+// strict mode.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an

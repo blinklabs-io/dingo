@@ -119,16 +119,18 @@ type KoiosParityConfig struct {
 	APIKey string
 	// Strict stops/cancels the node on the first tool error, local cache
 	// error or non-pass parity result, rather than logging it and continuing
-	// normal operation. Two failures are logged, recorded and retried but
-	// never stop the node: an epoch whose only significant mismatches are
-	// reference_lag (Koios's data has not caught up yet), and a Koios
-	// request that failed because Koios is unavailable (a transport error,
-	// timeout, 5xx, exhausted 408 budget or daily-quota exhaustion), up to
-	// UnavailableRetryLimit consecutive attempts.
+	// normal operation. Three failures are logged, recorded and retried
+	// instead: an epoch whose only significant mismatches are reference_lag
+	// (Koios's data has not caught up yet) and a fetch that fails on Koios's
+	// daily quota never stop the node, and a Koios request that failed
+	// because Koios is unavailable (a transport error, timeout, 5xx or
+	// exhausted 408 budget) stops it only after UnavailableRetryLimit
+	// consecutive attempts.
 	Strict bool
 	// UnavailableRetryLimit bounds how many consecutive attempts at one
 	// epoch's check may fail because Koios is unavailable (a transport
-	// error, timeout, 5xx, exhausted 408 budget or daily-quota exhaustion).
+	// error, timeout, 5xx or exhausted 408 budget; daily-quota exhaustion
+	// never counts).
 	// In strict mode the attempt that reaches it stops the node; in
 	// non-strict mode it is logged at ERROR and the check keeps retrying. A
 	// Koios answer, including one that is still reference lag, resets the

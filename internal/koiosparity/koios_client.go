@@ -396,10 +396,11 @@ var ErrKoiosPermanent = errors.New("koios: permanent error")
 // apart from a failure of the node's own storage.
 var errKoiosRequest = errors.New("koios request failed")
 
-// errKoiosUnavailable marks the two ErrKoiosPermanent failures that mean Koios
-// cannot serve right now rather than that the request is wrong: daily-quota
-// exhaustion and an exhausted 408 budget. Both are permanent only so the
-// caller stops retrying within this fetch; a later fetch can succeed.
+// errKoiosUnavailable marks an exhausted 408 budget: an ErrKoiosPermanent
+// failure that means Koios cannot serve right now rather than that the request
+// is wrong. It is permanent only so the caller stops retrying within this
+// fetch; a later fetch can succeed. ErrKoiosQuotaExceeded is the other such
+// failure and is identified by its own sentinel.
 var errKoiosUnavailable = errors.New("koios unavailable")
 
 // koiosMarkedError adds mark to err's errors.Is matches without changing its
@@ -1145,15 +1146,12 @@ func (k *KoiosClient) getAttempts(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, markKoiosError(
-					fmt.Errorf(
-						"%w: koios daily tier quota exceeded on %s: %s (%s)",
-						ErrKoiosQuotaExceeded,
-						path,
-						bodyStr,
-						hint,
-					),
-					errKoiosUnavailable,
+				return nil, fmt.Errorf(
+					"%w: koios daily tier quota exceeded on %s: %s (%s)",
+					ErrKoiosQuotaExceeded,
+					path,
+					bodyStr,
+					hint,
 				)
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
@@ -1367,15 +1365,12 @@ func (k *KoiosClient) postAttempts(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, markKoiosError(
-					fmt.Errorf(
-						"%w: koios daily tier quota exceeded on %s: %s (%s)",
-						ErrKoiosQuotaExceeded,
-						path,
-						bodyStr,
-						hint,
-					),
-					errKoiosUnavailable,
+				return nil, fmt.Errorf(
+					"%w: koios daily tier quota exceeded on %s: %s (%s)",
+					ErrKoiosQuotaExceeded,
+					path,
+					bodyStr,
+					hint,
 				)
 			}
 			if err := retryOrFail(otherAttempt, retryAfterDelay(resp),

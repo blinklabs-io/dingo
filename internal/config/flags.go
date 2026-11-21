@@ -660,7 +660,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first tool error, local cache error or non-pass parity result (a reference_lag-only result never stops the node; an unavailable Koios stops it only after --koios-parity-unavailable-retry-limit consecutive attempts)",
+		"stop/cancel the node on the first tool error, local cache error or non-pass parity result (a reference_lag-only result or a Koios daily quota error never stops the node; an unavailable Koios stops it only after --koios-parity-unavailable-retry-limit consecutive attempts)",
 	),
 	intFlag(
 		"KoiosParity.UnavailableRetryLimit",

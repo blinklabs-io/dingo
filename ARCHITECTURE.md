@@ -19080,51 +19080,50 @@ second sync:
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
     and stops processing the rest of the current batch. Every tool error
     (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`). A failed
-    reference fetch (`reportFetchError`) is classified by provenance, since
-    the fetch both requests Koios and reads and writes the local cache. Only
-    a Koios request that failed because Koios is unavailable
-    (`koiosUnavailable`) is not fatal-eligible: a transport error, timeout
-    or 5xx that outlasted the client's own retries, an exhausted 408 budget,
-    or daily-quota exhaustion. `get` and `post` mark every error they return
-    with `errKoiosRequest`, and the last two also with `errKoiosUnavailable`.
-    An unreachable reference says nothing about whether Dingo's state agrees
-    with it, so the error is persisted and the epoch is retried, but the node
-    keeps running until the outage outlasts `UnavailableRetryLimit`
-    (`koiosParity.unavailableRetryLimit`). Each check (one epoch on one queue)
-    counts its consecutive unavailable attempts in memory, and any attempt
-    that gets an answer from Koios, reference lag included, resets the count.
-    The attempt that reaches the limit is fatal-eligible, with an error naming
-    the attempt count and the elapsed time, so a lasting outage cannot leave
-    strict mode checking nothing while blocks apply. In non-strict mode it is
-    logged at ERROR and the check stays queued for retry, like every other
-    non-strict failure. `runQueue` re-runs a failed check on the first
-    `ErrorRetryDelay` tick at or after its due time, which is one
-    `ErrorRetryDelay` after the attempt ended, so consecutive attempts start at
-    least two ticks (ten minutes by default) apart and the default limit of
-    144 spans at least about 24 hours; an attempt that waits out the client's
-    own retries (up to an hour for an exhausted 408 budget) stretches it. The
-    count is not persisted, so a restart starts it again. A local cache or database error during the fetch, any
-    other `ErrKoiosPermanent` failure (a 401, 403, 400, 404 or 422 status,
-    an oversized response) and a response that fails to decode stay fatal-eligible, and a
-    failure to persist the retry (`RecordObserverError`) makes any reported
-    error fatal-eligible, because a non-fatal failure relies on that retry
-    surviving a restart. The one
-    non-pass result that is not fatal-eligible is a result whose significant
-    mismatches are all
-    `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
+    from either queue (`processEpoch` and `processAccountEpoch`), except
+    for the cases below. A result whose significant mismatches are all
+    `reference_lag` (`referenceLagOnly`) means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
-    never stops either queue. A fetch that fails on Koios's daily tier quota
+    never stops either queue. A failure on Koios's daily tier quota
     (`ErrKoiosQuotaExceeded`, which wraps `ErrKoiosPermanent`) says nothing
-    about the chain and clears on Koios's daily reset, so `reportError`
-    records the epoch as ERROR without calling `FatalFunc`, and the queue
-    retries it every `ErrorRetryDelay` until the quota resets. If that ERROR
-    row cannot be persisted, the failure stays fatal. That covers the
+    about the chain and clears on Koios's daily reset, so the epoch is
+    recorded as ERROR without calling `FatalFunc` and the queue retries it
+    every `ErrorRetryDelay` until the quota resets. That covers the
     `/tx_info` sample too: `fetchTransactionsIfNeeded` returns a quota error
     rather than swallowing it, since an uncached sampled transaction would
-    otherwise be checked as a fatal `dingo_db_missing`. The other ERROR-severity
-    categories stay fatal: `dingo_db_missing` past the grace window,
+    otherwise be checked as a fatal `dingo_db_missing`. Any other failed
+    reference fetch (`reportFetchError`) is classified by provenance, since
+    the fetch both requests Koios and reads and writes the local cache. `get`
+    and `post` mark every error they return with `errKoiosRequest`, and an
+    exhausted 408 budget also with `errKoiosUnavailable`. A Koios request
+    that failed because Koios is unavailable (`koiosUnavailable`: a
+    transport error, timeout or 5xx that outlasted the client's own retries,
+    or an exhausted 408 budget) is not fatal-eligible at first: an
+    unreachable reference says nothing about whether Dingo's state agrees
+    with it, so the error is persisted and the epoch is retried, but only
+    until the outage outlasts `UnavailableRetryLimit`
+    (`koiosParity.unavailableRetryLimit`). Each check (one epoch on one queue)
+    counts its consecutive unavailable attempts in memory, and any attempt
+    that gets an answer from Koios, reference lag and quota exhaustion
+    included, resets the count. The attempt that reaches the limit is
+    fatal-eligible, with an error naming the attempt count and the elapsed
+    time, so a lasting outage cannot leave strict mode checking nothing while
+    blocks apply. In non-strict mode it is logged at ERROR and the check stays
+    queued for retry, like every other non-strict failure. `runQueue` re-runs
+    a failed check on the first `ErrorRetryDelay` tick at or after its due
+    time, which is one `ErrorRetryDelay` after the attempt ended, so
+    consecutive attempts start at least two ticks (ten minutes by default)
+    apart and the default limit of 144 spans at least about 24 hours; an
+    attempt that waits out the client's own retries (up to an hour for an
+    exhausted 408 budget) stretches it. The count is not persisted, so a
+    restart starts it again. A local cache or database error during the
+    fetch, any other `ErrKoiosPermanent` failure (a 401, 403, 400, 404 or 422
+    status, an oversized response) and a response that fails to decode stay
+    fatal-eligible. A failure to persist the retry (`RecordObserverError`)
+    makes any reported error fatal-eligible, quota and unavailability
+    included, because a non-fatal failure relies on that retry surviving a
+    restart. The remaining ERROR-severity categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
     the reference set is unusable, and `reward_type_unmodeled` means a Koios
     reward type was never validated, which strict mode exists to surface.
