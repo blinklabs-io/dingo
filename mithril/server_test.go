@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -373,7 +374,7 @@ func TestServerSnapshotBootstrapsThroughClient(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, f.artifact.Hash, result.Snapshot.Digest)
-	for num := range 3 {
+	for num := range 2 {
 		for _, ext := range immutableFileExtensions {
 			name := itoa5(num) + "." + ext
 			got, err := os.ReadFile( //nolint:gosec // test temp dir
@@ -384,6 +385,14 @@ func TestServerSnapshotBootstrapsThroughClient(t *testing.T) {
 				t, []byte("immutable-"+name+"-data"), got, name,
 			)
 		}
+	}
+	for _, ext := range immutableFileExtensions {
+		name := "00002." + ext
+		got, err := os.ReadFile( //nolint:gosec // test temp dir
+			filepath.Join(result.AncillaryDir, "immutable", name),
+		)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("immutable-"+name+"-data"), got, name)
 	}
 	_, err = os.Stat(
 		filepath.Join(result.AncillaryDir, "ledger", "100", "state"),
@@ -405,6 +414,13 @@ func newSyncableDB(t *testing.T) string {
 		require.NoError(t, os.MkdirAll(
 			filepath.Join(db, filepath.Dir(name)), 0o750,
 		))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(db, name), content, 0o640,
+		))
+	}
+	unfinished, _ := validImmutableChunk(t, 1001, 0, common.Blake2b256{})
+	for name, content := range unfinished {
+		name = strings.Replace(name, "00000", "00001", 1)
 		require.NoError(t, os.WriteFile(
 			filepath.Join(db, name), content, 0o640,
 		))

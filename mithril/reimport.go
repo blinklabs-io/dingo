@@ -393,12 +393,7 @@ func clearReimportMarks(db *database.Database) error {
 }
 
 func setMithrilLedgerAnchor(db *database.Database, point ocommon.Point) error {
-	if err := db.SetSyncState(
-		mithrilLedgerSlotSyncKey, strconv.FormatUint(point.Slot, 10), nil,
-	); err != nil {
-		return fmt.Errorf("recording the Mithril ledger slot: %w", err)
-	}
-	return db.SetSyncState(mithrilLedgerHashSyncKey, hex.EncodeToString(point.Hash), nil)
+	return db.SetImportedLedgerStateBoundary(point, nil)
 }
 
 // mithrilLedgerAnchor reads the stable ledger point a Mithril import recorded.

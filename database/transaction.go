@@ -41,6 +41,8 @@ import (
 // because the database package cannot depend on ledger, which depends on it.
 const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
 
+const importedLedgerStateHashSyncKey = "mithril_ledger_hash"
+
 type metadataOnlyTransaction struct {
 	lcommon.Transaction
 }
@@ -111,6 +113,14 @@ func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 	return slot
 }
 
+// ImportedLedgerStateBoundarySlot returns the boundary of ledger state loaded
+// without replaying the blocks below it. The persisted key keeps its legacy
+// Mithril name for database compatibility, but the boundary applies to every
+// ledger-state loader.
+func (d *Database) ImportedLedgerStateBoundarySlot(txn *Txn) uint64 {
+	return d.MithrilTrustBoundarySlot(txn)
+}
+
 // MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
 // the underlying read error instead of swallowing it as "no boundary
 // recorded" — for a caller that must fail closed (refuse the operation)
@@ -145,6 +155,44 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 		return 0, nil
 	}
 	return parseMithrilTrustBoundary(val)
+}
+
+// ImportedLedgerStateBoundarySlotStrict is the fail-closed form of
+// ImportedLedgerStateBoundarySlot.
+func (d *Database) ImportedLedgerStateBoundarySlotStrict(
+	txn *Txn,
+) (uint64, error) {
+	return d.MithrilTrustBoundarySlotStrict(txn)
+}
+
+// SetImportedLedgerStateBoundary records the point at which a ledger state was
+// loaded without replaying earlier blocks. All ledger-state loaders use this
+// boundary; the storage keys retain their legacy names for compatibility.
+func (d *Database) SetImportedLedgerStateBoundary(
+	point ocommon.Point,
+	txn *Txn,
+) error {
+	if err := d.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(point.Slot, 10),
+		txn,
+	); err != nil {
+		return fmt.Errorf("record imported ledger-state slot: %w", err)
+	}
+	if len(point.Hash) == 0 {
+		if err := d.DeleteSyncState(importedLedgerStateHashSyncKey, txn); err != nil {
+			return fmt.Errorf("clear imported ledger-state hash: %w", err)
+		}
+		return nil
+	}
+	if err := d.SetSyncState(
+		importedLedgerStateHashSyncKey,
+		hex.EncodeToString(point.Hash),
+		txn,
+	); err != nil {
+		return fmt.Errorf("record imported ledger-state hash: %w", err)
+	}
+	return nil
 }
 
 // mithrilTrustBoundarySlot is MithrilTrustBoundarySlotStrict without the
@@ -708,7 +756,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		// The boundary is relevant only when a producer is actually missing.
 		// Keep it local to this transaction's recovery, never a cross-txn memo.
 		if !boundaryRead {
-			mithrilBoundarySlot = d.MithrilTrustBoundarySlot(txn)
+			mithrilBoundarySlot = d.ImportedLedgerStateBoundarySlot(txn)
 			boundaryRead = true
 		}
 		// For a validated block past the Mithril trust boundary, recover a

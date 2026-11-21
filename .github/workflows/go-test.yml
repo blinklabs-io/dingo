@@ -146,6 +146,11 @@ jobs:
       - name: golangci-lint (root)
         if: steps.detect.outputs.run-ci == 'true'
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      - name: golangci-lint (sdk)
+        if: steps.detect.outputs.run-ci == 'true'
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+        with:
+          working-directory: sdk
       # Unpinned like golangci-lint above, so a new analyzer release's findings
       # are fixed when it lands. Both run through the Makefile so this job and
       # `make lint` use the same build tags, flags, and package set.
@@ -209,6 +214,11 @@ jobs:
         # commit.
         if: steps.detect.outputs.run-ci == 'true'
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      # The root ./... stops at sdk/go.mod.
+      - name: go-test (sdk)
+        if: steps.detect.outputs.run-ci == 'true'
+        working-directory: sdk
+        run: go test -timeout 5m ./...
       - name: runner-probe-end
         if: always()
         run: python3 .github/scripts/runner-probe.py end
@@ -318,6 +328,9 @@ jobs:
           go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race
           -gcflags='modernc.org/...=-d=checkptr=0'
           -timeout 60m ./...
+      - name: go-test-race (sdk)
+        working-directory: sdk
+        run: go test -v -race -timeout 10m ./...
       - name: runner-probe-end
         if: always()
         run: python3 .github/scripts/runner-probe.py end

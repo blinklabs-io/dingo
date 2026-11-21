@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -125,36 +124,9 @@ func updateMithrilReadyState(
 				return fmt.Errorf("cleaning up sync state %q: %w", key, err)
 			}
 		}
-		if err := db.SetSyncState(
-			mithrilLedgerSlotSyncKey,
-			strconv.FormatUint(ledgerStateSlot, 10),
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"recording mithril ledger slot: %w", err,
-			)
-		}
-		if len(ledgerStateHash) > 0 {
-			if err := db.SetSyncState(
-				mithrilLedgerHashSyncKey,
-				hex.EncodeToString(ledgerStateHash),
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"recording mithril ledger hash: %w",
-					err,
-				)
-			}
-		} else if err := db.DeleteSyncState(
-			mithrilLedgerHashSyncKey,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"clearing mithril ledger hash: %w",
-				err,
-			)
-		}
-		return nil
+		return db.SetImportedLedgerStateBoundary(
+			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash), txn,
+		)
 	}); err != nil {
 		return err
 	}
