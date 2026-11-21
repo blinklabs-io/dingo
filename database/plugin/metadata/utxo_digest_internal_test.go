@@ -65,3 +65,62 @@ func TestCanonicalOutputCborIdempotent(t *testing.T) {
 		require.Equal(t, raw, canonicalOutputCbor(raw), name)
 	}
 }
+
+// TestCanonicalOutputCborTrailingBytes checks that an output followed by
+// bytes past its CBOR item, at the top level or inside a reference script's
+// tag 24 wrapper, is hashed as stored rather than canonicalised to the clean
+// output's bytes, so a corrupt stored output still digests differently.
+func TestCanonicalOutputCborTrailingBytes(t *testing.T) {
+	t.Parallel()
+	mustHex := func(h string) []byte {
+		b, err := hex.DecodeString(h)
+		require.NoError(t, err)
+		return b
+	}
+	outputs := map[string][]byte{
+		"imported": mustHex(
+			"a200581d60ef0f4519a2c1856d9486bec2f938cad9dab5145c50449fa2cd7fbcd1011a00117e5c",
+		),
+		"legacy": mustHex(
+			"82581d60ef0f4519a2c1856d9486bec2f938cad9dab5145c50449fa2cd7fbcd1821a00117e5ca1581cf6f49b186751e61f1fb8c64e7504e771f968cea9f4d11f5222b169e3a14674484f534b5900",
+		),
+		// {0: h'01', 1: 1, 3: #6.24(h'82004100')}
+		"script ref": mustHex("a300410101010" + "3d818448200" + "4100"),
+	}
+	suffixes := map[string][]byte{
+		"break byte":    {0xff},
+		"complete item": {0x00},
+		"second output": outputs["imported"],
+	}
+	for name, clean := range outputs {
+		want := canonicalOutputCbor(clean)
+		for sname, suffix := range suffixes {
+			dirty := append(append([]byte{}, clean...), suffix...)
+			got := canonicalOutputCbor(dirty)
+			require.Equal(t, dirty, got, "%s + %s", name, sname)
+			require.NotEqual(t, want, got, "%s + %s", name, sname)
+		}
+	}
+	for name, dirty := range map[string][]byte{
+		// The tag 24 content [0, h'00'] followed by 0x00.
+		"script ref content": mustHex("a3004101010103d81845820041" + "0000"),
+		// The tag 24 content [0, h'00'] followed by 0xff.
+		"script ref content break": mustHex(
+			"a3004101010103d81845820041" + "00ff",
+		),
+	} {
+		require.Equal(t, dirty, canonicalOutputCbor(dirty), name)
+		require.NotEqual(
+			t,
+			canonicalOutputCbor(outputs["script ref"]),
+			canonicalOutputCbor(dirty),
+			name,
+		)
+	}
+	// An inline datum's bytes are kept, so bytes past the datum item inside
+	// its tag 24 wrapper survive canonicalisation.
+	// {0: h'01', 1: 1, 2: [1, #6.24(h'00')]} with and without a trailing 0x00.
+	inline := canonicalOutputCbor(mustHex("a30041010101028201d8184100"))
+	padded := canonicalOutputCbor(mustHex("a30041010101028201d818420000"))
+	require.NotEqual(t, inline, padded)
+}

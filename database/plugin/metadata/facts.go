@@ -610,8 +610,10 @@ func (d *UtxoDigester) Add(
 // script's own bytes. An output created as the legacy array [address, value]
 // or [address, value, datum hash] keeps the array in its block, and a block
 // keeps its own ordering and heads, so the same output would otherwise digest
-// differently from its imported copy. The result is a fixed point of this function. Anything that
-// does not decode as such an output is returned unchanged.
+// differently from its imported copy. The result is a fixed point of this
+// function. Anything that does not decode as such an output, including an
+// output or a reference script followed by bytes past its CBOR item, is
+// returned unchanged.
 func canonicalOutputCbor(raw []byte) []byte {
 	if len(raw) == 0 {
 		return raw
@@ -624,7 +626,7 @@ func canonicalOutputCbor(raw []byte) []byte {
 			return raw
 		}
 	case 5:
-		if _, err := cbor.Decode(raw, &fields); err != nil {
+		if err := decodeWhole(raw, &fields); err != nil {
 			return raw
 		}
 	default:
@@ -665,7 +667,7 @@ func canonicalOutputCbor(raw []byte) []byte {
 // and as one definite-length string.
 func canonicalBytesCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
 	var b []byte
-	if _, err := cbor.Decode(raw, &b); err != nil {
+	if err := decodeWhole(raw, &b); err != nil {
 		return nil, false
 	}
 	out, err := cbor.Encode(b)
@@ -678,7 +680,7 @@ func tag24Content(raw cbor.RawMessage) ([]byte, bool) {
 		return nil, false
 	}
 	var b []byte
-	if _, err := cbor.Decode(raw[2:], &b); err != nil {
+	if err := decodeWhole(raw[2:], &b); err != nil {
 		return nil, false
 	}
 	return b, true
@@ -689,18 +691,18 @@ func tag24Content(raw cbor.RawMessage) ([]byte, bool) {
 // encodeMempackTxOut). The inline datum's own bytes are kept.
 func canonicalDatumCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
 	var pair []cbor.RawMessage
-	if _, err := cbor.Decode(raw, &pair); err != nil || len(pair) != 2 {
+	if err := decodeWhole(raw, &pair); err != nil || len(pair) != 2 {
 		return nil, false
 	}
 	var kind uint64
-	if _, err := cbor.Decode(pair[0], &kind); err != nil {
+	if err := decodeWhole(pair[0], &kind); err != nil {
 		return nil, false
 	}
 	var item any
 	switch kind {
 	case 0:
 		var hash []byte
-		if _, err := cbor.Decode(pair[1], &hash); err != nil {
+		if err := decodeWhole(pair[1], &hash); err != nil {
 			return nil, false
 		}
 		item = hash
@@ -727,11 +729,11 @@ func canonicalScriptRefCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
 		return nil, false
 	}
 	var pair []cbor.RawMessage
-	if _, err := cbor.Decode(inner, &pair); err != nil || len(pair) != 2 {
+	if err := decodeWhole(inner, &pair); err != nil || len(pair) != 2 {
 		return nil, false
 	}
 	var typ uint64
-	if _, err := cbor.Decode(pair[0], &typ); err != nil || typ > 3 {
+	if err := decodeWhole(pair[0], &typ); err != nil || typ > 3 {
 		return nil, false
 	}
 	script := pair[1]
@@ -752,7 +754,7 @@ func canonicalScriptRefCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
 // form.
 func legacyOutputFields(raw []byte) (map[uint64]cbor.RawMessage, bool) {
 	var items []cbor.RawMessage
-	if _, err := cbor.Decode(raw, &items); err != nil {
+	if err := decodeWhole(raw, &items); err != nil {
 		return nil, false
 	}
 	if len(items) < 2 || len(items) > 3 {
@@ -771,7 +773,7 @@ func legacyOutputFields(raw []byte) (map[uint64]cbor.RawMessage, bool) {
 	fields := map[uint64]cbor.RawMessage{0: addr, 1: items[1]}
 	if len(items) == 3 {
 		var dh []byte
-		if _, err := cbor.Decode(items[2], &dh); err != nil {
+		if err := decodeWhole(items[2], &dh); err != nil {
 			return nil, false
 		}
 		dat, err := cbor.Encode([]any{uint64(0), dh})
@@ -798,18 +800,18 @@ func canonicalValueCbor(raw []byte) (cbor.RawMessage, bool) {
 	var assets map[cbor.ByteString]map[cbor.ByteString]uint64
 	switch raw[0] >> 5 {
 	case 0:
-		if _, err := cbor.Decode(raw, &coin); err != nil {
+		if err := decodeWhole(raw, &coin); err != nil {
 			return nil, false
 		}
 	case 4:
 		var pair []cbor.RawMessage
-		if _, err := cbor.Decode(raw, &pair); err != nil || len(pair) != 2 {
+		if err := decodeWhole(raw, &pair); err != nil || len(pair) != 2 {
 			return nil, false
 		}
-		if _, err := cbor.Decode(pair[0], &coin); err != nil {
+		if err := decodeWhole(pair[0], &coin); err != nil {
 			return nil, false
 		}
-		if _, err := cbor.Decode(pair[1], &assets); err != nil {
+		if err := decodeWhole(pair[1], &assets); err != nil {
 			return nil, false
 		}
 	default:
@@ -859,6 +861,22 @@ func canonicalValueCbor(raw []byte) (cbor.RawMessage, bool) {
 		}
 	}
 	return out, true
+}
+
+var errTrailingCbor = errors.New("trailing bytes after CBOR item")
+
+// decodeWhole decodes data, which must hold exactly one CBOR item. Bytes
+// past the item would be dropped by re-encoding, so a stored output carrying
+// them would canonicalise to, and digest as, the clean output.
+func decodeWhole(data []byte, dest any) error {
+	n, err := cbor.Decode(data, dest)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return errTrailingCbor
+	}
+	return nil
 }
 
 // appendCborHead appends a CBOR item head of the given major type with its
