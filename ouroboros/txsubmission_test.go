@@ -288,8 +288,11 @@ type txsubmissionServiceWithoutHeadroom struct {
 type txsubmissionTransientAdmissionService struct {
 	mempool.Service
 	mempool.AdmissionHeadroom
-	remaining atomic.Int64
-	attempts  atomic.Int64
+	remaining             atomic.Int64
+	attempts              atomic.Int64
+	permanentFullBody     []byte
+	permanentFullTxSize   int
+	permanentFullAttempts atomic.Int64
 }
 
 func (s *txsubmissionTransientAdmissionService) AddTransaction(
@@ -298,6 +301,14 @@ func (s *txsubmissionTransientAdmissionService) AddTransaction(
 	txBytes []byte,
 ) error {
 	s.attempts.Add(1)
+	if s.permanentFullTxSize > 0 &&
+		slices.Equal(txBytes, s.permanentFullBody) {
+		s.permanentFullAttempts.Add(1)
+		return &mempool.MempoolFullError{
+			TxSize:   s.permanentFullTxSize,
+			Capacity: s.MaxAdmissionHeadroomBytes(),
+		}
+	}
 	if s.remaining.Add(-1) >= 0 {
 		return fmt.Errorf(
 			"test ledger movement: %w",
@@ -1159,6 +1170,10 @@ type txSubmissionRelayHarnessOpts struct {
 	// pendingStateMovesA injects transient ledger movement before node A's
 	// real mempool admission.
 	pendingStateMovesA int64
+	// permanentFullBodyA identifies a body whose retained mempool size is
+	// larger than node A can ever admit at its current capacity.
+	permanentFullBodyA   []byte
+	permanentFullTxSizeA int
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -1214,12 +1229,14 @@ func newTxSubmissionRelayHarnessWithOpts(
 		}
 	}
 	var transientAdmissionA *txsubmissionTransientAdmissionService
-	if opts.pendingStateMovesA > 0 {
+	if opts.pendingStateMovesA > 0 || opts.permanentFullTxSizeA > 0 {
 		headroom, ok := nodeAMempool.(mempool.AdmissionHeadroom)
 		require.True(t, ok)
 		transientAdmissionA = &txsubmissionTransientAdmissionService{
-			Service:           nodeAMempool,
-			AdmissionHeadroom: headroom,
+			Service:             nodeAMempool,
+			AdmissionHeadroom:   headroom,
+			permanentFullBody:   opts.permanentFullBodyA,
+			permanentFullTxSize: opts.permanentFullTxSizeA,
 		}
 		transientAdmissionA.remaining.Store(opts.pendingStateMovesA)
 		nodeAMempool = transientAdmissionA
@@ -1492,6 +1509,40 @@ func TestTxSubmissionServerInitRetainsMovedAdmissionSnapshot(t *testing.T) {
 		t,
 		int64(txsubmissionMaxAdmissionRetryStreak+2),
 		h.transientAdmissionA.attempts.Load(),
+	)
+}
+
+func TestTxSubmissionServerInitRejectsBodyAboveAdmissionCapacity(t *testing.T) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	const capacity = int64(1024 * 1024)
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		capacityA:            capacity,
+		permanentFullBodyA:   fixtures[0].body,
+		permanentFullTxSizeA: int(capacity) + 1,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, admitted := h.mA.GetTransaction(fixtures[1].hash)
+			return admitted
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected intake to continue after a permanently oversized transaction",
+	)
+	_, admitted := h.mA.GetTransaction(fixtures[0].hash)
+	require.False(t, admitted)
+	require.Equal(
+		t,
+		int64(txsubmissionMaxAdmissionRetryStreak),
+		h.transientAdmissionA.permanentFullAttempts.Load(),
 	)
 }
 

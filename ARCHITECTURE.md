@@ -12346,7 +12346,10 @@ headroom race to another peer is retried in bounded bursts with
 connection-cancellable backoff. An admission whose ledger snapshot moves
 during reconciliation follows the same path. Exhausting one burst retains the
 current offer and pauses intake before another burst, so a transaction with no
-admission verdict is never acknowledged and lost. A CBOR decode failure rejects the complete reply; three
+admission verdict is never acknowledged and lost. If the retained mempool size
+still exceeds the refreshed admission capacity after a retry burst, intake
+rejects that transaction and continues with later offers from the peer. A CBOR
+decode failure rejects the complete reply; three
 consecutive invalid replies stop intake for that connection. Mempool validation
 rejections for decoded transactions are logged and dropped without stopping
 the peer's intake pump; peer, protocol, or mempool shutdown still terminates the

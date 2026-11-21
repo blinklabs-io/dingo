@@ -711,10 +711,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 					var waitForHeadroom func(int64) bool
 					if limitAdmission {
 						waitForHeadroom = func(need int64) bool {
-							// A transaction that cannot fit even an empty
-							// pool waits for the whole budget before the
-							// next retry burst; asking for more would end
-							// intake for this peer.
+							// Bound the wait to the current admission
+							// budget. The exhausted-retry path below rejects
+							// a transaction that remains larger than it.
 							limit := headroom.MaxAdmissionHeadroomBytes()
 							return headroom.WaitForAdmissionHeadroom(
 								min(need, limit),
@@ -723,6 +722,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						}
 					}
 					transientFailureBursts := 0
+					permanentlyRejected := false
 					for {
 						err = retryTxsubmissionAdmission(
 							func() error {
@@ -740,6 +740,24 @@ func (o *Ouroboros) txsubmissionServerInit(
 							errTxsubmissionAdmissionRetriesExhausted,
 						) {
 							break
+						}
+						full, capacityFailure := errors.AsType[*mempool.MempoolFullError](err)
+						if capacityFailure {
+							maxAdmissionBytes := headroom.MaxAdmissionHeadroomBytes()
+							if int64(full.TxSize) > maxAdmissionBytes {
+								o.config.Logger.Warn(
+									"rejecting peer transaction larger than mempool admission capacity",
+									"component", "network",
+									"protocol", "tx-submission",
+									"role", "server",
+									"connection_id", ctx.ConnectionId.String(),
+									"tx_hash", tx.Hash(),
+									"tx_size", full.TxSize,
+									"max_admission_bytes", maxAdmissionBytes,
+								)
+								permanentlyRejected = true
+								break
+							}
 						}
 						transientFailureBursts++
 						if transientFailureBursts == 1 ||
@@ -770,6 +788,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 						case <-connDone:
 							return
 						}
+					}
+					if permanentlyRejected {
+						continue
 					}
 					if errors.Is(
 						err,
