@@ -63,3 +63,62 @@ func TestReleaseTagValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestSDKReleaseTagValidation(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	script := filepath.Join(
+		root,
+		".github/scripts/validate-sdk-release-tag.sh",
+	)
+
+	for _, tc := range []struct {
+		name    string
+		tag     string
+		version string
+		valid   bool
+	}{
+		{name: "v0", tag: "sdk/v0.1.0", version: "v0.1.0", valid: true},
+		{
+			name:    "v0 prerelease",
+			tag:     "sdk/v0.2.0-rc.1",
+			version: "v0.2.0-rc.1",
+			valid:   true,
+		},
+		// The SDK stays at major version 0 until a 1.0 is declared.
+		{name: "v1 before declared", tag: "sdk/v1.0.0"},
+		{name: "node tag", tag: "v0.1.0"},
+		{name: "other module", tag: "api/v0.1.0"},
+		{name: "leading zero", tag: "sdk/v0.01.0"},
+		{
+			name: "command injection",
+			tag:  "sdk/v0.1.0-#;e${IFS}id;#",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			output, err := exec.Command(script, tc.tag).CombinedOutput()
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("validate %q: %v: %s", tc.tag, err, output)
+				}
+				if got := strings.TrimSpace(string(output)); got != tc.version {
+					t.Fatalf(
+						"validate %q = %q, want %q",
+						tc.tag,
+						got,
+						tc.version,
+					)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf(
+					"validate %q unexpectedly succeeded: %s",
+					tc.tag,
+					output,
+				)
+			}
+		})
+	}
+}

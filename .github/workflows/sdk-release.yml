@@ -1,0 +1,56 @@
+name: sdk-release
+
+# Releases the plugin SDK module in sdk/. Go resolves a nested module's
+# versions from tags prefixed with its directory, so sdk/v0.1.0 is v0.1.0 of
+# github.com/blinklabs-io/dingo/sdk. publish.yml's 'v*.*.*' filter never
+# matches these tags ('*' does not match '/'), so an SDK release builds and
+# publishes no node binaries or images.
+
+on:
+  push:
+    tags:
+      - 'sdk/v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOPROXY: 'https://proxy.golang.org|direct'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        id: validate
+        env:
+          CANDIDATE_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(.github/scripts/validate-sdk-release-tag.sh "$CANDIDATE_RELEASE_TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: sdk/go.mod
+          cache: false
+      - name: go-test-race
+        working-directory: sdk
+        run: go test -race -timeout 30m ./...
+      # Fetching the version makes the proxy record it, which is also what
+      # pkg.go.dev indexes. Non-fatal: the tag is already published, and the
+      # proxy fetches on first use.
+      - name: Refresh Go module proxy
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: >-
+          curl --fail --silent --show-error --max-time 30
+          --retry 3 --retry-max-time 120
+          "https://proxy.golang.org/github.com/blinklabs-io/dingo/sdk/@v/${VERSION}.info"
