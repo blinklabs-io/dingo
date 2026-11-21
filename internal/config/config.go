@@ -885,7 +885,26 @@ type Config struct {
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints"          envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
 	// service. It defaults to false.
-	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled"                         envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	// BarkEventEnabled mounts Bark's EventService, which streams the node's
+	// internal events to remote subscribers. It defaults to false.
+	BarkEventEnabled bool `yaml:"barkEventEnabled" envconfig:"DINGO_BARK_EVENT_ENABLED"`
+	// BarkEventPublishEnabled additionally lets EventService accept Publish
+	// and PublishBatch. It requires BarkEventEnabled and defaults to false.
+	BarkEventPublishEnabled bool `yaml:"barkEventPublishEnabled" envconfig:"DINGO_BARK_EVENT_PUBLISH_ENABLED"`
+	// BarkEventNodeID is the origin_node_id EventService puts on this
+	// node's events. Empty selects a random identifier for each process
+	// run, so no host or infrastructure name is published.
+	BarkEventNodeID string `yaml:"barkEventNodeId" envconfig:"DINGO_BARK_EVENT_NODE_ID"`
+	// BarkEventBufferSize is how many delivered events EventService keeps for
+	// resuming subscribers. Zero selects the default.
+	BarkEventBufferSize int `yaml:"barkEventBufferSize" envconfig:"DINGO_BARK_EVENT_BUFFER_SIZE"`
+	// BarkEventMaxSubscribers bounds concurrent EventService streams. Zero
+	// or unset means unlimited.
+	BarkEventMaxSubscribers int `yaml:"barkEventMaxSubscribers" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS"`
+	// BarkEventMaxSubscribersPerClient bounds concurrent EventService streams
+	// from one caller address. Zero or unset means unlimited.
+	BarkEventMaxSubscribersPerClient int `yaml:"barkEventMaxSubscribersPerClient" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT"`
 	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`

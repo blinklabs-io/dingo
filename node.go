@@ -152,6 +152,8 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	leiosAdaptiveEb         *leios.AdaptiveEbController
 	bark                    *bark.Bark
+	eventNodeIDOnce         sync.Once
+	eventNodeIDValue        string
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer
@@ -640,14 +642,15 @@ func (n *Node) apiPluginSelection(
 // configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when set
 // -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
 // database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
-// etc. RPCs, or the remote Stop/Restart RPCs, will be mounted), this defaults
-// to loopback-only rather than letting bark.go's own empty-Host default
-// ("0.0.0.0") expose them on every interface; with no lifecycle service
-// mounted, "" is returned unchanged so bark's own existing default behavior
-// (all interfaces) is preserved for deployments only using it for the read-only
-// Archive service. Bark serves every RPC to anonymous callers, so the bind
-// address is the only exposure control: a caller that can reach the listener
-// can invoke the lifecycle RPCs, which is why they default to loopback.
+// etc. RPCs, the remote Stop/Restart RPCs, or the EventService will be
+// mounted), this defaults to loopback-only rather than letting bark.go's own
+// empty-Host default ("0.0.0.0") expose them on every interface; with none of
+// these mounted, "" is returned unchanged so bark's own existing default
+// behavior (all interfaces) is preserved for deployments only using it for the
+// read-only Archive service. Bark serves every RPC and event to anonymous
+// callers, so the bind address is the only exposure control: a caller that can
+// reach the listener can invoke the lifecycle RPCs or subscribe to events,
+// which is why these default to loopback.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -1768,9 +1771,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if n.config.barkPort > 0 {
 		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
 		remoteLifecycleEnabled := n.config.barkLifecycleEnabled
+		eventEnabled := n.config.cfg.BarkEventEnabled
 		barkHost := effectiveBarkHost(
 			n.config.barkHost,
-			lifecycleEnabled || remoteLifecycleEnabled,
+			lifecycleEnabled || remoteLifecycleEnabled || eventEnabled,
 		)
 		barkConfig := bark.BarkConfig{
 			Logger:                                   n.config.logger,
@@ -1790,6 +1794,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
+		}
+		if eventEnabled {
+			barkConfig.EventBus = n.eventBus
+			barkConfig.EventPublishEnabled = n.config.cfg.BarkEventPublishEnabled
+			barkConfig.EventNodeID = n.eventNodeID()
+			barkConfig.EventBufferSize = n.config.cfg.BarkEventBufferSize
+			barkConfig.EventMaxSubscribers = n.config.cfg.BarkEventMaxSubscribers
+			barkConfig.EventMaxSubscribersPerClient = n.config.cfg.BarkEventMaxSubscribersPerClient
+			barkConfig.EventEpochForSlot = n.eventEpochForSlot
+			barkConfig.EventEraNameForEpoch = n.eventEraNameForEpoch
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
