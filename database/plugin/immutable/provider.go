@@ -71,7 +71,10 @@ type Store interface {
 	// CBOR.
 	ReadLocation(loc immutable.Location) (uint, []byte, error)
 	// GetBlock returns the block at the point, or nil, nil when absent.
-	GetBlock(slot uint64, hash []byte) (*immutable.Block, *immutable.Location, error)
+	GetBlock(
+		slot uint64,
+		hash []byte,
+	) (*immutable.Block, *immutable.Location, error)
 	// TruncateAfter removes every block after the one at the point.
 	TruncateAfter(slot uint64, hash []byte) error
 	// TruncateAll removes every block.

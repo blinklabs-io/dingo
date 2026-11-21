@@ -29,6 +29,7 @@ type BackfillHotPathStats struct {
 	BlobUtxoOffsetWrites uint64
 	SkippedUtxoOffsets   uint64
 	SkippedInputRecovery uint64
+	PrefetchedInputs     uint64
 
 	AddressTxs      uint64
 	Witnesses       uint64
@@ -45,6 +46,7 @@ type BackfillHotPathStats struct {
 	RecoveredInputs uint64
 
 	BlockReadDecode       time.Duration
+	InputPrefetch         time.Duration
 	OffsetComputation     time.Duration
 	BlobOffsetWrites      time.Duration
 	SetTransactionBatched time.Duration
@@ -65,6 +67,7 @@ func (s *BackfillHotPathStats) Add(other BackfillHotPathStats) {
 	s.BlobUtxoOffsetWrites += other.BlobUtxoOffsetWrites
 	s.SkippedUtxoOffsets += other.SkippedUtxoOffsets
 	s.SkippedInputRecovery += other.SkippedInputRecovery
+	s.PrefetchedInputs += other.PrefetchedInputs
 	s.AddressTxs += other.AddressTxs
 	s.Witnesses += other.Witnesses
 	s.Scripts += other.Scripts
@@ -79,6 +82,7 @@ func (s *BackfillHotPathStats) Add(other BackfillHotPathStats) {
 	s.PParamUpdates += other.PParamUpdates
 	s.RecoveredInputs += other.RecoveredInputs
 	s.BlockReadDecode += other.BlockReadDecode
+	s.InputPrefetch += other.InputPrefetch
 	s.OffsetComputation += other.OffsetComputation
 	s.BlobOffsetWrites += other.BlobOffsetWrites
 	s.SetTransactionBatched += other.SetTransactionBatched

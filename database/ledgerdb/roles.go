@@ -31,15 +31,6 @@ import (
 
 // UtxoStore resolves and maintains the live UTxO set consensus reads.
 type UtxoStore interface {
-	// UtxoRollbackChanges reports what a rollback to slot does to the live
-	// UTxO set, read before the rollback runs: the live outputs created after
-	// slot, which it removes, and the outputs created at or before slot but
-	// spent after it, which it restores, with their CBOR.
-	UtxoRollbackChanges(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) ([]models.UtxoId, []models.Utxo, error)
 	// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep
 	// has hard-deleted spent rows at or below, or 0 when nothing has been
 	// swept. Rolling back below this slot cannot restore the UTxOs consumed
@@ -711,6 +702,28 @@ type RewardStore interface {
 	) ([]*models.AccountRewardDelta, error)
 	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
 	GetRewardAdaPots(epoch uint64, txn Txn) (*models.RewardAdaPots, error)
+	// SaveRewardLikelihoodState installs the non-myopic state visible from a
+	// completed reward boundary.
+	SaveRewardLikelihoodState(
+		state *models.RewardLikelihoodState,
+		pools []*models.RewardPoolLikelihood,
+		txn Txn,
+	) error
+	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
+	GetRewardLikelihoodStateBeforeEpoch(
+		epoch uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
+	GetRewardLikelihoodStateAtSlot(
+		slot uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
+	GetRewardPoolLikelihoods(
+		epoch uint64,
+		txn Txn,
+	) ([]*models.RewardPoolLikelihood, error)
 	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
 	GetRewardPoolInputs(
 		epoch uint64,

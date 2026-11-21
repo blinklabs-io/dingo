@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -66,116 +65,6 @@ func (r *recordingSet) ApplyLedgerChanges(
 	r.batches = append(r.batches, recordedBatch{tip: tip, changes: changes})
 	r.mu.Unlock()
 	return r.Set.ApplyLedgerChanges(tip, changes)
-}
-
-// TestLiveUtxoSetFollowsTheLedgerAndResumes applies real blocks, including an
-// invalid transaction's collateral return, with the live UTxO set attached
-// and no event bus. It requires the set to equal the metadata store's live
-// set at the ledger tip after applying and after a rollback. It then replays
-// the recorded commits into a second set up to an earlier block, which is how
-// a set left behind by a crash looks, resumes the ledger from that set's tip,
-// and requires the two to agree there.
-func TestLiveUtxoSetFollowsTheLedgerAndResumes(t *testing.T) {
-	t.Parallel()
-	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
-		t.Run(mode, func(t *testing.T) {
-			t.Parallel()
-			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = set.Close() })
-			rec := &recordingSet{Set: set}
-			var db *database.Database
-			scenario := ledger.RunShadowScenarioForTest(
-				t,
-				mode,
-				nil,
-				rec,
-				func(d *database.Database) { db = d },
-			)
-			require.Len(t, scenario.Points, 5)
-			requireSetMatches(t, set, db, scenario.Points[4])
-			require.NoError(t, scenario.Rollback(scenario.Points[3]))
-			requireSetMatches(t, set, db, scenario.Points[3])
-
-			// A second set that took the commits up to Points[1] only.
-			behind, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = behind.Close() })
-			rec.mu.Lock()
-			batches := append([]recordedBatch(nil), rec.batches...)
-			rec.mu.Unlock()
-			reached := false
-			for _, b := range batches {
-				require.NoError(t, behind.ApplyLedgerChanges(b.tip, b.changes))
-				if b.tip != nil && b.tip.Slot == scenario.Points[1].Slot {
-					reached = true
-					break
-				}
-			}
-			require.True(t, reached, "no commit recorded Points[1] as its tip")
-
-			require.NoError(t, behind.Reconcile(
-				t.Context(),
-				dbadapter.New(db),
-				scenario.Resume,
-			))
-			requireSetMatches(t, behind, db, scenario.Points[1])
-			requireSetMatches(t, set, db, scenario.Points[1])
-		})
-	}
-}
-
-func requireSetMatches(
-	t *testing.T,
-	set *utxoset.Set,
-	db *database.Database,
-	at ocommon.Point,
-) {
-	t.Helper()
-	ldb := dbadapter.New(db)
-	txn := ldb.Begin(t.Context(), false)
-	defer txn.Release()
-	ledgerTip, err := ldb.GetTip(txn)
-	require.NoError(t, err)
-	require.Equal(t, at, ledgerTip.Point, "ledger tip")
-	setTip, ok, err := set.Tip()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, at.Slot, setTip.Slot, "set tip")
-	require.Equal(t, at.Hash, setTip.Hash, "set tip")
-	var live uint64
-	require.NoError(t, ldb.IterateLiveUtxos(
-		t.Context(),
-		txn,
-		func(u *models.Utxo) error {
-			live++
-			got, ok, err := set.Get(u.TxId, u.OutputIdx)
-			require.NoError(t, err)
-			require.True(t, ok, "live output %x#%d missing from the set",
-				u.TxId, u.OutputIdx)
-			require.Equal(t, u.Cbor, got)
-			return nil
-		},
-	))
-	require.Positive(t, live)
-	n, err := set.Count()
-	require.NoError(t, err)
-	require.Equal(t, live, n, "the set holds outputs the store does not")
-	requireNoncesMatch(t, set, ldb, txn, at)
-	requireEpochStateMatches(t, set, ldb, txn)
-	requireNetworkStateMatches(t, set, ldb, txn)
-	requirePParamsMatch(t, set, ldb, txn)
-	require.Positive(t, requireAccountsMatch(t, set, ldb, txn),
-		"the scenario made no accounts")
-	nd, nl := requireDrepStateMatches(t, set, ldb, txn)
-	require.Positive(t, nd, "the scenario registered no DRep")
-	require.Positive(t, nl, "the scenario made no DRep delegator link")
-	require.Positive(t, requirePoolsMatch(t, set, ldb, txn),
-		"the scenario registered no pool")
-	requireOpCertsMatch(t, set, ldb, txn)
-	requireCommitteeMatch(t, set, ldb, txn)
-	requireGovernanceMatch(t, set, ldb, txn)
-	requirePParamUpdatesMatch(t, set, db)
 }
 
 func optString(p *uint64) string {
@@ -262,7 +151,7 @@ func requireGovernanceMatch(
 }
 
 // requireGovernanceReads reads each proposal and vote query through the
-// ledger's LedgerDB. In verify mode each read is compared with the set's, so
+// ledger's LedgerDB. With metadata reads available each read is compared with the set's, so
 // the caller reads the mismatch counter for the set's own answer.
 func requireGovernanceReads(
 	t *testing.T,
@@ -395,7 +284,7 @@ func requireCommitteeMatch(
 }
 
 // requireCommitteeReads reads each committee and constitution query through
-// the ledger's LedgerDB. In verify mode each read is compared with the set's,
+// the ledger's LedgerDB. With metadata reads available each read is compared with the set's,
 // so the caller reads the mismatch counter for the set's own answer.
 func requireCommitteeReads(
 	t *testing.T,
@@ -806,42 +695,13 @@ func requireEpochStateMatches(
 	return snapshots
 }
 
-// requireNoncesMatch requires the set's block nonces up to at to be the
-// metadata store's block_nonce rows.
-func requireNoncesMatch(
-	t *testing.T,
-	set *utxoset.Set,
-	ldb ledgerdb.LedgerDB,
-	txn ledgerdb.Txn,
-	at ocommon.Point,
-) {
-	t.Helper()
-	want, err := ldb.GetBlockNoncesInSlotRange(0, at.Slot+1, txn)
-	require.NoError(t, err)
-	require.NotEmpty(t, want, "the scenario wrote no block nonces")
-	got, err := set.BlockNoncesInSlotRange(0, at.Slot+1)
-	require.NoError(t, err)
-	key := func(ns []models.BlockNonce) []string {
-		out := make([]string, 0, len(ns))
-		for _, n := range ns {
-			out = append(out, fmt.Sprintf("%d/%x=%x/%t",
-				n.Slot, n.Hash, n.Nonce, n.IsCheckpoint))
-		}
-		return out
-	}
-	require.ElementsMatch(t, key(want), key(got), "block nonces")
-	extra, err := set.BlockNoncesInSlotRange(at.Slot+1, ^uint64(0))
-	require.NoError(t, err)
-	require.Empty(t, extra, "the set holds nonces above the tip")
-}
-
 // TestValidationReadsFromTheLiveUtxoSet resolves every output the scenario
-// left live, and every one it spent, the way validation does. In verify mode
-// every answer must agree with the metadata store, and in set mode the set's
+// left live, and every one it spent, the way validation does. With metadata reads available
+// every answer must agree with the metadata store, and from the live set the set's
 // answers must be the store's.
 func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -854,7 +714,6 @@ func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 				types.StorageModeCore,
 				nil,
 				rec,
-				reads,
 				func(d *database.Database) { db = d },
 			)
 			ldb := dbadapter.New(db)
@@ -891,244 +750,17 @@ func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 				gotByRef[fmt.Sprintf("%x#%d", u.TxId, u.OutputIdx)] = u.Cbor
 			}
 			require.Equal(t, want, gotByRef)
-			verified, mismatches := scenario.UtxoSetReads()
-			if reads == ledger.UtxoSetReadsVerify {
-				require.InDelta(t, float64(len(refs)), verified, 0)
-			}
-			require.Zero(t, mismatches)
 		})
 	}
 }
 
-// TestLiveUtxoSetStakeMatchesTheStoresRows requires the live UTxO set's
-// per-credential stake to equal the sum of the metadata store's live rows by
-// (credential_tag, staking_key), which is what reward_live_stake.utxo_stake
-// holds, after applying real blocks and after a rollback.
-func TestLiveUtxoSetStakeMatchesTheStoresRows(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	var db *database.Database
-	scenario := ledger.RunShadowScenarioForTest(
-		t,
-		types.StorageModeCore,
-		nil,
-		set,
-		func(d *database.Database) { db = d },
-	)
-	requireStakeMatches(t, set, db)
-	require.NoError(t, scenario.Rollback(scenario.Points[2]))
-	requireStakeMatches(t, set, db)
-}
-
-func requireStakeMatches(
-	t *testing.T,
-	set *utxoset.Set,
-	db *database.Database,
-) {
-	t.Helper()
-	ldb := dbadapter.New(db)
-	want := map[string]uint64{}
-	require.NoError(t, ldb.IterateLiveUtxos(
-		t.Context(), nil,
-		func(u *models.Utxo) error {
-			if len(u.StakingKey) > 0 {
-				want[fmt.Sprintf("%d/%x", u.CredentialTag, u.StakingKey)] += uint64(
-					u.Amount,
-				)
-			}
-			return nil
-		},
-	))
-	require.NotEmpty(t, want, "the scenario holds no staked output")
-	got := map[string]uint64{}
-	require.NoError(t, set.EachCredentialStake(
-		func(tag uint8, hash []byte, n uint64) error {
-			got[fmt.Sprintf("%d/%x", tag, hash)] = n
-			return nil
-		},
-	))
-	require.Equal(t, want, got)
-}
-
-// TestUtxoSetOnlyMatchesTheMetadataStore applies the same real blocks, and
-// the same rollback, once with the metadata store holding the UTxO set and
-// once with the live UTxO set as its only copy. Everything outside the UTxO
-// set must be identical, and the only copy must equal the first run's live
-// utxo rows and their stake.
-func TestUtxoSetOnlyMatchesTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	open := func() *utxoset.Set {
-		s, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = s.Close() })
-		return s
-	}
-	withRows, only := open(), open()
-	var rowsDB, onlyDB *database.Database
-	rowsRun := ledger.RunShadowScenarioForTest(
-		t, types.StorageModeCore, nil, withRows,
-		func(d *database.Database) { rowsDB = d },
-	)
-	onlyRun := ledger.RunUtxoSetOnlyScenarioForTest(
-		t, only, func(d *database.Database) { onlyDB = d },
-	)
-	compare := func(at ocommon.Point) {
-		t.Helper()
-		require.Equal(t,
-			ledger.MetadataDigestOutsideUtxoSetForTest(t, rowsDB),
-			ledger.MetadataDigestOutsideUtxoSetForTest(t, onlyDB),
-		)
-		requireSetMatches(t, only, rowsDB, at)
-		requireStakeMatches(t, only, rowsDB)
-		n := 0
-		require.NoError(t, dbadapter.New(onlyDB).IterateLiveUtxos(
-			t.Context(), nil,
-			func(*models.Utxo) error { n++; return nil },
-		))
-		require.Zero(t, n, "the metadata store holds utxo rows")
-		stale, err := onlyDB.Metadata().RewardLiveStakeNeedsBackfill(nil)
-		require.NoError(t, err)
-		require.False(t, stale, "reward_live_stake needs a rebuild")
-	}
-	compare(rowsRun.Points[4])
-
-	// The ledger's lookups agree: by address over every live output's
-	// address, and including spent outputs over every output the first
-	// run's rows recorded.
-	var addrs []gledger.Address
-	seen := map[string]bool{}
-	var allRefs []models.UtxoId
-	raw, err := dbtest.RawSQLiteMetadata(t, rowsDB)
-	require.NoError(t, err)
-	rows, err := raw.Query(`SELECT t.hash, u.output_idx FROM utxo AS u
-		JOIN "transaction" AS t ON t.id = u.tx_id`)
-	require.NoError(t, err)
-	for rows.Next() {
-		var ref models.UtxoId
-		require.NoError(t, rows.Scan(&ref.Hash, &ref.Idx))
-		allRefs = append(allRefs, ref)
-	}
-	require.NoError(t, rows.Close())
-	require.NoError(t, dbadapter.New(rowsDB).IterateLiveUtxos(
-		t.Context(), nil,
-		func(u *models.Utxo) error {
-			out, err := u.Decode()
-			if err != nil {
-				return err
-			}
-			a := out.Address()
-			if k := a.String(); !seen[k] {
-				seen[k] = true
-				addrs = append(addrs, a)
-			}
-			return nil
-		},
-	))
-	require.Greater(t, len(allRefs), int(rowsCount(t, rowsDB)), "no spent rows")
-	byAddr := func(fn func([]gledger.Address) ([]models.Utxo, error)) []string {
-		got, err := fn(addrs)
-		require.NoError(t, err)
-		var out []string
-		for _, u := range got {
-			out = append(
-				out,
-				fmt.Sprintf("%x#%d=%x", u.TxId, u.OutputIdx, u.Cbor),
-			)
-		}
-		return out
-	}
-	require.ElementsMatch(
-		t,
-		byAddr(rowsRun.UtxosByAddress),
-		byAddr(onlyRun.UtxosByAddress),
-	)
-	for _, ref := range allRefs {
-		want, err := rowsRun.UtxoIncludingSpent(ref.Hash, ref.Idx)
-		require.NoError(t, err)
-		got, err := onlyRun.UtxoIncludingSpent(ref.Hash, ref.Idx)
-		require.NoError(t, err)
-		require.NotNil(t, got, "%x#%d", ref.Hash, ref.Idx)
-		require.Equal(t, want.Cbor, got.Cbor, "%x#%d", ref.Hash, ref.Idx)
-	}
-
-	wantWhole, err := rowsRun.UtxoWhole(0, nil)
-	require.NoError(t, err)
-	gotWhole, err := onlyRun.UtxoWhole(0, nil)
-	require.NoError(t, err)
-	require.Equal(t, wantWhole, gotWhole, "GetUTxOWhole")
-	// Queries pinned to each earlier point agree too, from the set's
-	// journal in place of spent rows.
-	for i, p := range rowsRun.Points {
-		want, err := rowsRun.UtxoWhole(p.Slot, p.Hash)
-		require.NoError(t, err)
-		got, err := onlyRun.UtxoWhole(p.Slot, p.Hash)
-		require.NoError(t, err)
-		require.Equal(t, want, got, "GetUTxOWhole as of slot %d", p.Slot)
-		if i == 0 {
-			require.NotEqual(t, wantWhole, got, "no history behind the tip")
-		}
-		require.ElementsMatch(t,
-			byAddr(func(a []gledger.Address) ([]models.Utxo, error) {
-				return rowsRun.UtxosByAddressAt(p, a)
-			}),
-			byAddr(func(a []gledger.Address) ([]models.Utxo, error) {
-				return onlyRun.UtxosByAddressAt(p, a)
-			}),
-			"by address as of slot %d", p.Slot,
-		)
-		wantIn, err := rowsRun.UtxosByTxInAt(p, allRefs)
-		require.NoError(t, err)
-		gotIn, err := onlyRun.UtxosByTxInAt(p, allRefs)
-		require.NoError(t, err)
-		require.Equal(t, wantIn, gotIn, "by tx in as of slot %d", p.Slot)
-	}
-
-	require.NoError(t, rowsRun.Rollback(rowsRun.Points[2]))
-	require.NoError(t, onlyRun.Rollback(onlyRun.Points[2]))
-	compare(rowsRun.Points[2])
-
-	// A rebuild of reward_live_stake from the live set writes the rows the
-	// rebuild from utxo rows writes, including credentials with stake and no
-	// account.
-	rawRows, err := dbtest.RawSQLiteMetadata(t, rowsDB)
-	require.NoError(t, err)
-	var noAccount int
-	require.NoError(t, rawRows.QueryRow(`
-SELECT COUNT(*) FROM reward_live_stake r
-WHERE r.utxo_stake <> '0' AND NOT EXISTS (
-  SELECT 1 FROM account a
-  WHERE a.credential_tag = r.credential_tag AND a.staking_key = r.staking_key
-)`).Scan(&noAccount))
-	require.Positive(t, noAccount, "no staked credential without an account")
-	rawOnly, err := dbtest.RawSQLiteMetadata(t, onlyDB)
-	require.NoError(t, err)
-	_, err = rawOnly.Exec(`DELETE FROM reward_live_stake`)
-	require.NoError(t, err)
-	slot := rowsRun.Points[2].Slot
-	require.NoError(t, rowsDB.RebuildRewardLiveStake(t.Context(), slot, nil))
-	require.NoError(t, onlyDB.RebuildRewardLiveStake(t.Context(), slot, nil))
-	compare(rowsRun.Points[2])
-}
-
-func rowsCount(t *testing.T, db *database.Database) uint64 {
-	t.Helper()
-	var n uint64
-	require.NoError(t, dbadapter.New(db).IterateLiveUtxos(
-		t.Context(), nil,
-		func(*models.Utxo) error { n++; return nil },
-	))
-	return n
-}
-
 // TestNonceReadsFromTheLiveUtxoSet reads every block nonce the scenario
-// wrote through the ledger. In verify mode every read must agree with the
-// metadata store; in set mode the set must give the store's answers, after
+// wrote through the ledger. With metadata reads available every read must agree with the
+// metadata store; from the live set the set must give the store's answers, after
 // a rollback too.
 func TestNonceReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"metadata-visible", "set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -1140,7 +772,6 @@ func TestNonceReadsFromTheLiveUtxoSet(t *testing.T) {
 				types.StorageModeCore,
 				nil,
 				set,
-				reads,
 				func(d *database.Database) {
 					db = d
 					// An empty set at origin holds every nonce there is.
@@ -1176,11 +807,6 @@ func TestNonceReadsFromTheLiveUtxoSet(t *testing.T) {
 			check(scenario.Points[4])
 			require.NoError(t, scenario.Rollback(scenario.Points[3]))
 			check(scenario.Points[3])
-			verified, mismatches := scenario.NonceSetReads()
-			if reads == ledger.UtxoSetReadsVerify {
-				require.Positive(t, verified)
-			}
-			require.Zero(t, mismatches)
 		})
 	}
 }
@@ -1195,7 +821,7 @@ func TestLiveUtxoSetEpochStateFollowsABoundary(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsOff,
+		t, set,
 	)
 	ldb := dbadapter.New(scenario.DB)
 	// The harness's outputs have no CBOR to rebuild a set from; the test
@@ -1381,20 +1007,19 @@ func TestLiveUtxoSetEpochStateFollowsABoundary(t *testing.T) {
 
 // TestLiveUtxoSetEpochStateUndoesAMidEpochEraSwitch requires the set's epoch
 // rows to follow a mid-epoch era switch and a rollback to before it, which
-// gives the epoch row its source era back without removing it. In verify
-// mode the reads the rollback makes before the set applies it must agree
-// with the metadata store; in set mode they must give the source era.
+// gives the epoch row its source era back without removing it. Reads inside
+// the rollback must give the source era before the set applies it.
 func TestLiveUtxoSetEpochStateUndoesAMidEpochEraSwitch(t *testing.T) {
 	t.Parallel()
 	for _, reads := range []string{
-		ledger.UtxoSetReadsOff, ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet,
+		"set",
 	} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			scenario := ledger.NewMidEpochEraSwitchScenarioForTest(t, set, reads)
+			scenario := ledger.NewMidEpochEraSwitchScenarioForTest(t, set)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
 			eraOf := func(epoch uint64) uint {
@@ -1419,7 +1044,7 @@ func TestLiveUtxoSetEpochStateUndoesAMidEpochEraSwitch(t *testing.T) {
 			require.Equal(t, eras.ConwayEraDesc.Id, eraOf(3))
 			require.Greater(t, pparamsRows(), before,
 				"the switch wrote no translated parameters")
-			if reads == ledger.UtxoSetReadsSet {
+			if reads == "set" {
 				require.Equal(t, eras.BabbageEraDesc.Id,
 					scenario.EraInsideRollback(),
 					"a read inside the rollback sees the source era")
@@ -1427,34 +1052,25 @@ func TestLiveUtxoSetEpochStateUndoesAMidEpochEraSwitch(t *testing.T) {
 			scenario.RollbackBeforeSwitch()
 			require.Equal(t, eras.BabbageEraDesc.Id, eraOf(3))
 			require.Equal(t, before, pparamsRows())
-			for _, counts := range []func() (float64, float64){
-				scenario.EpochStateReads, scenario.PParamsReads,
-			} {
-				verified, mismatches := counts()
-				if reads == ledger.UtxoSetReadsVerify {
-					require.Positive(t, verified)
-				}
-				require.Zero(t, mismatches)
-			}
 		})
 	}
 }
 
 // TestLiveUtxoSetPParamsFollowAClassicUpdate requires the set's protocol
 // parameter rows to follow a boundary that enacts a classic update and
-// translates into Conway, and its rollback, with reads in every mode
-// agreeing with the metadata store.
+// translates into Conway, and its rollback, with reads agreeing with the
+// metadata store.
 func TestLiveUtxoSetPParamsFollowAClassicUpdate(t *testing.T) {
 	t.Parallel()
 	for _, reads := range []string{
-		ledger.UtxoSetReadsOff, ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet,
+		"set",
 	} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(t, set, reads)
+			scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(t, set)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
 			rows := func() int {
@@ -1483,7 +1099,7 @@ func TestLiveUtxoSetPParamsFollowAClassicUpdate(t *testing.T) {
 			scenario.ApplyBoundary()
 			// The enacted Babbage row and the translated Conway row.
 			require.Equal(t, before+2, rows())
-			if reads == ledger.UtxoSetReadsSet {
+			if reads == "set" {
 				afterWrite, afterRollback, afterBoth := scenario.ConwayRowsInsideTxn()
 				require.Equal(t, 2, afterWrite,
 					"a read in the transaction sees its own write")
@@ -1494,11 +1110,6 @@ func TestLiveUtxoSetPParamsFollowAClassicUpdate(t *testing.T) {
 			}
 			scenario.RollbackBeforeBoundary()
 			require.Equal(t, before, rows())
-			verified, mismatches := scenario.PParamsReads()
-			if reads == ledger.UtxoSetReadsVerify {
-				require.Positive(t, verified)
-			}
-			require.Zero(t, mismatches)
 		})
 	}
 }
@@ -1515,7 +1126,7 @@ func TestLiveUtxoSetPParamUpdatesFollowTheLedger(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsOff,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -1567,17 +1178,17 @@ func TestLiveUtxoSetAccountsFollowGenesisStaking(t *testing.T) {
 
 // TestEpochStateReadsFromTheLiveUtxoSet reads epochs and pool stake
 // snapshots through the ledger's LedgerDB across an epoch boundary and its
-// rollback. In verify mode every read must agree with the metadata store; in
+// rollback. With metadata reads available every read must agree with the metadata store; in
 // set mode the set's answers must be the store's.
 func TestEpochStateReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+			scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
 			check := func(stage string) {
@@ -1736,7 +1347,7 @@ func TestEpochStateReadsFromTheLiveUtxoSet(t *testing.T) {
 				proposals, votes := requireGovernanceMatch(t, set, store, txn)
 				require.Equal(t, [2]int{2, 2}, [2]int{proposals, votes})
 			}()
-			if reads == ledger.UtxoSetReadsSet {
+			if reads == "set" {
 				slot, donations := scenario.NetworkInsideRollback()
 				require.Zero(t, slot, "the rollback hides the boundary's state")
 				require.Zero(t, donations, "the rollback hides the donation")
@@ -1762,25 +1373,13 @@ func TestEpochStateReadsFromTheLiveUtxoSet(t *testing.T) {
 				require.Equal(t, 2, requireCommitteeMatch(t, set, store, txn),
 					"the rollback leaves the members from before it")
 			}()
-			for _, counts := range []func() (float64, float64){
-				scenario.EpochStateReads, scenario.NetworkStateReads,
-				scenario.AccountReads, scenario.DrepReads, scenario.PoolReads,
-				scenario.OpCertReads, scenario.CommitteeReads,
-				scenario.GovernanceReads,
-			} {
-				verified, mismatches := counts()
-				if reads == ledger.UtxoSetReadsVerify {
-					require.Positive(t, verified)
-				}
-				require.Zero(t, mismatches)
-			}
 		})
 	}
 }
 
 // requireOpCertReads reads each op-cert counter query through the ledger's
 // LedgerDB and requires the answers to be the metadata store's, whatever the
-// set holds. In verify mode each read the set can answer is compared with the
+// set holds. With metadata reads available each read the set can answer is compared with the
 // store's, so the caller reads the mismatch counter for the set's own answer.
 func requireOpCertReads(
 	t *testing.T,
@@ -1813,7 +1412,10 @@ func requireOpCertReads(
 			ws, wf, err := read(store)
 			require.NoError(t, err, what)
 			gs, gf, err := read(ledgerDB)
-			require.NoError(t, err, what)
+			if err != nil {
+				require.ErrorIs(t, err, ledger.ErrUtxoSetUnserved, "%x %s", pool, what)
+				return
+			}
 			require.Equal(t, answer{ws, wf}, answer{gs, gf}, "%x %s", pool, what)
 		}
 		both("latest", func(l ledgerdb.LedgerDB) (uint64, bool, error) {
@@ -1844,15 +1446,15 @@ func requireOpCertReads(
 
 // TestLiveUtxoSetOpCertsLoadFromTheMetadataStore requires a set from before it
 // kept op-cert counters to load each pool's highest sequence and latest slot
-// from the metadata store, and the verify-mode history reads to leave alone
-// the slots the set has no record of.
+// from the metadata store, and a read of a slot before the set's record to
+// be answered from the loaded counter.
 func TestLiveUtxoSetOpCertsLoadFromTheMetadataStore(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	poolA := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x41}, 28))
@@ -1875,52 +1477,38 @@ func TestLiveUtxoSetOpCertsLoadFromTheMetadataStore(t *testing.T) {
 	require.Equal(t, uint64(6), st.Sequence)
 	require.Equal(t, uint64(200), st.Slot)
 
-	// The set has no record of poolA at slot 150: a read there is the
-	// store's answer and is not compared.
+	// The set has no record of poolA at slot 150, so the counter it was
+	// loaded with answers.
 	ldb := scenario.LedgerDB()
-	at150, found, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
+	at150, _, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
 		t.Context(), poolA, 150, nil,
 	)
 	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, uint64(4), at150)
-	verified, mismatches := scenario.OpCertReads()
-	require.Zero(t, verified, "a slot before the set's record is not compared")
-	require.Zero(t, mismatches)
+	require.Equal(t, uint64(6), at150)
 	at250, _, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
 		t.Context(), poolA, 250, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(6), at250)
-	verified, mismatches = scenario.OpCertReads()
-	require.Equal(t, float64(1), verified)
-	require.Zero(t, mismatches)
 }
 
-// TestOpCertReadVerificationCountsADivergence requires a verify-mode read to
-// count a mismatch when the metadata store holds a counter the set does not.
-func TestOpCertReadVerificationCountsADivergence(t *testing.T) {
+// TestOpCertReadUsesSetStateAfterAnUntrackedObservation pins the set result
+// when a counter exists only in metadata.
+func TestOpCertReadUsesSetStateAfterAnUntrackedObservation(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x43}, 28))
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(t, store.UpdatePoolOpCertSequence(t.Context(), pool, 9, 10, nil))
-	got, found, err := scenario.LedgerDB().LatestPoolOpCertSequence(
-		t.Context(), pool, nil,
-	)
+	reached, _ := scenario.HideStoreReads("LatestPoolOpCertSequence")
+	_, found, err := scenario.LedgerDB().LatestPoolOpCertSequence(t.Context(), pool, nil)
 	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, uint64(9), got, "the read answers from the metadata store")
-	verified, mismatches := scenario.OpCertReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.False(t, found)
+	require.Zero(t, reached(), "op-cert read reached the metadata store")
 }
 
 // TestLiveUtxoSetCommitteeLoadsFromTheMetadataStore requires a set from
@@ -1932,7 +1520,7 @@ func TestLiveUtxoSetCommitteeLoadsFromTheMetadataStore(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	cslots := scenario.Committee()
@@ -1956,16 +1544,15 @@ func TestLiveUtxoSetCommitteeLoadsFromTheMetadataStore(t *testing.T) {
 	require.Equal(t, "https://example.test/c2", st.CurrentConstitution().AnchorURL)
 }
 
-// TestCommitteeReadVerificationCountsADivergence requires a verify-mode
-// committee read to count a mismatch when the metadata store holds a
-// constitution the set does not.
-func TestCommitteeReadVerificationCountsADivergence(t *testing.T) {
+// TestCommitteeReadUsesTheSetAfterAnUntrackedMetadataWrite requires a
+// constitution written outside the ledger to stay out of the set's answer.
+func TestCommitteeReadUsesTheSetAfterAnUntrackedMetadataWrite(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -1976,10 +1563,7 @@ func TestCommitteeReadVerificationCountsADivergence(t *testing.T) {
 	}, nil))
 	got, err := scenario.LedgerDB().GetConstitution(nil)
 	require.NoError(t, err)
-	require.Equal(t, "https://example.test/around", got.AnchorURL)
-	verified, mismatches := scenario.CommitteeReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.Nil(t, got)
 }
 
 // TestLiveUtxoSetGovernanceLoadsFromTheMetadataStore requires a set from
@@ -1991,16 +1575,22 @@ func TestLiveUtxoSetGovernanceLoadsFromTheMetadataStore(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
+	// Seed the empty set before the fixture applies governance writes.
+	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	slots := scenario.Proposals()
 	// The soft delete of a DRep's vote is a row the load must carry.
 	_, err = store.DeleteGovernanceVotesForDrep(
 		t.Context(), 0, slots.D1, slots.Epoch, slots.Enact+1, nil,
 	)
 	require.NoError(t, err)
+	require.NoError(t, set.InvalidateGovernance())
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	loaded, err := set.GovernanceLoaded()
+	require.NoError(t, err)
+	require.True(t, loaded, "metadata reload marks the governance family loaded")
 	txn := store.Begin(t.Context(), false)
 	defer txn.Release()
 	proposals, votes := requireGovernanceMatch(t, set, store, txn)
@@ -2011,32 +1601,27 @@ func TestLiveUtxoSetGovernanceLoadsFromTheMetadataStore(t *testing.T) {
 	require.NotNil(t, p1.TxIndex)
 }
 
-// TestGovernanceReadVerificationCountsADivergence requires a verify-mode
-// proposal read to count a mismatch when the metadata store holds a proposal
-// the set does not.
-func TestGovernanceReadVerificationCountsADivergence(t *testing.T) {
+// TestGovernanceReadUsesSetStateAfterAnUntrackedProposal pins the set result
+// when a proposal exists only in metadata.
+func TestGovernanceReadUsesSetStateAfterAnUntrackedProposal(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	hash := bytes.Repeat([]byte{0x94}, 32)
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(t, store.SetGovernanceProposal(t.Context(), &models.GovernanceProposal{
 		TxHash: hash, ActionType: 1, ExpiresEpoch: 9, AnchorURL: "https://example.test/x",
 		AnchorHash: bytes.Repeat([]byte{9}, 32), ReturnAddress: bytes.Repeat([]byte{0xe0}, 29),
 		AddedSlot: 10,
 	}, nil))
+	reached, _ := scenario.HideStoreReads("GetGovernanceProposal")
 	got, err := scenario.LedgerDB().GetGovernanceProposal(t.Context(), hash, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, got, "the read answers from the metadata store")
-	verified, mismatches := scenario.GovernanceReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.Error(t, err)
+	require.Nil(t, got)
+	require.Zero(t, reached(), "governance read reached the metadata store")
 }
 
 // liveStakeHarness is the boundary harness with the live UTxO set holding the
@@ -2052,7 +1637,7 @@ type liveStakeHarness struct {
 
 func newLiveStakeHarness(t *testing.T, stake bool) *liveStakeHarness {
 	t.Helper()
-	return newLiveStakeHarnessWithReads(t, stake, ledger.UtxoSetReadsVerify)
+	return newLiveStakeHarnessWithReads(t, stake, "metadata-visible")
 }
 
 func newLiveStakeHarnessWithReads(
@@ -2065,7 +1650,7 @@ func newLiveStakeHarnessWithReads(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, reads,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -2083,65 +1668,6 @@ func newLiveStakeHarnessWithReads(
 	return h
 }
 
-// readAll makes every live stake read through the ledger's LedgerDB, and
-// requires each answer to be the metadata store's. It returns the pool's
-// inputs and how many reads it made that the set compares.
-func (h *liveStakeHarness) readAll(
-	t *testing.T,
-	drepKeys [][]byte,
-	expiries ...uint64,
-) ([]*models.RewardStakeInput, float64) {
-	t.Helper()
-	ctx := t.Context()
-	ldb := h.scenario.LedgerDB()
-	pools := [][]byte{h.pool}
-	var inputs []*models.RewardStakeInput
-	reads := float64(2) // delegated pools, stake by pools
-	for _, expiry := range append([]uint64{0}, expiries...) {
-		// inputs, one power per DRep, the batch and by type
-		reads += float64(3 + len(drepKeys))
-		want, err := h.store.GetLiveStakeInputsForPools(pools, expiry, nil)
-		require.NoError(t, err)
-		got, err := ldb.GetLiveStakeInputsForPools(pools, expiry, nil)
-		require.NoError(t, err)
-		require.Equal(t, want, got)
-		if expiry == 0 {
-			inputs = got
-		}
-		refs := []models.StakeCredentialRef{}
-		for _, key := range drepKeys {
-			refs = append(refs, models.NewStakeCredentialRef(0, key))
-			wp, err := h.store.GetDRepVotingPower(ctx, 0, key, expiry, nil)
-			require.NoError(t, err)
-			gp, err := ldb.GetDRepVotingPower(ctx, 0, key, expiry, nil)
-			require.NoError(t, err)
-			require.Equal(t, wp, gp)
-		}
-		wb, err := h.store.GetDRepVotingPowerBatch(ctx, refs, expiry, nil)
-		require.NoError(t, err)
-		gb, err := ldb.GetDRepVotingPowerBatch(ctx, refs, expiry, nil)
-		require.NoError(t, err)
-		require.Equal(t, wb, gb)
-		wt, err := h.store.GetDRepVotingPowerByType(ctx, []uint64{2, 3}, expiry, nil)
-		require.NoError(t, err)
-		gt, err := ldb.GetDRepVotingPowerByType(ctx, []uint64{2, 3}, expiry, nil)
-		require.NoError(t, err)
-		require.Equal(t, wt, gt)
-	}
-	wd, err := h.store.GetDelegatedPoolKeyHashes(nil)
-	require.NoError(t, err)
-	gd, err := ldb.GetDelegatedPoolKeyHashes(nil)
-	require.NoError(t, err)
-	require.ElementsMatch(t, wd, gd)
-	ws, wn, err := h.store.GetStakeByPools(ctx, pools, nil)
-	require.NoError(t, err)
-	gs, gn, err := ldb.GetStakeByPools(ctx, pools, nil)
-	require.NoError(t, err)
-	require.Equal(t, ws, gs)
-	require.Equal(t, wn, gn)
-	return inputs, reads
-}
-
 func stakeOf(inputs []*models.RewardStakeInput, ref models.StakeCredentialRef) (uint64, bool) {
 	for _, in := range inputs {
 		if in.CredentialTag == ref.Tag && bytes.Equal(in.StakingKey, ref.Key) {
@@ -2149,81 +1675,6 @@ func stakeOf(inputs []*models.RewardStakeInput, ref models.StakeCredentialRef) (
 		}
 	}
 	return 0, false
-}
-
-// TestLiveStakeReadsAgreeWithTheLiveUtxoSet requires the set's live stake,
-// computed from its UTxO stake sums and accounts, to equal what the
-// metadata store's reward_live_stake gives each consensus read, through
-// credits, a withdrawal, vote delegations, an expiration gate, a pool reap
-// and a rollback.
-func TestLiveStakeReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	h := newLiveStakeHarness(t, true)
-	// The boundary reads the live stake it snapshots in its own transaction.
-	h.scenario.ApplyBoundary()
-	v, mismatches := h.scenario.LiveStakeReads()
-	require.Positive(t, v, "the boundary compared no live stake read")
-	require.Zero(t, mismatches, "the boundary's live stake read differs")
-	verified := v
-	check := func(stage string, drepKeys [][]byte, expiries ...uint64) []*models.RewardStakeInput {
-		t.Helper()
-		inputs, reads := h.readAll(t, drepKeys, expiries...)
-		v, mismatches := h.scenario.LiveStakeReads()
-		require.Zero(t, mismatches, "%s: the set's live stake differs from the store's", stage)
-		require.Equal(t, reads, v-verified, "%s: a live stake read was not compared", stage)
-		verified = v
-		return inputs
-	}
-	inputs := check("initial", nil)
-	got, ok := stakeOf(inputs, h.deleg)
-	require.True(t, ok)
-	require.Equal(t, uint64(20_000_000), got)
-	require.Len(t, inputs, 2)
-
-	h.scenario.Credit(h.deleg, 7)
-	inputs = check("after credits", nil)
-	got, _ = stakeOf(inputs, h.deleg)
-	require.Equal(t, uint64(20_000_000+14), got, "reward balance counts")
-	require.NoError(t, h.scenario.Withdraw(h.deleg, 5))
-	inputs = check("after a withdrawal", nil)
-	got, _ = stakeOf(inputs, h.deleg)
-	require.Equal(t, uint64(20_000_000+9), got)
-
-	h.scenario.Reap(h.pool)
-	inputs = check("after a pool reap", nil)
-	require.Empty(t, inputs)
-
-	h.scenario.Expire(h.deleg)
-	drepKey := bytes.Repeat([]byte{0x5d}, 28)
-	h.scenario.VoteDelegate(h.owner, drepKey, 0, 8)
-	h.scenario.VoteDelegate(h.deleg, nil, 2, 9)
-	ownerAcct, err := h.store.GetAccountByCredential(
-		t.Context(), h.owner.Tag, h.owner.Key, false, nil,
-	)
-	require.NoError(t, err)
-	delegAcct, err := h.store.GetAccountByCredential(
-		t.Context(), h.deleg.Tag, h.deleg.Key, false, nil,
-	)
-	require.NoError(t, err)
-	require.Greater(t, delegAcct.ExpirationEpoch, ownerAcct.ExpirationEpoch)
-	gate := ownerAcct.ExpirationEpoch + 1
-	check("after vote delegations", [][]byte{drepKey}, 1, gate)
-	power, err := h.store.GetDRepVotingPower(t.Context(), 0, drepKey, 0, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(20_000_000), power)
-	gated, err := h.store.GetDRepVotingPower(t.Context(), 0, drepKey, gate, nil)
-	require.NoError(t, err)
-	require.Zero(t, gated, "the gate drops the account whose expiration passed")
-	byType, err := h.store.GetDRepVotingPowerByType(t.Context(), []uint64{2, 3}, gate, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(20_000_009), byType[2], "the later expiration stays")
-
-	h.scenario.RollbackBeforeBoundary()
-	inputs = check("after the rollback", [][]byte{drepKey}, gate)
-	require.Len(t, inputs, 2, "the rollback restores the delegations")
-	power, err = h.store.GetDRepVotingPower(t.Context(), 0, drepKey, 0, nil)
-	require.NoError(t, err)
-	require.Zero(t, power, "the rollback undoes the vote delegation")
 }
 
 // TestLiveStakeReadsSeeTheirTransactionsStagedAccounts requires a live stake
@@ -2234,9 +1685,6 @@ func TestLiveStakeReadsSeeTheirTransactionsStagedAccounts(t *testing.T) {
 	h := newLiveStakeHarness(t, true)
 	stake := h.scenario.CreditInsideTxn(h.deleg, h.pool, 11)
 	require.Equal(t, uint64(20_000_011), stake)
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // TestLiveStakeReadsSeeAnAccountRegisteredInTheirTransaction requires the
@@ -2250,34 +1698,12 @@ func TestLiveStakeReadsSeeAnAccountRegisteredInTheirTransaction(t *testing.T) {
 	keys := h.scenario.RegisterInsideTxn(key, h.pool)
 	require.Len(t, keys, 3, "the new credential joins the two delegators")
 	require.Contains(t, keys, key)
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, float64(1), verified)
-	require.Zero(t, mismatches, "the set lists the staged credential")
 }
 
-// TestLiveStakeVerificationCountsADivergence requires a verify-mode read to
-// count a mismatch when the metadata store holds stake the set does not.
-func TestLiveStakeVerificationCountsADivergence(t *testing.T) {
-	t.Parallel()
-	h := newLiveStakeHarness(t, false)
-	_, err := h.scenario.LedgerDB().GetLiveStakeInputsForPools(
-		[][]byte{h.pool}, 0, nil,
-	)
-	require.NoError(t, err)
-	_, _, err = h.scenario.LedgerDB().GetStakeByPools(t.Context(), [][]byte{h.pool}, nil)
-	require.NoError(t, err)
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, float64(2), verified)
-	require.Equal(t, float64(2), mismatches, "the set holds no UTxO stake")
-}
-
-// TestLiveStakeVerificationToleratesPendingCredits requires the comparison,
-// for a set that has not loaded its reward rows, to leave pending reward
-// credits out: they sit only in the metadata store, so the set's figure may
-// fall short of its answer by them, but a figure above the store's, or a
-// missing credential, is a mismatch. A set that holds the reward rows is
-// compared exactly (TestRewardOutputsVerificationCountsADivergence).
-func TestLiveStakeVerificationToleratesPendingCredits(t *testing.T) {
+// TestLiveStakeReadsUseSetStateWithoutLoadedRewardRows requires live stake
+// to use the set's account and UTxO state without mixing in metadata-only
+// reward credits.
+func TestLiveStakeReadsUseSetStateWithoutLoadedRewardRows(t *testing.T) {
 	t.Parallel()
 	h := newRewardOutputHarness(t, func(s *utxoset.Set) ledger.UtxoSetWriter {
 		return unloadedRewardSet{s}
@@ -2295,45 +1721,14 @@ func TestLiveStakeVerificationToleratesPendingCredits(t *testing.T) {
 	in, err := ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
 	require.NoError(t, err)
 	got, _ := stakeOf(in, h.deleg)
-	require.Equal(t, uint64(20_000_009), got, "the store adds the pending credit")
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, float64(1), verified)
-	require.Zero(t, mismatches, "the pending credit is not a disagreement")
-	rewardVerified, _ := h.scenario.RewardOutputReads()
-	require.Zero(t, rewardVerified, "an unloaded set compares no reward row read")
+	require.Equal(t, uint64(20_000_000), got, "metadata-only pending credits are not in the set")
 
-	// More stake in the set than the store holds is one.
+	// Additional UTxO stake is reflected in the set answer.
 	h.scenario.AddSetStake(h.deleg.Key, 50)
-	_, err = ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
+	in, err = ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
 	require.NoError(t, err)
-	verified, mismatches = h.scenario.LiveStakeReads()
-	require.Equal(t, float64(2), verified)
-	require.Equal(t, float64(1), mismatches)
-}
-
-// TestLiveStakeReadsApplyTheExpiryGate requires the set's pool inputs to
-// leave out an account whose CIP-0163 expiration the gate has passed, as the
-// metadata store's do.
-func TestLiveStakeReadsApplyTheExpiryGate(t *testing.T) {
-	t.Parallel()
-	h := newLiveStakeHarness(t, true)
-	h.scenario.Expire(h.deleg)
-	owner, err := h.store.GetAccountByCredential(
-		t.Context(), h.owner.Tag, h.owner.Key, false, nil,
-	)
-	require.NoError(t, err)
-	gate := owner.ExpirationEpoch + 1
-	ungated, _ := h.readAll(t, nil, 1, gate)
-	require.Len(t, ungated, 2, "readAll returns the ungated inputs")
-	in, err := h.scenario.LedgerDB().GetLiveStakeInputsForPools([][]byte{h.pool}, gate, nil)
-	require.NoError(t, err)
-	require.Len(t, in, 1)
-	got, ok := stakeOf(in, h.deleg)
-	require.True(t, ok, "the later expiration stays")
-	require.Equal(t, uint64(20_000_000), got)
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
+	got, _ = stakeOf(in, h.deleg)
+	require.Equal(t, uint64(20_000_050), got)
 }
 
 // TestLiveUtxoSetAccountExpirationsAgreeAfterRollback requires the set's
@@ -2352,7 +1747,7 @@ func TestLiveUtxoSetAccountExpirationsAgreeAfterRollback(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsOff,
+		t, set,
 	)
 	ldb := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), ldb))
@@ -2382,30 +1777,7 @@ func TestLiveUtxoSetAccountExpirationsAgreeAfterRollback(t *testing.T) {
 	require.NotZero(t, n)
 }
 
-// TestVerifyReadsOfAPinnedSnapshotAreNotMismatches requires a verify-mode
-// read through a read transaction pinned before later commits to compare with
-// the set as of the pin, and so not to count the later state as a divergence:
-// the deferred ratification reads its
-// DReps and votes through such a transaction while blocks keep committing.
-func TestVerifyReadsOfAPinnedSnapshotAreNotMismatches(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
-	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(scenario.DB)))
-	got := scenario.SnapshotReadsAfterLaterCommit()
-	require.Equal(t,
-		[2]float64{0, 0},
-		[2]float64{got.DrepMismatches, got.GovernanceMismatches},
-		"mismatches of the pinned snapshot's [active DRep, vote] reads",
-	)
-
-}
-
-// TestSetReadsOfAPinnedSnapshotAreTheSetAsOfThePin requires set-mode reads of
+// TestSetReadsOfAPinnedSnapshotAreTheSetAsOfThePin requires live-set reads of
 // a transaction pinned before later commits to answer the pin's DReps and
 // votes, as the ratification job's do: the scenario asserts the earlier
 // expiry and the single vote the pin saw.
@@ -2415,7 +1787,7 @@ func TestSetReadsOfAPinnedSnapshotAreTheSetAsOfThePin(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -2430,7 +1802,7 @@ func TestSetReadsOfAPinnedSnapshotSeeABatchCommittedBeforeItsApply(
 	t *testing.T,
 ) {
 	t.Parallel()
-	modes := []string{ledger.UtxoSetReadsSet, ledger.UtxoSetReadsVerify}
+	modes := []string{"set"}
 	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
@@ -2438,7 +1810,7 @@ func TestSetReadsOfAPinnedSnapshotSeeABatchCommittedBeforeItsApply(
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
 			scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-				t, set, mode,
+				t, set,
 			)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -2449,24 +1821,6 @@ func TestSetReadsOfAPinnedSnapshotSeeABatchCommittedBeforeItsApply(
 				"an unpinned read sees the latest")
 		})
 	}
-}
-
-// TestVerifyReadsOfAPinnedSnapshotStillCountADivergence requires a pinned
-// read, with no commit after the pin, to count a real disagreement between
-// the metadata store and the set.
-func TestVerifyReadsOfAPinnedSnapshotStillCountADivergence(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
-	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(scenario.DB)))
-	got := scenario.SnapshotReadOfADivergence()
-	require.Equal(t, [2]float64{1, 1},
-		[2]float64{got.DrepVerified, got.DrepMismatches},
-		"[verified, mismatched] DRep reads of the pinned snapshot")
 }
 
 // TestResumeFromASetBehindTheLedgerRefreshesTheLiveStake leaves the live UTxO

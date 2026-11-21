@@ -35,11 +35,11 @@ type registrationHarness struct {
 	slots    ledger.RegistrationSlots
 }
 
-// newRegistrationHarness runs the registration scenario in verify mode over
+// newRegistrationHarness runs the registration scenario with metadata reads available over
 // a set that loaded its history first.
 func newRegistrationHarness(t *testing.T) *registrationHarness {
 	t.Helper()
-	return newRegistrationHarnessWith(t, ledger.UtxoSetReadsVerify, nil)
+	return newRegistrationHarnessWith(t, "metadata-visible", nil)
 }
 
 // newRegistrationHarnessWith is newRegistrationHarness with the given read
@@ -58,7 +58,7 @@ func newRegistrationHarnessWith(
 	if wrap != nil {
 		w = wrap(set)
 	}
-	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, w, reads)
+	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, w)
 	h.store = dbadapter.New(h.scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
 	h.slots = h.scenario.Registrations()
@@ -201,9 +201,6 @@ func TestRegistrationHistoryReadsAgreeAcrossReRegistrations(t *testing.T) {
 	require.Equal(t, ledger.StakeClassLegacy, events[0].Class)
 	require.Equal(t, ledger.StakeClassOther, events[2].Class)
 
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // TestRegistrationHistoryRollsBackAcrossReRegistrations requires a rollback
@@ -254,9 +251,6 @@ func TestRegistrationHistoryRollsBackAcrossReRegistrations(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, all)
 
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // TestRegistrationHistoryLoadsFromTheMetadataStore requires a set from before
@@ -320,15 +314,12 @@ func TestRegistrationHistoryLoadsFromTheMetadataStore(t *testing.T) {
 	}
 }
 
-// TestRegistrationHistoryVerificationCountsADivergence requires a verified
-// registration read to count a mismatch when the metadata store holds a DRep
-// registration the set never saw.
-func TestRegistrationHistoryVerificationCountsADivergence(t *testing.T) {
+// TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration pins
+// the set result when a registration exists only in metadata.
+func TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
 	t.Parallel()
 	h := newRegistrationHarness(t)
-	_, before := h.scenario.RegistrationReads()
 	cred := bytes.Repeat([]byte{0x7d}, 28)
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(t, h.scenario.DB.Metadata().ImportDrep(
 		&models.Drep{CredentialTag: 0, Credential: cred, AddedSlot: 5, Active: true},
 		&models.RegistrationDrep{
@@ -337,11 +328,11 @@ func TestRegistrationHistoryVerificationCountsADivergence(t *testing.T) {
 		},
 		nil,
 	))
+	reached, _ := h.scenario.HideStoreReads("GetDrepLastRegistrationDeposit")
 	got, err := h.scenario.LedgerDB().GetDrepLastRegistrationDeposit(t.Context(), 0, cred, nil)
 	require.NoError(t, err)
-	require.Equal(t, ptr(123), got, "the read answers from the metadata store")
-	_, after := h.scenario.RegistrationReads()
-	require.Equal(t, before+1, after)
+	require.Nil(t, got)
+	require.Zero(t, reached(), "registration history read reached the metadata store")
 }
 
 // TestRegistrationHistoryIsVisibleInsideAnOpenTransaction requires reads in a
@@ -350,13 +341,9 @@ func TestRegistrationHistoryVerificationCountsADivergence(t *testing.T) {
 func TestRegistrationHistoryIsVisibleInsideAnOpenTransaction(t *testing.T) {
 	t.Parallel()
 	h := newRegistrationHarness(t)
-	_, before := h.scenario.RegistrationReads()
 	rows, deposit := h.scenario.RegistrationsInsideTxn(h.slots.DReReg + 1)
 	require.Equal(t, []registrationShape{{h.slots.DReReg + 1, true, ptr(2_000_000)}}, shapesOf(rows))
 	require.Equal(t, ptr(500_000_000), deposit)
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Zero(t, mismatches)
-	require.Greater(t, verified, before)
 }
 
 // TestRegistrationHistoryViewHonoursAStagedRollback requires the set's view in
@@ -385,10 +372,7 @@ func TestRegistrationHistoryStagesAGenesisDRepDeposit(t *testing.T) {
 	deposit, err := h.set.DRepDeposit(0, cred)
 	require.NoError(t, err)
 	require.Equal(t, ptr(321), deposit)
-	_, before := h.scenario.RegistrationReads()
 	got, err := h.scenario.LedgerDB().GetDrepLastRegistrationDeposit(t.Context(), 0, cred, nil)
 	require.NoError(t, err)
 	require.Equal(t, ptr(321), got)
-	_, after := h.scenario.RegistrationReads()
-	require.Equal(t, before, after, "the set agrees with the metadata store")
 }

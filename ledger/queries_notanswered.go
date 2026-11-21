@@ -33,11 +33,6 @@ func queryNotAnswered(name, missing string) error {
 }
 
 const (
-	// missingPoolPerformance is what GetNonMyopicMemberRewards and
-	// GetRewardInfoPools both rank pools by.
-	missingPoolPerformance = "each pool's performance estimate, derived from a " +
-		"per-pool likelihood history and the reward pot of the last epoch " +
-		"boundary, neither of which is tracked"
 	// missingRatificationOutcome is what GetGovState reports for the ratify
 	// state while a governance action is pending.
 	missingRatificationOutcome = "the completed ratification outcome of the " +

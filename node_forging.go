@@ -954,8 +954,22 @@ type mempoolTransactionSource interface {
 	RemoveTxsByHash(hashes []string)
 }
 
+// blockCandidateSource is implemented by mempools that order transactions for
+// block production by a configured selection policy.
+type blockCandidateSource interface {
+	BlockCandidates() []mempool.MempoolTransaction
+}
+
+// mempoolTransactions returns the pending transactions in the order block
+// production should try them. Only forging reads this order; relay and the
+// query APIs keep admission order.
 func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
-	txs := source.Transactions()
+	var txs []mempool.MempoolTransaction
+	if candidates, ok := source.(blockCandidateSource); ok {
+		txs = candidates.BlockCandidates()
+	} else {
+		txs = source.Transactions()
+	}
 	result := make([]mempoolTxView, len(txs))
 	for i, tx := range txs {
 		result[i] = mempoolTxView{
@@ -1367,6 +1381,10 @@ func (a *slotClockAdapter) PrimaryChainTipRelationAndHeader(
 	return a.ledgerState.PrimaryChainTipRelationAndHeader(point)
 }
 
+func (a *slotClockAdapter) SlotToTime(slot uint64) (time.Time, error) {
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1405,6 +1423,14 @@ type leiosParentChain interface {
 		ocommon.Point,
 		*database.Txn,
 	) (models.Block, error)
+}
+
+func (a *leiosPipelineAdapter) MayPrepareEndorserBlock(slot uint64) (bool, string, error) {
+	if a.endorserBlockQuorumRefusal == nil {
+		return false, leiosEBSkipQuorumUnresolved, nil
+	}
+	reason := a.endorserBlockQuorumRefusal(slot)
+	return reason == "", reason, nil
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(

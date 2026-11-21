@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,8 +35,53 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// startSignalWriter is a fakeIndexerWriter that closes startedCh when the node
+// starts it, so a test can block on the start instead of polling for it.
+type startSignalWriter struct {
+	fakeIndexerWriter
+	startedCh chan struct{}
+	startOnce sync.Once
+}
+
+func newStartSignalWriter() *startSignalWriter {
+	return &startSignalWriter{
+		fakeIndexerWriter: fakeIndexerWriter{wakes: make(chan struct{}, 8)},
+		startedCh:         make(chan struct{}),
+	}
+}
+
+func (w *startSignalWriter) Start(ctx context.Context) error {
+	err := w.fakeIndexerWriter.Start(ctx)
+	w.startOnce.Do(func() { close(w.startedCh) })
+	return err
+}
+
+// requireWriterStarted blocks until Run starts the writer, and fails with
+// Run's own error if Run returns first.
+//
+// The first data directory a test process opens migrates the shared metadata
+// template inside Run, before the writer starts, and that takes tens of
+// seconds on a loaded host. The wait therefore follows the two events that
+// end it rather than a budget for that work; AsyncWait only reports a Run
+// that does neither.
+func requireWriterStarted(
+	t *testing.T,
+	writer *startSignalWriter,
+	runErr <-chan error,
+) {
+	t.Helper()
+	select {
+	case <-writer.startedCh:
+	case err := <-runErr:
+		t.Fatalf("node run ended before the IndexerDB writer started: %v", err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("node run neither started the IndexerDB writer nor returned")
+	}
+}
 
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
@@ -45,28 +91,30 @@ func freeLoopbackPort(t *testing.T) uint {
 	return uint(l.Addr().(*net.TCPAddr).Port) // #nosec G115 -- a TCP port
 }
 
-// TestSplitNodeServesEveryAPI runs a node on the split layout with the real
+// TestNodeServesEveryAPIFromTheIndexerDB runs a node with the real
 // built-in API providers and checks that each answers a request from the
 // IndexerDB rather than refusing it.
-func TestSplitNodeServesEveryAPI(t *testing.T) {
+func TestNodeServesEveryAPIFromTheIndexerDB(t *testing.T) {
 	t.Parallel()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	utxorpcPort := freeLoopbackPort(t)
 	blockfrostPort := freeLoopbackPort(t)
 	meshPort := freeLoopbackPort(t)
-	writer := &fakeIndexerWriter{wakes: make(chan struct{}, 8)}
+	writer := newStartSignalWriter()
 	var indexerDB atomic.Pointer[database.Database]
 	var slotTime atomic.Pointer[func(uint64) (time.Time, error)]
 	dbPath := t.TempDir()
 	n, err := New(NewConfig(
+		WithPluginSelection(plugin.CapabilityStorageBlob, plugin.Selection{
+			Provider: "badger", Config: map[string]any{"memTableSize": int64(8 << 20)},
+		}),
 		WithDatabasePath(dbPath),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
-		// The CLI path hands the split layout's consensus store a core
-		// storage mode (nodeStorageMode); the API servers must still start.
-		WithStorageMode(StorageModeCore),
-		WithIndexerLayout("split"),
+		// API storage mode keeps the consensus store in core mode; the API
+		// servers must still start.
+		WithStorageMode(StorageModeAPI),
 		WithIndexerWriterFactory(
 			func(deps IndexerWriterDeps) (IndexerWriter, error) {
 				indexerDB.Store(deps.Indexer)
@@ -94,13 +142,16 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 	}
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- n.Run(context.Background()) }()
+	runDone := make(chan struct{})
+	go func() {
+		runErr <- n.Run(context.Background())
+		close(runDone)
+	}()
 	t.Cleanup(func() {
 		require.NoError(t, n.Stop())
-		testutil.RequireReceive(t, runErr, 30*time.Second, "node run returned")
+		testutil.RequireReceive(t, runDone, 30*time.Second, "node run returned")
 	})
-	require.Eventually(t, writer.started.Load, 20*time.Second,
-		10*time.Millisecond, "a split node starts the IndexerDB writer")
+	requireWriterStarted(t, writer, runErr)
 	requireStartupComplete(t, n)
 
 	clock := slotTime.Load()
@@ -198,19 +249,21 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 		"UTxO RPC reports the IndexerDB tip, not the ledger tip")
 }
 
-// runSplitNode starts a split-layout node over dbPath and returns when its
+// runIndexerNode starts a node over dbPath and returns when its IndexerDB
 // writer is running, with a function that stops it.
-func runSplitNode(t *testing.T, dbPath string) func() {
+func runIndexerNode(t *testing.T, dbPath string) func() {
 	t.Helper()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
-	writer := &fakeIndexerWriter{wakes: make(chan struct{}, 8)}
+	writer := newStartSignalWriter()
 	n, err := New(NewConfig(
+		WithPluginSelection(plugin.CapabilityStorageBlob, plugin.Selection{
+			Provider: "badger", Config: map[string]any{"memTableSize": int64(8 << 20)},
+		}),
 		WithDatabasePath(dbPath),
 		WithCardanoNodeConfig(cardanoCfg),
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
-		WithStorageMode(StorageModeCore),
-		WithIndexerLayout("split"),
+		WithStorageMode(StorageModeAPI),
 		WithIndexerWriterFactory(
 			func(IndexerWriterDeps) (IndexerWriter, error) {
 				return writer, nil
@@ -226,20 +279,25 @@ func runSplitNode(t *testing.T, dbPath string) func() {
 	require.NoError(t, err)
 	n.config.listeners = nil
 	runErr := make(chan error, 1)
-	go func() { runErr <- n.Run(context.Background()) }()
-	require.Eventually(t, func() bool {
-		select {
-		case err := <-runErr:
-			t.Fatalf("node run ended early: %v", err)
-		default:
-		}
-		return writer.started.Load()
-	}, 20*time.Second, 10*time.Millisecond, "the IndexerDB writer starts")
-	requireStartupComplete(t, n)
-	return func() {
-		require.NoError(t, n.Stop())
-		testutil.RequireReceive(t, runErr, 30*time.Second, "node run returned")
+	runDone := make(chan struct{})
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	go func() {
+		defer close(runDone)
+		runErr <- n.Run(runCtx)
+	}()
+	var stopOnce sync.Once
+	stop := func() {
+		t.Helper()
+		stopOnce.Do(func() {
+			cancelRun()
+			assert.NoError(t, n.Stop())
+			testutil.RequireReceive(t, runDone, 30*time.Second, "node run returned")
+		})
 	}
+	t.Cleanup(stop)
+	requireWriterStarted(t, writer, runErr)
+	requireStartupComplete(t, n)
+	return stop
 }
 
 // requireStartupComplete waits for Run to finish starting. The writer starts
@@ -255,25 +313,25 @@ func requireStartupComplete(t *testing.T, n *Node) {
 		}
 		n.startupLifecycleMu.Unlock()
 		return true
-	}, 60*time.Second, 10*time.Millisecond, "node startup completes")
+	}, testutil.AsyncWait, 10*time.Millisecond, "node startup completes")
 }
 
-// A split node persists its consensus store in core mode, which a second
+// A node persists its consensus store in core mode, which a second
 // start over the same data directory must accept, after a clean stop and
 // after the directory is copied from under a running node as a crash would
 // leave it.
-func TestSplitNodeRestarts(t *testing.T) {
+func TestNodeRestartsOverItsDataDirectory(t *testing.T) {
 	t.Parallel()
 	dbPath := testutil.OwnerOnlyTempDir(t)
-	stop := runSplitNode(t, dbPath)
+	stop := runIndexerNode(t, dbPath)
 	crashImage := filepath.Join(testutil.OwnerOnlyTempDir(t), "image")
 	require.NoError(t, os.CopyFS(crashImage, os.DirFS(dbPath)))
 	require.NoError(t, os.Chmod(crashImage, 0o700))
 	stop()
 
-	stopAgain := runSplitNode(t, dbPath)
+	stopAgain := runIndexerNode(t, dbPath)
 	stopAgain()
 
-	stopImage := runSplitNode(t, crashImage)
+	stopImage := runIndexerNode(t, crashImage)
 	stopImage()
 }

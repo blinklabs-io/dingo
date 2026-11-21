@@ -20,7 +20,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,7 +45,7 @@ func rewardsAt(
 // after the compaction.
 func TestPinnedAccountRewardsCarryUnfoldedRewardOutputs(t *testing.T) {
 	t.Parallel()
-	h := newRewardOutputHarnessReads(t, nil, ledger.UtxoSetReadsSet)
+	h := newRewardOutputHarnessReads(t, nil, "set")
 	refs := []models.StakeCredentialRef{h.owner, h.deleg}
 	h.saveRounds(t)
 	h.applyRound(t, 11)

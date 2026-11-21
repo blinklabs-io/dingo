@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/dgraph-io/badger/v4"
 )
 
 // DefaultBatchBlocks is the default number of blocks per transaction.
@@ -115,13 +117,17 @@ type WithdrawalDebiter interface {
 
 // Writer follows the ledger into the IndexerDB.
 type Writer struct {
-	store    *indexerdb.Store
-	src      ChainSource
-	idx      BlockIndexer
-	facts    FactsSource
-	genesis  func(ctx context.Context, txn *database.Txn) error
-	logger   *slog.Logger
-	batch    int
+	store   *indexerdb.Store
+	src     ChainSource
+	idx     BlockIndexer
+	facts   FactsSource
+	genesis func(ctx context.Context, txn *database.Txn) error
+	logger  *slog.Logger
+	batch   int
+	// limit is the number of blocks the next batch reads. It falls below
+	// batch while the blob store keeps refusing a batch for its size, and
+	// climbs back as batches commit.
+	limit    int
 	wake     chan struct{}
 	runMu    sync.Mutex
 	progress func(indexerdb.Tip, ochainsync.Tip)
@@ -168,6 +174,7 @@ func NewWriter(
 		idx:    idx,
 		logger: logger,
 		batch:  batchBlocks,
+		limit:  batchBlocks,
 		wake:   make(chan struct{}, 1),
 	}
 	if syncer, ok := store.Database().Metadata().(metadata.CommitSyncer); ok {
@@ -294,6 +301,20 @@ func (w *Writer) Run(ctx context.Context) error {
 // errForked reports that the chain changed under a batch.
 var errForked = errors.New("indexer: chain changed under batch")
 
+// errBatchShrunk reports that a batch exceeded the blob store's transaction
+// size and the writer halved its batch size, so the step is worth repeating.
+var errBatchShrunk = errors.New(
+	"indexer: batch halved after oversized transaction",
+)
+
+// isTxnTooBig reports whether err is Badger refusing a transaction for its
+// size. Some storage layers format the cause with %v rather than wrap it, so
+// the message is matched as well.
+func isTxnTooBig(err error) bool {
+	return errors.Is(err, badger.ErrTxnTooBig) ||
+		strings.Contains(err.Error(), badger.ErrTxnTooBig.Error())
+}
+
 // CatchUp runs one bounded pass: it moves the IndexerDB to the ledger's
 // durable tip, rolling back first when its own tip left the canonical chain.
 // It is also the form a one-off history replay takes.
@@ -320,6 +341,9 @@ func (w *Writer) CatchUp(ctx context.Context) error {
 		done, err := w.step(ctx, nil, refreshAtTip)
 		if errors.Is(err, errForked) {
 			refreshAtTip = true
+			continue
+		}
+		if errors.Is(err, errBatchShrunk) {
 			continue
 		}
 		if err != nil {
@@ -427,7 +451,8 @@ func (w *Writer) step(
 	if !tip.IsZero() &&
 		(bytes.Equal(tip.Hash, target.Point.Hash) ||
 			tip.Slot > target.Point.Slot) {
-		if refresh, ok := w.facts.(FactsRefresher); ok && refreshAtTip &&
+		if refresh, ok := w.facts.(FactsRefresher); ok && ceiling == nil &&
+			refreshAtTip &&
 			bytes.Equal(tip.Hash, target.Point.Hash) {
 			txn := w.store.Database().Transaction(ctx, true)
 			if err := txn.Do(func(txn *database.Txn) error {
@@ -439,7 +464,7 @@ func (w *Writer) step(
 		w.report(tip, ledgerTip)
 		return true, nil
 	}
-	blocks, err := w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.batch)
+	blocks, err := w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.limit)
 	if err != nil {
 		return false, fmt.Errorf("read canonical blocks: %w", err)
 	}
@@ -525,7 +550,20 @@ func (w *Writer) step(
 		if a, ok := w.idx.(IndexAborter); ok {
 			a.AbortIndexing()
 		}
+		// The same batch would fail the same way on every retry, so read
+		// fewer blocks. A single block that is too big cannot shrink.
+		if isTxnTooBig(err) && len(blocks) > 1 {
+			w.limit = len(blocks) / 2
+			w.logger.Warn(
+				"indexer batch too big for one blob transaction, halving",
+				"blocks", len(blocks), "next_blocks", w.limit,
+			)
+			return false, errBatchShrunk
+		}
 		return false, fmt.Errorf("index blocks up to %d: %w", last.Number, err)
+	}
+	if w.limit < w.batch {
+		w.limit = min(2*w.limit, w.batch)
 	}
 	w.factsCommitted(ctx)
 	w.report(newTip, ledgerTip)

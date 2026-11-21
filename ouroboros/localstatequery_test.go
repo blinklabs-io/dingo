@@ -1644,12 +1644,12 @@ func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
 		ctx,
 		olocalstatequery.QueryWrapper{Query: &olocalstatequery.BlockQuery{
 			Query: &olocalstatequery.ShelleyQuery{
-				Query: &olocalstatequery.ShelleyRewardInfoPoolsQuery{},
+				Query: &olocalstatequery.ShelleyDebugEpochStateQuery{},
 			},
 		}},
 	)
 	require.ErrorIs(t, err, ledger.ErrQueryNotAnswered)
-	require.ErrorContains(t, err, "GetRewardInfoPools")
+	require.ErrorContains(t, err, "DebugEpochState")
 	// The session pins a metadata read connection. Held, it makes the wire
 	// Acquire below open a new SQLite connection inside the Acquire wait, which
 	// a fully parallel race run can push past the client's Acquire timeout.
@@ -1658,8 +1658,8 @@ func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
 	client := newLocalStateQueryTestClient(t, o)
 	require.NoError(t, client.AcquireVolatileTip())
 	_, err = client.GetCurrentEra()
-	require.NoError(t, err, "the era lookup GetRewardInfoPools starts with")
-	_, err = client.GetRewardInfoPools()
+	require.NoError(t, err, "the era lookup DebugEpochState starts with")
+	_, err = client.DebugEpochState()
 	require.Error(t, err)
 	_, err = client.GetChainPoint()
 	require.Error(t, err, "the connection ended with the failed query")

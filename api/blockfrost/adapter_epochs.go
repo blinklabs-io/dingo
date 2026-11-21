@@ -217,7 +217,13 @@ func (a *NodeAdapter) Epoch(
 
 // currentEpochNumber is the epoch containing the synced tip.
 func (a *NodeAdapter) currentEpochNumber() (uint64, error) {
-	tip, err := a.dataTip()
+	return a.currentEpochNumberAt(nil)
+}
+
+func (a *NodeAdapter) currentEpochNumberAt(
+	txn *database.Txn,
+) (uint64, error) {
+	tip, err := a.dataTipAt(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -354,9 +360,7 @@ func (a *NodeAdapter) epochStakeRows(
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-	incomplete, err := a.rewardStakeInputsIncomplete(
-		txn, label, label+1,
-	)
+	incomplete, err := a.rewardStakeInputsIncomplete(label, label+1)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check epoch %d stakes: %w", epoch, err)
 	}

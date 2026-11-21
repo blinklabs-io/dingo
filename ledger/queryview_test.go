@@ -118,6 +118,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 		return len(set)
 	}
 
+	attachQueryLiveUtxoSet(t, ls, db)
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
@@ -132,6 +133,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 		t, db, repeatedBytes(28, 0x12), repeatedBytes(32, 0x22), 1_000, 0,
 	)
 
+	attachQueryLiveUtxoSet(t, ls, db)
 	for _, tc := range []struct {
 		name            string
 		query           any
@@ -218,6 +220,7 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrPointNotOnChain)
 
+	attachQueryLiveUtxoSet(t, ls, db)
 	view, err := ls.AcquireQueryView(t.Context(), point)
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
@@ -791,6 +794,7 @@ func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
 	))
 	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
 
+	attachQueryLiveUtxoSet(t, ls, db)
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)

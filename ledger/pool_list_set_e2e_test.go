@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,12 +27,12 @@ var poolListReadNames = []string{
 }
 
 // TestPoolListReadsFromTheLiveUtxoSet reads the pools retiring at an epoch and
-// the active pools in set mode with those reads failing against the metadata
+// the active pools from the live set with those reads failing against the metadata
 // store, before and after a retirement and a re-registration, and requires
 // every answer to be the store's.
 func TestPoolListReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	h := newPoolReadsHarnessWithReads(t, ledger.UtxoSetReadsSet)
+	h := newPoolReadsHarnessWithReads(t, "set")
 	reached, _ := h.scenario.HideStoreReads(poolListReadNames...)
 	slot := h.cur.StartSlot + 1000
 	require.Equal(t, [][]byte{h.pool}, h.active(t, slot, true))
@@ -51,9 +50,6 @@ func TestPoolListReadsFromTheLiveUtxoSet(t *testing.T) {
 	require.Equal(t, [][]byte{newPool}, h.active(t, h.nextStart()+10, false),
 		"the boundary reaps the retired pool")
 	require.Zero(t, reached(), "a pool list read reached the metadata store")
-	verified, mismatches := h.counts()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
 // TestPoolRetirementReadSeesItsTransactionsStagedRetirementInSetMode requires
@@ -63,7 +59,7 @@ func TestPoolRetirementReadSeesItsTransactionsStagedRetirementInSetMode(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newPoolReadsHarnessWithReads(t, ledger.UtxoSetReadsSet)
+	h := newPoolReadsHarnessWithReads(t, "set")
 	reached, _ := h.scenario.HideStoreReads(poolListReadNames...)
 	got := h.scenario.RetireInsideTxn(h.pool, h.cur.EpochId+1, h.nextStart())
 	require.Len(t, got, 1)
@@ -71,27 +67,36 @@ func TestPoolRetirementReadSeesItsTransactionsStagedRetirementInSetMode(
 	require.Zero(t, reached(), "the retirement read reached the metadata store")
 }
 
-// TestPoolListReadsStayOnTheStoreWhenLeiosCertifies requires the pool list
-// reads to reach the metadata store on a node that certifies Leios, whose
-// certified registrations take effect at a slot the set does not hold.
-func TestPoolListReadsStayOnTheStoreWhenLeiosCertifies(t *testing.T) {
+// TestPoolListReadsUseTheSetForLeiosCertifications requires certified pool
+// state to agree with the metadata store without reading it through the ledger.
+func TestPoolListReadsUseTheSetForLeiosCertifications(t *testing.T) {
 	t.Parallel()
-	h := newPoolReadsHarnessWithReads(t, ledger.UtxoSetReadsSet)
+	h := newPoolReadsHarnessWithReads(t, "set")
 	reached, _ := h.scenario.HideStoreReads(poolListReadNames...)
 	h.scenario.CertifyLeios()
 	ldb := h.scenario.LedgerDB()
-	_, err := ldb.GetPoolsRetiringAtEpoch(
+
+	wantRetiring, err := h.store.GetPoolsRetiringAtEpoch(
 		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
 	)
-	require.Error(t, err)
-	_, err = ldb.GetActivePoolKeyHashes(t.Context(), nil)
-	require.Error(t, err)
-	_, err = ldb.GetActivePoolKeyHashesAtSlot(h.cur.StartSlot+1000, nil)
-	require.Error(t, err)
-	require.Equal(
-		t,
-		int64(3),
-		reached(),
-		"the reads reached the metadata store",
+	require.NoError(t, err)
+	gotRetiring, err := ldb.GetPoolsRetiringAtEpoch(
+		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
 	)
+	require.NoError(t, err)
+	require.Equal(t, wantRetiring, gotRetiring)
+
+	wantActive, err := h.store.GetActivePoolKeyHashes(t.Context(), nil)
+	require.NoError(t, err)
+	gotActive, err := ldb.GetActivePoolKeyHashes(t.Context(), nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, wantActive, gotActive)
+
+	slot := h.cur.StartSlot + 1000
+	wantAtSlot, err := h.store.GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	gotAtSlot, err := ldb.GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, wantAtSlot, gotAtSlot)
+	require.Zero(t, reached(), "pool reads use only the set")
 }

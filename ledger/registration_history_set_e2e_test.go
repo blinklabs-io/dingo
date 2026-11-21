@@ -134,13 +134,13 @@ func (h *registrationHarness) readsOf(
 }
 
 // TestRegistrationReadsFromTheLiveUtxoSet reads the registration history and
-// DRep deposits through the ledger's LedgerDB in set mode with the store's
+// DRep deposits through the ledger's LedgerDB from the live set with the store's
 // reads failing, for a credential that registers, deregisters and
 // re-registers, and DReps that register, update and retire, before and after
 // a rollback, and requires every answer to be the store's.
 func TestRegistrationReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	h := newRegistrationHarnessWith(t, ledger.UtxoSetReadsSet, nil)
+	h := newRegistrationHarnessWith(t, "set", nil)
 	reached, _ := h.scenario.HideStoreReads(registrationReadNames...)
 	ldb := h.scenario.LedgerDB()
 	want := h.readsOf(t, h.store)
@@ -151,25 +151,20 @@ func TestRegistrationReadsFromTheLiveUtxoSet(t *testing.T) {
 	require.Equal(t, want, h.readsOf(t, ldb), "after the rollback")
 	require.Empty(t, stakeHistory(t, ldb, h.slots.K, 0, 0, "asc"))
 	require.Zero(t, reached(), "a registration read reached the metadata store")
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
-// TestStakeRegistrationReadStaysOnTheStoreForAnUnknownTable requires the
-// stake registration certificates of a credential whose loaded registration
-// names no table to come from the metadata store, and the reads that need no
-// table to stay on the set.
-func TestStakeRegistrationReadStaysOnTheStoreForAnUnknownTable(t *testing.T) {
+// TestStakeRegistrationReadFailsForAnUnknownTable requires an unavailable
+// registration history table to fail without mixing in metadata reads.
+func TestStakeRegistrationReadFailsForAnUnknownTable(t *testing.T) {
 	t.Parallel()
-	h := newRegistrationHarnessWith(t, ledger.UtxoSetReadsSet,
+	h := newRegistrationHarnessWith(t, "set",
 		func(s *utxoset.Set) ledger.UtxoSetWriter { return unknownTableSet{s} })
 	reached, _ := h.scenario.HideStoreReads(registrationReadNames...)
 	ldb := h.scenario.LedgerDB()
 	_, err := ldb.GetStakeRegistrationsByCredential(0, h.slots.K, nil)
 	require.Error(t, err)
-	require.Equal(t, int64(1), reached())
+	require.Zero(t, reached(), "the read did not use the metadata store")
 	rows := stakeHistory(t, ldb, h.slots.K, 0, 0, "asc")
 	require.Len(t, rows, 5)
-	require.Equal(t, int64(1), reached(), "the history needs no table")
+	require.Zero(t, reached(), "the history is served by the set")
 }

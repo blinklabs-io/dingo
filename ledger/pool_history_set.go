@@ -17,14 +17,11 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"math"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -114,7 +111,7 @@ func (ls *LedgerState) poolHistoryReader(txn ledgerdb.Txn) PoolHistoryReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(PoolHistoryReader)
@@ -306,97 +303,19 @@ func retiringPoolRegistration(
 	return reg.Registration
 }
 
-// samePoolCertificate compares a registration certificate the metadata store
-// rebuilt with the set's registration: the fields consensus reads. The
-// credential tag is not part of a certificate.
-func samePoolCertificate(
-	c lcommon.PoolRegistrationCertificate,
-	r *models.PoolRegistration,
-) bool {
-	if r == nil || !bytes.Equal(c.Operator[:], r.PoolKeyHash) ||
-		!bytes.Equal(c.VrfKeyHash[:], r.VrfKeyHash) ||
-		c.Pledge != uint64(r.Pledge) || c.Cost != uint64(r.Cost) ||
-		!bytes.Equal(c.RewardAccount[:], r.RewardAccount) ||
-		len(c.PoolOwners) != len(r.Owners) {
-		return false
-	}
-	if (c.Margin.Rat == nil) != (r.Margin == nil || r.Margin.Rat == nil) ||
-		(c.Margin.Rat != nil && c.Margin.Cmp(r.Margin.Rat) != 0) {
-		return false
-	}
-	if (c.PoolMetadata != nil) != (r.MetadataUrl != "") ||
-		(c.PoolMetadata != nil &&
-			(c.PoolMetadata.Url != r.MetadataUrl ||
-				!bytes.Equal(c.PoolMetadata.Hash[:], r.MetadataHash))) {
-		return false
-	}
-	owners := make(map[string]int, len(r.Owners))
-	for _, o := range r.Owners {
-		owners[string(o.KeyHash)]++
-	}
-	for _, o := range c.PoolOwners {
-		owners[string(o[:])]--
-	}
-	for _, n := range owners {
-		if n != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// verifyPoolHistory compares a read with the answer the pool's history
-// gives. A set without its history, or reads off, are not compared.
-func (s stagingLedgerDB) verifyPoolHistory(
-	g verifyReadGuard,
-	what string,
-	pool []byte,
-	txn ledgerdb.Txn,
-	same func(events []PoolEvent) bool,
-) {
-	r := s.ls.poolHistoryReader(txn)
-	if r == nil {
-		return
-	}
-	events, err := s.ls.poolHistoryView(r, txn, pool)
-	s.ls.comparePoolRead(
-		g, fmt.Sprintf("pool %x %s", pool, what),
-		err == nil && same(events), err,
-	)
-}
-
 func (s stagingLedgerDB) GetPoolVrfKeyHashAtSlot(
 	poolKeyHash []byte,
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	if a, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
+	a, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
 		events, err := b.events(poolKeyHash)
 		if err != nil {
 			return vrfAnswer{}, err
 		}
 		return vrfAnswerOf(latestPoolRegistrationAt(events, slot)), nil
-	}); ok {
-		return a.key, a.found, err
-	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.GetPoolVrfKeyHashAtSlot(
-		poolKeyHash,
-		slot,
-		txn,
-	)
-	if err != nil {
-		return want, found, err
-	}
-	s.verifyPoolHistory(g, fmt.Sprintf("VRF key at slot %d", slot),
-		poolKeyHash, txn, func(events []PoolEvent) bool {
-			reg := latestPoolRegistrationAt(events, slot)
-			if reg == nil || !found {
-				return (reg != nil) == found
-			}
-			return bytes.Equal(reg.VrfKeyHash, want)
-		})
-	return want, found, nil
+	})
+	return a.key, a.found, err
 }
 
 func (s stagingLedgerDB) GetPoolEarliestVrfKeyHashAtSlot(
@@ -404,284 +323,61 @@ func (s stagingLedgerDB) GetPoolEarliestVrfKeyHashAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	if a, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
+	a, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
 		events, err := b.events(poolKeyHash)
 		if err != nil {
 			return vrfAnswer{}, err
 		}
 		return vrfAnswerOf(earliestPoolRegistrationAt(events, slot)), nil
-	}); ok {
-		return a.key, a.found, err
-	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.GetPoolEarliestVrfKeyHashAtSlot(
-		poolKeyHash, slot, txn,
-	)
-	if err != nil {
-		return want, found, err
-	}
-	s.verifyPoolHistory(g, fmt.Sprintf("earliest VRF key at slot %d", slot),
-		poolKeyHash, txn, func(events []PoolEvent) bool {
-			reg := earliestPoolRegistrationAt(events, slot)
-			if reg == nil || !found {
-				return (reg != nil) == found
-			}
-			return bytes.Equal(reg.VrfKeyHash, want)
-		})
-	return want, found, nil
+	})
+	return a.key, a.found, err
 }
 
-// GetPoolVrfState is compared on whether the pool has a row, which any
-// certificate creates, and on the latest registration's VRF key.
+// GetPoolVrfState returns the pool row and latest registration's VRF key.
 func (s stagingLedgerDB) GetPoolVrfState(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	got, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.pool(pkh[:], true)
-	}); ok {
-		return notFoundIfNil(got, err)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetPoolVrfState(ctx, pkh, txn)
-	found := err == nil && want != nil
-	if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
-		return want, err
-	}
-	s.verifyPoolHistory(
-		g,
-		"VRF state",
-		pkh[:],
-		txn,
-		func(events []PoolEvent) bool {
-			if !found || len(events) == 0 {
-				return found == (len(events) > 0)
-			}
-			reg := latestPoolRegistrationAt(events, math.MaxUint64)
-			if len(want.Registration) == 0 {
-				return reg == nil
-			}
-			return reg != nil &&
-				bytes.Equal(reg.VrfKeyHash, want.Registration[0].VrfKeyHash)
-		},
-	)
-	return want, err
+	})
+	return notFoundIfNil(got, err)
 }
 
-// GetPool is compared for a read that includes inactive pools, on whether
-// the pool has a row. Which pools are active depends on the metadata store's
-// tip epoch, which the set does not track, so that read is not compared.
+// GetPool returns a pool row from its registration and retirement history.
 func (s stagingLedgerDB) GetPool(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	got, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.pool(pkh[:], includeInactive)
-	}); ok {
-		return notFoundIfNil(got, err)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetPool(ctx, pkh, includeInactive, txn)
-	found := err == nil && want != nil
-	if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
-		return want, err
-	}
-	if includeInactive {
-		s.verifyPoolHistory(
-			g,
-			"row",
-			pkh[:],
-			txn,
-			func(events []PoolEvent) bool {
-				return found == (len(events) > 0)
-			},
-		)
-	}
-	return want, err
+	})
+	return notFoundIfNil(got, err)
 }
 
-// GetPoolRegistrations is compared on every registration, newest first.
+// GetPoolRegistrations returns the pool's registration certificates, newest first.
 func (s stagingLedgerDB) GetPoolRegistrations(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]lcommon.PoolRegistrationCertificate, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]lcommon.PoolRegistrationCertificate, error) {
 		return b.registrations(pkh)
-	}); ok {
-		return got, err
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetPoolRegistrations(pkh, txn)
-	if err != nil {
-		return want, err
-	}
-	s.verifyPoolHistory(
-		g,
-		"registrations",
-		pkh[:],
-		txn,
-		func(events []PoolEvent) bool {
-			var regs []*models.PoolRegistration
-			for _, e := range slices.Backward(events) {
-				if e.Registration != nil {
-					regs = append(regs, e.Registration)
-				}
-			}
-			if len(regs) != len(want) {
-				return false
-			}
-			for i := range want {
-				if !samePoolCertificate(want[i], regs[i]) {
-					return false
-				}
-			}
-			return true
-		},
-	)
-	return want, nil
+	})
 }
 
-// GetPoolsRetiringAtEpoch is compared on the pools retiring, and on the
-// reward account and deposit of each refund. The deposit is the one the
-// pool's state holds now: the registrations carry none, and the read runs
-// before the reap that removes it.
+// GetPoolsRetiringAtEpoch returns refunds for pools retiring at the boundary.
 func (s stagingLedgerDB) GetPoolsRetiringAtEpoch(
 	ctx context.Context,
 	epoch uint64,
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetirementRefund, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetirementRefund, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetirementRefund, error) {
 		return b.retiringAtEpoch(epoch, boundarySlot)
-	}); ok {
-		return got, err
-	}
-	if got, ok, err := s.retiringFromSet(txn, epoch, boundarySlot); err != nil {
-		return nil, err
-	} else if ok {
-		return got, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetPoolsRetiringAtEpoch(
-		ctx,
-		epoch,
-		boundarySlot,
-		txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	hr := s.ls.poolHistoryReader(txn)
-	pr := s.ls.poolReader(txn)
-	if hr == nil || pr == nil {
-		return want, nil
-	}
-	got, setErr := s.retiringRefunds(hr, pr, txn, epoch, boundarySlot)
-	same := setErr == nil && len(got) == len(want)
-	if same {
-		byPool := make(map[string]models.PoolRetirementRefund, len(got))
-		for _, r := range got {
-			byPool[string(r.PoolKeyHash)] = r
-		}
-		for _, w := range want {
-			r, ok := byPool[string(w.PoolKeyHash)]
-			if !ok || r.DepositHeld != w.DepositHeld ||
-				r.RewardAccountCredentialTag != w.RewardAccountCredentialTag ||
-				!bytes.Equal(r.RewardAccount, w.RewardAccount) {
-				same = false
-				break
-			}
-		}
-	}
-	s.ls.comparePoolRead(
-		g, fmt.Sprintf("retiring at epoch %d", epoch), same, setErr,
-	)
-	return want, nil
-}
-
-// retiringFromSet answers GetPoolsRetiringAtEpoch from the set in set mode
-// and reports whether it did. It stays on the store when a retiring pool's
-// state is gone, because the deposit held is read from that state and the
-// store's comes from the registration row, and on a node that certifies
-// Leios, where the state's deposit follows apply order and the store's row is
-// chosen in effective order. A drained family never reaches this read, since
-// poolBook answers it. The refunds come in pool order; the store gives none.
-func (s stagingLedgerDB) retiringFromSet(
-	txn ledgerdb.Txn,
-	epoch, boundarySlot uint64,
-) ([]models.PoolRetirementRefund, bool, error) {
-	pr := s.ls.poolServing(txn)
-	if pr == nil || s.ls.leiosCertifies() {
-		return nil, false, nil
-	}
-	hr := s.ls.poolHistoryReader(txn)
-	if hr == nil {
-		return nil, false, nil
-	}
-	got, err := s.retiringRefunds(hr, pr, txn, epoch, boundarySlot)
-	if err != nil {
-		return nil, false, err
-	}
-	if got == nil {
-		got = []models.PoolRetirementRefund{}
-	}
-	for _, r := range got {
-		st, err := s.ls.poolView(pr, txn, r.PoolKeyHash)
-		if err != nil {
-			return nil, false, err
-		}
-		if st == nil {
-			return nil, false, nil
-		}
-	}
-	slices.SortFunc(got, func(a, b models.PoolRetirementRefund) int {
-		return bytes.Compare(a.PoolKeyHash, b.PoolKeyHash)
 	})
-	return got, true, nil
-}
-
-// retiringRefunds computes the refunds of the pools retiring at epoch from
-// the registered pools, which is every pool the read can name: a pool is
-// removed only at the boundary the read precedes.
-func (s stagingLedgerDB) retiringRefunds(
-	hr PoolHistoryReader,
-	pr PoolReader,
-	txn ledgerdb.Txn,
-	epoch, boundary uint64,
-) ([]models.PoolRetirementRefund, error) {
-	pools, err := s.ls.poolKeys(pr, txn)
-	if err != nil {
-		return nil, err
-	}
-	var out []models.PoolRetirementRefund
-	for _, p := range pools {
-		events, err := s.ls.poolHistoryView(hr, txn, p)
-		if err != nil {
-			return nil, err
-		}
-		reg := retiringPoolRegistration(events, boundary, epoch)
-		if reg == nil {
-			continue
-		}
-		st, err := s.ls.poolView(pr, txn, p)
-		if err != nil {
-			return nil, err
-		}
-		var held uint64
-		if st != nil && st.DepositHeld != nil {
-			held = *st.DepositHeld
-		}
-		out = append(out, models.PoolRetirementRefund{
-			PoolKeyHash:                p,
-			RewardAccount:              reg.RewardAccount,
-			RewardAccountCredentialTag: reg.RewardAccountCredentialTag,
-			DepositHeld:                types.Uint64(held),
-		})
-	}
-	return out, nil
 }
 
 type vrfAnswer struct {

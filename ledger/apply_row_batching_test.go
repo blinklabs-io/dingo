@@ -395,6 +395,7 @@ func runRowBatchingScenarioTolerating(
 	cfg.ShelleyGenesis().NetworkId = "Testnet"
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:                db,
+		UtxoSet:                 NewMemLiveSetForTest(),
 		ChainManager:            cm,
 		CardanoNodeConfig:       cfg,
 		Logger:                  testLogger(),
@@ -559,59 +560,33 @@ func rowBatchingQueryOne[T any](
 
 // TestApplyRowBatchingSerialEquivalence applies the same unvalidated blocks
 // into two stores, with the setting off and on, and requires identical stored
-// state: tip, nonces, UTxOs and their assets, accounts, pools, DReps,
-// governance and every API-mode detail table. In core mode the setting
-// selects the batched path; API mode batches with it off as well.
+// state: tip, nonces, accounts, pools, DReps and governance. The setting
+// selects the batched path.
 func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
 	t.Parallel()
 
 	blocks, names := rowBatchingScenario(t)
 	totalTxs := len(names)
-	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
-		for _, batchSize := range []int{len(blocks), 1} {
-			t.Run(fmt.Sprintf("%s/batch%d", mode, batchSize), func(t *testing.T) {
-				t.Parallel()
-				off := runRowBatchingScenario(t, blocks, mode, false, batchSize)
-				on := runRowBatchingScenario(t, blocks, mode, true, batchSize)
-				offAgain := runRowBatchingScenario(t, blocks, mode, false, batchSize)
+	mode := types.StorageModeCore
+	for _, batchSize := range []int{len(blocks), 1} {
+		t.Run(fmt.Sprintf("batch%d", batchSize), func(t *testing.T) {
+			t.Parallel()
+			off := runRowBatchingScenario(t, blocks, mode, false, batchSize)
+			on := runRowBatchingScenario(t, blocks, mode, true, batchSize)
+			offAgain := runRowBatchingScenario(t, blocks, mode, false, batchSize)
 
-				if mode == types.StorageModeAPI {
-					require.Equal(t, totalTxs, off.batchedTxs,
-						"API mode batches with the flag off")
-				} else {
-					require.Zero(t, off.batchedTxs,
-						"flag off must not use the batched path")
-				}
-				require.Equal(t, totalTxs, on.batchedTxs,
-					"flag on must write every transaction of the "+
-						"unvalidated blocks through the batched path")
+			require.Zero(t, off.batchedTxs,
+				"flag off must not use the batched path")
+			require.Equal(t, totalTxs, on.batchedTxs,
+				"flag on must write every transaction of the "+
+					"unvalidated blocks through the batched path")
 
-				if mode == types.StorageModeAPI {
-					// The queued tables must be populated, or the digest
-					// comparison below says nothing about the flush.
-					raw, err := dbtest.RawSQLiteMetadata(t, on.db)
-					require.NoError(t, err)
-					for _, table := range []string{
-						"address_transaction", "key_witness",
-						"witness_scripts", "plutus_data", "datum",
-						"transaction_metadata_label",
-					} {
-						require.Positive(t, rowBatchingQueryOne[int](t, raw,
-							`SELECT COUNT(*) FROM "`+table+`"`),
-							"scenario must queue %s rows", table)
-					}
-					require.Equal(t, uint64(20), rowBatchingQueryOne[uint64](
-						t, raw, `SELECT added_slot FROM datum`),
-						"a datum shared within a chunk keeps its first slot")
-				}
-
-				offDigest := rowBatchingDigest(t, off.db)
-				require.Equal(t, offDigest, rowBatchingDigest(t, offAgain.db),
-					"the digest must be deterministic between identical runs")
-				require.Equal(t, offDigest, rowBatchingDigest(t, on.db),
-					"batched application changed the stored state")
-			})
-		}
+			offDigest := rowBatchingDigest(t, off.db)
+			require.Equal(t, offDigest, rowBatchingDigest(t, offAgain.db),
+				"the digest must be deterministic between identical runs")
+			require.Equal(t, offDigest, rowBatchingDigest(t, on.db),
+				"batched application changed the stored state")
+		})
 	}
 }
 
@@ -622,64 +597,39 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 	t.Parallel()
 
 	blocks, names := rowBatchingScenario(t)
-	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
-		t.Run(mode, func(t *testing.T) {
-			t.Parallel()
-			run := runRowBatchingScenario(t, blocks, mode, true, len(blocks))
-			require.Positive(t, run.batchedTxs)
-			raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-			require.NoError(t, err)
+	run := runRowBatchingScenario(
+		t, blocks, types.StorageModeCore, true, len(blocks),
+	)
+	require.Positive(t, run.batchedTxs)
+	raw, err := dbtest.RawSQLiteMetadata(t, run.db)
+	require.NoError(t, err)
 
-			stake := rowBatchingKey(0x22)
-			active := rowBatchingQueryOne[bool](t, raw,
-				`SELECT active FROM account WHERE staking_key = ?`, stake)
-			require.True(t, active, "the registered credential is active")
-			pool := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT pool FROM account WHERE staking_key = ?`, stake)
-			require.Equal(t, rowBatchingKey(0x11), pool,
-				"the delegation must see the registration from the same chunk")
-			drep := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT drep FROM account WHERE staking_key = ?`, stake)
-			require.Equal(t, rowBatchingKey(0x33), drep)
+	stake := rowBatchingKey(0x22)
+	active := rowBatchingQueryOne[bool](t, raw,
+		`SELECT active FROM account WHERE staking_key = ?`, stake)
+	require.True(t, active, "the registered credential is active")
+	pool := rowBatchingQueryOne[[]byte](t, raw,
+		`SELECT pool FROM account WHERE staking_key = ?`, stake)
+	require.Equal(t, rowBatchingKey(0x11), pool,
+		"the delegation must see the registration from the same chunk")
+	drep := rowBatchingQueryOne[[]byte](t, raw,
+		`SELECT drep FROM account WHERE staking_key = ?`, stake)
+	require.Equal(t, rowBatchingKey(0x33), drep)
 
-			spentAt := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
-				names["register"].hash)
-			require.Equal(t, names["spend"].hash, spentAt,
-				"the output produced earlier in the chunk is marked spent by its consumer")
-			deleted := rowBatchingQueryOne[uint64](t, raw,
-				`SELECT deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
-				names["register"].hash)
-			require.Equal(t, uint64(20), deleted)
-			chained := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 1`,
-				names["spend"].hash)
-			require.Equal(t, names["chain"].hash, chained)
-			live := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND deleted_slot = 0`,
-				names["chain"].hash)
-			require.Equal(t, 1, live)
+	require.False(t, outputLiveIn(t, run.ls, names["register"].hash, 0),
+		"the output produced earlier in the chunk is spent by its consumer")
+	require.False(t, outputLiveIn(t, run.ls, names["spend"].hash, 1))
+	require.True(t, outputLiveIn(t, run.ls, names["chain"].hash, 0))
 
-			assets := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM asset`)
-			if mode == types.StorageModeAPI {
-				require.Positive(t, assets,
-					"the native asset output is stored")
-			} else {
-				require.Zero(t, assets,
-					"core mode stores no asset rows")
-			}
-			pools := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM pool`)
-			require.Equal(t, 1, pools)
-			dreps := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM drep`)
-			require.Equal(t, 1, dreps)
-			proposals := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM governance_proposal`)
-			require.Equal(t, 1, proposals)
-		})
-	}
+	pools := rowBatchingQueryOne[int](t, raw,
+		`SELECT COUNT(*) FROM pool`)
+	require.Equal(t, 1, pools)
+	dreps := rowBatchingQueryOne[int](t, raw,
+		`SELECT COUNT(*) FROM drep`)
+	require.Equal(t, 1, dreps)
+	proposals := rowBatchingQueryOne[int](t, raw,
+		`SELECT COUNT(*) FROM governance_proposal`)
+	require.Equal(t, 1, proposals)
 }
 
 // TestApplyRowBatchingSkipsValidatedDeltas pins that a delta handed back by a

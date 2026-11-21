@@ -125,6 +125,7 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 
@@ -249,6 +250,7 @@ func TestMempoolIndexesConfirmedInputsThroughLedgerSession(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 

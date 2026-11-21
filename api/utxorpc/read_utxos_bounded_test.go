@@ -55,6 +55,7 @@ func TestReadUtxos_PassesByteLimitToLookup(t *testing.T) {
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 		Logger:           discardLogger(),
 		LedgerState:      stub,
+		QueryDatabase:    stubQueryDB(stub),
 		MaxResponseBytes: 4321,
 	})}
 	_, err := srv.ReadUtxos(
@@ -72,8 +73,9 @@ func TestReadUtxos_LookupOverLimitIsResourceExhausted(t *testing.T) {
 	t.Parallel()
 	stub := &boundedUtxosStub{err: database.ErrUtxoBytesExceeded}
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: stub,
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 	_, err := srv.ReadUtxos(
 		context.Background(),
@@ -112,8 +114,9 @@ func TestReadUtxos_CanceledAndDeadlineMapToConnectCodes(t *testing.T) {
 			defer cancel()
 			stub := &boundedUtxosStub{err: ctx.Err()}
 			srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-				Logger:      discardLogger(),
-				LedgerState: stub,
+				Logger:        discardLogger(),
+				LedgerState:   stub,
+				QueryDatabase: stubQueryDB(stub),
 			})}
 			_, err := srv.ReadUtxos(
 				ctx,
@@ -135,6 +138,7 @@ func TestUtxosByRefsBounded_StopsLoadingPastTheLimit(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	open := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 		Logger: discardLogger(), EventBus: h.EB, LedgerState: h.LS,
+		QueryDatabase: h.U.config.QueryDatabase,
 	})}
 	search, err := open.SearchUtxos(
 		context.Background(),

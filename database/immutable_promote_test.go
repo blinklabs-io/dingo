@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
@@ -29,6 +30,7 @@ import (
 	badgerblob "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
@@ -906,4 +908,93 @@ func TestBlockDeleteRefusesBlockPromotedBeforeTipMoves(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ran)
 	require.ErrorIs(t, deleteErr, database.ErrRollbackBelowImmutableTip)
+}
+
+// A database written before the ImmutableDB may hold blocks whose bodies a
+// v0.94.2 history expiry tombstoned, and blocks whose bp entry is gone while
+// their bi entry remains. Promotion covers both and still moves the live
+// blocks after them, and an expired block keeps reporting its slot and hash.
+func TestImmutablePromotionCoversLegacyExpiredHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	legacy, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	blocks := make([]models.Block, 4)
+	for i := range blocks {
+		blocks[i] = models.Block{
+			ID: uint64(i + 1), Slot: uint64(100 * (i + 1)),
+			Number: uint64(i + 1), Type: 1,
+			Hash: bytes.Repeat([]byte{byte(0xA1 + i)}, 32),
+			Cbor: []byte{0x82, 0x41, byte(i), 0x41, 0x02},
+		}
+		require.NoError(t, legacy.BlockCreate(blocks[i], nil))
+	}
+	tombstoned, missing := blocks[0], blocks[1]
+	_, err = legacy.PruneBlock(t.Context(), tombstoned.Slot, tombstoned.Hash)
+	require.NoError(t, err)
+	txn := legacy.BlobTxn(true)
+	require.NoError(t, legacy.Blob().Delete(
+		txn.Blob(), types.BlockBlobKey(missing.Slot, missing.Hash),
+	))
+	require.NoError(t, txn.Commit())
+	require.NoError(t, dbtest.CloseDatabase(legacy))
+
+	migrated, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir,
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 4320, CanContainEBB: true,
+		},
+	})
+	require.NoError(t, err)
+	last := blocks[len(blocks)-1]
+	result, err := migrated.PromoteThrough(t.Context(), last.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.Promoted)
+	require.Equal(t, last.ID, result.Tip.TipIndex,
+		"legacy expired history is covered by the ImmutableDB migration")
+
+	read := migrated.BlobTxn(false)
+	defer read.Release()
+	_, _, err = migrated.Blob().GetBlock(
+		read.Blob(), tombstoned.Slot, tombstoned.Hash,
+	)
+	var expired *types.HistoryExpiredError
+	require.ErrorAs(t, err, &expired)
+	require.Equal(t, tombstoned.Slot, expired.Slot)
+	require.Equal(t, tombstoned.Hash, expired.Hash)
+	for _, blk := range blocks[2:] {
+		body, _, err := migrated.Blob().GetBlock(read.Blob(), blk.Slot, blk.Hash)
+		require.NoError(t, err)
+		require.Equal(t, blk.Cbor, body)
+	}
+}
+
+func TestImmutableMutationLockAllowsMarkerReads(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 4320, CanContainEBB: true,
+		},
+	})
+	require.NoError(t, err)
+	block := models.Block{
+		ID: 1, Slot: 100, Type: 1, Hash: bytes.Repeat([]byte{1}, 32),
+		Cbor: []byte{0x82, 0x41, 1, 0x41, 2},
+	}
+	require.NoError(t, db.BlockCreate(block, nil))
+	_, err = db.PromoteThrough(t.Context(), 1)
+	require.NoError(t, err)
+	unlock, err := db.LockImmutable(t.Context())
+	require.NoError(t, err)
+	defer unlock()
+	readDone := make(chan error, 1)
+	go func() {
+		txn := db.BlobTxn(false)
+		defer txn.Release()
+		_, _, err := db.Blob().GetBlock(txn.Blob(), block.Slot, block.Hash)
+		readDone <- err
+	}()
+	require.NoError(t, testutil.RequireReceive(t, readDone, 5*time.Second,
+		"marker reads remain runnable while a snapshot waits for ledger commits"))
 }

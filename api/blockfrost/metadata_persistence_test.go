@@ -18,15 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"io"
-	"log/slog"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -34,26 +27,12 @@ import (
 )
 
 // TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders stores
-// transactions through the API-mode persistence path, so the label index is
+// transactions through the IndexerDB's persistence path, so the label index is
 // written by the same code that indexes chain data, and checks that every
 // metadata endpoint gives the same outcome for each key order on every call.
 func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     t.TempDir(),
-		StorageMode: types.StorageModeAPI,
-	})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(t.Context(), db, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
+	adapter, _, db := newDBBackedAdapter(t)
 
 	// Label 721 maps integer 1 and text "1", which collide in JSON; label 1
 	// is the representable text "a". The indefinite-length form re-encodes

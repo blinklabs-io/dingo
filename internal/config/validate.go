@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -72,6 +73,23 @@ func validateHostPort(addr string) error {
 	}
 	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
 		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
+// ValidateAdvertiseAddress checks that addr is an IP:port that remote nodes
+// can route to. The PeerSharing wire format carries IP literals only, and
+// peers drop non-routable addresses, so anything else would never be shared.
+func ValidateAdvertiseAddress(addr string) error {
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return errors.New("must be an IP literal and port, as IP:port")
+	}
+	if ap.Port() == 0 {
+		return errors.New("port must be in 1-65535")
+	}
+	if !peergov.IsRoutableIP(ap.Addr().Unmap().AsSlice()) {
+		return errors.New("must be a globally routable address")
 	}
 	return nil
 }
@@ -618,6 +636,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
+	if c.AdvertiseAddress != "" {
+		if err := ValidateAdvertiseAddress(c.AdvertiseAddress); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid advertiseAddress %q: %w",
+				c.AdvertiseAddress,
+				err,
+			))
+		}
+	}
+
 	// Mode enums
 	if !c.RunMode.Valid() {
 		errs = append(errs, fmt.Errorf(
@@ -650,62 +678,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"ledgerUtxoCheckpointKeep must not be negative",
 		))
 	}
-
-	switch c.LedgerUtxoReads {
-	case "":
-	case "verify", "set":
-		if !c.LedgerUtxoBadger {
-			errs = append(errs, fmt.Errorf(
-				"ledgerUtxoReads %q needs ledgerUtxoBadger",
-				c.LedgerUtxoReads,
-			))
-		}
-	default:
-		errs = append(errs, fmt.Errorf(
-			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
-			c.LedgerUtxoReads, "verify", "set",
-		))
-	}
-
-	// The node does not open the set without an on-disk database, and a
-	// set-only database would still be marked as holding no utxo rows.
-	if (c.LedgerUtxoBadger || c.LedgerUtxoBadgerOnly) &&
-		c.DatabasePath == "" {
-		errs = append(errs, errors.New(
-			"ledgerUtxoBadger needs databasePath: the live UTxO set is "+
-				"not opened without an on-disk database",
-		))
-	}
-
-	if c.LedgerUtxoBadgerOnly {
-		if !c.LedgerUtxoBadger {
-			errs = append(errs, errors.New(
-				"ledgerUtxoBadgerOnly needs ledgerUtxoBadger",
-			))
-		}
-		if c.LedgerUtxoReads == "verify" {
-			// There is no metadata UTxO set to compare against: reads
-			// always use the live set.
-			errs = append(errs, errors.New(
-				"ledgerUtxoReads \"verify\" has no effect with "+
-					"ledgerUtxoBadgerOnly",
-			))
-		}
-		if c.ConsensusStorageMode() == storageModeAPI {
-			errs = append(errs, errors.New(
-				"ledgerUtxoBadgerOnly needs core storage mode",
-			))
-		}
-		if c.LedgerUtxoShadow {
-			// The shadow bootstraps from the metadata store's UTxO set,
-			// which this mode does not keep.
-			errs = append(errs, errors.New(
-				"ledgerUtxoShadow cannot run with ledgerUtxoBadgerOnly",
-			))
-		}
-	}
-
-	errs = append(errs, ledgerStateSetOnlyErrors(c)...)
 
 	if c.TrustedNtCIdleTimeout < 0 {
 		errs = append(errs, fmt.Errorf(
@@ -1038,6 +1010,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			))
 		}
 	}
+	if value, ok := c.Plugins.Mempool.Config["selection"]; ok {
+		selection, isString := value.(string)
+		if !isString || (selection != MempoolSelectionAdmission &&
+			selection != MempoolSelectionFeeDensity) {
+			errs = append(errs, fmt.Errorf(
+				"invalid plugins.mempool.config.selection: %v (must be %q or %q)",
+				value,
+				MempoolSelectionAdmission,
+				MempoolSelectionFeeDensity,
+			))
+		}
+	}
 
 	if c.TokenRegistry.MaxDecompressedBytes < 0 {
 		errs = append(errs, fmt.Errorf(
@@ -1251,17 +1235,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	if c.ImmutableDB.KeepMithrilChunks && !c.ImmutableDB.Enabled {
-		errs = append(errs, errors.New(
-			"immutableDb.keepMithrilChunks requires immutableDb.enabled",
-		))
-	}
-
-	if c.ImmutableDB.Enabled && c.HistoryExpiry.Enabled {
-		errs = append(errs, errors.New(
-			"immutableDb.enabled cannot be combined with historyExpiry.enabled",
-		))
-	}
 	// ApplyDefaults fills only an unset (zero) frequency, so a negative one
 	// was configured; the promoter would otherwise substitute its own.
 	if c.ImmutableDB.PromoteFrequency < 0 {
@@ -1275,29 +1248,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid immutableDb.promoteBatch %d (want 0 to %d)",
 			c.ImmutableDB.PromoteBatch, MaxImmutableDBPromoteBatch,
-		))
-	}
-
-	switch c.Indexer.Layout {
-	case "", IndexerLayoutShared:
-	case IndexerLayoutSplit:
-		if c.StorageMode != storageModeAPI {
-			errs = append(errs, errors.New(
-				"indexer.layout split needs storageMode api: the IndexerDB "+
-					"is what serves the APIs",
-			))
-		}
-		if c.HistoryExpiry.Enabled {
-			errs = append(errs, errors.New(
-				"indexer.layout split is incompatible with "+
-					"historyExpiry.enabled: expiry would remove block "+
-					"bodies the IndexerDB writer has not yet read",
-			))
-		}
-	default:
-		errs = append(errs, fmt.Errorf(
-			"invalid indexer.layout %q (want shared or split)",
-			c.Indexer.Layout,
 		))
 	}
 
@@ -1875,54 +1825,6 @@ func validateDMQPeers(c DMQConfig) []error {
 				c.ListenIPv6Address,
 			))
 		}
-	}
-	return errs
-}
-
-// ValidateLedgerStateSetOnly checks the combinations ledgerStateSetOnly and
-// ledgerStateVerifyBeforeDrain accept. It is shared by Validate and by
-// library callers that build a node without going through it.
-func ValidateLedgerStateSetOnly(c *Config) error {
-	return errors.Join(ledgerStateSetOnlyErrors(c)...)
-}
-
-func ledgerStateSetOnlyErrors(c *Config) []error {
-	var errs []error
-	if c.LedgerStateSetOnly {
-		if !c.LedgerUtxoBadgerOnly {
-			errs = append(errs, errors.New(
-				"ledgerStateSetOnly needs ledgerUtxoBadgerOnly",
-			))
-		}
-		if c.ConsensusStorageMode() == storageModeAPI {
-			errs = append(errs, errors.New(
-				"ledgerStateSetOnly needs core storage mode: API mode "+
-					"keeps every SQL table",
-			))
-		}
-		switch c.LedgerUtxoReads {
-		case "set":
-		case "verify":
-			errs = append(errs, errors.New(
-				"ledgerUtxoReads \"verify\" cannot run with "+
-					"ledgerStateSetOnly: no SQL copy is left to compare",
-			))
-		default:
-			errs = append(errs, errors.New(
-				"ledgerStateSetOnly needs ledgerUtxoReads \"set\"",
-			))
-		}
-		if c.LedgerUtxoShadow {
-			errs = append(errs, errors.New(
-				"ledgerUtxoShadow cannot run with ledgerStateSetOnly",
-			))
-		}
-	}
-
-	if c.LedgerStateVerifyBeforeDrain && !c.LedgerStateSetOnly {
-		errs = append(errs, errors.New(
-			"ledgerStateVerifyBeforeDrain needs ledgerStateSetOnly",
-		))
 	}
 	return errs
 }

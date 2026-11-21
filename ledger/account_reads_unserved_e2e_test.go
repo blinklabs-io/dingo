@@ -28,48 +28,58 @@ import (
 // With accounts drained and no set serving them, the account lookups and
 // lists fail as unserved rather than fall through to the emptied table, the
 // empty-credential DRep delegator read included.
-func TestAccountReadsFailWhenTheDrainedFamilyHasNoServingSet(t *testing.T) {
+func TestAccountReadsUseLoadedSetAfterDrain(t *testing.T) {
 	t.Parallel()
-	h := newLiveStakeHarnessWithReads(t, false, ledger.UtxoSetReadsOff)
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
+	h := newLiveStakeHarnessWithReads(t, false, "set")
 	ldb := h.scenario.LedgerDB()
 	ctx := t.Context()
 	pools := []lcommon.PoolKeyHash{lcommon.PoolKeyHash(h.pool)}
 	ref := models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x72}, 28))
-	for name, err := range map[string]error{
-		"account": func() error {
-			_, err := ldb.GetAccountByCredential(ctx, 0, ref.Key, true, nil)
-			return err
-		}(),
-		"accounts": func() error {
-			_, err := ldb.GetAccountsByCredential(
-				ctx, []models.StakeCredentialRef{ref}, true, nil,
-			)
-			return err
-		}(),
-		"active": func() error {
-			_, err := ldb.GetActiveAccountCredentials(nil)
-			return err
-		}(),
-		"counts": func() error {
-			_, err := ldb.GetActiveDelegatorCountsByPool(pools, nil)
-			return err
-		}(),
-		"credentials": func() error {
-			_, err := ldb.GetActiveDelegatorCredentialsByPool(pools, nil)
-			return err
-		}(),
-		"drep delegators": func() error {
-			_, err := ldb.GetDRepDelegators(ctx, 0, ref.Key, nil)
-			return err
-		}(),
-		"predefined drep delegators": func() error {
-			_, err := ldb.GetDRepDelegators(ctx, 2, nil, nil)
-			return err
-		}(),
-	} {
-		require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved, name)
+	wantAccount, err := h.store.GetAccountByCredential(ctx, 0, ref.Key, true, nil)
+	require.NoError(t, err)
+	wantAccount.ID = 0
+	wantAccounts, err := h.store.GetAccountsByCredential(ctx, []models.StakeCredentialRef{ref}, true, nil)
+	require.NoError(t, err)
+	for _, account := range wantAccounts {
+		account.ID = 0
 	}
+	wantActive, err := h.store.GetActiveAccountCredentials(nil)
+	require.NoError(t, err)
+	wantCounts, err := h.store.GetActiveDelegatorCountsByPool(pools, nil)
+	require.NoError(t, err)
+	wantCredentials, err := h.store.GetActiveDelegatorCredentialsByPool(pools, nil)
+	require.NoError(t, err)
+	wantDelegators, err := h.store.GetDRepDelegators(ctx, 0, ref.Key, nil)
+	require.NoError(t, err)
+	h.scenario.DrainFamilies(nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts))
+	reached, hide := h.scenario.HideStoreReads(
+		"GetAccountByCredential", "GetAccountsByCredential", "GetActiveAccountCredentials",
+		"GetActiveDelegatorCountsByPool", "GetActiveDelegatorCredentialsByPool", "GetDRepDelegators",
+	)
+	gotAccount, err := ldb.GetAccountByCredential(ctx, 0, ref.Key, true, nil)
+	require.NoError(t, err)
+	gotAccount.ID = 0
+	require.Equal(t, wantAccount, gotAccount)
+	gotAccounts, err := ldb.GetAccountsByCredential(ctx, []models.StakeCredentialRef{ref}, true, nil)
+	require.NoError(t, err)
+	for _, account := range gotAccounts {
+		account.ID = 0
+	}
+	require.Equal(t, wantAccounts, gotAccounts)
+	gotActive, err := ldb.GetActiveAccountCredentials(nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, wantActive, gotActive)
+	gotCounts, err := ldb.GetActiveDelegatorCountsByPool(pools, nil)
+	require.NoError(t, err)
+	require.Equal(t, wantCounts, gotCounts)
+	gotCredentials, err := ldb.GetActiveDelegatorCredentialsByPool(pools, nil)
+	require.NoError(t, err)
+	require.Equal(t, wantCredentials, gotCredentials)
+	gotDelegators, err := ldb.GetDRepDelegators(ctx, 0, ref.Key, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, wantDelegators, gotDelegators)
+	_, err = ldb.GetDRepDelegators(ctx, 2, nil, nil)
+	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved, "predefined DRep has no set key")
+	hide(false)
+	require.Zero(t, reached(), "account reads reached the metadata store")
 }

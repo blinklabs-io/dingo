@@ -219,6 +219,7 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 	t.Cleanup(bus.Close)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
+		UtxoSet:            NewMemLiveSetForTest(),
 		ChainManager:       cm,
 		CardanoNodeConfig:  nodeConfig,
 		EventBus:           bus,

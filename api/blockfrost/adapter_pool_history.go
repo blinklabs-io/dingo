@@ -59,7 +59,10 @@ func (a *NodeAdapter) PoolsRetired(
 	ctx context.Context,
 	params PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
-	current, err := a.currentEpochNumber()
+	db := a.db()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	current, err := a.currentEpochNumberAt(txn)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -67,9 +70,6 @@ func (a *NodeAdapter) PoolsRetired(
 	if !ok {
 		return []PoolRetiringInfo{}, 0, nil
 	}
-	db := a.db()
-	txn := db.Transaction(ctx, false)
-	defer txn.Release()
 	rows, total, err := db.Metadata().GetRetiredPoolsPage(
 		current, params.Count, offset,
 		params.Order == PaginationOrderDesc, txn.Metadata(),

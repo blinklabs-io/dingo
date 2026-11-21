@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -33,8 +32,7 @@ import (
 // ErrLedgerStateAsOfUnavailable reports a ledger state read as of a past slot
 // that the live UTxO set cannot answer: the slot is older than its journals,
 // or the transaction holds staged changes the journals do not describe. It is
-// returned only when a family the read needs has been drained from the
-// metadata store; otherwise the read is answered from the metadata store.
+// returned when the configured set cannot answer the requested historical state.
 var ErrLedgerStateAsOfUnavailable = errors.New(
 	"ledger state before the live UTxO set's history is not available when the set is the only copy",
 )
@@ -121,8 +119,7 @@ func readSetAsOf[T any](
 	return v, nil
 }
 
-// The ledger-state families each as-of read's metadata store answer reads.
-// A read needing several fails closed once any is drained.
+// The ledger-state families each as-of read depends on.
 var (
 	drepFamilies = nodesettings.FamilyMask(0).
 			With(nodesettings.FamilyDReps)
@@ -142,18 +139,13 @@ type asOfRead[T any] struct {
 	// families are the ledger-state families whose SQL rows the metadata
 	// store's answer reads. The read fails closed once any is drained.
 	families nodesettings.FamilyMask
-	// serves reports whether set mode answers the read from the set.
+	// serves reports whether the set answers the read.
 	serves func() bool
-	// verifies reports whether verify mode compares the read with the set.
-	verifies func() bool
 	// current, when set and true, says the read is of the state txn sees
 	// now rather than of a past slot, so the set answers it without its
 	// journals.
-	current   func() bool
-	compare   func(g verifyReadGuard, what string, same bool, setErr error, detail ...any)
-	fromStore func() (T, error)
-	fromSet   func() (T, error)
-	same      func(want, got T) (bool, []any)
+	current func() bool
+	fromSet func() (T, error)
 }
 
 // fromSetAt reads the set for r as of slot.
@@ -168,48 +160,22 @@ func (r asOfRead[T]) fromSetAt(
 	return readSetAsOf(ls, txn, slot, r.fromSet)
 }
 
-// answerAsOf answers r. In set mode a read the set reaches is the set's. A
-// read it does not reach is the metadata store's, or, once a family it needs
-// is drained, an ErrLedgerStateAsOfUnavailable error. In verify mode
-// the store answers and the set's answer is compared when the set reaches the
-// slot.
+// answerAsOf reads from the configured set and returns an error when it cannot
+// serve the requested state.
 func answerAsOf[T any](
 	ls *LedgerState,
 	txn ledgerdb.Txn,
 	slot uint64,
 	r asOfRead[T],
 ) (T, error) {
-	noStore := ls.familiesDrained(r.families)
-	if r.serves() {
-		v, err := r.fromSetAt(ls, txn, slot)
-		if err == nil ||
-			!errors.Is(err, ErrLedgerStateAsOfUnavailable) ||
-			noStore {
-			return v, err
-		}
-	} else if noStore {
+	if !r.serves() {
 		var zero T
 		return zero, fmt.Errorf(
 			"%w: the live UTxO set does not serve %s",
 			ErrLedgerStateAsOfUnavailable, r.what,
 		)
 	}
-	g := ls.verifyGuard(txn)
-	want, err := r.fromStore()
-	if err != nil || !r.verifies() {
-		return want, err
-	}
-	got, setErr := r.fromSetAt(ls, txn, slot)
-	if errors.Is(setErr, ErrLedgerStateAsOfUnavailable) {
-		return want, nil
-	}
-	same := false
-	var detail []any
-	if setErr == nil {
-		same, detail = r.same(want, got)
-	}
-	r.compare(g, r.what, same, setErr, detail...)
-	return want, nil
+	return r.fromSetAt(ls, txn, slot)
 }
 
 // SetDrainedFamilies records the families whose SQL rows are gone. The mask
@@ -291,22 +257,6 @@ func (ls *LedgerState) drepsAt(
 	return out, err
 }
 
-func sameDrepLists(want, got []*models.Drep) (bool, []any) {
-	byKey := make(map[string]*models.Drep, len(got))
-	for _, d := range got {
-		byKey[models.NewStakeCredentialRef(d.CredentialTag, d.Credential).MapKey()] = d
-	}
-	same := len(want) == len(got)
-	for _, w := range want {
-		g, ok := byKey[models.NewStakeCredentialRef(w.CredentialTag, w.Credential).MapKey()]
-		if !ok || !sameDrep(*w, *g) {
-			same = false
-			break
-		}
-	}
-	return same, []any{"store_count", len(want), "set_count", len(got)}
-}
-
 func (s stagingLedgerDB) GetDrepsAtSlot(
 	ctx context.Context,
 	refs []models.StakeCredentialRef,
@@ -317,15 +267,9 @@ func (s stagingLedgerDB) GetDrepsAtSlot(
 		what:     fmt.Sprintf("DReps at slot %d", slot),
 		families: drepFamilies,
 		serves:   func() bool { return s.ls.drepServing(txn) != nil },
-		verifies: func() bool { return s.ls.drepVerifying(txn) != nil },
-		compare:  s.ls.compareDrepRead,
-		fromStore: func() ([]*models.Drep, error) {
-			return s.LedgerDB.GetDrepsAtSlot(ctx, refs, slot, txn)
-		},
 		fromSet: func() ([]*models.Drep, error) {
 			return s.ls.drepsAt(txn, refs, slot)
 		},
-		same: sameDrepLists,
 	})
 }
 
@@ -382,29 +326,6 @@ func (ls *LedgerState) drepDelegatorsAt(
 	return out, nil
 }
 
-func sameDelegators(
-	want, got map[string][]models.StakeCredentialRef,
-) (bool, []any) {
-	same := len(want) == len(got)
-	for k, w := range want {
-		g, ok := got[k]
-		if !ok || len(g) != len(w) {
-			same = false
-			break
-		}
-		have := make(map[string]struct{}, len(g))
-		for _, s := range g {
-			have[s.MapKey()] = struct{}{}
-		}
-		for _, s := range w {
-			if _, ok := have[s.MapKey()]; !ok {
-				same = false
-			}
-		}
-	}
-	return same, []any{"store_dreps", len(want), "set_dreps", len(got)}
-}
-
 func (s stagingLedgerDB) GetDRepDelegatorsAtSlot(
 	ctx context.Context,
 	dreps []models.StakeCredentialRef,
@@ -419,15 +340,9 @@ func (s stagingLedgerDB) GetDRepDelegatorsAtSlot(
 			what:     fmt.Sprintf("DRep delegators at slot %d", slot),
 			families: drepFamilies.With(nodesettings.FamilyAccounts),
 			serves:   func() bool { return s.ls.drepServing(txn) != nil },
-			verifies: func() bool { return s.ls.drepVerifying(txn) != nil },
-			compare:  s.ls.compareDrepRead,
-			fromStore: func() (map[string][]models.StakeCredentialRef, error) {
-				return s.LedgerDB.GetDRepDelegatorsAtSlot(ctx, dreps, slot, txn)
-			},
 			fromSet: func() (map[string][]models.StakeCredentialRef, error) {
 				return s.ls.drepDelegatorsAt(txn, dreps, slot)
 			},
-			same: sameDelegators,
 		},
 	)
 }
@@ -476,25 +391,8 @@ func (s stagingLedgerDB) GetDrepRegistrationDepositsAtSlot(
 		what:     fmt.Sprintf("DRep deposits at slot %d", slot),
 		families: drepFamilies,
 		serves:   func() bool { return s.ls.registrationHistoryServes(txn) },
-		verifies: func() bool {
-			return s.ls.registrationHistoryReader(txn) != nil
-		},
-		compare: func(g verifyReadGuard, what string, same bool, setErr error, _ ...any) {
-			s.ls.compareRegistrationRead(g, what, same, setErr)
-		},
-		fromStore: func() (map[string]uint64, error) {
-			return s.LedgerDB.GetDrepRegistrationDepositsAtSlot(
-				ctx,
-				refs,
-				slot,
-				txn,
-			)
-		},
 		fromSet: func() (map[string]uint64, error) {
 			return s.ls.drepDepositsAt(txn, refs, slot)
-		},
-		same: func(want, got map[string]uint64) (bool, []any) {
-			return maps.Equal(want, got), nil
 		},
 	})
 }
@@ -536,28 +434,6 @@ func (ls *LedgerState) votesAt(
 	return out, nil
 }
 
-// sameVotesAt compares the votes a read as of a slot gives. The store reports
-// a vote's update slot from its history, which names the cast itself for a
-// vote never replaced, where the set holds none, so it is not compared.
-func sameVotesAt(want, got []*models.GovernanceVote) (bool, []any) {
-	byVoter := make(map[string]*models.GovernanceVote, len(got))
-	for _, v := range got {
-		byVoter[voterKey(*v)] = v
-	}
-	same := len(want) == len(got)
-	for _, w := range want {
-		g, ok := byVoter[voterKey(*w)]
-		if !ok || g.ID != w.ID || g.ProposalID != w.ProposalID ||
-			g.Vote != w.Vote || g.AnchorURL != w.AnchorURL ||
-			!bytes.Equal(g.AnchorHash, w.AnchorHash) ||
-			g.AddedSlot != w.AddedSlot {
-			same = false
-			break
-		}
-	}
-	return same, []any{"store_votes", len(want), "set_votes", len(got)}
-}
-
 func (s stagingLedgerDB) GetGovernanceVotesAtSlot(
 	ctx context.Context,
 	proposalID uint,
@@ -575,23 +451,9 @@ func (s stagingLedgerDB) GetGovernanceVotesAtSlot(
 			r, err := s.ls.governanceServing(txn)
 			return err == nil && r != nil
 		},
-		verifies: func() bool {
-			_, mode := s.ls.utxoSetReader()
-			return mode != UtxoSetReadsOff && s.ls.governanceReader(txn) != nil
-		},
-		compare: s.ls.compareGovernanceRead,
-		fromStore: func() ([]*models.GovernanceVote, error) {
-			return s.LedgerDB.GetGovernanceVotesAtSlot(
-				ctx,
-				proposalID,
-				slot,
-				txn,
-			)
-		},
 		fromSet: func() ([]*models.GovernanceVote, error) {
 			return s.ls.votesAt(txn, proposalID, slot)
 		},
-		same: sameVotesAt,
 	})
 }
 
@@ -636,24 +498,6 @@ func (ls *LedgerState) poolRegistrationsAt(
 	return out, nil
 }
 
-func samePoolRegistrations(want, got []models.PoolRegistration) (bool, []any) {
-	byPool := make(map[string]*models.PoolRegistration, len(got))
-	for i := range got {
-		byPool[string(got[i].PoolKeyHash)] = &got[i]
-	}
-	same := len(want) == len(got)
-	for i := range want {
-		if !samePoolRegistration(
-			&want[i],
-			byPool[string(want[i].PoolKeyHash)],
-		) {
-			same = false
-			break
-		}
-	}
-	return same, []any{"store_count", len(want), "set_count", len(got)}
-}
-
 func (s stagingLedgerDB) GetPoolRegistrationsAtSlot(
 	pools []lcommon.PoolKeyHash,
 	slot uint64,
@@ -663,17 +507,9 @@ func (s stagingLedgerDB) GetPoolRegistrationsAtSlot(
 		what:     fmt.Sprintf("pool registrations at slot %d", slot),
 		families: poolFamilies,
 		serves:   func() bool { return s.ls.poolHistoryServes(txn) != nil },
-		verifies: func() bool { return s.ls.poolHistoryReader(txn) != nil },
-		compare: func(g verifyReadGuard, what string, same bool, setErr error, _ ...any) {
-			s.ls.comparePoolRead(g, what, same, setErr)
-		},
-		fromStore: func() ([]models.PoolRegistration, error) {
-			return s.LedgerDB.GetPoolRegistrationsAtSlot(pools, slot, txn)
-		},
 		fromSet: func() ([]models.PoolRegistration, error) {
 			return s.ls.poolRegistrationsAt(txn, pools, slot)
 		},
-		same: samePoolRegistrations,
 	})
 }
 
@@ -706,21 +542,6 @@ func (ls *LedgerState) retiringPoolsAt(
 	return out, err
 }
 
-func sameRetiringPools(want, got []models.PoolRetiringRow) (bool, []any) {
-	byPool := make(map[string]uint64, len(got))
-	for _, r := range got {
-		byPool[string(r.PoolKeyHash)] = r.Epoch
-	}
-	same := len(want) == len(got)
-	for _, w := range want {
-		if e, ok := byPool[string(w.PoolKeyHash)]; !ok || e != w.Epoch {
-			same = false
-			break
-		}
-	}
-	return same, []any{"store_count", len(want), "set_count", len(got)}
-}
-
 func (s stagingLedgerDB) GetRetiringPoolsAtSlot(
 	currentEpoch uint64,
 	slot uint64,
@@ -730,17 +551,9 @@ func (s stagingLedgerDB) GetRetiringPoolsAtSlot(
 		what:     fmt.Sprintf("retiring pools at slot %d", slot),
 		families: poolFamilies,
 		serves:   func() bool { return s.ls.poolServing(txn) != nil },
-		verifies: func() bool { return s.ls.poolVerifyReader(txn) != nil },
-		compare: func(g verifyReadGuard, what string, same bool, setErr error, _ ...any) {
-			s.ls.comparePoolRead(g, what, same, setErr)
-		},
-		fromStore: func() ([]models.PoolRetiringRow, error) {
-			return s.LedgerDB.GetRetiringPoolsAtSlot(currentEpoch, slot, txn)
-		},
 		fromSet: func() ([]models.PoolRetiringRow, error) {
 			return s.ls.retiringPoolsAt(txn, currentEpoch, slot)
 		},
-		same: sameRetiringPools,
 	})
 }
 
@@ -777,18 +590,8 @@ func (s stagingLedgerDB) GetPoolDepositsHeldAtSlot(
 		what:     fmt.Sprintf("pool deposits at slot %d", slot),
 		families: poolFamilies,
 		serves:   func() bool { return s.ls.poolServing(txn) != nil },
-		verifies: func() bool { return s.ls.poolVerifyReader(txn) != nil },
-		compare: func(g verifyReadGuard, what string, same bool, setErr error, _ ...any) {
-			s.ls.comparePoolRead(g, what, same, setErr)
-		},
-		fromStore: func() (map[string]uint64, error) {
-			return s.LedgerDB.GetPoolDepositsHeldAtSlot(pools, slot, txn)
-		},
 		fromSet: func() (map[string]uint64, error) {
 			return s.ls.poolDepositsAt(txn, pools, slot)
-		},
-		same: func(want, got map[string]uint64) (bool, []any) {
-			return maps.Equal(want, got), nil
 		},
 	})
 }
@@ -835,18 +638,6 @@ func (ls *LedgerState) accountsAt(
 	return out, nil
 }
 
-func sameAccountsAt(want, got map[string]*models.Account) (bool, []any) {
-	same := len(want) == len(got)
-	for k, w := range want {
-		g, ok := got[k]
-		if !ok || !sameAccount(*w, *g) {
-			same = false
-			break
-		}
-	}
-	return same, []any{"store_count", len(want), "set_count", len(got)}
-}
-
 func (s stagingLedgerDB) GetAccountsByCredentialAtSlot(
 	ctx context.Context,
 	refs []models.StakeCredentialRef,
@@ -857,22 +648,8 @@ func (s stagingLedgerDB) GetAccountsByCredentialAtSlot(
 		what:     fmt.Sprintf("accounts at slot %d", slot),
 		families: accountFamilies,
 		serves:   func() bool { return s.ls.accountServing(txn) != nil },
-		verifies: func() bool {
-			_, ok := s.ls.accountReadSource(txn)
-			return ok
-		},
-		compare: s.ls.compareAccountRead,
-		fromStore: func() (map[string]*models.Account, error) {
-			return s.LedgerDB.GetAccountsByCredentialAtSlot(
-				ctx,
-				refs,
-				slot,
-				txn,
-			)
-		},
 		fromSet: func() (map[string]*models.Account, error) {
 			return s.ls.accountsAt(txn, refs, slot)
 		},
-		same: sameAccountsAt,
 	})
 }

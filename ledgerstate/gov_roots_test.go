@@ -150,12 +150,15 @@ func TestImportLedgerStateResumeVerifiesPurposeRoots(t *testing.T) {
 	cfg := govImportConfigForTest(db, govStateWithRoots(
 		t, [4]*ParsedGovActionId{root, nil, nil, nil}, false,
 	))
+	cfg.UtxoSet = importSetFor(t, db)
 	cfg.ImportKey = "resume-purpose-roots"
 	cfg.State.Tip = &SnapshotTip{
 		Slot:      50_000,
 		BlockHash: bytes.Repeat([]byte{0x44}, 32),
 	}
 	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
+	// The interrupted run marked the database before its first phase.
+	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
 
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "is not an enacted governance proposal")
@@ -172,12 +175,15 @@ func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
 	cfg := govImportConfigForTest(db, govStateWithEncodedRoots(
 		t, []any{[]any{}, []any{}, []any{}}, false, nil, nil,
 	))
+	cfg.UtxoSet = importSetFor(t, db)
 	cfg.ImportKey = "resume-undecodable-roots"
 	cfg.State.Tip = &SnapshotTip{
 		Slot:      50_000,
 		BlockHash: bytes.Repeat([]byte{0x44}, 32),
 	}
 	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
+	// The interrupted run marked the database before its first phase.
+	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
 
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "GovRelation has 3 elements")

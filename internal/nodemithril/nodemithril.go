@@ -93,6 +93,11 @@ func New(p dingo.MithrilCatchUpParams) (dingo.MithrilCatchUp, error) {
 	// state is always Shelley or later.
 	var stabilityWindow uint64
 	if mode == mithril.ModeSnapshot {
+		if p.UtxoSet == nil {
+			return nil, errors.New(
+				"a snapshot restore requires the LedgerDB UTxO set",
+			)
+		}
 		var err error
 		stabilityWindow, err = ledger.ShelleyStabilityWindow(
 			p.CardanoNodeConfig.ShelleyGenesis(),
@@ -280,10 +285,6 @@ func (s *source) SnapshotProgress(
 }
 
 func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
-	var utxoSet ledgerstate.UtxoSetLoader
-	if s.utxoSet != nil {
-		utxoSet = s.utxoSet()
-	}
 	return mithril.SnapshotConfig{
 		Feed: mithril.ChunkFeedConfig{
 			Bootstrap:    s.bootstrap,
@@ -295,7 +296,7 @@ func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
 		CardanoNodeConfig: s.nodeConfig,
 		DataDir:           s.dataDir,
 		Logger:            s.logger,
-		UtxoSet:           utxoSet,
+		UtxoSet:           s.utxoSet(),
 	}
 }
 

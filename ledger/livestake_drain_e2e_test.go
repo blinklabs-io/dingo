@@ -16,8 +16,6 @@ package ledger_test
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
 	"fmt"
 	"slices"
 	"testing"
@@ -133,12 +131,10 @@ type liveStakeDrainResult struct {
 	err     error
 }
 
-// liveStakeDrainOpts changes a run just before its drain: corrupt edits the
-// metadata store through raw SQL or gives the set stake the store lacks, and
-// wrap hands the drain a set that differs from the real one.
+// liveStakeDrainOpts changes a run just before its drain: wrap hands the
+// drain a set that differs from the real one.
 type liveStakeDrainOpts struct {
-	corrupt func(raw *sql.DB, addSetStake func(key []byte, amount uint64))
-	wrap    func(*utxoset.Set) ledger.UtxoSetWriter
+	wrap func(*utxoset.Set) ledger.UtxoSetWriter
 }
 
 // wrappedDrainSource is drainTestSource over a wrapped set.
@@ -149,13 +145,6 @@ type wrappedDrainSource struct {
 
 func (s wrappedDrainSource) Loaded(f nodesettings.Family) (bool, error) {
 	return ledger.FamilyLoaded(f, s.set)
-}
-
-func (s wrappedDrainSource) Verify(
-	ctx context.Context,
-	f nodesettings.Family,
-) error {
-	return ledger.VerifyFamily(ctx, f, dbadapter.New(s.db), s.set)
 }
 
 // runLiveStakeDrain drives stake-changing UTxO writes, delegations, reward
@@ -173,7 +162,7 @@ func runLiveStakeDrain(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
@@ -195,11 +184,6 @@ func runLiveStakeDrain(
 	phase("initial", nil)
 
 	if drain {
-		if opts.corrupt != nil {
-			raw, err := dbtest.RawSQLiteMetadata(t, scenario.DB)
-			require.NoError(t, err)
-			opts.corrupt(raw, scenario.AddSetStake)
-		}
 		var src statedrain.Source = drainTestSource{set: set, db: scenario.DB}
 		if opts.wrap != nil {
 			src = wrappedDrainSource{
@@ -215,7 +199,7 @@ func runLiveStakeDrain(
 		require.Len(t, entries, 1)
 		res.err = statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies},
-			Set:   src, Guard: guard, VerifyBeforeDrain: true,
+			Set:   src, Guard: guard,
 		}, entries)
 		if res.err != nil {
 			return res
@@ -226,7 +210,7 @@ func runLiveStakeDrain(
 	f := scenario.BoundaryStake(0)
 	phase("fixture", nil)
 	res.answers["boundary fixture"] = renderBoundaryStake(
-		scenario.ReadBoundaryStake(f, false),
+		scenario.ReadBoundaryStake(f),
 	)
 	scenario.ApplyBoundary()
 	phase("boundary", nil)
@@ -273,82 +257,24 @@ func TestLiveStakeDrainMatchesAnUndrainedRun(t *testing.T) {
 	require.True(t, mask.Has(nodesettings.FamilyLiveStake))
 }
 
-// A set that differs from the metadata store's reward_live_stake, or has not
-// loaded the accounts and reward rows it derives live stake from, refuses the
-// drain and leaves the rows.
-func TestLiveStakeDrainRefusesADisagreement(t *testing.T) {
+// A set that has not loaded the accounts and reward rows it derives live
+// stake from refuses the drain and leaves the rows.
+func TestLiveStakeDrainRefusesAnUnloadedSet(t *testing.T) {
 	t.Parallel()
-	owner := bytes.Repeat([]byte{0x71}, 28)
-	for _, tc := range []struct {
-		name string
-		opts liveStakeDrainOpts
-		want string
-	}{
-		{
-			"a stored stake figure", liveStakeDrainOpts{
-				corrupt: func(raw *sql.DB, _ func([]byte, uint64)) {
-					_, err := raw.Exec(
-						`UPDATE reward_live_stake SET utxo_stake = '1',
-						total_stake = '1' WHERE staking_key = ?`, owner,
-					)
-					require.NoError(t, err)
-				},
-			}, "differ",
+	res := runLiveStakeDrain(t, true, liveStakeDrainOpts{
+		wrap: func(s *utxoset.Set) ledger.UtxoSetWriter {
+			return unloadedRewardSet{s}
 		},
-		{
-			"stake only the set holds", liveStakeDrainOpts{
-				corrupt: func(_ *sql.DB, add func([]byte, uint64)) {
-					add(bytes.Repeat([]byte{0x99}, 28), 5)
-				},
-			}, "only in the set",
-		},
-		{
-			"a row only the store holds", liveStakeDrainOpts{
-				corrupt: func(raw *sql.DB, _ func([]byte, uint64)) {
-					_, err := raw.Exec(
-						`INSERT INTO reward_live_stake (staking_key,
-						credential_tag, utxo_stake, reward_stake, total_stake,
-						registered, updated_slot) VALUES (?, 0, '8', '0', '8',
-						FALSE, 1)`, bytes.Repeat([]byte{0x98}, 28),
-					)
-					require.NoError(t, err)
-				},
-			}, "only in the store",
-		},
-		{
-			"a stored delegation", liveStakeDrainOpts{
-				corrupt: func(raw *sql.DB, _ func([]byte, uint64)) {
-					_, err := raw.Exec(
-						`UPDATE reward_live_stake SET pool_key_hash = ?
-						WHERE staking_key = ?`,
-						bytes.Repeat([]byte{0xee}, 28), owner,
-					)
-					require.NoError(t, err)
-				},
-			}, "differ",
-		},
-		{
-			"reward rows not loaded", liveStakeDrainOpts{
-				wrap: func(s *utxoset.Set) ledger.UtxoSetWriter {
-					return unloadedRewardSet{s}
-				},
-			}, "markers not loaded",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			res := runLiveStakeDrain(t, true, tc.opts)
-			require.ErrorIs(t, res.err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, res.err, tc.want)
-			mask, err := res.db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyLiveStake))
-			raw, err := dbtest.RawSQLiteMetadata(t, res.db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, "reward_live_stake"))
-			require.Empty(t, res.guard.Trips())
-		})
-	}
+	})
+	require.ErrorIs(t, res.err, statedrain.ErrGateRefused)
+	require.ErrorContains(t, res.err, "markers not loaded")
+	mask, err := res.db.DrainedFamilies(t.Context())
+	require.NoError(t, err)
+	require.False(t, mask.Has(nodesettings.FamilyLiveStake))
+	raw, err := dbtest.RawSQLiteMetadata(t, res.db)
+	require.NoError(t, err)
+	require.Positive(t, tableRows(t, raw, "reward_live_stake"))
+	require.Empty(t, res.guard.Trips())
 }
 
 // With the family drained and a set that cannot serve live stake, every live
@@ -359,7 +285,7 @@ func TestDrainedLiveStakeReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's accounts.
 	require.NoError(t, scenario.DB.RecordDrainedFamily(
@@ -474,7 +400,7 @@ func TestRelayProviderStakeIsServedFromTheSetOnceDrained(t *testing.T) {
 		t.Cleanup(func() { _ = set.Close() })
 		guard := statedrain.NewTripGuard()
 		scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-			t, set, ledger.UtxoSetReadsSet, guard,
+			t, set, guard,
 		)
 		require.NoError(t, set.LoadLedgerState(
 			t.Context(), dbadapter.New(scenario.DB),
@@ -491,7 +417,7 @@ func TestRelayProviderStakeIsServedFromTheSetOnceDrained(t *testing.T) {
 			}
 			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 				Store: drainStore{scenario.DB, scenario.DrainFamilies},
-				Set:   src, Guard: guard, VerifyBeforeDrain: true,
+				Set:   src, Guard: guard,
 			}, entries))
 		}
 		got, err := scenario.RelayProviderStake([][]byte{pool})

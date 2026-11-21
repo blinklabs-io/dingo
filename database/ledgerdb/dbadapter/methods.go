@@ -498,9 +498,7 @@ func (a Adapter) SetGenesisStakingWithDeposits(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
+	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
@@ -791,6 +789,35 @@ func (a Adapter) GetRewardAdaPots(
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardAdaPots(epoch, metaTxn(txn))
+}
+
+func (a Adapter) SaveRewardLikelihoodState(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+	txn ledgerdb.Txn,
+) error {
+	return a.db.Metadata().SaveRewardLikelihoodState(state, pools, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateBeforeEpoch(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateBeforeEpoch(epoch, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateAtSlot(
+	slot uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateAtSlot(slot, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardPoolLikelihoods(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) ([]*models.RewardPoolLikelihood, error) {
+	return a.db.Metadata().GetRewardPoolLikelihoods(epoch, metaTxn(txn))
 }
 
 func (a Adapter) GetRewardPoolInputs(
@@ -2050,12 +2077,7 @@ func (a Adapter) SetGenesisGovernance(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
-		return err
-	}
+	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisGovernance(
 		initialDReps,
 		delegs,
@@ -3099,14 +3121,6 @@ func (a Adapter) GetPParamsRows(
 	return a.db.GetPParamRows(epoch, eraId, dbTxn(txn))
 }
 
-func (a Adapter) UtxoRollbackChanges(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) ([]models.UtxoId, []models.Utxo, error) {
-	return a.db.UtxoRollbackChanges(ctx, slot, dbTxn(txn))
-}
-
 func (a Adapter) GetLatestEpochSummary(
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {
@@ -3220,8 +3234,10 @@ func (a Adapter) accountReadsDrained() error {
 	)
 }
 
-// rewardSyncKeyDrained refuses a read or write of a sync_state key the
-// reward-outputs family owns once it is drained.
+// rewardSyncKeyDrained refuses a read or write of a sync_state key a reward
+// family owns once it is drained: the precompute cursors and the eligibility
+// recheck belong to reward outputs, the pending stake-input record to reward
+// inputs.
 func (a Adapter) rewardSyncKeyDrained(key string) error {
 	if strings.HasPrefix(
 		key,
@@ -3229,6 +3245,9 @@ func (a Adapter) rewardSyncKeyDrained(key string) error {
 	) ||
 		key == models.RewardEligibilityRecheckKey {
 		return a.rewardOutputsDrained()
+	}
+	if key == models.RewardStakeInputsPendingKey {
+		return a.rewardInputsDrained()
 	}
 	return nil
 }

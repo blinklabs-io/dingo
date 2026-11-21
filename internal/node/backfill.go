@@ -138,6 +138,8 @@ type Backfill struct {
 		[]byte,
 		gledger.Block,
 	) (*database.BlockIngestionResult, error)
+	// prefetchInputs is replaced by tests that need to observe read-ahead.
+	prefetchInputs func(context.Context, []models.UtxoId) error
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -182,14 +184,9 @@ type Backfill struct {
 	// (ledger/delta.go): !delegatorInactivityEnabled skips the write.
 	//
 	// The zero value (false, skip) is NOT a safety guarantee about this
-	// path's callers -- it is just what "unset" happens to mean. Both current
-	// callers always call SetDelegatorInactivityEnabled explicitly instead of
-	// relying on it: mithril/sync.go hardcodes false (SyncConfig has no gate
-	// field, and the gate can never be on for that path -- see its call site's
-	// comment), while cmd/dingo/serve.go's resumeBackfill passes the real
-	// cfg.DelegatorInactivityEnabled, which CAN be true (it resumes any
-	// pending API-mode backfill checkpoint, not only a Mithril-originated
-	// one, and does not itself check the gate). A future caller that skips
+	// path's callers -- it is just what "unset" happens to mean. The IndexerDB
+	// writer calls SetDelegatorInactivityEnabled explicitly with the node's
+	// setting, which can be true. A future caller that skips
 	// SetDelegatorInactivityEnabled and relies on this default would silently
 	// drop withdrawal-witness rows if the gate happens to be on for it --
 	// always call the setter explicitly rather than assuming the default is
@@ -1107,7 +1104,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 	var resolveThrough uint64
 	if resumePoint != nil {
-		resolveThrough, _ = b.slotToEpoch(cp.LastSlot)
+		resolveThrough, _ = b.slotToEpoch(resumePoint.Slot)
 	} else if len(b.epochs) > 0 {
 		resolveThrough = b.epochs[0].EpochId
 	}
@@ -1214,6 +1211,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return fmt.Errorf("opening canonical block iterator: %w", err)
 	}
 	defer it.Close()
+	readAhead := b.startBackfillReadAhead(ctx, it.NextRaw)
+	defer readAhead.Close()
 
 	// Keep one accumulator across multiple blocks. Queued rows can be drained
 	// while the SQL transaction remains open; commits happen at complete-block
@@ -1331,17 +1330,29 @@ func (b *Backfill) Run(ctx context.Context) error {
 			return fmt.Errorf("cancelled: %w", err)
 		}
 
-		readDecodeStart := time.Now()
-		// CanonicalBlocksFromIndex binds ctx to the iterator so NextRaw can
-		// cancel a remote canonical index value read.
-		blk, err := it.NextRaw() //nolint:contextcheck
-		if err != nil {
+		readResult, ok := <-readAhead.results
+		if !ok {
+			break
+		}
+		if readResult.err != nil {
 			saveCommittedCheckpoint()
-			return fmt.Errorf("iterating blocks: %w", err)
+			if readResult.raw == nil {
+				return fmt.Errorf("%s: %w", readResult.errStage, readResult.err)
+			}
+			return fmt.Errorf(
+				"%s at slot %d: %w",
+				readResult.errStage,
+				readResult.raw.Slot,
+				readResult.err,
+			)
 		}
-		if blk == nil {
-			break // iteration complete
-		}
+		blk := readResult.raw
+		parsedBlock := readResult.parsed
+		intervalStats.BlockReadDecode += readResult.readDecode
+		intervalStats.InputPrefetch += readResult.inputPrefetch
+		// A slice length always fits uint64 on supported platforms.
+		intervalStats.PrefetchedInputs += uint64(readResult.prefetchedInputs) //nolint:gosec
+		intervalStats.Blocks++
 		if blk.Slot > tipSlot {
 			saveCommittedCheckpoint()
 			return fmt.Errorf(
@@ -1375,77 +1386,60 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		var blockTxCount int
 
-		parsedBlock, parseErr := models.DecodeBlockCbor(
-			blk.BlockType,
-			blk.Cbor,
-			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		point := ocommon.NewPoint(
+			blk.Slot, blk.Hash,
 		)
-		// Track raw block read plus ledger block decode cost.
-		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
-		intervalStats.Blocks++
-		if parseErr != nil {
-			saveCommittedCheckpoint()
-			return fmt.Errorf(
-				"parsing block at slot %d: %w",
-				blk.Slot, parseErr,
-			)
-		} else {
-			point := ocommon.NewPoint(
-				blk.Slot, blk.Hash,
-			)
 
-			// The block at the end slot is the Mithril anchor, whose
-			// block_nonce row the import seeded from the ledger state and
-			// live sync resumes from, so replay must not rewrite it.
-			if !endSlotSet || blk.Slot < endSlot {
-				if nErr := b.computeBlockNonce(
-					parsedBlock, point, eraId,
-					isNewEpoch, batchTxn,
-				); nErr != nil {
-					saveCommittedCheckpoint()
-					return fmt.Errorf(
-						"block nonce at slot %d: %w",
-						blk.Slot, nErr,
-					)
-				}
+		// The block at the end slot is the Mithril anchor, whose
+		// block_nonce row the import seeded from the ledger state and
+		// live sync resumes from, so replay must not rewrite it.
+		if !endSlotSet || blk.Slot < endSlot {
+			if nErr := b.computeBlockNonce(
+				parsedBlock, point, eraId,
+				isNewEpoch, batchTxn,
+			); nErr != nil {
+				saveCommittedCheckpoint()
+				return fmt.Errorf(
+					"block nonce at slot %d: %w",
+					blk.Slot, nErr,
+				)
 			}
+		}
 
-			txs := parsedBlock.Transactions()
-			if len(txs) > 0 {
-				txEraId, pp := b.blockEraParams(
-					epochId, eraId, uint(parsedBlock.Era().Id),
+		txs := parsedBlock.Transactions()
+		if len(txs) > 0 {
+			txEraId, pp := b.blockEraParams(
+				epochId, eraId, uint(parsedBlock.Era().Id),
+			)
+			offsetStart := time.Now()
+			offsets, oErr := b.computeBlockOffsets(
+				blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
+			)
+			// Track CBOR offset discovery for txs and produced UTxOs.
+			intervalStats.OffsetComputation += time.Since(offsetStart)
+			if oErr != nil {
+				saveCommittedCheckpoint()
+				return fmt.Errorf(
+					"computing offsets for block at slot %d: %w",
+					blk.Slot, oErr,
 				)
-				offsetStart := time.Now()
-				offsets, oErr := b.computeBlockOffsets(
-					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
-				)
-				// Track CBOR offset discovery for txs and produced UTxOs.
-				intervalStats.OffsetComputation += time.Since(offsetStart)
-				if oErr != nil {
-					saveCommittedCheckpoint()
-					return fmt.Errorf(
-						"computing offsets for block at slot %d: %w",
-						blk.Slot, oErr,
-					)
-				} else {
-					// Store transaction metadata into the shared batch
-					// instead of committing once per block.
-					if pErr := b.processBlockTxsBatched(
-						ctx, txs, point, epochId, txEraId,
-						pp, offsets, acc, batchTxn,
-						&intervalStats,
-						isFreshStart || (!legacyProgress &&
-							processedBlocks >= b.recoveryWindow()),
-					); pErr != nil {
-						saveCommittedCheckpoint()
-						return fmt.Errorf(
-							"processing block at slot %d: %w",
-							blk.Slot, pErr,
-						)
-					}
-					blockTxCount = len(txs)
-				}
 			}
+			// Store transaction metadata into the shared batch
+			// instead of committing once per block.
+			if pErr := b.processBlockTxsBatched(
+				ctx, txs, point, epochId, txEraId,
+				pp, offsets, acc, batchTxn,
+				&intervalStats,
+				isFreshStart || (!legacyProgress &&
+					processedBlocks >= b.recoveryWindow()),
+			); pErr != nil {
+				saveCommittedCheckpoint()
+				return fmt.Errorf(
+					"processing block at slot %d: %w",
+					blk.Slot, pErr,
+				)
+			}
+			blockTxCount = len(txs)
 		}
 
 		// Common tail: update progress for every block.
@@ -1825,6 +1819,8 @@ func appendBackfillStatsAttrs(
 		stats.BlobUtxoOffsetWrites,
 		"skipped_utxo_offsets",
 		stats.SkippedUtxoOffsets,
+		"prefetched_inputs",
+		stats.PrefetchedInputs,
 		"address_txs",
 		stats.AddressTxs,
 		"witnesses",
@@ -1849,6 +1845,8 @@ func appendBackfillStatsAttrs(
 		stats.PParamUpdates,
 		"block_read_decode_ms",
 		stats.BlockReadDecode.Milliseconds(),
+		"input_prefetch_ms",
+		stats.InputPrefetch.Milliseconds(),
 		"offset_compute_ms",
 		stats.OffsetComputation.Milliseconds(),
 		"blob_offset_write_ms",

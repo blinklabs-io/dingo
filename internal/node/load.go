@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -33,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -41,7 +41,9 @@ import (
 	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -234,7 +236,7 @@ func Load(
 // split layout's gate must be filled while the database has no chain state, or
 // the node refuses to start over the loaded blocks.
 func loadIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() {
+	if cfg.SplitIndexer() || cfg.ServerCoreNamespace {
 		return config.IndexerLayoutSplit
 	}
 	return ""
@@ -271,13 +273,18 @@ func ensureDB(
 			nil, cfg.CardanoConfig, cfg.Network,
 		),
 	}
+	// A blob-only copy resolves no node config and so has no chunk geometry
+	// to give a new database; a recorded ImmutableDB state installs its read
+	// path regardless.
+	if nodeCfg != nil {
+		dbConfig.Immutable = nodestorage.ImmutableConfig(
+			cfg.HistoryExpiry.Enabled, nodeCfg, cfg.ImmutableDB.PromoteBatch,
+		)
+	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
 		dbConfig,
-		internalplugins.StorageSelections{
-			Blob:     cfg.Plugins.Storage.Blob,
-			Metadata: cfg.Plugins.Storage.Metadata,
-		},
+		internalplugins.ConfiguredStorageSelections(cfg),
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode:    cfg.ConsensusStorageMode(),
@@ -384,15 +391,51 @@ func withBulkLoadPragmas(
 
 // RunPlannerStats collects query-planner statistics on the metadata store
 // if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
-func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
+func RunPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
 	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
 	if !ok {
 		return nil
 	}
-	if err := updater.UpdatePlannerStats(); err != nil {
+	if err := runPlannerStats(ctx, updater); err != nil {
 		return fmt.Errorf("planner statistics maintenance: %w", err)
 	}
 	return nil
+}
+
+// runPlannerStats keeps a full ANALYZE for a database that has no statistics.
+// Once statistics exist it runs the incremental form instead: a full ANALYZE
+// reads every table and index, so its cost grows with the database and delays
+// a resumed backfill. The final statistics are still a full ANALYZE, taken by
+// FinalizeBackfillPlannerStats.
+func runPlannerStats(
+	ctx context.Context,
+	updater metadata.PlannerStatsUpdater,
+) error {
+	incremental, hasIncremental := updater.(metadata.IncrementalPlannerStatsUpdater)
+	presence, hasPresence := updater.(metadata.PlannerStatsPresenceChecker)
+	if hasIncremental && hasPresence {
+		exists, err := presence.HasPlannerStats(ctx)
+		if err == nil && exists {
+			result, err := incremental.OptimizePlannerStatsContext(
+				ctx,
+				datatypes.PlannerStatsTriggerStartup,
+			)
+			if err != nil {
+				return err
+			}
+			if result.Supported && !result.Skipped {
+				return nil
+			}
+		}
+	}
+	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
+		return contextual.UpdatePlannerStatsContext(ctx)
+	}
+	return updater.UpdatePlannerStats()
 }
 
 // DeferredIndexRebuilder owns the drop/rebuild pairing for a single
@@ -683,39 +726,6 @@ func missingCriticalDeferredIndexes(
 	return missing, true
 }
 
-// RepairCriticalDeferredIndexes rebuilds the full manifest when no bulk-load
-// cycle is pending. During a pending cycle, it preserves that marker and
-// rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
-// finish the lazy remainder later.
-func RepairCriticalDeferredIndexes(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-) error {
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	if !ok {
-		return nil
-	}
-	pending, err := manager.HasDeferredIndexesPending()
-	if err != nil {
-		return err
-	}
-	if pending {
-		logger.Warn(
-			"critical deferred metadata indexes pending from a prior run; " +
-				"rebuilding before serving API traffic",
-		)
-		return ensureCriticalDeferredIndexes(ctx, manager, logger)
-	}
-	// A clear marker means no bulk-load cycle is active. Restore copies can
-	// still be missing any manifest entry because their recorded migrations do
-	// not re-run, so finish the whole manifest before accepting traffic.
-	if err := ensureCriticalDeferredIndexes(ctx, manager, logger); err != nil {
-		return err
-	}
-	return ensureAllDeferredIndexes(ctx, manager, logger)
-}
-
 // RepairDeferredIndexes rebuilds any deferred indexes that were
 // recorded as pending by a prior interrupted run. It is safe to call
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
@@ -752,24 +762,71 @@ func RepairDeferredIndexes(
 	return ensureAllDeferredIndexes(ctx, manager, logger)
 }
 
-// refuseDrainedDatabase fails when any ledger-state family has been drained
-// from the metadata store. Load replays through the metadata store and has no
-// live UTxO set to read the drained rows from, so replaying onto it would
-// read empty tables and write rows beside a set that no longer matches them.
-func refuseDrainedDatabase(ctx context.Context, db *database.Database) error {
-	mask, err := db.EffectiveDrainedFamilies(ctx)
+// openLoadUtxoSet opens the live UTxO set of the database a load replays
+// into, as a node over that database does, so the replay reads and writes the
+// ledger state where the node will look for it. It returns the directory the
+// set lives under and a function that closes the set, which must be called
+// after the ledger has stopped applying blocks.
+func openLoadUtxoSet(
+	cfg *config.Config,
+	logger *slog.Logger,
+	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
+) (*utxoset.Set, string, func() error, error) {
+	// The database in use, not cfg.DatabasePath: a caller that supplies its
+	// own database decides where its state lives.
+	dataDir := db.DataDir()
+	set, tempDir, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
+		DataDir:             dataDir,
+		Logger:              logger,
+		CardanoNodeConfig:   nodeCfg,
+		RetainRewardRecords: cfg.SplitIndexer(),
+		CheckpointKeep:      cfg.LedgerUtxoCheckpointKeep,
+	})
 	if err != nil {
-		return fmt.Errorf("reading the ledger-state drain latch: %w", err)
+		return nil, "", nil, err
 	}
-	if mask == 0 {
-		return nil
+	if tempDir != "" {
+		dataDir = tempDir
 	}
-	return fmt.Errorf(
-		"%w: load cannot run on a database whose ledger state was "+
-			"drained into the live UTxO set (families %v); start the "+
-			"node instead, or load into a fresh database",
-		nodesettings.ErrFamilyDrained, mask.Families(),
-	)
+	closeSet := func() error {
+		err := set.Close()
+		if tempDir != "" {
+			err = errors.Join(err, os.RemoveAll(tempDir))
+		}
+		return err
+	}
+	return set, dataDir, closeSet, nil
+}
+
+// startLoadAnchorUpdater feeds the live UTxO set the ledger's immutable point
+// while a load replays, as the node does. Without an anchor the set never
+// prunes its rollback journal, which would grow with every replayed block.
+// The returned function stops the updater and waits for it.
+func startLoadAnchorUpdater(
+	ctx context.Context,
+	ls *ledger.LedgerState,
+	set *utxoset.Set,
+) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(nodestorage.AnchorInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				nodestorage.UpdateAnchor(ctx, ls, set)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
@@ -888,9 +945,23 @@ func LoadWithDB(
 		return err
 	}
 	defer closeDB()
-	if err := refuseDrainedDatabase(ctx, db); err != nil {
+	if err := nodestorage.RefuseHistoryExpiryOverImmutable(
+		cfg.HistoryExpiry.Enabled, db,
+	); err != nil {
 		return err
 	}
+	utxoSet, utxoSetDataDir, closeUtxoSet, err := openLoadUtxoSet(
+		cfg, logger, db, nodeCfg,
+	)
+	if err != nil {
+		return err
+	}
+	// Deferred before the ledger's close, so it runs after it.
+	defer func() {
+		if err := closeUtxoSet(); err != nil {
+			logger.Error("failed to close the live UTxO set", "error", err)
+		}
+	}()
 	// Enable bulk-load optimizations if the metadata store supports them
 	cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
 	defer func() {
@@ -913,19 +984,14 @@ func LoadWithDB(
 	if c == nil {
 		return errors.New("primary chain not available")
 	}
-	snapshotMgr := snapshot.NewManager(dbadapter.New(db), nil, logger)
-	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
-	// so replay matches serve mode (node.go) on the same DB.
-	if err := snapshotMgr.SetDelegatorInactivity(
-		cfg.DelegatorInactivityEnabled,
-		cfg.DelegatorInactivity,
-	); err != nil {
-		return fmt.Errorf("configuring snapshot manager: %w", err)
+	if err := refuseBehindImmutableTip(db, c); err != nil {
+		return err
 	}
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           utxoSet,
 			ChainManager:      cm,
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
@@ -971,6 +1037,18 @@ func LoadWithDB(
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
+	}
+	// The snapshot manager writes through the ledger's LedgerDB, so its
+	// snapshot rows reach the live UTxO set, where the drained reward-input
+	// families live.
+	snapshotMgr := snapshot.NewManager(ls.LedgerDB(), nil, logger)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
+	// so replay matches serve mode (node.go) on the same DB.
+	if err := snapshotMgr.SetDelegatorInactivity(
+		cfg.DelegatorInactivityEnabled,
+		cfg.DelegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	if err := configureLoadChainSecurityParam(cm, nodeCfg); err != nil {
 		return err
@@ -1020,10 +1098,35 @@ func LoadWithDB(
 	); err != nil {
 		return fmt.Errorf("installing epoch-boundary snapshot hook: %w", err)
 	}
+	// The node's startup sequence: the set is made equal to the ledger and
+	// the graduated ledger-state families leave the metadata store before the
+	// ledger writes its genesis or applies a block. A set that cannot be
+	// brought to the database's ledger tip stops the load here. A load can be
+	// the first to open a database a release without the set wrote, so it
+	// reverts one below its tip as the node does; the replay below applies
+	// the blocks the revert kept before it appends any.
+	if err := (nodestorage.Reconcile{
+		DB:      db,
+		Set:     utxoSet,
+		DataDir: utxoSetDataDir,
+		Logger:  logger,
+		Publish: func(mask nodesettings.FamilyMask) {
+			ls.SetDrainedFamilies(mask)
+			utxoSet.SetDrainedFamilies(mask)
+		},
+		Resume:                     ls.ResumeUtxoSetFrom,
+		ResolveRewardInputs:        ls.ResolvePendingRewardStakeInputs,
+		RewindBlocks:               nodestorage.SecurityParam(nodeCfg),
+		DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
+		DelegatorInactivity:        cfg.DelegatorInactivity,
+	}).Run(ctx); err != nil {
+		return fmt.Errorf("failed to prepare the live UTxO set: %w", err)
+	}
 	if err := ls.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer ls.Close()
+	defer startLoadAnchorUpdater(ctx, ls, utxoSet)()
 
 	// Capture the genesis stake snapshot (epoch 0) now that ls.Start has
 	// applied genesis (including any Shelley-genesis staking), mirroring
@@ -1274,7 +1377,9 @@ func WithLoadBlobsProgress(
 // tree on the next run. An error from it stops the copy before any deletion.
 //
 // The copy must be the only reader of the tree once it starts.
-func WithChunkRetirement(onCommitted func(firstKept uint64) error) LoadBlobsOption {
+func WithChunkRetirement(
+	onCommitted func(firstKept uint64) error,
+) LoadBlobsOption {
 	return func(opts *loadBlobsOptions) {
 		opts.retireChunks = true
 		opts.onChunksCommit = onCommitted
@@ -1387,7 +1492,10 @@ func LoadBlobsWithDB(
 			// chunks become deletable, or a host failure could keep the
 			// deletion while losing the blocks it was supposed to back.
 			if err := db.Blob().Sync(); err != nil {
-				return fmt.Errorf("syncing blob store before retiring chunks: %w", err)
+				return fmt.Errorf(
+					"syncing blob store before retiring chunks: %w",
+					err,
+				)
 			}
 			if opts.onChunksCommit != nil {
 				if err := opts.onChunksCommit(firstKept); err != nil {

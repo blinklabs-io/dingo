@@ -306,7 +306,18 @@ jobs:
       - name: go-test-race
         # -timeout stays at 60m so a hang is still named by the per-package
         # panic before the job backstop above fires.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
+        #
+        # -race also turns on the compiler's checkptr instrumentation, which
+        # validates every unsafe.Pointer conversion. modernc.org/sqlite is C
+        # translated to Go and does pointer arithmetic on nearly every line,
+        # so those checks are about 30% of this job's CPU in the SQLite-backed
+        # packages and observe nothing the race detector reports. Turning
+        # checkptr off for modernc.org alone leaves the race detector on in
+        # every package, SQLite included, and checkptr on in the rest.
+        run: >-
+          go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race
+          -gcflags='modernc.org/...=-d=checkptr=0'
+          -timeout 60m ./...
       - name: runner-probe-end
         if: always()
         run: python3 .github/scripts/runner-probe.py end

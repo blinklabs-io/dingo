@@ -68,6 +68,7 @@ func newSlotZeroRollbackLedger(
 	}))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -290,6 +291,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),

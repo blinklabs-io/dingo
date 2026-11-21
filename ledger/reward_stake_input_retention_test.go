@@ -23,9 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,53 +149,6 @@ func TestPendingRewardInputsIgnoreRolledBackSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, protected)
 	require.Zero(t, floor)
-}
-
-func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
-	t.Parallel()
-	h := newExternalIngestHarness(t, false)
-	meta := h.db.Metadata()
-	require.NoError(
-		t,
-		meta.SaveRewardSnapshot(
-			&models.RewardSnapshot{
-				Epoch:         1,
-				SnapshotType:  "mark",
-				CapturedSlot:  0,
-				BoundarySlot:  1,
-				Authoritative: true,
-			},
-			nil,
-		),
-	)
-	require.NoError(
-		t,
-		markRewardStakeInputsPending(dbadapter.New(h.db), nil, 1, 1),
-	)
-	overlays := h.countOverlays()
-	blocks, names := externalIngestBlocks(t, 0)
-	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
-	require.NoError(t, err)
-	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
-	require.Zero(t, overlays.Load())
-	require.True(t, utxoRowExists(t, h.db, names["register"].hash, 0))
-	require.True(t, utxoRowExists(t, h.db, names["invalid"].hash, 1))
-	floor, err := h.db.ConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Zero(t, floor)
-	require.NoError(
-		t,
-		clearRewardStakeInputsPending(dbadapter.New(h.db), nil, 1),
-	)
-	pruned, _, err := h.ls.pruneConsumedUtxosUpTo(
-		t.Context(),
-		tip.Slot,
-		0,
-		1000,
-	)
-	require.NoError(t, err)
-	require.Positive(t, pruned)
-	require.False(t, utxoRowExists(t, h.db, names["register"].hash, 0))
 }
 
 type rewardRetentionHandoffStore struct {
@@ -365,4 +316,44 @@ func TestPendingRewardRetentionAcceptsNativeEmptyState(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, pruned)
 	require.Equal(t, uint64(200), floor)
+}
+
+// announcedUtxoPruneFloor returns the highest floor spent-UTxO pruning has
+// announced. Rows spent before it may be gone.
+func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
+	p := &ls.acquiredPins
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.utxoFloorSlot
+}
+
+func TestPendingRewardInputWriteRejectsMalformedRecord(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	staged := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: ls}
+	valid, err := FormatRewardStakeInputsPending(
+		[]RewardStakeInputsPendingEntry{{Epoch: 1, BoundarySlot: 100}},
+	)
+	require.NoError(t, err)
+	for _, invalid := range []string{"{", "null", "{}", `{"entries":{}}`, `{"entries":[],"unknown":1}`} {
+		t.Run(invalid, func(t *testing.T) {
+			require.NoError(
+				t,
+				staged.SetSyncState(rewardStakeInputsPendingKey, valid, nil),
+			)
+			require.Error(
+				t,
+				staged.SetSyncState(rewardStakeInputsPendingKey, invalid, nil),
+			)
+			got, err := db.Metadata().
+				GetSyncState(rewardStakeInputsPendingKey, nil)
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				valid,
+				got,
+				"rejected pending record must not overwrite durable state",
+			)
+		})
+	}
 }

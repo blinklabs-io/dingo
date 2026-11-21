@@ -2641,7 +2641,6 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	chainIndex *replayRecoveryChainIndex,
 ) (*replayRecoveryResolvedProducer, bool, error) {
 	present, err := ls.utxoExists(
-		context.Background(),
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
 	)

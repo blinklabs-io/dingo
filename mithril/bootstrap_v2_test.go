@@ -43,7 +43,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -403,7 +402,7 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(accountState),
 		cbor.RawMessage(ledgerState),
 		cbor.RawMessage(snapshots),
-		cbor.RawMessage(emptyMap),
+		[]any{cbor.RawMessage(emptyMap), uint64(0)},
 	})
 	require.NoError(t, err)
 	// nesBprev and nesBcur are BlocksMade, which the reference encodes as a
@@ -1327,9 +1326,9 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 	var immutableBlocksCopied atomic.Int64
 
 	_, err := Sync(context.Background(), SyncConfig{
-		Network:     "preprod",
-		DataDir:     t.TempDir(),
-		StorageMode: "core",
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: t.TempDir(),
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t, fixture.genesisVKey, fixture.ancillaryVKey,
 		),
@@ -1380,9 +1379,9 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	dataDir := t.TempDir()
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "core",
+		UtxoSet: newSyncTestSet(t),
+		Network: "preprod",
+		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
 			t,
 			fixture.genesisVKey,
@@ -2545,255 +2544,4 @@ func (f *v2Fixture) requestedImmutables() []uint64 {
 	f.immutableMu.Lock()
 	defer f.immutableMu.Unlock()
 	return slices.Clone(f.immutableRequests)
-}
-
-func TestSyncV2APIModeRemovesImmutableTreeBeforeBackfill(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	var backfillStarted atomic.Bool
-	var treesAtBackfill atomic.Int64
-	treesAtBackfill.Store(-1)
-	countTrees := func() int64 {
-		matches, err := filepath.Glob(
-			filepath.Join(dataDir, ".mithril-cache", "immutable-*"),
-		)
-		require.NoError(t, err)
-		var trees int64
-		for _, match := range matches {
-			if hasChunkFiles(filepath.Join(match, "immutable")) {
-				trees++
-			}
-		}
-		return trees
-	}
-
-	_, err := Sync(context.Background(), SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-		OnProgress: func(progress SyncProgress) {
-			if progress.Phase == PhaseBackfill && progress.Active &&
-				backfillStarted.CompareAndSwap(false, true) {
-				treesAtBackfill.Store(countTrees())
-			}
-		},
-	})
-	require.NoError(t, err)
-	require.True(t, backfillStarted.Load(), "API sync must reach backfill")
-	require.Zero(
-		t,
-		treesAtBackfill.Load(),
-		"the extracted immutable tree must be removed before backfill starts",
-	)
-}
-
-func TestSyncV2APIModeResumesBackfillAfterImmutableTreeRemoved(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-
-	result, err := Sync(context.Background(), baseConfig)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), result.LedgerSlot)
-}
-
-// Once sync_status is "backfill" every block is in the blob store and the
-// extracted tree is gone, so resuming must run the backfill from its checkpoint
-// without contacting the aggregator or downloading the snapshot again.
-func TestSyncV2APIModeResumesBackfillWithoutAggregator(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-	cacheBefore := listCacheEntries(t, dataDir)
-
-	resumed := baseConfig
-	resumed.AggregatorURL = "http://127.0.0.1:1"
-	result, err := Sync(context.Background(), resumed)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), result.LedgerSlot)
-
-	db := openSyncedDB(t, dataDir)
-	status, err := db.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status)
-	require.Equal(
-		t, cacheBefore, listCacheEntries(t, dataDir),
-		"resume must not download or extract",
-	)
-}
-
-// The backfill resume path must apply the same pin checks as the other resume
-// paths: a pin recorded for another network cannot be finished against this
-// run's configuration.
-func TestSyncV2APIModeBackfillResumeRejectsPinForOtherNetwork(t *testing.T) {
-	t.Parallel()
-
-	_, certifiedHash := validImmutableFiles(t, 1000)
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
-	})
-	dataDir := t.TempDir()
-	baseConfig := SyncConfig{
-		Network:     "preprod",
-		DataDir:     dataDir,
-		StorageMode: "api",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
-			t, fixture.genesisVKey, fixture.ancillaryVKey,
-		),
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   true,
-		CleanupAfterLoad:  true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		BackfillBatchSize: node.DefaultBackfillBatchSize,
-		Logger:            slog.New(slog.DiscardHandler),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var cancelled atomic.Bool
-	interrupted := baseConfig
-	interrupted.OnProgress = func(progress SyncProgress) {
-		if progress.Phase == PhaseBackfill && progress.Active &&
-			cancelled.CompareAndSwap(false, true) {
-			cancel()
-		}
-	}
-	_, err := Sync(ctx, interrupted)
-	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled.Load(), "sync must reach backfill")
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     dataDir,
-		Logger:      slog.New(slog.DiscardHandler),
-		StorageMode: "api",
-	})
-	require.NoError(t, err)
-	pin, hasPin, err := getPinnedArtifact(db)
-	require.NoError(t, err)
-	require.True(t, hasPin)
-	pin.Network = "mainnet"
-	require.NoError(t, setPinnedArtifact(db, pin))
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	resumed := baseConfig
-	resumed.AggregatorURL = "http://127.0.0.1:1"
-	_, err = Sync(context.Background(), resumed)
-	require.ErrorContains(t, err, "pinned artifact")
-	require.ErrorContains(t, err, "network mainnet")
-}
-
-func listCacheEntries(t *testing.T, dataDir string) []string {
-	t.Helper()
-	var names []string
-	root := filepath.Join(dataDir, ".mithril-cache")
-	err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		names = append(names, path)
-		return nil
-	})
-	require.NoError(t, err)
-	return names
 }

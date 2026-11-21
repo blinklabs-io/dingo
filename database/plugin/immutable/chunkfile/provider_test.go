@@ -16,6 +16,7 @@ package chunkfile_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -25,6 +26,25 @@ import (
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestEphemeralStoreUsesAndRemovesItsOwnDirectory(t *testing.T) {
+	t.Parallel()
+	host, svc := resolve(t, "")
+	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
+	require.True(t, filepath.IsAbs(svc.Dir()), "an ephemeral store must not write into the working directory")
+	st, err := svc.Open(testGeometry)
+	require.NoError(t, err)
+	loc, err := st.Append(block(3))
+	require.NoError(t, err)
+	require.NoError(t, st.Sync())
+	_, body, err := svc.ReadBlockAt(loc)
+	require.NoError(t, err)
+	require.Equal(t, blockBody(3), body)
+	dir := svc.Dir()
+	require.NoError(t, host.Stop(context.Background()))
+	_, err = os.Stat(dir)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
 
 var testGeometry = immutable.Geometry{ChunkSlots: 100}
 
@@ -100,6 +120,11 @@ func TestServiceRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, files, 3)
 
+	olderLoc, err := st.Append(block(103))
+	require.NoError(t, err)
+	require.NoError(t, st.Sync())
+	require.Equal(t, uint64(1), olderLoc.Chunk)
+
 	_, err = svc.Open(testGeometry)
 	require.ErrorIs(t, err, chunkfile.ErrStoreOpen)
 	require.NoError(t, st.Close())
@@ -107,7 +132,7 @@ func TestServiceRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	tip, hasTip = st2.Tip()
 	require.True(t, hasTip)
-	require.Equal(t, uint64(3), tip.Slot)
+	require.Equal(t, uint64(103), tip.Slot)
 }
 
 // Stop must close a writer its holder left open, and leave the provider

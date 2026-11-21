@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -147,6 +148,13 @@ type RestoreStorageConfig struct {
 	// RecoveryMarkerDirs are trusted local directories where a live restore's
 	// operation marker may reside after an interrupted directory swap.
 	RecoveryMarkerDirs []string
+	// AdoptLegacyAPI migrates a verified API snapshot in its staging
+	// directory, before that directory can replace the configured stores.
+	AdoptLegacyAPI func(context.Context, string) error
+	// DeferLegacyServerAdoption permits an offline restore of a legacy API
+	// snapshot. The original database is restored for adoption at startup
+	// only after preflighting the derived consensus database.
+	DeferLegacyServerAdoption bool
 	// Logger, when set, receives the restore's deferred-index repair
 	// progress. A full manifest rebuild on a multi-million-row table takes
 	// minutes and is otherwise silent. Nil disables that reporting; nothing
@@ -160,6 +168,35 @@ type RestoreStorageConfig struct {
 	// and demands a resync, exactly as a real startup would that omitted
 	// it. Zero preserves that refusal for a caller that has no genesis.
 	AlonzoLovelacePerUtxoWord uint64
+}
+
+func (c RestoreStorageConfig) adoptsLegacyAPI(m Manifest) bool {
+	return c.AdoptLegacyAPI != nil && m.StorageMode == "api" &&
+		m.IndexerSHA256 == ""
+}
+
+func (c RestoreStorageConfig) adoptsLegacyServerAPI(m Manifest) bool {
+	return c.adoptsLegacyAPI(m) &&
+		(m.MetadataPlugin == "postgres" || m.MetadataPlugin == "mysql")
+}
+
+func (c RestoreStorageConfig) defersLegacyServerAPI(m Manifest) bool {
+	return c.DeferLegacyServerAdoption && m.StorageMode == "api" &&
+		m.IndexerSHA256 == "" &&
+		(m.MetadataPlugin == "postgres" || m.MetadataPlugin == "mysql")
+}
+
+// CheckCompatibility checks all manifest settings and permits the old API
+// storage mode only when the staged database will be adopted.
+func (c RestoreStorageConfig) CheckCompatibility(
+	m Manifest, blobPlugin, metadataPlugin, storageMode, network string,
+	gates nodesettings.Values,
+) error {
+	if (c.adoptsLegacyAPI(m) || c.defersLegacyServerAPI(m)) &&
+		gates["indexer_layout"] == "split" {
+		storageMode = m.StorageMode
+	}
+	return m.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network, gates)
 }
 
 const staleRestoreWorkDirAge = 7 * 24 * time.Hour
@@ -281,7 +318,8 @@ func removeRestoreRecoveryMarkers(dirs []string, operationID string) error {
 				continue
 			}
 		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(path); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 			continue
 		}
@@ -305,12 +343,20 @@ func CleanStaleRestoreWorkDirs(parentDir string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("open restore work directory parent %q: %w", parentDir, err)
+		return fmt.Errorf(
+			"open restore work directory parent %q: %w",
+			parentDir,
+			err,
+		)
 	}
 	defer parent.Close() //nolint:errcheck // cleanup errors are returned below
 	entries, err := fs.ReadDir(parent.FS(), ".")
 	if err != nil {
-		return fmt.Errorf("read restore work directory parent %q: %w", parentDir, err)
+		return fmt.Errorf(
+			"read restore work directory parent %q: %w",
+			parentDir,
+			err,
+		)
 	}
 	cutoff := time.Now().Add(-staleRestoreWorkDirAge)
 	for _, entry := range entries {
@@ -322,7 +368,11 @@ func CleanStaleRestoreWorkDirs(parentDir string) error {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return fmt.Errorf("inspect restore work directory %q: %w", entry.Name(), err)
+			return fmt.Errorf(
+				"inspect restore work directory %q: %w",
+				entry.Name(),
+				err,
+			)
 		}
 		if err := cleanStaleRestoreEntry(parent, parentDir, entry.Name(), info, cutoff); err != nil {
 			return err
@@ -347,7 +397,11 @@ func cleanStaleRestoreEntry(
 	}
 	if !os.SameFile(expected, dir.info) {
 		_ = dir.closeRoot()
-		return fmt.Errorf("%w: %q changed after enumeration", errRestoreDirReplaced, path)
+		return fmt.Errorf(
+			"%w: %q changed after enumeration",
+			errRestoreDirReplaced,
+			path,
+		)
 	}
 	lease, acquired, err := leaseRestoreDir(dir.root, false)
 	switch {
@@ -670,7 +724,11 @@ func restoreValidated(
 	targetName := filepath.Base(filepath.Clean(targetDataDir))
 	var originalTarget *restoreDir
 	if _, statErr := workRoot.Lstat(targetName); statErr == nil {
-		originalTarget, err = openRestoreDir(workRoot, targetName, targetDataDir)
+		originalTarget, err = openRestoreDir(
+			workRoot,
+			targetName,
+			targetDataDir,
+		)
 		if err != nil {
 			return Manifest{}, err
 		}
@@ -781,7 +839,7 @@ func restoreValidated(
 			_ = rollback.removeDir()
 			return
 		}
-		if !rollback.metadataMutated && !rollback.blobMutated {
+		if !rollback.metadataMutated && !rollback.indexerMutated && !rollback.blobMutated {
 			_ = rollback.removeDir()
 			return
 		}
@@ -845,6 +903,12 @@ func restoreValidated(
 			return Manifest{}, err
 		}
 	}
+	if manifest.IndexerSHA256 != "" {
+		rollback.indexerMutated = rollback.indexerPath != ""
+		if err := restoreIndexerMetadata(ctx, host, manifest, filepath.Join(snapshotDir, IndexerMetadataBackupFileName), stagingDir, storageConfig.Metadata); err != nil {
+			return Manifest{}, fmt.Errorf("restore IndexerDB metadata: %w", err)
+		}
+	}
 	rollback.blobMutated = rollback.blobPath != "" || rollback.cloudBlob
 	if err := restoreBlobStore(
 		ctx,
@@ -897,6 +961,20 @@ func restoreValidated(
 	}
 	if err := staging.checkNamed(); err != nil {
 		return Manifest{}, err
+	}
+	if storageConfig.adoptsLegacyAPI(manifest) {
+		if storageConfig.adoptsLegacyServerAPI(manifest) {
+			rollback.legacyCoreMutated = true
+			if err := resetLegacyCore(ctx, host, manifest, stagingDir, storageConfig.Metadata); err != nil {
+				return Manifest{}, err
+			}
+		}
+		if err := storageConfig.AdoptLegacyAPI(ctx, stagingDir); err != nil {
+			return Manifest{}, fmt.Errorf("adopt the restored API database: %w", err)
+		}
+		if err := staging.checkNamed(); err != nil {
+			return Manifest{}, err
+		}
 	}
 
 	if staged != nil {
@@ -1064,7 +1142,10 @@ func fetchPayloads(
 	if !recognizedCloudScheme(registry, snapshotDir) {
 		// Consume private copies: reopening the operator's path after digest
 		// verification permits a replacement file to bypass authentication.
-		owned, err := createOwnedRestoreDir(workParent, ".dingo-restore-payloads-")
+		owned, err := createOwnedRestoreDir(
+			workParent,
+			".dingo-restore-payloads-",
+		)
 		if err != nil {
 			return "", nil, err
 		}
@@ -1081,7 +1162,11 @@ func fetchPayloads(
 				closeErr := src.Close()
 				if err != nil {
 					if errors.Is(err, ErrDownloadTooLarge) {
-						err = fmt.Errorf("%w: %w", ErrSnapshotPayloadMismatch, err)
+						err = fmt.Errorf(
+							"%w: %w",
+							ErrSnapshotPayloadMismatch,
+							err,
+						)
 					}
 					return err
 				}
@@ -1144,6 +1229,10 @@ type restoreRollback struct {
 	dirCleanupAttempted bool
 	dirCleanupErr       error
 	metadataPath        string
+	indexerPath         string
+	indexerMutated      bool
+	legacyCorePath      string
+	legacyCoreMutated   bool
 	blobPath            string
 	newBlobNamespace    string
 	oldBlobNamespace    string
@@ -1328,6 +1417,8 @@ func prepareRestore(
 		manifest.MetadataPlugin,
 		storageConfig.Metadata,
 		metadata.ProviderDependencies{
+			CoreNamespace: manifest.StorageMode == "core" &&
+				manifest.Gates["indexer_layout"] == "split",
 			DataDir:     targetDataDir,
 			StorageMode: manifest.StorageMode,
 		},
@@ -1393,6 +1484,22 @@ func prepareRestore(
 		))
 	}
 
+	if err := prepareIndexerRollback(ctx, host, manifest, snapshotDir, targetDataDir, storageConfig.Metadata, &rollback); err != nil {
+		return cleanupOnError(err)
+	}
+	if storageConfig.adoptsLegacyServerAPI(manifest) {
+		if !durable || rollback.metadataPath == "" {
+			return cleanupOnError(errors.New("legacy server API restore requires live recovery backups"))
+		}
+		if err := backupLegacyCore(ctx, host, manifest, targetDataDir, storageConfig.Metadata, &rollback); err != nil {
+			return cleanupOnError(err)
+		}
+	}
+	if storageConfig.defersLegacyServerAPI(manifest) {
+		if err := checkLegacyCoreTarget(ctx, host, manifest, targetDataDir, storageConfig.Metadata); err != nil {
+			return cleanupOnError(err)
+		}
+	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		ctx,
 		host,
@@ -1413,9 +1520,12 @@ func prepareRestore(
 		return cleanupOnError(err)
 	}
 	rollback.newBlobNamespace = blobNamespace
-	rollback.cloudBlob = manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs"
+	rollback.cloudBlob = manifest.BlobPlugin == "s3" ||
+		manifest.BlobPlugin == "gcs"
 	if rollback.cloudBlob && storageConfig.ActiveDataDir != "" {
-		rollback.oldBlobNamespace, err = blob.ReadNamespace(storageConfig.ActiveDataDir)
+		rollback.oldBlobNamespace, err = blob.ReadNamespace(
+			storageConfig.ActiveDataDir,
+		)
 		if err != nil {
 			_ = stopBlobCapabilityUncancelable(ctx, host)
 			return cleanupOnError(err)
@@ -1495,7 +1605,7 @@ func prepareRestore(
 			"stop blob plugin after restore preflight: %w", err,
 		))
 	}
-	if durable && (rollback.metadataPath != "" || rollback.cloudBlob) {
+	if durable && (rollback.metadataPath != "" || rollback.indexerPath != "" || rollback.cloudBlob) {
 		markerDir := storageConfig.ActiveDataDir
 		if markerDir == "" {
 			markerDir = targetDataDir
@@ -1534,7 +1644,10 @@ func (r *restoreRollback) restore(
 			if err := resetBlobStore(
 				ctx, host, manifest, r.dir, storageConfig.Blob,
 			); err != nil {
-				errs = append(errs, fmt.Errorf("remove staged blob namespace: %w", err))
+				errs = append(
+					errs,
+					fmt.Errorf("remove staged blob namespace: %w", err),
+				)
 			}
 		}
 	} else if r.blobMutated && r.blobPath != "" {
@@ -1571,9 +1684,31 @@ func (r *restoreRollback) restore(
 			)
 		}
 	}
+	if r.indexerMutated && r.indexerPath != "" {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		if err := restoreIndexerMetadata(
+			metadata.AllowResetOfPopulatedTarget(ctx), host, manifest,
+			r.indexerPath, targetDataDir, storageConfig.Metadata,
+		); err != nil {
+			errs = append(errs, fmt.Errorf("restore original IndexerDB metadata: %w", err))
+		}
+	}
+	if r.legacyCoreMutated && r.legacyCorePath != "" {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		if err := restoreMetadataStore(
+			metadata.AllowResetOfPopulatedTarget(ctx), host,
+			coreRestoreManifest(manifest), r.legacyCorePath, targetDataDir,
+			storageConfig.Metadata, nil,
+		); err != nil {
+			errs = append(errs, fmt.Errorf("restore original consensus metadata: %w", err))
+		}
+	}
 	if len(errs) == 0 && r.cloudBlob {
 		if err := selectBlobNamespace(targetDataDir, r.oldBlobNamespace); err != nil {
-			errs = append(errs, fmt.Errorf("restore original blob namespace marker: %w", err))
+			errs = append(
+				errs,
+				fmt.Errorf("restore original blob namespace marker: %w", err),
+			)
 		}
 	}
 	return errors.Join(errs...)
@@ -1595,12 +1730,19 @@ func resetBlobStore(
 		blob.ProviderDependencies{DataDir: targetDataDir, RunMode: "load"},
 	)
 	if err != nil {
-		return fmt.Errorf("resolve blob plugin %q: %w", manifest.BlobPlugin, err)
+		return fmt.Errorf(
+			"resolve blob plugin %q: %w",
+			manifest.BlobPlugin,
+			err,
+		)
 	}
 	resettable, ok := store.(blob.Resettable)
 	if !ok {
 		_ = stopBlobCapabilityUncancelable(ctx, host)
-		return fmt.Errorf("blob plugin %q does not support reset", manifest.BlobPlugin)
+		return fmt.Errorf(
+			"blob plugin %q does not support reset",
+			manifest.BlobPlugin,
+		)
 	}
 	resetErr := resettable.Reset(ctx)
 	if objects, ok := store.(blob.ImmutableObjects); ok {
@@ -1608,7 +1750,11 @@ func resetBlobStore(
 	}
 	stopErr := stopBlobCapabilityUncancelable(ctx, host)
 	if resetErr != nil {
-		return fmt.Errorf("reset blob plugin %q: %w", manifest.BlobPlugin, resetErr)
+		return fmt.Errorf(
+			"reset blob plugin %q: %w",
+			manifest.BlobPlugin,
+			resetErr,
+		)
 	}
 	if stopErr != nil {
 		return fmt.Errorf("stop blob plugin after reset: %w", stopErr)
@@ -1617,14 +1763,17 @@ func resetBlobStore(
 }
 
 type restoreRecoveryRecord struct {
-	OperationID      string `json:"operationId"`
-	BlobPlugin       string `json:"blobPlugin"`
-	MetadataPlugin   string `json:"metadataPlugin"`
-	StorageMode      string `json:"storageMode"`
-	NewBlobNamespace string `json:"newBlobNamespace,omitempty"`
-	OldBlobNamespace string `json:"oldBlobNamespace,omitempty"`
-	CloudBlob        bool   `json:"cloudBlob"`
-	MetadataMutated  bool   `json:"metadataMutated"`
+	LegacyCoreMutated bool   `json:"legacyCoreMutated,omitempty"`
+	IndexerMutated    bool   `json:"indexerMutated,omitempty"`
+	CoreNamespace     bool   `json:"coreNamespace,omitempty"`
+	OperationID       string `json:"operationId"`
+	BlobPlugin        string `json:"blobPlugin"`
+	MetadataPlugin    string `json:"metadataPlugin"`
+	StorageMode       string `json:"storageMode"`
+	NewBlobNamespace  string `json:"newBlobNamespace,omitempty"`
+	OldBlobNamespace  string `json:"oldBlobNamespace,omitempty"`
+	CloudBlob         bool   `json:"cloudBlob"`
+	MetadataMutated   bool   `json:"metadataMutated"`
 }
 
 func (r *restoreRollback) persist(manifest Manifest) error {
@@ -1632,14 +1781,17 @@ func (r *restoreRollback) persist(manifest Manifest) error {
 		return fmt.Errorf("sync restore recovery directory: %w", err)
 	}
 	record := restoreRecoveryRecord{
-		OperationID:      r.operationID,
-		BlobPlugin:       manifest.BlobPlugin,
-		MetadataPlugin:   manifest.MetadataPlugin,
-		StorageMode:      manifest.StorageMode,
-		NewBlobNamespace: r.newBlobNamespace,
-		OldBlobNamespace: r.oldBlobNamespace,
-		CloudBlob:        r.cloudBlob,
-		MetadataMutated:  r.metadataPath != "",
+		OperationID:       r.operationID,
+		BlobPlugin:        manifest.BlobPlugin,
+		MetadataPlugin:    manifest.MetadataPlugin,
+		StorageMode:       manifest.StorageMode,
+		NewBlobNamespace:  r.newBlobNamespace,
+		OldBlobNamespace:  r.oldBlobNamespace,
+		CloudBlob:         r.cloudBlob,
+		MetadataMutated:   r.metadataPath != "",
+		IndexerMutated:    r.indexerPath != "",
+		LegacyCoreMutated: r.legacyCorePath != "",
+		CoreNamespace:     manifest.StorageMode == "core" && manifest.Gates["indexer_layout"] == "split",
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -1711,7 +1863,7 @@ func (r *restoreRollback) removeDir() error {
 }
 
 func (r *restoreRollback) authenticate() error {
-	if !r.metadataMutated && !r.blobMutated {
+	if !r.metadataMutated && !r.indexerMutated && !r.legacyCoreMutated && !r.blobMutated {
 		return nil
 	}
 	for _, dir := range r.markerDirs {
@@ -1774,7 +1926,7 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 			"restore recovery record is missing provider names",
 		)
 	}
-	if record.MetadataMutated || record.CloudBlob {
+	if record.MetadataMutated || record.IndexerMutated || record.LegacyCoreMutated || record.CloudBlob {
 		operationID, err := hex.DecodeString(record.OperationID)
 		if err != nil || len(operationID) != restoreRecoveryIDBytes {
 			return rollback, Manifest{}, errors.New(
@@ -1782,7 +1934,22 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 			)
 		}
 	}
-	rollback.metadataPath = filepath.Join(dir, MetadataBackupFileName)
+	if record.MetadataMutated {
+		rollback.metadataPath = filepath.Join(dir, MetadataBackupFileName)
+	}
+	if record.IndexerMutated {
+		rollback.indexerPath = filepath.Join(dir, IndexerMetadataBackupFileName)
+		rollback.indexerMutated = true
+	}
+	if record.LegacyCoreMutated {
+		if !record.MetadataMutated || record.IndexerMutated ||
+			record.StorageMode != "api" ||
+			(record.MetadataPlugin != "postgres" && record.MetadataPlugin != "mysql") {
+			return rollback, Manifest{}, errors.New("invalid legacy core restore recovery record")
+		}
+		rollback.legacyCorePath = filepath.Join(dir, legacyCoreBackupFileName)
+		rollback.legacyCoreMutated = true
+	}
 	rollback.newBlobNamespace = record.NewBlobNamespace
 	rollback.oldBlobNamespace = record.OldBlobNamespace
 	rollback.cloudBlob = record.CloudBlob
@@ -1794,6 +1961,9 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 		BlobPlugin:     record.BlobPlugin,
 		MetadataPlugin: record.MetadataPlugin,
 		StorageMode:    record.StorageMode,
+	}
+	if record.CoreNamespace {
+		manifest.Gates = nodesettings.Values{"indexer_layout": "split"}
 	}
 	return rollback, manifest, nil
 }
@@ -1840,7 +2010,10 @@ func RecoverInterruptedRestore(
 		}
 		return err
 	}
-	rollback.markerDirs = restoreRecoveryMarkerDirs(storageConfig, targetDataDir)
+	rollback.markerDirs = restoreRecoveryMarkerDirs(
+		storageConfig,
+		targetDataDir,
+	)
 	// Only an external-store reset needs the marker binding; accepting a
 	// completed restore just disposes of the record.
 	if !accept {
@@ -1943,6 +2116,8 @@ func restoreMetadataStore(
 		manifest.MetadataPlugin,
 		providerConfig,
 		metadata.ProviderDependencies{
+			CoreNamespace: manifest.StorageMode == "core" &&
+				manifest.Gates["indexer_layout"] == "split",
 			DataDir:     targetDataDir,
 			StorageMode: manifest.StorageMode,
 		},
@@ -1962,6 +2137,7 @@ func restoreMetadataStore(
 			manifest.MetadataPlugin,
 		)
 	}
+	destructive, _ := store.(interface{ HasDestructiveReset() bool })
 	if resettable, ok := store.(metadata.Resettable); ok {
 		if err := resettable.Reset(ctx); err != nil {
 			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
@@ -1975,6 +2151,14 @@ func restoreMetadataStore(
 	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
 		return fmt.Errorf("stop metadata plugin before restore: %w", err)
 	}
+	if destructive != nil && destructive.HasDestructiveReset() {
+		// Server metadata uses its configured database. The local directory
+		// may still hold the active ledger during interrupted restore recovery.
+		if err := restorer.RestoreFrom(ctx, backupPath); err != nil {
+			return fmt.Errorf("restore metadata store: %w", err)
+		}
+		return nil
+	}
 	var ownedParent *os.Root
 	if target == nil {
 		parentPath := filepath.Dir(targetDataDir)
@@ -1987,10 +2171,16 @@ func restoreMetadataStore(
 		}
 		defer ownedParent.Close() //nolint:errcheck // cleanup errors are returned below
 		name := filepath.Base(filepath.Clean(targetDataDir))
-		if _, statErr := ownedParent.Lstat(name); errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := ownedParent.Lstat(name); errors.Is(
+			statErr,
+			os.ErrNotExist,
+		) {
 			ownedTarget, createErr := createOwnedRestoreDirAt(targetDataDir)
 			if createErr != nil {
-				return fmt.Errorf("create metadata restore directory: %w", createErr)
+				return fmt.Errorf(
+					"create metadata restore directory: %w",
+					createErr,
+				)
 			}
 			target = ownedTarget.dir
 			defer ownedTarget.close() //nolint:errcheck // restore error is returned below
@@ -2010,9 +2200,7 @@ func restoreMetadataStore(
 	}
 	// RestoreFrom refuses to overwrite an existing destination -- undo
 	// whatever the brief resolve-and-start above wrote to targetDataDir so
-	// it looks exactly as empty as before that call. Harmless no-op for a
-	// live client/server store, which never wrote real data under
-	// targetDataDir in the first place.
+	// it looks exactly as empty as before that call.
 	if err := target.removeContents(); err != nil {
 		return fmt.Errorf(
 			"reset target data directory %q: %w", targetDataDir, err,
@@ -2303,6 +2491,8 @@ func validateRestoredDatabase(
 		manifest.MetadataPlugin,
 		storageConfig.Metadata,
 		metadata.ProviderDependencies{
+			CoreNamespace: manifest.StorageMode == "core" &&
+				manifest.Gates["indexer_layout"] == "split",
 			DataDir:     targetDataDir,
 			StorageMode: manifest.StorageMode,
 		},
@@ -2417,6 +2607,11 @@ func validateRestoredDatabase(
 			manifest.TipSlot,
 			manifest.TipBlockNumber,
 		)
+	}
+	if err := validateIndexerMetadata(
+		ctx, host, manifest, db, targetDataDir, storageConfig.Metadata,
+	); err != nil {
+		return err
 	}
 	return nil
 }

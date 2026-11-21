@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/indexerdb"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -29,8 +32,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,15 +71,18 @@ func newHistoryFixtureAdapter(
 }
 
 // newHistoryFixture is newHistoryFixtureAdapter with the metadata read pool
-// sized to maxConnections (zero keeps the default) and the database exposed.
+// sized to maxConnections (zero keeps the default) and the IndexerDB exposed.
 func newHistoryFixture(
 	t *testing.T,
 	addrFor func(row int) lcommon.Address,
 	maxConnections int,
 ) (*NodeAdapter, *database.Database, []string) {
 	t.Helper()
-	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
-		Config:         &database.Config{DataDir: t.TempDir()},
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	db, err := dbtest.NewIndexerDatabase(t, consensus, dbtest.IndexerOptions{
 		MaxConnections: maxConnections,
 	})
 	require.NoError(t, err)
@@ -143,22 +147,27 @@ INSERT INTO utxo (
 		}
 		return nil
 	}))
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: historyFixtureSlots,
-			Hash: bytes.Repeat([]byte{0xee}, 32),
+	store, err := indexerdb.NewStore(db, db, 0)
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			return store.SetTip(indexerdb.Tip{
+				Slot:        historyFixtureSlots,
+				BlockNumber: historyFixtureSlots,
+				Hash:        bytes.Repeat([]byte{0xee}, 32),
+			}, txn)
 		},
-		BlockNumber: historyFixtureSlots,
-	}, nil))
+	))
 
-	chainManager, err := chain.NewManager(context.Background(), db, nil)
+	chainManager, err := chain.NewManager(context.Background(), consensus, nil)
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
+		Database:     consensus,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 	})
 	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls)
+	adapter, err := NewNodeAdapter(ls, store)
 	require.NoError(t, err)
 	adapter.pageSizeOverride = historyFixturePageSize
 

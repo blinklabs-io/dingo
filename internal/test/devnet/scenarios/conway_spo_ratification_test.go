@@ -131,7 +131,9 @@ func TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch(t *testing.T) {
 	require.NoError(t, err)
 	stakeKeys, err := loadGovernanceStakeKeys(filepath.Join(keysDir, "stake"))
 	require.NoError(t, err)
-	paymentKeys, err := loadGovernancePaymentKeys(keysDir)
+	paymentKeys, err := loadGovernancePaymentKeys(
+		keysDir, os.Getenv("DEVNET_GOVERNANCE_PAYMENT_KEY"),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, paymentKeys, "no genesis payment keys were exposed")
 
@@ -820,10 +822,26 @@ func loadGovernancePoolKeys(
 	return keys, nil
 }
 
-func loadGovernancePaymentKeys(dir string) ([]*governanceSigningKey, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "genesis.*.skey"))
+// loadGovernancePaymentKeys loads the genesis payment keys under dir. A
+// non-empty reserved names the one key txpump was configured not to spend
+// (such as "genesis.1"); only that key is loaded, so the scenario cannot draw
+// on a wallet txpump shares.
+func loadGovernancePaymentKeys(
+	dir, reserved string,
+) ([]*governanceSigningKey, error) {
+	pattern := "genesis.*.skey"
+	if reserved != "" {
+		pattern = reserved + ".skey"
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, pattern))
 	if err != nil {
 		return nil, err
+	}
+	if reserved != "" && len(paths) == 0 {
+		return nil, fmt.Errorf(
+			"reserved governance payment key %s not found under %s",
+			reserved, dir,
+		)
 	}
 	sort.Strings(paths)
 	keys := make([]*governanceSigningKey, 0, len(paths))

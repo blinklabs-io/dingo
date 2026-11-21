@@ -56,8 +56,7 @@ func TestAdapterReadsFromIndexerStore(t *testing.T) {
 	store, err := indexerdb.NewStore(idxDB, &fakeTipState{tip: "42:7:abcd"}, 10)
 	require.NoError(t, err)
 
-	a := &NodeAdapter{}
-	a.SetIndexerStore(store)
+	a := &NodeAdapter{indexer: store}
 	require.Same(t, idxDB, a.db())
 
 	point, err := a.Tip()

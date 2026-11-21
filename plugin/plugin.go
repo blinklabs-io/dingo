@@ -473,9 +473,11 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; if ctx expires before teardown completes, Stop returns ctx.Err
-// and the host continues teardown in the background. A later call waits for
-// that teardown and returns its accumulated result.
+// idempotent. Without durable providers, cancellation returns ctx.Err while
+// teardown continues in the background. With durable providers, Stop waits for
+// closure to finish even after cancellation. Provider errors and cancellation
+// during ordinary teardown remain errors; a durable close exceeding the deadline
+// alone is not an error. A later call waits for the accumulated result.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -631,10 +633,10 @@ func (h *Host) StopCapability(
 
 // stopReverse stops started in reverse order. A DurableClose instance gets a
 // context detached from ctx's cancellation and is waited for, with progress
-// logged. The second result is ctx's error observed after the last
-// non-durable stop, or after the whole list when no durable close is part of
-// this teardown (durableElsewhere reports one running in StopCapability): a
-// deadline that only a durable close outran is not an error.
+// logged. The second result records cancellation during a non-durable stop,
+// or cancellation of a teardown without durable work. A successful stop that
+// begins after durable work exhausted the deadline does not add a context error.
+// durableElsewhere reports durable work outside this list.
 func (h *Host) stopReverse(
 	ctx context.Context,
 	started []startedInstance,
@@ -647,8 +649,11 @@ func (h *Host) stopReverse(
 			durableSeen = true
 			err = h.closeDurable(ctx, item)
 		} else {
+			wasCanceled := ctx.Err() != nil
 			err = item.instance.Stop(ctx)
-			deadlineErr = ctx.Err()
+			if !wasCanceled || !durableSeen {
+				deadlineErr = ctx.Err()
+			}
 		}
 		if err != nil {
 			ret = errors.Join(ret, fmt.Errorf(

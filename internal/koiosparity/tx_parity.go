@@ -78,6 +78,15 @@ type TransactionParitySource interface {
 
 var _ TransactionParitySource = (*DatabaseSource)(nil)
 
+// ErrTransactionHistoryPending reports that the history database the
+// transaction sample reads has not indexed the whole epoch yet. A sample
+// taken then would be a prefix of the one a later read returns, so the fetch
+// and check phases could disagree on it. The observer defers the epoch
+// (Observer.deferForHistory) rather than failing it.
+var ErrTransactionHistoryPending = errors.New(
+	"koiosparity: transaction history has not reached the end of the epoch",
+)
+
 func utxoRef(hash string, idx int) string {
 	return hash + "#" + strconv.Itoa(idx)
 }
@@ -268,7 +277,7 @@ func (s *DatabaseSource) resolveOutputAddresses(
 		outs = append(outs, tx.CollateralReturn)
 	}
 	for _, u := range outs {
-		cbor, err := s.db.ResolveUtxoCborWithRecovery(
+		cbor, err := s.history.ResolveUtxoCborWithRecovery(
 			ctx, u.TxId, u.OutputIdx, txn,
 		)
 		if err != nil {
@@ -337,30 +346,48 @@ func (s *DatabaseSource) GetEpochTransactionHashes(
 // UTxOs after the stability window and does not retain the collateral and
 // reference associations, so an old transaction there would read as having
 // lost inputs.
+//
+// The epoch's slot range comes from the consensus database, which records an
+// epoch when the ledger enters it; a trailing history database may not hold
+// the row yet.
 func (s *DatabaseSource) walkEpochTransactions(
 	ctx context.Context,
 	epoch uint64,
 	limit int,
 	visit func(*database.Txn, *models.Transaction) error,
 ) error {
-	if limit <= 0 || s.db.StorageMode() != types.StorageModeAPI {
+	if limit <= 0 || s.history.StorageMode() != types.StorageModeAPI {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	txn := s.db.Transaction(ctx, false)
-	defer txn.Release()
-	ep, err := s.db.GetEpoch(epoch, txn)
+	ep, err := s.db.GetEpoch(epoch, nil)
 	if err != nil {
 		return fmt.Errorf("epoch %d lookup: %w", epoch, err)
 	}
 	if ep == nil || ep.LengthInSlots == 0 {
 		return nil
 	}
-	it := s.db.BlocksInRangeContext(
-		ctx, ep.StartSlot, ep.StartSlot+uint64(ep.LengthInSlots)-1,
-	)
+	lastSlot := ep.StartSlot + uint64(ep.LengthInSlots) - 1
+	txn := s.history.Transaction(ctx, false)
+	defer txn.Release()
+	if s.historyTrails {
+		// Read inside txn, so the rows visited below are the ones this tip
+		// covers.
+		tip, err := s.history.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("epoch %d history tip: %w", epoch, err)
+		}
+		if tip.Point.Slot < lastSlot {
+			return fmt.Errorf(
+				"%w: epoch %d ends at slot %d, history tip is at slot %d",
+				ErrTransactionHistoryPending,
+				epoch, lastSlot, tip.Point.Slot,
+			)
+		}
+	}
+	it := s.history.BlocksInRangeContext(ctx, ep.StartSlot, lastSlot)
 	defer it.Close()
 	visited := 0
 	for visited < limit {
@@ -371,7 +398,7 @@ func (s *DatabaseSource) walkEpochTransactions(
 		if blk == nil {
 			return nil
 		}
-		txs, err := s.db.GetTransactionsByBlockHash(ctx, blk.Hash, txn)
+		txs, err := s.history.GetTransactionsByBlockHash(ctx, blk.Hash, txn)
 		if err != nil {
 			return err
 		}
@@ -392,10 +419,12 @@ func (s *DatabaseSource) walkEpochTransactions(
 // transactions that are not cached yet. A Koios failure that outlasts the
 // retries is logged and swallowed, keeping any rows that did arrive: the check
 // then records each transaction still uncached as a missing reference (an
-// ERROR), and the rest of the epoch is still compared. Only cancellation and
-// ErrKoiosQuotaExceeded are returned: an uncached transaction is fatal in
-// strict mode, and an exhausted daily quota says nothing about the chain, so
-// the epoch is reported as a Koios outage and retried instead.
+// ERROR), and the rest of the epoch is still compared. Only cancellation,
+// ErrKoiosQuotaExceeded and ErrTransactionHistoryPending are returned: an
+// uncached transaction is fatal in strict mode, and neither an exhausted
+// daily quota nor a history database still catching up says anything about
+// the chain, so the epoch is retried instead: reported as a Koios outage for
+// the quota, deferred without a result for pending history.
 func (o *Observer) fetchTransactionsIfNeeded(
 	ctx context.Context,
 	epoch uint64,
@@ -412,10 +441,15 @@ func (o *Observer) fetchTransactionsIfNeeded(
 			"network", o.cfg.Network, "epoch", epoch, "error", err)
 		return nil
 	}
-	hashes, err := source.GetEpochTransactionHashes(
-		ctx, epoch, EpochTransactionSampleSize,
-	)
+	hashes, err := waitForHistory(ctx, func() ([]string, error) {
+		return source.GetEpochTransactionHashes(
+			ctx, epoch, EpochTransactionSampleSize,
+		)
+	})
 	if err != nil {
+		if errors.Is(err, ErrTransactionHistoryPending) {
+			return err
+		}
 		return fail(err)
 	}
 	cached, err := o.cache.GetTxInfos(o.cfg.Network, hashes)
