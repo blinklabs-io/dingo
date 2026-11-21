@@ -36,7 +36,7 @@ WHERE t.hash = ? AND u.output_idx = ?
   AND u.spent_at_tx_id IS NULL
   AND COALESCE(u.deleted_slot, 0) = 0
   AND u.collateral_return_for_tx_id IS NULL
-  AND NOT EXISTS (SELECT 1 FROM asset s WHERE s.utxo_id = u.id)
+  AND NOT EXISTS (SELECT 1 FROM asset_holding s WHERE s.utxo_id = u.id)
   AND NOT EXISTS (SELECT 1 FROM utxo_reference_edge e WHERE e.utxo_id = u.id)
   AND NOT EXISTS (SELECT 1 FROM utxo_collateral_edge e WHERE e.utxo_id = u.id)`
 

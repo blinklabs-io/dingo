@@ -3531,7 +3531,7 @@ with none of them does nothing.
   `utxo` rows into the live set. `Database.RemoveGenesisUtxos`
   (`Store.DeleteUnspentGenesisUtxos`) deletes, per listed output, the `utxo` row
   that is unspent (`spent_at_tx_id` null, `deleted_slot` zero, not a collateral
-  return), has amount `0`, and no `asset`, `utxo_reference_edge` or
+  return), has amount `0`, and no `asset_holding`, `utxo_reference_edge` or
   `utxo_collateral_edge` row. Its `utxo_address`, `utxo_pointer` and
   `utxo_reference_script` rows go with it, and so does its blob output offset
   on a store that still keeps offsets. A listed genesis transaction then loses
