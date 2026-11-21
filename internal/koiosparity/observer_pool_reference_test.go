@@ -80,6 +80,23 @@ type poolRefScenario struct {
 	historyDownA func(run int) bool
 	// unavailableRetryLimit sets ObserverConfig.UnavailableRetryLimit.
 	unavailableRetryLimit int
+	// source, when set, is a database from newPoolRefSource shared with
+	// other scenarios; otherwise the scenario opens its own.
+	source *DatabaseSource
+}
+
+// newPoolRefSource opens a Dingo database seeded with the epoch 5 aggregate
+// every scenario compares against. Scenarios only read it, so the subtests of
+// one test share it and run in turn rather than in parallel: the package's
+// event-driven observer tests wait at most five seconds for the observer
+// pipeline, and every concurrent database and observer setup competes with
+// them for CPU under -race.
+func newPoolRefSource(t *testing.T) *DatabaseSource {
+	t.Helper()
+	source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	seedDingoEpochAggregate(t, source, 5, 12345, 1, 1, 1)
+	return source
 }
 
 type poolRefOutcome struct {
@@ -149,10 +166,10 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 	)
 	t.Cleanup(srv.Close)
 
-	db := newTestDatabaseSourceDB(t)
-	real, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-	seedDingoEpochAggregate(t, real, 5, 12345, 1, 1, 1)
+	real := sc.source
+	if real == nil {
+		real = newPoolRefSource(t)
+	}
 	source := &poolMapStub{
 		RewardParitySource: real,
 		pools: map[string]*DingoPoolEpochData{
@@ -248,17 +265,19 @@ func TestObserverEmptyPoolHistoryIsRefetchedBeforeClassifying(t *testing.T) {
 // A pool Koios never registered stays a real disagreement.
 func TestObserverPoolAbsentFromKoiosStillFails(t *testing.T) {
 	t.Parallel()
+	source := newPoolRefSource(t)
 	for name, updates := range map[string]string{
 		"never registered": `[]`,
 		"registered later": `[{"active_epoch_no":9,"retiring_epoch":null,"block_time":100}]`,
 		"already retired": `[{"active_epoch_no":1,"retiring_epoch":null,"block_time":100},` +
 			`{"active_epoch_no":null,"retiring_epoch":3,"block_time":200}]`,
 	} {
+		// Not t.Parallel: see newPoolRefSource.
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			out := runPoolRefScenario(t, poolRefScenario{
 				historyA: func(int32) bool { return false },
 				updatesA: updates,
+				source:   source,
 			})
 			require.True(
 				t,
@@ -297,10 +316,12 @@ func TestObserverPersistentlyEmptyPoolHistoryIsNonFatalReferenceError(
 // than pool_only_dingo.
 func TestObserverPoolRetiringAtCheckedEpochIsNotAbsent(t *testing.T) {
 	t.Parallel()
+	source := newPoolRefSource(t)
 	for _, retiring := range []int{4, 5} {
+		// Not t.Parallel: see newPoolRefSource.
 		t.Run(fmt.Sprintf("retiring %d", retiring), func(t *testing.T) {
-			t.Parallel()
 			out := runPoolRefScenario(t, poolRefScenario{
+				source:   source,
 				historyA: func(int32) bool { return false },
 				updatesA: fmt.Sprintf(
 					`[{"active_epoch_no":1,"retiring_epoch":null,"block_time":100},`+
@@ -343,9 +364,11 @@ func TestObserverPoolSkippedByFirstActiveMapIsRefetched(t *testing.T) {
 // a missing pool itself before strict mode can act on pool_only_dingo.
 func TestObserverAccountQueueConfirmsMissingPool(t *testing.T) {
 	t.Parallel()
+	source := newPoolRefSource(t)
+	// Not t.Parallel in the subtests: see newPoolRefSource.
 	t.Run("published on re-request", func(t *testing.T) {
-		t.Parallel()
 		out := runPoolRefScenario(t, poolRefScenario{
+			source:   source,
 			accounts: true,
 			historyA: func(call int32) bool { return call >= 2 },
 			updatesA: updatesRegisteredAt1,
@@ -359,8 +382,8 @@ func TestObserverAccountQueueConfirmsMissingPool(t *testing.T) {
 		require.Zero(t, out.fatal, "%+v", out.result.Mismatches)
 	})
 	t.Run("never registered", func(t *testing.T) {
-		t.Parallel()
 		out := runPoolRefScenario(t, poolRefScenario{
+			source:   source,
 			accounts: true,
 			historyA: func(int32) bool { return false },
 			updatesA: `[]`,
@@ -373,8 +396,8 @@ func TestObserverAccountQueueConfirmsMissingPool(t *testing.T) {
 		require.Equal(t, int32(1), out.fatal)
 	})
 	t.Run("registered but never published", func(t *testing.T) {
-		t.Parallel()
 		out := runPoolRefScenario(t, poolRefScenario{
+			source:   source,
 			accounts: true,
 			historyA: func(int32) bool { return false },
 			updatesA: updatesRegisteredAt1,

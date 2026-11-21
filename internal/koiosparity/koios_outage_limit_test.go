@@ -76,12 +76,11 @@ type outageHarness struct {
 // every run refetches the reference.
 func newOutageHarness(
 	t *testing.T,
+	source RewardParitySource,
 	strict, accounts bool,
 	limit int,
 ) *outageHarness {
 	t.Helper()
-	source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
-	require.NoError(t, err)
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30", endTimeUnix: time.Now().Add(-time.Hour).Unix()},
 	})
@@ -135,14 +134,32 @@ func (h *outageHarness) fatalErrs() []error {
 	return append([]error(nil), h.fatals...)
 }
 
-func forEachQueue(t *testing.T, fn func(t *testing.T, accounts bool)) {
-	for name, accounts := range map[string]bool{
-		"aggregate": false,
-		"accounts":  true,
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			fn(t, accounts)
+// newSharedSource opens one unseeded Dingo database for a test's subtests to
+// share. The observer only reads its source, so sharing is safe.
+func newSharedSource(t *testing.T) RewardParitySource {
+	t.Helper()
+	source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	return source
+}
+
+// forEachQueue runs fn against the aggregate and then the account queue.
+// Not t.Parallel: both queues share one source database and run in turn,
+// which keeps each of these tests to one observer at a time. The package's
+// event-driven observer tests wait at most five seconds for the observer
+// pipeline, and every concurrent observer setup here competes with them for
+// CPU under -race.
+func forEachQueue(
+	t *testing.T,
+	fn func(t *testing.T, source RewardParitySource, accounts bool),
+) {
+	source := newSharedSource(t)
+	for _, q := range []struct {
+		name     string
+		accounts bool
+	}{{"aggregate", false}, {"accounts", true}} {
+		t.Run(q.name, func(t *testing.T) {
+			fn(t, source, q.accounts)
 		})
 	}
 }
@@ -151,9 +168,9 @@ func forEachQueue(t *testing.T, fn func(t *testing.T, accounts bool)) {
 // and stops the node on the limit-th, naming the attempt count.
 func TestStrictKoiosOutageIsFatalAtRetryLimit(t *testing.T) {
 	t.Parallel()
-	forEachQueue(t, func(t *testing.T, accounts bool) {
+	forEachQueue(t, func(t *testing.T, source RewardParitySource, accounts bool) {
 		const limit = 3
-		h := newOutageHarness(t, true, accounts, limit)
+		h := newOutageHarness(t, source, true, accounts, limit)
 		h.down.Store(true)
 
 		h.run(accounts, limit-1)
@@ -177,13 +194,15 @@ func TestStrictKoiosOutageIsFatalAtRetryLimit(t *testing.T) {
 func TestKoiosOutageCountResetsWhenKoiosAnswers(t *testing.T) {
 	t.Parallel()
 	down := func(run int) bool { return run != 3 }
+	source := newPoolRefSource(t)
 	for name, accounts := range map[string]bool{
 		"aggregate": false,
 		"accounts":  true,
 	} {
+		// Not t.Parallel: see newPoolRefSource.
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			below := runPoolRefScenario(t, poolRefScenario{
+				source:                source,
 				historyA:              func(int32) bool { return false },
 				historyDownA:          down,
 				updatesA:              updatesRegisteredAt1,
@@ -195,6 +214,7 @@ func TestKoiosOutageCountResetsWhenKoiosAnswers(t *testing.T) {
 				"a Koios answer must reset the consecutive-failure count")
 
 			at := runPoolRefScenario(t, poolRefScenario{
+				source:                source,
 				historyA:              func(int32) bool { return false },
 				historyDownA:          down,
 				updatesA:              updatesRegisteredAt1,
@@ -214,8 +234,8 @@ func TestKoiosReferenceLagNeverReachesRetryLimit(t *testing.T) {
 	t.Parallel()
 	t.Run("empty pool set", func(t *testing.T) {
 		t.Parallel()
-		forEachQueue(t, func(t *testing.T, accounts bool) {
-			h := newOutageHarness(t, true, accounts, 1)
+		forEachQueue(t, func(t *testing.T, source RewardParitySource, accounts bool) {
+			h := newOutageHarness(t, source, true, accounts, 1)
 			h.run(accounts, 4)
 			require.Empty(t, h.fatalErrs())
 			require.False(t, h.o.stopping())
@@ -223,13 +243,15 @@ func TestKoiosReferenceLagNeverReachesRetryLimit(t *testing.T) {
 	})
 	t.Run("registered pool never published", func(t *testing.T) {
 		t.Parallel()
+		source := newPoolRefSource(t)
 		for name, accounts := range map[string]bool{
 			"aggregate": false,
 			"accounts":  true,
 		} {
+			// Not t.Parallel: see newPoolRefSource.
 			t.Run(name, func(t *testing.T) {
-				t.Parallel()
 				out := runPoolRefScenario(t, poolRefScenario{
+					source:                source,
 					historyA:              func(int32) bool { return false },
 					updatesA:              updatesRegisteredAt1,
 					accounts:              accounts,
@@ -248,9 +270,9 @@ func TestKoiosReferenceLagNeverReachesRetryLimit(t *testing.T) {
 // queued for retry and logs, at ERROR, how long Koios has been unreachable.
 func TestNonStrictKoiosOutagePastLimitLogsAndKeepsRetrying(t *testing.T) {
 	t.Parallel()
-	forEachQueue(t, func(t *testing.T, accounts bool) {
+	forEachQueue(t, func(t *testing.T, source RewardParitySource, accounts bool) {
 		const limit = 2
-		h := newOutageHarness(t, false, accounts, limit)
+		h := newOutageHarness(t, source, false, accounts, limit)
 		h.down.Store(true)
 
 		h.run(accounts, limit+3)
@@ -273,5 +295,29 @@ func TestNonStrictKoiosOutagePastLimitLogsAndKeepsRetrying(t *testing.T) {
 		h.o.mu.Unlock()
 		require.True(t, scheduled,
 			"an exhausted outage must stay queued for retry in non-strict mode")
+	})
+}
+
+// Daily-quota exhaustion clears on Koios's daily reset and is never fatal while
+// its retry persists, so it must not count toward the unavailability limit.
+func TestKoiosQuotaNeverReachesRetryLimit(t *testing.T) {
+	t.Parallel()
+	forEachQueue(t, func(t *testing.T, source RewardParitySource, accounts bool) {
+		h := newOutageHarness(t, source, true, accounts, 1)
+		h.o.koios.http.Transport = failingKoiosTransport{
+			next:   h.o.koios.http.Transport,
+			paths:  map[string]bool{"/pool_list": true},
+			status: http.StatusTooManyRequests,
+			body:   "Exceeded Tier Limit",
+		}
+
+		h.run(accounts, 3)
+
+		require.Empty(t, h.fatalErrs(),
+			"quota exhaustion must not reach the unavailability limit")
+		require.False(t, h.o.stopping())
+		retrying, err := h.o.cache.GetEpochsNeedingRetry("preview", accounts)
+		require.NoError(t, err)
+		require.Equal(t, []uint64{5}, retrying)
 	})
 }
