@@ -16,10 +16,12 @@ package badgerutxo
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -574,7 +576,16 @@ func (s *Store) SnapshotsCapturedIn(
 		return nil, false, err
 	}
 	slices.SortFunc(rows, func(a, b SnapshotRow) int {
-		return bytes.Compare(snapshotKey(a), snapshotKey(b))
+		if c := cmp.Compare(a.Epoch, b.Epoch); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(len(a.Type), len(b.Type)); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Type, b.Type); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.Pool, b.Pool)
 	})
 	return rows, indexed, nil
 }

@@ -188,6 +188,9 @@ func deletePrefixKeys(txn *badger.Txn, prefix []byte) error {
 		keys = append(keys, it.Item().KeyCopy(nil))
 	}
 	it.Close()
+	if len(prefix) > 0 && prefix[0] == SnapshotTag {
+		return deleteSnapshotRows(txn, keys)
+	}
 	return deleteKeys(txn, keys)
 }
 
@@ -233,6 +236,36 @@ func (s *Store) deletePrefixes(prefixes [][]byte) error {
 // deletePrefixRows deletes every row under prefix in as many transactions as
 // it takes.
 func (s *Store) deletePrefixRows(prefix []byte) error {
+	if len(prefix) > 0 && prefix[0] == SnapshotTag {
+		var keys [][]byte
+		if err := s.view(func(txn *badger.Txn) error {
+			var err error
+			keys, err = snapshotKeysUnder(txn, prefix, func([]byte) bool { return true })
+			return err
+		}); err != nil {
+			return err
+		}
+		for len(keys) > 0 {
+			n := min(256, len(keys))
+			for {
+				// A row and its index entry must disappear in one commit,
+				// including when a prefix spans several transactions.
+				err := s.update(func(txn *badger.Txn) error {
+					return deleteSnapshotRows(txn, keys[:n])
+				})
+				if errors.Is(err, badger.ErrTxnTooBig) && n > 1 {
+					n /= 2
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				break
+			}
+			keys = keys[n:]
+		}
+		return nil
+	}
 	wb := s.newWriteBatch()
 	defer wb.Cancel()
 	err := s.view(func(txn *badger.Txn) error {
@@ -319,7 +352,9 @@ func rollbackRowsWithin(
 	}
 	for _, e := range entries {
 		if len(e.key) < 10 || len(e.value) < 1 {
-			return false, errors.New("badgerutxo: malformed state journal entry")
+			return false, errors.New(
+				"badgerutxo: malformed state journal entry",
+			)
 		}
 		if e.value[0] == tombstoneMark {
 			if err := deletePrefixKeys(txn, e.key[9:]); err != nil {

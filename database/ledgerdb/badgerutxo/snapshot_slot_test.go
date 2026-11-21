@@ -15,6 +15,7 @@
 package badgerutxo_test
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"testing"
@@ -22,6 +23,127 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSnapshotCaptureIndexFollowsPrefixDeletion(t *testing.T) {
+	t.Parallel()
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback=%t", rollback), func(t *testing.T) {
+			t.Parallel()
+			s := indexedStore(t)
+			applyEpochState(
+				t,
+				s,
+				point(2, 0x02),
+				nil,
+				snapAt(0, "mark", 'a', 2),
+			)
+			prefix := binary.BigEndian.AppendUint64(
+				[]byte{badgerutxo.SnapshotTag},
+				1,
+			)
+			if rollback {
+				tip := point(10, 0x0a)
+				_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+					Rows: []badgerutxo.RowPut{
+						{Slot: 10, Key: prefix, TombstonePrefix: true},
+					},
+				})
+				require.NoError(t, err)
+			}
+			applyEpochState(t, s, point(20, 0x14), nil,
+				snapAt(1, "mark", 'b', 15), snapAt(1, "set", 'c', 18))
+			if rollback {
+				_, err := s.Rollback(point(2, 0x02))
+				require.NoError(t, err)
+			} else {
+				tip := point(30, 0x1e)
+				_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+					Rows: []badgerutxo.RowPut{{Key: prefix, WipePrefix: true}},
+				})
+				require.NoError(t, err)
+			}
+			requireSnapshotIndexAgrees(t, s, "after deleting a snapshot prefix")
+			require.Equal(t, []string{"0marka@2"}, capturedIn(t, s, 0, 100))
+		})
+	}
+}
+
+func TestSnapshotIndexCheckerRejectsLegacyRowsAfterBackfill(t *testing.T) {
+	t.Parallel()
+	s := indexedStore(t)
+	r := snapAt(1, "mark", 'a', 15).Row
+	require.NoError(t, s.PutLegacySnapshotRowForTest(r))
+	bad, err := s.SnapshotIndexMismatchForTest()
+	require.NoError(t, err)
+	require.NotEmpty(t, bad)
+	require.NoError(t, s.ClearSnapshotSlotsMarkerForTest())
+	requireSnapshotIndexAgrees(
+		t,
+		s,
+		"legacy rows are permitted before backfill",
+	)
+}
+
+func TestIndexSnapshotSlotsResumesAfterACommittedChunk(t *testing.T) {
+	t.Parallel()
+	path := t.TempDir()
+	s := open(t, path)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	const rowCount = 300
+	for i := range rowCount {
+		r := snapAt(uint64(i), "mark", 'a', uint64(i+10)).Row
+		r.Value = binary.BigEndian.AppendUint64([]byte{1}, uint64(i+10))
+		require.NoError(t, s.PutLegacySnapshotRowForTest(r))
+	}
+	interrupted := errors.New("interrupted after the first chunk")
+	slotOf := func(r badgerutxo.SnapshotRow) (uint64, error) {
+		return binary.BigEndian.Uint64(r.Value[1:]), nil
+	}
+	err := s.IndexSnapshotSlots(func(r badgerutxo.SnapshotRow) (uint64, error) {
+		if r.Epoch == 270 {
+			return 0, interrupted
+		}
+		return slotOf(r)
+	})
+	require.ErrorIs(t, err, interrupted)
+	_, indexed, err := s.SnapshotsCapturedIn(0, 1000)
+	require.NoError(t, err)
+	require.False(t, indexed)
+	rows, err := s.Snapshots(0, "mark")
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		10,
+		rows[0].CapturedSlot,
+		"the first chunk committed",
+	)
+	require.NoError(t, s.Close())
+	s = open(t, path)
+	converted := 0
+	require.NoError(
+		t,
+		s.IndexSnapshotSlots(func(r badgerutxo.SnapshotRow) (uint64, error) {
+			converted++
+			return slotOf(r)
+		}),
+	)
+	require.Equal(
+		t,
+		rowCount-256,
+		converted,
+		"only uncommitted rows need conversion",
+	)
+	rows, indexed, err = s.SnapshotsCapturedIn(0, 1000)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	require.Len(t, rows, rowCount)
+	for i, r := range rows {
+		require.Equal(t, uint64(i), r.Epoch)
+		require.Equal(t, uint64(i+10), r.CapturedSlot)
+	}
+	requireSnapshotIndexAgrees(t, s, "after resuming the backfill")
+}
 
 func snapAt(epoch uint64, typ string, pool byte, slot uint64) badgerutxo.SnapshotOp {
 	op := snap(epoch, typ, pool)

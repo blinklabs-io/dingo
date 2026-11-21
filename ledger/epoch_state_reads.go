@@ -361,13 +361,9 @@ func (ls *LedgerState) snapshotsCapturedInView(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := r.Epochs()
+	starts, err := stagedRollbackEpochStarts(r, ops)
 	if err != nil {
 		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
 	}
 	view := make(map[rowKey]*models.PoolStakeSnapshot, len(rows))
 	for _, s := range rows {

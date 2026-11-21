@@ -146,3 +146,17 @@ func TestEpochSummaryReadsSkipEpochsWithoutRollback(t *testing.T) {
 	require.Less(t, set.epochsReads.Load(), int64(epochCount),
 		"Epochs reads for %d summary reads", epochCount)
 }
+
+func TestCapturedSnapshotReadsSkipEpochsWithoutRollback(t *testing.T) {
+	t.Parallel()
+	set := &countingEpochSet{
+		memNonceSet: &memNonceSet{nonces: map[string]models.BlockNonce{}},
+		epochs:      []models.Epoch{{EpochId: 1, StartSlot: 100}},
+	}
+	ls, _ := newDiskTestLedger(t)
+	ls.config.UtxoSet = set
+	rows, err := ls.snapshotsCapturedInView(set, nil, 100, 100)
+	require.NoError(t, err)
+	require.Len(t, rows, len(rewardSnapshotTypes))
+	require.Zero(t, set.epochsReads.Load())
+}

@@ -303,11 +303,18 @@ func (s *Store) ClearSnapshotSlotsMarkerForTest() error {
 func (s *Store) SnapshotIndexMismatchForTest() ([]string, error) {
 	var out []string
 	err := s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(snapshotSlotsKey)
+		marked := err == nil
+		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
 		want := map[string]bool{}
-		err := eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
+		err = eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
 			idx, err := snapshotSlotKeyOf(k, v)
 			if idx != nil {
 				want[string(idx)] = true
+			} else if err == nil && marked {
+				out = append(out, fmt.Sprintf("indexed store has legacy row: %x", k))
 			}
 			return err
 		})
