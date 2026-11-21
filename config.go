@@ -682,6 +682,15 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESAgentProfile; set them in each pool",
 		)
 	}
+	for name, v := range map[string]int{
+		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
+		"barkEventMaxSubscribers":          n.config.cfg.BarkEventMaxSubscribers,
+		"barkEventMaxSubscribersPerClient": n.config.cfg.BarkEventMaxSubscribersPerClient,
+	} {
+		if v < 0 {
+			return fmt.Errorf("invalid %s %d: must not be negative", name, v)
+		}
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -2323,6 +2332,32 @@ func WithBarkOperatorCertificateFingerprints(
 	}
 }
 
+// WithBarkEventService configures Bark's EventService. It is disabled by
+// default; publish additionally lets it accept Publish and PublishBatch, and
+// a zero buffer size selects the default and a zero subscriber limit means
+// unlimited.
+func WithBarkEventService(
+	enabled, publish bool,
+	bufferSize, maxSubscribers, maxSubscribersPerClient int,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventEnabled = enabled
+		c.cfg.BarkEventPublishEnabled = publish
+		c.cfg.BarkEventBufferSize = bufferSize
+		c.cfg.BarkEventMaxSubscribers = maxSubscribers
+		c.cfg.BarkEventMaxSubscribersPerClient = maxSubscribersPerClient
+	}
+}
+
+// WithBarkEventNodeID sets the origin_node_id Bark's EventService puts on
+// this node's events. Empty, the default, selects a random identifier for
+// each process run.
+func WithBarkEventNodeID(id string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventNodeID = id
+	}
+}
+
 // WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
 // service. It is disabled by default.
 func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
@@ -2821,6 +2856,12 @@ func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
 
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
+}
+
+// BarkEventNodeID returns the configured EventService origin node ID, or
+// empty when a random one is drawn for each run.
+func (c *Config) BarkEventNodeID() string {
+	return c.cfg.BarkEventNodeID
 }
 
 // BarkLifecycleOperatorCertificateFingerprints retains the legacy input.

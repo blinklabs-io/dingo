@@ -17,7 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.13
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
-	github.com/blinklabs-io/bark v0.2.0
+	github.com/blinklabs-io/bark v0.4.0
 	github.com/blinklabs-io/bursa v0.25.0
 	github.com/blinklabs-io/gouroboros v0.220.4
 	github.com/blinklabs-io/ouroboros-mock v0.21.2
