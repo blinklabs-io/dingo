@@ -270,6 +270,9 @@ type Config struct {
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir string
+	// malformedPluginSelections are capabilities WithPluginSelection could
+	// not store. The option cannot return an error, so New reports them.
+	malformedPluginSelections []hostplugin.Capability
 	// splitIndexer is set when the IndexerDB holds the API rows.
 	splitIndexer                    bool
 	bindAddr                        string
@@ -1132,6 +1135,27 @@ func (c *Config) syncCompatFields() {
 	}
 }
 
+// pluginSelection returns the selection for capability. Built-in capabilities
+// are found by exact contract; any other capability is found by name, because
+// a configured selection carries no contract version.
+func (c *Config) pluginSelection(
+	capability hostplugin.Capability,
+) (hostplugin.Selection, bool) {
+	if selection, ok := c.pluginSelections[capability]; ok {
+		return selection, true
+	}
+	if c.cfg == nil {
+		return hostplugin.Selection{}, false
+	}
+	selection, ok := c.cfg.Plugins.Extra[capability.Name()]
+	return selection, ok
+}
+
+// WithPluginSelection sets the selection for capability. Built-in
+// capabilities replace their configuration fields. Any other well-formed
+// capability is stored by name for a host that declares it. The selection
+// is keyed by name, so the contract version in capability does not matter.
+// A malformed capability makes New fail.
 func WithPluginSelection(
 	capability hostplugin.Capability,
 	selection hostplugin.Selection,
@@ -1140,7 +1164,17 @@ func WithPluginSelection(
 		if c.cfg == nil {
 			*c = NewConfig()
 		}
-		if capability == hostplugin.CapabilityMempool {
+		// Name() routes by name alone, so a malformed capability such as
+		// "mempool/v01" must be stopped before it reaches a built-in field.
+		if !capability.Valid() {
+			c.malformedPluginSelections = append(
+				c.malformedPluginSelections,
+				capability,
+			)
+			return
+		}
+		name := capability.Name()
+		if name == hostplugin.CapabilityMempool.Name() {
 			// The selection replaces the whole mempool config, so its
 			// capacity is explicit exactly when the caller supplied one.
 			_, c.mempoolCapacitySet = selection.Config["capacity"]
@@ -1153,38 +1187,43 @@ func WithPluginSelection(
 		// without a capacity takes the Praos default, which syncCompatFields
 		// raises to the Leios default where that applies; without it the
 		// pool would run with no capacity at all.
-		if capability == hostplugin.CapabilityMempool &&
+		if name == hostplugin.CapabilityMempool.Name() &&
 			!c.mempoolCapacitySet &&
 			(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
 			selection.Config["capacity"] = int64(
 				internalconfig.DefaultMempoolCapacityPraos,
 			)
 		}
-		switch capability {
-		case hostplugin.CapabilityStorageBlob:
+		switch name {
+		case hostplugin.CapabilityStorageBlob.Name():
 			c.cfg.Plugins.Storage.Blob = selection
-		case hostplugin.CapabilityStorageMetadata:
+		case hostplugin.CapabilityStorageMetadata.Name():
 			c.cfg.Plugins.Storage.Metadata = selection
-		case hostplugin.CapabilityStorageImmutable:
+		case hostplugin.CapabilityStorageImmutable.Name():
 			// The ImmutableDB has a single built-in provider and no
 			// selection.
 			return
-		case hostplugin.CapabilityConsensus:
+		case hostplugin.CapabilityConsensus.Name():
 			c.cfg.Plugins.Consensus = selection
-		case hostplugin.CapabilityMempool:
+		case hostplugin.CapabilityMempool.Name():
 			c.cfg.Plugins.Mempool = selection
-		case hostplugin.CapabilityAPIBlockfrost:
+		case hostplugin.CapabilityAPIBlockfrost.Name():
 			c.cfg.Plugins.API.Blockfrost = selection
-		case hostplugin.CapabilityAPIKupo:
+		case hostplugin.CapabilityAPIKupo.Name():
 			c.cfg.Plugins.API.Kupo = selection
-		case hostplugin.CapabilityAPIMesh:
+		case hostplugin.CapabilityAPIMesh.Name():
 			c.cfg.Plugins.API.Mesh = selection
-		case hostplugin.CapabilityAPIUtxorpc:
+		case hostplugin.CapabilityAPIUtxorpc.Name():
 			c.cfg.Plugins.API.Utxorpc = selection
-		case hostplugin.CapabilityAPIMcp:
+		case hostplugin.CapabilityAPIMcp.Name():
 			c.cfg.Plugins.API.Mcp = selection
 		default:
-			return
+			if c.cfg.Plugins.Extra == nil {
+				c.cfg.Plugins.Extra = make(
+					map[string]hostplugin.Selection,
+				)
+			}
+			c.cfg.Plugins.Extra[name] = selection
 		}
 	}
 }

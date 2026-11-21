@@ -189,7 +189,7 @@ func listAllPlugins() string {
 	buf.WriteString("Available plugins:\n")
 	var previous string
 	for _, provider := range host.Providers() {
-		capability := string(provider.Capability)
+		capability := provider.Capability.Name()
 		if capability != previous {
 			fmt.Fprintf(&buf, "\n%s:\n", capability)
 			previous = capability
