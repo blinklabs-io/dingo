@@ -133,19 +133,27 @@ func (s *supplySim) lovelace() uint64 {
 type supplyInput struct {
 	hash []byte
 	idx  uint32
+	// stored marks an input read back from the utxo table rather than one
+	// produced earlier in the same batch, so its row must be spent on apply.
+	stored bool
+	script bool
 }
 
 func (s *supplySim) liveInputs() []supplyInput {
 	rows, err := s.store.writeDB.QueryContext(
 		context.Background(),
-		`SELECT tx_id, output_idx FROM utxo WHERE deleted_slot = 0 ORDER BY id`,
+		// utxo.tx_id is the producer's row id; inputs name the producer by
+		// its hash.
+		`SELECT t.hash, u.output_idx, u.payment_script FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.deleted_slot = 0 ORDER BY u.id`,
 	)
 	require.NoError(s.t, err)
 	defer rows.Close()
 	var live []supplyInput
 	for rows.Next() {
-		var in supplyInput
-		require.NoError(s.t, rows.Scan(&in.hash, &in.idx))
+		in := supplyInput{stored: true}
+		require.NoError(s.t, rows.Scan(&in.hash, &in.idx, &in.script))
 		live = append(live, in)
 	}
 	require.NoError(s.t, rows.Err())
@@ -338,6 +346,39 @@ func (s *supplySim) rollback(slot uint64) {
 	s.slot = slot
 }
 
+// assertStoredInputsSpent requires every stored input a block consumed to be
+// marked spent at that block's slot, and returns how many were script
+// outputs. A picked input that resolves to no row would otherwise be a silent
+// no-op on the apply path and leave the spend path unexercised.
+func (s *supplySim) assertStoredInputsSpent(blocks []simBlock) int {
+	s.t.Helper()
+	scriptSpends := 0
+	for _, b := range blocks {
+		for _, in := range b.consumed {
+			if !in.stored {
+				continue
+			}
+			var deleted uint64
+			err := s.store.writeDB.QueryRowContext(
+				context.Background(),
+				`SELECT u.deleted_slot FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE t.hash = ? AND u.output_idx = ?`,
+				in.hash, in.idx,
+			).Scan(&deleted)
+			require.NoError(s.t, err, "stored input %x#%d has no row", in.hash, in.idx)
+			require.Equal(
+				s.t, b.point.Slot, deleted,
+				"stored input %x#%d not spent at its block", in.hash, in.idx,
+			)
+			if in.script {
+				scriptSpends++
+			}
+		}
+	}
+	return scriptSpends
+}
+
 func (s *supplySim) assertAggregateMatchesScan(step string) {
 	s.t.Helper()
 	want := fullScanScriptLockedSupply(s.t, s.store)
@@ -366,6 +407,7 @@ func TestScriptLockedSupplyAggregateMatchesFullScan(t *testing.T) {
 				// one) or on any block when the path commits per block.
 				var boundaries []uint64
 				sawScript := false
+				scriptSpends := 0
 				for step := range 40 {
 					if step > 4 && len(boundaries) > 0 && sim.rng.Intn(5) == 0 {
 						depth := 1 + sim.rng.Intn(min(4, len(boundaries)))
@@ -391,6 +433,7 @@ func TestScriptLockedSupplyAggregateMatchesFullScan(t *testing.T) {
 						)
 					}
 					sim.applyBatch(mode, blocks)
+					scriptSpends += sim.assertStoredInputsSpent(blocks)
 					if mode == applyPerRow {
 						for _, b := range blocks {
 							boundaries = append(boundaries, b.point.Slot)
@@ -409,6 +452,11 @@ func TestScriptLockedSupplyAggregateMatchesFullScan(t *testing.T) {
 					t,
 					sawScript,
 					"generator never produced a live script output",
+				)
+				require.Positive(
+					t,
+					scriptSpends,
+					"generator never spent a stored script output",
 				)
 			})
 		}
