@@ -8260,8 +8260,9 @@ performance calculations for both coin and credential inputs. The debug
 epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) remain deliberately
 unanswered: they return the whole epoch or new-epoch state in the ledger's
 encoding, which Dingo does not hold in that form. Each fails with
-`ErrQueryNotAnswered`, which names the query and what is missing. The
-LocalStateQuery state machine has no
+`ErrQueryNotAnswered`, which names the query and what is missing;
+`GetGovState` fails the same way only while a governance action is pending.
+The LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
 it at warn level with that reason. At node-to-client versions 21 to 23 the
@@ -8405,14 +8406,16 @@ types that are live by design (`GetGenesisConfig`, `GetLedgerPeerSnapshot`) stay
 live, as they are for any session. The LocalStateQuery protocol has no reply for
 a failed query: any error after a successful Acquire ends the connection. A
 rollback or prune committed after Acquire cannot cause one, since every query
-reads the session's snapshot, so the only remaining case is a reopen whose block
+reads the session's snapshot, so the only remaining cases are a reopen whose block
 this node can no longer answer for (rolled back, or past a retention floor,
-while the view was closed); that query fails and is logged. Closing a view never
+while the view was closed) and a `GetGovState` on a reopened view whose block is
+no longer the tip; that query fails and is logged. Closing a view never
 waits for a query in flight: that query completes against the snapshot and the
 last one out releases it.
 
-Every query type that reads ledger or consensus state honors a pinned point;
-`queryShelleyLeaf` audits each one. The first were `GetPoolDistr2`
+Every query type that reads ledger or consensus state honors a pinned point,
+except `GetGovState`, which answers only the tip; `queryShelleyLeaf` audits each
+one. The first were `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
 governed it and reading that epoch's already-persisted mark snapshot --
 rejecting a point outside the pool-snapshot retention window, ahead of the
@@ -8453,7 +8456,8 @@ honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
 `queryShelleyLeaf` carries a full audit of every query type, classified as
 honoring the point or intentionally live-only; none is left answering from the
-live tip.
+live tip, except that `GetGovState` answers a pinned point only when it is the
+current tip and refuses any other.
 
 `HardForkCurrentEraQuery` (`queryHardFork`, dispatched from `queryBlock`
 alongside `ShelleyQuery` rather than through `queryShelleyLeaf`, so it sat
@@ -20766,7 +20770,7 @@ current chain (`verifyPointOnChain`, returning `ledger.ErrPointNotOnChain`
 on a mismatch) before dispatching to any handler, so every point-sensitive
 query shares one fork-safety check rather than repeating it.
 `queryShelleyLeaf`'s doc comment carries a full audit of every one of its
-cases, classified as honoring the point or intentionally live-only --
+cases, classified as honoring the point, intentionally live-only, or tip-only --
 summarized here for the ones that matter
 to this comparison:
 `queryShelleyStakeDistribution`/`queryShelleyPoolDistr2` (via
@@ -20890,6 +20894,34 @@ activity has no recorded expiry: a DRep whose certificate state at that point
 is still its current one (or that was imported at slot 0) reports its current
 expiry, and any other reports 0 (unset). Rollback applies the same rule.
 
+`GetGovState` (`queryShelleyGovState`) answers at the tip. A pinned point is
+answered only when it is the current tip, which is what a reopened view names
+while the chain has not advanced; any other point is refused with
+`ErrHistoricalStateUnavailable`. The reply carries the roots (the latest
+enacted proposal of each purpose), the committee (the enacted members with the
+enacted quorum or the Conway genesis threshold, none after a NoConfidence), the
+constitution from `GetConstitution`, and the protocol parameters of the epoch
+the view answers for and the epoch before it, falling back to the current ones
+when that epoch has no stored row. A previous epoch in another era is
+converted with the current era's `HardForkFunc`.
+
+The reference node also returns a ratification outcome (the enacted and
+expired actions, the delay flag, and the enact state after enactment) and a
+scheduled parameter change, computed from a snapshot it freezes at the boundary
+that opened the epoch. Dingo stores neither the snapshot nor the outcome, and
+decides ratification at the boundary from live tables, so the outcome cannot be
+rebuilt. It is empty exactly when no governance action exists to ratify, expire
+or enact, so the query is answered only when the proposal set is empty both now
+and as of the last slot before the epoch began. It then carries empty
+proposals, no enacted or expired actions, no delay, a zero treasury as the
+reference node reports, and no scheduled parameter change. While an action is
+pending the query fails with `ErrQueryNotAnswered`, which ends the session,
+instead of reporting no outcome. The DRep pulsing snapshot's DRep state is read
+as of the last slot before the epoch began; its DRep distribution (registered
+DReps and the two predefined options that hold stake) and its pool distribution
+are read live, without the delegator-inactivity gate, so they can differ from
+the node's once stake moves within an epoch.
+
 `DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
 acquired block instead of the tip: its slot as the last slot, the epoch rows
 of the epoch containing it (era, epoch, previous-epoch and last-epoch-block
@@ -20903,8 +20935,10 @@ Non-checkpoint block nonce rows are pruned below the last three epochs, while
 checkpoint rows are kept; API storage mode accepts older points, and for those
 the fold recomputes the nonces from the stored blocks. With this, every
 implemented leaf query that reads ledger or consensus state answers at the
-acquired point; leaves not yet implemented (#394) are refused as unsupported
-rather than answered from the tip. `queryShelleyLeaf`'s audit lists each.
+acquired point, except `GetGovState`, which answers a pinned point only when it
+is the current tip and refuses any other with `ErrHistoricalStateUnavailable`;
+leaves not yet implemented (#394) are refused as unsupported rather than
+answered from the tip. `queryShelleyLeaf`'s audit lists each.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's

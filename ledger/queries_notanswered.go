@@ -33,6 +33,11 @@ func queryNotAnswered(name, missing string) error {
 }
 
 const (
+	// missingRatificationOutcome is what GetGovState reports for the ratify
+	// state while a governance action is pending.
+	missingRatificationOutcome = "the completed ratification outcome of the " +
+		"epoch boundary, which is not stored, while a governance action is " +
+		"pending"
 	// missingEpochState is the whole ledger state the debug queries return.
 	missingEpochState = "the whole epoch state in the ledger's encoding, " +
 		"which is not held in that form"
