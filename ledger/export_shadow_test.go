@@ -645,6 +645,8 @@ type BoundaryEpochStateScenario struct {
 	// DijkstraBoundary makes the epoch starting at the fixture's boundary a
 	// Dijkstra one, whose SNAP follows the boundary's enactment.
 	DijkstraBoundary func(f BoundaryStakeFixture)
+	// ApplyDijkstraBoundary runs the production rollover in Dijkstra.
+	ApplyDijkstraBoundary func()
 	// ReadBoundaryStake makes the five epoch-boundary stake reads for the
 	// fixture's boundary through the ledger's LedgerDB.
 	ReadBoundaryStake func(f BoundaryStakeFixture) BoundaryStakeAnswers
@@ -1416,6 +1418,13 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				gdijkstra.EraIdDijkstra, cur.SlotLength, cur.LengthInSlots, txn,
 			))
 			require.NoError(t, txn.Commit())
+		},
+		ApplyDijkstraBoundary: func() {
+			h.ls.activeEras = eras.ErasWithDijkstra
+			h.ls.currentEra = eras.DijkstraEraDesc
+			h.ls.currentPParams = dijkstraRetentionPParams()
+			h.next.EraId = eras.DijkstraEraDesc.Id
+			h.applyBoundary()
 		},
 		ReadBoundaryStake: func(f BoundaryStakeFixture) BoundaryStakeAnswers {
 			db := h.ls.LedgerDB()
