@@ -25,13 +25,12 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// Asset is one native-asset quantity held by an output. The asset's CIP-14
+// fingerprint is derived from PolicyId and Name where it is needed.
 type Asset struct {
-	Name        []byte
-	PolicyId    []byte
-	Fingerprint []byte
-	ID          uint
-	UtxoID      uint
-	Amount      types.Uint64
+	Name     []byte
+	PolicyId []byte
+	Amount   types.Uint64
 }
 
 type AssetHolderQuery struct {
@@ -134,7 +133,7 @@ func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
 // The slice is in canonical order (policy ID bytes, then asset name bytes), so
 // row insertion order and every API listing built from it are stable.
-// Each asset is populated with its name, policy ID, fingerprint, and amount.
+// Each asset is populated with its name, policy ID, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.
 func ConvertMultiAssetToModels(
 	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
@@ -167,17 +166,10 @@ func ConvertMultiAssetToModels(
 				)
 			}
 
-			// Calculate fingerprint
-			fingerprint := lcommon.NewAssetFingerprint(
-				policyIdBytes,
-				assetNameBytes,
-			)
-
 			asset := Asset{
-				Name:        assetNameBytes,
-				PolicyId:    policyIdBytes,
-				Fingerprint: []byte(fingerprint.String()),
-				Amount:      types.Uint64(amount),
+				Name:     assetNameBytes,
+				PolicyId: policyIdBytes,
+				Amount:   types.Uint64(amount),
 			}
 			assets = append(assets, asset)
 		}

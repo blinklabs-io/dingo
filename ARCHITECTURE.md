@@ -17927,7 +17927,10 @@ the `pool_retirement` epoch index and rank certificates only for those pools, th
 full history of each candidate, so a page does not read every registration and retirement ever recorded
 when few pools qualify.
 
-`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
+retained holding (live, or spent and not yet pruned) of the asset; neither an
+`asset_identity` row with no holdings nor a mint/burn record alone counts. The response's CIP-14 fingerprint is computed from the policy id and
+name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
 `SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
@@ -24968,9 +24971,8 @@ not incremented in place from dingo's side.
 `--ledger-apply-row-batching-enabled`; default off; honoured by serve mode and
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
-batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset rows to multi-row inserts, reuses one prepared transaction-row
-upsert, and coalesces each block's live-stake deltas, which
+batches whether or not it is set. In core mode the accumulator reuses one
+prepared transaction-row upsert and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next
 validated block runs, so stored state is identical to the per-row path. A reward

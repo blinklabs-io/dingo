@@ -60,7 +60,6 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			q := s.operationalQueries(db)
 			// Resolve on a copy: a row id written onto the caller's model
 			// would outlive a rollback of the identity row it names.
 			resolved := *utxo
@@ -102,28 +101,11 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				if !s.storesUtxoAssets() {
 					break
 				}
-				asset := &utxo.Assets[i]
-				asset.UtxoID = utxo.ID
-				assetID, err := q.CreateAsset(
-					ctx,
-					sqlitequery.CreateAssetParams{
-						Name:        asset.Name,
-						PolicyID:    asset.PolicyId,
-						Fingerprint: asset.Fingerprint,
-						UtxoID: sql.NullInt64{
-							Int64: id,
-							Valid: true,
-						},
-						Amount: sql.NullString{
-							String: decimalUint64(asset.Amount),
-							Valid:  true,
-						},
-					},
-				)
-				if err != nil {
+				if err := s.insertAssetHolding(
+					ctx, db, id, &utxo.Assets[i],
+				); err != nil {
 					return err
 				}
-				asset.ID = uint(assetID)
 			}
 			return s.refreshRewardLiveStakeAggregate(
 				ctx,
@@ -630,11 +612,12 @@ LIMIT ?`
 	rows, err = db.QueryContext(
 		ctx,
 		s.dialect.Rebind(`
-SELECT asset.policy_id, asset.name, asset.amount
+SELECT i.policy_id, i.name, h.amount
 FROM utxo
-JOIN asset ON asset.utxo_id = utxo.id
+JOIN asset_holding h ON h.utxo_id = utxo.id
+JOIN asset_identity i ON i.id = h.asset_id
 WHERE utxo.deleted_slot = 0 AND `+addressPredicate+`
-ORDER BY asset.policy_id, asset.name`),
+ORDER BY i.policy_id, i.name`),
 		args...,
 	)
 	if err != nil {
@@ -773,10 +756,11 @@ WHERE ` + predicate
 		return ret, nil
 	}
 	query = `
-SELECT asset.policy_id, asset.name, asset.amount
+SELECT i.policy_id, i.name, h.amount
 FROM utxo
 JOIN utxo_address ON utxo_address.utxo_id = utxo.id
-JOIN asset ON asset.utxo_id = utxo.id
+JOIN asset_holding h ON h.utxo_id = utxo.id
+JOIN asset_identity i ON i.id = h.asset_id
 WHERE ` + predicate
 	queryArgs = args
 	if maxResults > 0 {
@@ -926,13 +910,8 @@ func (s *Store) importUtxos(
 					if !s.storesUtxoAssets() {
 						break
 					}
-					asset := item.Assets[j]
-					if _, err := s.execCached(ctx, db, importAssetQuery,
-						asset.Name,
-						asset.PolicyId,
-						asset.Fingerprint,
-						validInt64(id),
-						validString(decimalUint64(asset.Amount)),
+					if err := s.insertAssetHolding(
+						ctx, db, id, &item.Assets[j],
 					); err != nil {
 						return fmt.Errorf(
 							"import UTxO asset: %w",
@@ -976,14 +955,13 @@ func (s *Store) importUtxosDeferredSQLite(
 	if len(utxos) == 0 {
 		return nil
 	}
-	// The insert helpers write IDs onto the models and their assets, so work
-	// on copies to leave the caller's slice untouched.
+	// The insert helpers write IDs onto the models, so work on copies to
+	// leave the caller's slice untouched.
 	owned := make([]models.Utxo, len(utxos))
 	utxoPtrs := make([]*models.Utxo, len(utxos))
 	linked := make([]bool, len(utxos))
 	for i := range utxos {
 		owned[i] = utxos[i]
-		owned[i].Assets = slices.Clone(utxos[i].Assets)
 		utxoPtrs[i] = &owned[i]
 		linked[i] = utxoNamesProducerRow(&owned[i])
 	}
@@ -2271,25 +2249,26 @@ func utxoOrderingClauses(
 		if len(query.AssetPolicyID) == 0 {
 			return "", "", nil, models.ErrEmptyAssetPolicyID
 		}
-		assetFilter := "asset.policy_id = ?"
+		identityFilter := "i.policy_id = ?"
 		assetArgs := []any{query.AssetPolicyID}
 		if query.AssetName != nil {
-			assetFilter += " AND asset.name = ?"
+			identityFilter += " AND i.name = ?"
 			assetArgs = append(assetArgs, query.AssetName)
 		}
 		if query.MatchAllAddresses {
-			// Nothing else narrows the live UTxO set, so probing asset once
-			// per live UTxO costs the same however few hold the asset. Start
-			// from the asset rows instead and look the UTxOs up by primary
-			// key.
-			from = "(SELECT DISTINCT asset.utxo_id AS id FROM asset WHERE " +
-				assetFilter + ") AS held JOIN utxo ON utxo.id = held.id"
-			args = append(assetArgs, args...)
+			// Nothing else narrows the live UTxO set, so probing the
+			// holdings once per live UTxO costs the same however few hold
+			// the asset. Resolve the asset's holdings first and look the
+			// UTxOs up by primary key.
+			predicate += " AND utxo.id IN (SELECT h.utxo_id FROM " +
+				"asset_holding h WHERE h.asset_id IN (SELECT i.id FROM " +
+				"asset_identity i WHERE " + identityFilter + "))"
 		} else {
-			predicate += " AND EXISTS (SELECT 1 FROM asset " +
-				"WHERE asset.utxo_id = utxo.id AND " + assetFilter + ")"
-			args = append(args, assetArgs...)
+			predicate += " AND EXISTS (SELECT 1 FROM asset_holding h " +
+				"JOIN asset_identity i ON i.id = h.asset_id " +
+				"WHERE h.utxo_id = utxo.id AND " + identityFilter + ")"
 		}
+		args = append(args, assetArgs...)
 	}
 	if utxoOrderingRanged(query) && len(query.IndexedExactAddress) == 0 {
 		from += utxoProducerJoin
@@ -2332,10 +2311,39 @@ const (
 	utxoAddressBlockIndexExpr = `utxo_address.block_index`
 )
 
+// utxoOrderingDisqualifiesLivenessIndex reports whether the statement must not
+// be offered the low-selectivity liveness index on utxo, which stale or
+// missing statistics can make look cheaper than the selective lookup beside
+// it and turn into a full live-row scan. That holds for an exact payment
+// lookup and for an asset filter with no address to narrow the UTxO set, where
+// the holdings drive and utxo is reached by primary key.
+func utxoOrderingDisqualifiesLivenessIndex(
+	dialect string,
+	query *models.UtxoWithOrderingQuery,
+) bool {
+	if dialect != "sqlite" {
+		return false
+	}
+	if query.MatchAllAddresses && query.FilterByAsset {
+		return true
+	}
+	if len(query.AddressPatterns) != 1 ||
+		len(query.AddressPatterns[0].ExactAddress) == 0 {
+		return false
+	}
+	addr, err := lcommon.NewAddressFromBytes(
+		query.AddressPatterns[0].ExactAddress,
+	)
+	return err == nil && addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+}
+
 func countUtxosOrderingStatement(
 	query *models.UtxoWithOrderingQuery,
+	disqualifyLivenessIndex bool,
 ) (string, []any, error) {
-	from, predicate, args, err := utxoOrderingClauses(query, false)
+	from, predicate, args, err := utxoOrderingClauses(
+		query, disqualifyLivenessIndex,
+	)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2436,19 +2444,8 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
-	// Disqualify the low-selectivity liveness index only for exact payment
-	// lookups, where stale statistics can otherwise cause a full live-row scan.
-	hint := s.dialect.Name() == "sqlite" && len(query.AddressPatterns) == 1 &&
-		len(query.AddressPatterns[0].ExactAddress) > 0
-	if hint {
-		addr, decodeErr := lcommon.NewAddressFromBytes(
-			query.AddressPatterns[0].ExactAddress,
-		)
-		hint = decodeErr == nil &&
-			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
-	}
-	indexed := len(query.IndexedExactAddress) > 0
-	if indexed && s.dialect.Name() == "sqlite" {
+	hint := utxoOrderingDisqualifiesLivenessIndex(s.dialect.Name(), query)
+	if len(query.IndexedExactAddress) > 0 && s.dialect.Name() == "sqlite" {
 		// Keep the liveness index from becoming the outer loop, which would
 		// visit every live UTxO to find one address's.
 		hint = true
@@ -2569,11 +2566,12 @@ func (s *Store) GetUtxosWithHistory(
 		}
 		predicate += `
  AND EXISTS (
-     SELECT 1 FROM asset
-     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
+     SELECT 1 FROM asset_holding h
+     JOIN asset_identity i ON i.id = h.asset_id
+     WHERE h.utxo_id = utxo.id AND i.policy_id = ?`
 		args = append(args, query.AssetPolicyID)
 		if query.AssetName != nil {
-			predicate += " AND asset.name = ?"
+			predicate += " AND i.name = ?"
 			args = append(args, query.AssetName)
 		}
 		predicate += ")"
@@ -2729,7 +2727,10 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	if err != nil {
 		return 0, err
 	}
-	statement, args, err := countUtxosOrderingStatement(query)
+	statement, args, err := countUtxosOrderingStatement(
+		query,
+		utxoOrderingDisqualifiesLivenessIndex(s.dialect.Name(), query),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
 	}
@@ -2848,6 +2849,30 @@ SELECT amount FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0`))
 }
 
+const liveUtxosByAssetPolicyQuery = `-- name: GetLiveUtxosByAssetPolicy :many
+SELECT ` + utxoRowColumns + `
+FROM utxo
+WHERE utxo.deleted_slot = 0
+  AND utxo.id IN (
+      SELECT h.utxo_id
+      FROM asset_identity i
+      JOIN asset_holding h ON h.asset_id = i.id
+      WHERE i.policy_id = ?
+  )
+ORDER BY utxo.id`
+
+const liveUtxosByAssetQuery = `-- name: GetLiveUtxosByAsset :many
+SELECT ` + utxoRowColumns + `
+FROM utxo
+WHERE utxo.deleted_slot = 0
+  AND utxo.id IN (
+      SELECT h.utxo_id
+      FROM asset_identity i
+      JOIN asset_holding h ON h.asset_id = i.id
+      WHERE i.policy_id = ? AND i.name = ?
+  )
+ORDER BY utxo.id`
+
 func (s *Store) GetUtxosByAssets(
 	policyID []byte,
 	assetName []byte,
@@ -2860,25 +2885,11 @@ func (s *Store) GetUtxosByAssets(
 	var ret []models.Utxo
 	if assetName == nil {
 		ret, err = s.queryUtxoModels(
-			ctx, db, `-- name: GetLiveUtxosByAssetPolicy :many
-SELECT `+utxoRowColumns+`
-FROM utxo
-WHERE utxo.deleted_slot = 0
-  AND utxo.id IN (SELECT utxo_id FROM asset WHERE policy_id = ?)
-ORDER BY utxo.id`,
-			policyID,
+			ctx, db, liveUtxosByAssetPolicyQuery, policyID,
 		)
 	} else {
 		ret, err = s.queryUtxoModels(
-			ctx, db, `-- name: GetLiveUtxosByAsset :many
-SELECT `+utxoRowColumns+`
-FROM utxo
-WHERE utxo.deleted_slot = 0
-  AND utxo.id IN (
-      SELECT utxo_id FROM asset WHERE policy_id = ? AND name = ?
-  )
-ORDER BY utxo.id`,
-			policyID, assetName,
+			ctx, db, liveUtxosByAssetQuery, policyID, assetName,
 		)
 	}
 	if err != nil {
@@ -3418,9 +3429,10 @@ func (s *Store) loadUtxoAssetsPointers(
 		}
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
 			"-- name: GetAssetsByUtxoIDs :many\n"+
-				"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
-				end-start,
-			)+") ORDER BY id",
+				"SELECT h.utxo_id, i.policy_id, i.name, h.amount "+
+				"FROM asset_holding h JOIN asset_identity i ON i.id = h.asset_id "+
+				"WHERE h.utxo_id IN ("+bindPlaceholders(end-start)+
+				") ORDER BY h.utxo_id, h.asset_id",
 		), args...)
 		if err != nil {
 			return err
@@ -3428,15 +3440,11 @@ func (s *Store) loadUtxoAssetsPointers(
 		err = func() error {
 			defer rows.Close()
 			for rows.Next() {
-				var name, policyID, fingerprint []byte
-				var id int64
-				var utxoID sql.NullInt64
+				var name, policyID []byte
+				var utxoID int64
 				var amount sql.NullString
-				if err := rows.Scan(&name, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
+				if err := rows.Scan(&utxoID, &policyID, &name, &amount); err != nil {
 					return err
-				}
-				if !utxoID.Valid {
-					continue
 				}
 				value := uint64(0)
 				if amount.Valid {
@@ -3446,14 +3454,11 @@ func (s *Store) loadUtxoAssetsPointers(
 					}
 				}
 				asset := models.Asset{
-					Name:        name,
-					PolicyId:    policyID,
-					Fingerprint: fingerprint,
-					ID:          uint(id),
-					UtxoID:      uint(utxoID.Int64),
-					Amount:      types.Uint64(value),
+					Name:     name,
+					PolicyId: policyID,
+					Amount:   types.Uint64(value),
 				}
-				for _, utxo := range byID[asset.UtxoID] {
+				for _, utxo := range byID[uint(utxoID)] { //nolint:gosec
 					utxo.Assets = append(utxo.Assets, asset)
 				}
 			}
@@ -3463,8 +3468,8 @@ func (s *Store) loadUtxoAssetsPointers(
 			return err
 		}
 	}
-	// Row ids follow insertion order, which databases written before
-	// canonical ordering hold in arbitrary order.
+	// Holdings arrive in asset_identity id order, which is the order the
+	// node first saw each asset, not canonical order.
 	for _, utxo := range utxos {
 		models.SortAssetsCanonical(utxo.Assets)
 	}
