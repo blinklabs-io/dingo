@@ -141,6 +141,31 @@ func TestPoolViewKeepsSurvivingStagedChangeAfterRollback(t *testing.T) {
 	require.Equal(t, first, *st.DepositHeld)
 }
 
+func TestPoolsChangedAfterIgnoresOnlyTheReadersBatch(t *testing.T) {
+	t.Parallel()
+	const slot = uint64(50)
+	ownTxn := &overlayTxn{}
+	own := &utxoSetBatch{
+		txn:   ownTxn,
+		seq:   2,
+		pools: []PoolChange{{Slot: slot + 1}},
+	}
+	ls := overlayLedger(&utxoSetBatch{
+		pools: []PoolChange{{Slot: slot - 1}},
+	})
+	ls.utxoSetBatches[ownTxn] = own
+
+	require.False(t, ls.poolsChangedAfter(ownTxn, slot))
+
+	foreignTxn := &overlayTxn{}
+	ls.utxoSetBatches[foreignTxn] = &utxoSetBatch{
+		txn:   foreignTxn,
+		seq:   3,
+		pools: []PoolChange{{Slot: slot + 1}},
+	}
+	require.True(t, ls.poolsChangedAfter(ownTxn, slot))
+}
+
 // A rollback drops staged changes after its own target; only the committed
 // read keeps the lowest target seen.
 

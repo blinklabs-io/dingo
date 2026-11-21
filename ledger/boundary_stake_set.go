@@ -128,12 +128,8 @@ func (ls *LedgerState) boundaryCurrent(txn ledgerdb.Txn, slot uint64) bool {
 // journal or in a batch txn sees. A journal that fails to answer is taken to
 // have changed, so the read is answered as of slot or not at all.
 func (ls *LedgerState) poolsChangedAfter(txn ledgerdb.Txn, slot uint64) bool {
-	for _, o := range ls.stagedOps(txn) {
-		for _, c := range o.pools {
-			if c.Slot > slot {
-				return true
-			}
-		}
+	if ls.stagedPoolsChangedAfter(txn, slot) {
+		return true
 	}
 	r := ls.poolReader(txn)
 	if r == nil {
@@ -145,6 +141,37 @@ func (ls *LedgerState) poolsChangedAfter(txn ledgerdb.Txn, slot uint64) bool {
 	}
 	changed, err := ah.PoolKeysChangedAfter(slot)
 	return err != nil || len(changed) > 0
+}
+
+// stagedPoolsChangedAfter reports changes visible from other transactions.
+// The reader's own changes are part of its current pool view, not evidence
+// that the view must be reconstructed from history.
+func (ls *LedgerState) stagedPoolsChangedAfter(
+	txn ledgerdb.Txn,
+	slot uint64,
+) bool {
+	ls.utxoSetApplyMu.RLock()
+	defer ls.utxoSetApplyMu.RUnlock()
+	var own *utxoSetBatch
+	if txn != nil {
+		ls.utxoSetMu.Lock()
+		own = ls.utxoSetBatches[txn]
+		ls.utxoSetMu.Unlock()
+	}
+	batches := ls.utxoSetBatchesSeenBy(ls.pinOf(txn), own)
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	for _, b := range batches {
+		if b == own {
+			continue
+		}
+		for _, c := range b.pools {
+			if c.Slot > slot {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // epochRows returns the epochs txn sees, oldest first.

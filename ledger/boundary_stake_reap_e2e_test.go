@@ -89,3 +89,19 @@ func TestDeferredBoundarySnapshotHoldsAPoolTheBoundaryReaped(t *testing.T) {
 		})
 	}
 }
+
+// TestDijkstraBoundarySnapshotsAfterPoolReap drives the production rollover
+// with a pool retiring at its boundary. Dijkstra's SNAP follows POOLREAP, so
+// the rollover must complete and omit the retired pool from mark.
+func TestDijkstraBoundarySnapshotsAfterPoolReap(t *testing.T) {
+	t.Parallel()
+	h := newBoundaryStakeHarness(t, "set")
+	f := h.scenario.BoundaryStake(6)
+	h.scenario.ApplyDijkstraBoundary()
+
+	got, err := h.scenario.LedgerDB().GetPoolStakeSnapshot(
+		6, "mark", f.Pool, nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
