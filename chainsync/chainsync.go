@@ -1076,6 +1076,28 @@ func (s *State) ClientProtocolPoint(
 	}, true
 }
 
+// ClientProtocolChainContains reports whether point remains on the ordered
+// protocol cursor delivered by connId. A rollback replaces any history that
+// does not lead to its point, so a match proves that subsequent roll-forwards
+// continue from point even when ledger admission has not caught up yet.
+func (s *State) ClientProtocolChainContains(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc := s.trackedClients[connId]
+	if tc == nil {
+		return false
+	}
+	for _, h := range tc.protocolHeaders {
+		if h.parent.Slot == point.Slot && bytes.Equal(h.hash, point.Hash) {
+			return true
+		}
+	}
+	return false
+}
+
 // ClientObserverHeaderGap reports whether this session skipped observer headers.
 func (s *State) ClientObserverHeaderGap(connId ouroboros.ConnectionId) bool {
 	s.clientConnIdMutex.RLock()

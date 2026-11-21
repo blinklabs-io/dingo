@@ -65,7 +65,7 @@ type AnchorChain interface {
 func (s *DatabaseSource) Anchor(
 	ctx context.Context,
 ) (indexerdb.Tip, bool, error) {
-	slot, err := s.db.MithrilTrustBoundarySlotStrict(nil)
+	slot, err := s.db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return indexerdb.Tip{}, false, err
 	}
@@ -724,7 +724,7 @@ func (w *Writer) replay(ctx context.Context, anchor indexerdb.Tip) error {
 			return err
 		}
 		done, err := w.step(ctx, &anchor, false)
-		if errors.Is(err, errForked) {
+		if errors.Is(err, errForked) || errors.Is(err, errBatchShrunk) {
 			continue
 		}
 		if err != nil {

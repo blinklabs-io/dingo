@@ -433,7 +433,7 @@ func TestRemoteStoresServeSnapshotsEndToEnd(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store, public := newStore(t)
-			hashes := createSnapshots(t, store, 1, 3)
+			hashes := createSnapshots(t, store, 2, 3)
 			removed, err := PruneSnapshots(context.Background(), store, 1)
 			require.NoError(t, err)
 			require.Equal(t, hashes[:1], removed)
@@ -460,7 +460,16 @@ func TestRemoteStoresServeSnapshotsEndToEnd(t *testing.T) {
 					assert.Equal(t, hashes[1], result.Snapshot.Digest)
 					entries, err := os.ReadDir(result.ImmutableDir)
 					require.NoError(t, err)
-					assert.Len(t, entries, 9)
+					assert.Len(t, entries, 6)
+					for _, ext := range []string{
+						"chunk", "primary", "secondary",
+					} {
+						_, err = os.Stat(filepath.Join(
+							result.AncillaryDir,
+							"immutable", "00002."+ext,
+						))
+						require.NoError(t, err)
+					}
 					_, err = os.Stat(filepath.Join(
 						result.AncillaryDir, "ledger", "100", "state",
 					))

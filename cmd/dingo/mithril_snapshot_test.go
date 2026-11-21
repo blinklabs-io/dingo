@@ -92,14 +92,14 @@ func TestRunMithrilSnapshotCreateAppliesRetention(t *testing.T) {
 	cfg.Mithril.Server.KeepSnapshots = 1
 
 	first, err := runMithrilSnapshotCreate(
-		t.Context(), cfg, cardanoDB(t, 1), discardLogger,
+		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(4), first.Beacon.Epoch, "epoch from ledger state")
 	assert.Equal(t, "preprod", first.Network)
 
 	second, err := runMithrilSnapshotCreate(
-		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
+		t.Context(), cfg, cardanoDB(t, 3), discardLogger,
 	)
 	require.NoError(t, err)
 	require.NotEqual(t, first.Hash, second.Hash)
@@ -121,13 +121,13 @@ func TestRunMithrilSnapshotCreateFailsWhenRetentionRemovesResult(t *testing.T) {
 	t.Parallel()
 
 	cfg, _ := snapshotTestConfig(t)
-	olderDB := cardanoDB(t, 1)
+	olderDB := cardanoDB(t, 2)
 	older, err := runMithrilSnapshotCreate(
 		t.Context(), cfg, olderDB, discardLogger,
 	)
 	require.NoError(t, err)
 	newer, err := runMithrilSnapshotCreate(
-		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
+		t.Context(), cfg, cardanoDB(t, 3), discardLogger,
 	)
 	require.NoError(t, err)
 
@@ -217,7 +217,7 @@ func TestServeMithrilServesSnapshotsUntilCancelled(t *testing.T) {
 
 	cfg, _ := snapshotTestConfig(t)
 	artifact, err := runMithrilSnapshotCreate(
-		t.Context(), cfg, cardanoDB(t, 1), discardLogger,
+		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
 	)
 	require.NoError(t, err)
 	srv, err := newMithrilServer(t.Context(), cfg, discardLogger)

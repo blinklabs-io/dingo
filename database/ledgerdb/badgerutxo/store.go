@@ -110,7 +110,13 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
-	// rangeRowsVisited counts the rows the range and prefix readers stepped over.
+	// added holds, for each family, the index of rows below the export floor
+	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
+	// put a row below the floor, each of which invalidates it.
+	added         addedIndexes
+	rowsRewritten atomic.Uint64
+	// rangeRowsVisited counts the rows and index entries the range, prefix,
+	// and added-row readers stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
 	rewardIndexVisited atomic.Uint64
@@ -133,6 +139,13 @@ var ErrLoadsRefused = errors.New(
 // no row loses none.
 func (s *Store) RefuseLoadsFor(drained nodesettings.FamilyMask) {
 	s.loadsRefused.Store(uint64(drained))
+}
+
+// LoadsRefusedFor reports whether family has lost its source rows. In-place
+// migrations use this to avoid querying a drained source before upgrading the
+// set's retained rows.
+func (s *Store) LoadsRefusedFor(family nodesettings.Family) bool {
+	return nodesettings.FamilyMask(s.loadsRefused.Load()).Has(family)
 }
 
 // Open opens or creates the store in dir.
@@ -395,6 +408,7 @@ func (s *Store) bootstrap(
 	// The journal describes history the new contents do not share.
 	// The tip is cleared, so no floor is raised: the contents the floors
 	// describe are gone with the rows.
+	defer s.rewriteRows()()
 	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}

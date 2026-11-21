@@ -147,6 +147,10 @@ type Reconcile struct {
 	// settings the rewind recomputes account expirations with.
 	DelegatorInactivityEnabled bool
 	DelegatorInactivity        uint64
+	// DeferUtxoRowCleanup lets the node become available after the verified
+	// live set is authoritative. CleanupMigratedUtxoRows removes the redundant
+	// SQL rows on a managed background worker.
+	DeferUtxoRowCleanup bool
 }
 
 // Run finishes a pending import, moves a metadata UTxO set into the live UTxO
@@ -154,7 +158,8 @@ type Reconcile struct {
 // equal to the ledger, and drains the graduated ledger-state families from
 // the metadata store. It runs after database recovery and before the ledger
 // writes its genesis or applies a block, so a new database never holds those
-// families in SQL.
+// families in SQL. A caller may defer deletion of redundant migration-source
+// UTxO rows until its managed services are available.
 func (r Reconcile) Run(ctx context.Context) error {
 	finish := r.FinishImport
 	if finish == nil {
@@ -171,8 +176,8 @@ func (r Reconcile) Run(ctx context.Context) error {
 	if err := r.resolveRewardInputs(ctx); err != nil {
 		return err
 	}
-	if err := MigrateUtxoRows(
-		ctx, r.DB, r.Set, r.DataDir, r.Logger,
+	if err := migrateUtxoRows(
+		ctx, r.DB, r.Set, r.DataDir, r.Logger, r.DeferUtxoRowCleanup,
 	); err != nil {
 		return err
 	}
@@ -369,6 +374,17 @@ func MigrateUtxoRows(
 	dataDir string,
 	logger *slog.Logger,
 ) error {
+	return migrateUtxoRows(ctx, db, set, dataDir, logger, false)
+}
+
+func migrateUtxoRows(
+	ctx context.Context,
+	db *database.Database,
+	set *utxoset.Set,
+	dataDir string,
+	logger *slog.Logger,
+	deferCleanup bool,
+) error {
 	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
@@ -416,9 +432,31 @@ func MigrateUtxoRows(
 			FreeBytes: func() (uint64, error) {
 				return utxoset.AvailableDiskBytes(dataDir)
 			},
-			Logger: logger,
+			DeferCleanup: deferCleanup,
+			Logger:       logger,
 		},
 	)
+}
+
+// CleanupMigratedUtxoRows removes redundant SQL UTxO rows after a deferred
+// migration cutover. It is safe to call when no cleanup is pending.
+func CleanupMigratedUtxoRows(
+	ctx context.Context,
+	db *database.Database,
+	set *utxoset.Set,
+	logger *slog.Logger,
+) error {
+	if set == nil {
+		return errors.New("the live UTxO set is not open")
+	}
+	return set.CleanupMigratedSQLRows(ctx, utxoset.MigrationEnv{
+		Store: DrainStore{db},
+		Marked: func(context.Context) (bool, error) {
+			v, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+			return v != "", err
+		},
+		Logger: logger,
+	})
 }
 
 // CheckUtxoSetOnly marks a database at origin as holding its UTxO set only in

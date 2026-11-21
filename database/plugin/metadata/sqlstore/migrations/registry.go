@@ -113,6 +113,7 @@ const (
 	immutableDBSchemaRelease                            = "immutable-db"
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
+	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -305,6 +306,7 @@ var schemaVersions = []struct {
 	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
+	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

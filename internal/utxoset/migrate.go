@@ -69,6 +69,10 @@ type MigrationEnv struct {
 	FreeBytes func() (uint64, error)
 	// ChunkRows overrides the rows one delete statement removes.
 	ChunkRows int
+	// DeferCleanup returns after the set-only mark is durable, leaving the
+	// redundant SQL rows for CleanupMigratedSQLRows. The migration progress
+	// record remains until that cleanup finishes, so a restart can resume it.
+	DeferCleanup bool
 	// Hook, when non-nil, is called after each step with the step's name; an
 	// error it returns stops the migration there, as a crash would. Tests
 	// use it to stop between steps.
@@ -90,20 +94,16 @@ const spaceFactor = 2
 // store to the set-only layout in place. The metadata store stays the
 // authority until the end: the set is built from its live utxo rows, checked
 // against them by count and a streamed digest of every output, the set-only
-// mark is written, and only then are the utxo rows deleted in bounded
-// batches. Every step is resumable: a crash before the mark leaves the
-// metadata store whole and the next run rebuilds or reuses the set after
-// checking it again; a crash after the mark resumes the deletes.
+// mark is written, and only then are the utxo rows eligible for deletion in
+// bounded batches. Every step is resumable: a crash before the mark leaves
+// the metadata store whole and the next run rebuilds or reuses the set after
+// checking it again; a crash after the mark leaves a committed progress
+// record from which cleanup resumes.
 func (s *Set) MigrateFromSQL(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
 	env MigrationEnv,
 ) error {
-	if s.sqlDrained.Load() {
-		return errors.New(
-			"utxoset: the metadata store has drained ledger-state families, so its UTxO rows cannot be the source of a migration",
-		)
-	}
 	s.migrating.Store(true)
 	defer s.migrating.Store(false)
 	log := env.Logger
@@ -130,6 +130,13 @@ func (s *Set) MigrateFromSQL(
 	// checked against; before it, a commit recorded by an earlier run says
 	// nothing of what the metadata store has been given since.
 	if progress != migrationCommitted || !marked {
+		// Drained families mean the rows are no longer a faithful source;
+		// a committed, marked migration never reads them again.
+		if s.sqlDrained.Load() {
+			return errors.New(
+				"utxoset: the metadata store has drained ledger-state families, so its UTxO rows cannot be the source of a migration",
+			)
+		}
 		tip, err := env.Store.SQLTip(ctx)
 		if err != nil {
 			return fmt.Errorf("utxoset: read metadata tip: %w", err)
@@ -154,6 +161,64 @@ func (s *Set) MigrateFromSQL(
 	}
 	if err := hook("marked"); err != nil {
 		return err
+	}
+	if env.DeferCleanup {
+		log.Info(
+			"moved the UTxO set out of the metadata store; row cleanup deferred",
+		)
+		return hook("ready")
+	}
+	inlineEnv := env
+	inlineEnv.Marked = func(context.Context) (bool, error) {
+		return true, nil
+	}
+	return s.CleanupMigratedSQLRows(ctx, inlineEnv)
+}
+
+// CleanupMigratedSQLRows deletes the metadata store's redundant UTxO rows
+// after MigrateFromSQL has durably committed and marked the live set as the
+// authority. The committed progress record is cleared only after every batch
+// succeeds, so cancellation or failure leaves cleanup resumable.
+func (s *Set) CleanupMigratedSQLRows(
+	ctx context.Context,
+	env MigrationEnv,
+) error {
+	progress, err := env.Store.GetSyncState(ctx, MigrationSyncKey)
+	if err != nil {
+		return fmt.Errorf("utxoset: read migration progress: %w", err)
+	}
+	if progress == "" {
+		return nil
+	}
+	if progress != migrationCommitted {
+		return fmt.Errorf(
+			"utxoset: refuse SQL row cleanup from migration state %q",
+			progress,
+		)
+	}
+	if env.Marked == nil {
+		return errors.New(
+			"utxoset: refuse SQL row cleanup without the UTxO set mark",
+		)
+	}
+	marked, err := env.Marked(ctx)
+	if err != nil {
+		return fmt.Errorf("utxoset: read the UTxO set mark: %w", err)
+	}
+	if !marked {
+		return errors.New(
+			"utxoset: refuse SQL row cleanup before the UTxO set mark",
+		)
+	}
+	log := env.Logger
+	if log == nil {
+		log = s.logger
+	}
+	hook := func(step string) error {
+		if env.Hook == nil {
+			return nil
+		}
+		return env.Hook(step)
 	}
 	if err := s.drainUtxoRows(ctx, env, log, hook); err != nil {
 		return err

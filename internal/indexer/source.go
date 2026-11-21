@@ -44,7 +44,7 @@ func (s *DatabaseSource) LedgerTip(context.Context) (ochainsync.Tip, error) {
 // FromGenesis reports whether the chain starts at genesis rather than at a
 // Mithril-imported ledger state.
 func (s *DatabaseSource) FromGenesis(context.Context) (bool, error) {
-	slot, err := s.db.MithrilTrustBoundarySlotStrict(nil)
+	slot, err := s.db.ImportedLedgerStateBoundarySlotStrict(nil)
 	return slot == 0, err
 }
 

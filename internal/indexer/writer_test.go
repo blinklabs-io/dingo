@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -599,4 +600,132 @@ func TestRunRetriesFailureWithoutAnotherWake(t *testing.T) {
 			), context.Canceled)
 		})
 	}
+}
+
+// sizeLimitedIndexer refuses a call for more than limit blocks the way the
+// blob store refuses a transaction past its size, formatting the cause with
+// %v as the storage layers do.
+type sizeLimitedIndexer struct {
+	syncRowIndexer
+	limit int
+	calls atomic.Int64
+}
+
+func (s *sizeLimitedIndexer) IndexBlocks(
+	ctx context.Context, txn *database.Txn, blocks []models.Block,
+) error {
+	s.calls.Add(1)
+	if len(blocks) > s.limit {
+		return fmt.Errorf("set utxo offset: %v", badger.ErrTxnTooBig)
+	}
+	return s.syncRowIndexer.IndexBlocks(ctx, txn, blocks)
+}
+
+func TestCatchUpShrinksBatchWhenBlobWritesAreTooBig(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	chain := newFakeChain(40, "a")
+	idx := &sizeLimitedIndexer{limit: 5}
+	w := NewWriter(store, chain, idx, nil, 32)
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain)
+}
+
+func TestCatchUpFailsWhenOneBlockIsTooBig(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	chain := newFakeChain(4, "a")
+	idx := &sizeLimitedIndexer{limit: 0}
+	w := NewWriter(store, chain, idx, nil, 4)
+	err := w.CatchUp(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, badger.ErrTxnTooBig.Error())
+	// 4 blocks, 2, 1: then the single block cannot shrink further.
+	require.Equal(t, int64(3), idx.calls.Load())
+}
+
+// limitRecordingChain records the block limit of every BlocksAfter call.
+type limitRecordingChain struct {
+	*fakeChain
+	limits []int
+}
+
+func (c *limitRecordingChain) BlocksAfter(
+	ctx context.Context, after indexerdb.Tip, through uint64, limit int,
+) ([]models.Block, error) {
+	c.limits = append(c.limits, limit)
+	return c.fakeChain.BlocksAfter(ctx, after, through, limit)
+}
+
+// denseBelowIndexer refuses a call for more than limit blocks when it starts
+// below block dense, as a dense region refuses an oversized transaction.
+type denseBelowIndexer struct {
+	syncRowIndexer
+	limit int
+	dense uint64
+}
+
+func (d *denseBelowIndexer) IndexBlocks(
+	ctx context.Context, txn *database.Txn, blocks []models.Block,
+) error {
+	if blocks[0].Number < d.dense && len(blocks) > d.limit {
+		return fmt.Errorf("set utxo offset: %w", badger.ErrTxnTooBig)
+	}
+	return d.syncRowIndexer.IndexBlocks(ctx, txn, blocks)
+}
+
+func TestCatchUpGrowsBatchBackAfterTheDenseRegion(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	chain := &limitRecordingChain{fakeChain: newFakeChain(40, "a")}
+	idx := &denseBelowIndexer{limit: 4, dense: 8}
+	w := NewWriter(store, chain, idx, nil, 8)
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain.fakeChain)
+	// Blocks 0..7 fail at 8 and commit at 4; the limit climbs back to 8 after
+	// each commit, so the batches past the dense region are full again.
+	require.Equal(t, []int{8, 4, 8, 4, 8, 8, 8, 8}, chain.limits)
+}
+
+// tooBigAboveIndexer refuses a call for more than limit blocks while still
+// counting the transactions of the calls it accepts.
+type tooBigAboveIndexer struct {
+	*countingIndexer
+	limit int
+}
+
+func (s *tooBigAboveIndexer) IndexBlocks(
+	ctx context.Context, txn *database.Txn, blocks []models.Block,
+) error {
+	if len(blocks) > s.limit {
+		return fmt.Errorf("set utxo offset: %w", badger.ErrTxnTooBig)
+	}
+	return s.countingIndexer.IndexBlocks(ctx, txn, blocks)
+}
+
+func TestReplayShrinksBatchWhenBlobWritesAreTooBig(t *testing.T) {
+	t.Parallel()
+	log := &[]string{}
+	chain := &anchoredChain{
+		fakeChain: newFakeChain(30, "c"), anchorNumber: 12,
+	}
+	store := newTestStore(t)
+	facts := &anchorFacts{recordingFacts: &recordingFacts{log: log}}
+	idx := &tooBigAboveIndexer{
+		countingIndexer: &countingIndexer{
+			loggingIndexer: &loggingIndexer{
+				syncRowIndexer: &syncRowIndexer{},
+				log:            log,
+			},
+		},
+		limit: 2,
+	}
+	w := NewWriter(store, chain, idx, nil, 5).WithFacts(facts)
+	require.NoError(t, w.CatchUp(t.Context()))
+	// The refused batches rolled back with their transaction count, so the
+	// replay still counts each of blocks 0..12 once.
+	require.Contains(t, *log, "verify@120 replayed=13")
+	tip, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(29), tip.BlockNumber)
 }

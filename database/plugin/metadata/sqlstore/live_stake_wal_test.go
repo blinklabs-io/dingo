@@ -156,6 +156,8 @@ func TestStakeBookkeepingWALFrames(t *testing.T) {
 		"idx_reward_live_stake_updated_slot",
 		"idx_account_reward_delta_tx_hash",
 		"idx_account_reward_delta_withdrawal",
+		"idx_account_reward_delta_w_tx_s_slot",
+		"idx_account_reward_delta_credential",
 		"idx_account_drep",
 	}
 	for _, name := range droppedIndexes {
