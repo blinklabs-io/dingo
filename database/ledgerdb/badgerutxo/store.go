@@ -110,6 +110,11 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
+	// added holds, for each family, the index of rows below the export floor
+	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
+	// put a row below the floor, each of which invalidates it.
+	added         addedIndexes
+	rowsRewritten atomic.Uint64
 	// rangeRowsVisited counts the rows RowsInRange stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
@@ -395,6 +400,7 @@ func (s *Store) bootstrap(
 	// The journal describes history the new contents do not share.
 	// The tip is cleared, so no floor is raised: the contents the floors
 	// describe are gone with the rows.
+	defer s.rewriteRows()()
 	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}
