@@ -17,6 +17,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -89,7 +90,7 @@ func newAssetIntegrationStore(t *testing.T, engine string) *Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	require.NoError(t, store.Start(context.Background()))
-	return store
+	return withAPIStorage(store)
 }
 
 // TestAssetHoldingsRoundTripOnEngines writes the parity scenario through the
@@ -171,8 +172,12 @@ func exerciseAssetIdentityWriters(
 	store := newAssetIntegrationStore(t, engine)
 	for id := 1; id <= writers; id++ {
 		_, err := store.writeDB.Exec(store.dialect.Rebind(`
+INSERT INTO transaction (id, hash) VALUES (?, ?)`),
+			id, bytes.Repeat([]byte{byte(id)}, 32))
+		require.NoError(t, err)
+		_, err = store.writeDB.Exec(store.dialect.Rebind(`
 INSERT INTO utxo (id, tx_id, output_idx, added_slot, deleted_slot, amount)
-VALUES (?, ?, 0, 1, 0, '1')`), id, []byte{0xaa, byte(id)})
+VALUES (?, ?, 0, 1, 0, '1')`), id, id)
 		require.NoError(t, err)
 	}
 	write := func(writer int) error {
