@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -108,6 +109,48 @@ func TestMassBehindLocalTipRecycleKeepsSomeHonestPeers(t *testing.T) {
 		300*time.Millisecond,
 		"other honest peers must not be recycled in the same window",
 	)
+}
+
+// The shared recycle cooldown limits connection churn, not candidate
+// observation. A peer that cannot take the window may be streaming a competing
+// chain forward from the intersection it negotiated, so its verified header
+// must still reach chain selection and the ledger admission path.
+func TestBehindLocalTipRecycleCooldownPreservesCandidateProgress(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localBlock = uint64(1000)
+		k          = uint64(10)
+	)
+	f := newForecastHorizonFixture(t, "10.0.0.2:3001")
+	f.setLocalTip(localBlock, k)
+	f.setBestPeer(false)
+	f.o.behindTipRecycleAt = time.Now()
+	var observed chainselection.PeerTipUpdateEvent
+	var observedSet bool
+	f.o.config.ChainsyncObservePeerTip = func(
+		update chainselection.PeerTipUpdateEvent,
+	) chainselection.PeerTipUpdateDisposition {
+		observed = update
+		observedSet = true
+		return chainselection.PeerTipUpdateAccepted
+	}
+	f.o.config.ChainsyncResolvePeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+		bool,
+	) {
+	}
+
+	header := newTestBlockHeader(400, localBlock-k-1, 0x01)
+	f.rollForwardWithTip(t, header, peerTipAt(localBlock+1))
+
+	require.True(
+		t,
+		observedSet,
+		"the recycle cooldown must not hide a competing candidate",
+	)
+	require.Equal(t, header.BlockNumber(), observed.ObservedTip.BlockNumber)
+	require.False(t, f.o.futureHeaderResyncPending(f.conn))
 }
 
 // A connection whose re-intersection is already scheduled or fired is being
