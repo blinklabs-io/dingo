@@ -56,9 +56,22 @@ func TestSnapshotCaptureIndexFollowsPrefixDeletion(t *testing.T) {
 				_, err := s.Rollback(point(2, 0x02))
 				require.NoError(t, err)
 			} else {
+				var rows []badgerutxo.RowPut
+				require.NoError(t, s.Rows(prefix, func(k, v []byte) error {
+					if len(rows) == 0 {
+						rows = append(rows, badgerutxo.RowPut{
+							Slot: 30, Key: k, Value: v,
+						})
+					}
+					return nil
+				}))
+				require.Len(t, rows, 1)
+				rows = append(rows, badgerutxo.RowPut{
+					Key: prefix, WipePrefix: true,
+				})
 				tip := point(30, 0x1e)
 				_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
-					Rows: []badgerutxo.RowPut{{Key: prefix, WipePrefix: true}},
+					Rows: rows,
 				})
 				require.NoError(t, err)
 			}
