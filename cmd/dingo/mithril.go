@@ -26,6 +26,7 @@ import (
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
@@ -234,8 +235,14 @@ func runMithrilShowV2(
 	}
 
 	fmt.Printf("Hash:                  %s\n", mithril.EscapeText(snapshot.Hash))
-	fmt.Printf("Merkle Root:           %s\n", mithril.EscapeText(snapshot.MerkleRoot))
-	fmt.Printf("Network:               %s\n", mithril.EscapeText(snapshot.Network))
+	fmt.Printf(
+		"Merkle Root:           %s\n",
+		mithril.EscapeText(snapshot.MerkleRoot),
+	)
+	fmt.Printf(
+		"Network:               %s\n",
+		mithril.EscapeText(snapshot.Network),
+	)
 	fmt.Printf(
 		"Epoch:                 %d\n",
 		snapshot.Beacon.Epoch,
@@ -256,7 +263,10 @@ func runMithrilShowV2(
 		"Cardano Node Version:  %s\n",
 		mithril.EscapeText(snapshot.CardanoNodeVersion),
 	)
-	fmt.Printf("Created:               %s\n", mithril.EscapeText(snapshot.CreatedAt))
+	fmt.Printf(
+		"Created:               %s\n",
+		mithril.EscapeText(snapshot.CreatedAt),
+	)
 	printLocations := func(label string, locs []mithril.CardanoDatabaseLocation) {
 		fmt.Printf("%s Locations:\n", label)
 		for _, loc := range locs {
@@ -264,7 +274,11 @@ func runMithrilShowV2(
 			if uri == "" {
 				uri = loc.URITemplate
 			}
-			fmt.Printf("  - [%s] %s\n", mithril.EscapeText(loc.Type), mithril.EscapeText(uri))
+			fmt.Printf(
+				"  - [%s] %s\n",
+				mithril.EscapeText(loc.Type),
+				mithril.EscapeText(uri),
+			)
 		}
 	}
 	printLocations("Digest", snapshot.Digests.Locations)
@@ -559,16 +573,6 @@ func runMithrilSyncWithRepair(
 				Percent:         p.Percent,
 				BlocksPerSecond: p.BytesPerSecond,
 			})
-		case mithril.PhaseGapBlocks:
-			metrics.recordGapBlocks(p.Count)
-		case mithril.PhaseBackfill:
-			metrics.recordBackfillProgress(node.BackfillProgress{
-				Slot:            p.CurrentSlot,
-				TipSlot:         p.TipSlot,
-				ProgressPercent: p.Percent,
-				BlocksPerSecond: p.BytesPerSecond,
-				ProcessedBlocks: p.Count,
-			})
 		case mithril.PhaseComplete:
 			metrics.markComplete()
 		case mithril.PhaseLedgerImport:
@@ -601,10 +605,28 @@ func runMithrilSyncWithRepair(
 		return err
 	}
 
+	// The ledger state's UTxO set goes to the live UTxO set the node opens at
+	// the same path.
+	if cfg.DatabasePath == "" {
+		return errors.New("mithril sync needs databasePath")
+	}
+	utxoSet, err := utxoset.Open(utxoset.Config{
+		Dir:    utxoset.DirFor(cfg.DatabasePath),
+		Logger: logger,
+		Only:   true,
+	})
+	if err != nil {
+		return fmt.Errorf("open live UTxO set: %w", err)
+	}
+	defer utxoSet.Close()
+	invalidateGovernance := utxoSet.InvalidateGovernance
+
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                 network,
 		DataDir:                 cfg.DatabasePath,
-		StorageMode:             cfg.StorageMode,
+		IndexerLayout:           mithrilSyncIndexerLayout(cfg),
+		ServerCoreNamespace:     cfg.ServerCoreNamespace,
+		UtxoSet:                 utxoSet,
 		CardanoConfigPath:       cfg.CardanoConfig,
 		Backend:                 backend,
 		AggregatorURL:           cfg.Mithril.AggregatorURL,
@@ -616,18 +638,20 @@ func runMithrilSyncWithRepair(
 		DownloadMaxBytes:        cfg.Mithril.DownloadMaxBytes,
 		VerifyCertChain:         cfg.Mithril.VerifyCertificates,
 		CleanupAfterLoad:        cfg.Mithril.CleanupAfterLoad,
+		KeepChunks:              !cfg.HistoryExpiry.Enabled,
 		RepairLegacyRewardState: repairRewardState,
 		StoragePlugins: mithril.StoragePlugins{
 			Blob:     cfg.Plugins.Storage.Blob,
 			Metadata: cfg.Plugins.Storage.Metadata,
 		},
-		RunMode:           string(config.RunModeSync),
-		BackfillBatchSize: cfg.BackfillBatchSize,
-		DatabaseWorkers:   cfg.DatabaseWorkers,
-		Tracing:           cfg.Tracing,
-		Logger:            logger,
-		OnProgress:        onProgress,
-		Metrics:           metrics.pipeline,
+		RunMode:         string(config.RunModeSync),
+		DatabaseWorkers: cfg.DatabaseWorkers,
+		Tracing:         cfg.Tracing,
+		Logger:          logger,
+		OnProgress:      onProgress,
+		Metrics:         metrics.pipeline,
+
+		InvalidateUtxoSetGovernance: invalidateGovernance,
 	})
 	if err != nil {
 		return err
@@ -636,6 +660,17 @@ func runMithrilSyncWithRepair(
 		metrics.recordSnapshot(res.Snapshot)
 	}
 	return nil
+}
+
+// mithrilSyncIndexerLayout returns the indexer layout a Mithril bootstrap
+// records. The snapshot's ledger state is imported into the consensus store
+// alone, and an API node's IndexerDB replays the blocks into itself once it
+// runs.
+func mithrilSyncIndexerLayout(cfg *config.Config) string {
+	if cfg.SplitIndexer() {
+		return config.IndexerLayoutSplit
+	}
+	return ""
 }
 
 // syncCommand creates the "sync" command with --mithril flag at the

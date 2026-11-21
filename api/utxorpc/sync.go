@@ -425,6 +425,7 @@ func (s *syncServiceServer) followTipResponse(
 		if err != nil {
 			return nil, fmt.Errorf("convert block: %w", err)
 		}
+		canonicalizeBlockAssets(tmpBlock)
 		var acb sync.AnyChainBlock
 		acbc := sync.AnyChainBlock_Cardano{
 			Cardano: tmpBlock,

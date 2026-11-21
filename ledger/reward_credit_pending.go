@@ -19,9 +19,9 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -35,8 +35,8 @@ import (
 // the boundary would have written, only where a stored balance must change.
 
 func registerAppliedRewardCreditRound(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	round models.RewardCreditRound,
 ) error {
 	return meta.AddAppliedRewardCreditRound(round, metaTxn)
@@ -72,37 +72,29 @@ func rewardCreditsForOutputs(
 // newEpoch is credited. Its outputs are then account balances, so nothing may
 // recompute or replace them.
 func (ls *LedgerState) rewardRoundCredited(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 ) (bool, error) {
 	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
 	if !ok {
 		return false, nil
 	}
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	return ls.db.Metadata().HasAppliedRewardCreditRound(
+	return ls.ledgerDB().HasAppliedRewardCreditRound(
 		epochs.snapshot,
-		metaTxn,
+		txn,
 	)
 }
 
-// pendingRewardCreditOutputs returns one credential's unfolded credits in the
-// credited rounds.
-func (ls *LedgerState) pendingRewardCreditOutputs(
-	txn *database.Txn,
+// pendingRewardCreditOutputsFrom returns one credential's unfolded credits in
+// the credited rounds, read from ldb.
+func pendingRewardCreditOutputsFrom(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
 ) ([]models.AccountRewardCredit, error) {
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	meta := ls.db.Metadata()
-	outputs, err := meta.GetPendingRewardAccountOutputsForCredential(
-		credentialTag, stakingKey, metaTxn,
+	outputs, err := ldb.GetPendingRewardAccountOutputsForCredential(
+		credentialTag, stakingKey, txn,
 	)
 	if err != nil {
 		return nil, err
@@ -127,11 +119,37 @@ func (ls *LedgerState) pendingRewardCreditOutputs(
 // pendingRewardCredit is the part of a credential's reward balance a pending
 // round has not written to its account yet.
 func (ls *LedgerState) pendingRewardCredit(
+	txn ledgerdb.Txn,
+	credentialTag uint8,
+	stakingKey []byte,
+) (uint64, error) {
+	return pendingRewardCreditFrom(
+		ls.ledgerDB(), txn, credentialTag, stakingKey,
+	)
+}
+
+// PendingRewardCreditIn is PendingRewardCredit over db, the database whose
+// rows and transaction the caller reads: the ledger's own, or a split
+// IndexerDB holding the copied reward outputs.
+func PendingRewardCreditIn(
+	db *database.Database,
 	txn *database.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
 ) (uint64, error) {
-	credits, err := ls.pendingRewardCreditOutputs(
+	return pendingRewardCreditFrom(
+		dbadapter.New(db), dbadapter.Txn(txn), credentialTag, stakingKey,
+	)
+}
+
+func pendingRewardCreditFrom(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	credentialTag uint8,
+	stakingKey []byte,
+) (uint64, error) {
+	credits, err := pendingRewardCreditOutputsFrom(
+		ldb,
 		txn,
 		credentialTag,
 		stakingKey,
@@ -157,7 +175,7 @@ func (ls *LedgerState) pendingRewardCredit(
 // the account row's reward adds it, read in the same txn, to report the
 // balance.
 func (ls *LedgerState) PendingRewardCredit(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
 ) (uint64, error) {
@@ -169,16 +187,12 @@ func (ls *LedgerState) PendingRewardCredit(
 // so no balance read counts them again.
 func (ls *LedgerState) foldRewardCreditFor(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
 ) error {
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	outputs, err := ls.db.Metadata().ClaimPendingRewardCreditsForCredential(
-		credentialTag, stakingKey, metaTxn,
+	outputs, err := ls.ledgerDB().ClaimPendingRewardCreditsForCredential(
+		credentialTag, stakingKey, txn,
 	)
 	if err != nil {
 		return err
@@ -191,7 +205,7 @@ func (ls *LedgerState) foldRewardCreditFor(
 // slot, under its source hash.
 func (ls *LedgerState) writeClaimedRewardCredits(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	outputs []*models.RewardAccountOutput,
 ) error {
 	var credits []models.AccountRewardCredit
@@ -211,7 +225,7 @@ func (ls *LedgerState) writeClaimedRewardCredits(
 	if len(credits) == 0 {
 		return nil
 	}
-	return ls.db.AddAccountRewardsByCredential(ctx, credits, txn)
+	return ls.ledgerDB().AddAccountRewardsByCredential(ctx, credits, txn)
 }
 
 // foldRewardCreditsForWithdrawals writes the pending reward credits of every
@@ -219,17 +233,13 @@ func (ls *LedgerState) writeClaimedRewardCredits(
 func (ls *LedgerState) foldRewardCreditsForWithdrawals(
 	ctx context.Context,
 	tx lcommon.Transaction,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	withdrawals := tx.Withdrawals()
 	if len(withdrawals) == 0 {
 		return nil
 	}
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	hasPending, err := ls.db.Metadata().HasPendingRewardCreditRounds(metaTxn)
+	hasPending, err := ls.ledgerDB().HasPendingRewardCreditRounds(txn)
 	if err != nil || !hasPending {
 		return err
 	}

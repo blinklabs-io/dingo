@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -739,6 +740,20 @@ func (d *Database) UtxosByRefs(
 	return utxos, nil
 }
 
+// PrefetchBackfillInputs lets a metadata provider warm the rows an upcoming
+// historical block will consume. Providers without a prefetch path leave the
+// ordered writer unchanged.
+func (d *Database) PrefetchBackfillInputs(
+	ctx context.Context,
+	refs []models.UtxoId,
+) error {
+	prefetcher, ok := d.Metadata().(metadata.BackfillInputPrefetcher)
+	if !ok || len(refs) == 0 {
+		return nil
+	}
+	return prefetcher.PrefetchBackfillInputs(ctx, refs)
+}
+
 // ErrUtxoBytesExceeded is returned by UtxosByRefsBounded when the CBOR of the
 // matching UTxOs adds up to more than the byte limit it was given.
 var ErrUtxoBytesExceeded = errors.New("utxo cbor exceeds byte limit")
@@ -1317,10 +1332,16 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	return refs, false, nil
 }
 
-// UtxoRefsByIndexedAddressPage returns an exact-address page and total from
-// the API-mode address index. indexed is false when the index is unavailable
-// or its startup backfill has not completed, allowing callers to use their
+// UtxoRefsByIndexedAddressPage returns an exact-address page from the
+// API-mode address index. indexed is false when the index is unavailable or
+// its startup backfill has not completed, allowing callers to use their
 // bounded CBOR scan instead.
+//
+// The query reads one row past the page, so its cost follows offset plus page
+// size rather than the address's live set. total is the exact number of live
+// UTxOs when that row shows the page reaches the end of the address, and -1
+// when more may follow or the offset lies past the end, as the bounded scan
+// reports an unknown total.
 func (d *Database) UtxoRefsByIndexedAddressPage(
 	ctx context.Context,
 	address lcommon.Address,
@@ -1351,7 +1372,7 @@ func (d *Database) UtxoRefsByIndexedAddressPage(
 	}
 	query := &models.UtxoWithOrderingQuery{
 		IndexedExactAddress: []byte(address.String()),
-		Limit:               limit,
+		Limit:               limit + 1,
 		Offset:              offset,
 		Descending:          descending,
 		SkipAssets:          true,
@@ -1366,15 +1387,11 @@ func (d *Database) UtxoRefsByIndexedAddressPage(
 	if err := ctx.Err(); err != nil {
 		return nil, 0, false, err
 	}
-	countQuery := *query
-	countQuery.Limit = 0
-	countQuery.Offset = 0
-	total, err := d.utxoStore().CountUtxosByAddressWithOrdering(
-		&countQuery,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, 0, false, err
+	total := -1
+	if len(rows) > limit {
+		rows = rows[:limit]
+	} else if len(rows) > 0 || offset == 0 {
+		total = offset + len(rows)
 	}
 	refs := make([]models.UtxoId, len(rows))
 	for i := range rows {
@@ -2263,4 +2280,57 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 			t.Metadata(), refs, atSlot,
 		)
 	})
+}
+
+// UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
+// holds no UTxO set because the ledger's live UTxO set is its only copy.
+const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
+
+// liveUtxoSourceSetter is the metadata store hook SetLiveUtxoSource drives.
+type liveUtxoSourceSetter interface {
+	SetLiveUtxoSource(types.LiveUtxoSource)
+}
+
+// SetLiveUtxoSource makes the database keep no utxo rows, output offsets or
+// consumed-input recovery, because the ledger holds the live UTxO set and
+// resolves inputs through src. Core storage mode only; call it before the
+// first write.
+func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
+	if d.config.StorageMode == types.StorageModeAPI {
+		return errors.New("a live UTxO source needs core storage mode")
+	}
+	setter, ok := d.metadata.(liveUtxoSourceSetter)
+	if !ok {
+		return errors.New("the metadata store cannot use a live UTxO source")
+	}
+	setter.SetLiveUtxoSource(src)
+	d.liveUtxo = src != nil
+	return nil
+}
+
+// LiveUtxo reports whether the ledger holds the live UTxO set outside the
+// metadata store.
+func (d *Database) LiveUtxo() bool {
+	return d.liveUtxo
+}
+
+// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
+// credential in refs, recording slot as its update.
+func (d *Database) RefreshRewardLiveStakeRefs(
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) error {
+	refresher, ok := d.metadata.(interface {
+		RefreshRewardLiveStakeRefs(
+			[]models.StakeCredentialRef, uint64, types.Txn,
+		) error
+	})
+	if !ok {
+		return errors.New("the metadata store cannot refresh live stake")
+	}
+	if txn == nil {
+		return refresher.RefreshRewardLiveStakeRefs(refs, slot, nil)
+	}
+	return refresher.RefreshRewardLiveStakeRefs(refs, slot, txn.Metadata())
 }

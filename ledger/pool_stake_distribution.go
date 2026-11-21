@@ -26,7 +26,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -157,7 +157,7 @@ func checkAsOfSnapshotRecency(
 // unconditionally would be stricter than what PoolStakeDistribution
 // actually needs.
 func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
 	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -175,13 +175,13 @@ func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 		targetEpoch,
 		ls.LeaderStakeSnapshotEpoch(targetEpoch),
 		liveEpoch,
-		ls.db.StorageMode() == types.StorageModeAPI,
+		ls.ledgerDB().StorageMode() == types.StorageModeAPI,
 	); err != nil {
 		return err
 	}
 	if at.pinned() && ls.circulatingSupplyGenesis() != nil {
-		metaTxn := txn.Metadata()
-		state, err := ls.db.Metadata().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
+		metaTxn := txn
+		state, err := ls.ledgerDB().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
 		if err != nil {
 			return err
 		}
@@ -288,7 +288,7 @@ func (ls *LedgerState) PoolStakeDistribution(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*PoolStakeDistribution, error) {
 	return ls.poolStakeDistribution(ctx, poolFilter, at, txn, 0)
 }
@@ -299,7 +299,7 @@ func (ls *LedgerState) PoolStakeDistributionBounded(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	maxPools int,
 ) (*PoolStakeDistribution, error) {
 	return ls.poolStakeDistribution(ctx, poolFilter, at, txn, maxPools)
@@ -309,7 +309,7 @@ func (ls *LedgerState) poolStakeDistribution(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	maxPools int,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
@@ -323,14 +323,13 @@ func (ls *LedgerState) poolStakeDistribution(
 		if err := ls.WaitEpochBoundaryJob(ctx); err != nil {
 			return nil, err
 		}
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
-	metaTxn := txn.Metadata()
 
 	// The tip comes from this transaction rather than the in-memory
 	// consensus snapshot; see epochAtTip for why.
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +359,7 @@ func (ls *LedgerState) poolStakeDistribution(
 			epoch,
 			ls.LeaderStakeSnapshotEpoch(epoch),
 			liveEpoch,
-			ls.db.StorageMode() == types.StorageModeAPI,
+			ls.ledgerDB().StorageMode() == types.StorageModeAPI,
 		); err != nil {
 			return nil, err
 		}
@@ -379,13 +378,13 @@ func (ls *LedgerState) poolStakeDistribution(
 			stakeByPool, err = ls.markStakeByPoolBounded(
 				snapshotEpoch,
 				maxPools+1,
-				metaTxn,
+				txn,
 			)
 		} else {
 			stakeByPool, err = ls.markStakeByPool(
 				snapshotEpoch,
 				true,
-				metaTxn,
+				txn,
 			)
 		}
 	} else {
@@ -396,7 +395,7 @@ func (ls *LedgerState) poolStakeDistribution(
 		stakeByPool, err = ls.markStakeForPools(
 			snapshotEpoch,
 			poolIds,
-			metaTxn,
+			txn,
 		)
 	}
 	if err != nil {
@@ -431,13 +430,13 @@ func (ls *LedgerState) poolStakeDistribution(
 	// is always inside that retained window. Moving either bound breaks the
 	// equality, which is what
 	// TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady is for.
-	totalActiveStake, err := ls.totalActiveStake(snapshotEpoch, true, metaTxn)
+	totalActiveStake, err := ls.totalActiveStake(snapshotEpoch, true, txn)
 	if err != nil {
 		return nil, err
 	}
 	// Read inside the same transaction as everything else here so a caller
 	// combining this with per-pool Stake gets one consistent view, the same
-	// reason totalActiveStake is read from metaTxn rather than a fresh one.
+	// reason totalActiveStake is read from txn rather than a fresh one.
 	//
 	// asOfSlot names at.Slot itself, not some epoch-boundary approximation:
 	// a pinned at already carries the exact slot the caller asked about, so
@@ -452,7 +451,7 @@ func (ls *LedgerState) poolStakeDistribution(
 		snapshotEpoch,
 		networkStateAsOfSlot,
 		true,
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -587,7 +586,7 @@ func (ls *LedgerState) electingPoolVrfKeyHashes(
 	ctx context.Context,
 	keyHashes []lcommon.PoolKeyHash,
 	slot, epochId uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
 	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(keyHashes))
 	if len(keyHashes) == 0 {
@@ -624,7 +623,7 @@ func (ls *LedgerState) electingPoolVrfKeyHashes(
 		}
 	}
 	if len(latest) > 0 {
-		fallback, err := ls.poolVrfKeyHashes(latest, nil, txn.Metadata())
+		fallback, err := ls.poolVrfKeyHashes(ctx, latest, nil, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -642,7 +641,7 @@ func (ls *LedgerState) electingPoolVrfKeyHashes(
 func (ls *LedgerState) electingSnapshotVrfKeyHashes(
 	slot, epochId uint64,
 	epochCache []models.Epoch,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
 	snapEpoch := epochId
 	kind := models.PoolStakeSnapshotTypeActive
@@ -658,8 +657,8 @@ func (ls *LedgerState) electingSnapshotVrfKeyHashes(
 			kind = models.PoolStakeSnapshotTypeMark
 		}
 	}
-	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
-		snapEpoch, kind, txn.Metadata(),
+	rows, err := ls.ledgerDB().GetPoolStakeSnapshotsByEpoch(
+		snapEpoch, kind, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("read electing snapshot VRF keys: %w", err)
@@ -686,15 +685,16 @@ func (ls *LedgerState) electingSnapshotVrfKeyHashes(
 // registration (registeredPoolVrfKeyHash). Callers reporting the key a block
 // must carry use electingPoolVrfKeyHashes instead.
 func (ls *LedgerState) poolVrfKeyHashes(
+	ctx context.Context,
 	keyHashes []lcommon.PoolKeyHash,
 	asOfSlot *uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
 	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(keyHashes))
 	if len(keyHashes) == 0 {
 		return out, nil
 	}
-	pools, err := ls.db.Metadata().GetPools(keyHashes, txn)
+	pools, err := ls.ledgerDB().GetPools(ctx, keyHashes, txn)
 	if err != nil {
 		return nil, err
 	}

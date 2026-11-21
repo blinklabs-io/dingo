@@ -1,0 +1,55 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package dingo
+
+import (
+	"context"
+
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
+)
+
+// prepareEpochCache loads the ledger's epoch cache before the ledger starts.
+// The set must be reconciled before its epoch rows can be read.
+func (n *Node) prepareEpochCache(ctx context.Context) error {
+	if !n.utxoSetReconciled {
+		if err := n.reconcileUtxoSet(ctx); err != nil {
+			return err
+		}
+	}
+	return n.ledgerState.PrepareEpochCacheForStartup(ctx)
+}
+
+func (n *Node) setDrainedFamilies(mask nodesettings.FamilyMask) {
+	if n.ledgerState != nil {
+		n.ledgerState.SetDrainedFamilies(mask)
+	}
+	if n.utxoSet != nil {
+		n.utxoSet.SetDrainedFamilies(mask)
+	}
+}
+
+// statementGuard returns the guard a debug build installs on the metadata
+// store's connections, nil in every other build.
+func (n *Node) statementGuard() metadata.StatementGuard {
+	if !drainGuardBuilt {
+		return nil
+	}
+	if n.drainGuard == nil {
+		n.drainGuard = statedrain.NewTripGuard()
+	}
+	return n.drainGuard
+}

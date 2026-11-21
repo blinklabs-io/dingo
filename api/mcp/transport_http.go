@@ -25,8 +25,10 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -43,6 +45,7 @@ type Server struct {
 	openedDB      *sql.DB
 	listener      *apilistener.Listener
 	allowedOrigin []string
+	ready         apiready.Check
 }
 
 // NewServer creates a new MCP Server instance.
@@ -75,6 +78,7 @@ func NewServer(
 		openedDB:      openedDB,
 		listener:      apilistener.New("MCP API", logger),
 		allowedOrigin: deps.CORSAllowedOrigins,
+		ready:         deps.Ready,
 	}, nil
 }
 
@@ -133,12 +137,29 @@ func (s *Server) handler() http.Handler {
 		http.NotFound(w, r)
 	})
 
+	// Every tool and resource can read current state, so all but the
+	// health routes wait for the IndexerDB on a split layout.
+	gated := apiready.Middleware(
+		s.ready,
+		func(r *http.Request) (indexerdb.Kind, bool) {
+			switch r.URL.Path {
+			case "/healthz", "/health":
+				return 0, false
+			}
+			return indexerdb.KindCurrent, true
+		},
+		func(w http.ResponseWriter, status int, message string) {
+			http.Error(w, message, status)
+		},
+		mux,
+	)
+
 	// Wrap mux with middleware (rate limiting and CORS)
 	handler := newSecurityMiddleware(
 		s.config.RateLimit,
 		s.config.Burst,
 		s.allowedOrigin,
-		mux,
+		gated,
 	)
 	handler.onClose = sessionAdmission.Close
 	return handler

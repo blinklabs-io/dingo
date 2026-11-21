@@ -39,13 +39,41 @@ type payloadFile struct {
 	sha256 string
 }
 
-// payloadFiles returns the backup files m declares. A snapshot holds exactly
-// these two beside its manifest; a restore fetches nothing else.
+// hasLeiosPayload reports whether m declares a LeiosDB backup.
+func (m Manifest) hasLeiosPayload() bool {
+	return m.LeiosBytes != 0 || m.LeiosSHA256 != ""
+}
+
+// payloadFiles returns the backup files m declares directly. A snapshot holds
+// these beside its manifest: the live UTxO set's only when it declares one,
+// and the LeiosDB's only for a node that has one. A snapshot with promoted
+// blocks also holds the chunk files its immutable index declares; see
+// Manifest.immutablePayloadFiles.
 func (m Manifest) payloadFiles() []payloadFile {
-	return []payloadFile{
+	files := []payloadFile{
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
 		{MetadataBackupFileName, m.MetadataBytes, m.MetadataSHA256},
 	}
+	if m.IndexerSHA256 != "" {
+		files = append(files, payloadFile{IndexerMetadataBackupFileName, m.IndexerBytes, m.IndexerSHA256})
+	}
+	if m.UtxoSetSHA256 != "" {
+		files = append(files, payloadFile{
+			UtxoSetBackupFileName, m.UtxoSetBytes, m.UtxoSetSHA256,
+		})
+	}
+	if m.ImmutableIndexSHA256 != "" {
+		files = append(files, payloadFile{
+			ImmutableIndexFileName, m.ImmutableIndexBytes, m.ImmutableIndexSHA256,
+		})
+	}
+	if m.hasLeiosPayload() {
+		files = append(
+			files,
+			payloadFile{LeiosBackupFileName, m.LeiosBytes, m.LeiosSHA256},
+		)
+	}
+	return files
 }
 
 // payloadDownloads returns the cloud objects to fetch for m, each bounded by
@@ -86,7 +114,21 @@ func (m Manifest) verifyPayloads(
 	dir string,
 	requireDigests bool,
 ) error {
-	for _, f := range m.payloadFiles() {
+	if err := verifyPayloadList(ctx, dir, m.payloadFiles(), requireDigests); err != nil {
+		return err
+	}
+	return m.verifyImmutableFiles(ctx, dir)
+}
+
+// verifyPayloadList checks files in dir against their declared sizes and
+// digests.
+func verifyPayloadList(
+	ctx context.Context,
+	dir string,
+	files []payloadFile,
+	requireDigests bool,
+) error {
+	for _, f := range files {
 		path := filepath.Join(dir, f.name)
 		if f.sha256 == "" {
 			if requireDigests {

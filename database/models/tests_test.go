@@ -379,10 +379,10 @@ func TestConwayBlockDecodeUpdateCommitteeQuorum(t *testing.T) {
 		{"zero", rat(0, 1), ""},
 		{"one", rat(1, 1), ""},
 		{"one half", rat(1, 2), ""},
-		{"negative", rat(-1, 2), "outside [0,1]"},
+		{"negative", rat(-1, 2), "rational is negative"},
 		{"above one", rat(3, 2), "outside [0,1]"},
 		{"zero denominator", rat(1, 0), "denominator"},
-		{"missing", nil, "invalid cbor.Rat"},
+		{"missing", nil, "expected CBOR rational tag"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

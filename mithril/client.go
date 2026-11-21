@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -168,9 +169,29 @@ func (p ProtocolParameters) ComputeHash() string {
 	hasher := sha256.New()
 	hasher.Write(uint64ToBigEndianBytes(p.K))
 	hasher.Write(uint64ToBigEndianBytes(p.M))
-	phiFixed := uint32(math.Round(p.PhiF * float64(uint64(1)<<24)))
-	hasher.Write(uint32ToBigEndianBytes(phiFixed))
+	hasher.Write(uint32ToBigEndianBytes(phiFU8F24Bits(p.PhiF)))
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// phiFU8F24Bits returns the bits of fixed's U8F24::from_num(phi) in a
+// release build: phi times 2^24, rounded to nearest with ties to even, with
+// only its low 32 bits kept when it is outside the 8.24 range. Go leaves an
+// out-of-range float-to-integer conversion to the platform, so the
+// wrapping is done in floating point, where math.Mod is exact. Rust panics
+// on a phi that is not finite; this returns 0. A phi_f outside (0, 1]
+// never verifies: verifySTMConcatenationProof rejects it.
+func phiFU8F24Bits(phi float64) uint32 {
+	// Scaling by a power of two is exact unless it overflows, and a phi
+	// that large is a multiple of 2^32 once scaled.
+	scaled := math.RoundToEven(phi * (1 << 24))
+	if math.IsInf(scaled, 0) || math.IsNaN(scaled) {
+		return 0
+	}
+	w := math.Mod(scaled, 1<<32)
+	if w < 0 {
+		w += 1 << 32
+	}
+	return uint32(w)
 }
 
 // StakeDistributionParty represents a signer in the certificate
@@ -197,6 +218,17 @@ type CertificateMetadata struct {
 	InitiatedAt string                   `json:"initiated_at"`
 	SealedAt    string                   `json:"sealed_at"`
 	Signers     []StakeDistributionParty `json:"signers"`
+}
+
+// MarshalJSON writes signers as an array even when there are none: Mithril
+// decodes them into a Vec, which rejects null.
+func (m CertificateMetadata) MarshalJSON() ([]byte, error) {
+	type plain CertificateMetadata
+	out := plain(m)
+	if out.Signers == nil {
+		out.Signers = []StakeDistributionParty{}
+	}
+	return json.Marshal(out)
 }
 
 // UnmarshalJSON bounds the signer collection while it is decoded. The
@@ -251,16 +283,16 @@ func (m CertificateMetadata) ComputeHash() (string, error) {
 	hasher.Write([]byte(m.Network))
 	hasher.Write([]byte(m.Version))
 	hasher.Write([]byte(m.Parameters.ComputeHash()))
-	initiatedAt, err := time.Parse(time.RFC3339Nano, m.InitiatedAt)
+	initiatedAt, err := chronoUnixNanos(m.InitiatedAt)
 	if err != nil {
 		return "", fmt.Errorf("parsing initiated_at: %w", err)
 	}
-	sealedAt, err := time.Parse(time.RFC3339Nano, m.SealedAt)
+	sealedAt, err := chronoUnixNanos(m.SealedAt)
 	if err != nil {
 		return "", fmt.Errorf("parsing sealed_at: %w", err)
 	}
-	hasher.Write(int64ToBigEndianBytes(initiatedAt.UnixNano()))
-	hasher.Write(int64ToBigEndianBytes(sealedAt.UnixNano()))
+	hasher.Write(int64ToBigEndianBytes(initiatedAt))
+	hasher.Write(int64ToBigEndianBytes(sealedAt))
 	for _, signer := range m.Signers {
 		hasher.Write([]byte(signer.ComputeHash()))
 	}
@@ -271,6 +303,18 @@ func (m CertificateMetadata) ComputeHash() (string, error) {
 // certificate.
 type ProtocolMessage struct {
 	MessageParts map[string]string `json:"message_parts"`
+}
+
+// MarshalJSON writes message parts as an object even when there are none:
+// Mithril decodes them into a map, which rejects null.
+func (p ProtocolMessage) MarshalJSON() ([]byte, error) {
+	parts := p.MessageParts
+	if parts == nil {
+		parts = map[string]string{}
+	}
+	return json.Marshal(struct {
+		MessageParts map[string]string `json:"message_parts"`
+	}{parts})
 }
 
 // UnmarshalJSON decodes the message parts, failing once they exceed
@@ -369,9 +413,11 @@ var protocolMessageHashOrder = []string{
 	"next_protocol_parameters",
 	"current_epoch",
 	"latest_block_number",
+	"cardano_blocks_transactions_block_number_offset",
 	"cardano_stake_distribution_epoch",
 	"cardano_stake_distribution_merkle_root",
 	"cardano_database_merkle_root",
+	"next_aggregate_verification_key_snark",
 }
 
 // SignedEntityType represents the type and parameters of the signed
@@ -386,6 +432,7 @@ const (
 	signedEntityTypeCardanoStakeDistribution  = "CardanoStakeDistribution"
 	signedEntityTypeCardanoImmutableFilesFull = "CardanoImmutableFilesFull"
 	signedEntityTypeCardanoTransactions       = "CardanoTransactions"
+	signedEntityTypeCardanoBlocksTransactions = "CardanoBlocksTransactions"
 	signedEntityTypeCardanoDatabase           = "CardanoDatabase"
 )
 
@@ -535,6 +582,21 @@ func (s *SignedEntityType) feedHash(hasher hash.Hash) error {
 		}
 		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
 		hasher.Write(uint64ToBigEndianBytes(beacon.BlockNumber))
+	case signedEntityTypeCardanoBlocksTransactions:
+		_, raw, err := s.singleEntry()
+		if err != nil {
+			return err
+		}
+		vals, err := signedEntityU64s(raw, 3)
+		if err != nil {
+			return fmt.Errorf("cannot parse beacon for %s: %w", kind, err)
+		}
+		// Mithril prefixes this variant with its entity type id, 5, as a
+		// u16; the older variants hash their beacon alone.
+		hasher.Write([]byte{0, 5})
+		for _, v := range vals {
+			hasher.Write(uint64ToBigEndianBytes(v))
+		}
 	case signedEntityTypeCardanoDatabase:
 		beacon := s.CardanoDatabase()
 		if beacon == nil {
@@ -609,15 +671,45 @@ func (s *SignedEntityType) CardanoTransactions() *CardanoTransactionsBeacon {
 	if s == nil || s.raw == nil {
 		return nil
 	}
-	var parsed map[string]CardanoTransactionsBeacon
-	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+	key, raw, err := s.singleEntry()
+	if err != nil || key != signedEntityTypeCardanoTransactions {
 		return nil
 	}
-	beacon, ok := parsed[signedEntityTypeCardanoTransactions]
-	if !ok {
+	// A tuple variant, (Epoch, BlockNumber), which serde writes as an array.
+	vals, err := signedEntityU64s(raw, 2)
+	if err != nil {
 		return nil
 	}
-	return &beacon
+	return &CardanoTransactionsBeacon{Epoch: vals[0], BlockNumber: vals[1]}
+}
+
+// signedEntityU64s decodes a JSON array of exactly n u64 values.
+func signedEntityU64s(raw json.RawMessage, n int) ([]uint64, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	// Decoding into []json.Number would accept a quoted number, which
+	// Mithril's u64 rejects; with UseNumber a JSON number decodes as
+	// json.Number and a string as string.
+	var items []any
+	if err := dec.Decode(&items); err != nil {
+		return nil, err
+	}
+	if len(items) != n {
+		return nil, fmt.Errorf("want %d values, got %d", n, len(items))
+	}
+	vals := make([]uint64, n)
+	for i, item := range items {
+		num, ok := item.(json.Number)
+		if !ok {
+			return nil, fmt.Errorf("value %d is not a number", i)
+		}
+		v, err := strconv.ParseUint(string(num), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = v
+	}
+	return vals, nil
 }
 
 // Certificate represents a Mithril certificate as returned by the

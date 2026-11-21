@@ -70,9 +70,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 	return hostplugin.Register(
 		host,
 		hostplugin.Descriptor{
-			Capability:  hostplugin.CapabilityStorageBlob,
-			Name:        "badger",
-			Description: "BadgerDB local key-value store",
+			Capability:   hostplugin.CapabilityStorageBlob,
+			Name:         "badger",
+			Description:  "BadgerDB local key-value store",
+			DurableClose: true,
 		},
 		defaultConfig,
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreBadger, hostplugin.Instance, error) {
@@ -135,6 +136,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 				// #nosec G115 -- values are capped to the destination maximum.
 				WithMemTableSize(
 					int64(min(memTableSize, uint64(math.MaxInt64))),
+				),
+				// #nosec G115 -- values are capped to the destination maximum.
+				WithInMemoryMemTableSize(
+					int64(min(cfg.MemTableSize, uint64(math.MaxInt64))),
 				),
 				// #nosec G115 -- values are capped to the destination maximum.
 				WithValueThreshold(

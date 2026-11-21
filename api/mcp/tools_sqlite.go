@@ -103,6 +103,14 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if err := limits.refuseDrainedTables(input.Query); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Query refused: " + err.Error()},
+				},
+			}, nil, nil
+		}
 		if err := limits.admitCallerSQL(); err != nil {
 			return nil, nil, err
 		}
@@ -258,6 +266,14 @@ func registerSQLiteTools(
 					&mcp.TextContent{
 						Text: "Query validation failed: " + err.Error(),
 					},
+				},
+			}, nil, nil
+		}
+		if err := limits.refuseDrainedTables(input.Query); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Query refused: " + err.Error()},
 				},
 			}, nil, nil
 		}

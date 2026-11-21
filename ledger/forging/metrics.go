@@ -24,6 +24,8 @@ import (
 // direct equivalent exists, enabling reuse of existing SPO
 // dashboards.
 type forgingMetrics struct {
+	leiosPrebuildTotal   *prometheus.CounterVec
+	leiosPrebuildSeconds prometheus.Histogram
 	// KES lifecycle (match cardano-node names)
 	currentKESPeriod    prometheus.Gauge
 	remainingKESPeriods prometheus.Gauge
@@ -43,6 +45,10 @@ type forgingMetrics struct {
 	// Leader slots handed to another pool of the same node that also leads
 	// the slot and wins the tiebreak.
 	forgeYieldedToOwnPool prometheus.Counter
+	// Settled slot battles by whether this pool's block won or lost.
+	slotBattleOutcome *prometheus.CounterVec
+	// Remote KES signer preparations ahead of a leader slot that failed.
+	remoteKESSignerNotReady prometheus.Counter
 
 	// Dingo-specific (no cardano-node equivalent)
 	slotBattlesTotal prometheus.Counter
@@ -90,11 +96,10 @@ type forgingMetrics struct {
 
 	// Leios EB forging outcomes
 	// leiosEbSelectionSeconds records how long endorser-block transaction
-	// selection ran. It is the dominant cost of a Leios leader slot and
-	// scales with mempool depth, so it is what an operator alerts on when
-	// blocks start arriving late.
+	// selection ran, including attempts prepared ahead of the leader slot.
+	// The consume span measures the cached path on the forging critical path.
 	leiosEbSelectionSeconds prometheus.Histogram
-	// leiosEbSelectionTruncated counts passes stopped by the slot deadline
+	// leiosEbSelectionTruncated counts passes stopped by their deadline
 	// rather than by running out of candidates -- i.e. slots where the
 	// budget, not the mempool, decided the endorser block's size.
 	leiosEbSelectionTruncated prometheus.Counter
@@ -196,6 +201,24 @@ func initForgingMetrics(
 			Help: "battles between locally forged and peer blocks detected by active Praos chain selection",
 		},
 	)
+	m.slotBattleOutcome = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_slot_battle_outcomes_total",
+			Help: "slot battles between a block of this pool and a peer block, by settled outcome: won when the pool's block is on the chain a security parameter of blocks later, lost otherwise; dingo_metrics_slotBattlesTotal_int counts battles at detection",
+		},
+		[]string{"result"},
+	)
+	// Materialize both results so dashboards see a zero series before the
+	// first battle settles.
+	for _, result := range []string{slotBattleWon, slotBattleLost} {
+		m.slotBattleOutcome.WithLabelValues(result)
+	}
+	m.remoteKESSignerNotReady = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_remote_kes_signer_not_ready_total",
+			Help: "times the remote KES signer could not be prepared ahead of a scheduled leader slot, once per leader slot",
+		},
+	)
 	m.forgeFenceBlocked = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_forgeFenceBlocked_int",
@@ -294,6 +317,29 @@ func initForgingMetrics(
 		},
 		[]string{"phase"},
 	)
+
+	m.leiosPrebuildTotal = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "dingo",
+			Subsystem: "forge",
+			Name:      "leios_prebuild_total",
+			Help:      "Unsigned endorser-block preparation and cache outcomes.",
+		},
+		[]string{"result"},
+	)
+	m.leiosPrebuildSeconds = factory.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "dingo",
+			Subsystem: "forge",
+			Name:      "leios_prebuild_seconds",
+			Help:      "Time spent preparing unsigned endorser blocks before leader slots.",
+			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 14),
+		},
+	)
+	for _, result := range []string{"hit", "miss", "parent_changed", "capacity_changed", "stale", "ready", "empty", "failed", "cancelled"} {
+		m.leiosPrebuildTotal.WithLabelValues(result)
+	}
+
 	m.leiosEbSelectionSeconds = factory.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "dingo_forge_eb_selection_seconds",
@@ -306,7 +352,7 @@ func initForgingMetrics(
 	m.leiosEbSelectionTruncated = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_eb_selection_truncated_total",
-			Help: "Leios endorser-block selection passes stopped by the slot deadline before considering every candidate",
+			Help: "Leios endorser-block selection passes stopped by their deadline before considering every candidate",
 		},
 	)
 

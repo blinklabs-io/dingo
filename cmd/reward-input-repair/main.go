@@ -86,6 +86,9 @@ func run() error {
 		return err
 	}
 	defer db.Close()
+	if err := refuseDrainedDatabase(db); err != nil {
+		return err
+	}
 	var credits int
 	if err := db.QueryRow("SELECT COUNT(*) FROM reward_credit_round WHERE snapshot_epoch = ?", *epoch).Scan(&credits); err != nil {
 		return fmt.Errorf("credit guard: %w", err)

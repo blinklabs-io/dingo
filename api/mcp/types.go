@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 )
@@ -48,6 +49,9 @@ type ProviderDependencies struct {
 	Host               string
 	Network            string
 	CORSAllowedOrigins []string
+	// Ready gates data routes on a split layout until the IndexerDB is
+	// ready. Nil serves everything.
+	Ready apiready.Check
 }
 
 // defaultQueryTimeout bounds each SQLite-backed request when the configured

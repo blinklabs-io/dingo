@@ -46,7 +46,13 @@ func (a *NodeAdapter) tipBlock(ctx context.Context) (models.Block, error) {
 	return retryTipBlock(
 		ctx,
 		tipBlockBackoff,
-		func() []byte { return a.ledgerState.Tip().Point.Hash },
+		func() []byte {
+			tip, err := a.dataTip()
+			if err != nil {
+				return nil
+			}
+			return tip.Point.Hash
+		},
 		func(hash []byte) (models.Block, error) {
 			return a.ledgerState.BlockByHash(ctx, hash)
 		},
@@ -102,7 +108,7 @@ func (a *NodeAdapter) neighborBlocks(
 	if err != nil {
 		return nil, 0, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Rollback() //nolint:errcheck
 	var tipID uint64
@@ -249,7 +255,7 @@ func (a *NodeAdapter) blockAtSlot(
 	ctx context.Context,
 	slot uint64,
 ) (models.Block, error) {
-	block, err := database.BlockBySlot(ctx, a.ledgerState.Database(), slot)
+	block, err := database.BlockBySlot(ctx, a.db(), slot)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return models.Block{}, fmt.Errorf(
@@ -260,7 +266,7 @@ func (a *NodeAdapter) blockAtSlot(
 		}
 		return models.Block{}, err
 	}
-	return block, nil
+	return a.withinDataTip(fmt.Sprintf("in slot %d", slot), block)
 }
 
 // BlockBySlot returns the block produced in an absolute slot.
@@ -280,7 +286,7 @@ func (a *NodeAdapter) blockAtEpochSlot(
 	epoch uint64,
 	epochSlot uint64,
 ) (models.Block, error) {
-	row, err := a.ledgerState.Database().GetEpoch(epoch, nil)
+	row, err := a.db().GetEpoch(epoch, nil)
 	if err != nil {
 		return models.Block{}, fmt.Errorf("get epoch %d: %w", epoch, err)
 	}
@@ -414,7 +420,7 @@ func (a *NodeAdapter) BlockAddresses(
 	if err != nil {
 		return nil, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
 	}
-	indexed, err := a.ledgerState.Database().
+	indexed, err := a.db().
 		GetTransactionsByBlockHash(ctx, block.Hash, nil)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -436,7 +442,7 @@ func (a *NodeAdapter) BlockAddresses(
 		}
 	}
 	if len(missing) > 0 {
-		applied, err := a.ledgerState.Database().
+		applied, err := a.db().
 			GetTransactionsByHashes(ctx, missing, nil)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -667,7 +673,7 @@ func (a *NodeAdapter) forwardPageStart(
 	tipID uint64,
 	offset uint64,
 ) (uint64, bool, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	cursor := origin
 	remaining := offset
 	if isByronBlockType(origin.Type) {
@@ -728,7 +734,7 @@ func (a *NodeAdapter) backwardPageStart(
 	origin models.Block,
 	offset uint64,
 ) (uint64, bool, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	if origin.ID <= database.BlockInitialIndex {
 		return 0, false, nil
 	}

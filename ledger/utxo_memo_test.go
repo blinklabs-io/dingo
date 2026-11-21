@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -244,6 +245,7 @@ func TestLedgerViewUtxoByIdDoesNotMemoizeNotFound(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ls := &LedgerState{db: db, config: LedgerStateConfig{Logger: testLogger()}}
+	set := attachQueryLiveUtxoSet(t, ls, db)
 
 	txId := bytes.Repeat([]byte{0x77}, 32)
 	input, err := omockledger.NewSimpleTransactionInput(txId, 0)
@@ -284,6 +286,7 @@ func TestLedgerViewUtxoByIdDoesNotMemoizeNotFound(t *testing.T) {
 					db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded),
 				)
 
+				require.NoError(t, set.ApplyUtxoChanges(nil, []UtxoEvent{{Added: []UtxoOutput{{Ref: models.UtxoId{Hash: txId, Idx: 0}, Cbor: encoded}}}}))
 				utxo, err := lv.UtxoById(input)
 				require.NoError(
 					t,
@@ -437,6 +440,7 @@ func newIntraBlockDoubleSpendFixture(
 		},
 	}
 	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	block := &validityOutcomeTestBlock{
@@ -597,7 +601,7 @@ func TestLedgerViewMemoizedUtxosUnchangedByValidation(t *testing.T) {
 	var lv *LedgerView
 	require.NoError(t, fx.dingoLS.validateTxCore(
 		fx.tx,
-		func(txn *database.Txn) *LedgerView {
+		func(txn ledgerdb.Txn) *LedgerView {
 			lv = &LedgerView{txn: txn, ls: fx.dingoLS}
 			return lv
 		},
@@ -606,12 +610,7 @@ func TestLedgerViewMemoizedUtxosUnchangedByValidation(t *testing.T) {
 	require.Len(t, lv.utxoMemo, distinctUtxoRefs(fx.tx))
 
 	for key, cached := range lv.utxoMemo {
-		stored, err := fx.db.UtxoByRef(
-			context.Background(),
-			key.TxId.Bytes(),
-			key.Index,
-			nil,
-		)
+		stored, err := fx.dingoLS.UtxoByRef(key.TxId.Bytes(), key.Index)
 		require.NoError(t, err)
 		fresh, err := stored.Decode()
 		require.NoError(t, err)

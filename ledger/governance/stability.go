@@ -21,7 +21,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -40,8 +40,8 @@ import (
 // callback owns side effects (logging, metrics) so the helper itself
 // stays free of logger/metric dependencies.
 type StabilityCheckInputs struct {
-	DB                      *database.Database
-	Txn                     *database.Txn
+	DB                      ledgerdb.LedgerDB
+	Txn                     ledgerdb.Txn
 	CurrentEpoch            uint64
 	DelegatorInactivityOn   bool
 	PParams                 lcommon.ProtocolParameters
@@ -50,8 +50,8 @@ type StabilityCheckInputs struct {
 }
 
 func NewStabilityCheckInputs(
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	delegatorInactivityOn bool,
 	pparams lcommon.ProtocolParameters,

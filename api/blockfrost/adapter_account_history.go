@@ -35,7 +35,7 @@ func (a *NodeAdapter) knownAccount(
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	account, err := a.ledgerState.Database().GetAccountByCredential(
+	account, err := a.db().GetAccountByCredential(
 		ctx, tag, key, true, nil,
 	)
 	if err != nil {
@@ -114,15 +114,13 @@ func (a *NodeAdapter) AccountStakeHistory(
 	if err != nil {
 		return nil, 0, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
 	// A snapshot captured before the account existed holds none of its
 	// stake, so only labels from first on can leave its history partial.
-	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
-		txn, first, current,
-	)
+	incomplete, err := a.rewardStakeInputsIncomplete(first, current)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check account stake history: %w", err)
 	}
@@ -184,7 +182,7 @@ func (a *NodeAdapter) AccountMIRs(
 	if !ok {
 		return []AccountMIRInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetAccountMIRHistory(
@@ -231,7 +229,7 @@ func (a *NodeAdapter) AccountAddressAssets(
 	if !ok {
 		return []AddressAmountInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetAccountAssetBalances(
@@ -254,7 +252,7 @@ func (a *NodeAdapter) AccountAddressTotal(
 	if err != nil {
 		return AccountAddressTotalInfo{}, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	totals, err := db.Metadata().GetAccountAddressTotals(

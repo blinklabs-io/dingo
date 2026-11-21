@@ -22,7 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // reconcileKeys is the set of live ledger keys present in an imported snapshot.
@@ -31,53 +31,26 @@ import (
 // The snapshot is the complete, trusted ledger state at its tip, so every live
 // row missing from it has been spent/deregistered/retired by that tip.
 type reconcileKeys struct {
-	utxos                       map[utxoReconcileKey]struct{}
 	accounts                    map[string]struct{}
 	pools                       map[string]struct{}
 	dreps                       map[string]struct{}
 	governanceProposals         map[string]struct{}
-	utxosComplete               bool
 	accountsComplete            bool
 	poolsComplete               bool
 	drepsComplete               bool
 	governanceProposalsComplete bool
-}
-
-type utxoReconcileKey struct {
-	txID      [32]byte
-	outputIdx uint32
+	// drained is the set of families whose SQL rows were deleted before the
+	// import: none of their rows can be stale.
+	drained nodesettings.FamilyMask
 }
 
 func newReconcileKeys() *reconcileKeys {
 	return &reconcileKeys{
-		utxos:               make(map[utxoReconcileKey]struct{}),
 		accounts:            make(map[string]struct{}),
 		pools:               make(map[string]struct{}),
 		dreps:               make(map[string]struct{}),
 		governanceProposals: make(map[string]struct{}),
 	}
-}
-
-func newUtxoReconcileKey(txID []byte, idx uint32) (utxoReconcileKey, bool) {
-	if len(txID) != 32 {
-		return utxoReconcileKey{}, false
-	}
-	var key utxoReconcileKey
-	copy(key.txID[:], txID)
-	key.outputIdx = idx
-	return key, true
-}
-
-func (k *reconcileKeys) addUtxo(txID []byte, idx uint32) error {
-	key, ok := newUtxoReconcileKey(txID, idx)
-	if !ok {
-		return fmt.Errorf(
-			"malformed UTxO reconcile key: tx hash is %d bytes, expected 32",
-			len(txID),
-		)
-	}
-	k.utxos[key] = struct{}{}
-	return nil
 }
 
 func (k *reconcileKeys) addAccount(tag uint8, stakingKey []byte) {
@@ -96,10 +69,6 @@ func (k *reconcileKeys) addGovernanceProposal(txHash []byte, actionIndex uint32)
 	k.governanceProposals[govActionIdKey(txHash, actionIndex)] = struct{}{}
 }
 
-func (k *reconcileKeys) markUtxosComplete() {
-	k.utxosComplete = true
-}
-
 func (k *reconcileKeys) markCertStateComplete() {
 	k.accountsComplete = true
 	k.poolsComplete = true
@@ -111,8 +80,7 @@ func (k *reconcileKeys) markGovernanceProposalsComplete() {
 }
 
 // reconcileStaleLedgerState marks every live row absent from the imported
-// snapshot's live key set inactive: live UTxOs get DeletedSlot=tipSlot, accounts
-// and DReps go Active=false, pools get a retirement at tipEpoch, and stale
+// snapshot's live key set inactive: accounts and DReps go Active=false, pools get a retirement at tipEpoch, and stale
 // governance proposals get DeletedSlot=tipSlot. It never deletes a row. On an
 // empty database (a fresh bootstrap) it is a no-op.
 //
@@ -138,13 +106,19 @@ func reconcileStaleLedgerState(
 
 	// Phase 1: collect the live rows that are absent from the snapshot.
 	var (
-		staleUtxos     []types.UtxoKey
 		staleAccts     []models.StakeCredentialRef
 		staleDreps     []models.StakeCredentialRef
 		stalePools     [][]byte
 		staleProposals []*models.GovernanceProposal
 	)
 
+	skipDrained := func(entity string) {
+		logger.Info(
+			"skipping "+entity+" reconcile: its SQL rows were drained, so "+
+				"none can be stale",
+			"component", "ledgerstate",
+		)
+	}
 	skipIncomplete := func(entity string) {
 		logger.Warn(
 			"skipping "+entity+" reconcile: the snapshot import did not "+
@@ -154,36 +128,9 @@ func reconcileStaleLedgerState(
 	}
 
 	rtxn := db.MetadataTxn(ctx, false)
-	if !keys.utxosComplete {
-		skipIncomplete("UTxO")
-	} else if err := store.IterateLiveUtxos(
-		rtxn.Metadata(),
-		func(u *models.Utxo) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			key, ok := newUtxoReconcileKey(u.TxId, u.OutputIdx)
-			if !ok {
-				staleUtxos = append(staleUtxos, types.UtxoKey{
-					TxId:      bytes.Clone(u.TxId),
-					OutputIdx: u.OutputIdx,
-				})
-				return nil
-			}
-			if _, ok := keys.utxos[key]; !ok {
-				staleUtxos = append(staleUtxos, types.UtxoKey{
-					TxId:      bytes.Clone(u.TxId),
-					OutputIdx: u.OutputIdx,
-				})
-			}
-			return nil
-		},
-	); err != nil {
-		rtxn.Release()
-		return fmt.Errorf("scanning live UTxOs: %w", err)
-	}
-
-	if !keys.accountsComplete {
+	if keys.drained.Has(nodesettings.FamilyAccounts) {
+		skipDrained("account")
+	} else if !keys.accountsComplete {
 		skipIncomplete("account")
 	} else {
 		accts, err := store.GetActiveAccountCredentials(rtxn.Metadata())
@@ -205,7 +152,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.drepsComplete {
+	if keys.drained.Has(nodesettings.FamilyDReps) {
+		skipDrained("DRep")
+	} else if !keys.drepsComplete {
 		skipIncomplete("DRep")
 	} else {
 		dreps, err := store.GetActiveDreps(rtxn.Metadata())
@@ -228,7 +177,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.poolsComplete {
+	if keys.drained.Has(nodesettings.FamilyPoolsHistory) {
+		skipDrained("pool")
+	} else if !keys.poolsComplete {
 		skipIncomplete("pool")
 	} else {
 		pools, err := store.GetActivePoolKeyHashes(rtxn.Metadata())
@@ -247,7 +198,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.governanceProposalsComplete {
+	if keys.drained.Has(nodesettings.FamilyGovernance) {
+		skipDrained("governance proposal")
+	} else if !keys.governanceProposalsComplete {
 		skipIncomplete("governance proposal")
 	} else {
 		proposals, err := db.GetGovernanceProposalSet(ctx, rtxn)
@@ -276,15 +229,6 @@ func reconcileStaleLedgerState(
 	}
 	wtxn := db.MetadataTxn(ctx, true)
 	defer wtxn.Release()
-	if err := store.MarkUtxosDeletedAtSlot(
-		wtxn.Metadata(), staleUtxos, tipSlot,
-	); err != nil {
-		return fmt.Errorf(
-			"tombstoning %d stale UTxOs: %w",
-			len(staleUtxos),
-			err,
-		)
-	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
 			"reconcile cancelled before applying stale markers: %w",
@@ -307,7 +251,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.DeactivateDreps(
-		wtxn.Metadata(), staleDreps,
+		wtxn.Metadata(), staleDreps, tipSlot,
 	); err != nil {
 		return fmt.Errorf(
 			"deactivating %d stale DReps: %w",
@@ -362,7 +306,6 @@ func reconcileStaleLedgerState(
 		"component", "ledgerstate",
 		"tip_slot", tipSlot,
 		"tip_epoch", tipEpoch,
-		"utxos_tombstoned", len(staleUtxos),
 		"accounts_deactivated", len(staleAccts),
 		"dreps_deactivated", len(staleDreps),
 		"pools_retired", len(stalePools),

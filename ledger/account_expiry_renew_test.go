@@ -354,6 +354,7 @@ func runRenew(
 			context.Background(),
 			txn,
 			currentEpoch,
+			0,
 			txs,
 		)
 	}))

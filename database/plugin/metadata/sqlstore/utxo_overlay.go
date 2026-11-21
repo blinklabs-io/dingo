@@ -196,6 +196,9 @@ type utxoOverlay struct {
 	assetSeq     int64
 	assetSeqRow  bool
 	assetWritten int64
+	// skipAssets leaves asset rows unwritten and their ids unreserved, so
+	// the asset sequence is not restored.
+	skipAssets bool
 
 	stats overlayStats
 	// mutations advances on every change, so a savepoint restore can tell
@@ -247,7 +250,9 @@ var errOverlaySavepoint = errors.New(
 // names inputs an earlier transaction of the same trusted batch committed.
 // producers are the hashes of the transactions the batch applies; an
 // identity row stored for one of them is reused rather than reported as a
-// conflict. It reports false, and changes nothing, outside SQLite core storage mode.
+// conflict. It reports false, and changes nothing, outside SQLite core storage
+// mode and when the live UTxO set holds the outputs, which leaves no rows to
+// overlay.
 func (s *Store) EnableBatchUtxoOverlay(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
@@ -257,7 +262,7 @@ func (s *Store) EnableBatchUtxoOverlay(
 ) (bool, error) {
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok || s.dialect.Name() != "sqlite" ||
-		s.storageMode == types.StorageModeAPI {
+		s.storageMode == types.StorageModeAPI || s.liveUtxo != nil {
 		return false, nil
 	}
 	transaction, ok := txn.(*sqlTxn)
@@ -271,11 +276,12 @@ func (s *Store) EnableBatchUtxoOverlay(
 		return false, err
 	}
 	overlay := &utxoOverlay{
-		created:  make(map[overlayKey]*overlayOutput),
-		inputs:   make(map[overlayKey]*overlayInput, len(inputs)),
-		absent:   make(map[overlayKey]struct{}),
-		deleteOn: make(map[overlayKey]struct{}, len(deleteOnSpend)),
-		txHashes: make(map[string]struct{}),
+		skipAssets: !s.storesUtxoAssets(),
+		created:    make(map[overlayKey]*overlayOutput),
+		inputs:     make(map[overlayKey]*overlayInput, len(inputs)),
+		absent:     make(map[overlayKey]struct{}),
+		deleteOn:   make(map[overlayKey]struct{}, len(deleteOnSpend)),
+		txHashes:   make(map[string]struct{}),
 
 		importedTx:      make(map[string]int64),
 		appliedTx:       make(map[string]struct{}),
@@ -488,6 +494,18 @@ INSERT INTO applied_transaction (
 	})
 	if err != nil {
 		return overlayWriteError("insert batch applied transaction rows", err)
+	}
+	if o.retainHistory {
+		// Address rows queued before these application rows were written, and
+		// outputs an import stored for a reused identity, hold the position
+		// they take without one.
+		ids := make([]int64, len(o.txPending))
+		for i, row := range o.txPending {
+			ids[i] = row.id
+		}
+		if err := fillUtxoAddressOrderByTransactions(ctx, db, ids); err != nil {
+			return err
+		}
 	}
 	o.txPending = nil
 	return nil
@@ -786,7 +804,9 @@ func (o *utxoOverlay) create(
 			assetBase: o.assetSeq + 1,
 		}
 		out.model.ID = uint(out.id)
-		o.assetSeq += int64(len(model.Assets))
+		if !o.skipAssets {
+			o.assetSeq += int64(len(model.Assets))
+		}
 		o.created[key] = out
 		o.order = append(o.order, out)
 		o.unwritten++
@@ -1044,7 +1064,9 @@ func (s *Store) writeOverlay(
 		if out.spentBy != nil {
 			continue
 		}
-		queueOverlayRelations(&accumulator.rows, out, &o.assetWritten)
+		if !o.skipAssets {
+			queueOverlayRelations(&accumulator.rows, out, &o.assetWritten)
+		}
 	}
 	return nil
 }
@@ -1259,6 +1281,9 @@ func restoreOverlaySequences(
 		ctx, db, "transaction", o.txSeq, o.txWritten, true,
 	); err != nil {
 		return err
+	}
+	if o.skipAssets {
+		return nil
 	}
 	return restoreSQLiteSequence(
 		ctx, db, "asset", o.assetSeq, o.assetWritten, o.assetSeqRow,

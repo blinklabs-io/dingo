@@ -20,7 +20,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -48,7 +48,7 @@ import (
 // genesis, NeutralNonce/nil).
 func (ls *LedgerState) epochLabNonce(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	epochStartSlot uint64,
 	epochEndSlot uint64,
 	carriedLabNonce []byte,
@@ -100,7 +100,7 @@ func (ls *LedgerState) epochLabNonce(
 
 func (ls *LedgerState) canonicalBlockBeforeSlot(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 ) (models.Block, error) {
 	if ls == nil {

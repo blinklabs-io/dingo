@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -71,8 +71,8 @@ func ProcessDRepDeregistrationEffects(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	for index, cert := range tx.Certificates() {
 		deregistration, ok := cert.(*lcommon.DeregistrationDrepCertificate)
@@ -112,11 +112,11 @@ type drepActivityWriter func(
 	slot uint64,
 	epoch uint64,
 	inactivityPeriod uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error
 
 // renewDRepExpiry is the live-ledger writer: activity also resets expiry.
-func renewDRepExpiry(db *database.Database) drepActivityWriter {
+func renewDRepExpiry(db ledgerdb.LedgerDB) drepActivityWriter {
 	return func(
 		ctx context.Context,
 		credentialTag uint8,
@@ -124,7 +124,7 @@ func renewDRepExpiry(db *database.Database) drepActivityWriter {
 		slot uint64,
 		epoch uint64,
 		inactivityPeriod uint64,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 	) error {
 		return db.UpdateDRepActivity(
 			ctx,
@@ -143,7 +143,7 @@ func renewDRepExpiry(db *database.Database) drepActivityWriter {
 // updateNumDormantEpochs, CERTS updateDormantDRepExpiry), so an expiry
 // recomputed from a historical vote or certificate would replace the correct
 // expiry the snapshot recorded with a stale one.
-func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
+func recordDRepActivityEpoch(db ledgerdb.LedgerDB) drepActivityWriter {
 	return func(
 		ctx context.Context,
 		credentialTag uint8,
@@ -151,7 +151,7 @@ func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
 		_ uint64,
 		epoch uint64,
 		_ uint64,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 	) error {
 		return db.RecordDRepActivityEpoch(
 			ctx,
@@ -174,8 +174,8 @@ func ProcessDRepActivityCertificates(
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
 	protocolMajor uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	return processDRepActivityCertificates(
 		ctx,
@@ -198,8 +198,8 @@ func ProcessHistoricalDRepActivityCertificates(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	return processDRepActivityCertificates(
 		ctx,
@@ -226,8 +226,8 @@ func processDRepActivityCertificates(
 	drepInactivityPeriod uint64,
 	protocolMajor uint64,
 	recordActivity drepActivityWriter,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	updated := make(map[string]struct{})
 	dormantEpochs := uint64(0)
@@ -322,8 +322,8 @@ func ProcessProposals(
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	pp lcommon.ProtocolParameters,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	validated *bool,
 ) error {
 	if err := validateCostModelLanguageIDs(tx); err != nil {
@@ -395,8 +395,8 @@ func ProcessHistoricalProposals(
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	pp lcommon.ProtocolParameters,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	validated *bool,
 ) error {
 	if err := validateCostModelLanguageIDs(tx); err != nil {
@@ -516,8 +516,8 @@ func ProcessTransactionEffects(
 	drepInactivityPeriod uint64,
 	govActionLifetime uint64,
 	protocolMajor uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	pp lcommon.ProtocolParameters,
 	validated *bool,
 ) error {
@@ -573,8 +573,8 @@ func ProcessHistoricalTransactionEffects(
 	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	pp lcommon.ProtocolParameters,
 	validated *bool,
 ) error {
@@ -640,8 +640,8 @@ func ResetDormantDRepExpiryBeforeCertificates(
 	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	if len(tx.ProposalProcedures()) == 0 {
 		return nil
@@ -658,10 +658,10 @@ func ResetDormantDRepExpiryBeforeCertificates(
 // boundary's extension.
 func BumpDormantDRepExpiryAtEpochBoundary(
 	ctx context.Context,
-	db *database.Database,
+	db ledgerdb.LedgerDB,
 	epoch uint64,
 	slot uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	proposals, err := db.GetActiveGovernanceProposals(ctx, epoch, txn)
 	if err != nil {
@@ -684,8 +684,8 @@ func persistGovernanceProposals(
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	settleNew bool,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	if err := validateCostModelLanguageIDs(tx); err != nil {
 		return err
@@ -825,8 +825,8 @@ func ProcessVotes(
 	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	return processVotes(
 		ctx,
@@ -850,8 +850,8 @@ func ProcessHistoricalVotes(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	return processVotes(
 		ctx,
@@ -874,8 +874,8 @@ func processVotes(
 	recordActivity drepActivityWriter,
 	drepInactivityPeriod uint64,
 	settleNewProposals bool,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) error {
 	votingProcedures := tx.VotingProcedures()
 	if len(votingProcedures) == 0 {
@@ -1127,8 +1127,8 @@ func newProposalRepairCache(settleNew bool) *proposalRepairCache {
 
 func (c *proposalRepairCache) epochForSlot(
 	slot uint64,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) (models.Epoch, error) {
 	if c == nil {
 		epoch, err := db.GetEpochBySlot(slot, txn)
@@ -1162,8 +1162,8 @@ func (c *proposalRepairCache) epochForSlot(
 func (c *proposalRepairCache) govActionValidityPeriod(
 	epoch models.Epoch,
 	proposalTxHash []byte,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if c != nil {
 		if validity, ok := c.govActionValidityByEpochID[epoch.EpochId]; ok {
@@ -1227,8 +1227,8 @@ func repairMissingGovernanceProposal(
 	ctx context.Context,
 	proposalTxHash []byte,
 	actionIndex uint32,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	repairCache *proposalRepairCache,
 ) (*models.GovernanceProposal, error) {
 	txRecord, err := db.GetTransactionByHash(ctx, proposalTxHash, txn)
@@ -1242,7 +1242,7 @@ func repairMissingGovernanceProposal(
 	if txRecord == nil {
 		return nil, models.ErrGovernanceProposalNotFound
 	}
-	txBodyCbor, err := db.CborCache().ResolveTxCbor(txn, proposalTxHash)
+	txBodyCbor, err := db.ResolveTxCbor(txn, proposalTxHash)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve governance proposal tx body %s: %w",

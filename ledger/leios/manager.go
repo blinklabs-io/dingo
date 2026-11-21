@@ -429,6 +429,10 @@ type votingConfigurationSnapshot struct {
 	generation uint64
 	pool       []byte
 	key        *VoteSigningKey
+	// keySet marks a vote decided under ConfigureVotingKeys: generation is
+	// then the key set's generation, pool is unused, and the commit requires
+	// key to still be in the set.
+	keySet bool
 	// lifecycle is the manager lifecycle the vote belongs to; Stop advances
 	// it, so a vote decided before Stop never commits after it.
 	lifecycle uint64
@@ -627,8 +631,10 @@ type VoteManager struct {
 	pendingVoteCount       int
 	pendingVoteCountByConn map[string]int
 
-	votingPool []byte // local pool key hash; nil disables voting
-	votingKey  *VoteSigningKey
+	votingKeys           []*VoteSigningKey
+	votingKeysGeneration uint64
+	votingPool           []byte // local pool key hash; nil disables voting
+	votingKey            *VoteSigningKey
 	// deferredVotingPool/deferredVotingKey retain an operator-configured
 	// signing key while the authoritative historical on-chain key snapshot is
 	// not available locally yet. They never participate in vote emission;
@@ -937,7 +943,92 @@ func (m *VoteManager) EnableVoting(
 	}
 	m.votingPool = slices.Clone(poolKeyHash[:])
 	m.votingKey = key
+	m.clearVotingKeysLocked()
 	return nil
+}
+
+// ConfigureVotingKeys replaces the set of signing keys the node votes with,
+// as the reference node does for a key file holding several envelopes. Unlike
+// ConfigureVoting, no key is bound to a pool: at each announcement every key
+// is matched against the epoch's resolved committee keys and votes at the
+// smallest seat that holds it, so a rotation pair keeps a pool voting through
+// the epoch in which its registered key changes, and a bundle of many pools'
+// keys votes for every seat it covers. A key that holds no seat casts
+// nothing. A nil or empty slice stops key-set voting.
+//
+// A non-empty key set supersedes any pool-bound configuration made by
+// ConfigureVoting or EnableVoting, and those supersede a key set: the latest
+// configuration is the only one in force.
+//
+// Announcements that were ready before the call are replayed, as they are when
+// ConfigureVoting activates a deferred key.
+func (m *VoteManager) ConfigureVotingKeys(keys []*VoteSigningKey) error {
+	unique := make([]*VoteSigningKey, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for i, key := range keys {
+		if key == nil {
+			return fmt.Errorf("nil leios vote signing key at index %d", i)
+		}
+		id := string(key.PublicKeyBytes())
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, key)
+	}
+
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	m.mu.Lock()
+	m.votingKeys = unique
+	m.votingKeysGeneration++
+	if len(unique) > 0 {
+		m.clearPoolBoundVotingLocked()
+	}
+	var ready []readyAnnouncement
+	lifecycle := m.lifecycle
+	if len(unique) > 0 {
+		ready = m.readyAnnouncementsForEpochLocked(
+			m.epochProvider.CurrentEpoch(),
+		)
+	}
+	m.mu.Unlock()
+
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].record.slot != ready[j].record.slot {
+			return ready[i].record.slot < ready[j].record.slot
+		}
+		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
+	})
+	for _, item := range ready {
+		m.emitPrototypeVoteLocked(item.rbHash, item.record, lifecycle)
+	}
+	return nil
+}
+
+// VotingKeyCount returns how many distinct keys ConfigureVotingKeys holds.
+func (m *VoteManager) VotingKeyCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.votingKeys)
+}
+
+// clearPoolBoundVotingLocked drops the ConfigureVoting state, including a
+// deferred configuration, and supersedes lookups still in flight. It requires
+// m.mu.
+func (m *VoteManager) clearPoolBoundVotingLocked() {
+	m.votingPool = nil
+	m.votingKey = nil
+	m.deferredVotingPool = nil
+	m.deferredVotingKey = nil
+	m.deferredVotingAuthorized = false
+	m.votingLookupGeneration++
+}
+
+// clearVotingKeysLocked drops the ConfigureVotingKeys set. It requires m.mu.
+func (m *VoteManager) clearVotingKeysLocked() {
+	m.votingKeys = nil
+	m.votingKeysGeneration++
 }
 
 // ConfigureVoting configures local vote emission for a pool. Production
@@ -968,6 +1059,7 @@ func (m *VoteManager) ConfigureVoting(
 		return VotingConfigurationEnabled, nil
 	}
 	m.mu.Lock()
+	m.clearVotingKeysLocked()
 	m.votingPool = nil
 	m.votingKey = nil
 	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
@@ -2440,7 +2532,13 @@ func (m *VoteManager) insertVote(
 	// the commit, not before waiting for the lock.
 	now := m.now()
 	if expectedVoting != nil {
-		if m.votingLookupGeneration != expectedVoting.generation ||
+		if expectedVoting.keySet {
+			if m.votingKeysGeneration != expectedVoting.generation ||
+				!slices.Contains(m.votingKeys, expectedVoting.key) {
+				m.mu.Unlock()
+				return false
+			}
+		} else if m.votingLookupGeneration != expectedVoting.generation ||
 			m.votingKey != expectedVoting.key ||
 			!slices.Equal(m.votingPool, expectedVoting.pool) {
 			m.mu.Unlock()
@@ -2490,7 +2588,11 @@ func (m *VoteManager) insertVote(
 					return false
 				}
 			}
-			if _, voted := m.votedAnnouncements[announcingRbHash]; voted {
+			// A key set votes for several seats of one announcement, so
+			// the first committed seat must not refuse the others; the
+			// per-seat dedup against voteRecords below still holds.
+			if _, voted := m.votedAnnouncements[announcingRbHash]; voted &&
+				(expectedVoting == nil || !expectedVoting.keySet) {
 				m.mu.Unlock()
 				return false
 			}
@@ -3061,6 +3163,20 @@ func (m *VoteManager) declineLocalVote(
 	)
 }
 
+// localVoteCandidate is one committee seat this node may vote for with one
+// of its keys.
+type localVoteCandidate struct {
+	key    *VoteSigningKey
+	member CommitteeMember
+	// keySet marks a seat found by matching a ConfigureVotingKeys key against
+	// the seats' registered keys, as opposed to the pool-bound key of
+	// ConfigureVoting. generation and pool snapshot whichever configuration
+	// produced it.
+	keySet     bool
+	generation uint64
+	pool       []byte
+}
+
 func (m *VoteManager) emitPrototypeVoteLocked(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
@@ -3070,13 +3186,16 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	votingPool := slices.Clone(m.votingPool)
 	votingKey := m.votingKey
 	votingGeneration := m.votingLookupGeneration
+	keySet := slices.Clone(m.votingKeys)
+	keySetGeneration := m.votingKeysGeneration
 	_, alreadyVoted := m.votedAnnouncements[rbHash]
 	m.mu.Unlock()
 	if alreadyVoted {
 		m.noteVoteNotEmitted(voteNotEmittedDuplicate)
 		return
 	}
-	if len(votingPool) == 0 || votingKey == nil {
+	poolBound := len(votingPool) != 0 && votingKey != nil
+	if !poolBound && len(keySet) == 0 {
 		m.noteVoteNotEmitted(voteNotEmittedNoKey)
 		return
 	}
@@ -3100,6 +3219,55 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		)
 		return
 	}
+	var candidates []localVoteCandidate
+	if poolBound {
+		candidate, ok := m.poolBoundVoteCandidate(
+			entry, record, votingPool, votingKey, votingGeneration,
+		)
+		if ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	candidates = append(
+		candidates,
+		m.keySetVoteCandidates(entry, keySet, keySetGeneration)...,
+	)
+	if len(candidates) == 0 {
+		if !poolBound {
+			m.noteVoteNotEmitted(voteNotEmittedNotSeated)
+			m.logger.Debug(
+				"no configured leios voting key holds a committee seat, not voting",
+				"slot",
+				record.slot,
+				"epoch",
+				record.epoch,
+			)
+		}
+		return
+	}
+	for _, candidate := range candidates {
+		// A timer outlives a rollback or a Stop. Signing is the expensive
+		// step, so recheck the announcement before it; insertVote checks
+		// again at the commit, which covers state that moves while signing.
+		if !m.localVoteCurrent(rbHash, record, lifecycle) {
+			m.noteVoteNotEmitted(voteNotEmittedSuperseded)
+			return
+		}
+		m.signAndInsertLocalVote(
+			candidate, entry, rbHash, record, lifecycle, deadline,
+		)
+	}
+}
+
+// poolBoundVoteCandidate resolves the seat of the pool ConfigureVoting bound
+// a key to. It counts and logs the reason when the pool cannot vote.
+func (m *VoteManager) poolBoundVoteCandidate(
+	entry *epochEntry,
+	record announcementRecord,
+	votingPool []byte,
+	votingKey *VoteSigningKey,
+	votingGeneration uint64,
+) (localVoteCandidate, bool) {
 	committee := entry.committee
 	voterId, ok := committee.VoterIdFor(votingPool)
 	if !ok {
@@ -3109,12 +3277,12 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			"slot", record.slot,
 			"epoch", record.epoch,
 		)
-		return
+		return localVoteCandidate{}, false
 	}
 	member, ok := committee.Member(voterId)
 	if !ok {
 		m.noteVoteNotEmitted(voteNotEmittedUnknownMember)
-		return
+		return localVoteCandidate{}, false
 	}
 	// A vote this node marks verified=true is trusted without a
 	// signature check by every local consumer (tallying, certificate
@@ -3133,17 +3301,75 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			"voter_id",
 			voterId,
 		)
-		return
+		return localVoteCandidate{}, false
 	}
-	// A timer outlives a rollback or a Stop. Signing is the expensive step,
-	// so recheck the announcement before it; insertVote checks again at the
-	// commit, which covers state that moves while signing.
-	if !m.localVoteCurrent(rbHash, record, lifecycle) {
-		m.noteVoteNotEmitted(voteNotEmittedSuperseded)
-		return
+	return localVoteCandidate{
+		key:        votingKey,
+		member:     member,
+		generation: votingGeneration,
+		pool:       votingPool,
+	}, true
+}
+
+// keySetVoteCandidates matches each configured key against the committee's
+// resolved voting keys. A key votes at the smallest seat that holds it and a
+// key that holds none is skipped, so only the currently registered key of a
+// rotation pair finds a seat. Each seat is returned at most once.
+func (m *VoteManager) keySetVoteCandidates(
+	entry *epochEntry,
+	keySet []*VoteSigningKey,
+	generation uint64,
+) []localVoteCandidate {
+	if len(keySet) == 0 {
+		return nil
 	}
+	seats := make(map[string]CommitteeMember, len(entry.committee.Members))
+	for _, member := range entry.committee.Members {
+		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+		if !ok || pub == nil {
+			continue
+		}
+		raw := pub.Bytes()
+		id := string(raw[:])
+		if held, dup := seats[id]; dup && held.VoterId <= member.VoterId {
+			continue
+		}
+		seats[id] = member
+	}
+	voted := make(map[uint64]struct{}, len(keySet))
+	var candidates []localVoteCandidate
+	for _, key := range keySet {
+		member, ok := seats[string(key.PublicKeyBytes())]
+		if !ok {
+			continue
+		}
+		if _, dup := voted[member.VoterId]; dup {
+			continue
+		}
+		voted[member.VoterId] = struct{}{}
+		candidates = append(candidates, localVoteCandidate{
+			key:        key,
+			member:     member,
+			keySet:     true,
+			generation: generation,
+		})
+	}
+	return candidates
+}
+
+// signAndInsertLocalVote signs, commits and publishes one local vote. The
+// caller holds localEmissionMu.
+func (m *VoteManager) signAndInsertLocalVote(
+	candidate localVoteCandidate,
+	entry *epochEntry,
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+	lifecycle uint64,
+	deadline time.Time,
+) {
+	voterId := candidate.member.VoterId
 	msg := PrototypeVoteMessageBytes(rbHash)
-	sig, err := m.signVote(votingKey, msg)
+	sig, err := m.signVote(candidate.key, msg)
 	if err != nil {
 		m.noteVoteNotEmitted(voteNotEmittedSigningFailed)
 		m.logger.Error(
@@ -3162,15 +3388,16 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	}
 	m.prototypeEmissionMu.Lock()
 	snapshot := &votingConfigurationSnapshot{
-		generation: votingGeneration,
-		pool:       votingPool,
-		key:        votingKey,
+		generation: candidate.generation,
+		pool:       candidate.pool,
+		key:        candidate.key,
+		keySet:     candidate.keySet,
 		lifecycle:  lifecycle,
 		deadline:   deadline,
 	}
 	inserted := m.insertVote(
-		"", vote, record.epoch, committee, member, true, entry.tau, rbHash,
-		snapshot,
+		"", vote, record.epoch, entry.committee, candidate.member, true,
+		entry.tau, rbHash, snapshot,
 	)
 	if inserted {
 		if m.metrics != nil {
@@ -3694,6 +3921,51 @@ func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 	m.observeIssuedAnnouncement(
 		header.SlotNumber(), rbHash, ebHash, issuer, 0, m.now(),
 	)
+}
+
+// AnnouncementVotes reports the votes collected so far for the endorser block
+// announced by the ranking block rbHash at slot, measured against the
+// committee and quorum threshold of the epoch the announcement was made in.
+// An error means that committee is unavailable, and the outcome of the
+// announcement is then unknown rather than empty.
+func (m *VoteManager) AnnouncementVotes(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+) (AnnouncementVotes, error) {
+	epoch, err := m.epochProvider.EpochForSlot(slot)
+	if err != nil {
+		return AnnouncementVotes{}, fmt.Errorf(
+			"resolve announcing ranking block epoch: %w", err,
+		)
+	}
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return AnnouncementVotes{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	votes := AnnouncementVotes{
+		TotalActiveStake: entry.committee.TotalActiveStake,
+		Threshold:        new(big.Rat).Set(entry.tau),
+	}
+	// Legacy slot-plus-EB-hash votes are tallied under a zero announcing
+	// hash. A network votes with one scheme, so the larger tally is the
+	// announcement's, never their sum.
+	for _, announcing := range []lcommon.Blake2b256{
+		rbHash, {},
+	} {
+		if tally, ok := m.tallies[tallyKey{
+			slotNo:           slot,
+			ebHash:           ebHash,
+			announcingRbHash: announcing,
+		}]; ok {
+			votes.VerifiedStake = max(
+				votes.VerifiedStake, tally.verifiedStake,
+			)
+		}
+	}
+	return votes, nil
 }
 
 // ObserveAnnouncement records the ranking-block identity used by current

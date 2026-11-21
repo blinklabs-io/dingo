@@ -18,6 +18,8 @@ import (
 	"context"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -34,14 +36,14 @@ import (
 // restored the remaining account fields.
 func (ls *LedgerState) recomputeAccountExpirationsAfterRollback(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rollbackSlot uint64,
 	affectedRefs []models.StakeCredentialRef,
 ) error {
 	return database.RecomputeAccountExpirationsAfterTruncate(
 		ctx,
 		ls.db,
-		txn,
+		dbadapter.Unwrap(txn),
 		ls.config.DelegatorInactivityEnabled,
 		ls.config.DelegatorInactivity,
 		rollbackSlot,

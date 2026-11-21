@@ -64,29 +64,13 @@ func serveRun(
 		return err
 	}
 
-	// Historical metadata backfill is only needed for API mode.
-	// API mode rebuilds any pending deferred indexes at the end of
-	// resumeBackfill; Core mode has no backfill step, so it falls
-	// through to the explicit repair below. Uses effectiveStorageMode,
-	// not the raw configured value, so this choice agrees with the mode
-	// openConfiguredDatabase actually opened above and the mode node.Run
-	// is about to run with (see effectiveStorageMode's doc comment).
-	if effectiveStorageMode(cfg).IsAPI() {
-		if err := resumeBackfill(
-			cmd.Context(), cfg, logger,
-		); err != nil {
-			return fmt.Errorf("backfill resume failed: %w", err)
-		}
-	} else {
-		// Core mode: if a Mithril sync interrupted between drop
-		// and rebuild, repair before exposing the node so
-		// secondary-index-backed queries return correct
-		// cardinalities.
-		if err := repairDeferredIndexes(
-			cmd.Context(), cfg, logger,
-		); err != nil {
-			return fmt.Errorf("deferred-index repair failed: %w", err)
-		}
+	// A Mithril sync interrupted between dropping the deferred indexes and
+	// rebuilding them leaves them missing; repair before exposing the node so
+	// secondary-index-backed queries return correct cardinalities.
+	if err := repairDeferredIndexes(
+		cmd.Context(), cfg, logger,
+	); err != nil {
+		return fmt.Errorf("deferred-index repair failed: %w", err)
 	}
 
 	// Run node. The node runs Mithril catch-up itself under mithril.enabled;
@@ -94,6 +78,7 @@ func serveRun(
 	if err := node.Run(
 		cmd.Context(), cfg, logger,
 		dingo.WithMithrilCatchUp(nodemithril.New),
+		dingo.WithMithrilLedgerReimport(nodemithril.NewReimporter),
 	); err != nil {
 		return err
 	}
@@ -103,8 +88,11 @@ func serveRun(
 // checkSyncState refuses to serve a database a manual sync left incomplete.
 // An empty sync_status passes in every mode, an empty database included:
 // with mithril.enabled the node then syncs it from Mithril or Ouroboros
-// itself. So does the backfill status, which serve resumes, an interrupted
-// reward-state repair, which serve finishes, and, in Mithril snapshot mode,
+// itself. So does the backfill status, which a store that left API mode
+// during a v0.94.2 metadata backfill still carries: a core store keeps no
+// history to backfill, and the migration refuses one that is still API. So do
+// an interrupted reward-state repair, which serve finishes, and, in Mithril
+// snapshot mode,
 // the node's own interrupted snapshot restore, which the node resumes. Any
 // other value is an interrupted `dingo sync` or `dingo mithril sync`, which
 // only that command can finish, so it refuses whatever mithril.enabled says.
@@ -147,10 +135,9 @@ func checkSyncState(
 	if val == "" || val == syncStatusBackfill {
 		// metadata_indexes_pending can still be set if a prior
 		// run dropped the deferred indexes and crashed before
-		// the rebuild. The repair is handled below (Core mode)
-		// or inside resumeBackfill (API mode) so the operator
-		// does not have to re-bootstrap just to recreate
-		// secondary indexes.
+		// the rebuild. serveRun repairs it so the operator does
+		// not have to re-bootstrap just to recreate secondary
+		// indexes.
 		return nil
 	}
 	pendingRepair, err := mithril.RewardStateRepairPending(db)
@@ -162,6 +149,14 @@ func checkSyncState(
 		return err
 	}
 	if val == syncStatusInProgress && pendingRepair && repairActive {
+		return nil
+	}
+	// The node runs its own ledger-state re-import again at start.
+	ownReimport, err := mithril.ReimportInterrupted(db)
+	if err != nil {
+		return err
+	}
+	if ownReimport {
 		return nil
 	}
 	// The node resumes its own snapshot restore, but only in the mode that
@@ -408,169 +403,14 @@ func repairDeferredIndexes(
 	return node.RepairDeferredIndexes(ctx, db, logger)
 }
 
-// resumeBackfill checks whether metadata backfill is needed and
-// runs it to completion before the node starts serving.
-func resumeBackfill(
-	ctx context.Context,
-	cfg *config.Config,
-	logger *slog.Logger,
-) error {
-	// Load Cardano node config for pparams and nonce
-	// computation during backfill.
-	cardanoConfigPath := cfg.CardanoConfig
-	network := cfg.Network
-	if cardanoConfigPath == "" {
-		if network == "" {
-			network = "preview"
-		}
-		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
-	}
-	nodeCfg, nodeCfgErr := cardano.LoadCardanoNodeConfigWithFallback(
-		cardanoConfigPath,
-		network,
-		cardano.EmbeddedConfigFS,
-	)
-	if nodeCfgErr != nil {
-		logger.Warn(
-			"could not load cardano node config, "+
-				"backfill will skip pparams seeding "+
-				"and nonce computation",
-			"component", "backfill",
-			"error", nodeCfgErr,
-		)
-	}
-
-	runtime, err := openConfiguredDatabase(
-		ctx, cfg, logger, cfg.DatabaseWorkers,
-	)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	db, runtimeErr := runtimeDatabase(runtime)
-	if runtimeErr != nil {
-		return runtimeErr
-	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		// Backfill writes through full transactions which heal a
-		// commit-timestamp mismatch as it makes progress, and
-		// node.Run will run a full recovery pass afterwards. So a
-		// recoverable mismatch should not block the resume.
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
-			return fmt.Errorf("opening database: %w", recoveryErr)
-		}
-		logger.Warn(
-			"backfill observed commit timestamp mismatch; "+
-				"continuing — backfill writes will heal it",
-			"component", "backfill",
-			"metadata_timestamp", cte.MetadataTimestamp,
-			"blob_timestamp", cte.BlobTimestamp,
-		)
-	}
-
-	bf := node.NewBackfill(db, nodeCfg, logger)
-	// This resumes whatever backfill checkpoint is pending, Mithril-originated
-	// or not, and checkMithrilInactivityCompat above only refuses to start when
-	// the gate is on AND the database was Mithril-bootstrapped -- it is a
-	// no-op otherwise. So cfg.DelegatorInactivityEnabled can genuinely be true
-	// here; this call is what makes the CIP-0163 witness write correct in that
-	// case, not a redundant belt-and-suspenders report.
-	bf.SetDelegatorInactivityEnabled(cfg.DelegatorInactivityEnabled)
-	if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
-		return fmt.Errorf(
-			"invalid BackfillBatchSize %d in SetBatchSize: %w",
-			cfg.BackfillBatchSize,
-			err,
-		)
-	}
-	needed, err := bf.NeedsBackfill()
-	if err != nil {
-		return fmt.Errorf("checking backfill state: %w", err)
-	}
-	if !needed {
-		// Still rebuild deferred indexes if a prior bulk-load
-		// run left them pending — the previous backfill may
-		// have completed but crashed before the critical rebuild
-		// ran. The lazy remainder is handled by background
-		// maintenance after the API starts.
-		if err := node.RepairCriticalDeferredIndexes(
-			ctx, db, logger,
-		); err != nil {
-			return err
-		}
-		if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
-			return err
-		}
-		return clearBackfillSyncStatus(db)
-	}
-
-	if err := node.RunPlannerStats(db, logger); err != nil {
-		return fmt.Errorf("running planner statistics before backfill: %w", err)
-	}
-
-	// Enable bulk-load optimizations for the backfill.
-	cleanup := node.WithBulkLoadPragmas(db, logger)
-	defer func() {
-		if err := cleanup(); err != nil {
-			logger.Error("failed to restore normal settings", "error", err)
-		}
-	}()
-
-	logger.Info(
-		"running metadata backfill",
-		"component", "backfill",
-	)
-	if err := bf.Run(ctx); err != nil {
-		return fmt.Errorf("backfill: %w", err)
-	}
-	// Rebuild critical deferred indexes before clearing sync_status so a
-	// crash between the two leaves both markers set and the next
-	// startup re-runs the rebuild.
-	if err := node.RepairCriticalDeferredIndexes(ctx, db, logger); err != nil {
-		return err
-	}
-	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
-		return err
-	}
-	if err := clearBackfillSyncStatus(db); err != nil {
-		return err
-	}
-	return nil
-}
-
-// effectiveStorageMode returns the storage mode this run will actually end
-// up with once internal/node.Run applies its own dev-mode override ("dev
-// mode always uses API storage for full transaction metadata"), so any
-// preflight step that opens the database before node.Run gets to run --
-// openConfiguredDatabase chief among them -- opens it in the same mode
-// node.Run will, rather than whatever was configured.
-//
-// Without this, a dev-mode config with storageMode: core (permitted through
-// by validate.go's dev-mode exemption for midnight.enabled, since dev mode
-// is documented to upgrade to API before the contradiction would matter)
-// would have this preflight open a database in core mode first. That
-// latches storage_mode="core" as a node settings gate, and storage_mode is
-// a LatchEnum that only ever moves api-to-core, never back -- so the very
-// next open, from node.Run in its already-upgraded api mode, would fail
-// enforcement against the gate this preflight just recorded.
-func effectiveStorageMode(cfg *config.Config) dingo.StorageMode {
-	mode := dingo.StorageMode(cfg.StorageMode)
-	// internal/node.Run normalizes an unset mode to core before it reaches
-	// WithStorageMode, so do the same here rather than returning "". The
-	// values happen to converge today only because database.New applies its
-	// own empty-to-core default, and leaning on that would leave this
-	// helper's contract -- return exactly what node.Run will open with --
-	// dependent on a third component's default staying put. storage_mode is
-	// a one-way latch, so a future divergence here is not the kind that
-	// merely looks untidy.
-	if mode == "" {
-		mode = dingo.StorageModeCore
-	}
-	if cfg.RunMode.IsDevMode() && !mode.IsAPI() {
-		return dingo.StorageModeAPI
-	}
-	return mode
+// effectiveStorageMode returns the storage mode of the consensus store, which
+// every preflight step that opens the database before node.Run must open it
+// in. The store is core in every run mode, dev mode included: API rows live in
+// the IndexerDB, which the node opens in API mode itself. storage_mode is a
+// latch that only moves api to core, so a preflight that opened the store as
+// api would be refused on the start after the node latched it as core.
+func effectiveStorageMode(*config.Config) dingo.StorageMode {
+	return dingo.StorageModeCore
 }
 
 func openConfiguredDatabase(
@@ -600,10 +440,7 @@ func openConfiguredDatabase(
 				nil, cfg.CardanoConfig, cfg.Network,
 			),
 		},
-		internalplugins.StorageSelections{
-			Blob:     cfg.Plugins.Storage.Blob,
-			Metadata: cfg.Plugins.Storage.Metadata,
-		},
+		internalplugins.ConfiguredStorageSelections(cfg),
 		internalplugins.StorageDependencies{
 			GenesisStakingEmpty: genesisStakingEmpty,
 			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
@@ -620,20 +457,6 @@ func runtimeDatabase(
 		return nil, errors.New("database runtime did not provide a database")
 	}
 	return runtime.Database, nil
-}
-
-func clearBackfillSyncStatus(db *database.Database) error {
-	status, err := db.GetSyncState("sync_status", nil)
-	if err != nil {
-		return fmt.Errorf("reading sync status: %w", err)
-	}
-	if status != syncStatusBackfill {
-		return nil
-	}
-	if err := db.DeleteSyncState("sync_status", nil); err != nil {
-		return fmt.Errorf("clearing backfill sync status: %w", err)
-	}
-	return nil
 }
 
 func serveCommand() *cobra.Command {

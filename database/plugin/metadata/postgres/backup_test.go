@@ -199,7 +199,7 @@ func TestBackupPostgresFailureDoesNotTouchDestination(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "backup.dump")
 	original := runPgDump
 	t.Cleanup(func() { runPgDump = original })
-	runPgDump = func(_ context.Context, _ []string, staged string) error {
+	runPgDump = func(_ context.Context, _ []string, staged string, _ []string) error {
 		require.NoError(t, os.WriteFile(staged, []byte("partial"), 0o600))
 		require.NoError(t, os.WriteFile(dst, []byte("concurrent"), 0o600))
 		return errors.New("simulated pg_dump failure")
@@ -208,6 +208,7 @@ func TestBackupPostgresFailureDoesNotTouchDestination(t *testing.T) {
 		context.Background(),
 		"postgres://alice@db.internal:5432/mydb",
 		dst,
+		pgScope{},
 	)
 	require.Error(t, err)
 	data, err := os.ReadFile(dst)
@@ -253,7 +254,7 @@ func TestBackupPostgresRejectsExistingDestination(t *testing.T) {
 	called := false
 	original := runPgDump
 	t.Cleanup(func() { runPgDump = original })
-	runPgDump = func(_ context.Context, _ []string, staged string) error {
+	runPgDump = func(_ context.Context, _ []string, staged string, _ []string) error {
 		called = true
 		return os.WriteFile(staged, []byte("new"), 0o600)
 	}
@@ -261,6 +262,7 @@ func TestBackupPostgresRejectsExistingDestination(t *testing.T) {
 		context.Background(),
 		"postgres://alice@db.internal:5432/mydb",
 		dst,
+		pgScope{},
 	)
 	require.Error(t, err)
 	require.False(

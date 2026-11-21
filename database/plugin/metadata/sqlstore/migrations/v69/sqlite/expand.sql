@@ -1,0 +1,4 @@
+-- No schema change. A database that has drained ledger-state families records
+-- them in the ledger_state_drained row of node_settings_gate and no longer
+-- holds the rows an earlier binary reads. Raising the schema version makes an
+-- earlier binary stop with ErrNewerSchema before it opens such a database.

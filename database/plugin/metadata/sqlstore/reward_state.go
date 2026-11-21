@@ -135,6 +135,172 @@ func (s *Store) GetRewardAdaPots(
 	}, nil
 }
 
+func (s *Store) SaveRewardLikelihoodState(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+	txn types.Txn,
+) error {
+	if state == nil {
+		return errors.New("save reward likelihood state: state is nil")
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			for _, pool := range pools {
+				if pool == nil {
+					return errors.New("save reward pool likelihood: pool is nil")
+				}
+				if pool.Epoch != state.Epoch {
+					return fmt.Errorf(
+						"save reward pool likelihood: pool epoch %d does not match state epoch %d",
+						pool.Epoch,
+						state.Epoch,
+					)
+				}
+			}
+			epoch, err := checkedInt64(state.Epoch)
+			if err != nil {
+				return err
+			}
+			capturedSlot, err := checkedInt64(state.CapturedSlot)
+			if err != nil {
+				return err
+			}
+			boundarySlot, err := checkedInt64(state.BoundarySlot)
+			if err != nil {
+				return err
+			}
+			id, err := q.SaveRewardLikelihoodState(
+				ctx,
+				sqlitequery.SaveRewardLikelihoodStateParams{
+					Epoch:        epoch,
+					RewardPot:    decimalUint64(state.RewardPot),
+					CapturedSlot: capturedSlot,
+					BoundarySlot: boundarySlot,
+					Complete:     state.Complete,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("save reward likelihood state: %w", err)
+			}
+			state.ID = uint(id)
+			if err := q.DeleteRewardPoolLikelihoodsForEpoch(ctx, epoch); err != nil {
+				return fmt.Errorf("replace reward pool likelihoods: %w", err)
+			}
+			for _, pool := range pools {
+				poolID, err := q.SaveRewardPoolLikelihood(
+					ctx,
+					sqlitequery.SaveRewardPoolLikelihoodParams{
+						Epoch:               epoch,
+						PoolKeyHash:         pool.PoolKeyHash,
+						LogWeights:          pool.LogWeights,
+						PerformanceEstimate: pool.PerformanceEstimate,
+						BoundarySlot:        boundarySlot,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("save reward pool likelihood: %w", err)
+				}
+				pool.ID = uint(poolID)
+			}
+			return nil
+		},
+	)
+}
+
+func rewardLikelihoodStateFromRow(
+	row sqlitequery.RewardLikelihoodState,
+) (*models.RewardLikelihoodState, error) {
+	rewardPot, err := parseUint64("reward_pot", row.RewardPot)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardLikelihoodState{
+		ID:           uint(row.ID),
+		Epoch:        uint64(row.Epoch),
+		RewardPot:    types.Uint64(rewardPot),
+		CapturedSlot: uint64(row.CapturedSlot),
+		BoundarySlot: uint64(row.BoundarySlot),
+		Complete:     row.Complete,
+	}, nil
+}
+
+func (s *Store) GetRewardLikelihoodStateBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.RewardLikelihoodState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.operationalQueries(db).
+		GetRewardLikelihoodStateBeforeEpoch(ctx, sqlEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward likelihood state before epoch: %w", err)
+	}
+	return rewardLikelihoodStateFromRow(row)
+}
+
+func (s *Store) GetRewardLikelihoodStateAtSlot(
+	slot uint64,
+	txn types.Txn,
+) (*models.RewardLikelihoodState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.operationalQueries(db).
+		GetRewardLikelihoodStateAtSlot(ctx, sqlSlot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward likelihood state at slot: %w", err)
+	}
+	return rewardLikelihoodStateFromRow(row)
+}
+
+func (s *Store) GetRewardPoolLikelihoods(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardPoolLikelihood, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).GetRewardPoolLikelihoods(ctx, sqlEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get reward pool likelihoods: %w", err)
+	}
+	ret := make([]*models.RewardPoolLikelihood, 0, len(rows))
+	for _, row := range rows {
+		ret = append(ret, &models.RewardPoolLikelihood{
+			ID:                  uint(row.ID),
+			Epoch:               uint64(row.Epoch),
+			PoolKeyHash:         row.PoolKeyHash,
+			LogWeights:          row.LogWeights,
+			PerformanceEstimate: row.PerformanceEstimate,
+		})
+	}
+	return ret, nil
+}
+
 func (s *Store) SaveRewardSnapshot(
 	snapshot *models.RewardSnapshot,
 	txn types.Txn,
@@ -291,6 +457,11 @@ func (s *Store) GetImportedPoolBlockCounts(
 	epoch uint64,
 	txn types.Txn,
 ) (map[string]uint64, uint64, bool, error) {
+	if err := s.refuseDrained(
+		"imported_epoch_block_total", "imported_pool_block_count",
+	); err != nil {
+		return nil, 0, false, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, false, err
@@ -406,6 +577,40 @@ func (s *Store) GetRewardSeedFailure(
 		return "", fmt.Errorf("get reward seed failure: %w", err)
 	}
 	return reason, nil
+}
+
+// GetRewardSeedFailureSlot returns the durable imported reward-basis failure
+// and the slot it was captured at, or an empty reason when none was recorded.
+func (s *Store) GetRewardSeedFailureSlot(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (string, uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", 0, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return "", 0, err
+	}
+	var reason string
+	var slot int64
+	err = db.QueryRowContext(ctx, `
+SELECT failure_reason, captured_slot
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?`, sqlEpoch, snapshotType,
+	).Scan(&reason, &slot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("get reward seed failure slot: %w", err)
+	}
+	if slot < 0 {
+		return "", 0, fmt.Errorf("reward seed failure slot %d is negative", slot)
+	}
+	return reason, uint64(slot), nil
 }
 
 func (s *Store) DeleteRewardSeedFailure(
@@ -1338,6 +1543,9 @@ func (s *Store) GetRewardAccountOutputsByCredential(
 	order string,
 	txn types.Txn,
 ) ([]*models.RewardAccountOutput, error) {
+	if err := s.refuseDrained("reward_account_output"); err != nil {
+		return nil, err
+	}
 	ret := make([]*models.RewardAccountOutput, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
@@ -1419,6 +1627,9 @@ func (s *Store) CountRewardAccountOutputsByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
+	if err := s.refuseDrained("reward_account_output"); err != nil {
+		return 0, err
+	}
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
@@ -1463,6 +1674,37 @@ func (s *Store) DeleteRewardStateAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	return s.deleteRewardStateAfterSlot(slot, types.RewardStateSkips{}, txn)
+}
+
+// DeleteRewardStateAfterSlotSkippingBlockCounts is DeleteRewardStateAfterSlot
+// without the delete of the imported pool block counts and epoch block
+// totals, for a database that drained them.
+func (s *Store) DeleteRewardStateAfterSlotSkippingBlockCounts(
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardStateAfterSlot(
+		slot, types.RewardStateSkips{BlockCounts: true}, txn,
+	)
+}
+
+// DeleteRewardStateAfterSlotSkipping is DeleteRewardStateAfterSlot without
+// the deletes of the tables skips names, for a database that drained them.
+func (s *Store) DeleteRewardStateAfterSlotSkipping(
+	slot uint64,
+	skips types.RewardStateSkips,
+	txn types.Txn,
+) error {
+	return s.deleteRewardStateAfterSlot(slot, skips, txn)
+}
+
+func (s *Store) deleteRewardStateAfterSlot(
+	slot uint64,
+	skips types.RewardStateSkips,
+	txn types.Txn,
+) error {
+	skipBlockCounts := skips.BlockCounts
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1471,65 +1713,81 @@ func (s *Store) DeleteRewardStateAfterSlot(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
-			if err := q.DeleteRewardAdaPotsAfterSlot(
-				ctx,
-				sqlSlot,
-			); err != nil {
-				return err
-			}
 			pair := sqlitequery.DeleteRewardSnapshotsAfterSlotParams{
 				CapturedSlot: sqlSlot,
 				BoundarySlot: sqlSlot,
 			}
-			if err := q.DeleteRewardSnapshotsAfterSlot(
-				ctx,
-				pair,
+			if !skips.Inputs {
+				if err := q.DeleteRewardAdaPotsAfterSlot(
+					ctx,
+					sqlSlot,
+				); err != nil {
+					return err
+				}
+				if err := q.DeleteRewardSnapshotsAfterSlot(
+					ctx,
+					pair,
+				); err != nil {
+					return err
+				}
+				if err := q.DeleteRewardSeedFailuresAfterSlot(
+					ctx,
+					sqlSlot,
+				); err != nil {
+					return err
+				}
+			}
+			if !skipBlockCounts {
+				if err := q.DeleteImportedPoolBlockCountsAfterSlot(
+					ctx,
+					sqlSlot,
+				); err != nil {
+					return err
+				}
+				if err := q.DeleteImportedEpochBlockTotalsAfterSlot(
+					ctx,
+					sqlSlot,
+				); err != nil {
+					return err
+				}
+			}
+			if !skips.Inputs {
+				if err := q.DeleteRewardPoolInputsAfterSlot(
+					ctx,
+					sqlitequery.DeleteRewardPoolInputsAfterSlotParams(pair),
+				); err != nil {
+					return err
+				}
+				if err := q.DeleteRewardStakeInputsAfterSlot(
+					ctx,
+					sqlitequery.DeleteRewardStakeInputsAfterSlotParams(pair),
+				); err != nil {
+					return err
+				}
+			}
+			if err := q.DeleteRewardLikelihoodStatesAfterSlot(
+				ctx, sqlSlot,
 			); err != nil {
 				return err
 			}
-			if err := q.DeleteRewardSeedFailuresAfterSlot(
-				ctx,
-				sqlSlot,
-			); err != nil {
-				return err
-			}
-			if err := q.DeleteImportedPoolBlockCountsAfterSlot(
-				ctx,
-				sqlSlot,
-			); err != nil {
-				return err
-			}
-			if err := q.DeleteImportedEpochBlockTotalsAfterSlot(
-				ctx,
-				sqlSlot,
-			); err != nil {
-				return err
-			}
-			if err := q.DeleteRewardPoolInputsAfterSlot(
-				ctx,
-				sqlitequery.DeleteRewardPoolInputsAfterSlotParams(pair),
-			); err != nil {
-				return err
-			}
-			if err := q.DeleteRewardStakeInputsAfterSlot(
-				ctx,
-				sqlitequery.DeleteRewardStakeInputsAfterSlotParams(pair),
-			); err != nil {
+			if err := q.DeleteOrphanRewardPoolLikelihoods(ctx); err != nil {
 				return err
 			}
 			// A reward output depends only on inputs captured at or before
 			// its captured slot, so a rollback that stays above that slot
 			// leaves it valid even before it is applied: its boundary slot is
 			// the future boundary that applies it.
-			if err := q.DeleteRewardPoolOutputsAfterSlot(
-				ctx, sqlSlot,
-			); err != nil {
-				return err
-			}
-			if err := q.DeleteRewardAccountOutputsAfterSlot(
-				ctx, sqlSlot,
-			); err != nil {
-				return err
+			if !skips.Outputs {
+				if err := q.DeleteRewardPoolOutputsAfterSlot(
+					ctx, sqlSlot,
+				); err != nil {
+					return err
+				}
+				if err := q.DeleteRewardAccountOutputsAfterSlot(
+					ctx, sqlSlot,
+				); err != nil {
+					return err
+				}
 			}
 			// Applying a round writes its reward pot into the row of its
 			// pots epoch, which sits below the rollback slot, and the round's
@@ -1537,11 +1795,17 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			// the row records belongs to a round no surviving state computed,
 			// and a row with a nonzero pot is what marks a round as
 			// precomputed. A round whose outputs survived keeps its pot.
-			if _, err := db.ExecContext(
-				ctx,
-				rewardPotWithoutOutputsResetQuery,
-			); err != nil {
-				return err
+			// The reset reads both the pots and the pool outputs.
+			if !skips.Inputs && !skips.Outputs {
+				if _, err := db.ExecContext(
+					ctx,
+					rewardPotWithoutOutputsResetQuery,
+				); err != nil {
+					return err
+				}
+			}
+			if skips.Outputs {
+				return nil
 			}
 			return s.deleteRewardCreditRoundsAfterSlot(ctx, db, slot)
 		},
@@ -1680,6 +1944,26 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 	if err := s.DeleteRewardStakeInputBeforeEpoch(ctx, epoch, txn); err != nil {
 		return err
 	}
+	if err := s.pruneRewardRowsBeforeEpoch(
+		ctx,
+		"reward_account_output",
+		rewardAccountOutputPrunePredicate,
+		epoch,
+		txn,
+	); err != nil {
+		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
+	}
+	return nil
+}
+
+// DeleteRewardAccountOutputsBeforeEpoch prunes reward_account_output below
+// epoch as DeleteRewardStateBeforeEpoch does, without touching
+// reward_stake_input, for a database that drained it.
+func (s *Store) DeleteRewardAccountOutputsBeforeEpoch(
+	ctx context.Context,
+	epoch uint64,
+	txn types.Txn,
+) error {
 	if err := s.pruneRewardRowsBeforeEpoch(
 		ctx,
 		"reward_account_output",

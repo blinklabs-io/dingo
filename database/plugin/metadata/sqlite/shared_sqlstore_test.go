@@ -604,6 +604,7 @@ func TestSharedSQLStoreDrepParity(t *testing.T) {
 		[]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(1, importedCredential),
 		},
+		98,
 	))
 	_, err = store.ClearDanglingDRepDelegations(99, nil)
 	require.NoError(t, err)

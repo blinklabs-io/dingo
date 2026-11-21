@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -377,6 +376,7 @@ func aheadChainBlock(
 		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = number
 	block.BlockHeader.Body.Slot = slot
@@ -440,7 +440,7 @@ func newAheadReplayEnvWith(
 	require.NoError(t, f.db.Transaction(t.Context(), true).Do(
 		func(txn *database.Txn) error {
 			if err := f.db.CreateUtxo(t.Context(), txn, &models.Utxo{
-				TxId: freeTxId, OutputIdx: 0, AddedSlot: 1,
+				TxId: freeTxId, OutputIdx: 0, AddedSlot: 1, Address: keyAddrBytes,
 			}); err != nil {
 				return err
 			}
@@ -509,6 +509,7 @@ func newAheadReplayEnvWith(
 	cfg := LedgerStateConfig{
 		Database:              f.db,
 		ChainManager:          cm,
+		UtxoSet:               NewMemLiveSetForTest(),
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                testLogger(),
 		PromRegistry:          prometheus.NewRegistry(),
@@ -519,6 +520,7 @@ func newAheadReplayEnvWith(
 	ls, err := NewLedgerState(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	setReplayTestLedgerOrigin(ls, eras.ConwayEraDesc, pp)
 	require.NoError(t, cm.SetLedger(ls))
 	ls.utxoPrefetchAheadAwaitReady = cfg.LedgerPrefetchAheadEnabled
@@ -549,11 +551,7 @@ func (e *aheadReplayEnv) state(t *testing.T) aheadReplayState {
 		refs = append(refs, tx.Hash().Bytes())
 	}
 	for _, id := range refs {
-		_, err := e.db.UtxoByRef(t.Context(), id, 0, nil)
-		if err != nil {
-			require.ErrorIs(t, err, types.ErrUtxoNotFound)
-		}
-		state.LiveUtxos[string(id)] = err == nil
+		state.LiveUtxos[string(id)] = outputLiveIn(t, e.ls, id, 0)
 	}
 	return state
 }

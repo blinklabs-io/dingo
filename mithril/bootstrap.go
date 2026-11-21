@@ -291,9 +291,9 @@ type BootstrapResult struct {
 	// AncillaryVerified reports that the ancillary tree's contents were checked
 	// against the signed ancillary manifest (a verified v2 bootstrap).
 	//
-	// The ledger-state import accepts a verified tree's state even when it is
-	// newer than the certified tip, and refuses a verified tree that yields no
-	// state at all.
+	// Only a verified tree contributes the immutable file after the certified
+	// tip to the ImmutableDB. Its ledger state is loaded at or below the last
+	// block the import stored, never above it.
 	AncillaryVerified bool
 	// CertificateVerified reports that the bootstrap was asked to verify the
 	// certificate chain, so a missing ancillary tree is a verification failure
@@ -685,35 +685,8 @@ func verifyCertificateChainAnchored(
 				cert.Hash,
 			)
 		}
-		if cert.ProtocolMessage.ComputeHash() != cert.SignedMessage {
-			return nil, fmt.Errorf(
-				"certificate %s signed_message mismatch",
-				currentHash,
-			)
-		}
-		expectedHash, err := cert.ComputeHash()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"computing certificate hash for %s: %w",
-				currentHash,
-				err,
-			)
-		}
-		if expectedHash != cert.Hash {
-			return nil, fmt.Errorf(
-				"certificate %s content hash mismatch",
-				currentHash,
-			)
-		}
-		currentEpoch, ok := cert.ProtocolMessage.MessageParts["current_epoch"]
-		expectedEpoch := strconv.FormatUint(cert.Epoch, 10)
-		if !ok || currentEpoch != expectedEpoch {
-			return nil, fmt.Errorf(
-				"certificate %s current_epoch mismatch: got %q, expected %s",
-				currentHash,
-				currentEpoch,
-				expectedEpoch,
-			)
+		if err := checkCertificateContent(cert); err != nil {
+			return nil, err
 		}
 		if mode == VerificationModeSTM {
 			if err := verifySTMCertificate(cert, budget); err != nil {
@@ -764,6 +737,43 @@ func verifyCertificateChainAnchored(
 	}
 }
 
+// checkCertificateContent checks what a certificate commits to on its own:
+// its signed message is the hash of its protocol message, its hash is the
+// hash of its content, and the protocol message names its epoch.
+func checkCertificateContent(cert *Certificate) error {
+	if cert.ProtocolMessage.ComputeHash() != cert.SignedMessage {
+		return fmt.Errorf(
+			"certificate %s signed_message mismatch",
+			cert.Hash,
+		)
+	}
+	expectedHash, err := cert.ComputeHash()
+	if err != nil {
+		return fmt.Errorf(
+			"computing certificate hash for %s: %w",
+			cert.Hash,
+			err,
+		)
+	}
+	if expectedHash != cert.Hash {
+		return fmt.Errorf(
+			"certificate %s content hash mismatch",
+			cert.Hash,
+		)
+	}
+	currentEpoch, ok := cert.ProtocolMessage.MessageParts["current_epoch"]
+	expectedEpoch := strconv.FormatUint(cert.Epoch, 10)
+	if !ok || currentEpoch != expectedEpoch {
+		return fmt.Errorf(
+			"certificate %s current_epoch mismatch: got %q, expected %s",
+			cert.Hash,
+			currentEpoch,
+			expectedEpoch,
+		)
+	}
+	return nil
+}
+
 // checkCertificateLink checks that parent may precede child in a chain: the
 // hashes link, the epochs are equal or adjacent, and the child's AVK and
 // protocol parameters are the parent's within an epoch, or the ones the parent
@@ -783,6 +793,16 @@ func checkCertificateLink(child, parent *Certificate) error {
 	if child.Epoch != parent.Epoch && child.Epoch != parent.Epoch+1 {
 		return fmt.Errorf(
 			"certificate chain missing epoch between child=%d and parent=%d",
+			child.Epoch,
+			parent.Epoch,
+		)
+	}
+	// Mithril's main branch, after release 2642.0, requires the certificate
+	// after genesis to be in the next epoch: the genesis certificate
+	// announces the next epoch's AVK, and only that epoch may use it.
+	if parent.IsGenesis() && child.Epoch != parent.Epoch+1 {
+		return fmt.Errorf(
+			"certificate chain epoch %d follows genesis epoch %d",
 			child.Epoch,
 			parent.Epoch,
 		)

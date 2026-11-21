@@ -29,6 +29,10 @@ type leiosMetrics struct {
 	//   merged_after_wait - closure arrived during the bounded wait
 	//   unresolved        - closure did not arrive; connection closed (not served)
 	certRbOutcomes *prometheus.CounterVec
+	// pinWalkFailures counts collection passes that stopped because the pin
+	// walk failed. A walk that keeps failing stops all collection of the
+	// Leios store, so a rising count needs attention.
+	pinWalkFailures prometheus.Counter
 	// certRbWaitSeconds records how long the server waited for a missing
 	// closure, labelled resolved (closure arrived), timeout (the wait window
 	// elapsed), or cancelled (the serving connection ended first).
@@ -43,6 +47,10 @@ type leiosMetrics struct {
 func (o *Ouroboros) initLeiosMetrics() {
 	factory := promauto.With(o.registerer)
 	o.leiosMetrics = &leiosMetrics{
+		pinWalkFailures: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_leios_pin_walk_failures_total",
+			Help: "Leios collection passes skipped because pinning certified endorser blocks failed",
+		}),
 		certRbOutcomes: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_leios_ntc_certrb_total",

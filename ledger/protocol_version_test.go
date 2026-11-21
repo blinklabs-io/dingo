@@ -656,6 +656,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: cfg,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

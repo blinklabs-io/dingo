@@ -8,6 +8,7 @@ GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name
 # Gather every Go module directory. Nested modules have their own go.mod and
 # are therefore outside the root module's ./..., so they need their own run.
 GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.claude' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+NESTED_GO_MODULE_DIRS=$(filter-out $(ROOT_DIR),$(GO_MODULE_DIRS))
 
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
@@ -92,6 +93,9 @@ uninstall: ## Remove installed binaries from ~/.local/bin
 mod-tidy: ## Run go mod tidy
 	# Needed to fetch new dependencies and add them to go.mod
 	go mod tidy
+	@for dir in $(NESTED_GO_MODULE_DIRS); do \
+		(cd $$dir && go mod tidy) || exit 1; \
+	done
 
 clean: ## Remove compiled binaries
 	rm -f $(BINARIES)
@@ -116,14 +120,15 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 
 # CI runs these same targets in the lint job.
 #
-# nilaway's live heap on this tree is about 12 GB, and without a limit its peak
-# passes the 16 GB of a hosted runner and the runner is killed. GOMEMLIMIT
-# makes the collector hold it near the floor at the cost of run time.
+# The analysis driver loads every package's test variants unless -test=false;
+# -exclude-test-files only filters diagnostics, and loading them takes the peak
+# past the 16 GB of a hosted runner. An unlimited run still peaks there without
+# them, so GOMEMLIMIT holds it near 11 GB.
 nilaway: export GOMEMLIMIT ?= 10GiB
 nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
+	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -test=false ./...
 
 modernize: ## Fail on modernize findings in hand-written packages
 	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_FLAGS) $(MODERNIZE_PACKAGES)
@@ -176,6 +181,10 @@ $(PROTOC):
 # per-package -timeout. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
 	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
+	@for dir in $(NESTED_GO_MODULE_DIRS); do \
+		echo "go test -race ./... ($$dir)"; \
+		(cd $$dir && go test -v -race -timeout 30m ./...) || exit 1; \
+	done
 
 test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
 	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .

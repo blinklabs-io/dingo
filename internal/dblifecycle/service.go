@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	"github.com/blinklabs-io/dingo/internal/version"
 )
 
@@ -72,6 +73,7 @@ type Service struct {
 	logger              *slog.Logger
 	destinationRegistry *lifecycle.DestinationRegistry
 	liveNode            LiveNode
+	rollbackFactory     IndexerRollbackFactory
 }
 
 // NewService creates a Service bound to cfg's database configuration
@@ -114,39 +116,12 @@ func (s *Service) SetLiveNode(n LiveNode) {
 func (s *Service) openDatabase(
 	ctx context.Context,
 ) (*internalplugins.DatabaseRuntime, error) {
-	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
-		nil, s.cfg.CardanoConfig, s.cfg.Network, s.cfg.NetworkMagic,
-	)
+	deps, err := s.storageDependencies()
 	if err != nil {
-		return nil, fmt.Errorf("loading cardano node config: %w", err)
+		return nil, err
 	}
 	runtime, err := internalplugins.OpenDatabase(
-		ctx,
-		&database.Config{
-			DataDir:        s.cfg.DatabasePath,
-			Logger:         s.logger,
-			StorageMode:    s.cfg.StorageMode,
-			Network:        s.cfg.Network,
-			NetworkMagic:   s.cfg.NetworkMagic,
-			StartEra:       string(s.cfg.StartEra),
-			BlobPlugin:     s.cfg.Plugins.Storage.Blob.Provider,
-			MetadataPlugin: s.cfg.Plugins.Storage.Metadata.Provider,
-			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
-				nil, s.cfg.CardanoConfig, s.cfg.Network,
-			),
-		},
-		internalplugins.StorageSelections{
-			Blob:     s.cfg.Plugins.Storage.Blob,
-			Metadata: s.cfg.Plugins.Storage.Metadata,
-		},
-		internalplugins.StorageDependencies{
-			GenesisStakingEmpty: genesisStakingEmpty,
-			DataDir:             s.cfg.DatabasePath,
-			StorageMode:         s.cfg.StorageMode,
-			MaxConnections:      s.cfg.DatabaseWorkers,
-			Logger:              s.logger,
-			TracingEnabled:      s.cfg.Tracing,
-		},
+		ctx, s.databaseConfig(), s.storageSelections(), deps,
 	)
 	if err != nil {
 		if runtime != nil {
@@ -180,6 +155,11 @@ func (s *Service) Snapshot(
 	if s.liveNode != nil {
 		return s.liveNode.Snapshot(ctx, destDir, name, description)
 	}
+	if s.cfg.SplitIndexer() {
+		if err := s.checkSplitSupported(); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+	}
 	db, err := s.openDatabase(ctx)
 	if err != nil {
 		return lifecycle.Manifest{}, err
@@ -195,7 +175,31 @@ func (s *Service) Snapshot(
 			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
 		),
 	)
-	return lifecycle.SnapshotToCloud(
+	setOpts, closeSet, err := SnapshotOptions(s.cfg.DatabasePath)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	defer closeSet() //nolint:errcheck // the set is read-only here
+	manifestOpts = append(manifestOpts, setOpts...)
+	var (
+		stagedIndexer string
+		indexerMeta   IndexerPayload
+	)
+	if s.cfg.SplitIndexer() {
+		// The IndexerDB first, so its tip is never past the ledger's.
+		var cleanup func()
+		stagedIndexer, indexerMeta, cleanup, err = s.captureIndexer(
+			ctx, db.Database,
+		)
+		if err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		defer cleanup()
+	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
+	}
+	manifest, err := lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
 		db.Database,
@@ -212,6 +216,7 @@ func (s *Service) Snapshot(
 		description,
 		manifestOpts...,
 	)
+	return manifest, err
 }
 
 // Restore populates the configured database's data directory from the
@@ -232,7 +237,7 @@ func (s *Service) Restore(
 	// config value against the manifest's always-defaulted recorded value
 	// would otherwise reject a perfectly compatible restore just because
 	// the caller's config.Config was never explicitly defaulted.
-	storageMode := s.cfg.StorageMode
+	storageMode := s.cfg.ConsensusStorageMode()
 	if storageMode == "" {
 		storageMode = types.StorageModeCore
 	}
@@ -250,6 +255,8 @@ func (s *Service) Restore(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
+
+	restoreStorage := s.RestoreStorageConfig()
 	manifest, err := lifecycle.RestoreValidated(
 		ctx,
 		host,
@@ -257,7 +264,8 @@ func (s *Service) Restore(
 		snapshotDir,
 		s.cfg.DatabasePath,
 		func(m lifecycle.Manifest) error {
-			if err := m.CheckCompatibility(
+			if err := restoreStorage.CheckCompatibility(
+				m,
 				s.cfg.Plugins.Storage.Blob.Provider,
 				s.cfg.Plugins.Storage.Metadata.Provider,
 				storageMode,
@@ -269,9 +277,10 @@ func (s *Service) Restore(
 					err,
 				)
 			}
+
 			return nil
 		},
-		s.RestoreStorageConfig(),
+		restoreStorage,
 		manifestOpts...,
 	)
 	if err != nil {
@@ -300,7 +309,7 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 	if s == nil || s.cfg == nil {
 		return lifecycle.RestoreStorageConfig{}
 	}
-	return lifecycle.RestoreStorageConfig{
+	restoreStorage := lifecycle.RestoreStorageConfig{
 		Blob:     s.cfg.Plugins.Storage.Blob.Config,
 		Metadata: s.cfg.Plugins.Storage.Metadata.Config,
 		Logger:   s.logger,
@@ -308,6 +317,19 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 			nil, s.cfg.CardanoConfig, s.cfg.Network,
 		),
 	}
+	if s.cfg.SplitIndexer() {
+		switch s.cfg.Plugins.Storage.Metadata.Provider {
+		case "sqlite":
+			restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
+				return storageadopt.AdoptStagedAPI(
+					ctx, *s.cfg, s.logger, nil, stagingDir,
+				)
+			}
+		case "postgres", "mysql":
+			restoreStorage.DeferLegacyServerAdoption = true
+		}
+	}
+	return restoreStorage
 }
 
 // intendedGateValues builds the subset of database/nodesettings.Gates that
@@ -330,6 +352,9 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 // dingo.
 func intendedGateValues(cfg *config.Config) nodesettings.Values {
 	values := make(nodesettings.Values, 7)
+	if cfg.SplitIndexer() {
+		values["indexer_layout"] = config.IndexerLayoutSplit
+	}
 	// A zero NetworkMagic means "not known yet" (the same convention
 	// database/commit_timestamp.go's phase1GateValues and
 	// internal/settingsresolve use), not a meaningful configured value of
@@ -396,11 +421,22 @@ func (s *Service) Truncate(
 		return s.liveNode.Truncate(ctx, target)
 	}
 
+	if s.cfg.SplitIndexer() && s.rollbackFactory == nil {
+		return 0, errors.New(
+			"truncate of an API node's database needs the IndexerDB rolled " +
+				"back first and this build wires no indexer writer",
+		)
+	}
 	db, err := s.openDatabase(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer db.Close(ctx)
+	setOpts, closeSet, err := TruncateOptions(s.cfg.DatabasePath)
+	if err != nil {
+		return 0, err
+	}
+	defer closeSet() //nolint:errcheck // the set is closed after its rollback committed
 
 	if pending, pendingErr := lifecycle.GetPendingTruncate(db.Database); pendingErr != nil {
 		return 0, pendingErr
@@ -412,12 +448,22 @@ func (s *Service) Truncate(
 			0,
 			s.cfg.DelegatorInactivityEnabled,
 			s.cfg.DelegatorInactivity,
+			setOpts...,
 		)
 	}
 
 	block, err := ResolveTarget(ctx, db.Database, target)
 	if err != nil {
 		return 0, err
+	}
+	// While the ledger still stores the blocks being removed, so the writer
+	// finds exact ancestors by parent links. A stop between the two steps
+	// leaves the IndexerDB at or below the ledger tip, which the writer
+	// heals.
+	if s.cfg.SplitIndexer() {
+		if err := s.rollbackIndexer(ctx, db.Database, block, setOpts...); err != nil {
+			return 0, err
+		}
 	}
 	return lifecycle.Truncate(
 		ctx,
@@ -426,6 +472,7 @@ func (s *Service) Truncate(
 		0,
 		s.cfg.DelegatorInactivityEnabled,
 		s.cfg.DelegatorInactivity,
+		setOpts...,
 	)
 }
 

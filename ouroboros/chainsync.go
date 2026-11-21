@@ -888,11 +888,20 @@ func (o *Ouroboros) chainsyncClientIntersectFound(
 	o.chainsyncReintersectMu.Lock()
 	run := o.chainsyncReintersecting[ctx.ConnectionId]
 	reintersecting := run != nil && run.client == ctx.Client && !run.settled
-	if reintersecting {
+	stale := reintersecting && run.absorbed
+	switch {
+	case stale:
+		// A resync arrived after the points this intersection answers may
+		// have been built, so the point may no longer be on the local chain.
+		// The run stays unsettled, which drops this session's replies as
+		// the old cursor's are, and re-intersects with fresh points.
+		run.absorbed = false
+		run.again = true
+	case reintersecting:
 		run.settled = true
 	}
 	o.chainsyncReintersectMu.Unlock()
-	if !reintersecting {
+	if !reintersecting || stale {
 		return nil
 	}
 	o.settleReintersectedCursor(ctx.ConnectionId, point)
@@ -2568,33 +2577,39 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			tip.BlockNumber,
 		) {
 			// A connection with a due or fired re-intersection is already
-			// being recycled; its in-flight headers must not take the shared
-			// window from another stale peer. A later-onset future-header
-			// timer withholds every header until it fires, so it is replaced.
+			// being recycled, so its in-flight headers stay withheld. A
+			// later-onset future-header timer is replaced by this immediate
+			// recovery. When another connection owns the shared recycle
+			// window, however, this header continues through verification and
+			// observation: the cooldown limits re-intersections, not candidate
+			// progress, and this may be a competing chain streaming forward
+			// from its negotiated intersection.
 			now := time.Now()
-			if o.headerResyncDueOrFired(ctx.ConnectionId, now) ||
-				!o.claimBehindTipRecycle(now) {
+			if o.headerResyncDueOrFired(ctx.ConnectionId, now) {
 				return nil
 			}
-			// The connection may already have left the connection manager,
-			// or another schedule may have won; neither recycles anything.
-			if !o.scheduleHeaderResync(
-				ctx.ConnectionId,
-				now,
-				event.ChainsyncResyncReasonBehindLocalTip,
-			) {
-				o.releaseBehindTipRecycle(now)
-				return nil
+			if o.claimBehindTipRecycle(now) {
+				// The connection may already have left the connection manager,
+				// or another schedule may have won. In either case no recovery
+				// owns this header, so it continues through normal admission.
+				if !o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					now,
+					event.ChainsyncResyncReasonBehindLocalTip,
+				) {
+					o.releaseBehindTipRecycle(now)
+				} else {
+					o.config.Logger.Debug(
+						"chainsync: cursor far behind the local tip",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"block_number", v.BlockNumber(),
+						"peer_tip_block_number", tip.BlockNumber,
+						"connection_id", ctx.ConnectionId.String(),
+					)
+					return nil
+				}
 			}
-			o.config.Logger.Debug(
-				"chainsync: cursor far behind the local tip",
-				"component", "ouroboros",
-				"slot", blockSlot,
-				"block_number", v.BlockNumber(),
-				"peer_tip_block_number", tip.BlockNumber,
-				"connection_id", ctx.ConnectionId.String(),
-			)
-			return nil
 		}
 		// Raw observer history does not seed an admitted candidate frontier.
 		// Starting above the applied suffix would leave a gap that cannot
@@ -4095,7 +4110,8 @@ func (o *Ouroboros) chainsyncCursorCondemned(
 	o.chainsyncReintersectMu.Lock()
 	defer o.chainsyncReintersectMu.Unlock()
 	run := o.chainsyncReintersecting[ctx.ConnectionId]
-	return run != nil && run.client == ctx.Client && !run.settled
+	return run != nil && run.client == ctx.Client && !run.settled &&
+		!run.preserveReplies
 }
 
 // chainsyncCursorEpoch counts connId's in-place re-intersects. A callback
@@ -4111,7 +4127,9 @@ func (o *Ouroboros) chainsyncCursorEpoch(
 
 // defaultChainsyncReintersectTimeout bounds an in-place re-intersect. A client
 // parked at the peer's tip drains only when the next block arrives, so the
-// bound must stay well below the MustReply timer the protocol enforces.
+// bound must stay well below the MustReply timer the protocol enforces. On a
+// connection the peer dialed it bounds only building the intersect points;
+// see reintersectWithWatchdog.
 const defaultChainsyncReintersectTimeout = 5 * time.Second
 
 // SubscribeChainsyncResync registers an EventBus subscriber that
@@ -4121,7 +4139,7 @@ const defaultChainsyncReintersectTimeout = 5 * time.Second
 // intersect points. Local authoritative
 // rollbacks additionally rewind tracked client cursors and attempt
 // ledger-side recovery before recycling affected connections as a
-// fallback.
+// fallback; an inbound connection is re-intersected in place instead.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.eventBus == nil {
 		return
@@ -4209,8 +4227,17 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				// accumulated and prevented recovery after reconnect.
 				// RecoverAfterLocalRollback already cleaned up blockfetch
 				// state, so there are no in-flight lookups to break.
+				//
+				// Closing an inbound connection also ends the session our
+				// server runs for the peer that dialed us, so a downstream
+				// follower loses us until it redials, and peer governance
+				// does not redial a peer it knows only from that connection.
+				// An inbound client is re-intersected in place instead, as
+				// the local cursor resyncs are, keeping the connection while
+				// its client waits for the peer's next block; a re-intersect
+				// that fails closes it as before.
 				o.config.Logger.Info(
-					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
+					"local rollback had no recoverable peer history, resyncing chainsync clients",
 					"component",
 					"ouroboros",
 					"rollback_slot",
@@ -4219,6 +4246,20 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					len(connIds),
 				)
 				for _, connId := range connIds {
+					// The peer may already have rolled its live protocol cursor
+					// back to the same point and started streaming the competing
+					// branch while ledger recovery was running. Re-intersecting
+					// that cursor condemns its pipelined descendants until the
+					// drain completes, which can take one block per outstanding
+					// AwaitReply. Keep the ordered stream that already continues
+					// from the authoritative rollback point instead.
+					if o.chainsyncState != nil &&
+						o.chainsyncState.ClientProtocolChainContains(connId, e.Point) {
+						continue
+					}
+					if o.localRollbackReintersectsInbound(ctx, connId, e.Reason) {
+						continue
+					}
 					if o.chainsyncState != nil {
 						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
@@ -4254,6 +4295,28 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			}
 		},
 	)
+}
+
+// localRollbackReintersectsInbound re-intersects connId's chainsync client in
+// place when the connection was dialed by the peer, and reports whether it did
+// so. A local rollback with no recoverable peer history otherwise closes the
+// connection so peer governance redials it from the new intersect points. On
+// an inbound connection the close also ends the session our server runs for
+// the peer that dialed us, and governance does not redial a peer it knows only
+// from that connection.
+func (o *Ouroboros) localRollbackReintersectsInbound(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if o.chainsyncState == nil {
+		return false
+	}
+	outbound, tracked := o.chainsyncState.ClientStartedAsOutbound(connId)
+	if !tracked || outbound {
+		return false
+	}
+	return o.startChainsyncReintersect(ctx, connId, reason)
 }
 
 // chainsyncResyncReintersects reports whether a re-sync reason is recovered by
@@ -4347,6 +4410,31 @@ type chainsyncReintersectRun struct {
 	// that arrives later is not absorbed by the run: the run has already
 	// trimmed the history and dropped the resync marker.
 	settled bool
+	// absorbed is set when a resync arrives while the run is unsettled. The
+	// run may already have built its intersect points, and a local rollback
+	// can remove a block among them, so the intersection the peer then picks
+	// is not settled: the run re-intersects again with fresh points.
+	absorbed bool
+	// again is set when the client found an intersection that was not
+	// settled because a resync had been absorbed; the run re-intersects.
+	again bool
+	// preserveReplies keeps validating the ordered replies already requested
+	// when a local verification-context change caused the re-intersection.
+	// Those descendants can resolve the deferred competing chain while the
+	// request window drains. Cursor-gap and rollback recoveries leave this
+	// false because their old replies no longer describe a usable cursor.
+	preserveReplies bool
+}
+
+func chainsyncReintersectPreservesReplies(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonHeaderValidationRecovery,
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+		event.ChainsyncResyncReasonForecastCorroborationRecovery:
+		return true
+	default:
+		return false
+	}
 }
 
 // startChainsyncReintersect re-intersects connId's chainsync client in the
@@ -4375,6 +4463,9 @@ func (o *Ouroboros) startChainsyncReintersect(
 	o.chainsyncReintersectMu.Lock()
 	if prev := o.chainsyncReintersecting[connId]; prev != nil &&
 		prev.client == client && !prev.settled {
+		prev.absorbed = true
+		prev.preserveReplies = prev.preserveReplies &&
+			chainsyncReintersectPreservesReplies(reason)
 		o.chainsyncReintersectMu.Unlock()
 		o.config.Logger.Debug(
 			"chainsync re-intersect already running",
@@ -4383,7 +4474,10 @@ func (o *Ouroboros) startChainsyncReintersect(
 		)
 		return true
 	}
-	run := &chainsyncReintersectRun{client: client}
+	run := &chainsyncReintersectRun{
+		client:          client,
+		preserveReplies: chainsyncReintersectPreservesReplies(reason),
+	}
 	o.chainsyncReintersecting[connId] = run
 	o.chainsyncReintersectMu.Unlock()
 	go func() {
@@ -4413,6 +4507,17 @@ func (o *Ouroboros) reintersectChainsyncClient(
 	point, err := o.reintersectWithWatchdog(ctx, connId, client)
 	if o.chainsyncReintersectReturnedHook != nil {
 		o.chainsyncReintersectReturnedHook()
+	}
+	for err == nil && o.takeChainsyncReintersectAgain(connId, client) {
+		o.config.Logger.Debug(
+			"chainsync re-intersect absorbed a resync, re-intersecting with fresh points",
+			"connection_id", connId.String(),
+			"reason", reason,
+		)
+		point, err = o.reintersectWithWatchdog(ctx, connId, client)
+		if o.chainsyncReintersectReturnedHook != nil {
+			o.chainsyncReintersectReturnedHook()
+		}
 	}
 	if err == nil {
 		// chainsyncClientIntersectFound has already trimmed the history and
@@ -4452,17 +4557,44 @@ func (o *Ouroboros) reintersectChainsyncClient(
 	o.closeConnectionForChainsyncResync(connId, reason)
 }
 
+// takeChainsyncReintersectAgain reports whether connId's running re-intersect
+// of client found an intersection it left unsettled because a resync was
+// absorbed meanwhile, and clears that mark: the caller re-intersects again.
+func (o *Ouroboros) takeChainsyncReintersectAgain(
+	connId ouroboros.ConnectionId,
+	client *ochainsync.Client,
+) bool {
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	run := o.chainsyncReintersecting[connId]
+	if run == nil || run.client != client || !run.again {
+		return false
+	}
+	run.again = false
+	return true
+}
+
 // reintersectWithWatchdog builds connId's intersect points and runs
-// Reintersect on client, returning its intersection point. Both steps are
-// bounded by chainsyncReintersectTimeout: a client parked in MustReply drains
-// only when the peer sends the next block, and the ledger read behind the
-// points can block. On expiry the abandoned call returns once the caller
+// Reintersect on client, returning its intersection point. Building the points
+// is bounded by chainsyncReintersectTimeout, since the ledger read behind them
+// can block. Reintersect is bounded by it too unless the peer dialed the
+// connection.
+//
+// Reintersect first drains every request already sent, and a client parked
+// at the peer's tip drains only when the peer sends its next block, which can
+// be minutes away. Closing an inbound connection also ends the session our
+// server runs for the peer, and peer governance does not redial it, so an
+// inbound re-intersect is left to the chainsync protocol's own state timers:
+// MustReply bounds a peer that never sends the block, and the intersect
+// timeout bounds its answer to FindIntersect. Either expiring closes the
+// connection. On a watchdog expiry the abandoned call returns once the caller
 // closes the connection.
 func (o *Ouroboros) reintersectWithWatchdog(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	client *ochainsync.Client,
 ) (ocommon.Point, error) {
+	boundReintersect := o.chainsyncReintersectBoundsDrain(connId)
 	opCtx, cancel := context.WithTimeout(ctx, o.chainsyncReintersectTimeout)
 	defer cancel()
 	type result struct {
@@ -4470,6 +4602,7 @@ func (o *Ouroboros) reintersectWithWatchdog(
 		err   error
 	}
 	done := make(chan result, 1)
+	pointsBuilt := make(chan struct{})
 	go func() {
 		points, err := o.buildDefaultChainsyncIntersectPoints(opCtx, connId)
 		if err != nil {
@@ -4481,18 +4614,46 @@ func (o *Ouroboros) reintersectWithWatchdog(
 			done <- result{err: opCtx.Err()}
 			return
 		}
+		close(pointsBuilt)
 		point, _, err := client.Reintersect(points)
 		done <- result{point: point, err: err}
 	}()
-	select {
-	case r := <-done:
-		return r.point, r.err
-	case <-opCtx.Done():
-		if ctx.Err() != nil {
+	watchdog := opCtx.Done()
+	for {
+		select {
+		case r := <-done:
+			return r.point, r.err
+		case <-ctx.Done():
 			return ocommon.Point{}, ctx.Err()
+		case <-watchdog:
+			if ctx.Err() != nil {
+				return ocommon.Point{}, ctx.Err()
+			}
+			if !boundReintersect {
+				select {
+				case <-pointsBuilt:
+					// Only the drain or the peer's answer is pending.
+					watchdog = nil
+					continue
+				default:
+				}
+			}
+			return ocommon.Point{}, errors.New("re-intersect timed out")
 		}
-		return ocommon.Point{}, errors.New("re-intersect timed out")
 	}
+}
+
+// chainsyncReintersectBoundsDrain reports whether the watchdog bounds connId's
+// Reintersect call as well as building its points. It does unless the chainsync
+// state tracks connId's client as started on a connection the peer dialed.
+func (o *Ouroboros) chainsyncReintersectBoundsDrain(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.chainsyncState == nil {
+		return true
+	}
+	outbound, tracked := o.chainsyncState.ClientStartedAsOutbound(connId)
+	return !tracked || outbound
 }
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(

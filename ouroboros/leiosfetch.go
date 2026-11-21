@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -134,25 +135,83 @@ func (o *Ouroboros) instrumentLeiosfetchBlockRangeRequest(
 	}
 }
 
-// leiosServingRefused reports whether point names an uncertified endorser
-// block behind the immutable point. The reference node garbage-collects such a
-// block with the volatile database, so it is answered as unknown even while
-// it is still cached or persisted. An unresolvable immutable point or
-// certification lookup refuses nothing: serving an extra block is harmless.
+// leiosServingRefused reports whether point names an endorser block the
+// reference node would have garbage-collected with its volatile database:
+// one behind the immutable point, or behind the Leios store's collection
+// watermark, that no certifying immutable ranking block has pinned. Such a
+// block is answered as unknown even while it is still cached or persisted.
+// The live immutable point leads the persisted watermark, which only moves
+// when the collection worker runs. An unresolvable immutable point or pin
+// lookup refuses nothing it cannot prove stale: serving an extra block is
+// harmless.
 func (o *Ouroboros) leiosServingRefused(point ocommon.Point) bool {
-	if o.leiosImmutableSlot == nil {
-		return false
-	}
-	immutableSlot, found, err := o.leiosImmutableSlot(context.Background())
-	if err != nil || !found || point.Slot >= immutableSlot {
-		return false
-	}
 	db := o.leiosDatabase()
 	if db == nil {
 		return false
 	}
-	certified, err := db.IsLeiosEBCertified(point.Slot, point.Hash)
-	return err == nil && !certified
+	bound, ok := o.leiosServingBound(db)
+	if !ok || point.Slot >= bound {
+		return false
+	}
+	pinned, err := db.IsLeiosEBPinned(point.Slot, point.Hash)
+	return err == nil && !pinned
+}
+
+// leiosServingBound is the slot below which an unpinned endorser block is
+// refused to peers. With the pin walk wired it is the smaller of the live
+// immutable slot and the pin watermark, the collector's own bound, raised to
+// the collection watermark: an endorser block between the watermark and the
+// immutable slot may be certified by a ranking block the walk has not reached,
+// so refusal never depends on how far the walk has got. Without a pin walk
+// nothing is ever pinned and the retention bound applies.
+func (o *Ouroboros) leiosServingBound(db *database.Database) (uint64, bool) {
+	if o.leiosPinAdvance == nil {
+		return o.leiosRetentionBound(db)
+	}
+	store, err := db.LeiosDB()
+	if err != nil {
+		return 0, false
+	}
+	wm, err := store.Watermarks()
+	if err != nil {
+		return 0, false
+	}
+	var (
+		bound uint64
+		known bool
+	)
+	if o.leiosImmutableSlot != nil && wm.PinnedThroughSet {
+		slot, found, err := o.leiosImmutableSlot(context.Background())
+		if err == nil && found {
+			bound, known = min(slot, wm.PinnedThrough.Slot), true
+		}
+	}
+	if wm.GCBefore > 0 {
+		bound, known = max(bound, wm.GCBefore), true
+	}
+	return bound, known
+}
+
+// leiosRetentionBound is the slot below which an unpinned endorser block is
+// stale: the larger of the live immutable slot and the store's collection
+// watermark. ok is false when neither is known.
+func (o *Ouroboros) leiosRetentionBound(db *database.Database) (uint64, bool) {
+	var (
+		bound uint64
+		known bool
+	)
+	if o.leiosImmutableSlot != nil {
+		slot, found, err := o.leiosImmutableSlot(context.Background())
+		if err == nil && found {
+			bound, known = slot, true
+		}
+	}
+	if store, err := db.LeiosDB(); err == nil {
+		if wm, err := store.Watermarks(); err == nil && wm.GCBefore > 0 {
+			bound, known = max(bound, wm.GCBefore), true
+		}
+	}
+	return bound, known
 }
 
 func (o *Ouroboros) leiosfetchServerBlockRequest(

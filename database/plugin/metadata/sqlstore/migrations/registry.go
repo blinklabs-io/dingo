@@ -103,10 +103,18 @@ const (
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 	datumHashIndexDropSchemaRelease                     = "datum-hash-duplicate-index-drop"
 	scriptHashIndexDropSchemaRelease                    = "script-hash-duplicate-index-drop"
+	governanceVoteTombstoneSchemaRelease                = "governance-vote-tombstone"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
+	poolRetirementEpochIndexSchemaRelease               = "pool-retirement-epoch-index"
+	poolCurrentStateSchemaRelease                       = "pool-current-state"
+	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
+	immutableDBSchemaRelease                            = "immutable-db"
+	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
+	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
+	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	scriptLockedSupplySchemaRelease                     = "script-locked-supply-aggregate"
 )
 
@@ -293,7 +301,15 @@ var schemaVersions = []struct {
 	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
 	{Version: 64, Name: epochStakesIndexSchemaRelease, Dir: "v64"},
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
-	{Version: 66, Name: scriptLockedSupplySchemaRelease, Dir: "v66"},
+	{Version: 66, Name: governanceVoteTombstoneSchemaRelease, Dir: "v66"},
+	{Version: 67, Name: poolCurrentStateSchemaRelease, Dir: "v67"},
+	{Version: 68, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v68"},
+	{Version: 69, Name: ledgerStateDrainSchemaRelease, Dir: "v69"},
+	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
+	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
+	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
+	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: scriptLockedSupplySchemaRelease, Dir: "v74"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -420,6 +436,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoSpentStakingIndexBackfill
 		}
+		if version.Name == utxoAddressOrderSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoAddressOrderBackfill
+		}
 		if version.Name == utxoTransactionIdentitySchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.BatchSize = utxoIdentityBatchSize
@@ -428,6 +448,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == poolRelayIPv6NetworkOrderSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = poolRelayIPv6NetworkOrderBackfill
+		}
+		if version.Name == poolCurrentStateSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.BatchSize = poolCurrentStateBatchPools
+			migration.Backfill = poolCurrentStateBackfill
 		}
 		if version.Name == scriptLockedSupplySchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2476,6 +2501,65 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		return BatchResult{}, fmt.Errorf("create %s: %w", name, err)
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// utxoAddressOrderBackfill copies each utxo_address row's page position from
+// its output and the application row of the producing transaction, in
+// utxo_id ranges. The cursor is the last utxo_id covered.
+func utxoAddressOrderBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse UTxO address order cursor: %w", err,
+			)
+		}
+		lastID = parsed
+	}
+	var upper sql.NullInt64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT MAX(utxo_id) FROM (
+    SELECT utxo_id FROM utxo_address
+    WHERE utxo_id > ? ORDER BY utxo_id LIMIT ?
+) AS page`), lastID, batch.Limit).Scan(&upper); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read UTxO address order range: %w", err,
+		)
+	}
+	if !upper.Valid {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE utxo_address SET
+    tx_id = (SELECT u.tx_id FROM utxo u WHERE u.id = utxo_address.utxo_id),
+    output_idx = (
+        SELECT u.output_idx FROM utxo u WHERE u.id = utxo_address.utxo_id
+    ),
+    slot = (
+        SELECT COALESCE(a.slot, u.added_slot)
+        FROM utxo u
+        LEFT JOIN applied_transaction a ON a.tx_id = u.tx_id
+        WHERE u.id = utxo_address.utxo_id
+    ),
+    block_index = (
+        SELECT COALESCE(a.block_index, 0)
+        FROM utxo u
+        LEFT JOIN applied_transaction a ON a.tx_id = u.tx_id
+        WHERE u.id = utxo_address.utxo_id
+    )
+WHERE utxo_id > ? AND utxo_id <= ?`), lastID, upper.Int64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("fill UTxO address order: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return BatchResult{
+		Cursor: strconv.FormatInt(upper.Int64, 10),
+		Rows:   rows,
+	}, nil
 }
 
 // scriptLockedSupplyBackfill seeds script_locked_supply with the sum the

@@ -200,11 +200,9 @@ func (n *Node) initMultiPool() error {
 // the block producer: the pools must be refused where only one is supported,
 // and the arbiter must read the ledger the forgers are about to use.
 func (n *Node) prepareMultiPool() error {
-	if n.producerPoolCount() > 1 &&
-		(n.config.leiosForgingEnabled() ||
-			n.config.leiosVoteSigningKeyFile != "") {
+	if n.producerPoolCount() > 1 && n.config.leiosForgingEnabled() {
 		return errors.New(
-			"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
+			"blockProducerPools lists more than one pool, which Leios forging does not support",
 		)
 	}
 	if err := n.initMultiPool(); err != nil {
@@ -547,6 +545,24 @@ func (o *ownForgedBlocks) RecordSlotBattle() {
 	if f != nil {
 		f.RecordSlotBattle()
 	}
+}
+
+// SlotBattleOutcome resolves, for the ledger, the forger that forged the block
+// of a battle: the pool whose slot tracker holds that hash for the slot. It
+// returns nil when none does.
+func (o *ownForgedBlocks) SlotBattleOutcome(
+	slot uint64,
+	localHash []byte,
+) func(won bool) {
+	o.mu.RLock()
+	forgers := o.forgers
+	o.mu.RUnlock()
+	for _, f := range forgers {
+		if settle := f.SlotBattleOutcome(slot, localHash); settle != nil {
+			return settle
+		}
+	}
+	return nil
 }
 
 // poolProducersReady reports every pool after the first that cannot forge,

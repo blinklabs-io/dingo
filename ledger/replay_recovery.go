@@ -1137,8 +1137,11 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	// Its over-K refusal is the one outcome that must not stop the descent:
 	// a recovery target deeper than the security parameter is precisely what
 	// this function windows, and every step is validated again on its own.
+	// A target below the immutable tip is joined to that over-K refusal when
+	// it is deeper than K, and no window reaches it, so it still stops here.
 	if err := ls.chain.ValidateRollback(context.Background(), point); err != nil &&
-		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) ||
+			errors.Is(err, database.ErrRollbackBelowImmutableTip)) {
 		return false, fmt.Errorf("validate recovery target: %w", err)
 	}
 	window := uint64(securityParam) //nolint:gosec // positive, checked above
@@ -1403,8 +1406,8 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 // rewindPrimaryChainForRecovery is the windowed rewind every recovery path
 // takes, plus the one classification a pipeline restart cannot help with.
 //
-// A rewind the chain refuses for exceeding K leaves recovery with no legal
-// target at all, so the caller's error would otherwise return to
+// A rewind the chain refuses for exceeding K, or for reaching below the
+// ImmutableDB tip, leaves recovery with no legal target at all, so the caller's error would otherwise return to
 // ledgerProcessBlocks as an ordinary retryable failure and be recomputed on
 // the next restart, forever. Once the refusal has repeated at an applied tip
 // that never moved, it is reported as errHaltLedgerPipeline: the node stops,
@@ -1469,7 +1472,8 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	)
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
-			!errors.Is(err, errRecoveryRewindNotConverging)) {
+			!errors.Is(err, errRecoveryRewindNotConverging) &&
+			!errors.Is(err, database.ErrRollbackBelowImmutableTip)) {
 		return committed, err
 	}
 	ls.RLock()
@@ -1479,7 +1483,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	if !exhausted {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
-				"recovery rewind refused for exceeding the security parameter; the primary chain has outrun the applied ledger tip",
+				"recovery rewind refused for exceeding the security parameter or reaching below the immutable tip",
 				"component",
 				"ledger",
 				"rewind_target_slot",
@@ -1512,7 +1516,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 			"error",
 			err,
 			"hint",
-			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
+			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows or removes blocks already in the ImmutableDB, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
 		)
 	}
 	return committed, fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
@@ -2542,7 +2546,7 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 		if scanned >= maxReplayRecoveryScanBlocks {
 			break
 		}
-		block, err := ls.db.BlockByIndex(blockIndex, nil)
+		block, err := ls.ledgerDB().BlockByIndex(blockIndex, nil)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				if blockIndex == database.BlockInitialIndex {
@@ -2636,11 +2640,9 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
 ) (*replayRecoveryResolvedProducer, bool, error) {
-	present, err := ls.db.UtxoExists(
-		context.Background(),
+	present, err := ls.utxoExists(
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
-		nil,
 	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return nil, false, fmt.Errorf(
@@ -2674,7 +2676,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			return nil, true, nil
 		}
 	}
-	producerTx, err := ls.db.GetTransactionByHash(
+	producerTx, err := ls.ledgerDB().GetTransactionByHash(
 		context.Background(),
 		pending.Input.Id().Bytes(),
 		nil,
@@ -2844,7 +2846,7 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	} else if ok && floorIndex < targetIndex {
 		targetIndex = floorIndex
 	}
-	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
+	anchorBlock, err := ls.ledgerDB().BlockByIndex(targetIndex, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// A pruned prefix can put the security-parameter target below

@@ -211,6 +211,9 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
+	if err := s.refuseDrained("stake_registration"); err != nil {
+		return nil, err
+	}
 	ret := []models.AccountRegistrationHistoryRow{}
 	if len(stakingKey) == 0 {
 		return ret, nil
@@ -259,7 +262,7 @@ func (s *Store) GetLatestAccountRegistrationAtOrBefore(
 	}
 	query, args := accountRegistrationHistoryQuery(credentialTag, stakingKey)
 	query = "SELECT added_slot, block_index, cert_index, tx_hash, action, " +
-		"deposit, tx_slot, block_hash FROM (" + query +
+		"deposit, tx_slot, block_hash, effective_slot FROM (" + query +
 		") registration_history WHERE added_slot <= ? " +
 		"ORDER BY added_slot DESC, block_index DESC, cert_index DESC, " +
 		"tx_hash DESC, action DESC LIMIT 1"
@@ -283,6 +286,7 @@ func scanAccountRegistrationHistoryRows(
 	for rows.Next() {
 		var row models.AccountRegistrationHistoryRow
 		var deposit sql.NullString
+		var effective uint64
 		if err := rows.Scan(
 			&row.AddedSlot,
 			&row.BlockIndex,
@@ -292,8 +296,12 @@ func scanAccountRegistrationHistoryRows(
 			&deposit,
 			&row.TxSlot,
 			&row.BlockHash,
+			&effective,
 		); err != nil {
 			return nil, err
+		}
+		if effective != row.AddedSlot {
+			row.EffectiveSlot = effective
 		}
 		var err error
 		row.Deposit, err = parseNullableUint64(
@@ -313,6 +321,9 @@ func (s *Store) CountAccountRegistrationHistoryByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
+	if err := s.refuseDrained("stake_registration"); err != nil {
+		return 0, err
+	}
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
@@ -338,6 +349,9 @@ func (s *Store) GetAccountWithdrawalHistoryByCredential(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountWithdrawalHistoryRow, error) {
+	if err := s.refuseDrained("account_reward_delta"); err != nil {
+		return nil, err
+	}
 	ret := make([]models.AccountWithdrawalHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
@@ -390,6 +404,9 @@ func (s *Store) CountAccountWithdrawalHistoryByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
+	if err := s.refuseDrained("account_reward_delta"); err != nil {
+		return 0, err
+	}
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
@@ -534,6 +551,133 @@ func (s *Store) AccountLastWitnessSlots(
 		}
 	}
 	return ret, nil
+}
+
+// IterateAccountWitnessSlots calls fn with every distinct (credential, slot)
+// AccountLastWitnessSlots takes the greatest slot of.
+func (s *Store) IterateAccountWitnessSlots(
+	txn types.Txn,
+	fn func(ref models.StakeCredentialRef, slot uint64) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	parts := make([]string, 0, len(accountWitnessTables)+2)
+	for _, table := range accountWitnessTables {
+		parts = append(parts,
+			"SELECT credential_tag, staking_key, added_slot FROM "+table)
+	}
+	parts = append(
+		parts,
+		"SELECT credential_tag, staking_key, added_slot FROM account_withdrawal_witness",
+		"SELECT credential_tag, staking_key, added_slot FROM account_reward_delta WHERE withdrawal = TRUE",
+	)
+	rows, err := db.QueryContext(ctx,
+		"SELECT DISTINCT credential_tag, staking_key, added_slot FROM ("+
+			strings.Join(parts, " UNION ALL ")+") witnesses")
+	if err != nil {
+		return fmt.Errorf("iterate account witness slots: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref models.StakeCredentialRef
+		var slot uint64
+		if err := rows.Scan(&ref.Tag, &ref.Key, &slot); err != nil {
+			return fmt.Errorf("iterate account witness slots: %w", err)
+		}
+		if err := fn(ref, slot); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateAccountWitnessEffectiveSlots calls fn with every distinct
+// (credential, applied slot, effective slot) witness. The effective slot is
+// the closure's context slot where the witness's transaction is a Leios
+// closure transaction, else the applied slot, as the witness events of
+// historicalExpirationSQL read it.
+func (s *Store) IterateAccountWitnessEffectiveSlots(
+	txn types.Txn,
+	fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	parts := make([]string, 0, len(accountWitnessTables)+2)
+	for _, table := range accountWitnessTables {
+		parts = append(parts, `
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs c ON c.transaction_id = lc.transaction_id WHERE c.id = witness.certificate_id), witness.added_slot) AS effective_slot
+FROM `+table+` witness`)
+	}
+	parts = append(parts, `
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS effective_slot
+FROM account_withdrawal_witness witness`, `
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS effective_slot
+FROM account_reward_delta witness WHERE witness.withdrawal = TRUE`)
+	rows, err := db.QueryContext(ctx,
+		"SELECT DISTINCT credential_tag, staking_key, added_slot, effective_slot FROM ("+
+			strings.Join(parts, " UNION ALL ")+") witnesses")
+	if err != nil {
+		return fmt.Errorf("iterate account witness effective slots: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref models.StakeCredentialRef
+		var slot, effective uint64
+		if err := rows.Scan(&ref.Tag, &ref.Key, &slot, &effective); err != nil {
+			return fmt.Errorf("iterate account witness effective slots: %w", err)
+		}
+		if err := fn(ref, slot, effective); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateAccountWithdrawalEffectiveSlots calls fn with every distinct
+// (credential, applied slot, effective slot) reward withdrawal whose
+// transaction is a Leios closure transaction with a context slot before the
+// slot it was applied at.
+func (s *Store) IterateAccountWithdrawalEffectiveSlots(
+	txn types.Txn,
+	fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT DISTINCT credential_tag, staking_key, added_slot, effective_slot FROM (
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot,
+       (SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash) AS effective_slot
+FROM account_withdrawal_witness witness
+UNION ALL
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot,
+       (SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash) AS effective_slot
+FROM account_reward_delta witness WHERE witness.withdrawal = TRUE
+) withdrawals
+WHERE effective_slot IS NOT NULL AND effective_slot <> added_slot`)
+	if err != nil {
+		return fmt.Errorf("iterate account withdrawal effective slots: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref models.StakeCredentialRef
+		var slot, effective uint64
+		if err := rows.Scan(&ref.Tag, &ref.Key, &slot, &effective); err != nil {
+			return fmt.Errorf("iterate account withdrawal effective slots: %w", err)
+		}
+		if err := fn(ref, slot, effective); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Store) AccountsWitnessedAfterSlot(
@@ -800,7 +944,8 @@ SELECT %[1]s.added_slot AS added_slot,
        ? AS action,
        %[2]s AS deposit,
        tx.slot AS tx_slot,
-       tx.block_hash AS block_hash
+       tx.block_hash AS block_hash,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), %[1]s.added_slot) AS effective_slot
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
 JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id

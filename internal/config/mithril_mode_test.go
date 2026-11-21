@@ -21,20 +21,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMithrilEnabledRequiresCore(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Mithril.Enabled = true
-	cfg.StorageMode = storageModeAPI
-	err := cfg.validate(RunModeServe, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mithril.enabled requires core storage mode")
-
-	cfg.StorageMode = storageModeCore
-	assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
-
-	// One-shot sync is not gated by the node-managed setting.
-	cfg.StorageMode = storageModeAPI
-	assert.NoError(t, cfg.validate(RunModeSync, minUnprivilegedPort))
+func TestMithrilEnabledSupportsServingStorageModes(t *testing.T) {
+	for _, storageMode := range []string{storageModeCore, storageModeAPI} {
+		t.Run(storageMode, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Mithril.Enabled = true
+			cfg.StorageMode = storageMode
+			assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+		})
+	}
 }
 
 func TestMithrilWindowValidation(t *testing.T) {

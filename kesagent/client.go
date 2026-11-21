@@ -68,6 +68,9 @@ var (
 	// ErrClosed is returned by every Client method once Close has been
 	// called.
 	ErrClosed = errors.New("kesagent: client closed")
+	// ErrAgentRefused wraps an agent's refusal to sign: it answered, so the
+	// session and the agent are working.
+	ErrAgentRefused = errors.New("kesagent: agent refused to sign")
 	// ErrWrongProtocol is returned when the agent's Hello does not report
 	// ProtocolID.
 	ErrWrongProtocol = errors.New("kesagent: unrecognized agent protocol")
@@ -818,10 +821,7 @@ func validateSignResponse(
 		)
 	}
 	if resp.Error != "" {
-		return fmt.Errorf(
-			"kesagent: agent refused to sign: %s",
-			resp.Error,
-		)
+		return fmt.Errorf("%w: %s", ErrAgentRefused, resp.Error)
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
 		return fmt.Errorf(

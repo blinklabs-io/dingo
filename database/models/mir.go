@@ -39,6 +39,8 @@ type MIREffect struct {
 	// ID is the move_instantaneous_rewards row ID. Ordering comes from the
 	// store query and this value is also the mir_id join key for reward rows.
 	ID uint
+	// AddedSlot is the slot of the block that carried the certificate.
+	AddedSlot uint64
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
 	Pot uint
 	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).

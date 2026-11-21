@@ -55,6 +55,7 @@ func fetchBlockWith(
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:                    discardLogger(),
 		LedgerState:               stub,
+		QueryDatabase:             stubQueryDB(stub),
 		MaxConcurrentBulkRequests: 1,
 	})
 	srv := &syncServiceServer{utxorpc: u}

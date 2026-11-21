@@ -22,8 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
@@ -139,14 +138,16 @@ func TestCachedReadPackedTransactionsKeepIndependentCapacity(t *testing.T) {
 	}
 }
 
-type countingBlobReads struct {
-	blob.BlobStore
+// countingLeiosReads counts the reads the benchmark makes of the Leios store,
+// where endorser blocks live.
+type countingLeiosReads struct {
+	leiosdb.Store
 	reads atomic.Int64
 }
 
-func (b *countingBlobReads) Get(txn types.Txn, key []byte) ([]byte, error) {
-	b.reads.Add(1)
-	return b.BlobStore.Get(txn, key)
+func (s *countingLeiosReads) Get(eb leiosdb.Ref) (leiosdb.Content, error) {
+	s.reads.Add(1)
+	return s.Store.Get(eb)
 }
 
 func TestRunBenchCachedReadsReduceActualStorageRequests(t *testing.T) {
@@ -163,8 +164,12 @@ func TestRunBenchCachedReadsReduceActualStorageRequests(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				counter := &countingBlobReads{BlobStore: db.Blob()}
-				db.SetBlobStore(counter)
+				base, err := db.LeiosDB()
+				if err != nil {
+					t.Fatal(err)
+				}
+				counter := &countingLeiosReads{Store: base}
+				db.SetLeiosDB(counter)
 				config := validTestConfig()
 				const peers = 5
 				config.downstreamPeers = peers
@@ -179,7 +184,7 @@ func TestRunBenchCachedReadsReduceActualStorageRequests(t *testing.T) {
 				}
 				if got := counter.reads.Load(); got != want {
 					t.Fatalf(
-						"cached=%v issued %d blob reads, want %d",
+						"cached=%v issued %d Leios store reads, want %d",
 						cached,
 						got,
 						want,

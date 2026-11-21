@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -40,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -837,9 +839,12 @@ func markTxParityScriptTxInvalid(
 	return stored, want
 }
 
+// txParityEpochLastSlot is the last slot of the epoch storeTxParityBlock
+// records around the fixture block.
+const txParityEpochLastSlot = 127999999
+
 // sampleStoredTxParityBlock writes the block to an API-mode database and
-// returns the epoch sample. The block's external inputs are seeded as bare
-// utxo rows, because the association writers only link rows that exist.
+// returns the epoch sample.
 func sampleStoredTxParityBlock(
 	t *testing.T,
 	blockCbor []byte,
@@ -853,6 +858,36 @@ func sampleStoredTxParityBlock(
 	require.NoError(t, err)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
+	storeTxParityBlock(t, db, db, blockCbor)
+
+	sample, err := source.GetEpochTransactionSample(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.NoError(t, err)
+
+	hashes, err := source.GetEpochTransactionHashes(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.NoError(t, err)
+	wantHashes := make([]string, len(sample))
+	for i, tx := range sample {
+		wantHashes[i] = tx.Hash
+	}
+	require.Equal(t, wantHashes, hashes)
+	return sample
+}
+
+// storeTxParityBlock stores the fixture block and its epoch in ledgerDB, as
+// the ledger does, and indexes its transactions into historyDB through the
+// production write path. The block's external inputs are seeded as bare utxo
+// rows, because the association writers only link rows that exist.
+func storeTxParityBlock(
+	t *testing.T,
+	ledgerDB, historyDB *database.Database,
+	blockCbor []byte,
+) {
+	t.Helper()
+	ctx := context.Background()
 
 	// The tampered invalid-transaction set no longer matches the header's
 	// body hash, which is not what this test is about.
@@ -865,19 +900,19 @@ func sampleStoredTxParityBlock(
 	hash, err := hex.DecodeString(txParityBlockHash)
 	require.NoError(t, err)
 
-	raw := sourceSQLDB(t, db)
-	_, err = raw.db.Exec(
+	_, err = sourceSQLDB(t, ledgerDB).db.Exec(
 		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots)
 		VALUES (3, 127000000, 6, 1000, 1000000)`,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, ledgerDB.BlockCreate(models.Block{
 		Slot: txParityBlockSlot, Hash: hash, Cbor: blockCbor,
 		Type:     ledger.BlockTypeConway,
 		Number:   1,
 		PrevHash: bytes.Repeat([]byte{0x09}, 32),
 	}, nil))
 
+	raw := sourceSQLDB(t, historyDB)
 	txs := block.Transactions()
 	known := make(map[string]struct{})
 	for _, tx := range txs {
@@ -909,30 +944,248 @@ func sampleStoredTxParityBlock(
 	).ComputeOffsets(blockCbor, block)
 	require.NoError(t, err)
 	point := ocommon.NewPoint(txParityBlockSlot, hash)
-	acc := db.NewValidatedBlockBatchAccumulator()
+	acc := historyDB.NewValidatedBlockBatchAccumulator()
 	require.NotNil(t, acc)
-	txn := db.Transaction(ctx, true)
+	txn := historyDB.Transaction(ctx, true)
 	for i, tx := range txs {
-		require.NoError(t, db.SetTransactionBatched(
+		require.NoError(t, historyDB.SetTransactionBatched(
 			ctx, tx, point, uint32(i), 0, nil, nil, offsets, acc, txn, 10,
 		))
 	}
-	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, historyDB.FlushBatch(acc, txn))
 	require.NoError(t, txn.Commit())
+}
 
-	sample, err := source.GetEpochTransactionSample(
+// TestDatabaseSourceTransactionSampleReadsTheIndexerDB composes the stores as
+// an API node does: a core-mode consensus database, which holds the epoch and
+// the block, and an IndexerDB over it, which holds the transaction history.
+// The sample must come from the IndexerDB, and only once its tip covers the
+// epoch.
+func TestDatabaseSourceTransactionSampleReadsTheIndexerDB(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	rawHex, err := os.ReadFile("testdata/tx_parity_preview_block.hex")
+	require.NoError(t, err)
+	blockCbor, err := hex.DecodeString(strings.TrimSpace(string(rawHex)))
+	require.NoError(t, err)
+	var recorded []KoiosTxInfoItem
+	rawJSON, err := os.ReadFile("testdata/tx_parity_preview_koios.json")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(rawJSON, &recorded))
+	koios := make(map[string]KoiosTxInfoItem, len(recorded))
+	for _, item := range recorded {
+		koios[item.TxHash] = item
+	}
+
+	consensus := newTestDatabaseSourceDB(t)
+	require.Equal(t, types.StorageModeCore, consensus.StorageMode())
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	storeTxParityBlock(t, consensus, indexerDB, blockCbor)
+	setIndexerTip := func(slot uint64) {
+		t.Helper()
+		require.NoError(t, indexerDB.SetTip(ochainsync.Tip{
+			Point: ocommon.NewPoint(slot, bytes.Repeat([]byte{0x0a}, 32)),
+		}, nil))
+	}
+
+	consensusOnly, err := NewDatabaseSource(consensus)
+	require.NoError(t, err)
+	sample, err := consensusOnly.GetEpochTransactionSample(
 		ctx, 3, EpochTransactionSampleSize,
 	)
 	require.NoError(t, err)
+	require.Empty(t, sample,
+		"the consensus database of an API node holds no history")
 
+	source, err := NewDatabaseSource(consensus)
+	require.NoError(t, err)
+	source = source.WithTransactionHistory(indexerDB)
+
+	// The block is indexed but the tip has not passed the epoch: a later
+	// read could return more, so neither phase may take this as the sample.
+	setIndexerTip(txParityBlockSlot)
+	_, err = source.GetEpochTransactionSample(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.ErrorIs(t, err, ErrTransactionHistoryPending)
+	_, err = source.GetEpochTransactionHashes(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.ErrorIs(t, err, ErrTransactionHistoryPending)
+
+	setIndexerTip(txParityEpochLastSlot + 1)
+	sample, err = source.GetEpochTransactionSample(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.NoError(t, err)
+	require.Len(t, sample, len(recorded))
+	require.Empty(t, CompareEpochTransactions(
+		"preview", 3, sample, koios, time.Now(),
+	))
 	hashes, err := source.GetEpochTransactionHashes(
 		ctx, 3, EpochTransactionSampleSize,
 	)
 	require.NoError(t, err)
-	wantHashes := make([]string, len(sample))
-	for i, tx := range sample {
-		wantHashes[i] = tx.Hash
+	require.Len(t, hashes, len(recorded))
+}
+
+// pendingHistoryStub reports ErrTransactionHistoryPending until ready is set.
+type pendingHistoryStub struct {
+	txSampleStub
+	ready atomic.Bool
+}
+
+func (s *pendingHistoryStub) GetEpochTransactionSample(
+	ctx context.Context, epoch uint64, limit int,
+) ([]DingoTransaction, error) {
+	if !s.ready.Load() {
+		return nil, ErrTransactionHistoryPending
 	}
-	require.Equal(t, wantHashes, hashes)
-	return sample
+	return s.txSampleStub.GetEpochTransactionSample(ctx, epoch, limit)
+}
+
+func (s *pendingHistoryStub) GetEpochTransactionHashes(
+	ctx context.Context, epoch uint64, limit int,
+) ([]string, error) {
+	if !s.ready.Load() {
+		return nil, ErrTransactionHistoryPending
+	}
+	return s.txSampleStub.GetEpochTransactionHashes(ctx, epoch, limit)
+}
+
+// TestObserverDefersAnEpochWhoseHistoryIsPending pins what a strict observer
+// does while the IndexerDB trails the closed epoch: no result, no fatal stop,
+// and a retry on the ERROR schedule, from the fetch and from the check.
+func TestObserverDefersAnEpochWhoseHistoryIsPending(t *testing.T) {
+	// Not t.Parallel: swaps the package-level transactionHistoryWait seam.
+	setTransactionHistoryWait(t, time.Millisecond, 0)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
+	})
+	base, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	source := &pendingHistoryStub{
+		txSampleStub: txSampleStub{RewardParitySource: base},
+	}
+	var fatal, results atomic.Int32
+	o, err := NewObserver(ObserverConfig{
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Source:                source,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Strict:                true,
+		Logger:                slog.New(slog.DiscardHandler),
+		FatalFunc:             func(error) { fatal.Add(1) },
+		OnResult:              func(*EpochCompareResult) { results.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+	ctx := context.Background()
+
+	err = o.fetchTransactionsIfNeeded(ctx, 5)
+	require.ErrorIs(t, err, ErrTransactionHistoryPending,
+		"a swallowed error would let the check run without the sample")
+	_, err = checkEpochTransactions(
+		ctx, o.cache, source, "preview", 5, time.Now(),
+	)
+	require.ErrorIs(t, err, ErrTransactionHistoryPending,
+		"a recorded dingo_db_error would stop strict validation")
+
+	o.processEpoch(ctx, 5)
+	o.processAccountEpoch(ctx, 5)
+	require.Equal(t, int32(0), fatal.Load())
+	require.Equal(t, int32(0), results.Load())
+	o.mu.Lock()
+	_, retried := o.retry[5]
+	_, accountsRetried := o.retryAccounts[5]
+	o.mu.Unlock()
+	require.True(t, retried)
+	require.True(t, accountsRetried)
+
+	require.False(t, o.deferForHistory(5, false, errors.New("other")))
+
+	// The epoch is sampled once the history covers it.
+	source.ready.Store(true)
+	require.NoError(t, o.fetchTransactionsIfNeeded(ctx, 5))
+}
+
+// setTransactionHistoryWait shortens the bounded wait for the IndexerDB to
+// reach a sampled epoch.
+func setTransactionHistoryWait(t *testing.T, poll, wait time.Duration) {
+	t.Helper()
+	prevPoll, prevWait := transactionHistoryPoll, transactionHistoryWait
+	transactionHistoryPoll, transactionHistoryWait = poll, wait
+	t.Cleanup(func() {
+		transactionHistoryPoll, transactionHistoryWait = prevPoll, prevWait
+	})
+}
+
+// laggingHistoryStub reports the history pending for its first few reads, as
+// an IndexerDB that is seconds behind at an epoch boundary does.
+type laggingHistoryStub struct {
+	txSampleStub
+	pending atomic.Int32
+}
+
+func (s *laggingHistoryStub) GetEpochTransactionSample(
+	ctx context.Context, epoch uint64, limit int,
+) ([]DingoTransaction, error) {
+	if s.pending.Add(-1) >= 0 {
+		return nil, ErrTransactionHistoryPending
+	}
+	return s.txSampleStub.GetEpochTransactionSample(ctx, epoch, limit)
+}
+
+func (s *laggingHistoryStub) GetEpochTransactionHashes(
+	ctx context.Context, epoch uint64, limit int,
+) ([]string, error) {
+	if s.pending.Add(-1) >= 0 {
+		return nil, ErrTransactionHistoryPending
+	}
+	return s.txSampleStub.GetEpochTransactionHashes(ctx, epoch, limit)
+}
+
+// An IndexerDB that catches up shortly after the boundary must not turn the
+// epoch into an ERROR retry: the fetch and the check wait for it and the
+// epoch is compared at once.
+func TestObserverWaitsForHistoryThatCatchesUp(t *testing.T) {
+	// Not t.Parallel: swaps the package-level transactionHistoryWait seam.
+	setTransactionHistoryWait(t, time.Millisecond, time.Minute)
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
+	})
+	base, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	source := &laggingHistoryStub{
+		txSampleStub: txSampleStub{RewardParitySource: base},
+	}
+	source.pending.Store(3)
+	var results atomic.Int32
+	o, err := NewObserver(ObserverConfig{
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Source:                source,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Strict:                true,
+		Logger:                slog.New(slog.DiscardHandler),
+		FatalFunc:             func(error) {},
+		OnResult:              func(*EpochCompareResult) { results.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	o.processEpoch(context.Background(), 5)
+	require.Equal(t, int32(1), results.Load(),
+		"the epoch must be compared once the history catches up, not deferred")
+	require.LessOrEqual(t, source.pending.Load(), int32(0),
+		"the check must have waited out the lag")
 }

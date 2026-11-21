@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -697,6 +698,7 @@ func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
 	}))
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           livesettest.New(),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

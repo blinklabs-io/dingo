@@ -33,7 +33,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/rewardlikelihood"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -87,6 +89,8 @@ type RawLedgerState struct {
 	PrevPParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
+	// NonMyopicData is EpochState's per-pool likelihood history and reward pot.
+	NonMyopicData cbor.RawMessage
 	// PoolDistrData is the deferred CBOR for the active consensus pool
 	// distribution in NewEpochState.pool-distr.
 	PoolDistrData cbor.RawMessage
@@ -441,10 +445,37 @@ type ImportConfig struct {
 	// rewardCreditFoldBatchSize overrides how many covered reward credits one
 	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
 	rewardCreditFoldBatchSize int
+	// UtxoSet is the live UTxO set, the only copy of it, and is required. It
+	// receives the snapshot's UTxO set: the import marks the database
+	// (database.UtxoSetOnlySyncKey), writes no utxo rows or output CBOR to
+	// the metadata and blob stores, and reads UTxO stake from the set. A
+	// Reconcile import needs a set that is also a FamilyLoader.
+	UtxoSet UtxoSetLoader
 }
 
-type deferredRewardLiveStakeImporter interface {
-	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
+// UtxoSetLoader is a live UTxO set an import loads, which serves the metadata
+// store's UTxO reads during the import.
+type UtxoSetLoader interface {
+	types.LiveUtxoSource
+	// LoadUtxoSet replaces the set with the outputs feed puts, as of point.
+	LoadUtxoSet(
+		point ocommon.Point,
+		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
+	) error
+}
+
+// CatchUpLoader is a live UTxO set that keeps the ledger-state families it
+// holds when a catch-up replaces its outputs, so a catch-up into a set that is
+// the only copy of the ledger state keeps the history older than the snapshot,
+// as a catch-up into SQL rows does.
+type CatchUpLoader interface {
+	UtxoSetLoader
+	// LoadUtxoSetCatchUp replaces the outputs with the ones feed puts, as of
+	// point, keeping the families.
+	LoadUtxoSetCatchUp(
+		point ocommon.Point,
+		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
+	) error
 }
 
 func requiredImportEraParams(
@@ -589,6 +620,38 @@ func ImportLedgerState(
 	if cfg.Database == nil {
 		return errors.New("database is nil")
 	}
+	drainedImport, finishDrained, err := beginDrainedImport(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if !drainedImport {
+		if err := cfg.Database.RefuseLedgerStateRewrite(ctx); err != nil {
+			return err
+		}
+	}
+	importDone := false
+	if finishDrained {
+		defer func() {
+			if !importDone {
+				cfg.Database.EndDrainedImport(ctx)
+			}
+		}()
+	}
+	if cfg.UtxoSet == nil {
+		return errors.New("ledger-state import requires the LedgerDB UTxO set")
+	}
+	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set mode: %w", err)
+	}
+	// A set that also holds the ledger-state families takes the catch-up: it
+	// replaces the whole set with the snapshot's outputs.
+	_, familyLoader := cfg.UtxoSet.(FamilyLoader)
+	if cfg.Reconcile && !familyLoader {
+		return errors.New(
+			"a catch-up import into a live-UTxO-set-only database is not supported",
+		)
+	}
 	if cfg.State == nil {
 		return errors.New("ledger state is nil")
 	}
@@ -599,6 +662,18 @@ func ImportLedgerState(
 		return fmt.Errorf("validating imported era history: %w", err)
 	}
 	slot := cfg.State.Tip.Slot
+	if drainedImport {
+		if reset, err := cfg.Database.PinDrainedImportPoint(
+			ctx, ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+		); err != nil {
+			return err
+		} else if reset {
+			cfg.Logger.Warn(
+				"a pending import of another snapshot left rows in the drained families; emptied them before importing",
+				"component", "ledgerstate", "slot", slot,
+			)
+		}
+	}
 	if cfg.Reconcile {
 		if err := validateReconcileImportConfig(cfg); err != nil {
 			return err
@@ -606,6 +681,13 @@ func ImportLedgerState(
 		// Accumulate the snapshot's live keys as the import phases run, so the
 		// post-import reconcile can mark every absent live row inactive.
 		cfg.reconcileKeys = newReconcileKeys()
+		if drainedImport {
+			mask, _, err := cfg.Database.DrainedImportPending(ctx)
+			if err != nil {
+				return err
+			}
+			cfg.reconcileKeys.drained = mask
+		}
 	}
 
 	progress := func(p ImportProgress) {
@@ -639,11 +721,6 @@ func ImportLedgerState(
 			)
 		}
 	}
-	rewardLiveStakeCursor, rewardLiveStakeStarted, err := models.RewardLiveStakeImportCursor(completedPhase)
-	if err != nil {
-		return fmt.Errorf("loading reward live stake checkpoint: %w", err)
-	}
-
 	cfg.Logger.Info(
 		"starting ledger state import",
 		"component", "ledgerstate",
@@ -664,6 +741,17 @@ func ImportLedgerState(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
 	}
+	// Marked only once the snapshot is known valid: the mark pins the
+	// database to the live UTxO set.
+	if err := markUtxoSetOnlyImport(
+		ctx, cfg, marked, completedPhase,
+	); err != nil {
+		return err
+	}
+	if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
+		return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
+	}
+	defer func() { _ = cfg.Database.SetLiveUtxoSource(nil) }()
 
 	// Delete post-anchor rollover residue so replay can re-trigger every
 	// crossed epoch boundary. See DATABASE.md for the cleanup's scope and
@@ -748,9 +836,7 @@ func ImportLedgerState(
 	) {
 		if cfg.State.UTxOTablePath != "" ||
 			cfg.State.UTxOData != nil {
-			if err := importUTxOs(
-				ctx, cfg, slot, progress,
-			); err != nil {
+			if err := importUTxOs(ctx, cfg, progress); err != nil {
 				return fmt.Errorf("importing UTxOs: %w", err)
 			}
 		}
@@ -1012,78 +1098,20 @@ func ImportLedgerState(
 				err,
 			)
 		}
-		if cfg.ImportKey != "" && !cfg.Reconcile {
-			err := cfg.Database.RebuildRewardLiveStakeResumable(
-				ctx,
-				slot,
-				rewardLiveStakeCursor,
-				rewardLiveStakeStarted,
-				func(
-					txn *database.Txn,
-					cursor []byte,
-					current int64,
-					total int64,
-					done bool,
-				) error {
-					phase := models.RewardLiveStakeImportCheckpoint(cursor)
-					if done {
-						phase = models.ImportPhaseRewardLiveStake
-					}
-					if err := cfg.Database.Metadata().SetImportCheckpoint(
-						&models.ImportCheckpoint{
-							ImportKey: cfg.ImportKey,
-							Phase:     phase,
-						},
-						txn.Metadata(),
-					); err != nil {
-						return fmt.Errorf(
-							"saving reward live stake checkpoint: %w",
-							err,
-						)
-					}
-					return nil
-				},
-				func(
-					_ []byte,
-					current int64,
-					total int64,
-					done bool,
-				) {
-					percent := float64(0)
-					if total > 0 {
-						percent = float64(current) / float64(total) * 100
-					} else if done {
-						percent = 100
-					}
-					// #nosec G115 -- progress counts cannot exceed addressable rows.
-					progress(ImportProgress{
-						Stage:       "reward_live_stake",
-						Current:     int(current),
-						Total:       int(total),
-						Percent:     percent,
-						Description: "rebuilding reward live stake",
-					})
-				},
-			)
-			if err != nil {
-				return fmt.Errorf("rebuilding reward live stake: %w", err)
-			}
-		} else {
-			if err := cfg.Database.RebuildRewardLiveStake(
-				ctx,
-				slot,
-				nil,
-			); err != nil {
-				return fmt.Errorf("rebuilding reward live stake: %w", err)
-			}
-			progress(ImportProgress{
-				Stage:       "reward_live_stake",
-				Current:     1,
-				Total:       1,
-				Percent:     100,
-				Description: "reward live stake rebuilt",
-			})
+		if err := cfg.Database.RebuildRewardLiveStake(
+			ctx,
+			slot,
+			nil,
+		); err != nil {
+			return fmt.Errorf("rebuilding reward live stake: %w", err)
 		}
+		progress(ImportProgress{
+			Stage:       "reward_live_stake",
+			Current:     1,
+			Total:       1,
+			Percent:     100,
+			Description: "reward live stake rebuilt",
+		})
 	} else {
 		cfg.Logger.Info(
 			"skipping reward live stake rebuild (already completed)",
@@ -1131,6 +1159,10 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	if finishDrained {
+		importDone = true
+		return FinishDrainedImport(ctx, cfg.Database, cfg.UtxoSet)
+	}
 	return nil
 }
 
@@ -1427,12 +1459,11 @@ func seedImportedEpochDonations(
 	return nil
 }
 
-// importUTxOs streams the UTxO map and imports in batches. Supports
+// importUTxOs loads the snapshot's UTxO map into the live UTxO set. Supports
 // both inline UTxO data and file-based UTxO-HD tvar format.
 func importUTxOs(
 	ctx context.Context,
 	cfg ImportConfig,
-	slot uint64,
 	progress func(ImportProgress),
 ) error {
 	source := "inline"
@@ -1445,100 +1476,17 @@ func importUTxOs(
 		"source", source,
 	)
 
-	store := cfg.Database.Metadata()
-	// The concrete store cannot change mid-import, so resolve the deferred
-	// importer once rather than per batch. Skipping the per-batch aggregate
-	// refresh is only sound because ImportLedgerState rebuilds
-	// reward_live_stake in full once every phase has been imported.
-	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
-	totalImported := 0
+	return loadUtxoSet(ctx, cfg, progress)
+}
+
+// parseImportUTxOs streams the snapshot's UTxOs to batchCallback in batches.
+func parseImportUTxOs(
+	cfg ImportConfig,
+	batchCallback func([]ParsedUTxO) error,
+	progress func(ImportProgress),
+) error {
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
-
-	batchCallback := func(batch []ParsedUTxO) error {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf(
-				"UTxO import cancelled: %w", ctx.Err(),
-			)
-		default:
-		}
-
-		utxos := make([]models.Utxo, 0, len(batch))
-		for i := range batch {
-			if cfg.reconcileKeys != nil {
-				if err := cfg.reconcileKeys.addUtxo(
-					batch[i].TxHash, batch[i].OutputIndex,
-				); err != nil {
-					return fmt.Errorf(
-						"recording reconcile UTxO key %x#%d: %w",
-						batch[i].TxHash,
-						batch[i].OutputIndex,
-						err,
-					)
-				}
-			}
-			utxos = append(
-				utxos,
-				UTxOToModel(&batch[i], slot),
-			)
-		}
-
-		txn := cfg.Database.Transaction(ctx, true)
-		defer txn.Release()
-
-		var err error
-		if supportsDeferredRefresh {
-			err = importer.ImportUtxosDeferredRewardLiveStakeRefresh(
-				utxos,
-				txn.Metadata(),
-			)
-		} else {
-			err = store.ImportUtxos(utxos, txn.Metadata())
-		}
-		if err != nil {
-			return fmt.Errorf(
-				"inserting UTxO batch: %w",
-				err,
-			)
-		}
-		blob := txn.BlobStore()
-		if blob == nil {
-			return errors.New("blob store not available during UTxO import")
-		}
-		for i := range batch {
-			if len(batch[i].Cbor) == 0 {
-				return fmt.Errorf(
-					"UTxO %x#%d has no serialized output",
-					batch[i].TxHash,
-					batch[i].OutputIndex,
-				)
-			}
-			if err := blob.SetUtxo(
-				txn.Blob(), batch[i].TxHash,
-				batch[i].OutputIndex, batch[i].Cbor,
-			); err != nil {
-				return fmt.Errorf(
-					"storing imported UTxO CBOR %x#%d: %w",
-					batch[i].TxHash,
-					batch[i].OutputIndex,
-					err,
-				)
-			}
-		}
-
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"committing UTxO batch: %w",
-				err,
-			)
-		}
-
-		totalImported += len(batch)
-
-		return nil
-	}
-
 	reportProgress := func(p UTxOParseProgress) {
 		now := time.Now()
 		if !lastProgressLog.IsZero() &&
@@ -1601,17 +1549,91 @@ func importUTxOs(
 			)
 		}
 	}
+	return nil
+}
 
-	if cfg.reconcileKeys != nil {
-		cfg.reconcileKeys.markUtxosComplete()
+// loadUtxoSet loads the snapshot's UTxOs into cfg.UtxoSet as of the
+// snapshot's tip.
+func loadUtxoSet(
+	ctx context.Context,
+	cfg ImportConfig,
+	progress func(ImportProgress),
+) error {
+	point := ocommon.Point{
+		Slot: cfg.State.Tip.Slot,
+		Hash: cfg.State.Tip.BlockHash,
 	}
-
+	total := 0
+	load := cfg.UtxoSet.LoadUtxoSet
+	if cl, ok := cfg.UtxoSet.(CatchUpLoader); ok && cfg.Reconcile {
+		load = cl.LoadUtxoSetCatchUp
+	}
+	if err := load(point,
+		func(put func([]byte, uint32, []byte) error) error {
+			return parseImportUTxOs(cfg, func(batch []ParsedUTxO) error {
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("UTxO import cancelled: %w", err)
+				}
+				for i := range batch {
+					if len(batch[i].Cbor) == 0 {
+						return fmt.Errorf(
+							"UTxO %x#%d has no serialized output",
+							batch[i].TxHash,
+							batch[i].OutputIndex,
+						)
+					}
+					if err := put(
+						batch[i].TxHash, batch[i].OutputIndex, batch[i].Cbor,
+					); err != nil {
+						return err
+					}
+				}
+				total += len(batch)
+				return nil
+			}, progress)
+		},
+	); err != nil {
+		return fmt.Errorf("loading the live UTxO set: %w", err)
+	}
 	cfg.Logger.Info(
-		"finished importing UTxOs",
+		"finished loading UTxOs into the live UTxO set",
 		"component", "ledgerstate",
-		"count", totalImported,
+		"count", total,
 	)
+	return nil
+}
 
+// markUtxoSetOnlyImport records that the database keeps its UTxO set only in
+// the live UTxO set, unless it already does. An unmarked database must hold
+// no live utxo rows and no earlier import's progress; a snapshot restore may
+// already have stored its blocks.
+func markUtxoSetOnlyImport(
+	ctx context.Context,
+	cfg ImportConfig,
+	marked string,
+	completedPhase string,
+) error {
+	if marked != "" {
+		return nil
+	}
+	errHasRows := errors.New("has utxo rows")
+	err := cfg.Database.IterateLiveUtxos(
+		ctx, nil,
+		func(*models.Utxo) error { return errHasRows },
+	)
+	if err != nil && !errors.Is(err, errHasRows) {
+		return fmt.Errorf("look for utxo rows: %w", err)
+	}
+	if err != nil || completedPhase != "" {
+		return errors.New(
+			"a live-UTxO-set-only import needs a database without a metadata UTxO set",
+		)
+	}
+	if err := cfg.Database.SetSyncState(
+		database.UtxoSetOnlySyncKey, "1", nil,
+	); err != nil {
+		return fmt.Errorf("record UTxO set mode: %w", err)
+	}
 	return nil
 }
 
@@ -2770,9 +2792,93 @@ func seedImportedRewardBasis(
 	); err != nil {
 		return err
 	}
+	if err := seedImportedNonMyopicState(
+		cfg,
+		epoch,
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return err
+	}
 	// Release stays with the defer for both outcomes: nilling the handle
 	// here to signal "committed" would skip it on the success path.
 	return txn.Commit()
+}
+
+func seedImportedNonMyopicState(
+	cfg ImportConfig,
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if len(cfg.State.NonMyopicData) == 0 {
+		return nil
+	}
+	items, err := decodeRawArray(cfg.State.NonMyopicData)
+	if err != nil {
+		return fmt.Errorf("decode imported non-myopic state: %w", err)
+	}
+	if len(items) != 2 {
+		return fmt.Errorf(
+			"decode imported non-myopic state: got %d fields, want 2",
+			len(items),
+		)
+	}
+	var likelihoods map[gledger.Blake2b224][]float32
+	if _, err := cbor.Decode(items[0], &likelihoods); err != nil {
+		return fmt.Errorf("decode imported pool likelihoods: %w", err)
+	}
+	var rewardPot uint64
+	if _, err := cbor.Decode(items[1], &rewardPot); err != nil {
+		return fmt.Errorf("decode imported non-myopic reward pot: %w", err)
+	}
+	pools := make([]*models.RewardPoolLikelihood, 0, len(likelihoods))
+	for key, values := range likelihoods {
+		if len(values) != rewardlikelihood.SampleCount {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: got %d samples, want %d",
+				key.Bytes(),
+				len(values),
+				rewardlikelihood.SampleCount,
+			)
+		}
+		encoded, err := rewardlikelihood.Encode(values)
+		if err != nil {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: %w",
+				key.Bytes(),
+				err,
+			)
+		}
+		performance, err := rewardlikelihood.Performance(values)
+		if err != nil {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: %w",
+				key.Bytes(),
+				err,
+			)
+		}
+		pools = append(pools, &models.RewardPoolLikelihood{
+			Epoch:               epoch,
+			PoolKeyHash:         key.Bytes(),
+			LogWeights:          encoded,
+			PerformanceEstimate: performance,
+		})
+	}
+	if err := cfg.Database.Metadata().SaveRewardLikelihoodState(
+		&models.RewardLikelihoodState{
+			Epoch:        epoch,
+			RewardPot:    types.Uint64(rewardPot),
+			CapturedSlot: slot,
+			BoundarySlot: slot,
+			Complete:     true,
+		},
+		pools,
+		txn,
+	); err != nil {
+		return fmt.Errorf("seed imported non-myopic state: %w", err)
+	}
+	return nil
 }
 
 func persistImportedSnapshot(

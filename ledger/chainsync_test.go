@@ -41,6 +41,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -6795,7 +6797,7 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	ls.rollbackTruncateAfterSlotFunc = func(
 		point ocommon.Point,
 		trustSlot uint64,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		close(truncateEntered)
 		<-allowTruncate
@@ -6803,7 +6805,7 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 			ls.lifecycleContext(),
 			point,
 			trustSlot,
-			txn,
+			dbadapter.Unwrap(txn),
 		)
 	}
 
@@ -11395,7 +11397,7 @@ func TestProcessChainIteratorRollbackRetainsIntentAfterMetadataTruncationFailure
 	fixture.ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -11538,7 +11540,7 @@ func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
 	fixture.ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -11683,6 +11685,7 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger: slog.New(
@@ -11803,6 +11806,10 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	return newChainsyncRollbackFixtureWithDB(t, newTestDB(t))
 }
 
+// chainsyncFixtureBlockCbor is a non-empty CBOR array: the immutable store
+// reads the header from the first element when it promotes a block.
+var chainsyncFixtureBlockCbor = []byte{0x81, 0x00}
+
 func newChainsyncRollbackFixtureWithDB(
 	t *testing.T,
 	db *database.Database,
@@ -11822,7 +11829,7 @@ func newChainsyncRollbackFixtureWithDB(
 		Hash:        ancestorHash,
 		BlockNumber: 1,
 		Type:        1,
-		Cbor:        []byte{0x80},
+		Cbor:        chainsyncFixtureBlockCbor,
 	}
 	currentBlock := chain.RawBlock{
 		Slot:        20,
@@ -11830,7 +11837,7 @@ func newChainsyncRollbackFixtureWithDB(
 		BlockNumber: 2,
 		Type:        1,
 		PrevHash:    ancestorHash,
-		Cbor:        []byte{0x80},
+		Cbor:        chainsyncFixtureBlockCbor,
 	}
 	require.NoError(
 		t,
@@ -11843,6 +11850,7 @@ func newChainsyncRollbackFixtureWithDB(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger: slog.New(
@@ -11897,6 +11905,7 @@ func newChainsyncRollbackFixtureWithDB(
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
 	}
 
+	ls.config.UtxoSet = newQuerySetHistory()
 	return &chainsyncRollbackFixture{
 		ls:            ls,
 		connId:        connId,
@@ -11936,7 +11945,7 @@ func putPrimaryChainOnForkBeyondK(
 			BlockNumber: fixture.ancestorTip.BlockNumber + blockOffset,
 			Type:        1,
 			PrevHash:    prevHash,
-			Cbor:        []byte{0x80},
+			Cbor:        chainsyncFixtureBlockCbor,
 		})
 		prevHash = hash
 	}
@@ -12506,7 +12515,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
 	var called bool
 	var got event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			called = true
 			got = evt
 			return nil
@@ -12537,7 +12546,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			// Read hooks must not write, but prove the savepoint covers it.
 			if err := db.Metadata().SaveRewardSnapshot(&models.RewardSnapshot{
 				Epoch:           evt.NewEpoch,
@@ -12546,7 +12555,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 				BoundarySlot:    1,
 				ProtocolVersion: 8,
 				Authoritative:   true,
-			}, txn.Metadata()); err != nil {
+			}, dbadapter.Unwrap(txn).Metadata()); err != nil {
 				return err
 			}
 			return errStakeHookBoom
@@ -13123,6 +13132,54 @@ func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
 	assert.Equal(t, 0, testChain.HeaderCount())
 	assert.Empty(t, ls.bufferedHeaderEvents[connId.String()])
 	assert.Empty(t, ls.peerHeaderHistory[connId.String()])
+}
+
+func TestHandleEventChainsyncIgnoresFailedBlockfetchPeer(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6000, 3001)
+	testChain := &chain.Chain{}
+	ls := &LedgerState{
+		chain: testChain,
+		bufferedHeaderEvents: map[string][]ChainsyncEvent{
+			connId.String(): {{ConnectionId: connId}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.markBlockfetchPeerFailedLocked(connId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	admitted := make(chan bool, 1)
+
+	ls.handleEventChainsync(event.NewEvent(
+		ChainsyncEventType,
+		ChainsyncEvent{
+			ConnectionId: connId,
+			Point:        ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
+			Tip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
+				BlockNumber: 2,
+			},
+			BlockHeader: mockHeader{
+				hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 2,
+				slot:        2,
+			},
+			PeerTipAdmission: func(ok bool) { admitted <- ok },
+		},
+	))
+
+	assert.False(t, testutil.RequireReceive(
+		t,
+		admitted,
+		time.Second,
+		"failed peer admission result",
+	))
+	assert.Zero(t, testChain.HeaderCount())
+	assert.Empty(t, ls.bufferedHeaderEvents[connId.String()])
 }
 
 func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
@@ -18518,7 +18575,7 @@ func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
 	var called bool
 	var got event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			called = true
 			got = evt
 			return nil
@@ -18556,7 +18613,7 @@ func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			// Write a row, then fail: the savepoint rollback must discard it.
 			if err := db.Metadata().SaveRewardSnapshot(&models.RewardSnapshot{
 				Epoch:           evt.NewEpoch,
@@ -18565,7 +18622,7 @@ func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
 				BoundarySlot:    1,
 				ProtocolVersion: 8,
 				Authoritative:   true,
-			}, txn.Metadata()); err != nil {
+			}, dbadapter.Unwrap(txn).Metadata()); err != nil {
 				return err
 			}
 			return errors.New("capture boom")
@@ -20682,6 +20739,7 @@ func newChainsyncRollbackFixtureWithBus(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -20721,6 +20779,7 @@ func newChainsyncRollbackFixtureWithBus(
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
+	ls.config.UtxoSet = newQuerySetHistory()
 	return &chainsyncRollbackFixture{
 		ls:          ls,
 		ancestorTip: ancestorTip,

@@ -44,6 +44,10 @@ const voteSigningKeySize = 32
 // text envelope plus surrounding whitespace fits comfortably in 1 KiB.
 const voteSigningKeyFileMaxSize = 1024
 
+// voteSigningKeysFileMaxSize bounds a key bundle file: a Cardano text
+// envelope is under 200 bytes, so this holds several thousand keys.
+const voteSigningKeysFileMaxSize = 1 << 20
+
 // voterPoolKeyHashSize is the Blake2b-224 pool key hash length.
 const voterPoolKeyHashSize = 28
 
@@ -100,7 +104,47 @@ func ParseVoteSigningKey(hexStr string) (*VoteSigningKey, error) {
 // The file must not be accessible beyond its owner (checked on the open
 // handle via keystore, which avoids TOCTOU races between check and read)
 // and must not exceed voteSigningKeyFileMaxSize.
+//
+// It loads exactly one key; LoadVoteSigningKeysFile accepts the reference's
+// JSON array of envelopes.
 func LoadVoteSigningKeyFile(path string) (*VoteSigningKey, error) {
+	data, err := readVoteSigningKeyFile(path, voteSigningKeyFileMaxSize)
+	if err != nil {
+		return nil, err
+	}
+	key, err := parseVoteSigningKeyFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("vote signing key file %q: %w", path, err)
+	}
+	return key, nil
+}
+
+// LoadVoteSigningKeysFile reads the Leios BLS signing keys of a block
+// producer. It accepts everything LoadVoteSigningKeyFile does and, like the
+// reference node's --shelley-bls-key, a JSON array of Cardano text envelopes:
+// a rotation pair keeps a pool voting across the epoch in which its
+// registered key changes, and a bundle of many pools' keys votes for every
+// seat they collectively hold. Keys are returned in file order. An empty
+// array yields no keys, which leaves voting disabled. One invalid element
+// fails the whole file.
+//
+// The file is subject to the same permission checks as a single key file but
+// may be up to voteSigningKeysFileMaxSize bytes, so large bundles load.
+func LoadVoteSigningKeysFile(path string) ([]*VoteSigningKey, error) {
+	data, err := readVoteSigningKeyFile(path, voteSigningKeysFileMaxSize)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := parseVoteSigningKeysFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("vote signing key file %q: %w", path, err)
+	}
+	return keys, nil
+}
+
+// readVoteSigningKeyFile reads a key file of at most limit bytes after the
+// permission check on the open handle.
+func readVoteSigningKeyFile(path string, limit int) ([]byte, error) {
 	f, err := keystore.OpenRegularFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open vote signing key file: %w", err)
@@ -111,22 +155,18 @@ func LoadVoteSigningKeyFile(path string) (*VoteSigningKey, error) {
 	}
 	// Read one byte past the limit so oversized files are rejected
 	// rather than silently truncated.
-	data, err := io.ReadAll(io.LimitReader(f, voteSigningKeyFileMaxSize+1))
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read vote signing key file: %w", err)
 	}
-	if len(data) > voteSigningKeyFileMaxSize {
+	if len(data) > limit {
 		return nil, fmt.Errorf(
 			"vote signing key file %q exceeds %d bytes",
 			path,
-			voteSigningKeyFileMaxSize,
+			limit,
 		)
 	}
-	key, err := parseVoteSigningKeyFile(data)
-	if err != nil {
-		return nil, fmt.Errorf("vote signing key file %q: %w", path, err)
-	}
-	return key, nil
+	return data, nil
 }
 
 type voteSigningKeyEnvelope struct {
@@ -144,6 +184,44 @@ func parseVoteSigningKeyFile(data []byte) (*VoteSigningKey, error) {
 	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
 		return nil, fmt.Errorf("decode Cardano signing key envelope: %w", err)
 	}
+	return voteSigningKeyFromEnvelope(envelope)
+}
+
+// parseVoteSigningKeysFile parses a key file holding a JSON array of Cardano
+// text envelopes, a single envelope, or the legacy raw hex scalar. Every
+// array element must be an envelope: a bare hex string inside the array is
+// rejected, and so is a null file, which is not an empty array.
+func parseVoteSigningKeysFile(data []byte) ([]*VoteSigningKey, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "[") {
+		key, err := parseVoteSigningKeyFile(data)
+		if err != nil {
+			return nil, err
+		}
+		return []*VoteSigningKey{key}, nil
+	}
+
+	var envelopes []voteSigningKeyEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &envelopes); err != nil {
+		return nil, fmt.Errorf(
+			"decode Cardano signing key envelope array: %w",
+			err,
+		)
+	}
+	keys := make([]*VoteSigningKey, 0, len(envelopes))
+	for i, envelope := range envelopes {
+		key, err := voteSigningKeyFromEnvelope(envelope)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", i, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func voteSigningKeyFromEnvelope(
+	envelope voteSigningKeyEnvelope,
+) (*VoteSigningKey, error) {
 	keyType := strings.ToLower(envelope.Type)
 	if !strings.Contains(keyType, "bls") &&
 		!strings.Contains(keyType, "leios") {

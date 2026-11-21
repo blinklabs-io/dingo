@@ -779,8 +779,9 @@ in upcoming forged blocks:
     in memory.
   - `mempool_bytes`: Bytes retained by buffered transactions (CBOR plus decoded
     outputs), the figure capacity and admission are measured against.
-  - `max_mempool_bytes`: Configured maximum memory pool capacity (default 1 MiB
-    in standard modes, 25 MiB in Leios).
+  - `max_mempool_bytes`: Maximum memory pool capacity currently in force
+    (default 1 MiB in standard modes; 25 MiB in Leios while the epoch's
+    committee can reach its quorum, 1 MiB until then).
   - `saturation_pct`: Real-time percentage saturation of the node's mempool
     buffer.
   - `transactions`: The first `limit` pending transactions (default 10, at

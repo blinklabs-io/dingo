@@ -174,6 +174,36 @@ func (ls *LedgerState) leiosPParamsForEpoch(
 	return dijkstraPParams, nil
 }
 
+// LeiosCertificationGap returns the number of slots that must pass between
+// the ranking block announcing an endorser block at announcingSlot and a block
+// that certifies it, under the protocol parameters of the announcing block's
+// epoch. An error means the node cannot tell, which is not a gap of zero.
+func (ls *LedgerState) LeiosCertificationGap(
+	announcingSlot uint64,
+) (uint64, error) {
+	snapshot, tip := ls.loadConsensusAndTipSnapshots()
+	if snapshot == nil {
+		return 0, errors.New("ledger state not yet published")
+	}
+	epoch, _, err := ls.leiosEpochsForSlots(
+		snapshot,
+		tip,
+		announcingSlot,
+		announcingSlot,
+	)
+	if err != nil {
+		return 0, err
+	}
+	pparams, err := ls.leiosPParamsForEpoch(snapshot, epoch)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve certification protocol parameters: %w",
+			err,
+		)
+	}
+	return leiosCertificationGapSlots(pparams, uint64(epoch.SlotLength))
+}
+
 // CheckLeiosCertificationTiming reports whether a ranking block at slot may
 // certify the endorser block announced by the ranking block at announcingSlot.
 // It returns nil when it may, errLeiosCertificateAcrossEpochBoundary when the

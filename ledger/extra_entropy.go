@@ -124,7 +124,7 @@ func (ls *LedgerState) epochExtraEntropyBase(
 	era = *eraDesc
 	var base lcommon.ProtocolParameters
 	if era.DecodePParamsFunc != nil {
-		stored, err := ls.db.GetPParams(
+		stored, err := ls.ledgerDB().GetPParams(
 			epochId, era.Id, era.DecodePParamsFunc, nil,
 		)
 		if err != nil {

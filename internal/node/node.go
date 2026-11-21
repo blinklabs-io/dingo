@@ -110,15 +110,59 @@ func waitForStop(
 	return &req, signaled, err
 }
 
+// logRepeatedShutdownSignals logs each of sigs received after shutdown has
+// begun. The command's signal.NotifyContext stays registered until the process
+// returns, so a repeated SIGINT or SIGTERM would otherwise vanish while a
+// storage close runs to completion; the signal does not interrupt that close.
+// The returned func stops the watcher.
+func logRepeatedShutdownSignals(
+	logger *slog.Logger,
+	sigs ...os.Signal,
+) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, sigs...)
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case sig := <-ch:
+				logger.Warn(
+					"shutdown already in progress; storage close runs to completion and is not interrupted by this signal, send SIGKILL to abandon it",
+					"signal",
+					sig.String(),
+				)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(ch)
+		close(done)
+		<-stopped
+	}
+}
+
+// requestedShutdownProgressInterval is how often runRequestedShutdown logs
+// that it is still waiting for shutdown to finish past the request deadline.
+const requestedShutdownProgressInterval = 10 * time.Second
+
 // runRequestedShutdown performs a stop or restart accepted over the remote
-// lifecycle service. The graceful shutdown is abandoned once req.Timeout
-// elapses so the request can never leave the process hanging, and a restart
-// re-executes the process even then.
+// lifecycle service. The request deadline marks the graceful shutdown as
+// overrun and reports it, but does not abandon it: shutdown's own deadline
+// already bounds everything except storage closes, which run to completion,
+// and exiting or re-executing before they finish would leave the store with an
+// unfinished close for the next process. A restart re-executes the process
+// once shutdown has returned.
 func runRequestedShutdown(
+	logger *slog.Logger,
 	req dingo.ShutdownRequest,
 	causalErr error,
 	shutdown func() error,
 	reExec func() error,
+	progressInterval time.Duration,
 ) error {
 	done := make(chan error, 1)
 	go func() { done <- shutdown() }()
@@ -126,11 +170,34 @@ func runRequestedShutdown(
 	if !req.Deadline.IsZero() {
 		remaining = max(time.Until(req.Deadline), 0)
 	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(remaining):
-		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	case <-timer.C:
+		overrun := fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+		logger.Warn(
+			"graceful shutdown exceeded the request deadline; waiting for storage close to finish",
+			"timeout",
+			req.Timeout,
+		)
+		start := time.Now()
+		ticker := time.NewTicker(progressInterval)
+		defer ticker.Stop()
+	wait:
+		for {
+			select {
+			case shutdownErr := <-done:
+				err = errors.Join(overrun, shutdownErr)
+				break wait
+			case <-ticker.C:
+				logger.Warn(
+					"still waiting for shutdown to finish",
+					"elapsed", time.Since(start).Round(time.Millisecond),
+				)
+			}
+		}
 	}
 	if !req.Restart {
 		return errors.Join(causalErr, err)
@@ -570,17 +637,13 @@ func Run(
 		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
 
-	// Validate storage mode
-	storageMode := dingo.StorageMode(cfg.StorageMode)
-	if storageMode == "" {
-		storageMode = dingo.StorageModeCore
+	storageMode, err := nodeStorageMode(cfg)
+	if err != nil {
+		return err
 	}
-	if !storageMode.Valid() {
-		return fmt.Errorf(
-			"invalid storage mode %q: must be %q or %q",
-			cfg.StorageMode,
-			dingo.StorageModeCore,
-			dingo.StorageModeAPI,
+	if cfg.SplitIndexer() {
+		logger.Info(
+			"API endpoints read the IndexerDB and answer 503 until it is ready",
 		)
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
@@ -588,15 +651,16 @@ func Run(
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
+	apiMode := storageMode.IsAPI()
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
-		"kupo", storageMode.IsAPI() && kupoPort > 0,
-		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"blockfrost", apiMode && blockfrostPort > 0,
+		"kupo", apiMode && kupoPort > 0,
+		"utxorpc", apiMode && utxorpcPort > 0,
+		"mesh", apiMode && meshPort > 0,
 		"mcp", mcpPort > 0,
-		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
-		"midnight_grpc", storageMode.IsAPI() &&
+		"midnight_indexing", cfg.Midnight.Enabled && apiMode,
+		"midnight_grpc", apiMode &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
@@ -715,6 +779,9 @@ func Run(
 
 	// Wait for signal, remote request or error
 	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	defer logRepeatedShutdownSignals(
+		logger, syscall.SIGINT, syscall.SIGTERM,
+	)()
 	shutdown := func() error { //nolint:contextcheck // bounded by shutdownTimeout
 		return gracefulShutdown(
 			logger,
@@ -731,7 +798,10 @@ func Run(
 			"restart", req.Restart,
 			"timeout", req.Timeout,
 		)
-		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+		return runRequestedShutdown(
+			logger, *req, err, shutdown, dingo.ReExec,
+			requestedShutdownProgressInterval,
+		)
 	}
 	if signaled {
 		logger.Info("signal received, initiating graceful shutdown")
@@ -787,6 +857,26 @@ func forgeEBCap(v *uint64, fallback uint64) uint64 {
 	return *v
 }
 
+// nodeStorageMode validates cfg's storage mode and returns it. In API mode the
+// node keeps the ledger's own store in core mode and holds API rows in the
+// IndexerDB, which it opens in API mode itself and serves the API endpoints
+// from.
+func nodeStorageMode(cfg *config.Config) (dingo.StorageMode, error) {
+	storageMode := dingo.StorageMode(cfg.StorageMode)
+	if storageMode == "" {
+		storageMode = dingo.StorageModeCore
+	}
+	if !storageMode.Valid() {
+		return "", fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			dingo.StorageModeCore,
+			dingo.StorageModeAPI,
+		)
+	}
+	return storageMode, nil
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -829,6 +919,7 @@ func buildDingoConfig(
 			plugin.CapabilityMempool,
 			cfg.Plugins.Mempool,
 		),
+		dingo.WithMempoolCapacityDefaulted(cfg.MempoolCapacityDefaulted()),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIBlockfrost,
 			cfg.Plugins.API.Blockfrost,
@@ -855,6 +946,7 @@ func buildDingoConfig(
 		dingo.WithListeners(listeners...),
 		dingo.WithOutboundSourcePort(cfg.RelayPort),
 		dingo.WithPeerSharing(peerSharing),
+		dingo.WithAdvertiseAddress(cfg.AdvertiseAddress),
 		dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 		dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 		dingo.WithAPIConfig(cfg.API),
@@ -887,6 +979,10 @@ func buildDingoConfig(
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
+		}),
+		dingo.WithImmutableDB(dingo.ImmutableDBConfig{
+			PromoteBatch:     cfg.ImmutableDB.PromoteBatch,
+			PromoteFrequency: cfg.ImmutableDB.PromoteFrequency,
 		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
 			Enabled:               cfg.KoiosParity.Enabled,
@@ -1056,6 +1152,8 @@ func buildDingoConfig(
 		),
 		dingo.WithBindAddr(cfg.BindAddr),
 		dingo.WithStorageMode(storageMode),
+		dingo.WithIndexerWriterFactory(NewIndexerService),
+		dingo.WithIndexerMaxReadyLagBlocks(cfg.Indexer.MaxReadyLagBlocks),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
 		dingo.WithCIP0203(cfg.CIP0203Enabled),
@@ -1098,6 +1196,8 @@ func buildDingoConfig(
 			cfg.ShelleyKESAgentServerSPKISHA256,
 		),
 		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
+		dingo.WithShelleyKESAgentAddresses(cfg.ShelleyKESAgentAddresses...),
+		dingo.WithShelleyKESAgentProfile(cfg.ShelleyKESAgentProfile),
 		// A slice of structs, so the scalar forwarding test cannot see it;
 		// TestBuildDingoConfigForwardsBlockProducerPools covers it.
 		dingo.WithBlockProducerPools(cfg.BlockProducerPools...),
@@ -1132,6 +1232,9 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerUtxoCheckpoint(
+			cfg.LedgerUtxoCheckpointEpochs, cfg.LedgerUtxoCheckpointKeep,
+		),
 		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,

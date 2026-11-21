@@ -15,9 +15,11 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"sync"
@@ -29,11 +31,14 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/blockpromote"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -355,6 +360,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",
@@ -436,6 +442,7 @@ func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",
@@ -562,4 +569,265 @@ func TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose(t *testing.T) {
 	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
 	assert.ErrorContains(t, stopErr, string(stuckType))
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// TestNodeStopClosesLiveUtxoSet requires shutdown to close the live UTxO set
+// and log the close under its resource name.
+func TestNodeStopClosesLiveUtxoSet(t *testing.T) {
+	t.Parallel()
+
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	logs := &shutdownLogBuffer{}
+	n := &Node{utxoSet: set}
+	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	require.NoError(t, n.Stop())
+	assert.Nil(t, n.utxoSet)
+	assert.Contains(t, logs.String(), "durable store closed")
+	assert.Contains(t, logs.String(), `resource="live UTxO set"`)
+}
+
+// TestNodeStopWaitsForLiveUtxoSetCloseAfterDeadline pins that the live UTxO
+// set close is not abandoned at the shutdown deadline. The checkpoint writer
+// the close joins before closing the set is held past the deadline.
+func TestNodeStopWaitsForLiveUtxoSetCloseAfterDeadline(t *testing.T) {
+	t.Parallel()
+
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	logs := &shutdownLogBuffer{}
+	n := &Node{utxoSet: set, durableCloseProgress: 20 * time.Millisecond}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWriter := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseWriter()
+	var writerDone atomic.Bool
+	n.utxoCkptWG.Go(func() {
+		<-release
+		writerDone.Store(true)
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+
+	select {
+	case stopErr := <-done:
+		t.Fatalf("Node.Stop abandoned the live UTxO set close at the deadline: %v", stopErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.False(t, writerDone.Load())
+
+	releaseWriter()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second,
+		"Node.Stop did not return after the live UTxO set close finished")
+	require.NoError(t, stopErr)
+	require.True(t, writerDone.Load())
+	assert.Nil(t, n.utxoSet)
+	out := logs.String()
+	assert.Contains(t, out, "durable store close still in progress")
+	assert.Contains(t, out, "live UTxO set close finished after the shutdown deadline")
+}
+
+// TestNodeStopClosesDatabaseToCompletion requires shutdown to close the
+// database, which owns the ImmutableDB chunk store, under the durable-close
+// policy rather than a deadline-bounded close that can leave a close queued
+// behind a promotion batch.
+func TestNodeStopClosesDatabaseToCompletion(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 4320, CanContainEBB: true,
+		},
+	})
+	require.NoError(t, err)
+	logs := &shutdownLogBuffer{}
+	n := &Node{db: db}
+	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	require.NoError(t, n.Stop())
+	out := logs.String()
+	assert.Contains(t, out, "durable store closed")
+	assert.Contains(t, out, "resource=database")
+}
+
+// A promotion step still resolving its ceiling at the shutdown deadline reads
+// the blob store when it returns, so shutdown must leave storage open rather
+// than close it underneath that read.
+func TestNodeStopKeepsStorageOpenWhilePromotionLookupRuns(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	var enteredOnce sync.Once
+	promoter := blockpromote.New(blockpromote.Config{
+		DB:        db,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Frequency: time.Hour,
+		Ceiling: func(context.Context) (uint64, bool, error) {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+			return 0, false, nil
+		},
+	})
+	require.NoError(t, promoter.Start(context.Background()))
+	testutil.RequireReceive(
+		t, entered, time.Second, "promotion ceiling lookup did not start",
+	)
+
+	n := &Node{
+		config:        NewConfig(WithShutdownTimeout(100 * time.Millisecond)),
+		db:            db,
+		blockPromoter: promoter,
+	}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	err = n.Stop()
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+	require.NoError(t, readErr, "storage must remain open while the lookup runs")
+}
+
+type shutdownLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *shutdownLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *shutdownLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestNodeStopWaitsForDurableStorageCloseAfterDeadline pins that a storage
+// provider's close is never abandoned at the shutdown deadline: Node.Stop
+// waits for it, warns about the overrun, and does not report the deadline as
+// a shutdown error.
+func TestNodeStopWaitsForDurableStorageCloseAfterDeadline(t *testing.T) {
+	t.Parallel()
+
+	host := plugin.NewHost()
+	closeStarted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseClose()
+	var closeFinished atomic.Bool
+	require.NoError(t, plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:   plugin.CapabilityStorageBlob,
+			Name:         "slow-test-store",
+			DurableClose: true,
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "store", plugin.Lifecycle{
+				StopFunc: func(context.Context) error {
+					close(closeStarted)
+					<-release
+					closeFinished.Store(true)
+					return nil
+				},
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(), host, plugin.CapabilityStorageBlob,
+		"slow-test-store", nil, struct{}{},
+	)
+	require.NoError(t, err)
+
+	logs := &shutdownLogBuffer{}
+	n := &Node{pluginHost: host}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+	testutil.RequireReceive(t, closeStarted, 5*time.Second, "storage close never started")
+
+	// Wait past the shutdown deadline, then check Stop is still waiting.
+	select {
+	case stopErr := <-done:
+		t.Fatalf("Node.Stop abandoned the storage close at the deadline: %v", stopErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.False(t, closeFinished.Load())
+
+	releaseClose()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second, "Node.Stop did not return after the storage close finished")
+	require.NoError(t, stopErr)
+	require.True(t, closeFinished.Load())
+	require.Contains(t, logs.String(), "level=WARN")
+	require.Contains(t, logs.String(), "storage close finished after the shutdown deadline")
+}
+
+// TestNodeStopWarnsOnDeadlineOverrunWhenStorageCloseFails pins that the
+// overrun warning does not depend on the close succeeding.
+func TestNodeStopWarnsOnDeadlineOverrunWhenStorageCloseFails(t *testing.T) {
+	t.Parallel()
+
+	host := plugin.NewHost()
+	closeStarted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseClose()
+	errClose := errors.New("close failed")
+	require.NoError(t, plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:   plugin.CapabilityStorageBlob,
+			Name:         "failing-test-store",
+			DurableClose: true,
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "store", plugin.Lifecycle{
+				StopFunc: func(context.Context) error {
+					close(closeStarted)
+					<-release
+					return errClose
+				},
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(), host, plugin.CapabilityStorageBlob,
+		"failing-test-store", nil, struct{}{},
+	)
+	require.NoError(t, err)
+
+	logs := &shutdownLogBuffer{}
+	n := &Node{pluginHost: host}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+	testutil.RequireReceive(t, closeStarted, 5*time.Second, "storage close never started")
+	select {
+	case stopErr := <-done:
+		t.Fatalf("Node.Stop abandoned the storage close at the deadline: %v", stopErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	releaseClose()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second, "Node.Stop did not return")
+	require.ErrorIs(t, stopErr, errClose)
+	require.NotErrorIs(t, stopErr, context.DeadlineExceeded)
+	require.Contains(t, logs.String(), "storage close finished after the shutdown deadline")
 }

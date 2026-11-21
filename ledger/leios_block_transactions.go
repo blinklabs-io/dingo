@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
@@ -26,6 +27,18 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+)
+
+// ErrCertifiedClosureUnavailable reports that the endorser-block closure a
+// certifying ranking block applies is neither persisted nor held by the
+// endorser-block data provider. It is not corruption: the ledger persists the
+// closure when it applies the certifying block, so a stored block the ledger
+// has not applied yet can lack it, as can any block read before the provider
+// is wired at startup. A caller that can wait may retry once the ledger has
+// applied the block; a closure that is present but invalid fails with a
+// different error.
+var ErrCertifiedClosureUnavailable = errors.New(
+	"certified endorser-block closure unavailable",
 )
 
 type leiosBlockCertifierHeader interface {
@@ -91,15 +104,144 @@ func (ls *LedgerState) CertifiedClosureTransactions(
 	return ls.decodeCertifiedClosure(data)
 }
 
-type certifiedClosureData struct {
-	manifest     *lcommon.LeiosEndorserBlock
-	transactions []cbor.RawMessage
+// CertifiedClosure is the endorser block a certifying ranking block applies,
+// validated against the manifest its parent announced.
+type CertifiedClosure struct {
+	// EndorserBlockHash and EndorserBlockSlot identify the endorser block:
+	// the parent's announcement, at the parent's slot.
+	EndorserBlockHash lcommon.Blake2b256
+	EndorserBlockSlot uint64
+	manifest          *lcommon.LeiosEndorserBlock
+	transactions      []cbor.RawMessage
+}
+
+// CertifiedClosureSource is what a certified closure is read from.
+type CertifiedClosureSource interface {
+	// ParentBlock returns the stored block with the given hash.
+	ParentBlock(ctx context.Context, hash []byte) (models.Block, error)
+	// EndorserBlockData returns the manifest and transaction bytes of the
+	// endorser block announced at slot. The errors it returns are wrapped
+	// as the caller reports them.
+	EndorserBlockData(
+		ctx context.Context,
+		hash []byte,
+		slot uint64,
+	) ([]byte, []cbor.RawMessage, error)
+}
+
+// ledgerClosureSource reads through the ledger state: the parent may be a
+// rolled-back block, and a closure missing from storage may still be
+// available from the configured provider.
+type ledgerClosureSource struct{ ls *LedgerState }
+
+func (s ledgerClosureSource) ParentBlock(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	// The parent may itself have been rolled back, as when WatchTx rebuilds
+	// the undo of a rolled-back chain, so it is also read from the rollback
+	// cache.
+	return s.ls.BlockByHashIncludingRolledBack(ctx, hash)
+}
+
+func (s ledgerClosureSource) EndorserBlockData(
+	_ context.Context,
+	hash []byte,
+	slot uint64,
+) ([]byte, []cbor.RawMessage, error) {
+	return readEndorserBlockData(
+		s.ls.db, hash, slot, s.ls.config.EndorserBlockDataProvider,
+	)
+}
+
+// databaseClosureSource reads a closure from a database alone, as a consumer
+// that applies blocks the ledger already committed does.
+type databaseClosureSource struct{ db *database.Database }
+
+// NewDatabaseClosureSource reads certified closures from db's stored blocks
+// and endorser-block data.
+func NewDatabaseClosureSource(db *database.Database) CertifiedClosureSource {
+	return databaseClosureSource{db: db}
+}
+
+func (s databaseClosureSource) ParentBlock(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	return database.BlockByHash(ctx, s.db, hash)
+}
+
+func (s databaseClosureSource) EndorserBlockData(
+	_ context.Context,
+	hash []byte,
+	slot uint64,
+) ([]byte, []cbor.RawMessage, error) {
+	return readEndorserBlockData(s.db, hash, slot, nil)
+}
+
+func readEndorserBlockData(
+	db *database.Database,
+	hash []byte,
+	slot uint64,
+	provider func([]byte, uint64) ([]byte, []cbor.RawMessage, bool),
+) ([]byte, []cbor.RawMessage, error) {
+	manifestRaw, manifestErr := db.GetLeiosEBManifest(hash, slot)
+	blockTransactions, txErr := db.GetLeiosEBTxs(hash, slot)
+	if manifestErr != nil && !errors.Is(manifestErr, types.ErrBlobKeyNotFound) {
+		return nil, nil, fmt.Errorf(
+			"load certified endorser-block manifest: %w",
+			manifestErr,
+		)
+	}
+	if txErr != nil && !errors.Is(txErr, types.ErrBlobKeyNotFound) {
+		return nil, nil, fmt.Errorf(
+			"load certified endorser-block transactions: %w",
+			txErr,
+		)
+	}
+	if !errors.Is(manifestErr, types.ErrBlobKeyNotFound) &&
+		!errors.Is(txErr, types.ErrBlobKeyNotFound) {
+		return manifestRaw, blockTransactions, nil
+	}
+	missing := func() error {
+		if manifestErr != nil {
+			return fmt.Errorf(
+				"%w: load certified endorser-block manifest: %w",
+				ErrCertifiedClosureUnavailable,
+				manifestErr,
+			)
+		}
+		return fmt.Errorf(
+			"%w: load certified endorser-block transactions: %w",
+			ErrCertifiedClosureUnavailable,
+			txErr,
+		)
+	}
+	if provider == nil {
+		return nil, nil, missing()
+	}
+	manifestRaw, blockTransactions, ok := provider(hash, slot)
+	if !ok {
+		return nil, nil, missing()
+	}
+	return manifestRaw, blockTransactions, nil
 }
 
 func (ls *LedgerState) loadCertifiedClosure(
 	ctx context.Context,
 	decoded ledger.Block,
-) (*certifiedClosureData, error) {
+) (*CertifiedClosure, error) {
+	return LoadCertifiedClosure(ctx, ledgerClosureSource{ls: ls}, decoded)
+}
+
+// LoadCertifiedClosure returns the closure a certifying ranking block
+// applies, or nil for a block that certifies nothing. The manifest and the
+// transaction count are validated; Decode checks each transaction.
+func LoadCertifiedClosure(
+	ctx context.Context,
+	src CertifiedClosureSource,
+	decoded ledger.Block,
+) (*CertifiedClosure, error) {
 	if decoded == nil {
 		return nil, nil
 	}
@@ -112,13 +254,7 @@ func (ls *LedgerState) loadCertifiedClosure(
 		return nil, nil
 	}
 
-	// The parent may itself have been rolled back, as when WatchTx rebuilds
-	// the undo of a rolled-back chain, so it is also read from the rollback
-	// cache.
-	parent, err := ls.BlockByHashIncludingRolledBack(
-		ctx,
-		header.PrevHash().Bytes(),
-	)
+	parent, err := src.ParentBlock(ctx, header.PrevHash().Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("load certifying block parent: %w", err)
 	}
@@ -138,55 +274,11 @@ func (ls *LedgerState) loadCertifiedClosure(
 			"certifying block parent announced no endorser block",
 		)
 	}
-
-	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(
-		ebHash.Bytes(),
-		parent.Slot,
+	manifestRaw, blockTransactions, err := src.EndorserBlockData(
+		ctx, ebHash.Bytes(), parent.Slot,
 	)
-	blockTransactions, txErr := ls.db.GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
-	if manifestErr != nil && !errors.Is(manifestErr, types.ErrBlobKeyNotFound) {
-		return nil, fmt.Errorf(
-			"load certified endorser-block manifest: %w",
-			manifestErr,
-		)
-	}
-	if txErr != nil && !errors.Is(txErr, types.ErrBlobKeyNotFound) {
-		return nil, fmt.Errorf(
-			"load certified endorser-block transactions: %w",
-			txErr,
-		)
-	}
-	if errors.Is(manifestErr, types.ErrBlobKeyNotFound) ||
-		errors.Is(txErr, types.ErrBlobKeyNotFound) {
-		if ls.config.EndorserBlockDataProvider == nil {
-			if manifestErr != nil {
-				return nil, fmt.Errorf(
-					"load certified endorser-block manifest: %w",
-					manifestErr,
-				)
-			}
-			return nil, fmt.Errorf(
-				"load certified endorser-block transactions: %w",
-				txErr,
-			)
-		}
-		var ok bool
-		manifestRaw, blockTransactions, ok = ls.config.EndorserBlockDataProvider(
-			ebHash.Bytes(),
-			parent.Slot,
-		)
-		if !ok {
-			if manifestErr != nil {
-				return nil, fmt.Errorf(
-					"load certified endorser-block manifest: %w",
-					manifestErr,
-				)
-			}
-			return nil, fmt.Errorf(
-				"load certified endorser-block transactions: %w",
-				txErr,
-			)
-		}
+	if err != nil {
+		return nil, err
 	}
 	manifest, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
 	if err != nil {
@@ -215,18 +307,25 @@ func (ls *LedgerState) loadCertifiedClosure(
 		)
 	}
 
-	return &certifiedClosureData{
-		manifest:     manifest,
-		transactions: blockTransactions,
+	return &CertifiedClosure{
+		EndorserBlockHash: ebHash,
+		EndorserBlockSlot: parent.Slot,
+		manifest:          manifest,
+		transactions:      blockTransactions,
 	}, nil
 }
 
-func (ls *LedgerState) decodeCertifiedClosure(
-	data *certifiedClosureData,
-) ([]lcommon.Transaction, error) {
-	manifest, blockTransactions := data.manifest, data.transactions
-	ret := make([]lcommon.Transaction, 0, len(blockTransactions))
-	for i, raw := range blockTransactions {
+// RawTransactions returns the closure's transactions as delivered, in
+// manifest order.
+func (c *CertifiedClosure) RawTransactions() []cbor.RawMessage {
+	return c.transactions
+}
+
+// Decode returns the closure's transactions in manifest order, each checked
+// against its manifest reference.
+func (c *CertifiedClosure) Decode() ([]lcommon.Transaction, error) {
+	ret := make([]lcommon.Transaction, 0, len(c.transactions))
+	for i, raw := range c.transactions {
 		tx, err := safedecode.DijkstraBlockTransaction(raw)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -235,7 +334,7 @@ func (ls *LedgerState) decodeCertifiedClosure(
 				err,
 			)
 		}
-		reference := manifest.TransactionReferences[i]
+		reference := c.manifest.TransactionReferences[i]
 		// The manifest reference hashes the full block_transaction CBOR,
 		// not the Cardano transaction body.
 		if lcommon.Blake2b256Hash(raw) != reference.TransactionHash {
@@ -252,9 +351,33 @@ func (ls *LedgerState) decodeCertifiedClosure(
 		}
 		ret = append(ret, tx)
 	}
-	hash := manifest.Hash()
+	return ret, nil
+}
+
+func (ls *LedgerState) decodeCertifiedClosure(
+	data *CertifiedClosure,
+) ([]lcommon.Transaction, error) {
+	ret, err := data.Decode()
+	if err != nil {
+		return nil, err
+	}
+	hash := data.manifest.Hash()
 	ls.certifiedClosureReceipt.Store(&hash)
 	return ret, nil
+}
+
+// BodyCbors returns the transaction body CBOR of each transaction, in
+// manifest order: the payload of a transaction's offset entry.
+func (c *CertifiedClosure) BodyCbors() ([][]byte, error) {
+	bodies := make([][]byte, len(c.transactions))
+	for i, raw := range c.transactions {
+		_, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return nil, fmt.Errorf("endorser tx %d: %w", i, err)
+		}
+		bodies[i] = []byte(elems[0])
+	}
+	return bodies, nil
 }
 
 // BlockTransactionCount counts the top-level transactions represented by a

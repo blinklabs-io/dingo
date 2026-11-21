@@ -428,7 +428,7 @@ PRIMARY KEY (utxo_id, tx_id))`)
 
 func TestLoadUtxoAssetsBatchPreservesGrouping(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t)
+	store := withAPIStorage(newTestStore(t))
 	_, err := store.writeDB.Exec(`
 CREATE TABLE asset (
  name BLOB, policy_id BLOB, fingerprint BLOB,
@@ -465,7 +465,7 @@ VALUES ('a', 'p', 'f1', 1, 10, '18446744073709551615'),
 
 func TestLoadUtxoAssetsDeduplicatesIDsAcrossChunks(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t)
+	store := withAPIStorage(newTestStore(t))
 	_, err := store.writeDB.Exec(`
 CREATE TABLE asset (
  name BLOB, policy_id BLOB, fingerprint BLOB,

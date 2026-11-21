@@ -336,6 +336,44 @@ func TestValidate(t *testing.T) {
 			modify:  func(c *Config) { c.RunMode = "batch" },
 			wantErr: "invalid runMode",
 		},
+		{name: "advertise address unset", modify: func(*Config) {}},
+		{
+			name:   "advertise address ipv4",
+			modify: func(c *Config) { c.AdvertiseAddress = "45.0.0.7:3001" },
+		},
+		{
+			name: "advertise address ipv6",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "[2001:4860:4860::8888]:3001"
+			},
+		},
+		{
+			name: "advertise address hostname",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "relay.example.com:3001"
+			},
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address without port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address zero port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7:0" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address private",
+			modify:  func(c *Config) { c.AdvertiseAddress = "10.0.0.1:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address wildcard",
+			modify:  func(c *Config) { c.AdvertiseAddress = "0.0.0.0:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
 		{
 			name:    "invalid start era",
 			modify:  func(c *Config) { c.StartEra = "byron" },
@@ -345,6 +383,27 @@ func TestValidate(t *testing.T) {
 			name:    "invalid storage mode",
 			modify:  func(c *Config) { c.StorageMode = "full" },
 			wantErr: "invalid storageMode",
+		},
+		{
+			name: "immutable db promote batch above the limit",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteBatch = MaxImmutableDBPromoteBatch + 1
+			},
+			wantErr: "invalid immutableDb.promoteBatch",
+		},
+		{
+			name: "negative immutable db promote batch",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteBatch = -1
+			},
+			wantErr: "invalid immutableDb.promoteBatch",
+		},
+		{
+			name: "negative immutable db promote frequency",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteFrequency = -5 * time.Second
+			},
+			wantErr: "invalid immutableDb.promoteFrequency",
 		},
 		{
 			name: "negative history expiry frequency",
@@ -680,6 +739,17 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
 		},
 		{
+			name: "mempool fee-density selection",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "selection", MempoolSelectionFeeDensity)
+			},
+		},
+		{
+			name:    "unknown mempool selection",
+			modify:  func(c *Config) { setMempoolSetting(c, "selection", "feedensity") },
+			wantErr: "invalid plugins.mempool.config.selection",
+		},
+		{
 			// Every ordered comparison with NaN is false, so a plain
 			// out-of-range check would let NaN through (e.g. from
 			// --eviction-watermark NaN, which strconv parses).
@@ -774,6 +844,17 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESAgentPlaintext = true
 			},
 			wantErr: "shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
+		},
+		{
+			name: "profile without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentProfile = "pool-a"
+			},
+			wantErr: "shelleyKesAgentProfile requires shelleyKesAgentAddress",
 		},
 		{
 			name: "client certificate without a remote KES agent",
@@ -1117,6 +1198,13 @@ func TestValidate(t *testing.T) {
 		{
 			name:   "empty mithril backend",
 			modify: func(c *Config) { c.Mithril.Backend = "" },
+		},
+		{
+			name: "history expiry in api storage mode",
+			modify: func(c *Config) {
+				c.StorageMode = "api"
+				c.HistoryExpiry.Enabled = true
+			},
 		},
 	}
 	for _, tt := range tests {

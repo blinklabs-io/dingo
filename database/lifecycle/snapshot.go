@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -43,6 +44,12 @@ var syncSnapshotFile = (*os.File).Sync
 const (
 	BlobBackupFileName     = "blob.bak"
 	MetadataBackupFileName = "metadata.sqlite"
+	// UtxoSetBackupFileName is the live UTxO set's backup, written only for
+	// a node that keeps the set.
+	UtxoSetBackupFileName = "utxoset.bak"
+	// LeiosBackupFileName holds the LeiosDB backup. It is written only when
+	// the database has a LeiosDB open.
+	LeiosBackupFileName = "leios.bak"
 )
 
 // Snapshot captures a point-in-time backup of db's blob and metadata
@@ -205,6 +212,22 @@ func Snapshot(
 	// (for example, a pre-cancelled context rejected by PauseCommitsContext):
 	// Unix permits unlinking the still-open blob file, but Windows does not.
 	defer blobFile.Close() //nolint:errcheck // the backup path records its close error below
+	utxoSetBackuper := snapshotUtxoSet(opts)
+	var utxoSetFile *os.File
+	if utxoSetBackuper != nil {
+		utxoSetFile, err = snapshotRoot.OpenFile(
+			UtxoSetBackupFileName,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+			0o600,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"create %q: %w",
+				filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		defer utxoSetFile.Close() //nolint:errcheck // the backup path records its close error below
+	}
 
 	// Everything read or backed up between PauseCommits and resume()
 	// describes the same set of committed writes: no new commit can land
@@ -271,6 +294,15 @@ func Snapshot(
 	if pauseContext != nil {
 		pauseCtx = pauseContext(ctx)
 	}
+	// Promotion waits on a blob commit while holding the ImmutableDB lock, so
+	// the lock is taken before the barrier, never after it.
+	unlockImmutable, err := db.LockImmutable(pauseCtx)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("lock immutable database: %w", err)
+	}
+	var unlockImmutableOnce sync.Once
+	releaseImmutable := func() { unlockImmutableOnce.Do(unlockImmutable) }
+	defer releaseImmutable()
 	resume, err := db.PauseCommitsContext(pauseCtx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
@@ -297,6 +329,43 @@ func Snapshot(
 		metrics.pause.WithLabelValues(result).Observe(pauseDuration.Seconds())
 	}()
 	defer releaseBarrier()
+	// The LeiosDB commits on its own, outside the commit barrier, so its
+	// backup can be newer than the blob and metadata backups. That is safe:
+	// it only adds endorser blocks the restored chain has not reached yet,
+	// and the pin walk reconciles a pin watermark ahead of the chain. It is
+	// selected here, under the barrier, because the store opens on first use:
+	// a certified block applied before the pause may have created it, and
+	// the ranking block that block committed would be captured without its
+	// closure if the selection ran earlier.
+	var (
+		leiosBackuper blob.Backuper
+		leiosFile     *os.File
+	)
+	leiosStore, hasLeios, err := db.LeiosBackupStore()
+	if err != nil {
+		return Manifest{}, fmt.Errorf("snapshot: %w", err)
+	}
+	if hasLeios {
+		var ok bool
+		leiosBackuper, ok = leiosStore.(blob.Backuper)
+		if !ok {
+			return Manifest{}, errors.New(
+				"snapshot: the Leios store does not support backup",
+			)
+		}
+		leiosFile, err = snapshotRoot.OpenFile(
+			LeiosBackupFileName,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+			0o600,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"create %q: %w", filepath.Join(dir, LeiosBackupFileName), err,
+			)
+		}
+		defer leiosFile.Close() //nolint:errcheck // the backup path records its close error below
+	}
+
 	// The limit starts once the barrier is held; backupCtx is cancelled by
 	// the caller's ctx as well, so cancellation behaves as before.
 	backupCtx, cancelBackup := context.WithCancel(ctx)
@@ -362,11 +431,42 @@ func Snapshot(
 	}
 	tip, commitTimestamp, gates := state.tip, state.commitTimestamp, state.gates
 
+	// The chunk files are captured under the same barrier as the blob state
+	// that records their tip, so the two describe one point in time. Linking
+	// and the copy of the open chunk are bounded; hashing waits for the
+	// barrier to be released. Promotion commits its markers outside the
+	// barrier, so the ImmutableDB lock stays held until the blob backup has
+	// finished; markers committed before it reads would name chunk bytes the
+	// capture does not hold.
+	immutableCapture, err := captureImmutable(backupCtx, db, dir)
+	if err != nil {
+		return Manifest{}, err
+	}
+
 	type backupResult struct {
 		store string
 		err   error
 	}
-	backupResults := make(chan backupResult, 2)
+	backupResults := make(chan backupResult, 4)
+	pending := 2
+	if utxoSetBackuper != nil {
+		pending++
+		go func() {
+			backupResults <- backupResult{
+				store: "utxoset",
+				err:   utxoSetBackuper.Backup(backupCtx, utxoSetFile),
+			}
+		}()
+	}
+	if leiosBackuper != nil {
+		pending++
+		go func() {
+			backupResults <- backupResult{
+				store: "leios",
+				err:   leiosBackuper.Backup(backupCtx, leiosFile),
+			}
+		}()
+	}
 	go func() {
 		backupResults <- backupResult{
 			store: "blob",
@@ -379,16 +479,22 @@ func Snapshot(
 			err:   metadataBackuper.BackupTo(backupCtx, metadataStagePath),
 		}
 	}()
-	var backupErr, metadataErr error
+	var backupErr, metadataErr, utxoSetErr, leiosErr error
 	backupCtxDone := backupCtx.Done()
 	pauseLimitExpired := false
-	for completed := 0; completed < 2; {
+	for completed := 0; completed < pending; {
 		select {
 		case result := <-backupResults:
 			completed++
-			if result.store == "blob" {
+			switch result.store {
+			case "blob":
 				backupErr = result.err
-			} else {
+				releaseImmutable()
+			case "utxoset":
+				utxoSetErr = result.err
+			case "leios":
+				leiosErr = result.err
+			default:
 				metadataErr = result.err
 			}
 			if result.err != nil {
@@ -429,7 +535,9 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf(
 			"%w (%s): %w",
 			ErrCommitPauseExceeded, maxPause,
-			errors.Join(context.DeadlineExceeded, backupErr, metadataErr),
+			errors.Join(
+				context.DeadlineExceeded, backupErr, metadataErr, utxoSetErr, leiosErr,
+			),
 		)
 	}
 	if backupErr != nil && !errors.Is(backupErr, context.Canceled) &&
@@ -445,11 +553,23 @@ func Snapshot(
 	if metadataErr != nil && !errors.Is(metadataErr, context.Canceled) {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
+	if utxoSetErr != nil && !errors.Is(utxoSetErr, context.Canceled) {
+		return Manifest{}, fmt.Errorf("backup live UTxO set: %w", utxoSetErr)
+	}
+	if leiosErr != nil && !errors.Is(leiosErr, context.Canceled) {
+		return Manifest{}, fmt.Errorf("backup Leios store: %w", leiosErr)
+	}
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
+	}
+	if utxoSetErr != nil {
+		return Manifest{}, fmt.Errorf("backup live UTxO set: %w", utxoSetErr)
+	}
+	if leiosErr != nil {
+		return Manifest{}, fmt.Errorf("backup Leios store: %w", leiosErr)
 	}
 	if err := os.Chmod(metadataStagePath, 0o600); err != nil {
 		return Manifest{}, fmt.Errorf("restrict %q: %w", metadataStagePath, err)
@@ -469,6 +589,25 @@ func Snapshot(
 	}
 	if err := blobFile.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
+	}
+	if utxoSetFile != nil {
+		utxoSetPath := filepath.Join(dir, UtxoSetBackupFileName)
+		if err := syncSnapshotFile(utxoSetFile); err != nil {
+			return Manifest{}, fmt.Errorf("sync %q: %w", utxoSetPath, err)
+		}
+		if err := utxoSetFile.Close(); err != nil {
+			return Manifest{}, fmt.Errorf("close %q: %w", utxoSetPath, err)
+		}
+	}
+	var leiosBytes int64
+	var leiosDigest string
+	if leiosFile != nil {
+		if err := syncSnapshotFile(leiosFile); err != nil {
+			return Manifest{}, fmt.Errorf("sync %q: %w", LeiosBackupFileName, err)
+		}
+		if err := leiosFile.Close(); err != nil {
+			return Manifest{}, fmt.Errorf("close %q: %w", LeiosBackupFileName, err)
+		}
 	}
 	if err := installStagedSnapshotFile(
 		ctx, snapshotRoot, metadataStageDir, MetadataBackupFileName,
@@ -522,26 +661,80 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
 	}
+	var utxoSetBytes int64
+	var utxoSetDigest string
+	if utxoSetFile != nil {
+		utxoSetInfo, err := snapshotRoot.Stat(UtxoSetBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"stat %q: %w", filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		utxoSetBytes = utxoSetInfo.Size()
+		utxoSetDigest, err = hashSnapshotRootFile(
+			ctx, snapshotRoot, UtxoSetBackupFileName,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"hash %q: %w", filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		metrics.bytes.WithLabelValues("utxoset").Add(float64(utxoSetBytes))
+	}
+	var immutableIndexBytes int64
+	var immutableIndexDigest string
+	if immutableCapture != nil {
+		immutableIndexBytes, immutableIndexDigest, err = writeImmutableIndex(
+			ctx, snapshotRoot, immutableCapture,
+		)
+		if err != nil {
+			return Manifest{}, err
+		}
+		if err := syncDir(dir); err != nil {
+			return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
+		}
+	}
+	if leiosFile != nil {
+		leiosInfo, err := snapshotRoot.Stat(LeiosBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("stat %q: %w", LeiosBackupFileName, err)
+		}
+		leiosBytes = leiosInfo.Size()
+		leiosDigest, err = hashSnapshotRootFile(ctx, snapshotRoot, LeiosBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("hash %q: %w", LeiosBackupFileName, err)
+		}
+		metrics.bytes.WithLabelValues("leios").Add(float64(leiosBytes))
+	}
 	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
 	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
 	manifest := Manifest{
-		CreatedAt:       time.Now().UTC(),
-		Trigger:         trigger,
-		StorageMode:     db.Config().StorageMode,
-		Network:         db.Config().Network,
-		CommitTimestamp: commitTimestamp,
-		TipSlot:         tip.Point.Slot,
-		TipHash:         tip.Point.Hash,
-		TipBlockNumber:  tip.BlockNumber,
-		BlobPlugin:      blobPluginName,
-		MetadataPlugin:  metadataPluginName,
-		Gates:           gates,
-		DingoVersion:    dingoVersion,
-		BlobBytes:       blobInfo.Size(),
-		MetadataBytes:   metadataInfo.Size(),
-		BlobSHA256:      blobDigest,
-		MetadataSHA256:  metadataDigest,
+		CreatedAt:            time.Now().UTC(),
+		Trigger:              trigger,
+		StorageMode:          db.Config().StorageMode,
+		Network:              db.Config().Network,
+		CommitTimestamp:      commitTimestamp,
+		TipSlot:              tip.Point.Slot,
+		TipHash:              tip.Point.Hash,
+		TipBlockNumber:       tip.BlockNumber,
+		BlobPlugin:           blobPluginName,
+		MetadataPlugin:       metadataPluginName,
+		Gates:                gates,
+		DingoVersion:         dingoVersion,
+		BlobBytes:            blobInfo.Size(),
+		MetadataBytes:        metadataInfo.Size(),
+		BlobSHA256:           blobDigest,
+		MetadataSHA256:       metadataDigest,
+		UtxoSetBytes:         utxoSetBytes,
+		UtxoSetSHA256:        utxoSetDigest,
+		LeiosBytes:           leiosBytes,
+		LeiosSHA256:          leiosDigest,
+		ImmutableIndexBytes:  immutableIndexBytes,
+		ImmutableIndexSHA256: immutableIndexDigest,
+	}
+	if err := captureIndexerBackup(ctx, snapshotRoot, &manifest, opts); err != nil {
+		return Manifest{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err

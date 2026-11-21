@@ -258,7 +258,8 @@ ORDER BY pr.added_slot DESC, `+poolRegistrationBlockIndex+` DESC,
          COALESCE(c.cert_index, 0) DESC, pr.registration_index DESC
 LIMIT 1`,
 		append([]any{poolID}, args...)...,
-	).Scan(&held, &charged, &addedSlot, &blockIdx, &certIdx)
+	).
+		Scan(&held, &charged, &addedSlot, &blockIdx, &certIdx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, false, nil
 	}
@@ -462,6 +463,11 @@ RETURNING id`,
 				return fmt.Errorf("import pool registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
+			if err := refreshPoolCurrentState(
+				ctx, db, [][]byte{registration.PoolKeyHash, pool.PoolKeyHash},
+			); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 				registrationID,
@@ -522,6 +528,9 @@ func (s *Store) GetPool(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Pool, error) {
+	if err := s.refuseDrained("pool"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -642,7 +651,8 @@ func (s *Store) getPoolByRegistrationKey(
 	// the query already confirms is active (via the retirement precedence
 	// below) is what makes retirement correctly fall through to the next
 	// candidate instead of resolving the whole lookup to nil.
-	query := strings.ReplaceAll(`-- name: GetPoolByRegistrationKeyCandidates :many
+	query := strings.ReplaceAll(
+		`-- name: GetPoolByRegistrationKeyCandidates :many
 WITH candidates AS (
     SELECT DISTINCT pool_id FROM pool_registration WHERE registration_key = ?
 ),
@@ -820,7 +830,10 @@ same_epoch_claimant AS (
 SELECT pool_id, 0 AS tier FROM active_owner WHERE ? = 0
 UNION
 SELECT pool_id, 1 AS tier FROM same_epoch_claimant WHERE ? = 1
-ORDER BY tier, pool_id`, "registration_key", column)
+ORDER BY tier, pool_id`,
+		"registration_key",
+		column,
+	)
 	rows, err := db.QueryContext(ctx, query,
 		key,
 		slotValue,
@@ -908,6 +921,29 @@ func (s *Store) activePoolOrNil(
 	return pool, nil
 }
 
+// ListPoolKeyHashes returns the key hash of every pool row, registered or
+// not, in no particular order.
+func (s *Store) ListPoolKeyHashes(txn types.Txn) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT pool_key_hash FROM pool`)
+	if err != nil {
+		return nil, fmt.Errorf("list pool key hashes: %w", err)
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var pkh []byte
+		if err := rows.Scan(&pkh); err != nil {
+			return nil, fmt.Errorf("list pool key hashes: %w", err)
+		}
+		out = append(out, pkh)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetPools(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn types.Txn,
@@ -993,6 +1029,9 @@ func (s *Store) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil
+	}
 	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
@@ -1025,8 +1064,10 @@ func (s *Store) UpdatePoolOpCertSequence(
 				if storedSequence != sequenceValue {
 					return fmt.Errorf(
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
-						poolKeyHash.Bytes(), slot,
-						decodeOpCertSequence(storedSequence), sequence,
+						poolKeyHash.Bytes(),
+						slot,
+						decodeOpCertSequence(storedSequence),
+						sequence,
 					)
 				}
 			} else if inserted != 1 {
@@ -1034,6 +1075,9 @@ func (s *Store) UpdatePoolOpCertSequence(
 					"insert opcert counter for pool %x at slot %d affected %d rows",
 					poolKeyHash.Bytes(), slot, inserted,
 				)
+			}
+			if s.poolsDrained() {
+				return nil
 			}
 			_, err = s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
@@ -1052,6 +1096,9 @@ func (s *Store) UpdatePoolOpCertSequenceBatched(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil
+	}
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok {
 		return fmt.Errorf(
@@ -1074,7 +1121,10 @@ func (s *Store) UpdatePoolOpCertSequenceBatched(
 		if queued.sequence != sequence {
 			return fmt.Errorf(
 				"opcert counter conflict for pool %x at slot %d: queued %d, candidate %d",
-				poolKeyHash.Bytes(), slot, queued.sequence, sequence,
+				poolKeyHash.Bytes(),
+				slot,
+				queued.sequence,
+				sequence,
 			)
 		}
 		return nil
@@ -1159,9 +1209,13 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 	latest := make(map[lcommon.PoolKeyHash]int64)
 	for _, key := range batched.opCertOrder {
 		queued := batched.opCertSequences[key]
-		if sequence, ok := latest[key.poolKeyHash]; !ok || queued.sequenceValue > sequence {
+		if sequence, ok := latest[key.poolKeyHash]; !ok ||
+			queued.sequenceValue > sequence {
 			latest[key.poolKeyHash] = queued.sequenceValue
 		}
+	}
+	if s.poolsDrained() {
+		return nil
 	}
 	updated := make(map[lcommon.PoolKeyHash]struct{}, len(latest))
 	for _, key := range batched.opCertOrder {
@@ -1202,6 +1256,9 @@ func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (uint64, bool, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return 0, false, errTableDrained("pool_opcert_sequence")
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1248,6 +1305,9 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	afterSlot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return 0, false, errTableDrained("pool_opcert_sequence")
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1256,7 +1316,8 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAfterSQL),
 		poolKeyHash.Bytes(),
 		afterSlot,
-	).Scan(&sequence)
+	).
+		Scan(&sequence)
 	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
@@ -1269,6 +1330,9 @@ func (s *Store) PoolOpCertSequencesExistAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) (bool, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return false, errTableDrained("pool_opcert_sequence")
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, err
@@ -1314,6 +1378,9 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	slot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return 0, false, errTableDrained("pool_opcert_sequence")
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1326,7 +1393,8 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAtOrBeforeSQL),
 		poolKeyHash.Bytes(),
 		slotValue,
-	).Scan(&sequence)
+	).
+		Scan(&sequence)
 	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
@@ -1351,6 +1419,9 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 	endSlot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return 0, false, errTableDrained("pool_opcert_sequence")
+	}
 	if startSlot > endSlot {
 		return 0, false, nil
 	}
@@ -1371,7 +1442,8 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 		poolKeyHash.Bytes(),
 		startValue,
 		endValue,
-	).Scan(&sequence)
+	).
+		Scan(&sequence)
 	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
@@ -1400,6 +1472,9 @@ GROUP BY pool_key_hash`
 func (s *Store) LatestPoolOpCertSequences(
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, errTableDrained("pool_opcert_sequence")
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1424,6 +1499,56 @@ func (s *Store) LatestPoolOpCertSequences(
 	return ret, rows.Err()
 }
 
+// LatestPoolOpCertCountersSQL is the statement LatestPoolOpCertCounters
+// issues.
+const LatestPoolOpCertCountersSQL = `
+SELECT c.pool_key_hash, c.max_sequence, c.max_slot, (
+    SELECT MAX(l.sequence) FROM pool_opcert_sequence l
+    WHERE l.pool_key_hash = c.pool_key_hash AND l.slot = c.max_slot
+)
+FROM (
+    SELECT pool_key_hash, MAX(sequence) AS max_sequence, MAX(slot) AS max_slot
+    FROM pool_opcert_sequence
+    GROUP BY pool_key_hash
+) c`
+
+// LatestPoolOpCertCounters returns each pool's highest observed op-cert
+// sequence, the highest slot of any of its rows, and the highest sequence of
+// the rows at that slot.
+func (s *Store) LatestPoolOpCertCounters(
+	txn types.Txn,
+) ([]models.PoolOpCertCounter, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, errTableDrained("pool_opcert_sequence")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, LatestPoolOpCertCountersSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []models.PoolOpCertCounter
+	for rows.Next() {
+		var poolKeyHash []byte
+		var sequence, slot, last int64
+		if err := rows.Scan(&poolKeyHash, &sequence, &slot, &last); err != nil {
+			return nil, err
+		}
+		ret = append(ret, models.PoolOpCertCounter{
+			PoolKeyHash: poolKeyHash,
+			Sequence:    decodeOpCertSequence(sequence),
+			Slot: uint64(
+				slot,
+			), //nolint:gosec // a slot is stored as a non-negative int64
+			LastSequence: decodeOpCertSequence(last),
+		})
+	}
+	return ret, rows.Err()
+}
+
 // PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
 // a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
 // DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
@@ -1434,6 +1559,30 @@ const PoolOpCertSequencesChangedAfterSQL = `
 SELECT pool_key_hash
 FROM pool_opcert_sequence
 WHERE slot > ?`
+
+func scanDistinctPoolKeyHashes(rows *sql.Rows) ([][]byte, error) {
+	var hashes [][]byte
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if _, ok := seen[string(hash)]; ok {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
 
 // PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
 // a slot, read through idx_pool_opcert_sequence_pool_slot.
@@ -1446,6 +1595,9 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	slot uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, errTableDrained("pool_opcert_sequence")
+	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -1470,24 +1622,8 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	if err != nil {
 		return nil, err
 	}
-	var changed [][]byte
-	seen := make(map[string]struct{})
-	for rows.Next() {
-		var poolKeyHash []byte
-		if err := rows.Scan(&poolKeyHash); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if _, dup := seen[string(poolKeyHash)]; dup {
-			continue
-		}
-		seen[string(poolKeyHash)] = struct{}{}
-		changed = append(changed, poolKeyHash)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
+	changed, err := scanDistinctPoolKeyHashes(rows)
+	if err != nil {
 		return nil, err
 	}
 	for _, poolKeyHash := range changed {
@@ -1602,6 +1738,9 @@ func (s *Store) GetPoolBlockIssuersInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) ([]models.PoolOpCertSequence, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, errTableDrained("pool_opcert_sequence")
+	}
 	if endSlot < startSlot {
 		return nil, nil
 	}
@@ -1652,6 +1791,9 @@ func (s *Store) CountPoolBlocksInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) (map[string]uint64, uint64, error) {
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, 0, errTableDrained("pool_opcert_sequence")
+	}
 	counts := make(map[string]uint64, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		counts[string(poolKeyHash.Bytes())] = 0
@@ -1745,13 +1887,28 @@ WHERE pool_key_hash IN (`+bindPlaceholders(len(chunk))+`)`,
 				if err != nil {
 					return err
 				}
+				type retiringPool struct {
+					id   int64
+					hash []byte
+				}
+				// Read every pool before writing: a server driver cannot run
+				// a statement on the connection while a result is open.
+				var retiring []retiringPool
 				for rows.Next() {
-					var poolID int64
-					var hash []byte
-					if err := rows.Scan(&poolID, &hash); err != nil {
+					var pool retiringPool
+					if err := rows.Scan(&pool.id, &pool.hash); err != nil {
 						rows.Close()
 						return err
 					}
+					retiring = append(retiring, pool)
+				}
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				for _, pool := range retiring {
 					if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
@@ -1762,22 +1919,18 @@ WHERE NOT EXISTS (
     WHERE certificate_id = 0 AND pool_id = ?
       AND epoch = ? AND added_slot = ?
 )`,
-						hash,
-						poolID,
+						pool.hash,
+						pool.id,
 						epochValue,
 						slotValue,
-						poolID,
+						pool.id,
 						epochValue,
 						slotValue,
 					); err != nil {
-						rows.Close()
 						return err
 					}
 				}
-				if err := rows.Close(); err != nil {
-					return err
-				}
-				if err := rows.Err(); err != nil {
+				if err := refreshPoolCurrentState(ctx, db, chunk); err != nil {
 					return err
 				}
 			}
@@ -1786,17 +1939,28 @@ WHERE NOT EXISTS (
 	)
 }
 
-// retiringPoolsCTE ranks every pool's registration and retirement
-// certificates, newest first. The AtSlot form keeps only certificates added
-// at or before a slot, so the ranking reads as that slot saw it.
-var retiringPoolsCTE = retiringPoolsCTEWhere("", "")
+// retiringPoolsCTE ranks the registration and retirement certificates of the
+// pools with at least one retirement row satisfying "epoch <epochOp> ?",
+// newest first. That set is a superset of the pools whose latest retirement
+// qualifies, so no result is lost. Ranking only those pools, found through the
+// retirement epoch index, keeps the work off the history of every other pool;
+// the full history of each candidate is still ranked. The epoch is bound once per ranked
+// table ahead of the main query's own. The AtSlot form keeps only
+// certificates added at or before a slot, so the ranking reads as that slot
+// saw it.
+func retiringPoolsCTE(epochOp string) string {
+	return retiringPoolsCTEWhere("WHERE", "WHERE", epochOp)
+}
 
-var retiringPoolsCTEAtSlot = retiringPoolsCTEWhere(
-	"WHERE pr.added_slot <= ?",
-	"WHERE pt.added_slot <= ?",
-)
+func retiringPoolsCTEAtSlot(epochOp string) string {
+	return retiringPoolsCTEWhere(
+		"WHERE pr.added_slot <= ? AND",
+		"WHERE pt.added_slot <= ? AND",
+		epochOp,
+	)
+}
 
-func retiringPoolsCTEWhere(regWhere, retWhere string) string {
+func retiringPoolsCTEWhere(regWhere, retWhere, epochOp string) string {
 	return `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
@@ -1814,7 +1978,10 @@ WITH latest_reg AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
-    ` + regWhere + `
+    ` + regWhere + ` pr.pool_key_hash IN (
+        SELECT pq.pool_key_hash FROM pool_retirement pq
+        WHERE pq.epoch ` + epochOp + ` ?
+    )
 ),
 latest_ret AS (
     SELECT pt.pool_key_hash, pt.epoch, pt.added_slot,
@@ -1831,7 +1998,10 @@ latest_ret AS (
     FROM pool_retirement pt
     LEFT JOIN certs c ON c.id = pt.certificate_id
     LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
-    ` + retWhere + `
+    ` + retWhere + ` pt.pool_key_hash IN (
+        SELECT pq.pool_key_hash FROM pool_retirement pq
+        WHERE pq.epoch ` + epochOp + ` ?
+    )
 )
 `
 }
@@ -1860,7 +2030,10 @@ WHERE r.rn = 1 AND r.epoch ` + epochOp + ` ?
 const retiringPoolsOrder = `
 ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index, r.pool_key_hash`
 
-func scanRetiringPools(rows *sql.Rows, capacity int) ([]models.PoolRetiringRow, error) {
+func scanRetiringPools(
+	rows *sql.Rows,
+	capacity int,
+) ([]models.PoolRetiringRow, error) {
 	defer rows.Close()
 	ret := make([]models.PoolRetiringRow, 0, capacity)
 	for rows.Next() {
@@ -1883,9 +2056,9 @@ func (s *Store) GetRetiringPools(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
+		s.dialect.Rebind(retiringPoolsCTE(">")+"SELECT r.pool_key_hash, r.epoch"+
 			retiringPoolsFrom(">")+retiringPoolsOrder),
-		currentEpoch,
+		currentEpoch, currentEpoch, currentEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get retiring pools: %w", err)
@@ -1907,9 +2080,9 @@ func (s *Store) GetRetiringPoolsAtSlot(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTEAtSlot+"SELECT r.pool_key_hash, r.epoch"+
+		s.dialect.Rebind(retiringPoolsCTEAtSlot(">")+"SELECT r.pool_key_hash, r.epoch"+
 			retiringPoolsFrom(">")+retiringPoolsOrder),
-		slot, slot, currentEpoch,
+		slot, currentEpoch, slot, currentEpoch, currentEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get retiring pools at slot: %w", err)
@@ -1951,6 +2124,9 @@ func (s *Store) poolsByRetirementPage(
 	descending bool,
 	txn types.Txn,
 ) ([]models.PoolRetiringRow, int, error) {
+	if err := s.refuseDrained("pool"); err != nil {
+		return nil, 0, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -1958,8 +2134,8 @@ func (s *Store) poolsByRetirementPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
-		currentEpoch,
+		s.dialect.Rebind(retiringPoolsCTE(epochOp)+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
+		currentEpoch, currentEpoch, currentEpoch,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
 	}
@@ -1974,10 +2150,10 @@ ORDER BY r.epoch DESC, r.added_slot DESC,
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+
+		s.dialect.Rebind(retiringPoolsCTE(epochOp)+
 			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom(epochOp)+order+
 			" LIMIT ? OFFSET ?"),
-		currentEpoch, limit, offset,
+		currentEpoch, currentEpoch, currentEpoch, limit, offset,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get retiring pool page: %w", err)
@@ -2031,6 +2207,9 @@ func (s *Store) GetActivePoolKeyHashesPage(
 	descending bool,
 	txn types.Txn,
 ) ([][]byte, int, error) {
+	if err := s.refuseDrained("pool"); err != nil {
+		return nil, 0, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -2542,6 +2721,9 @@ func (s *Store) GetStakeByPools(
 	poolKeyHashes [][]byte,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
+	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
+		return nil, nil, err
+	}
 	if len(poolKeyHashes) == 0 {
 		stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
 		return stakes, delegators, nil
@@ -2573,6 +2755,9 @@ func (s *Store) GetStakeByPools(
 // when it is incomplete the total is rebuilt from the per-pool path, which
 // falls back to the UTxO table exactly as GetStakeByPools does.
 func (s *Store) GetActivePoolStakeTotal(txn types.Txn) (uint64, error) {
+	if err := s.refuseDrained("account", "reward_live_stake", "pool"); err != nil {
+		return 0, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
@@ -2747,6 +2932,9 @@ func (s *Store) getStakeByPoolsDirect(
 	if len(poolKeyHashes) == 0 {
 		return stakes, delegators, nil
 	}
+	if s.liveUtxo != nil {
+		return nil, nil, errLiveUtxoStakeIncomplete
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err
@@ -2831,10 +3019,11 @@ WHERE account.active = TRUE AND utxo.deleted_slot = 0
 	return stakes, delegators, nil
 }
 
-// GetPoolRegistrationsAtSlot returns the latest registration for every
-// requested pool at or before slot. Certificate position breaks same-slot
-// ties, with the row ID as a deterministic final fallback.
-func (s *Store) GetPoolRegistrationsAtSlot(
+// getPoolRegistrationsAtSlotFromHistory ranks the certificate history of every
+// requested pool. It is the definition of the result:
+// GetPoolRegistrationsAtSlot answers from pool_current_state wherever that
+// provably gives the same answer and calls this for the rest.
+func (s *Store) getPoolRegistrationsAtSlotFromHistory(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	slot uint64,
 	txn types.Txn,
@@ -2869,7 +3058,9 @@ WITH ranked AS (
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
     WHERE pr.pool_key_hash IN (`+
-			bindPlaceholders(end-start)+`) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
+			bindPlaceholders(
+				end-start,
+			)+`) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 )
 SELECT pr.margin, pr.metadata_url, pr.vrf_key_hash, pr.pool_key_hash,
        pr.reward_account, pr.reward_account_credential_tag, pr.metadata_hash,
@@ -2915,7 +3106,11 @@ WHERE r.rn = 1`,
 	return ret, nil
 }
 
-func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
+// getPoolRegistrationsEffectiveForEpochFromHistory ranks the certificate
+// history of every requested pool. It is the definition of the result:
+// GetPoolRegistrationsEffectiveForEpoch answers from pool_current_state
+// wherever that provably gives the same answer and calls this for the rest.
+func (s *Store) getPoolRegistrationsEffectiveForEpochFromHistory(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	epochStartSlot uint64,
 	endedEpoch uint64,
@@ -3104,6 +3299,17 @@ SELECT id FROM ranked WHERE rn = 1`,
 			return nil, err
 		}
 	}
+	return loadPoolRegistrationsByID(ctx, db, registrationIDs)
+}
+
+// loadPoolRegistrationsByID loads the registration rows with the given ids,
+// owners and relays included, in no particular order.
+func loadPoolRegistrationsByID(
+	ctx context.Context,
+	db queryer,
+	registrationIDs []uint,
+) ([]models.PoolRegistration, error) {
+	ret := []models.PoolRegistration{}
 	for start := 0; start < len(registrationIDs); start += 400 {
 		end := min(start+400, len(registrationIDs))
 		args := make([]any, end-start)
@@ -3593,20 +3799,54 @@ func (s *Store) RestorePoolStateAtSlot(
 			// values that lose a sequence row to this rollback, and that set
 			// is unrecoverable from pool_opcert_sequence once the DELETE has
 			// run.
-			affectedOpCertPoolKeyHashes, err := queryPoolKeyHashesWithOpCertAfterSlot(
-				ctx,
-				db,
-				slot,
-			)
-			if err != nil {
-				return err
+			var affectedOpCertPoolKeyHashes [][]byte
+			opCertsDrained := s.tableDrained("pool_opcert_sequence")
+			if !opCertsDrained {
+				hashes, err := queryPoolKeyHashesWithOpCertAfterSlot(
+					ctx, db, slot,
+				)
+				if err != nil {
+					return err
+				}
+				affectedOpCertPoolKeyHashes = hashes
+				if _, err := db.ExecContext(
+					ctx,
+					"DELETE FROM pool_opcert_sequence WHERE slot > ?",
+					slot,
+				); err != nil {
+					return err
+				}
 			}
-			if _, err := db.ExecContext(
-				ctx,
-				"DELETE FROM pool_opcert_sequence WHERE slot > ?",
-				slot,
-			); err != nil {
-				return err
+			// The op-cert rows above are the only pool state a drained
+			// pools-history family leaves in this store.
+			if s.poolsDrained() {
+				return nil
+			}
+			// pool_registration_owner and pool_registration_relay reference
+			// pool through a plain foreign key (fk_pool_owners,
+			// fk_pool_relays) as well as through their registration. The
+			// registration cascade alone is not enough: MySQL checks the
+			// direct reference row by row and PostgreSQL checks it before
+			// the cascaded child deletes have run, so both reject the pool
+			// delete while owner or relay rows remain.
+			for _, table := range []string{
+				"pool_registration_owner",
+				"pool_registration_relay",
+			} {
+				if _, err := db.ExecContext(ctx, `
+DELETE FROM `+table+`
+WHERE pool_id IN (
+    SELECT pool.id FROM pool
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pool_registration registration
+        WHERE registration.pool_id = pool.id
+          AND registration.added_slot <= ?
+    )
+)`,
+					slot,
+				); err != nil {
+					return err
+				}
 			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool
@@ -3622,7 +3862,10 @@ WHERE NOT EXISTS (
 			if _, err := s.restorePoolDenormalizedFields(ctx, db, slot); err != nil {
 				return err
 			}
-			_, err = s.restorePoolLatestOpCertSequence(
+			if opCertsDrained {
+				return nil
+			}
+			_, err := s.restorePoolLatestOpCertSequence(
 				ctx,
 				db,
 				affectedOpCertPoolKeyHashes,
@@ -3635,7 +3878,9 @@ WHERE NOT EXISTS (
 // queryPoolKeyHashesWithOpCertAfterSlot returns the distinct pool_key_hash
 // values with a pool_opcert_sequence row above slot -- exactly the rows
 // RestorePoolStateAtSlot's own DELETE FROM pool_opcert_sequence is about to
-// remove. Callers must read this before issuing that delete.
+// remove. Callers must read this before issuing that delete. Deduplication is
+// intentionally outside SQL so SQLite ranges over the slot index instead of
+// scanning the pool-ordered history to satisfy DISTINCT.
 func queryPoolKeyHashesWithOpCertAfterSlot(
 	ctx context.Context,
 	db queryer,
@@ -3643,22 +3888,13 @@ func queryPoolKeyHashesWithOpCertAfterSlot(
 ) ([][]byte, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		"SELECT DISTINCT pool_key_hash FROM pool_opcert_sequence WHERE slot > ?",
+		PoolOpCertSequencesChangedAfterSQL,
 		slot,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var hashes [][]byte
-	for rows.Next() {
-		var hash []byte
-		if err := rows.Scan(&hash); err != nil {
-			return nil, err
-		}
-		hashes = append(hashes, hash)
-	}
-	return hashes, rows.Err()
+	return scanDistinctPoolKeyHashes(rows)
 }
 
 // restorePoolDenormalizedFields reverts pledge/cost/margin/VRF/reward-account/
@@ -4128,7 +4364,93 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	if err := loadPoolRegistrationChildrenBatch(ctx, db, registrations); err != nil {
 		return err
 	}
-	return s.loadPoolRetirementsBatch(ctx, db, pools)
+	if err := s.loadPoolRetirementsBatch(ctx, db, pools); err != nil {
+		return err
+	}
+	return s.loadPoolCertEffectiveSlots(ctx, db, pools)
+}
+
+// loadPoolCertEffectiveSlots fills EffectiveSlot on each registration and
+// retirement whose certificate is part of a Leios closure whose context slot
+// differs from the slot the certificate was added at.
+func (s *Store) loadPoolCertEffectiveSlots(
+	ctx context.Context,
+	db queryer,
+	pools []models.Pool,
+) error {
+	type target struct {
+		added uint64
+		set   func(uint64)
+	}
+	byCert := make(map[uint][]target)
+	var ids []any
+	add := func(id uint, added uint64, set func(uint64)) {
+		if id == 0 {
+			return
+		}
+		if _, ok := byCert[id]; !ok {
+			ids = append(ids, id)
+		}
+		byCert[id] = append(byCert[id], target{added, set})
+	}
+	for i := range pools {
+		for j := range pools[i].Registration {
+			r := &pools[i].Registration[j]
+			add(
+				r.CertificateID,
+				r.AddedSlot,
+				func(v uint64) { r.EffectiveSlot = v },
+			)
+		}
+		for j := range pools[i].Retirement {
+			r := &pools[i].Retirement[j]
+			add(
+				r.CertificateID,
+				r.AddedSlot,
+				func(v uint64) { r.EffectiveSlot = v },
+			)
+		}
+	}
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		rows, err := db.QueryContext(
+			ctx,
+			s.dialect.Rebind(`
+SELECT c.id, lc.slot
+FROM certs c
+JOIN leios_transaction_context lc ON lc.transaction_id = c.transaction_id
+WHERE c.id IN (`+bindPlaceholders(end-start)+`)`),
+			ids[start:end]...,
+		)
+		if err != nil {
+			return fmt.Errorf("load pool certificate effective slots: %w", err)
+		}
+		for rows.Next() {
+			var id uint
+			var slot int64
+			if err := rows.Scan(&id, &slot); err != nil {
+				rows.Close()
+				return err
+			}
+			for _, t := range byCert[id] {
+				if uint64(
+					slot,
+				) != t.added { //nolint:gosec // a slot is stored as a non-negative int64
+					t.set(
+						uint64(slot),
+					) //nolint:gosec // a slot is stored as a non-negative int64
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) loadPoolRetirementsBatch(

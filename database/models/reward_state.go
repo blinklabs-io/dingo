@@ -182,6 +182,28 @@ type RewardPoolOutput struct {
 	BoundarySlot        uint64
 }
 
+// RewardLikelihoodState is the non-myopic pool-ranking state installed by a
+// completed reward update. BoundarySlot is when the state became visible.
+type RewardLikelihoodState struct {
+	ID           uint
+	Epoch        uint64
+	RewardPot    types.Uint64
+	CapturedSlot uint64
+	BoundarySlot uint64
+	Complete     bool
+}
+
+// RewardPoolLikelihood stores one pool's cumulative 100-point log-likelihood
+// distribution for a RewardLikelihoodState. LogWeights contains 100 IEEE-754
+// binary32 values in network byte order.
+type RewardPoolLikelihood struct {
+	ID                  uint
+	Epoch               uint64
+	PoolKeyHash         []byte
+	LogWeights          []byte
+	PerformanceEstimate float64
+}
+
 // RewardAccountOutput captures per-account reward calculation output.
 type RewardAccountOutput struct {
 	StakingKey    []byte
@@ -211,6 +233,16 @@ type RewardCreditRound struct {
 // StakeRewardSourcePrefix namespaces the sync_state keys and the journal
 // source hashes of the stake-reward round.
 const StakeRewardSourcePrefix = "dingo:stake-reward:"
+
+// RewardStakeInputsPendingKey is the sync_state key listing the snapshots
+// whose reward_stake_input rows the ledger has not finished writing.
+const RewardStakeInputsPendingKey = StakeRewardSourcePrefix +
+	"stake-inputs-pending"
+
+// RewardPrecomputeCursorPrefix prefixes the sync_state keys holding the
+// reward precompute cursor of each snapshot epoch.
+const RewardPrecomputeCursorPrefix = StakeRewardSourcePrefix +
+	"precompute-cursor:"
 
 // StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
 // reward_account_output row produces, which makes crediting it idempotent.

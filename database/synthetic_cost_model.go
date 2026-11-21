@@ -17,6 +17,8 @@ package database
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 // SyntheticV2CostModelSyncKey is the durable sync_state marker key backing
@@ -27,7 +29,7 @@ import (
 // this package (which reads/resets it during rollback/truncate) so both
 // agree on the exact same marker regardless of which caller performs the
 // truncation.
-const SyntheticV2CostModelSyncKey = "synthetic_v2_cost_model"
+const SyntheticV2CostModelSyncKey = statedrain.SyntheticV2SyncKey
 
 // SyntheticV2CostModelClearedEpochSyncKey is the durable sync_state marker
 // key recording the epoch at which real (non-synthetic) PlutusV2 cost-model
@@ -38,7 +40,7 @@ const SyntheticV2CostModelSyncKey = "synthetic_v2_cost_model"
 // signal RecomputeSyntheticV2CostModelMarkerAfterTruncate uses to decide
 // whether a rollback or truncate crossed back before the confirmation, and
 // so must undo it.
-const SyntheticV2CostModelClearedEpochSyncKey = "synthetic_v2_cost_model_cleared_epoch"
+const SyntheticV2CostModelClearedEpochSyncKey = statedrain.SyntheticV2ClearedEpochSyncKey
 
 // SyntheticV2CostModelClearedEpoch reads the durable marker and reports the
 // epoch at which real PlutusV2 cost-model data was last confirmed, whether
@@ -118,6 +120,10 @@ func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 	txn *Txn,
 	rollbackSlot uint64,
 ) error {
+	if d.pparamsDrained() {
+		// The set holds both markers and reverts them in its own rollback.
+		return nil
+	}
 	clearedEpoch, cleared, err := SyntheticV2CostModelClearedEpoch(d, txn)
 	if err != nil {
 		return fmt.Errorf(

@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -40,6 +41,51 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
+
+type historyFloorSet struct {
+	*livesettest.Mem
+	floor uint64
+}
+
+func (s *historyFloorSet) SnapshotUtxoSet() (
+	ledger.UtxoSetWriter,
+	func(),
+	error,
+) {
+	set, release, err := s.Mem.SnapshotUtxoSet()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &historyFloorSnapshot{
+		UtxoSetWriter: set,
+		history:       set.(ledger.UtxoSetHistory),
+		floor:         s.floor,
+	}, release, nil
+}
+
+func (s *historyFloorSet) UtxoSetAt(
+	point ocommon.Point,
+) (ledger.UtxoSetView, error) {
+	if point.Slot < s.floor {
+		return nil, ledger.ErrUtxoAsOfUnavailable
+	}
+	return s.Mem.UtxoSetAt(point)
+}
+
+type historyFloorSnapshot struct {
+	ledger.UtxoSetWriter
+	history ledger.UtxoSetHistory
+	floor   uint64
+}
+
+func (s *historyFloorSnapshot) UtxoSetAt(
+	point ocommon.Point,
+) (ledger.UtxoSetView, error) {
+	if point.Slot < s.floor {
+		return nil, ledger.ErrUtxoAsOfUnavailable
+	}
+	return s.history.UtxoSetAt(point)
+}
 
 func TestReleaseLocalStateQueryAcquiredPointOwnerKeepsReplacement(
 	t *testing.T,
@@ -314,6 +360,37 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 		t, recorded,
 		"a rejected Acquire must not record the unvalidated point",
 	)
+}
+
+func TestLocalstatequeryProtocol_LiveSetHistoryTooOld(t *testing.T) {
+	t.Parallel()
+
+	set := &historyFloorSet{Mem: livesettest.New(), floor: 2}
+	ls, db := newTestLedgerStateWithChainAtAndConfigAndSet(
+		t, 2, "", nil, set,
+	)
+	o := newOuroboros(OuroborosConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	o.ledgerState = ls
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+
+	tipHash := bytes.Repeat([]byte{2}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2, tipHash),
+	}, nil))
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+
+	client := newLocalStateQueryTestClient(t, o)
+	oldPoint := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
+	err := client.Acquire(&oldPoint)
+	require.ErrorIs(t, err, olocalstatequery.ErrAcquireFailurePointTooOld)
+
+	require.NoError(t, client.AcquireVolatileTip())
+	require.NoError(t, client.Release())
 }
 
 // TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint covers the
@@ -1644,12 +1721,12 @@ func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
 		ctx,
 		olocalstatequery.QueryWrapper{Query: &olocalstatequery.BlockQuery{
 			Query: &olocalstatequery.ShelleyQuery{
-				Query: &olocalstatequery.ShelleyRewardInfoPoolsQuery{},
+				Query: &olocalstatequery.ShelleyDebugEpochStateQuery{},
 			},
 		}},
 	)
 	require.ErrorIs(t, err, ledger.ErrQueryNotAnswered)
-	require.ErrorContains(t, err, "GetRewardInfoPools")
+	require.ErrorContains(t, err, "DebugEpochState")
 	// The session pins a metadata read connection. Held, it makes the wire
 	// Acquire below open a new SQLite connection inside the Acquire wait, which
 	// a fully parallel race run can push past the client's Acquire timeout.
@@ -1658,8 +1735,8 @@ func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
 	client := newLocalStateQueryTestClient(t, o)
 	require.NoError(t, client.AcquireVolatileTip())
 	_, err = client.GetCurrentEra()
-	require.NoError(t, err, "the era lookup GetRewardInfoPools starts with")
-	_, err = client.GetRewardInfoPools()
+	require.NoError(t, err, "the era lookup DebugEpochState starts with")
+	_, err = client.DebugEpochState()
 	require.Error(t, err)
 	_, err = client.GetChainPoint()
 	require.Error(t, err, "the connection ended with the failed query")

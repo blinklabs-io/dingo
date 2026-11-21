@@ -25,7 +25,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -65,8 +65,8 @@ var ErrMissingCurrentBoundarySPOState = errors.New(
 // EpochInput collects the inputs needed at an epoch boundary
 // to drive the governance state machine.
 type EpochInput struct {
-	DB        *database.Database
-	Txn       *database.Txn
+	DB        ledgerdb.LedgerDB
+	Txn       ledgerdb.Txn
 	Logger    *slog.Logger
 	PrevEpoch uint64 // epoch being closed out
 	NewEpoch  uint64 // epoch being opened
@@ -201,8 +201,7 @@ func ProcessEpoch(
 	}
 
 	// --- ENACTMENT ----------------------------------------------------
-	initialNetworkState, err := in.DB.Metadata().
-		GetNetworkState(in.Txn.Metadata())
+	initialNetworkState, err := in.DB.GetNetworkState(in.Txn)
 	if err != nil {
 		return nil, fmt.Errorf("get initial network state: %w", err)
 	}
@@ -483,7 +482,7 @@ func ProcessEpoch(
 	// caller adds the donations after ProcessEpoch returns. The seed is read
 	// here, in the boundary transaction, because a deferred Decide reads a
 	// snapshot that also holds the boundary's later pot writes.
-	ratifyState, err := in.DB.Metadata().GetNetworkState(in.Txn.Metadata())
+	ratifyState, err := in.DB.GetNetworkState(in.Txn)
 	if err != nil {
 		return nil, fmt.Errorf("get ratification network state: %w", err)
 	}
@@ -560,7 +559,7 @@ func (p *RatificationPlan) BoundarySlot() uint64 { return p.in.BoundarySlot }
 // commits provides.
 func (p *RatificationPlan) Decide(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*RatificationDecision, error) {
 	in := p.in
 	if in.BoundarySPOStateDeferred && in.CurrentBoundarySPOState == nil {
@@ -577,7 +576,7 @@ func (p *RatificationPlan) Decide(
 func (p *RatificationPlan) Apply(
 	ctx context.Context,
 	decision *RatificationDecision,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (int, error) {
 	in := p.in
 	in.Txn = txn
@@ -1417,8 +1416,8 @@ func predictedBoundaryStakeEpochFor(currentEpoch uint64) uint64 {
 // virtual DReps are not counted.
 func countActiveDReps(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) (int, error) {
 	dreps, err := db.GetActiveDreps(ctx, txn)
@@ -1528,8 +1527,8 @@ func isDelayingActionPurpose(purpose govActionPurpose) bool {
 // missing or inactive, the unclaimed deposit returns to the treasury.
 func refundProposalDeposit(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	proposal *models.GovernanceProposal,
 	slot uint64,
 ) error {
@@ -1540,8 +1539,8 @@ func refundProposalDeposit(
 
 func refundProposalDepositFromSource(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	proposal *models.GovernanceProposal,
 	slot uint64,
 	sourceHash []byte,
@@ -1598,8 +1597,8 @@ func refundProposalDepositFromSource(
 // remove their own descendant subtrees.
 func removeOrphanedProposals(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
 	dropped []*models.GovernanceProposal,
@@ -1619,8 +1618,8 @@ func removeOrphanedProposals(
 
 func removeOrphanedProposalsFromSet(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
 	dropped []*models.GovernanceProposal,
@@ -1807,8 +1806,8 @@ var defaultCCQuorum = big.NewRat(2, 3)
 func conwayRatifyQuorum(
 	ctx context.Context,
 	logger *slog.Logger,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	genesis *conway.ConwayGenesis,
 ) (*big.Rat, error) {
 	if db != nil {
@@ -1839,8 +1838,8 @@ func conwayRatifyQuorum(
 // the 2/3 default. The result is a copy the caller may modify.
 func EffectiveCommitteeQuorum(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	genesis *conway.ConwayGenesis,
 ) (*big.Rat, error) {
 	quorum, err := conwayRatifyQuorum(ctx, nil, db, txn, genesis)

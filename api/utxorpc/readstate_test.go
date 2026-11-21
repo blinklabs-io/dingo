@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -76,7 +76,7 @@ func (s *blockingReadStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	_ []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
-	_ *database.Txn,
+	_ ledgerdb.Txn,
 	_ int,
 ) (*ledger.PoolStakeDistribution, error) {
 	close(s.started)
@@ -104,7 +104,7 @@ func (s *readStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
-	_ *database.Txn,
+	_ ledgerdb.Txn,
 	maxPools int,
 ) (*ledger.PoolStakeDistribution, error) {
 	s.calls++
@@ -126,8 +126,9 @@ func newReadStateServer(
 ) *betaQueryServiceServer {
 	t.Helper()
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: stubQueryDB(ls),
 	})
 	return &betaQueryServiceServer{utxorpc: u}
 }
@@ -244,6 +245,7 @@ func TestReadState_UsesBulkAdmission(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:                    discardLogger(),
 		LedgerState:               stub,
+		QueryDatabase:             stubQueryDB(stub),
 		MaxConcurrentBulkRequests: 1,
 	})
 	srv := &betaQueryServiceServer{utxorpc: u}
@@ -277,6 +279,7 @@ func TestReadState_BoundsResponseBytes(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:           discardLogger(),
 		LedgerState:      stub,
+		QueryDatabase:    stubQueryDB(stub),
 		MaxResponseBytes: 1,
 	})
 	srv := &betaQueryServiceServer{utxorpc: u}
@@ -295,6 +298,7 @@ func TestReadState_HasServerDeadline(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:        discardLogger(),
 		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 		ServerTimeout: time.Nanosecond,
 	})
 	srv := &betaQueryServiceServer{utxorpc: u}
@@ -525,6 +529,7 @@ func TestReadState_RejectsOversizedPoolFilter(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 		MaxPoolFilter: 2,
 	})
 	srv := &betaQueryServiceServer{utxorpc: u}
@@ -571,6 +576,7 @@ func TestReadStateBoundsLedgerMaterialization(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerState:      stub,
+		QueryDatabase:    stubQueryDB(stub),
 		MaxResponseBytes: 128,
 	})
 	srv := &betaQueryServiceServer{utxorpc: u}

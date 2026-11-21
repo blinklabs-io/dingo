@@ -142,25 +142,31 @@ func (d *s3Destination) uploadAuthenticatedSnapshot(
 	// rather than done here to avoid pulling in a newer, less-established
 	// API right alongside this package's initial real-cloud test coverage.
 	uploader := manager.NewUploader(d.client) //nolint:staticcheck
-	for _, file := range files {
-		key := d.objectKey(file.name)
-		_, uploadErr := uploader.Upload( //nolint:staticcheck
-			ctx,
-			&s3.PutObjectInput{
-				Bucket: &d.bucket,
-				Key:    &key,
-				Body:   file.file,
-			},
-		)
-		if uploadErr != nil {
-			return snapshotUploadResult{}, fmt.Errorf(
-				"upload snapshot file %q to s3://%s/%s: %w",
-				file.name,
-				d.bucket,
-				key,
-				uploadErr,
+	if err := forEachSnapshotUploadFile(
+		ctx, root, files, snapshotUploadWorkers,
+		func(ctx context.Context, file snapshotUploadFile, f *os.File) error {
+			key := d.objectKey(file.name)
+			_, uploadErr := uploader.Upload( //nolint:staticcheck
+				ctx,
+				&s3.PutObjectInput{
+					Bucket: &d.bucket,
+					Key:    &key,
+					Body:   f,
+				},
 			)
-		}
+			if uploadErr != nil {
+				return fmt.Errorf(
+					"upload snapshot file %q to s3://%s/%s: %w",
+					file.name,
+					d.bucket,
+					key,
+					uploadErr,
+				)
+			}
+			return nil
+		},
+	); err != nil {
+		return snapshotUploadResult{}, err
 	}
 	key := d.objectKey(cloudMirrorMarkerName)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{

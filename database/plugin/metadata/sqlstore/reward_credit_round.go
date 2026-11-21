@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -617,29 +618,39 @@ func scanRewardAccountOutputRows(
 	defer rows.Close()
 	var ret []*models.RewardAccountOutput
 	for rows.Next() {
-		var output models.RewardAccountOutput
-		var id, epoch, tag, captured, boundary int64
-		var amount string
-		if err := rows.Scan(
-			&output.StakingKey, &output.PoolKeyHash, &output.RewardType,
-			&id, &epoch, &tag, &amount, &output.Spendable, &output.Guarded,
-			&captured, &boundary,
-		); err != nil {
-			return nil, err
-		}
-		value, err := parseUint64("reward account amount", amount)
+		output, err := scanRewardAccountOutputRow(rows)
 		if err != nil {
 			return nil, err
 		}
-		output.ID = uint(id)                   //nolint:gosec
-		output.Epoch = uint64(epoch)           //nolint:gosec
-		output.CredentialTag = uint8(tag)      //nolint:gosec
-		output.CapturedSlot = uint64(captured) //nolint:gosec
-		output.BoundarySlot = uint64(boundary) //nolint:gosec
-		output.Amount = types.Uint64(value)
-		ret = append(ret, &output)
+		ret = append(ret, output)
 	}
 	return ret, rows.Err()
+}
+
+func scanRewardAccountOutputRow(
+	rows *sql.Rows,
+) (*models.RewardAccountOutput, error) {
+	var output models.RewardAccountOutput
+	var id, epoch, tag, captured, boundary int64
+	var amount string
+	if err := rows.Scan(
+		&output.StakingKey, &output.PoolKeyHash, &output.RewardType,
+		&id, &epoch, &tag, &amount, &output.Spendable, &output.Guarded,
+		&captured, &boundary,
+	); err != nil {
+		return nil, err
+	}
+	value, err := parseUint64("reward account amount", amount)
+	if err != nil {
+		return nil, err
+	}
+	output.ID = uint(id)                   //nolint:gosec
+	output.Epoch = uint64(epoch)           //nolint:gosec
+	output.CredentialTag = uint8(tag)      //nolint:gosec
+	output.CapturedSlot = uint64(captured) //nolint:gosec
+	output.BoundarySlot = uint64(boundary) //nolint:gosec
+	output.Amount = types.Uint64(value)
+	return &output, nil
 }
 
 const rewardAccountOutputColumns = `staking_key, pool_key_hash, reward_type,
@@ -732,6 +743,37 @@ ORDER BY rao.epoch, rao.pool_key_hash, rao.reward_type`),
 	return scanRewardAccountOutputRows(rows)
 }
 
+// IterateUnfoldedRewardAccountOutputs calls fn with every spendable,
+// unguarded output not yet folded, of any epoch, in row order.
+func (s *Store) IterateUnfoldedRewardAccountOutputs(
+	txn types.Txn,
+	fn func(*models.RewardAccountOutput) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT `+rewardAccountOutputColumns+`
+FROM reward_account_output
+WHERE spendable = TRUE AND guarded = FALSE AND folded = FALSE
+ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("iterate unfolded reward account outputs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		output, err := scanRewardAccountOutputRow(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(output); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func (s *Store) GetRewardAccountOutputsInPoolKeyHashRange(
 	epoch uint64,
 	lo, hi []byte,
@@ -766,6 +808,11 @@ func (s *Store) pendingDRepCredits(
 	filterCol string,
 	values []any,
 ) (map[string]uint64, map[uint64]uint64, error) {
+	if err := s.refuseDrained(
+		"account", "reward_account_output", "reward_credit_round",
+	); err != nil {
+		return nil, nil, err
+	}
 	byCredential := make(map[string]uint64)
 	byType := make(map[uint64]uint64)
 	if len(values) == 0 {
@@ -852,7 +899,9 @@ func (s *Store) recordRewardEligibilityRecheck(
 	db queryer,
 	refs []models.StakeCredentialRef,
 ) error {
-	if len(refs) == 0 {
+	// The key belongs to the reward-outputs family, whose drain deletes it;
+	// the set keeps the restored credentials itself.
+	if len(refs) == 0 || s.familyDrained(nodesettings.FamilyRewardOutputs) {
 		return nil
 	}
 	var raw string
@@ -972,6 +1021,9 @@ func (s *Store) RewardCreditsAlreadyApplied(
 	credits []models.AccountRewardCredit,
 	txn types.Txn,
 ) ([]bool, error) {
+	if err := s.refuseDrained("account_reward_delta"); err != nil {
+		return nil, err
+	}
 	ret := make([]bool, len(credits))
 	if len(credits) == 0 {
 		return ret, nil
@@ -980,45 +1032,9 @@ func (s *Store) RewardCreditsAlreadyApplied(
 	if err != nil {
 		return nil, err
 	}
-	hashes := make([]any, 0, len(credits))
-	seen := make(map[string]struct{}, len(credits))
-	for _, credit := range credits {
-		hash := credit.SourceHash
-		if hash == nil {
-			hash = []byte{}
-		}
-		if _, ok := seen[string(hash)]; ok {
-			continue
-		}
-		seen[string(hash)] = struct{}{}
-		hashes = append(hashes, hash)
-	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
-		hashes...,
-	)
+	applied, err := s.appliedRewardCreditKeys(ctx, db, credits)
 	if err != nil {
 		return nil, fmt.Errorf("check reward credits applied: %w", err)
-	}
-	defer rows.Close()
-	applied := make(map[rewardCreditJournalKey]struct{})
-	for rows.Next() {
-		var hash, key []byte
-		var tag, slot int64
-		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
-			return nil, err
-		}
-		applied[rewardCreditJournalKey{
-			sourceHash:    string(hash),
-			credentialTag: uint8(tag), //nolint:gosec
-			stakingKey:    string(key),
-			slot:          uint64(slot), //nolint:gosec
-		}] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	for i, credit := range credits {
 		hash := credit.SourceHash

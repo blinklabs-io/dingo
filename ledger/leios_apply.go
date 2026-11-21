@@ -20,10 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -198,7 +201,7 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
@@ -223,7 +226,7 @@ func (ls *LedgerState) applyEndorserBlock(
 
 func (ls *LedgerState) applyEndorserBlockInContext(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
@@ -261,7 +264,7 @@ func endorserBlockStorageSpan(txs []lcommon.Transaction) uint64 {
 // nil, is set to endorserBlockStorageSpan once the closure decodes.
 func (ls *LedgerState) applyEndorserBlockWithReservation(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
@@ -355,16 +358,16 @@ func (ls *LedgerState) applyEndorserBlockWithReservation(
 	if err != nil {
 		return 0, 0, err
 	}
-	// The blob commits in its own blob transaction (nil txn) so a dense Leios
-	// backlog cannot overflow the shared 50-block chunk transaction with
-	// ErrTxnTooBig; offset reads use a fresh blob snapshot if the shared LRU
-	// misses. See DATABASE.md, "Leios endorser-block storage".
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, nil); err != nil {
+	// The closure lives in the LeiosDB, so a dense Leios backlog cannot
+	// overflow the shared 50-block chunk transaction with ErrTxnTooBig, and
+	// the offsets written below resolve into it through the offset resolver's
+	// LeiosDB fallback. It is written before the offsets that point at it.
+	// See DATABASE.md, "Leios endorser-block storage".
+	if err := ls.db.PutLeiosClosure(ebSlot, ebHash[:], blob); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
-	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
 	// The offsets of a dense endorser block exceed one blob transaction, so
 	// they commit in bounded blob transactions of their own, after the blob
 	// they point at. See DATABASE.md, "Leios endorser-block storage".
@@ -372,7 +375,7 @@ func (ls *LedgerState) applyEndorserBlockWithReservation(
 	for _, idx := range keepIndexes {
 		levels = append(levels, TransactionLevelsForApply(txs[idx])...)
 	}
-	if err := ls.db.PersistTransactionOffsets(
+	if err := ls.ledgerDB().PersistTransactionOffsets(
 		txn,
 		levels,
 		offsets,
@@ -399,7 +402,7 @@ func (e *leiosEndorserBlockValidationError) Unwrap() error {
 
 func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	referenceSlot uint64,
@@ -412,7 +415,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		return 0, 0, err
 	}
 	snapshot := ls.txValidationSnapshot()
-	acc := ls.db.NewLeiosClosureBatchAccumulator()
+	acc := ls.ledgerDB().NewLeiosClosureBatchAccumulator()
 	if acc != nil {
 		defer acc.Reset()
 	}
@@ -422,7 +425,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	}
 	flush := func() error {
 		flushStart := time.Now()
-		err := ls.db.FlushBatch(acc, txn)
+		err := ls.ledgerDB().FlushBatch(acc, txn)
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
 		if err != nil {
 			return &leiosEndorserBlockStorageError{
@@ -442,7 +445,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	windowEnd := 0
 	for position, idx := range indexes {
 		if acc != nil && position == windowEnd {
-			n, err := ls.db.PrepareLeiosClosureBatch(
+			n, err := ls.ledgerDB().PrepareLeiosClosureBatch(
 				acc,
 				txn,
 				selected[position:],
@@ -618,6 +621,13 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				ls.Lock()
 				ls.untickedClosure = pending
 				ls.Unlock()
+				// The closure's ledger.tx events wait for the certifying
+				// block, but its outputs are in the store now: a rollback
+				// before that block removes them, and a ledger.utxo
+				// consumer must have seen them added.
+				for _, evt := range applyEvents {
+					ls.publishUtxoEventForTransaction(ctx, evt)
+				}
 			})
 		} else {
 			txn.AfterCommit(func() {
@@ -635,7 +645,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 
 func (ls *LedgerState) loadLeiosSpentInputs(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tx lcommon.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
@@ -648,11 +658,11 @@ func (ls *LedgerState) loadLeiosSpentInputs(
 		if _, alreadyLoaded := created[key]; alreadyLoaded {
 			continue
 		}
-		stored, err := ls.db.UtxoByRefIncludingSpent(
+		stored, err := ls.utxoIncludingSpent(
 			ctx,
+			txn,
 			input.Id().Bytes(),
 			input.Index(),
-			txn,
 		)
 		if err != nil {
 			return err
@@ -675,7 +685,7 @@ func (ls *LedgerState) loadLeiosSpentInputs(
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	ctx context.Context,
 	txs []lcommon.Transaction,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) ([]int, error) {
 	if len(txs) == 0 {
 		return nil, nil
@@ -684,7 +694,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	for i, tx := range txs {
 		hashes[i] = tx.Hash().Bytes()
 	}
-	existing, err := ls.db.GetTransactionsByHashes(ctx, hashes, txn)
+	existing, err := ls.ledgerDB().GetTransactionsByHashes(ctx, hashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
@@ -721,6 +731,21 @@ func (e *leiosEndorserBlockStorageError) Error() string {
 
 func (e *leiosEndorserBlockStorageError) Unwrap() error {
 	return e.err
+}
+
+// EndorserBlockOffsets returns the offsets of an endorser block's transactions
+// and outputs inside its stored blob, keyed by (ebSlot, ebHash). bodyCbors is
+// each transaction's body CBOR, as CertifiedClosure.BodyCbors returns. A
+// consumer that does not store the blob itself, because the ledger already
+// did, writes these offsets under its own keys.
+func EndorserBlockOffsets(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+) (*database.BlockIngestionResult, error) {
+	_, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
+	return offsets, err
 }
 
 // buildEndorserBlockBlob lays out a standalone CBOR blob holding, for each
@@ -2036,7 +2061,7 @@ func (b *leiosBackfiller) awaitFetch(
 // ledger before NEWEPOCH, retaining the certifying RB point for rollback.
 func (ls *LedgerState) applyUntickedBoundaryClosure(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	block ledger.Block,
 	parentPoint ocommon.Point,
 ) error {
@@ -2087,7 +2112,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		ls.RLock()
 		epoch := ls.currentEpoch.EpochId
 		ls.RUnlock()
-		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+		if err := ls.ledgerDB().AddNetworkDonation(point.Slot, epoch, donation, txn); err != nil {
 			return err
 		}
 	}
@@ -2103,7 +2128,7 @@ type pendingLeiosClosure struct {
 // the certifying RB's commit, including when a failed body is retried.
 func (ls *LedgerState) publishUntickedClosureAfterCommit(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	point ocommon.Point,
 ) {
 	ls.RLock()
@@ -2124,7 +2149,72 @@ func (ls *LedgerState) publishUntickedClosureAfterCommit(
 			ls.beforeTransactionApplyPublish()
 		}
 		for _, evt := range pending.events {
-			ls.publishTransactionEvent(ctx, evt)
+			ls.publishTransactionEventOnly(ctx, evt)
 		}
 	})
+}
+
+// certifiedEndorserBlockData resolves the closure a certifying ranking block
+// applies. With a data provider the manifest and transactions come from one
+// cache lookup, so an eviction between two lookups cannot leave apply holding
+// transactions whose manifest it can no longer persist. Without one the
+// manifest is nil and nothing is persisted.
+func (ls *LedgerState) certifiedEndorserBlockData(
+	ebHash []byte,
+	ebSlot uint64,
+) ([]byte, []cbor.RawMessage, bool) {
+	if ls.config.EndorserBlockDataProvider != nil {
+		return ls.config.EndorserBlockDataProvider(ebHash, ebSlot)
+	}
+	txs, ok := ls.config.EndorserBlockProvider(ebHash, ebSlot)
+	return nil, txs, ok
+}
+
+// persistCertifiedEndorserBlock writes the manifest and transactions of a
+// certified endorser block to the LeiosDB when it lacks either or holds
+// different bytes, so the closure stays readable after the in-memory
+// endorser-block cache expires. The fetch-path write is skipped for an
+// unverified slot and can fail, so it is not a durability guarantee for a
+// block that certification has made part of the chain.
+//
+// It writes exactly what apply resolved (see certifiedEndorserBlockData), so
+// it needs no second lookup that could miss. The write commits in the
+// LeiosDB's own transaction before the certifying ranking block commits, so
+// the record exists whenever that block is on the chain. A record left by a
+// ranking block that is rejected afterwards is volatile and collected like any
+// other uncertified one. Collection cannot remove it first: its bound never
+// passes the immutable point or the pin watermark, and the endorser block a
+// certifying ranking block applies is its parent's, at the applied tip, which
+// a rollback never moves behind an immutable point. A nil manifest (no data
+// provider) writes nothing; the closure then depends on whatever the fetch
+// path persisted.
+func (ls *LedgerState) persistCertifiedEndorserBlock(
+	ebHash []byte,
+	ebSlot uint64,
+	manifestRaw []byte,
+	txs []cbor.RawMessage,
+) error {
+	if manifestRaw == nil {
+		return nil
+	}
+	storedManifest, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
+	stored, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
+	// Matching counts do not prove the stored bytes are the verified ones: a
+	// stale or legacy-wrapped element would be read back as the closure.
+	if manifestErr == nil && txErr == nil &&
+		bytes.Equal(storedManifest, manifestRaw) &&
+		slices.EqualFunc(stored, txs, func(a, b cbor.RawMessage) bool {
+			return bytes.Equal(a, b)
+		}) {
+		return nil
+	}
+	for _, err := range []error{manifestErr, txErr} {
+		if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return fmt.Errorf("read stored endorser block: %w", err)
+		}
+	}
+	if !bytes.Equal(lcommon.Blake2b256Hash(manifestRaw).Bytes(), ebHash) {
+		return errors.New("endorser block manifest hash mismatch")
+	}
+	return ls.db.SetLeiosEB(ebSlot, ebHash, manifestRaw, txs)
 }

@@ -170,3 +170,40 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncRefusesToAdvanceACompleteSplitDatabase pins that a completed split
+// database is not caught up to a newer snapshot: the IndexerDB's rows belong
+// to the anchor it was built at.
+func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := SyncConfig{
+		Network: "preview", DataDir: t.TempDir(),
+		IndexerLayout: "split", Logger: logger,
+		UtxoSet: newSyncTestSet(t),
+		// Nothing listens here: a run that gets past the refusal fails
+		// quickly at the aggregator rather than waiting on the network.
+		AggregatorURL: "http://127.0.0.1:1", AllowInsecureHTTP: true,
+	}
+	// Open the empty database with the layout so the gate is filled, as the
+	// bootstrap that built it did, then give it chain state.
+	runtime, err := openDatabase(ctx, cfg, logger, 1)
+	require.NoError(t, err)
+	gates, err := runtime.Database.Metadata().GetNodeSettingsGates(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "split", gates["indexer_layout"],
+		"a split bootstrap fills the layout gate on the empty database")
+	require.NoError(t, runtime.Database.BlockCreate(models.Block{
+		Slot:     42,
+		Hash:     bytes.Repeat([]byte{0xaa}, 32),
+		PrevHash: bytes.Repeat([]byte{0xbb}, 32),
+		Cbor:     []byte{0x80},
+		Number:   7,
+		Type:     6,
+	}, nil))
+	require.NoError(t, runtime.Close(ctx))
+
+	_, err = Sync(ctx, cfg)
+	require.ErrorIs(t, err, errSplitCatchUp)
+}

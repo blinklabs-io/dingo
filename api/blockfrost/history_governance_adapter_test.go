@@ -80,7 +80,7 @@ func (fx *epochFixture) addProposal(
 		GovActionCbor: actionCbor,
 		AddedSlot:     slot,
 	}
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceProposal(proposal, nil))
+	require.NoError(t, fx.adapter.db().Metadata().SetGovernanceProposal(proposal, nil))
 	return proposal
 }
 
@@ -96,7 +96,7 @@ func TestNodeAdapterGovernanceProposalsAndDetail(t *testing.T) {
 	info.RatifiedEpoch, info.RatifiedSlot = &ratified, &slot
 	info.EnactedEpoch, info.EnactedSlot = &enacted, &slot
 	info.DroppedEpoch, info.DroppedSlot = &dropped, &slot
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceProposal(info, nil))
+	require.NoError(t, fx.adapter.db().Metadata().SetGovernanceProposal(info, nil))
 
 	rows, total, err := fx.adapter.GovernanceProposals(ctx, asc)
 	require.NoError(t, err)
@@ -231,7 +231,7 @@ func TestNodeAdapterGovernanceProposalMetadata(t *testing.T) {
 	_, err := fx.adapter.GovernanceProposalMetadata(ctx, ref)
 	assert.ErrorIs(t, err, models.ErrGovernanceProposalNotFound, "no document has been fetched")
 
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.db().Metadata()
 	_, err = meta.EnsureOffchainMetadataPointers(ctx, time.Now(), nil)
 	require.NoError(t, err)
 	_, err = fx.adapter.GovernanceProposalMetadata(ctx, ref)
@@ -359,7 +359,7 @@ func (fx *epochFixture) addVote(
 	if voterType == models.VoterTypeCC {
 		row.AnchorURL, row.AnchorHash = "https://example.com/vote.json", fill32(0x6b)
 	}
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(row, nil))
+	require.NoError(t, fx.adapter.db().Metadata().SetGovernanceVote(row, nil))
 	if deleted {
 		_, err := fx.raw.Exec(`UPDATE governance_vote SET deleted_slot = ? WHERE id = ?`, slot+1, row.ID)
 		require.NoError(t, err)
@@ -508,7 +508,7 @@ func TestNodeAdapterDRepVotesAndPoolVotes(t *testing.T) {
 	fx.addVote(t, first, models.VoterTypeSPO, 0, 0xa1, models.VoteNo, 100, false)
 	fx.addVote(t, second, models.VoterTypeDRep, 0, 0xd1, models.VoteNo, 110, false)
 	fx.addVote(t, second, models.VoterTypeDRep, 1, 0xd1, models.VoteYes, 110, false)
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().CreateDrep(nil, &models.Drep{
+	require.NoError(t, fx.adapter.db().Metadata().CreateDrep(nil, &models.Drep{
 		Credential: bytes32of(28, 0xd1), CredentialTag: 0, Active: true, AddedSlot: 5,
 	}))
 
@@ -563,7 +563,7 @@ func TestNodeAdapterDRepUpdatesDelegatorsAndMetadata(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)
 	ctx := context.Background()
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.db().Metadata()
 	require.NoError(t, meta.CreateDrep(nil, &models.Drep{
 		Credential: bytes32of(28, 0xd1), CredentialTag: 0, Active: true, AddedSlot: 5,
 		AnchorURL: "https://example.com/drep.json", AnchorHash: fill32(0x7d),
@@ -674,7 +674,7 @@ func TestNodeAdapterGovernanceCommittee(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)
 	ctx := context.Background()
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.db().Metadata()
 	require.NoError(t, meta.SetCommitteeMembers([]*models.CommitteeMember{
 		{ColdCredentialTag: 0, ColdCredHash: bytes32of(28, 0x0a), ExpiresEpoch: 500, AddedSlot: 10},
 		{ColdCredentialTag: 1, ColdCredHash: bytes32of(28, 0x0b), ExpiresEpoch: 600, AddedSlot: 10},
@@ -917,7 +917,7 @@ func TestNodeAdapterCommitteeVotesReportOnlyRecordedAnchors(t *testing.T) {
 	})
 	fx.addVote(t, proposal, models.VoterTypeCC, 1, 0x1d, models.VoteYes, 100, false)
 	slot := uint64(200)
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, fx.adapter.db().Metadata().SetGovernanceVote(&models.GovernanceVote{
 		ProposalID: proposal.ID, VoterType: models.VoterTypeCC, VoterCredentialTag: 0,
 		VoterCredential: bytes32of(28, 0x1e), Vote: models.VoteNo,
 		AddedSlot: slot, VoteUpdatedSlot: &slot,
@@ -978,7 +978,7 @@ func TestNodeAdapterCommitteeVotesColdWithManyHotCredentials(t *testing.T) {
 		5000: {number: 1, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotVoter, govID(t, 0x01, 0), uint8(1)))}},
 	})
 	slot := uint64(5000)
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, fx.adapter.db().Metadata().SetGovernanceVote(&models.GovernanceVote{
 		ProposalID: proposal.ID, VoterType: models.VoterTypeCC,
 		VoterCredential: last, Vote: models.VoteYes,
 		AddedSlot: slot, VoteUpdatedSlot: &slot,
@@ -1006,7 +1006,7 @@ func TestNodeAdapterVotesListEveryCast(t *testing.T) {
 	cast := func(vote uint8, slot uint64, tx byte, index uint32) {
 		t.Helper()
 		updated := slot
-		require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(
+		require.NoError(t, fx.adapter.db().Metadata().SetGovernanceVote(
 			&models.GovernanceVote{
 				ProposalID: proposal.ID, VoterType: models.VoterTypeDRep,
 				VoterCredential: bytes32of(28, 0xd1), Vote: vote,
@@ -1030,7 +1030,7 @@ func TestNodeAdapterVotesListEveryCast(t *testing.T) {
 		{TxHash: hexOf(fill32(0xb2)), CertIndex: 2, VoterRole: "drep", Voter: drepID, Vote: "yes", Counted: true},
 	}, rows)
 
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().CreateDrep(nil, &models.Drep{
+	require.NoError(t, fx.adapter.db().Metadata().CreateDrep(nil, &models.Drep{
 		Credential: bytes32of(28, 0xd1), CredentialTag: 0, Active: true, AddedSlot: 5,
 	}))
 	drepVotes, total, err := fx.adapter.DRepVotes(

@@ -270,6 +270,59 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	return ret, nil
 }
 
+// IterateAccountImportBaselines calls fn with every account import baseline,
+// active or not.
+func (s *Store) IterateAccountImportBaselines(
+	txn types.Txn,
+	fn func(models.AccountImportBaselineRow) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, staking_key, pool, drep, drep_type, active,
+    added_slot, deposit_amount
+FROM account_import_baseline`)
+	if err != nil {
+		return fmt.Errorf("iterate account import baselines: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row models.AccountImportBaselineRow
+		var addedSlot int64
+		var drepType sql.NullInt64
+		var raw sql.NullString
+		if err := rows.Scan(
+			&row.CredentialTag, &row.StakingKey, &row.Pool, &row.Drep,
+			&drepType, &row.Active, &addedSlot, &raw,
+		); err != nil {
+			return fmt.Errorf("iterate account import baselines: %w", err)
+		}
+		if drepType.Valid {
+			row.DrepType, err = checkedUint64(drepType.Int64)
+			if err != nil {
+				return fmt.Errorf("iterate account import baselines: %w", err)
+			}
+		}
+		row.AddedSlot, err = checkedUint64(addedSlot)
+		if err != nil {
+			return fmt.Errorf("iterate account import baselines: %w", err)
+		}
+		if raw.Valid {
+			deposit, err := parseUint64("account import deposit", raw.String)
+			if err != nil {
+				return err
+			}
+			row.Deposit = &deposit
+		}
+		if err := fn(row); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func readAccountImportBaseline(
 	ctx context.Context,
 	db queryer,
@@ -341,6 +394,9 @@ func (s *Store) GetAccountByCredential(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Account, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -374,6 +430,38 @@ func (s *Store) GetAccountByCredential(
 	return accountFromSQLite(row)
 }
 
+// IterateAccounts calls fn with every account row, active or not, in no
+// particular order. fn's account is its own to keep.
+func (s *Store) IterateAccounts(
+	txn types.Txn,
+	fn func(*models.Account) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT "+sqliteAccountColumns+" FROM account")
+	if err != nil {
+		return fmt.Errorf("iterate accounts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteAccount(rows)
+		if err != nil {
+			return fmt.Errorf("iterate accounts: %w", err)
+		}
+		account, err := accountFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(account); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // accountsByCredentialChunkQuery builds the SELECT for one credential_tag
 // chunk of GetAccountsByCredential: a single-column staking_key IN (...)
 // predicate against idx_account_credential, never a per-ref
@@ -405,6 +493,9 @@ func (s *Store) GetAccountsByCredential(
 	includeInactive bool,
 	txn types.Txn,
 ) (map[string]*models.Account, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	ret := make(map[string]*models.Account, len(refs))
 	if len(refs) == 0 {
 		return ret, nil
@@ -660,6 +751,9 @@ WHERE EXISTS (
 func (s *Store) GetActiveAccountCredentials(
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -699,6 +793,9 @@ func (s *Store) GetActiveDelegatorCountsByPool(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	ret := make(map[string]uint64, len(poolKeyHashes))
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
@@ -759,6 +856,9 @@ func (s *Store) GetActiveDelegatorCredentialsByPool(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (map[string][]models.StakeCredentialRef, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	ret := make(map[string][]models.StakeCredentialRef, len(poolKeyHashes))
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
@@ -880,6 +980,9 @@ WHERE pool = ?`,
 			// pool_key_hash), so leaving it behind would keep feeding the
 			// stake distribution the delegation just removed. The values match
 			// what a refresh would compute for an account with no pool.
+			if s.rewardLiveStakeDrained.Load() {
+				return nil
+			}
 			if _, err := db.ExecContext(ctx, `
 UPDATE reward_live_stake
 SET pool_key_hash = NULL, pool_delegation_slot = 0,
@@ -1029,6 +1132,9 @@ func (s *Store) GetAccountSumsByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (models.AccountSums, error) {
+	if err := s.refuseDrained("account_reward_delta"); err != nil {
+		return models.NewAccountSums(), err
+	}
 	// The two MIR totals are non-nil on every return, including the failure
 	// ones, so AccountSums never hands a caller a nil *big.Int.
 	ret := models.NewAccountSums()
@@ -1121,9 +1227,13 @@ type accountStateAtSlot struct {
 // deriveAccountStateAtSlot derives an account's state at slot without writing
 // anything. RestoreAccountStateAtSlot writes the result back on rollback;
 // GetAccountsByCredentialAtSlot answers queries at a past slot with it.
+//
+// poolsDrained says the pool tables are gone: the reap check below cannot be
+// answered then, so a delegation that needs it fails with ErrFamilyDrained.
 func deriveAccountStateAtSlot(
 	ctx context.Context,
 	db queryer,
+	poolsDrained bool,
 	tag uint8,
 	key []byte,
 	createdSlot uint64,
@@ -1261,6 +1371,9 @@ func deriveAccountStateAtSlot(
 	// back on that pool. Before the reap the certificate is authoritative
 	// again, and the boundary check excludes that case.
 	if hasPool && len(pool.value) > 0 {
+		if poolsDrained {
+			return state, errTableDrained("pool_retirement")
+		}
 		reaped, err := poolReapedAfterDelegation(
 			ctx,
 			db,
@@ -1370,6 +1483,7 @@ FROM account WHERE added_slot > ?`,
 				state, err := deriveAccountStateAtSlot(
 					ctx,
 					db,
+					s.poolsDrained(),
 					account.tag,
 					account.key,
 					account.createdSlot,
@@ -1828,48 +1942,13 @@ func (s *Store) addAccountRewardCreditBatch(
 		return nil
 	}
 
-	// IN lists on the leading columns of idx_account_reward_delta_w_tx_s_slot
-	// and idx_account_credential; a derived-table join here was planned as a
-	// scan of the joined table per batch.
-	hashes := make([]any, 0, len(pending))
-	seenHash := make(map[string]struct{}, len(pending))
+	candidates := make([]models.AccountRewardCredit, 0, len(pending))
 	for _, item := range pending {
-		if _, ok := seenHash[item.key.sourceHash]; ok {
-			continue
-		}
-		seenHash[item.key.sourceHash] = struct{}{}
-		hashes = append(hashes, item.credit.SourceHash)
+		candidates = append(candidates, item.credit)
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
-		hashes...,
-	)
+	applied, err := s.appliedRewardCreditKeys(ctx, db, candidates)
 	if err != nil {
 		return fmt.Errorf("look up applied reward credits: %w", err)
-	}
-	applied := make(map[rewardCreditJournalKey]struct{})
-	for rows.Next() {
-		var hash, key []byte
-		var tag, slot int64
-		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan applied reward credit: %w", err)
-		}
-		applied[rewardCreditJournalKey{
-			sourceHash:    string(hash),
-			credentialTag: uint8(tag), //nolint:gosec // stored from uint8
-			stakingKey:    string(key),
-			slot:          uint64(slot), //nolint:gosec // stored from uint64
-		}] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("iterate applied reward credits: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return err
 	}
 
 	type accountCredit struct {
@@ -2016,6 +2095,77 @@ ON CONFLICT (
 		}
 	}
 	return nil
+}
+
+// appliedRewardCreditKeys returns the exact journal keys already present.
+// The complete-key probes use the credential-leading unique index without a
+// second source-hash index, and are chunked for every supported dialect.
+func (s *Store) appliedRewardCreditKeys(
+	ctx context.Context,
+	db queryer,
+	credits []models.AccountRewardCredit,
+) (map[rewardCreditJournalKey]struct{}, error) {
+	applied := make(map[rewardCreditJournalKey]struct{})
+	if len(credits) == 0 {
+		return applied, nil
+	}
+	const argsPerCredit = 4
+	batchSize := s.dialect.ParameterLimit() / argsPerCredit
+	if batchSize == 0 {
+		return nil, fmt.Errorf(
+			"dialect parameter limit %d cannot fit reward credit lookup",
+			s.dialect.ParameterLimit(),
+		)
+	}
+	for start := 0; start < len(credits); start += batchSize {
+		end := min(start+batchSize, len(credits))
+		predicates := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*argsPerCredit)
+		for _, credit := range credits[start:end] {
+			hash := credit.SourceHash
+			if hash == nil {
+				hash = []byte{}
+			}
+			slot, err := checkedInt64(credit.Slot)
+			if err != nil {
+				return nil, err
+			}
+			predicates = append(predicates, `(credential_tag = ? AND
+staking_key = ? AND added_slot = ? AND tx_hash = ?)`)
+			args = append(
+				args, credit.CredentialTag, credit.StakingKey, slot, hash,
+			)
+		}
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT tx_hash, credential_tag, staking_key, added_slot
+FROM account_reward_delta
+WHERE withdrawal = FALSE AND (`+strings.Join(predicates, " OR ")+`)`), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var hash, key []byte
+			var tag, slot int64
+			if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			applied[rewardCreditJournalKey{
+				sourceHash:    string(hash),
+				credentialTag: uint8(tag), //nolint:gosec // stored from uint8
+				stakingKey:    string(key),
+				slot:          uint64(slot), //nolint:gosec // stored from uint64
+			}] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return applied, nil
 }
 
 const rewardCreditAccountUpdateQuery = `UPDATE account SET reward = ? WHERE id = ?`
@@ -2316,7 +2466,7 @@ func (s *Store) DeleteAccountRewardJournalForCredentialsAfterSlot(
 		return err
 	}
 	// Grouped by credential_tag and queried as a single-column staking_key
-	// IN (...), matching idx_account_reward_delta_credential
+	// IN (...), matching the credential-leading reward-delta unique index
 	// (credential_tag, staking_key) for the delta delete, the same grouping
 	// GetAccountsByCredential uses and for the same reason. The witness
 	// table's credential index (idx_account_withdrawal_witness_credential_slot)

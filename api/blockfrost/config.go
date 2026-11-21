@@ -14,11 +14,18 @@
 
 package blockfrost
 
-import "github.com/blinklabs-io/dingo/internal/apiconfig"
+import (
+	"net"
+
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+)
 
 // BlockfrostConfig holds configuration for the Blockfrost
 // API server.
 type BlockfrostConfig struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen func(string, string) (net.Listener, error)
 	// ListenAddress is the address to listen on.
 	// Defaults to "127.0.0.1:3000".
 	ListenAddress string
@@ -29,6 +36,12 @@ type BlockfrostConfig struct {
 	// evaluation work from one remote address. Zero (the default) is
 	// unlimited.
 	MaxConcurrentMutationsPerClient uint
+	// MaxConcurrentPoolLists bounds the pool list and retiring pool list
+	// requests across the server. Zero (the default) is unlimited.
+	MaxConcurrentPoolLists uint
+	// MaxConcurrentPoolListsPerClient bounds those requests from one remote
+	// address. Zero (the default) is unlimited.
+	MaxConcurrentPoolListsPerClient uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string

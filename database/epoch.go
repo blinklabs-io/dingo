@@ -18,12 +18,25 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 func (d *Database) GetEpoch(
 	epochId uint64,
 	txn *Txn,
 ) (*models.Epoch, error) {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		epochs, err := d.drainedEpochs()
+		if err != nil {
+			return nil, err
+		}
+		for i := range epochs {
+			if epochs[i].EpochId == epochId {
+				return &epochs[i], nil
+			}
+		}
+		return nil, nil
+	}
 	if txn == nil {
 		return d.epochStore().GetEpoch(epochId, nil)
 	}
@@ -34,6 +47,19 @@ func (d *Database) GetEpochsByEra(
 	eraId uint,
 	txn *Txn,
 ) ([]models.Epoch, error) {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		epochs, err := d.drainedEpochs()
+		if err != nil {
+			return nil, err
+		}
+		var out []models.Epoch
+		for _, e := range epochs {
+			if e.EraId == eraId {
+				out = append(out, e)
+			}
+		}
+		return out, nil
+	}
 	if txn == nil {
 		return d.epochStore().GetEpochsByEra(eraId, nil)
 	}
@@ -62,6 +88,9 @@ func EpochBySlot(d *Database, slot uint64, txn *Txn) (models.Epoch, error) {
 }
 
 func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		return d.drainedEpochs()
+	}
 	if txn == nil {
 		return d.epochStore().GetEpochs(nil)
 	}
@@ -72,6 +101,13 @@ func (d *Database) GetEpochBySlot(
 	slot uint64,
 	txn *Txn,
 ) (*models.Epoch, error) {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		epochs, err := d.drainedEpochs()
+		if err != nil {
+			return nil, err
+		}
+		return drainedEpochBySlot(epochs, slot), nil
+	}
 	if txn == nil {
 		return d.epochStore().GetEpochBySlot(slot, nil)
 	}
@@ -82,6 +118,9 @@ func (d *Database) DeleteEpochsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		return drainedWrite(nodesettings.FamilyEpochs)
+	}
 	if txn == nil {
 		return d.epochStore().DeleteEpochsAfterSlot(slot, nil)
 	}
@@ -97,6 +136,9 @@ func (d *Database) SetEpoch(
 	era, slotLength, lengthInSlots uint,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		return drainedWrite(nodesettings.FamilyEpochs)
+	}
 	if txn == nil {
 		return d.epochStore().SetEpoch(
 			slot,

@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -209,7 +210,7 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 	// The rollback path emits before chain.Rollback truncates; the
 	// block-apply goroutine publishes forward events only after it
 	// observes that truncation, i.e. strictly afterwards.
-	ls.emitRollbackTransactionEvents(context.Background(), undoOrder)
+	require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), undoOrder))
 
 	forwardBlk, err := blocks[0].Decode()
 	require.NoError(t, err)
@@ -319,7 +320,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 			fixture.currentTip,
 			fixture.currentTip.Point,
 			"",
-			func(txn *database.Txn) error {
+			func(txn ledgerdb.Txn) error {
 				return delta.apply(context.Background(), ls, txn)
 			},
 		)
@@ -465,7 +466,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 		fixture.ancestorTip,
 		rolledBackCandidate,
 		"",
-		func(*database.Txn) error {
+		func(ledgerdb.Txn) error {
 			operationCalled = true
 			return nil
 		},
@@ -486,7 +487,7 @@ func TestBlockApplyRejectsDurablyRolledBackTipBeforeCacheReload(t *testing.T) {
 		fixture.currentTip,
 		fixture.currentTip.Point,
 		"",
-		func(*database.Txn) error {
+		func(ledgerdb.Txn) error {
 			operationCalled = true
 			return nil
 		},
@@ -541,7 +542,7 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 
 	point := ocommon.Point{Slot: blocks[0].Slot, Hash: blocks[0].Hash}
 	for range cycles {
-		ls.emitRollbackTransactionEvents(context.Background(), blocks)
+		require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), blocks))
 		ls.publishTransactionEvent(context.Background(), TransactionEvent{
 			Transaction: cycleTxs[0],
 			Point:       point,
@@ -1121,7 +1122,7 @@ func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
 	ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -1201,7 +1202,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 			done <- err
 			return
 		}
-		ls.emitRollbackTransactionEvents(context.Background(), blocks)
+		require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), blocks))
 		if !bus.PublishOrdered(
 			TransactionEventType,
 			event.NewEvent(TransactionEventType, TransactionEvent{}),
@@ -1634,6 +1635,7 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -1726,7 +1728,7 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 		},
 	}
 
-	ls.emitRollbackTransactionEvents(context.Background(), rolledBack)
+	require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), rolledBack))
 
 	for i, wantSlot := range []uint64{100, 200} {
 		evt := testutil.RequireReceive(

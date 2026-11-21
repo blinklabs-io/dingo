@@ -27,6 +27,28 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 )
 
+// ErrAlonzoPParamsUnitDrained is returned when the Alonzo parameter unit
+// marker is still the legacy one although the protocol parameter rows are
+// drained from the metadata store: the rows to repair or to count are gone.
+var ErrAlonzoPParamsUnitDrained = errors.New(
+	"alonzo protocol-parameter unit marker is legacy and the protocol " +
+		"parameters are drained from the metadata store, so the repair cannot " +
+		"read the rows it rewrites",
+)
+
+// refuseDrainedAlonzoUnit reads the latch, which a database that has just
+// opened has not loaded, and refuses to inspect rows a drain deleted.
+func (d *Database) refuseDrainedAlonzoUnit(ctx context.Context) error {
+	mask, err := d.EffectiveDrainedFamilies(ctx)
+	if err != nil {
+		return err
+	}
+	if mask.Has(nodesettings.FamilyPParamsUpdates) {
+		return ErrAlonzoPParamsUnitDrained
+	}
+	return nil
+}
+
 type alonzoPParamsEraStore interface {
 	HasPParamsForEra(uint, types.Txn) (bool, error)
 }
@@ -105,6 +127,9 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) 
 	if gates[nodesettings.AlonzoPParamsUnitGateName] !=
 		nodesettings.AlonzoPParamsUnitLegacyByteV0 {
 		return nil
+	}
+	if err := d.refuseDrainedAlonzoUnit(ctx); err != nil {
+		return err
 	}
 	store, ok := d.Metadata().(alonzoPParamsEraStore)
 	if !ok {
@@ -190,6 +215,9 @@ func (e errAlonzoPParamsUnitUnrepairable) Error() string {
 // reason the repair could not be applied, and any other error is a store
 // failure. It never returns (false, nil).
 func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
+	if err := d.refuseDrainedAlonzoUnit(ctx); err != nil {
+		return false, err
+	}
 	word := d.config.AlonzoLovelacePerUtxoWord
 	if word == 0 {
 		return false, errAlonzoPParamsUnitUnrepairable{

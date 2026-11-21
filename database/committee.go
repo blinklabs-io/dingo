@@ -32,6 +32,9 @@ func (d *Database) GetCommitteeMember(
 	termStartSlot uint64,
 	txn *Txn,
 ) (*models.AuthCommitteeHot, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -59,6 +62,9 @@ func (d *Database) GetCommitteeHotAuthorizationsSince(
 	minSlot uint64,
 	txn *Txn,
 ) ([]*models.AuthCommitteeHot, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -74,6 +80,9 @@ func (d *Database) GetActiveCommitteeMembers(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.AuthCommitteeHot, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -89,6 +98,9 @@ func (d *Database) IsCommitteeMemberResigned(
 	termStartSlot uint64,
 	txn *Txn,
 ) (bool, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return false, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -108,6 +120,9 @@ func (d *Database) GetResignedCommitteeMembers(
 	coldCredentials []models.CommitteeCredential,
 	txn *Txn,
 ) (map[string]bool, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -125,6 +140,9 @@ func (d *Database) GetCommitteeAuthorizedCount(
 	ctx context.Context,
 	txn *Txn,
 ) (int, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return 0, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -139,6 +157,9 @@ func (d *Database) SetCommitteeMembers(
 	members []*models.CommitteeMember,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetCommitteeMembers(
 			members, txn.Metadata(),
@@ -156,6 +177,9 @@ func (d *Database) SetCommitteeQuorum(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	if quorum == nil {
 		return errors.New("committee quorum cannot be nil")
 	}
@@ -182,6 +206,9 @@ func (d *Database) ClearCommitteeQuorum(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().ClearCommitteeQuorum(
 			slot, txn.Metadata(),
@@ -197,6 +224,9 @@ func (d *Database) GetCommitteeQuorum(
 	ctx context.Context,
 	txn *Txn,
 ) (*big.Rat, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -217,6 +247,9 @@ func (d *Database) GetCommitteeMembers(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.CommitteeMember, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -236,6 +269,9 @@ func (d *Database) GetCommitteeMembersIncludeDeleted(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.CommitteeMember, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -259,6 +295,9 @@ func (d *Database) DeleteCommitteeMembersAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteCommitteeMembersAfterSlot(
 			slot, txn.Metadata(),
@@ -281,6 +320,9 @@ func (d *Database) SoftDeleteCommitteeMembers(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SoftDeleteCommitteeMembers(
 			coldCredentials, slot, txn.Metadata(),
@@ -300,6 +342,9 @@ func (d *Database) SoftDeleteAllCommitteeMembers(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SoftDeleteAllCommitteeMembers(
 			slot, txn.Metadata(),
@@ -310,4 +355,36 @@ func (d *Database) SoftDeleteAllCommitteeMembers(
 		}
 		return nil
 	})
+}
+
+// LatestCommitteeQuorum returns the committee quorum row with the highest
+// added slot, whose Quorum is nil for a clear marker, or nil without a row.
+func (d *Database) LatestCommitteeQuorum(
+	ctx context.Context,
+	txn *Txn,
+) (*models.CommitteeQuorum, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().LatestCommitteeQuorum(txn.Metadata())
+}
+
+// LatestCommitteeResignations returns each resigned cold credential's
+// resignation with the highest added slot.
+func (d *Database) LatestCommitteeResignations(
+	ctx context.Context,
+	txn *Txn,
+) ([]*models.ResignCommitteeCold, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().LatestCommitteeResignations(txn.Metadata())
 }

@@ -79,8 +79,7 @@ func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return data, nil
@@ -296,8 +295,7 @@ func (d *BlobStoreS3) resolveKeyLimited(
 		}
 		if int64(len(change.value)) > maxBytes {
 			return nil, fmt.Errorf(
-				"blob object exceeds maximum size of %d bytes",
-				maxBytes,
+				"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 			)
 		}
 		value := append([]byte{}, change.value...)
@@ -560,7 +558,8 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 		}
 		fullObjectKey := aws.ToString(it.page[it.pageIdx].Key)
 		it.pageIdx++
-		if it.store.isNamespacedObject(fullObjectKey) {
+		if it.store.isNamespacedObject(fullObjectKey) ||
+			it.store.isImmutableObject(fullObjectKey) {
 			continue
 		}
 		objectKey := strings.TrimPrefix(fullObjectKey, it.store.prefix)
@@ -1282,7 +1281,8 @@ func (d *BlobStoreS3) listKeysToFile(
 		}
 		for _, obj := range page.Contents {
 			fullObjectKey := aws.ToString(obj.Key)
-			if d.isNamespacedObject(fullObjectKey) {
+			if d.isNamespacedObject(fullObjectKey) ||
+				d.isImmutableObject(fullObjectKey) {
 				continue
 			}
 			key := strings.TrimPrefix(fullObjectKey, d.prefix)
@@ -1367,8 +1367,7 @@ func (d *BlobStoreS3) getInternalLimited(
 	defer out.Body.Close()
 	if out.ContentLength != nil && *out.ContentLength > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 

@@ -289,17 +289,17 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 // Config.LazyHotStatements replaces the eager pass with borrowStmt's
 // on-demand preparation, which keeps the same cache and the same retirement
 // rules. The deadlock argument above is met differently: a lazy prepare runs
-// only when the caller's queryer is the write pool itself, never a
-// transaction, so it never waits on a connection its own caller holds. A
-// miss on any other queryer takes the uncached path, as after Reset.
-// A failed lazy prepare is not returned: like the eager pass it is logged and
+// against the caller's connection. Pool statements enter the shared cache;
+// transaction statements stay in that transaction's cache. Neither needs a
+// second connection while a transaction holds the first.
+// A failed pool prepare is not returned: like the eager pass it is logged and
 // remembered, so the query takes the uncached path, which reports any real SQL
 // error to the caller, and the statement is not re-prepared on every call.
 // Reset, RestoreFrom and Close forget the failures and stop further lazy
 // preparation, matching the eager cache, which they empty without refilling.
 
 // borrowStmt is borrowCachedStmt that, for a store with lazy hot statements,
-// first prepares query on demand when db is the write pool.
+// first prepares query on demand on the caller's connection.
 func (s *Store) borrowStmt(
 	ctx context.Context,
 	db queryer,
@@ -308,10 +308,59 @@ func (s *Store) borrowStmt(
 	if stmt, release, ok := s.borrowCachedStmt(query); ok {
 		return stmt, release, true
 	}
+	if tx, ok := unwrapQueryer(db).(*sql.Tx); ok && s.lazyHotStatements {
+		stmt, ok := s.lazyTransactionStmt(ctx, tx, query)
+		return stmt, func() {}, ok
+	}
 	if !s.lazyHotStatements || !s.prepareLazily(ctx, db, query) {
 		return nil, func() {}, false
 	}
 	return s.borrowCachedStmt(query)
+}
+
+// A transaction already owns its connection, so preparing on it avoids the
+// pool self-deadlock. These statements belong only to that transaction;
+// database/sql closes them and releaseConnection evicts their references.
+func (s *Store) lazyTransactionStmt(
+	ctx context.Context,
+	tx *sql.Tx,
+	query string,
+) (*sql.Stmt, bool) {
+	if _, hot := hotStatementSet[query]; !hot ||
+		!cacheableForDialect(s.dialect.Name(), query) {
+		return nil, false
+	}
+	s.stmtMu.Lock()
+	invalid := s.stmtsInvalidated
+	s.stmtMu.Unlock()
+	if invalid || s.closed.Load() {
+		return nil, false
+	}
+	s.txStmtMu.Lock()
+	defer s.txStmtMu.Unlock()
+	if stmt := s.lazyTxStmts[tx][query]; stmt != nil {
+		return stmt, true
+	}
+	stmt, err := newDialectQueryer(tx, s.dialect.Name()).
+		PrepareContext(ctx, query) //nolint:sqlclosecheck
+	if err != nil {
+		return nil, false
+	}
+	if s.lazyTxStmts == nil {
+		s.lazyTxStmts = make(map[*sql.Tx]map[string]*sql.Stmt)
+	}
+	if s.lazyTxStmts[tx] == nil {
+		s.lazyTxStmts[tx] = make(map[string]*sql.Stmt)
+	}
+	s.lazyTxStmts[tx][query] = stmt
+	if s.txStmts == nil {
+		s.txStmts = make(map[*sql.Tx]map[*sql.Stmt]*sql.Stmt)
+	}
+	if s.txStmts[tx] == nil {
+		s.txStmts[tx] = make(map[*sql.Stmt]*sql.Stmt)
+	}
+	s.txStmts[tx][stmt] = stmt
+	return stmt, true
 }
 
 // prepareLazily prepares and caches query if it is a cacheable hot statement
@@ -657,6 +706,7 @@ func (s *Store) txScopedStmt(
 func (s *Store) evictTxStmts(tx *sql.Tx) {
 	s.txStmtMu.Lock()
 	delete(s.txStmts, tx)
+	delete(s.lazyTxStmts, tx)
 	s.txStmtMu.Unlock()
 }
 

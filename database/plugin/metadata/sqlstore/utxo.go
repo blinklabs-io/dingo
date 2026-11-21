@@ -47,6 +47,12 @@ const utxoRowColumns = "utxo.tx_id, " +
 	"utxo.datum_hash, utxo.id, utxo.added_slot, utxo.deleted_slot, " +
 	"utxo.amount, utxo.output_idx, utxo.payment_script"
 
+// storesUtxoAssets reports whether output asset rows are maintained. Core
+// storage mode reads output values from the stored CBOR, so it keeps none.
+func (s *Store) storesUtxoAssets() bool {
+	return s.storageMode == types.StorageModeAPI
+}
+
 func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 	if utxo == nil {
 		return errors.New("create UTxO: UTxO is nil")
@@ -102,6 +108,9 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			for i := range utxo.Assets {
+				if !s.storesUtxoAssets() {
+					break
+				}
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
 				assetID, err := q.CreateAsset(
@@ -991,6 +1000,9 @@ func (s *Store) importUtxos(
 					return err
 				}
 				for j := range item.Assets {
+					if !s.storesUtxoAssets() {
+						break
+					}
 					asset := item.Assets[j]
 					if _, err := s.execCached(ctx, db, importAssetQuery,
 						asset.Name,
@@ -1135,11 +1147,9 @@ func (s *Store) hydrateImportedUtxo(
 	//
 	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
 	// conflict path) are also reached by database/transaction.go's
-	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
-	// recover a missing input's producer row from the blob store rather than
-	// hydrate a certified snapshot. Neither can trigger this clause in
-	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
-	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// ensureTransactionConsumedUtxos, which recovers a missing input's
+	// producer row from the blob store rather than hydrate a certified
+	// snapshot. It cannot trigger this clause in practice: it only ever
 	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
 	// reaching this ON CONFLICT branch for it would require a concurrent
 	// writer to the same row within one block's write transaction -- which
@@ -2351,14 +2361,25 @@ func utxoOrderingClauses(
 		predicate = "+utxo.deleted_slot = 0"
 	}
 	args := []any{}
+	slotExpr, blockIndexExpr := utxoOrderingSlotExpr, utxoOrderingBlockIndexExpr
 	if len(query.IndexedExactAddress) > 0 {
 		if query.MatchAllAddresses || len(query.AddressPatterns) != 0 {
 			return "", "", nil, errors.New(
 				"indexed exact address cannot be combined with address patterns",
 			)
 		}
-		from += " JOIN utxo_address ON utxo_address.utxo_id = utxo.id"
+		// utxo_address leads: its ordering index serves the page order, so
+		// on SQLite CROSS JOIN fixes the loop order and keeps the join to utxo
+		// from being reordered ahead of it. PostgreSQL does not accept ON after
+		// CROSS JOIN and plans the lookup from the address index on its own.
+		join := "JOIN"
+		if disqualifyLivenessIndex {
+			join = "CROSS JOIN"
+		}
+		from = "utxo_address " + join + " utxo ON utxo.id = utxo_address.utxo_id"
 		predicate += " AND utxo_address.address = ?"
+		slotExpr = utxoAddressSlotExpr
+		blockIndexExpr = utxoAddressBlockIndexExpr
 		args = append(args, query.IndexedExactAddress)
 	} else {
 		switch {
@@ -2407,19 +2428,19 @@ func utxoOrderingClauses(
 			args = append(args, assetArgs...)
 		}
 	}
-	if utxoOrderingRanged(query) {
+	if utxoOrderingRanged(query) && len(query.IndexedExactAddress) == 0 {
 		from += utxoProducerJoin
 	}
 	if from := query.CreatedFrom; from != nil {
-		predicate += " AND (" + utxoOrderingSlotExpr + " > ? OR (" +
-			utxoOrderingSlotExpr + " = ? AND " +
-			utxoOrderingBlockIndexExpr + " >= ?))"
+		predicate += " AND (" + slotExpr + " > ? OR (" +
+			slotExpr + " = ? AND " +
+			blockIndexExpr + " >= ?))"
 		args = append(args, from.Slot, from.Slot, from.TxIndex)
 	}
 	if to := query.CreatedTo; to != nil {
-		predicate += " AND (" + utxoOrderingSlotExpr + " < ? OR (" +
-			utxoOrderingSlotExpr + " = ? AND " +
-			utxoOrderingBlockIndexExpr + " <= ?))"
+		predicate += " AND (" + slotExpr + " < ? OR (" +
+			slotExpr + " = ? AND " +
+			blockIndexExpr + " <= ?))"
 		args = append(args, to.Slot, to.Slot, to.TxIndex)
 	}
 	return from, predicate, args, nil
@@ -2442,6 +2463,10 @@ LEFT JOIN applied_transaction
 const (
 	utxoOrderingSlotExpr       = `COALESCE(applied_transaction.slot, utxo.added_slot)`
 	utxoOrderingBlockIndexExpr = `COALESCE(applied_transaction.block_index, 0)`
+	// An exact-address page orders by the position copied onto utxo_address
+	// (utxoAddressOrderSet), which equals the expressions above.
+	utxoAddressSlotExpr       = `utxo_address.slot`
+	utxoAddressBlockIndexExpr = `utxo_address.block_index`
 )
 
 func countUtxosOrderingStatement(
@@ -2452,6 +2477,73 @@ func countUtxosOrderingStatement(
 		return "", nil, err
 	}
 	return "SELECT COUNT(*) FROM " + from + " WHERE " + predicate, args, nil
+}
+
+// utxoOrderingStatement builds the page query over the FROM source and WHERE
+// predicate of utxoOrderingClauses. afterTxID is the row id of
+// query.After.TxId when a keyset bound is set. An exact-address page orders
+// by the position copied onto utxo_address, so its order is read from
+// idx_utxo_address_order instead of sorted.
+func utxoOrderingStatement(
+	query *models.UtxoWithOrderingQuery,
+	from string,
+	predicate string,
+	args []any,
+	afterTxID any,
+) (string, []any) {
+	indexed := len(query.IndexedExactAddress) > 0
+	slotExpr := utxoOrderingSlotExpr
+	blockIndexExpr := utxoOrderingBlockIndexExpr
+	outputIdxExpr := "utxo.output_idx"
+	txIDExpr := "utxo.tx_id"
+	if indexed {
+		slotExpr = utxoAddressSlotExpr
+		blockIndexExpr = utxoAddressBlockIndexExpr
+		outputIdxExpr = "utxo_address.output_idx"
+		txIDExpr = "utxo_address.tx_id"
+	} else if !utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
+		predicate += `
+ AND (
+     ` + slotExpr + ` ` + comparison + ` ?
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` ` + comparison + ` ?)
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
+         AND ` + outputIdxExpr + ` ` + comparison + ` ?)
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
+         AND ` + outputIdxExpr + ` = ? AND ` + txIDExpr + ` ` + comparison + ` ?)
+ )`
+		args = append(
+			args,
+			query.After.Slot,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			afterTxID,
+		)
+	}
+	orderDir := "ASC"
+	if query.Descending {
+		orderDir = "DESC"
+	}
+	statement := `
+SELECT ` + utxoRowColumns + `,
+       ` + slotExpr + `, ` + blockIndexExpr + `
+FROM ` + from + `
+WHERE ` + predicate + `
+ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
+         ` + outputIdxExpr + ` ` + orderDir + `, ` + txIDExpr + ` ` + orderDir
+	return addLimitOffset(statement, args, query.Limit, query.Offset)
 }
 
 func (s *Store) GetUtxosByAddressWithOrdering(
@@ -2492,61 +2584,26 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 		hint = decodeErr == nil &&
 			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
 	}
+	indexed := len(query.IndexedExactAddress) > 0
+	if indexed && s.dialect.Name() == "sqlite" {
+		// Keep the liveness index from becoming the outer loop, which would
+		// visit every live UTxO to find one address's.
+		hint = true
+	}
 	from, predicate, args, err := utxoOrderingClauses(query, hint)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
-	if !utxoOrderingRanged(query) {
-		from += utxoProducerJoin
-	}
-	slotExpr := utxoOrderingSlotExpr
-	blockIndexExpr := utxoOrderingBlockIndexExpr
 	var afterTxID any
 	if query.After != nil {
-		var err error
 		afterTxID, err = s.cursorTxID(ctx, db, query.After.TxId)
 		if err != nil {
 			return nil, err
 		}
-		comparison := ">"
-		if query.Descending {
-			comparison = "<"
-		}
-		predicate += `
- AND (
-     ` + slotExpr + ` ` + comparison + ` ?
-     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` ` + comparison + ` ?)
-     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx ` + comparison + ` ?)
-     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
- )`
-		args = append(
-			args,
-			query.After.Slot,
-			query.After.Slot,
-			query.After.BlockIndex,
-			query.After.Slot,
-			query.After.BlockIndex,
-			query.After.OutputIdx,
-			query.After.Slot,
-			query.After.BlockIndex,
-			query.After.OutputIdx,
-			afterTxID,
-		)
 	}
-	orderDir := "ASC"
-	if query.Descending {
-		orderDir = "DESC"
-	}
-	statement := `
-SELECT ` + utxoRowColumns + `,
-       ` + slotExpr + `, ` + blockIndexExpr + `
-FROM ` + from + `
-WHERE ` + predicate + `
-ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
-         utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
-	statement, args = addLimitOffset(statement, args, query.Limit, query.Offset)
+	statement, args := utxoOrderingStatement(
+		query, from, predicate, args, afterTxID,
+	)
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(statement),
@@ -2964,6 +3021,90 @@ ORDER BY utxo.id`,
 	return ret, nil
 }
 
+// utxoAddressOrderSet copies a UTxO's page position onto its utxo_address
+// row: the producing transaction's application position, or the output's
+// added_slot and 0 while the producer has no application row. The ordering
+// index on utxo_address is built from these columns, so an address page reads
+// it in order rather than sorting the address's live set.
+const utxoAddressOrderSet = `
+SET tx_id = (SELECT u.tx_id FROM utxo u WHERE u.id = utxo_address.utxo_id),
+    output_idx = (
+        SELECT u.output_idx FROM utxo u WHERE u.id = utxo_address.utxo_id
+    ),
+    slot = (
+        SELECT COALESCE(a.slot, u.added_slot)
+        FROM utxo u
+        LEFT JOIN applied_transaction a ON a.tx_id = u.tx_id
+        WHERE u.id = utxo_address.utxo_id
+    ),
+    block_index = (
+        SELECT COALESCE(a.block_index, 0)
+        FROM utxo u
+        LEFT JOIN applied_transaction a ON a.tx_id = u.tx_id
+        WHERE u.id = utxo_address.utxo_id
+    )`
+
+// fillUtxoAddressOrderByIDs refreshes the page position of the utxo_address
+// rows of the given UTxO ids. Callers pass at most the dialect's parameter
+// limit.
+func fillUtxoAddressOrderByIDs(
+	ctx context.Context,
+	db Execer,
+	ids []int64,
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	_, err := db.ExecContext(ctx,
+		"-- name: FillUtxoAddressOrder :exec\nUPDATE utxo_address"+
+			utxoAddressOrderSet+"\nWHERE utxo_id IN ("+
+			strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")+")",
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("fill UTxO address order: %w", err)
+	}
+	return nil
+}
+
+// fillUtxoAddressOrderByTransactionSQL refreshes the page position of every
+// output a transaction produced, after its application row is written or
+// its position changes.
+const fillUtxoAddressOrderByTransactionSQL = `-- name: FillUtxoAddressOrderByTransaction :exec
+UPDATE utxo_address` + utxoAddressOrderSet + `
+WHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id = ?)`
+
+// fillUtxoAddressOrderByTransactions is fillUtxoAddressOrderByTransaction for
+// many transactions, in statements of a bounded size.
+func fillUtxoAddressOrderByTransactions(
+	ctx context.Context,
+	db Execer,
+	transactionIDs []int64,
+) error {
+	const chunk = 500
+	for start := 0; start < len(transactionIDs); start += chunk {
+		ids := transactionIDs[start:min(start+chunk, len(transactionIDs))]
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		if _, err := db.ExecContext(ctx,
+			"-- name: FillUtxoAddressOrderByTransactions :exec\n"+
+				"UPDATE utxo_address"+utxoAddressOrderSet+
+				"\nWHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id IN ("+
+				strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")+"))",
+			args...,
+		); err != nil {
+			return fmt.Errorf("fill UTxO address order: %w", err)
+		}
+	}
+	return nil
+}
+
 func persistUtxoAddress(
 	ctx context.Context,
 	db queryer,
@@ -2987,7 +3128,7 @@ func persistUtxoAddress(
 	if err != nil {
 		return fmt.Errorf("persist UTxO address: %w", err)
 	}
-	return nil
+	return fillUtxoAddressOrderByIDs(ctx, db, []int64{utxoID})
 }
 
 func (s *Store) persistUtxoAddress(
@@ -3068,7 +3209,10 @@ func (s *Store) SetUtxoAddress(
 			_, err := db.ExecContext(ctx, `
 INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
 ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-			return err
+			if err != nil {
+				return err
+			}
+			return fillUtxoAddressOrderByIDs(ctx, db, []int64{int64(utxoID)})
 		},
 	)
 }
@@ -3373,7 +3517,7 @@ func (s *Store) loadUtxoAssetsPointers(
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
-	if len(utxos) == 0 {
+	if len(utxos) == 0 || !s.storesUtxoAssets() {
 		return nil
 	}
 	for _, utxo := range utxos {
@@ -3445,6 +3589,11 @@ func (s *Store) loadUtxoAssetsPointers(
 		if err != nil {
 			return err
 		}
+	}
+	// Row ids follow insertion order, which databases written before
+	// canonical ordering hold in arbitrary order.
+	for _, utxo := range utxos {
+		models.SortAssetsCanonical(utxo.Assets)
 	}
 	return nil
 }

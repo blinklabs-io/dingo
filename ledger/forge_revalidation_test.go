@@ -118,6 +118,7 @@ func newForgeRevalidationFixture(t *testing.T) *forgeRevalidationFixture {
 		},
 	}
 	ls.SetMempool(mempool)
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return &forgeRevalidationFixture{
@@ -154,6 +155,7 @@ func (f *forgeRevalidationFixture) seedUtxo(
 		}
 		return f.db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
 	}))
+	attachTestLiveSet(t, f.ls)
 	return shelley.ShelleyTransactionInput{
 		TxId:        lcommon.NewBlake2b256(txId),
 		OutputIndex: 0,
@@ -291,6 +293,7 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 			[]dbtypes.UtxoKey{{TxId: in.TxId.Bytes(), OutputIdx: 0}},
 			2,
 		))
+		attachTestLiveSet(t, f.ls)
 		require.Empty(t, f.forge(t, queued))
 		require.Empty(t, f.mempool.removed)
 	})

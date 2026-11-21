@@ -165,6 +165,7 @@ func (d *DAG) Consumer(connId ouroboros.ConnectionId) RelayConsumer {
 // AdmissionHeadroomBytes returns the bytes currently available before DAG
 // admission reaches its rejection watermark.
 func (d *DAG) AdmissionHeadroomBytes() int64 {
+	d.refreshCapacity()
 	d.RLock()
 	defer d.RUnlock()
 	return d.admissionHeadroomBytesLocked()
@@ -172,6 +173,7 @@ func (d *DAG) AdmissionHeadroomBytes() int64 {
 
 // MaxAdmissionHeadroomBytes returns the maximum DAG admission budget.
 func (d *DAG) MaxAdmissionHeadroomBytes() int64 {
+	d.refreshCapacity()
 	return d.admissionLimitBytes()
 }
 

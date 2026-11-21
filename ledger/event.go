@@ -33,7 +33,9 @@ const (
 	// round trip while EventBus backpressure stops further admission.
 	ChainsyncEventBufferSize = ochainsync.DefaultPipelineLimit
 
-	BlockfetchEventType event.EventType = "ledger.blockfetch"
+	// RewardFactsEventType reports a reward round whose output facts committed.
+	RewardFactsEventType event.EventType = "ledger.reward_facts"
+	BlockfetchEventType  event.EventType = "ledger.blockfetch"
 	// BlockEventType carries a BlockEvent for a block added to or removed from
 	// the primary chain. The ledger republishes it from the chain-update
 	// stream, so an Apply marks the block joining the chain, not the ledger
@@ -46,6 +48,7 @@ const (
 	LedgerErrorEventType                event.EventType = "ledger.error"
 	PoolStateRestoredEventType          event.EventType = event.PoolStateRestoredEventType
 	TransactionEventType                event.EventType = "ledger.tx"
+	UtxoEventType                       event.EventType = "ledger.utxo"
 )
 
 // BlockAction is the direction a block moved on the primary chain: added
@@ -164,6 +167,50 @@ type TransactionEvent struct {
 	Rollback    bool
 }
 
+// UtxoChangeCause names what changed the live UTxO set.
+type UtxoChangeCause string
+
+const (
+	// UtxoChangeTransaction is a transaction applied by a block, valid or
+	// not: an invalid transaction spends its collateral and creates its
+	// collateral return.
+	UtxoChangeTransaction UtxoChangeCause = "transaction"
+	// UtxoChangeGenesis creates the genesis outputs.
+	UtxoChangeGenesis UtxoChangeCause = "genesis"
+	// UtxoChangeAvvmRemoval removes the AVVM outputs at the Allegra boundary.
+	UtxoChangeAvvmRemoval UtxoChangeCause = "avvm_removal"
+	// UtxoChangeRollback reverts every change after Point.
+	UtxoChangeRollback UtxoChangeCause = "rollback"
+)
+
+// UtxoOutput is an output and its CBOR.
+type UtxoOutput struct {
+	Ref  models.UtxoId
+	Cbor []byte
+}
+
+// UtxoEvent is one change to the live UTxO set, published on the ordered
+// ledger.utxo lane after the change commits. Applying every event in order,
+// adding Added and removing Removed, reproduces the live set without reading
+// the store: a rollback's event carries the outputs it restores.
+type UtxoEvent struct {
+	// Point is where the change happens. For a rollback it is the point
+	// rolled back to. Its hash may be empty for genesis and the AVVM
+	// removal.
+	Point ocommon.Point
+	Cause UtxoChangeCause
+	// TxIndex is the transaction's index in its block, for
+	// UtxoChangeTransaction.
+	TxIndex uint32
+	// Added are outputs that become live.
+	Added []UtxoOutput
+	// Removed are outputs that stop being live.
+	Removed []models.UtxoId
+	// EffectiveSlot is the context slot of a Leios closure transaction whose
+	// outputs and spends take effect before Point.Slot, or zero.
+	EffectiveSlot uint64
+}
+
 // ConnectionClosedEvent is emitted by the node layer when a connection closes.
 // Ledger subscribes to this ledger-owned event type instead of connmanager directly,
 // so ledger/ does not need to import connmanager/.
@@ -178,4 +225,10 @@ type ConnectionClosedEvent struct {
 type ConnectionRecycleRequestedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string
+}
+
+// RewardFactsEvent identifies completed reward outputs without advancing the tip.
+type RewardFactsEvent struct {
+	SnapshotEpoch uint64
+	CapturedSlot  uint64
 }

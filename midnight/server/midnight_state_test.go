@@ -775,3 +775,39 @@ func TestGetUtxoEvents_SharesOneReadTransactionAcrossTables(t *testing.T) {
 		)
 	}
 }
+
+// TestGetUtxoEvents_EndBlockHashNotFound verifies an end_block_hash the
+// resolver cannot find is refused like an unknown block in the block RPCs,
+// instead of leaving the response unbounded. A block above the IndexerDB tip
+// resolves as not found, so a hidden block takes this path.
+func TestGetUtxoEvents_EndBlockHashNotFound(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(1),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+	addr := startTestServerConfig(t, server.Config{
+		Metadata: store,
+		BlockNumberByHash: func(context.Context, []byte) (uint64, bool, error) {
+			return 0, false, nil
+		},
+	})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+		TxCapacity:   10,
+		EndBlockHash: hashForByte(9),
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), "%v", err)
+}

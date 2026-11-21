@@ -76,9 +76,10 @@ type ObserverConfig struct {
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
 	// on the first Koios/tool error or non-pass parity result, except an
-	// epoch whose only significant mismatches are reference_lag: Koios's
-	// own data had not caught up, so that result is logged and recorded
-	// but never triggers FatalFunc (see Observer.fail). When
+	// epoch whose only significant mismatches are reference_lag (Koios's
+	// own data had not caught up) or whose fetch failed on Koios's daily
+	// quota: those are logged and recorded but never trigger FatalFunc (see
+	// Observer.fail). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -733,6 +734,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, false, err) {
+			return
+		}
 		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
@@ -758,6 +762,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, false, err) {
 			return
 		}
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
@@ -808,6 +815,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, true, err) {
+			return
+		}
 		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
@@ -822,6 +832,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
@@ -849,6 +862,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
@@ -915,6 +931,39 @@ func cancelled(ctx context.Context, err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
+// deferForHistory handles a fetch or check that stopped on
+// ErrTransactionHistoryPending: the IndexerDB an API node samples from trails
+// the ledger, so at an epoch boundary it has usually not indexed the epoch
+// that just closed. That is neither a parity result nor a failure, so nothing
+// is emitted and strict validation continues. The queue's ERROR status is
+// persisted and the epoch retried on the ERROR schedule, as reportError does,
+// so a restart before the retry still selects it. It reports false, leaving
+// err to reportError, for any other error and when the status cannot be
+// persisted.
+func (o *Observer) deferForHistory(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) bool {
+	if !errors.Is(err, ErrTransactionHistoryPending) {
+		return false
+	}
+	if persistErr := o.cache.RecordObserverError(
+		o.cfg.Network, epoch, accountsChecked,
+	); persistErr != nil {
+		return false
+	}
+	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
+	o.cfg.Logger.Info(
+		"koiosparity observer: transaction history not indexed yet, epoch deferred",
+		"network", o.cfg.Network,
+		"epoch", epoch,
+		"retry_in", o.cfg.ErrorRetryDelay,
+		"reason", err,
+	)
+	return true
+}
+
 // reportError records a genuine (non-shutdown) per-epoch fetch/check
 // failure: it logs and, in strict mode, fires FatalFunc via fail, and
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
@@ -933,14 +982,19 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	// Quota exhaustion is exempt only when the ERROR row was written: without
+	// it a restart would not retry the epoch. Decide before joining, since the
+	// joined error still matches ErrKoiosQuotaExceeded.
+	fatal := !errors.Is(err, ErrKoiosQuotaExceeded)
 	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
+		fatal = true
 		err = errors.Join(
 			err,
 			fmt.Errorf("persist observer retry: %w", persistErr),
 		)
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, true)
+	o.fail(epoch, err, fatal)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -1327,7 +1381,9 @@ func (o *Observer) fetchAccountsIfNeeded(
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
 // run/runAccounts keep processing later epochs. Every other non-pass result,
 // including dingo_db_missing and dingo_db_error, and every reportError call
-// stays fatal in strict mode.
+// other than Koios quota exhaustion stays fatal in strict mode. Quota
+// exhaustion is retried on the ERROR schedule and clears on Koios's daily
+// reset; it stays fatal when its ERROR row cannot be persisted.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an

@@ -16,17 +16,12 @@ package blockfrost
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -36,21 +31,9 @@ import (
 // that still holds its snapshot while loading blocks waits on itself.
 func TestNodeAdapterVotesReleaseSnapshotBeforeBlockReads(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
-		Config:         &database.Config{DataDir: t.TempDir()},
-		MaxConnections: 1,
-	})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
+	adapter, _, db := newDBBackedAdapterWithIndexer(
+		t, dbtest.IndexerOptions{MaxConnections: 1},
+	)
 
 	meta := db.Metadata()
 	proposal := &models.GovernanceProposal{
@@ -83,7 +66,7 @@ func TestNodeAdapterVotesReleaseSnapshotBeforeBlockReads(t *testing.T) {
 		)
 		done <- err
 	}()
-	err = testutil.RequireReceive(
+	err := testutil.RequireReceive(
 		t, done, 10*time.Second,
 		"votes page blocked on its own pooled read connection",
 	)

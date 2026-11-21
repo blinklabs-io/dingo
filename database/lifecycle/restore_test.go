@@ -27,9 +27,12 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/objectfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -76,6 +79,7 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 
 	var gotRunModes []string
 	host := plugin.NewHost()
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	require.NoError(t, plugin.Register(
 		host,
 		plugin.Descriptor{
@@ -152,6 +156,17 @@ type remoteTestMetadataStore struct {
 
 func (s *remoteTestMetadataStore) HasDestructiveReset() bool { return true }
 
+func (s *remoteTestMetadataStore) CheckRestoreTarget(ctx context.Context) error {
+	state, err := s.GetSyncState("legacy-api-restore-probe", nil)
+	if err != nil {
+		return err
+	}
+	if state != "" {
+		return errors.New("server restore target already has data")
+	}
+	return ctx.Err()
+}
+
 func (s *remoteTestMetadataStore) Reset(context.Context) error {
 	s.resetPending.Store(true)
 	return nil
@@ -176,6 +191,7 @@ type remoteTestBlobStore struct {
 	*badger.BlobStoreBadger
 	control             *remoteBlobRestoreControl
 	legacyNamespaceRoot string
+	immutableDir        string
 }
 
 type remoteBlobRestoreControl struct {
@@ -223,6 +239,100 @@ func (s *remoteTestBlobStore) Reset(ctx context.Context) error {
 	return nil
 }
 
+func (s *remoteTestBlobStore) ReadImmutableFile(
+	ctx context.Context, name string, dst io.Writer,
+) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return 0, errors.New("invalid immutable file name")
+	}
+	file, err := os.Open(filepath.Join(s.immutableDir, name))
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return io.Copy(dst, file)
+}
+
+func (s *remoteTestBlobStore) WriteImmutableFile(
+	ctx context.Context, name string, src io.Reader, size int64,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return errors.New("invalid immutable file name")
+	}
+	if err := os.MkdirAll(s.immutableDir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.Create(filepath.Join(s.immutableDir, name))
+	if err != nil {
+		return err
+	}
+	n, copyErr := io.Copy(file, src)
+	closeErr := file.Close()
+	if n != size {
+		copyErr = errors.Join(
+			copyErr,
+			errors.New("unexpected immutable file size"),
+		)
+	}
+	return errors.Join(copyErr, closeErr)
+}
+
+func (s *remoteTestBlobStore) ListImmutableFiles(
+	ctx context.Context,
+) ([]blob.ImmutableObject, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	files, err := immutable.ListFiles(s.immutableDir)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]blob.ImmutableObject, 0, len(files))
+	for _, file := range files {
+		objects = append(
+			objects,
+			blob.ImmutableObject{Name: file.Name, Size: file.Size},
+		)
+	}
+	return objects, nil
+}
+
+func (s *remoteTestBlobStore) DeleteImmutableFile(
+	ctx context.Context, name string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return errors.New("invalid immutable file name")
+	}
+	if err := os.Remove(filepath.Join(s.immutableDir, name)); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *remoteTestBlobStore) ResetImmutableFiles(
+	ctx context.Context,
+) error {
+	files, err := s.ListImmutableFiles(ctx)
+	if err != nil {
+		return err
+	}
+	var resetErr error
+	for _, file := range files {
+		resetErr = errors.Join(resetErr, s.DeleteImmutableFile(ctx, file.Name))
+	}
+	return resetErr
+}
+
 func (s *remoteTestBlobStore) Restore(ctx context.Context, r io.Reader) error {
 	if s.control.cancelOnRestore.CompareAndSwap(true, false) {
 		s.control.cancel()
@@ -258,39 +368,10 @@ func newRemoteRestoreHostWithBlobName(
 	namespaceAware bool,
 ) *plugin.Host {
 	t.Helper()
-	metadataDir := filepath.Join(dataRoot, "metadata")
 	blobDir := filepath.Join(dataRoot, "blob")
 	host := plugin.NewHost()
-	require.NoError(t, plugin.Register[metadata.MetadataStore](
-		host,
-		plugin.Descriptor{
-			Capability: plugin.CapabilityStorageMetadata,
-			Name:       remoteMetadataProviderName,
-		},
-		func() struct{} { return struct{}{} },
-		func(
-			_ context.Context,
-			_ struct{},
-			deps metadata.ProviderDependencies,
-		) (metadata.MetadataStore, plugin.Instance, error) {
-			if err := seedMigratedMetadata(metadataDir); err != nil {
-				return nil, nil, err
-			}
-			store, err := sqlite.NewSQLStore(
-				sqlite.Config{DataDir: metadataDir}, deps,
-			)
-			if err != nil {
-				return nil, nil, err
-			}
-			remote := &remoteTestMetadataStore{
-				Store: store, dataDir: metadataDir,
-			}
-			return remote, plugin.Lifecycle{
-				StartFunc: remote.Start,
-				StopFunc:  remote.stop,
-			}, nil
-		},
-	))
+	require.NoError(t, chunkfile.RegisterProvider(host))
+	registerRemoteRestoreMetadata(t, host, remoteMetadataProviderName, dataRoot)
 	require.NoError(t, plugin.Register[blob.BlobStore](
 		host,
 		plugin.Descriptor{
@@ -331,6 +412,10 @@ func newRemoteRestoreHostWithBlobName(
 			remote := &remoteTestBlobStore{
 				BlobStoreBadger: store,
 				control:         control,
+				immutableDir: filepath.Join(
+					resolvedBlobDir,
+					".immutable-files",
+				),
 			}
 			if namespaceAware && resolvedBlobDir == blobDir {
 				remote.legacyNamespaceRoot = blobDir
@@ -341,8 +426,49 @@ func newRemoteRestoreHostWithBlobName(
 			}, nil
 		},
 	))
+	if blobProviderName == "s3" || blobProviderName == "gcs" {
+		require.NoError(t, objectfile.RegisterProvider(host, blobProviderName))
+	}
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	return host
+}
+
+func registerRemoteRestoreMetadata(t *testing.T, host *plugin.Host, provider, dataRoot string) {
+	t.Helper()
+	require.NoError(t, plugin.Register[metadata.MetadataStore](
+		host,
+		plugin.Descriptor{
+			Capability: plugin.CapabilityStorageMetadata,
+			Name:       provider,
+		},
+		func() struct{} { return struct{}{} },
+		func(
+			_ context.Context,
+			_ struct{},
+			deps metadata.ProviderDependencies,
+		) (metadata.MetadataStore, plugin.Instance, error) {
+			metadataDir := filepath.Join(dataRoot, "metadata")
+			if deps.CoreNamespace {
+				metadataDir = filepath.Join(dataRoot, "metadata-core")
+			}
+			if err := seedMigratedMetadata(metadataDir); err != nil {
+				return nil, nil, err
+			}
+			store, err := sqlite.NewSQLStore(
+				sqlite.Config{DataDir: metadataDir}, deps,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			remote := &remoteTestMetadataStore{
+				Store: store, dataDir: metadataDir,
+			}
+			return remote, plugin.Lifecycle{
+				StartFunc: remote.Start,
+				StopFunc:  remote.stop,
+			}, nil
+		},
+	))
 }
 
 // seedMigratedMetadata places the process's migrated metadata template in dir
@@ -517,9 +643,11 @@ func runRemoteRestoreFailureRollback(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
+	originalCommitTimestamp, err := original.db.Metadata().
+		GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
+	originalGates, err := original.db.Metadata().
+		GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -557,10 +685,12 @@ func runRemoteRestoreFailureRollback(
 	restoredTip, err := restored.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, originalTip, restoredTip)
-	restoredCommitTimestamp, err := restored.db.Metadata().GetCommitTimestamp(context.Background())
+	restoredCommitTimestamp, err := restored.db.Metadata().
+		GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalCommitTimestamp, restoredCommitTimestamp)
-	restoredGates, err := restored.db.Metadata().GetNodeSettingsGates(context.Background())
+	restoredGates, err := restored.db.Metadata().
+		GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, restoredGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, restored.db))
@@ -767,6 +897,21 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
+	oldChunks := filepath.Join(
+		remoteDir,
+		"blob",
+		oldNamespace,
+		".immutable-files",
+	)
+	require.NoError(t, os.MkdirAll(oldChunks, 0o755))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(oldChunks, "00000.chunk"),
+			[]byte("retired chunk"),
+			0o600,
+		),
+	)
 
 	firstSnapshot, firstBlobs := makeCloudRestoreSnapshot(t, 0x55)
 	firstTarget := filepath.Join(t.TempDir(), "first")
@@ -780,16 +925,31 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 		firstSnapshot,
 		firstTarget,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	firstNamespace, err := blob.ReadNamespace(firstTarget)
 	require.NoError(t, err)
 	require.NotEqual(t, oldNamespace, firstNamespace)
-	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
-	require.Equal(t, firstBlobs, readRemoteBlobNamespace(t, remoteDir, firstNamespace))
+	require.Equal(
+		t,
+		originalBlobs,
+		readRemoteBlobNamespace(t, remoteDir, oldNamespace),
+	)
+	require.Equal(
+		t,
+		firstBlobs,
+		readRemoteBlobNamespace(t, remoteDir, firstNamespace),
+	)
 	require.NoError(t, firstRecovery.Commit())
 	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.Empty(
+		t,
+		chunkDirDigests(t, oldChunks),
+		"retiring a namespace must reclaim its ImmutableDB files",
+	)
 
 	secondSnapshot, secondBlobs := makeCloudRestoreSnapshot(t, 0x77)
 	secondTarget := filepath.Join(t.TempDir(), "second")
@@ -803,7 +963,9 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 		secondSnapshot,
 		secondTarget,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: firstTarget}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: firstTarget,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	secondNamespace, err := blob.ReadNamespace(secondTarget)
@@ -822,7 +984,11 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 		true,
 	))
 	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, firstNamespace))
-	require.Equal(t, secondBlobs, readRemoteBlobNamespace(t, remoteDir, secondNamespace))
+	require.Equal(
+		t,
+		secondBlobs,
+		readRemoteBlobNamespace(t, remoteDir, secondNamespace),
+	)
 }
 
 func TestCloudRestoreRetryDisposesFailedCommitRecovery(t *testing.T) {
@@ -848,7 +1014,9 @@ func TestCloudRestoreRetryDisposesFailedCommitRecovery(t *testing.T) {
 		firstSnapshot,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	firstNamespace, err := blob.ReadNamespace(targetDir)
@@ -869,7 +1037,9 @@ func TestCloudRestoreRetryDisposesFailedCommitRecovery(t *testing.T) {
 		secondSnapshot,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
@@ -900,14 +1070,20 @@ func TestCloudRestoreCommitPreservesNewNamespaceAfterLegacyStore(t *testing.T) {
 		snapshotDir,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	newNamespace, err := blob.ReadNamespace(targetDir)
 	require.NoError(t, err)
 	require.NoError(t, recovery.Commit())
 	require.Equal(t, legacyBlobs, readRemoteBlobNamespace(t, remoteDir, ""))
-	require.Equal(t, incomingBlobs, readRemoteBlobNamespace(t, remoteDir, newNamespace))
+	require.Equal(
+		t,
+		incomingBlobs,
+		readRemoteBlobNamespace(t, remoteDir, newNamespace),
+	)
 }
 
 func TestInterruptedCloudRestoreCanRecoverOriginalPair(t *testing.T) {
@@ -918,6 +1094,8 @@ func TestInterruptedCloudRestoreCanRecoverOriginalPair(t *testing.T) {
 	activeDir := filepath.Join(t.TempDir(), "active")
 	oldNamespace := strings.Repeat("2", 32)
 	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	localState := filepath.Join(activeDir, "ledger-state-marker")
+	require.NoError(t, os.WriteFile(localState, []byte("original ledger state"), 0o600))
 	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
 	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x22), nil))
 	originalBlobs := readBlobContents(t, original.db)
@@ -935,7 +1113,9 @@ func TestInterruptedCloudRestoreCanRecoverOriginalPair(t *testing.T) {
 		snapshotDir,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	newNamespace, err := blob.ReadNamespace(targetDir)
@@ -950,11 +1130,20 @@ func TestInterruptedCloudRestoreCanRecoverOriginalPair(t *testing.T) {
 		recoveryHost,
 		recovery.BackupDir(),
 		activeDir,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 		false,
 	))
-	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.Equal(
+		t,
+		originalBlobs,
+		readRemoteBlobNamespace(t, remoteDir, oldNamespace),
+	)
 	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, newNamespace))
+	state, err := os.ReadFile(localState)
+	require.NoError(t, err)
+	require.Equal(t, []byte("original ledger state"), state)
 	restored := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
 	block, err := restored.db.BlockByIndex(1, nil)
 	require.NoError(t, err)
@@ -987,15 +1176,25 @@ func TestCloudRestoreRollbackReactivatesOriginalNamespace(t *testing.T) {
 		snapshotDir,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	require.NoError(t, recovery.Rollback(context.Background()))
 	restoredNamespace, err := blob.ReadNamespace(targetDir)
 	require.NoError(t, err)
 	require.Equal(t, oldNamespace, restoredNamespace)
-	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, restoredNamespace))
-	restored := openRemoteTestDatabaseInNamespace(t, remoteDir, restoredNamespace)
+	require.Equal(
+		t,
+		originalBlobs,
+		readRemoteBlobNamespace(t, remoteDir, restoredNamespace),
+	)
+	restored := openRemoteTestDatabaseInNamespace(
+		t,
+		remoteDir,
+		restoredNamespace,
+	)
 	block, err := restored.db.BlockByIndex(1, nil)
 	require.NoError(t, err)
 	require.Equal(t, testBlock(1, 0x33).Hash, block.Hash)
@@ -1026,7 +1225,9 @@ func TestCloudRestoreRollbackRecreatesAbsentLegacyTarget(t *testing.T) {
 		snapshotDir,
 		targetDir,
 		nil,
-		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		lifecycle.RestoreStorageConfig{
+			ActiveDataDir: activeDir,
+		}, // restoreconfig:zero-value-required
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(targetDir))
@@ -1084,9 +1285,11 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
+	originalCommitTimestamp, err := original.db.Metadata().
+		GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
+	originalGates, err := original.db.Metadata().
+		GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -1154,7 +1357,8 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 		GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalCommitTimestamp, rolledBackCommitTimestamp)
-	rolledBackGates, err := rolledBack.db.Metadata().GetNodeSettingsGates(context.Background())
+	rolledBackGates, err := rolledBack.db.Metadata().
+		GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, rolledBackGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, rolledBack.db))
@@ -1163,6 +1367,157 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 		require.NoError(t, err)
 	}
 	rolledBack.close(t)
+}
+
+func TestLegacyAPIRestoreServerMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := metadata.AllowResetOfPopulatedTarget(t.Context())
+	const stateKey = "legacy-api-restore-probe"
+	source, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(), StorageMode: "api",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(source) })
+	require.NoError(t, source.SetSyncState(stateKey, "restored API", nil))
+	snapshotDir := snapshotTestDir(t, "legacy-api")
+	_, err = lifecycle.Snapshot(
+		ctx, source, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+	manifest, err := lifecycle.ReadManifest(snapshotDir)
+	require.NoError(t, err)
+	manifest.MetadataPlugin = "postgres"
+	manifest.BlobPlugin = remoteBlobProviderName
+	require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+
+	for name, interrupted := range map[string]bool{
+		"adoption failure": false, "interrupted after staging": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			remoteDir := t.TempDir()
+			host := newRemoteRestoreHost(t, remoteDir, &remoteBlobRestoreControl{})
+			registerRemoteRestoreMetadata(t, host, "postgres", remoteDir)
+			meta := func(core bool) metadata.MetadataStore {
+				t.Helper()
+				mode := "api"
+				if core {
+					mode = "core"
+				}
+				store, err := plugin.Resolve[metadata.MetadataStore](
+					ctx, host, plugin.CapabilityStorageMetadata, "postgres", nil,
+					metadata.ProviderDependencies{CoreNamespace: core, StorageMode: mode},
+				)
+				require.NoError(t, err)
+				return store
+			}
+			stop := func() {
+				t.Helper()
+				require.NoError(t, host.StopCapability(ctx, plugin.CapabilityStorageMetadata))
+			}
+			require.NoError(t, meta(false).SetSyncState(stateKey, "original API", nil))
+			require.NoError(t, meta(true).SetSyncState(stateKey, "original core", nil))
+			stop()
+
+			adoptFailed := errors.New("adoption interrupted after updating both stores")
+			activeDir := testutil.OwnerOnlyTempDir(t)
+			_, recovery, err := lifecycle.RestoreRecoverable(
+				ctx, host, nil, snapshotDir, filepath.Join(t.TempDir(), "staging"),
+				nil,
+				lifecycle.RestoreStorageConfig{
+					ActiveDataDir: activeDir,
+					AdoptLegacyAPI: func(context.Context, string) error {
+						state, err := meta(false).GetSyncState(stateKey, nil)
+						require.NoError(t, err)
+						require.Equal(t, "restored API", state)
+						core := meta(true)
+						state, err = core.GetSyncState(stateKey, nil)
+						require.NoError(t, err)
+						require.Empty(t, state)
+						require.NoError(t, core.SetSyncState(stateKey, "restored core", nil))
+						stop()
+						if !interrupted {
+							return adoptFailed
+						}
+						return nil
+					},
+				}, // restoreconfig:zero-value-required
+			)
+			if interrupted {
+				require.NoError(t, err)
+				require.NotNil(t, recovery)
+				require.NoError(t, host.Stop(ctx))
+				recoveryHost := newRemoteRestoreHost(t, remoteDir, &remoteBlobRestoreControl{})
+				registerRemoteRestoreMetadata(t, recoveryHost, "postgres", remoteDir)
+				require.NoError(t, lifecycle.RecoverInterruptedRestore(
+					ctx, recoveryHost, recovery.BackupDir(), activeDir,
+					lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, false,
+				))
+				host = recoveryHost
+			} else {
+				require.ErrorIs(t, err, adoptFailed)
+				require.NotErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+			}
+			state, err := meta(false).GetSyncState(stateKey, nil)
+			require.NoError(t, err)
+			require.Equal(t, "original API", state)
+			state, err = meta(true).GetSyncState(stateKey, nil)
+			require.NoError(t, err)
+			require.Equal(t, "original core", state)
+			stop()
+		})
+	}
+	t.Run("offline preflights the core database before restoring API rows", func(t *testing.T) {
+		remoteDir := t.TempDir()
+		host := newRemoteRestoreHost(t, remoteDir, &remoteBlobRestoreControl{})
+		registerRemoteRestoreMetadata(t, host, "postgres", remoteDir)
+		resolve := func(core bool) metadata.MetadataStore {
+			t.Helper()
+			store, err := plugin.Resolve[metadata.MetadataStore](
+				t.Context(), host, plugin.CapabilityStorageMetadata, "postgres", nil,
+				metadata.ProviderDependencies{CoreNamespace: core},
+			)
+			require.NoError(t, err)
+			return store
+		}
+		offline := lifecycle.RestoreStorageConfig{DeferLegacyServerAdoption: true}
+		validate := func(m lifecycle.Manifest) error {
+			return offline.CheckCompatibility(
+				m, remoteBlobProviderName, "postgres", "core", manifest.Network,
+				map[string]string{"indexer_layout": "split"},
+			)
+		}
+		target := filepath.Join(testutil.OwnerOnlyTempDir(t), "offline")
+		core := resolve(true)
+		require.NoError(t, core.SetSyncState(stateKey, "original core", nil))
+		require.NoError(t, host.StopCapability(t.Context(), plugin.CapabilityStorageMetadata))
+		_, err := lifecycle.RestoreValidated(
+			t.Context(), host, nil, snapshotDir, target, validate,
+			offline, // restoreconfig:zero-value-required
+		)
+		require.ErrorContains(t, err, "server restore target already has data")
+		require.NoDirExists(t, target)
+		got, err := resolve(false).GetSyncState(stateKey, nil)
+		require.NoError(t, err)
+		require.Empty(t, got, "offline preflight must precede API restore")
+		core = resolve(true)
+		got, err = core.GetSyncState(stateKey, nil)
+		require.NoError(t, err)
+		require.Equal(t, "original core", got)
+		require.NoError(t, core.DeleteSyncState(stateKey, nil))
+		require.NoError(t, host.StopCapability(t.Context(), plugin.CapabilityStorageMetadata))
+
+		_, err = lifecycle.RestoreValidated(
+			t.Context(), host, nil, snapshotDir, target, validate,
+			offline, // restoreconfig:zero-value-required
+		)
+		require.NoError(t, err)
+		got, err = resolve(false).GetSyncState(stateKey, nil)
+		require.NoError(t, err)
+		require.Equal(t, "restored API", got)
+		got, err = resolve(true).GetSyncState(stateKey, nil)
+		require.NoError(t, err)
+		require.Empty(t, got, "startup fills the derived core database")
+	})
 }
 
 // restoreStorageConfigAllowBareMarker exempts a call site from
@@ -1640,4 +1995,73 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)
+}
+
+func TestCloudRestorePublishesImmutableChunks(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"s3", "gcs"} {
+		t.Run(provider, func(t *testing.T) {
+			ctx := context.Background()
+			source := promotedSnapshotDB(t)
+			want := chunkDirDigests(t, source.ImmutableDir())
+			require.Greater(
+				t,
+				len(want),
+				6,
+				"the fixture must span multiple chunks",
+			)
+			snapshotDir := snapshotTestDir(t, "remote-immutable")
+			manifest, err := lifecycle.Snapshot(
+				ctx,
+				source,
+				snapshotDir,
+				lifecycle.TriggerManual,
+				"test",
+				"badger",
+				"sqlite",
+			)
+			require.NoError(t, err)
+			manifest.BlobPlugin = provider
+			manifest.MetadataPlugin = remoteMetadataProviderName
+			require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+			remoteDir := t.TempDir()
+			host := newRemoteRestoreHostWithBlobName(
+				t,
+				remoteDir,
+				&remoteBlobRestoreControl{},
+				provider,
+				true,
+			)
+			restoredDir := filepath.Join(t.TempDir(), "restored")
+			_, err = lifecycle.Restore(
+				ctx,
+				host,
+				nil,
+				snapshotDir,
+				restoredDir,
+				lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
+			)
+			require.NoError(t, err)
+			namespace, err := blob.ReadNamespace(restoredDir)
+			require.NoError(t, err)
+			require.NotEmpty(t, namespace)
+			remoteChunks := filepath.Join(
+				remoteDir,
+				"blob",
+				namespace,
+				".immutable-files",
+			)
+			require.Equal(t, want, chunkDirDigests(t, remoteChunks))
+			local, err := immutable.ListFiles(
+				filepath.Join(restoredDir, database.ImmutableDirName),
+			)
+			require.NoError(t, err)
+			require.Len(
+				t,
+				local,
+				3,
+				"only the writable tail should remain staged locally",
+			)
+		})
+	}
 }

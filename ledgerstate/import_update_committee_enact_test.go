@@ -21,6 +21,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -154,7 +156,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
 	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    500,
 		NewEpoch:     501,

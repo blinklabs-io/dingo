@@ -23,10 +23,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // A mark snapshot's per-credential reward basis (reward_stake_input) is first
@@ -35,20 +33,21 @@ import (
 // entry in rewardStakeInputsPendingKey marks its rows as incomplete until the
 // last chunk commits; every reader of reward_stake_input goes through
 // ensureRewardStakeInputsReady first.
-const rewardStakeInputsPendingKey = stakeRewardSourcePrefix +
-	"stake-inputs-pending"
+const rewardStakeInputsPendingKey = models.RewardStakeInputsPendingKey
 
 // deferredStakeInputChunk bounds each write transaction, so the writer never
 // holds the metadata writer for the whole snapshot.
 const deferredStakeInputChunk = 50_000
 
-type rewardStakeInputsPendingEntry struct {
+// RewardStakeInputsPendingEntry names a snapshot whose stake rows are not
+// all written.
+type RewardStakeInputsPendingEntry struct {
 	Epoch        uint64 `json:"epoch"`
 	BoundarySlot uint64 `json:"boundary_slot"`
 }
 
 type rewardStakeInputsPending struct {
-	Entries []rewardStakeInputsPendingEntry `json:"entries"`
+	Entries []RewardStakeInputsPendingEntry `json:"entries"`
 }
 
 // errRewardStakeInputsNotReady reports that a snapshot's reward basis is still
@@ -62,13 +61,19 @@ var errRewardStakeInputsUnrecoverable = errors.New(
 )
 
 func loadRewardStakeInputsPending(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) (*rewardStakeInputsPending, error) {
 	raw, err := meta.GetSyncState(rewardStakeInputsPendingKey, metaTxn)
 	if err != nil {
 		return nil, fmt.Errorf("load pending reward stake inputs: %w", err)
 	}
+	return decodeRewardStakeInputsPending(raw)
+}
+
+func decodeRewardStakeInputsPending(
+	raw string,
+) (*rewardStakeInputsPending, error) {
 	pending := &rewardStakeInputsPending{}
 	if raw == "" {
 		return pending, nil
@@ -89,9 +94,36 @@ func loadRewardStakeInputsPending(
 	return pending, nil
 }
 
+// ParseRewardStakeInputsPending decodes the value of the pending sync_state
+// key, rejecting a format it does not know.
+func ParseRewardStakeInputsPending(
+	raw string,
+) ([]RewardStakeInputsPendingEntry, error) {
+	pending, err := decodeRewardStakeInputsPending(raw)
+	if err != nil {
+		return nil, err
+	}
+	return pending.Entries, nil
+}
+
+// FormatRewardStakeInputsPending is the pending sync_state value naming
+// entries, empty when there are none.
+func FormatRewardStakeInputsPending(
+	entries []RewardStakeInputsPendingEntry,
+) (string, error) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(&rewardStakeInputsPending{Entries: entries})
+	if err != nil {
+		return "", fmt.Errorf("encode pending reward stake inputs: %w", err)
+	}
+	return string(raw), nil
+}
+
 func saveRewardStakeInputsPending(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	pending *rewardStakeInputsPending,
 ) error {
 	raw, err := json.Marshal(pending)
@@ -109,7 +141,7 @@ func saveRewardStakeInputsPending(
 func (p *rewardStakeInputsPending) find(epoch uint64) int {
 	return slices.IndexFunc(
 		p.Entries,
-		func(e rewardStakeInputsPendingEntry) bool {
+		func(e RewardStakeInputsPendingEntry) bool {
 			return e.Epoch == epoch
 		},
 	)
@@ -118,8 +150,8 @@ func (p *rewardStakeInputsPending) find(epoch uint64) int {
 // markRewardStakeInputsPending records, in the boundary transaction, that the
 // snapshot for epoch has not had its reward_stake_input rows written yet.
 func markRewardStakeInputsPending(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	epoch uint64,
 	boundarySlot uint64,
 ) error {
@@ -127,7 +159,7 @@ func markRewardStakeInputsPending(
 	if err != nil {
 		return err
 	}
-	entry := rewardStakeInputsPendingEntry{
+	entry := RewardStakeInputsPendingEntry{
 		Epoch: epoch, BoundarySlot: boundarySlot,
 	}
 	if i := pending.find(epoch); i >= 0 {
@@ -139,8 +171,8 @@ func markRewardStakeInputsPending(
 }
 
 func clearRewardStakeInputsPending(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	epoch uint64,
 ) error {
 	pending, err := loadRewardStakeInputsPending(meta, metaTxn)
@@ -161,8 +193,8 @@ func clearRewardStakeInputsPending(
 // and a reader of the marker would otherwise report that epoch's basis as
 // incomplete.
 func discardRewardStakeInputsPendingAfterSlot(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	slot uint64,
 ) error {
 	pending, err := loadRewardStakeInputsPending(meta, metaTxn)
@@ -171,7 +203,7 @@ func discardRewardStakeInputsPendingAfterSlot(
 	}
 	kept := slices.DeleteFunc(
 		slices.Clone(pending.Entries),
-		func(e rewardStakeInputsPendingEntry) bool {
+		func(e RewardStakeInputsPendingEntry) bool {
 			return e.BoundarySlot > slot
 		},
 	)
@@ -187,7 +219,7 @@ func discardRewardStakeInputsPendingAfterSlot(
 // commits.
 func (ls *LedgerState) takeDeferredRewardStakeInputs(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	hook := ls.epochBoundaryDeferredStakeInputsHook()
 	if hook == nil {
@@ -197,8 +229,16 @@ func (ls *LedgerState) takeDeferredRewardStakeInputs(
 	if !ok {
 		return nil
 	}
+	if sd, ok := ls.ledgerDB().(stagingLedgerDB); ok {
+		sd.stageStakeInputs(txn, inputs) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		if sd.rewardInputsDrained() {
+			// The set writes the rows in the boundary's own apply, so
+			// there is no gap for a pending entry to describe.
+			return nil
+		}
+	}
 	if err := markRewardStakeInputsPending(
-		ls.db.Metadata(), txn.Metadata(), epoch, boundarySlot,
+		ls.ledgerDB(), txn, epoch, boundarySlot,
 	); err != nil {
 		return err
 	}
@@ -301,8 +341,8 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 		final := end == len(inputs)
 		stop := false
 		ls.rewardPrecomputeWriteMu.Lock()
-		txn := ls.db.Transaction(ctx, true)
-		err := txn.Do(func(txn *database.Txn) error {
+		txn := ls.ledgerDB().Begin(ctx, true)
+		err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 			if ls.rewardInputRollbackActive.Load() != 0 ||
 				ls.rewardInputGeneration.Load() != generation {
 				stop = true
@@ -313,9 +353,9 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 					return err
 				}
 			}
-			meta := ls.db.Metadata()
-			metaTxn := txn.Metadata()
-			pending, err := loadRewardStakeInputsPending(meta, metaTxn)
+			ldb := ls.ledgerDB()
+			metaTxn := txn
+			pending, err := loadRewardStakeInputsPending(ldb, metaTxn)
 			if err != nil {
 				return err
 			}
@@ -324,7 +364,8 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 				stop = true
 				return nil
 			}
-			if err := meta.SaveRewardStakeInputs(
+			// The boundary staged these rows for the set already.
+			if err := ls.metadataLedgerDB().SaveRewardStakeInputs(
 				inputs[start:end], metaTxn,
 			); err != nil {
 				return fmt.Errorf(
@@ -333,7 +374,7 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 				)
 			}
 			if final {
-				return clearRewardStakeInputsPending(meta, metaTxn, epoch)
+				return clearRewardStakeInputsPending(ldb, metaTxn, epoch)
 			}
 			return nil
 		})
@@ -356,14 +397,38 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 // A read-only reader cannot complete them, so it must not present the
 // snapshot's rows as the whole distribution.
 func (ls *LedgerState) RewardStakeInputsIncomplete(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	from uint64,
 	through uint64,
 ) (bool, error) {
-	pending, err := loadRewardStakeInputsPending(
-		ls.db.Metadata(),
-		txn.Metadata(),
-	)
+	return ls.rewardStakeInputsIncomplete(txn, from, through)
+}
+
+// RewardStakeInputsPendingState returns the pending record as the ledger
+// stores it, in the set once the reward-inputs family is drained, or the empty
+// string when none exists.
+func (ls *LedgerState) RewardStakeInputsPendingState() (string, error) {
+	return ls.ledgerDB().GetSyncState(rewardStakeInputsPendingKey, nil)
+}
+
+// RewardStakeInputsIncompleteCommitted is RewardStakeInputsIncomplete read
+// from the ledger store's committed state, for a reader whose own
+// transaction belongs to another store: the ledger store records which
+// snapshots are still being written, and a split IndexerDB copies their rows
+// from it.
+func (ls *LedgerState) RewardStakeInputsIncompleteCommitted(
+	from uint64,
+	through uint64,
+) (bool, error) {
+	return ls.rewardStakeInputsIncomplete(nil, from, through)
+}
+
+func (ls *LedgerState) rewardStakeInputsIncomplete(
+	txn ledgerdb.Txn,
+	from uint64,
+	through uint64,
+) (bool, error) {
+	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), txn)
 	if err != nil {
 		return false, err
 	}
@@ -382,12 +447,22 @@ func (ls *LedgerState) RewardStakeInputsIncomplete(
 // from the historical reconstruction the retention path already uses,
 // checked against the snapshot's persisted pool inputs, in txn.
 func (ls *LedgerState) ensureRewardStakeInputsReady(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	epoch uint64,
 ) error {
-	meta := ls.db.Metadata()
-	metaTxn := txn.Metadata()
-	pending, err := loadRewardStakeInputsPending(meta, metaTxn)
+	return ls.ensureRewardStakeInputsReadyIn(ls.ledgerDB(), txn, epoch)
+}
+
+// ensureRewardStakeInputsReadyIn is ensureRewardStakeInputsReady against an
+// explicit store, so the metadata store can be read directly while the ledger
+// store would serve the set.
+func (ls *LedgerState) ensureRewardStakeInputsReadyIn(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	epoch uint64,
+) error {
+	metaTxn := txn
+	pending, err := loadRewardStakeInputsPending(ldb, metaTxn)
 	if err != nil {
 		return err
 	}
@@ -404,23 +479,23 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 	if !txn.IsReadWrite() {
 		return errRewardStakeInputsNotReady
 	}
-	snapshot, err := meta.GetRewardSnapshot(epoch, "mark", metaTxn)
+	snapshot, err := ldb.GetRewardSnapshot(epoch, "mark", metaTxn)
 	if err != nil {
 		return fmt.Errorf("get reward snapshot for epoch %d: %w", epoch, err)
 	}
 	if snapshot == nil ||
 		snapshot.BoundarySlot != pending.Entries[i].BoundarySlot {
 		// The snapshot the entry describes was rolled back.
-		return clearRewardStakeInputsPending(meta, metaTxn, epoch)
+		return clearRewardStakeInputsPending(ldb, metaTxn, epoch)
 	}
-	poolInputs, err := meta.GetRewardPoolInputs(epoch, metaTxn)
+	poolInputs, err := ldb.GetRewardPoolInputs(epoch, metaTxn)
 	if err != nil {
 		return fmt.Errorf(
 			"get reward pool inputs for epoch %d: %w", epoch, err,
 		)
 	}
 	rebuilt, rejected, err := ls.rebuildPrunedRewardStakeInputsDetailed(
-		meta, metaTxn, epoch, snapshot, poolInputs,
+		ldb, metaTxn, epoch, snapshot, poolInputs,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -444,17 +519,17 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 			snapshot.TotalDelegators,
 		)
 	}
-	if err := meta.DeleteRewardInputsForEpoch(epoch, metaTxn); err != nil {
+	if err := ldb.DeleteRewardInputsForEpoch(epoch, metaTxn); err != nil {
 		return fmt.Errorf(
 			"clear partial reward inputs for epoch %d: %w", epoch, err,
 		)
 	}
-	if err := meta.SaveRewardPoolInputs(poolInputs, metaTxn); err != nil {
+	if err := ldb.SaveRewardPoolInputs(poolInputs, metaTxn); err != nil {
 		return fmt.Errorf(
 			"restore reward pool inputs for epoch %d: %w", epoch, err,
 		)
 	}
-	if err := meta.SaveRewardStakeInputs(rebuilt, metaTxn); err != nil {
+	if err := ldb.SaveRewardStakeInputs(rebuilt, metaTxn); err != nil {
 		return fmt.Errorf(
 			"save rebuilt reward stake inputs for epoch %d: %w", epoch, err,
 		)
@@ -465,7 +540,7 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 		"epoch", epoch,
 		"rows", len(rebuilt),
 	)
-	return clearRewardStakeInputsPending(meta, metaTxn, epoch)
+	return clearRewardStakeInputsPending(ldb, metaTxn, epoch)
 }
 
 // completePendingRewardStakeInputs runs ensureRewardStakeInputsReady for the
@@ -481,12 +556,47 @@ func (ls *LedgerState) completePendingRewardStakeInputs(newEpoch uint64) error {
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return nil
 	}
-	txn := ls.db.Transaction(context.Background(), true)
-	err := txn.Do(func(txn *database.Txn) error {
+	txn := ls.ledgerDB().Begin(context.Background(), true)
+	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		return ls.ensureRewardStakeInputsReady(txn, epochs.snapshot)
 	})
 	if errors.Is(err, errRewardStakeInputsNotReady) {
 		return nil
 	}
 	return err
+}
+
+// ResolvePendingRewardStakeInputs completes every pending reward stake-input
+// epoch from ldb, the metadata store, in one write transaction. It must run
+// while that store still holds the UTxO and delegation history the rebuild
+// reads, which the move into the live UTxO set and the drain of the
+// reward-inputs family delete. An epoch whose history cannot reproduce the
+// retained pool totals keeps its marker.
+func (ls *LedgerState) ResolvePendingRewardStakeInputs(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+) error {
+	pending, err := loadRewardStakeInputsPending(ldb, nil)
+	if err != nil {
+		return err
+	}
+	for _, entry := range pending.Entries {
+		txn := ldb.Begin(ctx, true)
+		err := ldb.Run(txn, func(txn ledgerdb.Txn) error {
+			return ls.ensureRewardStakeInputsReadyIn(ldb, txn, entry.Epoch)
+		})
+		switch {
+		case err == nil:
+		case errors.Is(err, errRewardStakeInputsUnrecoverable):
+			ls.config.Logger.Warn(
+				"pending reward stake inputs stay incomplete",
+				"component", "ledger",
+				"epoch", entry.Epoch,
+				"error", err,
+			)
+		default:
+			return err
+		}
+	}
+	return nil
 }

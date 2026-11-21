@@ -46,13 +46,6 @@ const (
 	LeiosAnnouncementStaleOCIN
 )
 
-// errOpCertBaselineNotImported reports a Mithril-restored database that holds
-// no certified operational-certificate counter at its trust boundary, so a
-// pool with no later observation has no known counter at all.
-var errOpCertBaselineNotImported = errors.New(
-	"certified opcert counter baseline missing at the Mithril trust boundary",
-)
-
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
 // block header. The Shelley-family headers carry the opcert fields flat on the
 // header body; the Babbage-family headers (Babbage/Conway/Dijkstra) nest them
@@ -226,7 +219,7 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 		return LeiosAnnouncementStaleOCIN, nil
 	}
 	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
-	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+	stored, found, err := ls.ledgerDB().LatestPoolOpCertSequenceAtOrBefore(
 		context.Background(),
 		poolKeyHash,
 		immutablePoint.Slot,
@@ -315,4 +308,23 @@ func verifyOpCertHeaderCrypto(
 		return fmt.Errorf("opcert KES period invalid: %w", err)
 	}
 	return nil
+}
+
+// BlockOpCertCounter returns the pool that issued block and the operational
+// certificate issue number its header carries. ok is false for a block whose
+// header has no certificate (Byron).
+func BlockOpCertCounter(
+	block ledger.Block,
+) (pool lcommon.PoolKeyHash, issueNumber uint64, ok bool, err error) {
+	opCert, has := opCertFromHeader(block.Header())
+	if !has {
+		return pool, 0, false, nil
+	}
+	if opCert == nil {
+		return pool, 0, false, errors.New(
+			"block header reported an operational certificate but returned nil",
+		)
+	}
+	return lcommon.PoolKeyHash(block.IssuerVkey().Hash()), opCert.IssueNumber,
+		true, nil
 }

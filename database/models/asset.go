@@ -15,9 +15,11 @@
 package models
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -84,9 +86,9 @@ func ConvertMintToAssetMintBurnModels(
 		return nil
 	}
 	var rows []AssetMintBurn
-	for _, policyId := range mint.Policies() {
+	for _, policyId := range SortedPolicies(mint) {
 		policyIdBytes := policyId.Bytes()
-		for _, assetNameBytes := range mint.Assets(policyId) {
+		for _, assetNameBytes := range SortedAssetNames(mint, policyId) {
 			amount := mint.Asset(policyId, assetNameBytes)
 			if amount == nil || amount.Sign() == 0 {
 				continue
@@ -130,6 +132,8 @@ func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
 }
 
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
+// The slice is in canonical order (policy ID bytes, then asset name bytes), so
+// row insertion order and every API listing built from it are stable.
 // Each asset is populated with its name, policy ID, fingerprint, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.
 func ConvertMultiAssetToModels(
@@ -140,7 +144,7 @@ func ConvertMultiAssetToModels(
 	}
 	numAssets := 0
 	// Get all policy IDs
-	policyIds := multiAsset.Policies()
+	policyIds := SortedPolicies(multiAsset)
 	for _, policyId := range policyIds {
 		numAssets += len(multiAsset.Assets(policyId))
 	}
@@ -149,7 +153,7 @@ func ConvertMultiAssetToModels(
 		policyIdBytes := policyId.Bytes()
 
 		// Get asset names for this policy
-		assetNames := multiAsset.Assets(policyId)
+		assetNames := SortedAssetNames(multiAsset, policyId)
 		for _, assetNameBytes := range assetNames {
 			amount, err := CheckedUint64FromBigInt(
 				multiAsset.Asset(policyId, assetNameBytes),
@@ -180,4 +184,41 @@ func ConvertMultiAssetToModels(
 	}
 
 	return assets, nil
+}
+
+// SortedPolicies returns the policy IDs of multiAsset in canonical order:
+// ascending by the raw policy ID bytes. MultiAsset.Policies iterates a Go map,
+// so its order differs from call to call.
+func SortedPolicies[T int64 | uint64 | *big.Int](
+	multiAsset *lcommon.MultiAsset[T],
+) []lcommon.Blake2b224 {
+	policies := multiAsset.Policies()
+	slices.SortFunc(policies, func(a, b lcommon.Blake2b224) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return policies
+}
+
+// SortedAssetNames returns the asset names under policyId in canonical order:
+// ascending by raw bytes. MultiAsset.Assets iterates a Go map, so its order
+// differs from call to call.
+func SortedAssetNames[T int64 | uint64 | *big.Int](
+	multiAsset *lcommon.MultiAsset[T],
+	policyId lcommon.Blake2b224,
+) [][]byte {
+	names := multiAsset.Assets(policyId)
+	slices.SortFunc(names, bytes.Compare)
+	return names
+}
+
+// SortAssetsCanonical sorts assets in place into canonical order: policy ID
+// bytes, then asset name bytes. The sort is stable, so equal keys keep their
+// relative order.
+func SortAssetsCanonical(assets []Asset) {
+	slices.SortStableFunc(assets, func(a, b Asset) int {
+		if c := bytes.Compare(a.PolicyId, b.PolicyId); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.Name, b.Name)
+	})
 }
