@@ -401,6 +401,35 @@ func (s *Store) AddReplayTransactions(n uint64, txn *database.Txn) error {
 	)
 }
 
+// RemoveReplayTransactions takes n out of the replay's transaction count
+// inside txn, for applied_transaction rows removed after the replay counted
+// them. An IndexerDB with no count, which never replayed toward an anchor, is
+// left alone.
+func (s *Store) RemoveReplayTransactions(txn *database.Txn, n uint64) error {
+	if txn == nil {
+		return errors.New(
+			"indexerdb: RemoveReplayTransactions needs the writer's transaction",
+		)
+	}
+	v, err := s.state.GetSyncState(ReplayTransactionsSyncKey, txn)
+	if err != nil || v == "" || n == 0 {
+		return err
+	}
+	cur, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("malformed indexer replay transactions: %w", err)
+	}
+	if n > cur {
+		return fmt.Errorf(
+			"indexerdb: removing %d transactions from a replay count of %d",
+			n, cur,
+		)
+	}
+	return s.state.SetSyncState(
+		ReplayTransactionsSyncKey, strconv.FormatUint(cur-n, 10), txn,
+	)
+}
+
 // Kind classifies what an API endpoint reads, for readiness.
 type Kind int
 
