@@ -601,9 +601,10 @@ func NewRewardBlocksScenarioForTest(
 			}
 			var once sync.Once
 			done := make(chan result, 1)
-			committedInChunk := false
+			started, committedInChunk := false, false
 			h.ls.rewardPrecomputeBeforeSaveHook = func() {
 				once.Do(func() {
+					started = true
 					go func() {
 						ctx, cancel := context.WithTimeout(
 							context.Background(), time.Minute,
@@ -628,9 +629,10 @@ func NewRewardBlocksScenarioForTest(
 				replayBoundaryNewEpoch*uint64(replayBoundaryLength),
 			)
 			h.ls.rewardPrecomputeBeforeSaveHook = nil
-			if !committedInChunk {
-				// The probe stayed behind the chunk; wait it out so no
-				// goroutine outlives the test.
+			// A round that returns before the hook fires never starts the
+			// probe, so only a started probe that stayed behind the chunk is
+			// waited out; that keeps it from outliving the test.
+			if started && !committedInChunk {
 				r := <-done
 				require.NoError(t, r.err)
 			}
