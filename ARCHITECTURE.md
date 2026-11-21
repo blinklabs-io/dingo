@@ -23979,7 +23979,10 @@ read-only transaction. Pass 2 runs a bounded batch of pools at a time
 the batch to `rewardPrecomputeChunkDelegators` (5000) delegators and never
 fewer than one pool, so a run of large pools cannot hold the single write
 connection for tens of seconds. Each batch runs in its own write
-transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
+transaction (`LedgerDB.BeginStaged`, a transaction with a read-pool metadata
+view and no write connection, once `reward-inputs` and `reward-outputs` are both
+drained, because the batch then only stages changes for the live UTxO set and
+block commits are not queued behind it) that re-reads the owning `RewardSnapshot` and proceeds only if it
 still matches, no rollback generation changed since Pass 1 ran, and no epoch
 boundary has claimed the round (`rewardPrecomputeFence`, bumped under
 `rewardPrecomputeWriteMu` before the boundary transaction opens). Each chunk
