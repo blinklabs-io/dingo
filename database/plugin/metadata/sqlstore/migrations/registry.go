@@ -113,6 +113,7 @@ const (
 	immutableDBSchemaRelease                            = "immutable-db"
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
+	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -305,6 +306,7 @@ var schemaVersions = []struct {
 	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
+	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -484,6 +486,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == committeeRenewalTermStartSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeRenewalTermStartBackfill
+		}
+		if version.Name == assetIdentityHoldingsSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
+			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
 	}
@@ -2031,6 +2038,7 @@ var (
 	mysqlInlineKeyPattern = regexp.MustCompile(
 		`(?is)(PRIMARY\s+KEY|UNIQUE(?:\s+KEY)?)\s*\(([^)]*)\)`,
 	)
+	withoutRowIDClause      = regexp.MustCompile(`(?i)\s+WITHOUT\s+ROWID\b`)
 	mysqlTextDefaultPattern = regexp.MustCompile(
 		`(?i)\btext(\s+NOT\s+NULL)?\s+DEFAULT\s+'0'`,
 	)
@@ -2075,6 +2083,11 @@ func translateSchemaSQLInSchema(
 	}
 	for index, statement := range statements {
 		value := statement
+		// WITHOUT ROWID is SQLite-only syntax, which PostgreSQL and MySQL
+		// reject.
+		if dialect != "sqlite" {
+			value = withoutRowIDClause.ReplaceAllString(value, "")
+		}
 		switch dialect {
 		case "postgres":
 			value = strings.ReplaceAll(value, "`", `"`)
