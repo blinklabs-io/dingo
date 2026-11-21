@@ -53,6 +53,10 @@ func buildGenesisUtxoSet(
 	if err != nil {
 		return nil, fmt.Errorf("generate Byron genesis UTxOs: %w", err)
 	}
+	// The reference Byron to Shelley UTxO translation drops every output
+	// whose coin is zero, so the Shelley ledger state, and the state a
+	// Mithril snapshot imports, never holds them.
+	_, byronGenesisUtxos = splitZeroValueByron(byronGenesisUtxos)
 	shelleyGenesis := nodeCfg.ShelleyGenesis()
 	shelleyGenesisUtxos, err := shelleyGenesis.GenesisUtxos()
 	if err != nil {

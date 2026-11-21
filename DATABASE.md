@@ -3453,6 +3453,80 @@ Until step 4 the metadata store stays whole and authoritative, so a stop at
 any earlier point loses nothing. Blob output offsets written for the old rows
 are left in the blob store.
 
+#### Zero-coin Byron genesis outputs
+
+The reference Byron to Shelley UTxO translation (`translateUTxOByronToShelley`)
+drops every Byron genesis output whose coin is zero, so neither the Shelley
+ledger state nor a Mithril-imported state holds one. Preview and Preprod each
+have seven such outputs in their Byron genesis; mainnet has none. A zero-coin
+Shelley `initialFunds` output is kept by the reference, and so by Dingo.
+
+`buildGenesisUtxoSet` drops them, so a database created now never holds them,
+in the ledger's stores or in an IndexerDB seeded by `SeedIndexerGenesis`. A
+database seeded by an earlier release holds them in whichever stores it has, and
+is repaired at startup from the genesis configuration. No schema migration does
+this: a core-mode store never wrote `utxo_address`, no `utxo` column tells a
+Byron genesis output from a Shelley one, and a store that keeps its UTxO set
+only in the live set has no `utxo` rows to select from. The repair instead
+names the outputs exactly: `ledger.ZeroValueByronGenesisOutputs` lists the
+zero-coin outputs of `ByronGenesis().GenesisUtxos()`, the source
+`buildGenesisUtxoSet` reads, and the genesis transactions no retained genesis
+output shares (a genesis transaction's id is the hash of its address). A
+zero-coin Byron output at the address of a Shelley `initialFunds` entry has
+the same reference as that retained output, so it is not listed. A network
+with none of them does nothing.
+
+- Metadata store. `nodestorage.Reconcile.Run` starts with
+  `ledger.RepairZeroValueByronGenesis`, so it runs before anything copies
+  `utxo` rows into the live set. `Database.RemoveGenesisUtxos`
+  (`Store.DeleteUnspentGenesisUtxos`) deletes, per listed output, the `utxo` row
+  that is unspent (`spent_at_tx_id` null, `deleted_slot` zero, not a collateral
+  return), has amount `0`, and no `asset`, `utxo_reference_edge` or
+  `utxo_collateral_edge` row. Its `utxo_address`, `utxo_pointer` and
+  `utxo_reference_script` rows go with it, and so does its blob output offset
+  on a store that still keeps offsets. A listed genesis transaction then loses
+  its `address_transaction`, `applied_transaction` (slot 0) and `transaction`
+  rows when no `utxo` row, spend or edge refers to it; a store without `utxo`
+  rows has only these. The deletes and the `sync_state` key
+  `ledger.byron_genesis_zero_repair` commit in one transaction, so a stop
+  leaves the store as it was and the next start repeats the repair. With the key
+  set the repair does nothing. A spent output stays, as does a funded Byron or
+  zero-coin Shelley output.
+- IndexerDB. `NewIndexerService` runs the same repair on the IndexerDB, which
+  has its own `sync_state` key, before the writer reads it. That covers an
+  IndexerDB seeded from genesis by a release and an API store copied by the
+  move to the split layout; both would otherwise disagree with a Mithril-imported
+  state when the replay reaches its anchor. The seed of a replay toward a
+  Mithril anchor counted the genesis transactions it wrote into
+  `indexer_replay_txs`, which the anchor check compares with the
+  `applied_transaction` rows, so the same transaction takes the removed
+  application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
+- Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
+  `Set.RemoveZeroCoinOutputs` (`badgerutxo.Store.RemoveOutputs`) on every
+  start. It deletes the listed outputs the set holds whose coin is zero, as the
+  metadata repair checks the amount, and adjusts the output count and the
+  stake sums in the same transaction. It writes no journal record and leaves the
+  tip alone: a record would sit newest in the journal and the next rollback, of
+  any depth, would undo it first and make the outputs live again. No journal
+  record covers these outputs otherwise, since no block spent them. The set has
+  no mark because it can be rebuilt or restored from a checkpoint that predates
+  the removal; looking up the few listed keys each start is cheaper than a mark
+  that could outlive them. An output the set does not hold is not touched.
+
+Removing them changes no live stake: a Byron address has no stake credential and
+the amount is zero, so no `reward_live_stake` row or stake sum includes them.
+`TestRepairZeroValueByronGenesisCoreStore`,
+`TestRepairZeroValueByronGenesisAPIStore` and
+`TestReconcileRemovesGenesisFromLiveSetOnlyStore` pin the store shapes,
+`TestReconcileRemovesLegacyZeroValueByronGenesis` and
+`TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
+`TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
+repaired IndexerDB, `TestReconcileKeepsOutputAtSharedZeroByronReference` and
+`TestIndexerServiceKeepsOutputAtSharedZeroByronReference` a shared reference,
+and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
+statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
+run on SQLite.
+
 #### Reverting a released database below its tip
 
 The set's rollback journal starts at the point the state is moved at, and a
