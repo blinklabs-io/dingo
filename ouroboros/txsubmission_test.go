@@ -1466,11 +1466,11 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 	require.Equal(t, txBytes, relayed.Cbor)
 }
 
-func TestTxSubmissionServerInitRetriesMovedAdmissionSnapshot(t *testing.T) {
+func TestTxSubmissionServerInitRetainsMovedAdmissionSnapshot(t *testing.T) {
 	t.Parallel()
 
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		pendingStateMovesA: 1,
+		pendingStateMovesA: int64(txsubmissionMaxAdmissionRetryStreak + 1),
 	})
 	defer h.close(t)
 
@@ -1486,9 +1486,13 @@ func TestTxSubmissionServerInitRetriesMovedAdmissionSnapshot(t *testing.T) {
 		},
 		5*time.Second,
 		10*time.Millisecond,
-		"expected a moved ledger snapshot to be retried before the offer is dropped",
+		"expected a moved ledger snapshot to be retained across retry bursts",
 	)
-	require.Equal(t, int64(2), h.transientAdmissionA.attempts.Load())
+	require.Equal(
+		t,
+		int64(txsubmissionMaxAdmissionRetryStreak+2),
+		h.transientAdmissionA.attempts.Load(),
+	)
 }
 
 // The real TxSubmission client advertises a size 32 bytes below the wrapped

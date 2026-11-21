@@ -12342,12 +12342,11 @@ their outputs have moved into ledger state. The DAG backend never
 watermark-evicts transactions. Its TxSubmission intake waits for sufficient
 admission headroom, while direct submissions receive `MempoolFullError` above
 the rejection watermark. A transaction that repeatedly loses the available
-headroom race to another peer is dropped after a bounded retry streak so that
-one offer cannot stall the connection indefinitely. An admission whose ledger
-snapshot moves during reconciliation is retried under the same bound.
-Exhausting that bound drops the peer's already-acknowledged transaction without
-a verdict so repeated snapshot movement cannot stall the connection
-indefinitely. A CBOR decode failure rejects the complete reply; three
+headroom race to another peer is retried in bounded bursts with
+connection-cancellable backoff. An admission whose ledger snapshot moves
+during reconciliation follows the same path. Exhausting one burst retains the
+current offer and pauses intake before another burst, so a transaction with no
+admission verdict is never acknowledged and lost. A CBOR decode failure rejects the complete reply; three
 consecutive invalid replies stop intake for that connection. Mempool validation
 rejections for decoded transactions are logged and dropped without stopping
 the peer's intake pump; peer, protocol, or mempool shutdown still terminates the
