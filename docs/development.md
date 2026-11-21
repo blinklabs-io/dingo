@@ -52,7 +52,7 @@ any obsolete runs that remain active to stop.
 ## Plugin SDK module
 
 `sdk/` is a separate Go module, `github.com/blinklabs-io/dingo/sdk`. The root
-module's `./...` does not include it; `make test`, `make lint` and
+module's `./...` does not include it; `make test` and
 `make mod-tidy` run each nested module on their own. Its import rules are
 checked by `make import-boundaries`.
 
