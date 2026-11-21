@@ -24166,7 +24166,8 @@ primary chain (`chain.Chain`) and decodes them into `gouroboros/ledger.Block`
 values before handing a batch to `ledgerProcessBlocksFromSource` for validation
 and apply, exactly as before. When `LedgerStateConfig.BlockPipelineEnabled` is
 set (config `blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
-`--block-pipeline-enabled`; default off), `LedgerState` owns a
+`--block-pipeline-enabled`; default on in core mode except on Musashi),
+`LedgerState` owns a
 `github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with decode workers
 set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 `GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)
