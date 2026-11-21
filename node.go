@@ -417,6 +417,25 @@ func New(cfg Config) (*Node, error) {
 			return nil, fmt.Errorf("invalid plugin selection: %w", err)
 		}
 	}
+	var extraSelections map[string]plugin.Selection
+	if cfg.cfg != nil {
+		extraSelections = cfg.cfg.Plugins.Extra
+	}
+	for name, selection := range extraSelections {
+		capability, ok := pluginHost.Contract(name)
+		if !ok {
+			return nil, fmt.Errorf(
+				"invalid plugin selection: no provider can serve %q: "+
+					"the plugin host does not declare that capability",
+				name,
+			)
+		}
+		if err := pluginHost.ValidateSelection(
+			capability, selection.Provider, selection.Config,
+		); err != nil {
+			return nil, fmt.Errorf("invalid plugin selection: %w", err)
+		}
+	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -576,7 +595,7 @@ func validateAPIProviderSecurityPolicy(
 func (n *Node) apiPluginSelection(
 	capability plugin.Capability,
 ) (plugin.Selection, uint, error) {
-	selection, ok := n.config.pluginSelections[capability]
+	selection, ok := n.config.pluginSelection(capability)
 	if !ok {
 		return selection, 0, fmt.Errorf(
 			"plugin selection is missing for capability %s",

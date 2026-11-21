@@ -7,6 +7,34 @@ domain packages do not self-register during package initialization. The host
 erases types only at its registry boundary while typed factories retain their
 provider configuration, service, and dependency bundles.
 
+A capability is a namespaced, versioned contract string, `<name>/v<N>` (for
+example `storage.blob/v0`, `consensus/v0`). The name is dot-separated lowercase
+segments (the segments `provider` and `config` are reserved); `N` is a
+non-negative integer without leading zeros. `plugin.ParseCapability` is the
+single parser. A host speaks one contract version per name: `NewHost` speaks
+the built-in set (`plugin.AllCapabilities`) and `Host.Declare` adds others.
+`Register` and `ValidateSelection` reject a capability the host does not speak,
+and when the name is spoken at another version the error names both versions.
+No capability list is closed in code, so a new plugin kind needs a `Declare`
+call and a provider registration, not a host edit.
+
+Configuration and environment key on the capability name, never the version.
+`plugin.EnvironmentPrefix` is `DINGO_PLUGINS_` plus the upper-cased name with
+dots as underscores, so contract version changes do not rename variables. In
+YAML the name's segments nest under `plugins`, as `storage.blob` already does:
+`example.widget` is `plugins.example.widget.{provider,config}`. The built-in
+selections keep their fixed fields; every other selection is collected into
+`PluginsConfig.Extra` by name. A mapping with a `provider` or `config` key is a
+selection, any other mapping is a namespace, and decoding stays strict: an
+unknown key, a malformed name, or `storage.immutable` (which has no selection)
+is a load error. `LoadConfig` applies the `DINGO_PLUGINS_<NAME>_*` overlay to
+each extra selection present in the loaded YAML, and CLI flags still win. The
+precedence is CLI > environment > YAML > defaults. `Config.WithPluginSelection`
+stores a selection for a non-built-in capability by name. `Node.New` fails when
+a configured selection names a capability its host does not declare, rather
+than ignoring it. Out-of-tree providers must still be registered explicitly;
+there is no `init()` registration.
+
 `Node.New` validates plugin selections and node configuration before registering
 metrics or starting EventBus workers. Configuration failure leaves the caller
 metrics registry unchanged, so corrected construction can reuse it.

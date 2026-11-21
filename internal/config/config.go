@@ -27,6 +27,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1349,6 +1350,160 @@ type PluginsConfig struct {
 	Consensus hostplugin.Selection `yaml:"consensus"`
 	Mempool   hostplugin.Selection `yaml:"mempool"`
 	API       APIPluginsConfig     `yaml:"api"`
+	// Extra holds the selections for every capability that has no field above,
+	// keyed by capability name. In YAML the name's dot-separated segments nest
+	// under plugins, so "example.widget" is plugins.example.widget with
+	// provider and config keys, exactly as storage.blob is plugins.storage.blob.
+	Extra map[string]hostplugin.Selection `yaml:"-"`
+}
+
+// UnmarshalYAML decodes the built-in selections strictly, as a plain struct
+// decode would, and routes every other selection into Extra. A mapping is a
+// selection when it has a provider or config key; any other mapping is a
+// namespace whose keys extend the capability name. A key that is neither a
+// built-in field nor part of a selection is an error.
+func (p *PluginsConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: plugins must be a mapping", node.Line)
+	}
+	extras := make(map[string]*yaml.Node)
+	fixed, _, err := splitPluginsNode(node, "", extras)
+	if err != nil {
+		return err
+	}
+	if fixed != nil {
+		data, err := yaml.Marshal(fixed)
+		if err != nil {
+			return err
+		}
+		type fixedPlugins PluginsConfig
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		if err := decoder.Decode((*fixedPlugins)(p)); err != nil &&
+			!errors.Is(err, io.EOF) {
+			return err
+		}
+	}
+	for name, selectionNode := range extras {
+		data, err := yaml.Marshal(selectionNode)
+		if err != nil {
+			return err
+		}
+		var selection hostplugin.Selection
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&selection); err != nil {
+			return fmt.Errorf("plugins selection %s: %w", name, err)
+		}
+		if p.Extra == nil {
+			p.Extra = make(map[string]hostplugin.Selection)
+		}
+		p.Extra[name] = selection
+	}
+	return nil
+}
+
+// builtinPluginSelectionPaths are the plugins.* paths that have a struct
+// field, keyed by capability name.
+var builtinPluginSelectionPaths = map[string]struct{}{
+	"storage.blob":     {},
+	"storage.metadata": {},
+	"consensus":        {},
+	"mempool":          {},
+	"api.blockfrost":   {},
+	"api.kupo":         {},
+	"api.mesh":         {},
+	"api.utxorpc":      {},
+	"api.mcp":          {},
+}
+
+func isPluginSelectionNode(node *yaml.Node) bool {
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		switch node.Content[i].Value {
+		case "provider", "config":
+			return true
+		}
+	}
+	return false
+}
+
+// splitPluginsNode walks the plugins mapping. It returns a copy holding only
+// what the struct decode must see, and collects selection nodes for
+// non-built-in capabilities into extras. The bool reports whether extras were
+// taken from beneath node, so a namespace emptied that way is dropped.
+func splitPluginsNode(
+	node *yaml.Node,
+	path string,
+	extras map[string]*yaml.Node,
+) (*yaml.Node, bool, error) {
+	if node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	if node.Kind != yaml.MappingNode {
+		return node, false, nil
+	}
+	if path != "" && isPluginSelectionNode(node) {
+		if _, ok := builtinPluginSelectionPaths[path]; ok {
+			return node, false, nil
+		}
+		if slices.ContainsFunc(
+			hostplugin.AllCapabilities(),
+			func(c hostplugin.Capability) bool { return c.Name() == path },
+		) {
+			return nil, false, fmt.Errorf(
+				"line %d: plugins.%s has no selection",
+				node.Line,
+				path,
+			)
+		}
+		if err := validatePluginSelectionName(path); err != nil {
+			return nil, false, fmt.Errorf("line %d: %w", node.Line, err)
+		}
+		extras[path] = node
+		return nil, true, nil
+	}
+	out := &yaml.Node{
+		Kind:        node.Kind,
+		Tag:         node.Tag,
+		Style:       node.Style,
+		Line:        node.Line,
+		Column:      node.Column,
+		HeadComment: node.HeadComment,
+	}
+	tookExtras := false
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		child := key.Value
+		if path != "" {
+			child = path + "." + key.Value
+		}
+		kept, took, err := splitPluginsNode(value, child, extras)
+		if err != nil {
+			return nil, false, err
+		}
+		tookExtras = tookExtras || took
+		if kept == nil || (took && len(kept.Content) == 0) {
+			continue
+		}
+		out.Content = append(out.Content, key, kept)
+	}
+	if tookExtras && len(out.Content) == 0 {
+		return nil, true, nil
+	}
+	return out, tookExtras, nil
+}
+
+// validatePluginSelectionName checks that name could be a capability name by
+// parsing it at an arbitrary contract version.
+func validatePluginSelectionName(name string) error {
+	if _, err := hostplugin.ParseCapability(name + "/v0"); err != nil {
+		return fmt.Errorf(
+			"plugins.%s is not a capability selection: %w",
+			name,
+			err,
+		)
+	}
+	return nil
 }
 
 type StoragePluginsConfig struct {
@@ -2035,6 +2190,15 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
 	clone.Plugins.API.Mcp = clonePluginSelection(cfg.Plugins.API.Mcp)
+	if cfg.Plugins.Extra != nil {
+		clone.Plugins.Extra = make(
+			map[string]hostplugin.Selection,
+			len(cfg.Plugins.Extra),
+		)
+		for name, selection := range cfg.Plugins.Extra {
+			clone.Plugins.Extra[name] = clonePluginSelection(selection)
+		}
+	}
 	if cfg.provenance != nil {
 		clone.provenance = make(Provenance, len(cfg.provenance))
 		maps.Copy(clone.provenance, cfg.provenance)
@@ -2167,6 +2331,16 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
 			return nil, fmt.Errorf("process plugin environment: %w", err)
 		}
+	}
+	// The environment names no capability version, so a selection present in
+	// the loaded configuration is overlaid at the lowest one. Only the name
+	// shapes the variable prefix.
+	for name, selection := range cfg.Plugins.Extra {
+		capability := hostplugin.Capability(name + "/v0")
+		if err := hostplugin.ApplyEnvironment(capability, &selection, pluginEnviron); err != nil {
+			return nil, fmt.Errorf("process plugin environment: %w", err)
+		}
+		cfg.Plugins.Extra[name] = selection
 	}
 
 	// LoadConfig only parses and merges configuration sources; it makes
