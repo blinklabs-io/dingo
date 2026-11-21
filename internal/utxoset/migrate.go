@@ -104,11 +104,6 @@ func (s *Set) MigrateFromSQL(
 	ldb ledgerdb.LedgerDB,
 	env MigrationEnv,
 ) error {
-	if s.sqlDrained.Load() {
-		return errors.New(
-			"utxoset: the metadata store has drained ledger-state families, so its UTxO rows cannot be the source of a migration",
-		)
-	}
 	s.migrating.Store(true)
 	defer s.migrating.Store(false)
 	log := env.Logger
@@ -135,6 +130,13 @@ func (s *Set) MigrateFromSQL(
 	// checked against; before it, a commit recorded by an earlier run says
 	// nothing of what the metadata store has been given since.
 	if progress != migrationCommitted || !marked {
+		// Drained families mean the rows are no longer a faithful source;
+		// a committed, marked migration never reads them again.
+		if s.sqlDrained.Load() {
+			return errors.New(
+				"utxoset: the metadata store has drained ledger-state families, so its UTxO rows cannot be the source of a migration",
+			)
+		}
 		tip, err := env.Store.SQLTip(ctx)
 		if err != nil {
 			return fmt.Errorf("utxoset: read metadata tip: %w", err)
