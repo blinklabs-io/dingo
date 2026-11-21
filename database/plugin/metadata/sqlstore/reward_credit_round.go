@@ -1032,45 +1032,9 @@ func (s *Store) RewardCreditsAlreadyApplied(
 	if err != nil {
 		return nil, err
 	}
-	hashes := make([]any, 0, len(credits))
-	seen := make(map[string]struct{}, len(credits))
-	for _, credit := range credits {
-		hash := credit.SourceHash
-		if hash == nil {
-			hash = []byte{}
-		}
-		if _, ok := seen[string(hash)]; ok {
-			continue
-		}
-		seen[string(hash)] = struct{}{}
-		hashes = append(hashes, hash)
-	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
-		hashes...,
-	)
+	applied, err := s.appliedRewardCreditKeys(ctx, db, credits)
 	if err != nil {
 		return nil, fmt.Errorf("check reward credits applied: %w", err)
-	}
-	defer rows.Close()
-	applied := make(map[rewardCreditJournalKey]struct{})
-	for rows.Next() {
-		var hash, key []byte
-		var tag, slot int64
-		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
-			return nil, err
-		}
-		applied[rewardCreditJournalKey{
-			sourceHash:    string(hash),
-			credentialTag: uint8(tag), //nolint:gosec
-			stakingKey:    string(key),
-			slot:          uint64(slot), //nolint:gosec
-		}] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	for i, credit := range credits {
 		hash := credit.SourceHash

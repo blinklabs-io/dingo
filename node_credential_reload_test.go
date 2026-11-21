@@ -305,6 +305,7 @@ func TestQuiesceZeroizesTheLiveCredentialsAfterTheirUsers(t *testing.T) {
 	require.Equal(
 		t,
 		[]string{
+			"legacy SQL UTxO row cleanup",
 			"block forger",
 			"leader election",
 			"block producer credentials",

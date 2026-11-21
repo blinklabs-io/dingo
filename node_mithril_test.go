@@ -684,12 +684,15 @@ func TestStartMithrilCoordinator(t *testing.T) {
 func TestQuiesceStopsMithrilRunFirst(t *testing.T) {
 	t.Parallel()
 	n := &Node{}
-	assert.Empty(t, n.quiesceComponentStops())
-	n.mithrilCoordinator = &mithrilCoordinator{}
 	stops := n.quiesceComponentStops()
-	require.NotEmpty(t, stops)
-	assert.Equal(t, "mithril catch-up", stops[0].name)
-	require.NoError(t, stops[0].stop())
+	require.Len(t, stops, 1)
+	assert.Equal(t, "legacy SQL UTxO row cleanup", stops[0].name)
+	n.mithrilCoordinator = &mithrilCoordinator{}
+	stops = n.quiesceComponentStops()
+	require.Len(t, stops, 2)
+	assert.Equal(t, "legacy SQL UTxO row cleanup", stops[0].name)
+	assert.Equal(t, "mithril catch-up", stops[1].name)
+	require.NoError(t, stops[1].stop())
 }
 
 // The Mithril rate comes only from a successful run long enough to measure,

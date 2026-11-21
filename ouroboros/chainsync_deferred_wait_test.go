@@ -296,6 +296,243 @@ func TestChainsyncClientRollForwardWaitsOutDeferredVerification(t *testing.T) {
 	)
 }
 
+// A competing branch must remain on the same ChainSync session while local
+// ledger state settles. Once verification succeeds, the ordinary production
+// ingress path must expose the branch to chain selection so a longer fork can
+// replace the incumbent.
+func TestChainsyncDeferredCompetingForkReachesSelection(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			EventBus:                  bus,
+			SecurityParam:             10,
+			DisableEventSubscriptions: true,
+		},
+	)
+	ls := newTestLedgerState(t)
+	settled := newSettleSignal()
+	o := newOuroboros(OuroborosConfig{
+		EventBus:    bus,
+		LedgerState: ls,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncHeaderVerificationSettled: settled.current,
+		ChainsyncObservePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+		) chainselection.PeerTipUpdateDisposition {
+			selector.PreparePeerTipAdmission(update)
+			return chainselection.PeerTipUpdateAccepted
+		},
+		ChainsyncResolvePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+			admitted bool,
+		) {
+			if admitted {
+				selector.CommitPeerTipAdmission(update)
+				return
+			}
+			selector.RejectPeerTipAdmission(update)
+		},
+	})
+	t.Cleanup(o.stopFutureHeaderResyncs)
+
+	ancestorHash := gledger.Blake2b256{0xa0}
+	producerHash := gledger.Blake2b256{0xb0}
+	competitorHash := gledger.Blake2b256{0xc0}
+	competitorChildHashes := []gledger.Blake2b256{
+		{0xc1},
+		{0xc2},
+		{0xc3},
+	}
+	producerConn := newTestConnId("127.0.0.1:6091", "10.0.0.1:3001")
+	competitorConn := newTestConnId("127.0.0.1:6092", "10.0.0.2:3001")
+
+	var localTipMu sync.Mutex
+	localTipHash := ancestorHash.Bytes()
+	o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+		localTipMu.Lock()
+		defer localTipMu.Unlock()
+		return append([]byte(nil), localTipHash...),
+			append([]byte(nil), localTipHash...)
+	}
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
+		return true
+	}
+	transientErr := transientContextErr(t)
+	var competitorAttempts atomic.Int32
+	competitorAttempted := make(chan struct{}, 1)
+	o.chainSelectionVerifyHeaderCrypto = func(
+		conn ouroboros.ConnectionId,
+		header gledger.BlockHeader,
+	) (uint64, error) {
+		if conn.String() == competitorConn.String() &&
+			header.Hash() == competitorHash &&
+			competitorAttempts.Add(1) == 1 {
+			competitorAttempted <- struct{}{}
+			return 0, transientErr
+		}
+		return 1, nil
+	}
+
+	deliver := func(
+		conn ouroboros.ConnectionId,
+		header gledger.BlockHeader,
+		peerTip ochainsync.Tip,
+	) {
+		t.Helper()
+		require.NoError(t, o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			header,
+			peerTip,
+		))
+		evt := testutil.RequireReceive(
+			t,
+			ledgerCh,
+			testutil.AsyncWait,
+			"verified header admission",
+		)
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.NotNil(t, data.PeerTipAdmission)
+		data.PeerTipAdmission(true)
+		selector.EvaluateAndSwitch()
+	}
+
+	producer := nonByronTestHeader{&testBlockHeader{
+		hash:        producerHash,
+		prevHash:    ancestorHash,
+		blockNumber: 100,
+		slotNumber:  1_000,
+	}}
+	producerTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			producer.SlotNumber(),
+			producerHash.Bytes(),
+		),
+		BlockNumber: producer.BlockNumber(),
+	}
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(990, ancestorHash.Bytes()),
+		BlockNumber: 99,
+	})
+	deliver(producerConn, producer, producerTip)
+	best := selector.GetBestPeer()
+	require.NotNil(t, best)
+	require.Equal(t, producerConn.String(), best.String())
+
+	localTipMu.Lock()
+	localTipHash = producerHash.Bytes()
+	localTipMu.Unlock()
+	ls.SetTipForTesting(producerTip)
+	selector.SetLocalTip(producerTip)
+
+	competitor := nonByronTestHeader{&testBlockHeader{
+		hash:        competitorHash,
+		prevHash:    ancestorHash,
+		blockNumber: 100,
+		slotNumber:  1_004,
+	}}
+	competitorTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			1_012,
+			competitorChildHashes[len(competitorChildHashes)-1].Bytes(),
+		),
+		BlockNumber: 103,
+	}
+	callbackDone := make(chan error, 1)
+	go func() {
+		callbackDone <- o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: competitorConn},
+			0,
+			competitor,
+			competitorTip,
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		competitorAttempted,
+		testutil.AsyncWait,
+		"competing header verification deferral",
+	)
+	testutil.RequireNoReceive(
+		t,
+		callbackDone,
+		100*time.Millisecond,
+		"the competing header must retain its ChainSync cursor while state settles",
+	)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		100*time.Millisecond,
+		"an unverified competing header must not reach the ledger",
+	)
+
+	settled.publish()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		callbackDone,
+		testutil.AsyncWait,
+		"competing header verification retry",
+	))
+	evt := testutil.RequireReceive(
+		t,
+		ledgerCh,
+		testutil.AsyncWait,
+		"verified competing header admission",
+	)
+	competingEvent, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.NotNil(t, competingEvent.PeerTipAdmission)
+	competingEvent.PeerTipAdmission(true)
+	selector.EvaluateAndSwitch()
+
+	prevHash := competitorHash
+	for i, hash := range competitorChildHashes {
+		child := nonByronTestHeader{&testBlockHeader{
+			hash:        hash,
+			prevHash:    prevHash,
+			blockNumber: uint64(101 + i),
+			slotNumber:  uint64(1_010 + i),
+		}}
+		deliver(competitorConn, child, competitorTip)
+		prevHash = hash
+	}
+
+	require.EqualValues(t, 2, competitorAttempts.Load())
+	best = selector.GetBestPeer()
+	require.NotNil(t, best)
+	require.Equal(
+		t,
+		competitorConn.String(),
+		best.String(),
+		"the verified longer fork must replace the incumbent producer branch",
+	)
+	testutil.RequireNoReceive(
+		t,
+		recycleCh,
+		100*time.Millisecond,
+		"a local-state deferral is not a peer fault",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		100*time.Millisecond,
+		"a deferral resolved in place must not re-intersect the peer",
+	)
+}
+
 // A header that stays deferred past the bound falls back to parking it for
 // recovery, with no peer penalty.
 func TestChainsyncClientRollForwardParksHeaderDeferredPastWaitBound(

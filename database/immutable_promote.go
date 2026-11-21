@@ -568,10 +568,32 @@ func (d *Database) PromoteThrough(
 ) (PromoteResult, error) {
 	rt := d.immutable
 	if rt == nil {
-		return PromoteResult{}, errors.New("the ImmutableDB is not enabled")
+		return PromoteResult{}, ErrImmutableNotEnabled
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	return d.promoteThrough(ctx, ceilingIndex)
+}
+
+// PromoteThroughLocked is PromoteThrough for a caller that holds
+// LockImmutable, which PromoteThrough would otherwise wait on forever. An
+// import uses it to append blocks it has just stored to the chunk files
+// before anything else can read the recorded tip.
+func (d *Database) PromoteThroughLocked(
+	ctx context.Context,
+	ceilingIndex uint64,
+) (PromoteResult, error) {
+	if d.immutable == nil {
+		return PromoteResult{}, ErrImmutableNotEnabled
+	}
+	return d.promoteThrough(ctx, ceilingIndex)
+}
+
+func (d *Database) promoteThrough(
+	ctx context.Context,
+	ceilingIndex uint64,
+) (PromoteResult, error) {
+	rt := d.immutable
 	store, err := d.openImmutableStore()
 	if err != nil {
 		return PromoteResult{}, err

@@ -9029,7 +9029,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	}
 	var removedSlot *uint64
 	var unseatSeeded bool
-	mithrilBoundary, err := ls.ledgerDB().MithrilTrustBoundarySlotStrict(txn)
+	mithrilBoundary, err := ls.ledgerDB().ImportedLedgerStateBoundarySlotStrict(txn)
 	if err != nil {
 		return fmt.Errorf(
 			"read Mithril boundary before seeding genesis committee: %w",

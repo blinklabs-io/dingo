@@ -3170,6 +3170,18 @@ func newTestLedgerStateWithChainAtAndConfig(
 	dataDir string,
 	cardanoConfig *cardano.CardanoNodeConfig,
 ) (*ledger.LedgerState, *database.Database) {
+	return newTestLedgerStateWithChainAtAndConfigAndSet(
+		t, blockCount, dataDir, cardanoConfig, livesettest.New(),
+	)
+}
+
+func newTestLedgerStateWithChainAtAndConfigAndSet(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+	cardanoConfig *cardano.CardanoNodeConfig,
+	utxoSet ledger.UtxoSetWriter,
+) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
@@ -3200,7 +3212,7 @@ func newTestLedgerStateWithChainAtAndConfig(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           utxoSet,
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

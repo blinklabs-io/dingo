@@ -108,161 +108,6 @@ func verifyRewardRepairStateNotBehindStablePoint(
 	return nil
 }
 
-func cleanupInvalidRepairStoredGapBeforeImport(
-	ctx context.Context,
-	db *database.Database,
-	certifiedTip ocommon.Point,
-	prepared *preparedLedgerStateImport,
-	preservedLocalTail map[string]struct{},
-	logger *slog.Logger,
-) (bool, error) {
-	stateTip := prepared.state.Tip
-	if stateTip.Slot <= certifiedTip.Slot {
-		return false, nil
-	}
-	recent, err := database.BlocksRecent(ctx, db, 1)
-	if err != nil {
-		return false, fmt.Errorf(
-			"reading local chain tip for repair gap: %w",
-			err,
-		)
-	}
-	if len(recent) == 0 || recent[0].Slot <= certifiedTip.Slot {
-		return false, nil
-	}
-	resumeGapEnd := min(recent[0].Slot, stateTip.Slot)
-	storedGapBlocks, err := loadGapBlocksFromBlob(
-		ctx,
-		db,
-		certifiedTip.Slot+1,
-		resumeGapEnd,
-	)
-	if err != nil {
-		return false, fmt.Errorf(
-			"loading stored repair gap before import: %w",
-			err,
-		)
-	}
-	immutableTip, err := database.BlockByPoint(ctx, db, certifiedTip)
-	if err != nil {
-		return false, fmt.Errorf(
-			"reading certified tip for repair gap: %w",
-			err,
-		)
-	}
-	var validateErr error
-	if recent[0].Slot < stateTip.Slot {
-		validateErr = errors.New(
-			"stored partial gap does not reach the signed ledger-state point",
-		)
-	} else if resumeGapEnd == stateTip.Slot {
-		validateErr = validateCompleteGapBlocks(
-			storedGapBlocks,
-			certifiedTip,
-			ocommon.NewPoint(stateTip.Slot, stateTip.BlockHash),
-		)
-	} else {
-		validateErr = validateStoredGapContinuity(storedGapBlocks, immutableTip)
-	}
-	if validateErr == nil {
-		return false, nil
-	}
-	logger.Warn(
-		"stored volatile gap blocks failed continuity check before reward-state import; refetching from relay",
-		"component", "mithril",
-		"immutable_tip_slot", certifiedTip.Slot,
-		"resume_gap_end_slot", resumeGapEnd,
-		"ledger_state_slot", stateTip.Slot,
-		"error", validateErr,
-	)
-	if err := deleteBlobBlocksAboveSlotExcept(
-		ctx,
-		db,
-		certifiedTip.Slot,
-		preservedLocalTail,
-	); err != nil {
-		return false, fmt.Errorf(
-			"cleaning rejected stored repair gap before import: %w",
-			err,
-		)
-	}
-	return true, nil
-}
-
-// errRejectedTailAfterUTxOImport is terminal for the database: the stored
-// blocks and the checkpoint that cause it are unchanged by a re-run, which
-// refuses again. Only a fresh bootstrap recovers.
-var errRejectedTailAfterUTxOImport = errors.New(
-	"the UTxOs of that state are already imported, and removing the stored " +
-		"tail would delete them; nothing was deleted, a re-run refuses the " +
-		"same way, so run the sync again with an empty data directory",
-)
-
-// cleanRejectedStoredGapBeforeImport removes the stored blocks above the
-// immutable tip, and the rows their processing wrote, when they do not extend
-// to the prepared ledger state. It runs before the import so the cleanup, which
-// cuts at the immutable tip's slot, never meets a row the import wrote at the
-// state's slot or below it.
-//
-// An import that skips its UTxO phase on resume does not rewrite what the
-// cleanup deletes, so a checkpoint that records the phase as complete makes
-// the cleanup refuse. A reconcile import never reads a checkpoint and rewrites
-// every phase.
-func cleanRejectedStoredGapBeforeImport(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-	prepared *preparedLedgerStateImport,
-	result *BootstrapResult,
-	reconcile bool,
-	immutableTipSlot uint64,
-) (bool, error) {
-	tip := prepared.state.Tip
-	gap, err := checkStoredGap(
-		ctx, db, immutableTipSlot, tip.Slot, tip.BlockHash,
-	)
-	if err != nil {
-		return false, err
-	}
-	if !gap.present || gap.rejected == nil {
-		return false, nil
-	}
-	logger.Warn(
-		"stored volatile gap blocks failed continuity check, refetching from relay",
-		"component", "mithril",
-		"immutable_tip_slot", immutableTipSlot,
-		"resume_gap_end_slot", gap.resumeGapEnd,
-		"ledger_state_slot", tip.Slot,
-		"ledger_state_hash", hex.EncodeToString(tip.BlockHash),
-		"error", gap.rejected,
-	)
-	if key := importCheckpointKey(reconcile, result, tip.Slot); key != "" {
-		checkpoint, err := db.Metadata().GetImportCheckpoint(key, nil)
-		if err != nil {
-			return false, fmt.Errorf("reading import checkpoint: %w", err)
-		}
-		if checkpoint != nil &&
-			models.IsPhaseCompleted(checkpoint.Phase, models.ImportPhaseUTxO) {
-			return false, fmt.Errorf(
-				"stored volatile gap blocks above slot %d do not extend to ledger state slot %d: %w: %w",
-				immutableTipSlot, tip.Slot, errRejectedTailAfterUTxOImport, gap.rejected,
-			)
-		}
-	}
-	// Drop the rejected blob blocks so neither the later BlocksRecent query
-	// nor any slot-ordered iterator can resurface them as the chain tip after
-	// the relay refetch.
-	if err := deleteBlobBlocksAboveSlotExcept(
-		ctx, db, immutableTipSlot, nil,
-	); err != nil {
-		return false, fmt.Errorf(
-			"removing rejected gap blocks above slot %d: %w",
-			immutableTipSlot, err,
-		)
-	}
-	return true, nil
-}
-
 func verifyRewardRepairLocalTail(
 	ctx context.Context,
 	db *database.Database,
@@ -563,7 +408,6 @@ const (
 	PhaseBootstrap     SyncPhase = "bootstrap"
 	PhaseLedgerImport  SyncPhase = "ledger_import"
 	PhaseImmutableCopy SyncPhase = "immutable_copy"
-	PhaseGapBlocks     SyncPhase = "gap_blocks"
 	PhasePostLedger    SyncPhase = "post_ledger_state"
 	PhaseIndexRebuild  SyncPhase = "index_rebuild"
 	PhaseComplete      SyncPhase = "complete"
@@ -581,7 +425,7 @@ type SyncProgress struct {
 	CurrentSlot     uint64
 	TipSlot         uint64
 	Percent         float64
-	Count           int    // generic counter (gap blocks, blocks copied)
+	Count           int    // generic counter (blocks copied)
 	Total           int    // Total complements Count for non-byte progress (e.g. ledger-import items).
 	Description     string // free-form (era/stage label)
 }
@@ -636,17 +480,17 @@ type SyncConfig struct {
 	// UtxoSet is the LedgerDB set that receives the ledger state's UTxO set
 	// and families; see ledgerstate.ImportConfig.UtxoSet.
 	UtxoSet ledgerstate.FamilyLoader
-	// InvalidateUtxoSetGovernance, when set, is called after the gap cleanup
-	// has deleted governance rows from the metadata store, so a live UTxO
+	// InvalidateUtxoSetGovernance, when set, is called after a volatile-block
+	// cleanup has deleted governance rows from the metadata store, so a live UTxO
 	// set that kept copies of them reloads them at its next startup instead
 	// of serving rows the store no longer has.
 	InvalidateUtxoSetGovernance func() error
 }
 
-// deleteGapBlocksAbove is deleteBlobBlocksAboveSlotExcept followed by the
+// deleteVolatileBlocksAbove is deleteBlobBlocksAboveSlotExcept followed by the
 // governance invalidation, which runs even when the cleanup failed part way
 // since its deletes are not atomic with the set.
-func (cfg SyncConfig) deleteGapBlocksAbove(
+func (cfg SyncConfig) deleteVolatileBlocksAbove(
 	ctx context.Context,
 	db *database.Database,
 	slot uint64,
@@ -732,7 +576,8 @@ func markSyncInProgress(
 
 // Sync performs a full Mithril bootstrap of the database at cfg.DataDir:
 // download + verify + extract a snapshot, import ledger state and immutable
-// blocks, close the volatile gap, and mark the sync complete. The resulting database is servable by dingo.Node.Run.
+// blocks, and mark the sync complete. The resulting database is servable by
+// dingo.Node.Run.
 func Sync(
 	ctx context.Context,
 	cfg SyncConfig,
@@ -1237,12 +1082,24 @@ func Sync(
 			"certified ImmutableDB has no chain tip",
 		)
 	}
-	slotLimit := func() (uint64, error) {
-		return ancillarySlotLimit(nodeCfg, certifiedTip.Slot)
+	// The ImmutableDB this import builds ends at the last block of the signed
+	// ancillary chunk, or at the certified tip when the artifact carries none.
+	// Read before anything is written, so the ledger state can be selected
+	// against it up front.
+	var ancillaryBlocks []immutable.Block
+	if bootstrapResult.Snapshot != nil {
+		ancillaryBlocks, err = readAncillaryChunk(
+			logger, bootstrapResult,
+			bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
+		)
+		if err != nil {
+			return SyncResult{}, err
+		}
 	}
+	immutableTip := ancillaryTip(*certifiedTip, ancillaryBlocks)
 
-	var preparedRepairImport *preparedLedgerStateImport
 	var preservedLocalTail map[string]struct{}
+	var localTip models.Block
 
 	// Catch-up: confirm the local chain is an ancestor of the target artifact
 	// before mutating anything. A divergent database is left untouched and the
@@ -1262,7 +1119,7 @@ func Sync(
 				"catch-up: local database has no chain tip",
 			)
 		}
-		localTip := recent[0]
+		localTip = recent[0]
 		targetImmutable := uint64(0)
 		if bootstrapResult.Snapshot != nil {
 			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
@@ -1298,24 +1155,29 @@ func Sync(
 			}
 			return SyncResult{}, nil
 		}
+	}
+
+	// The ledger state is selected, verified and parsed before the first
+	// write. A run refused here leaves no in-progress marker, so the next run
+	// selects the aggregator's latest artifact instead of resuming this one.
+	prepared, err := prepareLedgerStateImport(
+		logger, bootstrapResult, immutableTip.Slot,
+	)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("preparing ledger state: %w", err)
+	}
+	defer prepared.Close()
+
+	if catchUp {
 		if cfg.RepairLegacyRewardState {
-			preparedRepairImport, err = prepareLedgerStateImport(
-				logger, bootstrapResult, certifiedTip.Slot, slotLimit,
-			)
-			if err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"preparing reward-repair ledger state: %w", err,
-				)
-			}
-			defer preparedRepairImport.Close()
 			if err := verifyRewardRepairStateNotBehindStablePoint(
-				db, preparedRepairImport,
+				db, prepared,
 			); err != nil {
 				return SyncResult{}, err
 			}
 			if localTip.Slot > certifiedTip.Slot {
 				preservedLocalTail, err = verifyRewardRepairLocalTail(
-					ctx, db, localTip, preparedRepairImport,
+					ctx, db, localTip, prepared,
 				)
 				if err != nil {
 					return SyncResult{}, err
@@ -1323,7 +1185,7 @@ func Sync(
 				logger.Info(
 					"reward repair will preserve the verified local chain tail for startup replay",
 					"component", "mithril",
-					"snapshot_slot", preparedRepairImport.state.Tip.Slot,
+					"snapshot_slot", prepared.state.Tip.Slot,
 					"local_tip_slot", localTip.Slot,
 					"preserved_blocks", len(preservedLocalTail),
 				)
@@ -1353,14 +1215,11 @@ func Sync(
 	syncComplete := false
 	defer func() {
 		if !syncComplete {
-			msg := "sync did not complete; " +
-				"re-run 'dingo mithril sync' to resume"
-			if errors.Is(syncErr, errRejectedTailAfterUTxOImport) {
-				msg = "sync did not complete and cannot resume on this " +
-					"database; run 'dingo mithril sync' with an empty " +
-					"data directory"
-			}
-			logger.Error(msg, "component", "mithril", "error", syncErr)
+			logger.Error(
+				"sync did not complete; "+
+					"re-run 'dingo mithril sync' to resume",
+				"component", "mithril", "error", syncErr,
+			)
 		}
 	}()
 
@@ -1374,30 +1233,6 @@ func Sync(
 		}
 	}()
 
-	// A rejected pre-existing gap must be cleared before importing an
-	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
-	// slot, and doing that after import would remove the authoritative snapshot
-	// UTxOs whose AddedSlot is the selected state slot. Every route clears it
-	// here or in importLedgerStatePhase; none clears it afterwards.
-	gapCleanedBeforeImport := false
-	if preparedRepairImport != nil {
-		gapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
-			ctx,
-			db,
-			*certifiedTip,
-			preparedRepairImport,
-			preservedLocalTail,
-			logger,
-		)
-		if cfg.InvalidateUtxoSetGovernance != nil &&
-			(gapCleanedBeforeImport || err != nil) {
-			err = errors.Join(err, cfg.InvalidateUtxoSetGovernance())
-		}
-		if err != nil {
-			return SyncResult{}, err
-		}
-	}
-
 	// Drop the deferred-index manifest BEFORE inserting any rows
 	// so secondary indexes are not maintained during ledger-state
 	// import, immutable blob load, or API backfill. The rebuild is
@@ -1407,14 +1242,11 @@ func Sync(
 	// the next startup.
 	deferredIndexes := node.WithDeferredIndexes(ctx, db, logger)
 
-	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
-	// states can be newer than that certified point because they come from the
-	// source node's volatile database. importLedgerState selects a state at or
-	// below the certified immutable tip when one is available there; a verified
-	// ancillary tree with nothing at or below that tip may instead hand back
-	// its newest state regardless of slot, vouched for by the ancillary
-	// manifest signature rather than by the certified range. Either way, later
-	// blocks must go through normal ledger validation when the node starts.
+	// The Mithril certificate commits to the ImmutableDB content up to the
+	// certified tip, and the ancillary signature to the chunk after it. A
+	// ledger state is imported only at or below the last of those blocks,
+	// and the blocks after the state go through ordinary ledger replay when
+	// the node starts.
 	// The certified tip is the artifact identity the ledger-state import
 	// actually depends on: the extraction cache is reused across runs, so a
 	// pinned artifact whose cache no longer yields the recorded tip must not
@@ -1434,7 +1266,6 @@ func Sync(
 	var loadResult *node.LoadBlobsResult
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte
-	var ledgerStateBeyondCertifiedTip bool
 
 	importLedgerStatePhase := func() error {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
@@ -1449,50 +1280,23 @@ func Sync(
 				Description: p.Stage,
 			})
 		}
+		// The state is loaded only once its block is in the ImmutableDB.
+		importErr := requireStateInImmutableDB(
+			ctx, db, immutableTip, prepared.point(),
+		)
 		var slot uint64
 		var hash []byte
-		var beyondCertifiedTip bool
-		var importErr error
-		if preparedRepairImport != nil {
-			slot, hash, beyondCertifiedTip, importErr = importPreparedLedgerState(
+		if importErr == nil {
+			slot, hash, importErr = importPreparedLedgerState(
 				ctx,
 				db,
 				logger,
 				nodeCfg,
 				bootstrapResult,
-				preparedRepairImport,
+				prepared,
 				catchUp,
 				cfg.UtxoSet,
 				onLedger,
-			)
-		} else {
-			slot, hash, beyondCertifiedTip, importErr = importLedgerState(
-				ctx,
-				db,
-				logger,
-				nodeCfg,
-				bootstrapResult,
-				catchUp,
-				certifiedTip.Slot,
-				cfg.UtxoSet,
-				onLedger,
-				func(prepared *preparedLedgerStateImport) error {
-					var cleanErr error
-					gapCleanedBeforeImport, cleanErr = cleanRejectedStoredGapBeforeImport(
-						ctx, db, logger, prepared, bootstrapResult, catchUp,
-						loadResult.ImmutableTipSlot,
-					)
-					// The cleanup deletes governance rows without going
-					// through the live set, so it is invalidated here as
-					// deleteGapBlocksAbove does for the other cleanups.
-					if cfg.InvalidateUtxoSetGovernance != nil &&
-						(gapCleanedBeforeImport || cleanErr != nil) {
-						cleanErr = errors.Join(
-							cleanErr, cfg.InvalidateUtxoSetGovernance(),
-						)
-					}
-					return cleanErr
-				},
 			)
 		}
 		if importErr != nil {
@@ -1500,7 +1304,6 @@ func Sync(
 		}
 		ledgerStateSlot = slot
 		ledgerStateHash = hash
-		ledgerStateBeyondCertifiedTip = beyondCertifiedTip
 		if len(hash) > 0 {
 			cfg.emit(
 				SyncProgress{
@@ -1613,13 +1416,40 @@ func Sync(
 	if err := copyImmutablePhase(); err != nil {
 		return SyncResult{}, err
 	}
+	landed, err := landAncillaryChunk(ctx, db, ancillaryBlocks)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"storing signed ancillary chunk: %w", err,
+		)
+	}
+	if len(preservedLocalTail) > 0 {
+		// The signed chunk can run past the old local tip. The blocks it
+		// appended continue the verified tail, so replay needs them too.
+		for _, block := range ancillaryBlocks {
+			preservedLocalTail[string(block.Hash)] = struct{}{}
+		}
+	}
+	if loadResult == nil {
+		loadResult = &node.LoadBlobsResult{}
+	}
+	loadResult.BlocksCopied += landed
+	loadResult.ImmutableTipSlot = immutableTip.Slot
+	if len(ancillaryBlocks) > 0 {
+		logger.Info(
+			"signed ancillary chunk stored in ImmutableDB",
+			"component", "mithril",
+			"blocks", len(ancillaryBlocks),
+			"blocks_stored", landed,
+			"immutable_tip_slot", immutableTip.Slot,
+		)
+	}
 	if err := importLedgerStatePhase(); err != nil {
 		return SyncResult{}, err
 	}
-	if cfg.RepairLegacyRewardState && preparedRepairImport != nil {
-		// No gap blocks have been processed yet. Rolling back to the selected
-		// state must discard post-state metadata and restore spends, whether or
-		// not the local chain has a tail beyond the certified ImmutableDB tip.
+	if cfg.RepairLegacyRewardState {
+		// Rolling back to the selected state must discard post-state metadata
+		// and restore spends, whether or not the local chain has a tail beyond
+		// the ImmutableDB tip.
 		if deferredIndexes != nil {
 			if err := deferredIndexes.BuildCritical(); err != nil {
 				return SyncResult{}, fmt.Errorf(
@@ -1641,22 +1471,6 @@ func Sync(
 			)
 		}
 	}
-	// A ledger state past the certified tip is refused unless
-	// importLedgerState itself vouches for the reason: a verified ancillary
-	// tree's signed manifest can legitimately carry a state newer than the
-	// certified ImmutableDB boundary (the aggregator packages it from the
-	// source node's volatile database), and that state's authenticity comes
-	// from the ancillary signature, not from being within the certified
-	// range. Any other path producing a slot past certifiedTip is exactly the
-	// bug this check exists to catch.
-	if ledgerStateSlot > certifiedTip.Slot && !ledgerStateBeyondCertifiedTip {
-		return SyncResult{}, fmt.Errorf(
-			"selected ledger state slot %d is past certified ImmutableDB tip slot %d",
-			ledgerStateSlot,
-			certifiedTip.Slot,
-		)
-	}
-
 	// The pipelined copy stores produced-UTxO offsets per block but does not
 	// advance the offsets-complete marker, and the post-bootstrap copy only
 	// marks it when it copied at least one block (so it is skipped when the
@@ -1673,15 +1487,8 @@ func Sync(
 		}
 	}
 
-	// The imported ledger state is deliberately at or behind the certified
-	// ImmutableDB tip, or — for a verified ancillary state the signature
-	// vouches for directly — slightly ahead of it. Either way, the artifact
-	// import above did not copy the blocks between the certified tip and the
-	// imported state's slot into the blob store. This Sync call closes that
-	// gap itself, immediately below: from stored volatile blocks left over
-	// from a prior run when available, from a relay otherwise. Anything past
-	// the imported state's slot is left for ordinary node-startup replay, not
-	// fetched here.
+	// The imported ledger state is at or behind the ImmutableDB tip. Blocks
+	// after it are left for ordinary node-startup replay.
 	recentBlocks, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("reading chain tip: %w", err)
@@ -1696,7 +1503,7 @@ func Sync(
 		// The selected state can precede the certified tip. Keep the verified
 		// local chain after that point, including certified blocks, and remove
 		// same-range fork blobs before ordinary ledger replay sees them.
-		if cleanupErr := cfg.deleteGapBlocksAbove(
+		if cleanupErr := cfg.deleteVolatileBlocksAbove(
 			ctx, db, ledgerStateSlot, preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1712,11 +1519,8 @@ func Sync(
 			)
 		}
 	}
-	// When the snapshot's ledger state lands exactly on an immutable
-	// boundary, there is no gap to fill — but stale volatile blocks
-	// from a prior run can still sit above it. Drop them now so the
-	// trust boundary below lands on ledgerStateSlot instead of the
-	// stale block slot.
+	// Volatile blocks from a prior run can sit above a ledger state taken at
+	// the ImmutableDB tip. Drop them so the chain ends at the state's block.
 	if len(recentBlocks) > 0 &&
 		recentBlocks[0].Slot > immutableTipSlot &&
 		immutableTipSlot == ledgerStateSlot {
@@ -1726,7 +1530,7 @@ func Sync(
 			"stored_tip_slot", recentBlocks[0].Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		if cleanupErr := cfg.deleteGapBlocksAbove(
+		if cleanupErr := cfg.deleteVolatileBlocksAbove(
 			ctx,
 			db, immutableTipSlot,
 			preservedLocalTail,
@@ -1736,167 +1540,9 @@ func Sync(
 				immutableTipSlot, cleanupErr,
 			)
 		}
-		recentBlocks, err = database.BlocksRecent(ctx, db, 1)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"reading chain tip after stale volatile cleanup: %w",
-				err,
-			)
-		}
 	}
-	storedGap, err := checkStoredGap(
-		ctx, db, immutableTipSlot, ledgerStateSlot, ledgerStateHash,
-	)
-	if err != nil {
-		return SyncResult{}, err
-	}
-	if storedGap.present {
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true})
-		resumeGapEnd := storedGap.resumeGapEnd
-		storedGapBlocks := storedGap.blocks
-		immutableTip := storedGap.immutableTip
-		logger.Info(
-			"processing stored volatile gap blocks from blob store",
-			"component", "mithril",
-			"immutable_tip_slot", immutableTipSlot,
-			"stored_tip_slot", storedGap.storedTipSlot,
-			"resume_gap_end_slot", resumeGapEnd,
-		)
-		if validateErr := storedGap.rejected; validateErr != nil {
-			// The rejected blocks and their rows are removed before the
-			// import, never here: their cleanup is cut at a slot below the
-			// imported rows' own, so running it after the import would delete
-			// them. A rejection that reaches this point means the stored
-			// blocks changed since the decision was taken.
-			if !gapCleanedBeforeImport {
-				return SyncResult{}, fmt.Errorf(
-					"stored volatile gap blocks above slot %d were rejected after the ledger state import: %w",
-					immutableTipSlot, validateErr,
-				)
-			}
-			recentBlocks = []models.Block{immutableTip}
-		} else {
-			storedTipSlot := storedGap.storedTipSlot
-			if storedTipSlot > resumeGapEnd {
-				logger.Info(
-					"removing stored volatile blocks beyond ledger state tip",
-					"component", "mithril",
-					"stored_tip_slot", storedTipSlot,
-					"resume_gap_end_slot", resumeGapEnd,
-				)
-				if cleanupErr := cfg.deleteGapBlocksAbove(
-					ctx,
-					db, resumeGapEnd,
-					preservedLocalTail,
-				); cleanupErr != nil {
-					return SyncResult{}, fmt.Errorf(
-						"removing stored gap blocks above slot %d: %w",
-						resumeGapEnd,
-						cleanupErr,
-					)
-				}
-			}
-			if resumeGapEnd < ledgerStateSlot {
-				logger.Info(
-					"accepted partial stored volatile gap; remainder will be fetched from relay",
-					"component", "mithril",
-					"immutable_tip_slot", immutableTipSlot,
-					"resume_gap_end_slot", resumeGapEnd,
-					"ledger_state_slot", ledgerStateSlot,
-				)
-			}
-			cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true, Count: len(storedGapBlocks)})
-			if err := processGapBlocks(
-				ctx,
-				db,
-				logger,
-				storedGapBlocks,
-			); err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"processing stored gap block transactions: %w",
-					err,
-				)
-			}
-			recentBlocks, err = database.BlocksRecent(ctx, db, 1)
-			if err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"reading chain tip after gap resume: %w",
-					err,
-				)
-			}
-		}
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: false})
-	}
-	if len(recentBlocks) > 0 && ledgerStateSlot > recentBlocks[0].Slot {
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true})
-		immutableTip := recentBlocks[0]
-		logger.Info(
-			"fetching volatile blocks to close gap",
-			"component", "mithril",
-			"immutable_tip_slot", immutableTip.Slot,
-			"ledger_state_slot", ledgerStateSlot,
-		)
-		maxGapBlocks, limitErr := ancillaryBlockLimit(nodeCfg)
-		if limitErr != nil {
-			return SyncResult{}, limitErr
-		}
-		gapBlocks, fetchErr := fetchGapBlocks(
-			ctx, logger, network,
-			ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
-			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
-			maxGapBlocks,
-		)
-		if fetchErr != nil {
-			return SyncResult{}, fmt.Errorf(
-				"fetching volatile blocks: %w",
-				fetchErr,
-			)
-		}
-		cfg.emit(
-			SyncProgress{
-				Phase:  PhaseGapBlocks,
-				Active: true,
-				Count:  len(gapBlocks),
-			},
-		)
-		// Store gap blocks to the blob store, then index
-		// their metadata. These two steps are not atomic:
-		// if processGapBlocks fails, re-running the sync
-		// will re-fetch and re-store the blocks. Both
-		// BlockCreate and SetTransaction use idempotent
-		// writes, so re-processing is safe.
-		for _, block := range gapBlocks {
-			if err := db.BlockCreate(block, nil); err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"storing volatile block: %w",
-					err,
-				)
-			}
-		}
-		if err := processGapBlocks(ctx, db, logger, gapBlocks); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"processing gap block transactions: %w",
-				err,
-			)
-		}
-		logger.Info(
-			"volatile blocks stored",
-			"component", "mithril",
-			"count", len(gapBlocks),
-		)
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: false})
-	}
-
-	// Deferred until here rather than run right after the certified-tip
-	// guard above: setStableMithrilLedgerTip looks the ledger state's block
-	// up by point, and for a verified ancillary state past the certified tip
-	// (ledgerStateBeyondCertifiedTip) that block is not copied by the
-	// immutable-copy step above — it is only stored once the gap-block
-	// sections immediately above this comment fetch and store it. Calling
-	// this any earlier fails that lookup on exactly the fresh-bootstrap path
-	// this exists to support. For the pre-existing at-or-below-certified-tip
-	// case the block was always already present, so moving the call later
-	// changes nothing about when the point becomes visible.
+	// Ledger snapshots do not carry the absolute block number, so it is read
+	// from the state's block in the ImmutableDB.
 	if err := setStableMithrilLedgerTip(
 		ctx,
 		db,

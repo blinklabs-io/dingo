@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +122,29 @@ func readTree(t *testing.T, dir string) map[string][]byte {
 	return out
 }
 
+func readArchiveTree(t *testing.T, archive string) map[string][]byte {
+	t.Helper()
+	f, err := os.Open(archive) //nolint:gosec // test temp file
+	require.NoError(t, err)
+	defer f.Close()
+	zr, err := zstd.NewReader(f)
+	require.NoError(t, err)
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	out := map[string][]byte{}
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		data, err := io.ReadAll(tr)
+		require.NoError(t, err)
+		out[header.Name] = data
+	}
+	return out
+}
+
 // TestCreateSnapshotIsReproducible pins the deterministic-output contract:
 // two runs over the same directory yield identical bytes and the same hash.
 func TestCreateSnapshotIsReproducible(t *testing.T) {
@@ -141,7 +166,8 @@ func TestCreateSnapshotIsReproducible(t *testing.T) {
 
 	assert.Equal(t, first.Hash, second.Hash)
 	treeA, treeB := readTree(t, dirA), readTree(t, dirB)
-	require.Len(t, treeA, 3+3) // trios + digests, ancillary, metadata
+	// The newest trio remains in ancillary; only earlier trios are certified.
+	require.Len(t, treeA, 2+3) // certified trios + digests, ancillary, metadata
 	assert.Equal(t, treeA, treeB)
 }
 
@@ -161,7 +187,7 @@ func TestCreateSnapshotArtifactIsConsistent(t *testing.T) {
 
 	assert.Equal(t, artifact.ComputeHash(), artifact.Hash)
 	assert.Equal(t, "preprod", artifact.Network)
-	assert.Equal(t, uint64(2), artifact.Beacon.ImmutableFileNumber)
+	assert.Equal(t, uint64(1), artifact.Beacon.ImmutableFileNumber)
 	assert.Equal(t, "dingo-test", artifact.CardanoNodeVersion)
 	assert.Equal(t, "2026-01-02T03:04:05Z", artifact.CreatedAt)
 
@@ -170,42 +196,56 @@ func TestCreateSnapshotArtifactIsConsistent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stored[artifactMetadataName], &metadata))
 	assert.Equal(t, *artifact, metadata)
 
-	extract := func(name string) string {
-		out := filepath.Join(t.TempDir(), "out")
-		_, err := ExtractArchive(
-			context.Background(),
-			filepath.Join(dir, artifact.Hash, name),
-			out, slog.New(slog.DiscardHandler),
-		)
-		require.NoError(t, err)
-		return out
+	archive := func(name string) map[string][]byte {
+		return readArchiveTree(t, filepath.Join(dir, artifact.Hash, name))
 	}
 
-	digestDir := extract(digestsArchiveName)
+	digestFiles := archive(digestsArchiveName)
 	var entries []CardanoDatabaseDigestEntry
 	require.NoError(t, json.Unmarshal(
-		readTree(t, digestDir)[digestsJSONName], &entries,
+		digestFiles[digestsJSONName], &entries,
 	))
-	require.Len(t, entries, 9)
+	require.Len(t, entries, 6)
 	require.NoError(t, verifyDigestMerkleRoot(entries, artifact))
 
-	immutableDir := extract("00001.tar.zst")
-	chunk, err := os.ReadFile( //nolint:gosec // test temp dir
-		filepath.Join(immutableDir, "immutable", "00001.chunk"),
-	)
-	require.NoError(t, err)
+	immutableFiles := archive("00001.tar.zst")
+	chunk := immutableFiles["immutable/00001.chunk"]
 	assert.Equal(t, []byte("immutable-00001.chunk-data"), chunk)
 
-	ancillaryDir := extract(ancillaryArchiveName)
-	root, err := os.OpenRoot(ancillaryDir)
+	ancillaryFiles := archive(ancillaryArchiveName)
+	manifest, err := parseAndVerifyAncillaryManifest(
+		ancillaryFiles[ancillaryManifestFilename],
+		mithrilJSONHexKey(t, pub),
+	)
 	require.NoError(t, err)
-	defer root.Close()
-	covered, err := verifyAncillaryManifest(root, mithrilJSONHexKey(t, pub))
-	require.NoError(t, err)
+	covered := manifest.Data
+	for name, want := range covered {
+		sum := sha256.Sum256(ancillaryFiles[name])
+		assert.Equal(t, want, hex.EncodeToString(sum[:]), name)
+	}
 	assert.Contains(t, covered, "ledger/100/state")
-	assert.Equal(t, int64(len(
+	for _, ext := range immutableFileExtensions {
+		name := "immutable/00002." + ext
+		assert.Contains(t, covered, name)
+		data := ancillaryFiles[name]
+		assert.Equal(t, []byte("immutable-00002."+ext+"-data"), data)
+	}
+	assert.Greater(t, artifact.Ancillary.SizeUncompressed, int64(len(
 		minimalLedgerState(t, 1000, make([]byte, 32)),
-	)), artifact.Ancillary.SizeUncompressed)
+	)))
+}
+
+func TestCreateSnapshotRequiresCompletedImmutableTrio(t *testing.T) {
+	t.Parallel()
+
+	db := newCardanoDB(t, 1)
+	_, key := newSigningKey(t)
+	store, dir := newLocalStore(t)
+	_, err := CreateSnapshot(
+		context.Background(), newSnapshotConfig(t, db, store, key),
+	)
+	require.ErrorContains(t, err, "no completed immutable trios")
+	assert.Empty(t, readTree(t, dir))
 }
 
 func TestCreateSnapshotRejectsIncompleteInput(t *testing.T) {

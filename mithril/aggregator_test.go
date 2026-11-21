@@ -320,14 +320,14 @@ func TestAggregatorSignsOldestPendingSnapshotFirst(t *testing.T) {
 	require.NotNil(t, pc)
 	require.Contains(
 		t, string(pc.SignedEntityType),
-		`"immutable_file_number":1`,
+		`"immutable_file_number":0`,
 	)
 	f.signUntilCertified(older.Hash, signers)
 	_, pc = f.pending()
 	require.NotNil(t, pc)
 	require.Contains(
 		t, string(pc.SignedEntityType),
-		`"immutable_file_number":2`,
+		`"immutable_file_number":1`,
 	)
 	f.signUntilCertified(newer.Hash, signers)
 }
@@ -928,7 +928,7 @@ func TestAggregatorDropsSnapshotPrunedWhileOpen(t *testing.T) {
 	_, pc := f.pending()
 	require.NotNil(t, pc)
 	require.Contains(
-		t, string(pc.SignedEntityType), `"immutable_file_number":2`,
+		t, string(pc.SignedEntityType), `"immutable_file_number":1`,
 	)
 	f.signUntilCertified(newer.Hash, signers)
 }
