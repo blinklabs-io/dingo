@@ -174,7 +174,8 @@ func (r StakeCredentialRef) MapKey() string {
 // credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
 // TxHash so rollback can restore the cleared reward balance.
 //
-// The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
+// The unique index idx_account_reward_delta_credential_slot_kind_source
+// includes AddedSlot.
 // Withdrawal writers use TxHash and the credential as their logical replay key,
 // regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) use an
 // event discriminator in TxHash when one is available and otherwise use the
@@ -202,7 +203,7 @@ type AccountRewardDelta struct {
 	// needs both this rule marker and the boundary's era.
 
 	// Not indexed: it is only ever read alongside added_slot for a single
-	// boundary slot, which idx_account_reward_delta_credential/added_slot
+	// boundary slot, which the credential-leading unique and added-slot indexes
 	// already narrow.
 	PostSnapshot bool
 }
