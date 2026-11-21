@@ -2008,6 +2008,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
+├── sdk/                 # Plugin SDK, a separate Go module
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -21524,6 +21525,13 @@ Package isolation is enforced by direction, ownership, and composition:
   should expose server logic through local interfaces. Concrete adapters to
   `ledger`, `database`, and `mempool` are integration boundaries and should
   remain narrow.
+- `sdk/` is the plugin SDK, a separate Go module
+  (`github.com/blinklabs-io/dingo/sdk`) that plugins build against without
+  depending on the node. No SDK package imports the node module or any of its
+  `internal/` packages, and only packages under `sdk/cardano/` import
+  gouroboros, so every other contract stays chain-neutral. The module is
+  released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
+  contract versioned `v0` and experimental, until a 1.0 is declared.
 
 ### Import Boundary Check
 
@@ -21533,6 +21541,10 @@ Reviewed critical package boundaries are enforced by
 ```shell
 make import-boundaries
 ```
+
+The same check enforces the `sdk/` module's two import rules
+(`internal/architecture/sdk_boundary_test.go`). It reads the files directly,
+because the root module's `./...` stops at `sdk/go.mod`.
 
 `make lint` also runs the boundary check before the standard linters, so local
 pre-commit and CI quality paths catch forbidden local imports automatically.

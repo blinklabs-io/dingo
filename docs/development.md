@@ -49,6 +49,18 @@ permissions.
 Normal cancellation gives runner cleanup 30 seconds to finish before forcing
 any obsolete runs that remain active to stop.
 
+## Plugin SDK module
+
+`sdk/` is a separate Go module, `github.com/blinklabs-io/dingo/sdk`. The root
+module's `./...` does not include it; `make test`, `make lint` and
+`make mod-tidy` run each nested module on their own. Its import rules are
+checked by `make import-boundaries`.
+
+Release it by pushing an `sdk/v0.MINOR.PATCH` tag. The `sdk-release` workflow
+validates the tag, runs the SDK tests and refreshes the Go module proxy; it
+builds no node binaries or images. The SDK stays at major version 0 until a
+1.0 is declared, and the tag check rejects any other major version.
+
 ## Conformance profiles
 
 Dingo reports compatibility in separate layers; a green ledger result is not
