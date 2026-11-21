@@ -112,6 +112,8 @@ func TestEveryRegisteredRouteIsClassified(t *testing.T) {
 		if path == "/" {
 			continue // the catch-all answers 404 for every unknown path
 		}
+		// {$} anchors the end of the path and matches nothing itself.
+		path = strings.ReplaceAll(path, "{$}", "")
 		path = wildcard.ReplaceAllString(path, "x")
 		if path == "/x" {
 			path = "/"
