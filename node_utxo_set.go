@@ -71,6 +71,7 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 		Set:                        n.utxoSet,
 		DataDir:                    n.config.dataDir,
 		Logger:                     n.config.logger,
+		CardanoNodeConfig:          n.config.cardanoNodeConfig,
 		FinishImport:               n.finishDrainedImport,
 		Publish:                    n.setDrainedFamilies,
 		Resume:                     n.ledgerState.ResumeUtxoSetFrom,

@@ -579,6 +579,37 @@ var flagSpecs = []flagSpec{
 		"bark-lifecycle-enabled",
 		"enable Bark remote Stop, Restart, and GetStatus RPCs",
 	),
+	boolFlag(
+		"BarkEventEnabled",
+		"bark-event-enabled",
+		"enable Bark EventService streaming of node events",
+	),
+	boolFlag(
+		"BarkEventPublishEnabled",
+		"bark-event-publish-enabled",
+		"let Bark EventService accept Publish and PublishBatch",
+	),
+	stringFlag(
+		"BarkEventNodeID",
+		"bark-event-node-id",
+		"",
+		"origin node ID on Bark EventService events (empty = random per run)",
+	),
+	intFlag(
+		"BarkEventBufferSize",
+		"bark-event-buffer-size",
+		"events Bark EventService keeps for resuming subscribers (0 = default)",
+	),
+	intFlag(
+		"BarkEventMaxSubscribers",
+		"bark-event-max-subscribers",
+		"most concurrent Bark EventService streams (0 = unlimited)",
+	),
+	intFlag(
+		"BarkEventMaxSubscribersPerClient",
+		"bark-event-max-subscribers-per-client",
+		"most concurrent Bark EventService streams per caller address (0 = unlimited)",
+	),
 	stringSliceFlag(
 		"BarkLifecycleOperatorCertificateFingerprints",
 		"bark-lifecycle-operator-certificate-fingerprints",
@@ -660,7 +691,12 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result or a Koios daily quota error never stops the node)",
+		"stop/cancel the node on the first tool error, local cache error or non-pass parity result (a reference_lag-only result or a Koios daily quota error never stops the node; an unavailable Koios stops it only after --koios-parity-unavailable-retry-limit consecutive attempts)",
+	),
+	intFlag(
+		"KoiosParity.UnavailableRetryLimit",
+		"koios-parity-unavailable-retry-limit",
+		"consecutive attempts at one epoch's check that may fail because Koios is unavailable before strict mode stops the node (0 = default, 144, at least about 24 hours)",
 	),
 	intFlag(
 		"KoiosParity.GraceHours",

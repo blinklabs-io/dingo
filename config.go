@@ -117,13 +117,27 @@ type KoiosParityConfig struct {
 	AllowPrivateAddresses bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
-	// Strict stops/cancels the node on the first Koios/tool error or
-	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The exceptions are an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet) and
-	// a fetch that fails on Koios's daily quota; both are logged and
-	// recorded, and the epoch is retried, but neither stops the node.
+	// Strict stops/cancels the node on the first tool error, local cache
+	// error or non-pass parity result, rather than logging it and continuing
+	// normal operation. Three failures are logged, recorded and retried
+	// instead: an epoch whose only significant mismatches are reference_lag
+	// (Koios's data has not caught up yet) and a fetch that fails on Koios's
+	// daily quota never stop the node, and a Koios request that failed
+	// because Koios is unavailable (a transport error, timeout, 5xx or
+	// exhausted 408 budget) stops it only after UnavailableRetryLimit
+	// consecutive attempts.
 	Strict bool
+	// UnavailableRetryLimit bounds how many consecutive attempts at one
+	// epoch's check may fail because Koios is unavailable (a transport
+	// error, timeout, 5xx or exhausted 408 budget; daily-quota exhaustion
+	// never counts).
+	// In strict mode the attempt that reaches it stops the node; in
+	// non-strict mode it is logged at ERROR and the check keeps retrying. A
+	// Koios answer, including one that is still reference lag, resets the
+	// count. A failed check is retried every ten minutes at the fastest, so
+	// the default of 144 is at least about 24 hours of continuous
+	// unavailability. 0 selects the default.
+	UnavailableRetryLimit int
 	// GraceHours is the window after an epoch closes during which a missing
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
@@ -668,6 +682,15 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESAgentProfile; set them in each pool",
 		)
 	}
+	for name, v := range map[string]int{
+		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
+		"barkEventMaxSubscribers":          n.config.cfg.BarkEventMaxSubscribers,
+		"barkEventMaxSubscribersPerClient": n.config.cfg.BarkEventMaxSubscribersPerClient,
+	} {
+		if v < 0 {
+			return fmt.Errorf("invalid %s %d: must not be negative", name, v)
+		}
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -997,6 +1020,7 @@ func (c *Config) syncCompatFields() {
 		AllowInsecureHTTP:     c.cfg.KoiosParity.AllowInsecureHTTP,
 		AllowPrivateAddresses: c.cfg.KoiosParity.AllowPrivateAddresses,
 		Strict:                c.cfg.KoiosParity.Strict,
+		UnavailableRetryLimit: c.cfg.KoiosParity.UnavailableRetryLimit,
 		GraceHours:            c.cfg.KoiosParity.GraceHours,
 		Accounts:              &koiosParityAccounts,
 		AccountChunkSize:      c.cfg.KoiosParity.AccountChunkSize,
@@ -2308,6 +2332,32 @@ func WithBarkOperatorCertificateFingerprints(
 	}
 }
 
+// WithBarkEventService configures Bark's EventService. It is disabled by
+// default; publish additionally lets it accept Publish and PublishBatch, and
+// a zero buffer size selects the default and a zero subscriber limit means
+// unlimited.
+func WithBarkEventService(
+	enabled, publish bool,
+	bufferSize, maxSubscribers, maxSubscribersPerClient int,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventEnabled = enabled
+		c.cfg.BarkEventPublishEnabled = publish
+		c.cfg.BarkEventBufferSize = bufferSize
+		c.cfg.BarkEventMaxSubscribers = maxSubscribers
+		c.cfg.BarkEventMaxSubscribersPerClient = maxSubscribersPerClient
+	}
+}
+
+// WithBarkEventNodeID sets the origin_node_id Bark's EventService puts on
+// this node's events. Empty, the default, selects a random identifier for
+// each process run.
+func WithBarkEventNodeID(id string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventNodeID = id
+	}
+}
+
 // WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
 // service. It is disabled by default.
 func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
@@ -2409,6 +2459,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			AllowInsecureHTTP:     cfg.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 			Strict:                cfg.Strict,
+			UnavailableRetryLimit: cfg.UnavailableRetryLimit,
 			GraceHours:            cfg.GraceHours,
 			Accounts:              accounts,
 			AccountChunkSize:      cfg.AccountChunkSize,
@@ -2805,6 +2856,12 @@ func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
 
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
+}
+
+// BarkEventNodeID returns the configured EventService origin node ID, or
+// empty when a random one is drawn for each run.
+func (c *Config) BarkEventNodeID() string {
+	return c.cfg.BarkEventNodeID
 }
 
 // BarkLifecycleOperatorCertificateFingerprints retains the legacy input.

@@ -494,13 +494,27 @@ type KoiosParityConfig struct {
 	// AllowPrivateAddresses permits a private, loopback, or special-use
 	// BaseURL. Leave false for the default outbound request guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
-	// Strict stops/cancels the node on the first Koios/tool error or
-	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The exceptions are an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet) and
-	// a fetch that fails on Koios's daily quota; both are logged and
-	// recorded, and the epoch is retried, but neither stops the node.
-	Strict bool `yaml:"strict"                envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// Strict stops/cancels the node on the first tool error, local cache
+	// error or non-pass parity result, rather than logging it and continuing
+	// normal operation. Three failures are logged, recorded and retried
+	// instead: an epoch whose only significant mismatches are reference_lag
+	// (Koios's data has not caught up yet) and a fetch that fails on Koios's
+	// daily quota never stop the node, and a Koios request that failed
+	// because Koios is unavailable (a transport error, timeout, 5xx or
+	// exhausted 408 budget) stops it only after UnavailableRetryLimit
+	// consecutive attempts.
+	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// UnavailableRetryLimit bounds how many consecutive attempts at one
+	// epoch's check may fail because Koios is unavailable (a transport
+	// error, timeout, 5xx or exhausted 408 budget; daily-quota exhaustion
+	// never counts).
+	// In strict mode the attempt that reaches it stops the node; in
+	// non-strict mode it is logged at ERROR and the check keeps retrying. A
+	// Koios answer, including one that is still reference lag, resets the
+	// count. A failed check is retried every ten minutes at the fastest, so
+	// the default of 144 is at least about 24 hours of continuous
+	// unavailability. 0 selects the default.
+	UnavailableRetryLimit int `yaml:"unavailableRetryLimit" envconfig:"DINGO_KOIOS_PARITY_UNAVAILABLE_RETRY_LIMIT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
@@ -885,7 +899,26 @@ type Config struct {
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints"          envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
 	// service. It defaults to false.
-	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled"                         envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	// BarkEventEnabled mounts Bark's EventService, which streams the node's
+	// internal events to remote subscribers. It defaults to false.
+	BarkEventEnabled bool `yaml:"barkEventEnabled" envconfig:"DINGO_BARK_EVENT_ENABLED"`
+	// BarkEventPublishEnabled additionally lets EventService accept Publish
+	// and PublishBatch. It requires BarkEventEnabled and defaults to false.
+	BarkEventPublishEnabled bool `yaml:"barkEventPublishEnabled" envconfig:"DINGO_BARK_EVENT_PUBLISH_ENABLED"`
+	// BarkEventNodeID is the origin_node_id EventService puts on this
+	// node's events. Empty selects a random identifier for each process
+	// run, so no host or infrastructure name is published.
+	BarkEventNodeID string `yaml:"barkEventNodeId" envconfig:"DINGO_BARK_EVENT_NODE_ID"`
+	// BarkEventBufferSize is how many delivered events EventService keeps for
+	// resuming subscribers. Zero selects the default.
+	BarkEventBufferSize int `yaml:"barkEventBufferSize" envconfig:"DINGO_BARK_EVENT_BUFFER_SIZE"`
+	// BarkEventMaxSubscribers bounds concurrent EventService streams. Zero
+	// or unset means unlimited.
+	BarkEventMaxSubscribers int `yaml:"barkEventMaxSubscribers" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS"`
+	// BarkEventMaxSubscribersPerClient bounds concurrent EventService streams
+	// from one caller address. Zero or unset means unlimited.
+	BarkEventMaxSubscribersPerClient int `yaml:"barkEventMaxSubscribersPerClient" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT"`
 	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
