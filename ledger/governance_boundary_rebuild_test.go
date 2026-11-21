@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -87,6 +86,12 @@ type rebuildOptions struct {
 	// so the ledger reads stake from it and a rollback restores spent
 	// outputs from its journal.
 	liveSet bool
+	// protocolMajor sets the protocol version the boundaries run under.
+	protocolMajor uint
+	// delegatorInactivity enables CIP-0163 with delegatorWindow epochs of
+	// inactivity allowed.
+	delegatorInactivity bool
+	delegatorWindow     uint64
 	// prepare runs before the first live boundary.
 	prepare func(
 		t *testing.T, f *treasuryRolloverFixture, withdrawal *models.GovernanceProposal,
@@ -110,6 +115,13 @@ func newRebuildScenarioWith(
 	t.Helper()
 	const ada = uint64(1_000_000)
 	f := newTreasuryRolloverFixture(t, 100*ada)
+	if opts.protocolMajor != 0 {
+		f.currentPParams.ProtocolVersion.Major = opts.protocolMajor
+	}
+	if opts.delegatorInactivity {
+		f.ls.config.DelegatorInactivityEnabled = true
+		f.ls.config.DelegatorInactivity = opts.delegatorWindow
+	}
 	if opts.liveSet {
 		f.ls.config.UtxoSet = NewMemLiveSetForTest()
 		require.NoError(t, f.db.SetLiveUtxoSource(f.ls))
@@ -268,10 +280,25 @@ func TestRebuildGovernanceBoundarySnapshotJournalMissKeepsSentinel(
 	require.False(t, sc.f.ls.utxoSetFailed.Load())
 }
 
+// TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary leaves the row of
+// a boundary whose RATIFY job is still pending to that job, while the pass
+// still rebuilds the older boundary. The control run shows the stored chain
+// lets the pass rebuild that same boundary when nothing is pending, so the
+// absent row comes from the skip.
 func TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary(
 	t *testing.T,
 ) {
 	t.Parallel()
+
+	control := newRebuildScenario(t)
+	require.NoError(t, control.f.ls.rebuildGovernanceBoundarySnapshots(
+		context.Background(),
+	))
+	for i, epoch := range control.epochs {
+		got, err := control.f.boundaryRow(t, epoch)
+		require.NoError(t, err)
+		require.Equal(t, control.rows[i], got, "control epoch %d", epoch.EpochId)
+	}
 
 	sc := newRebuildScenario(t)
 	rec := pendingRatificationRecord{
@@ -284,15 +311,19 @@ func TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary(
 	require.NoError(t, sc.f.db.SetSyncState(
 		pendingRatificationSyncKey, string(raw), nil,
 	))
+	before := sc.f.liveState(t, sc.withdrawal)
 	require.NoError(t, sc.f.ls.rebuildGovernanceBoundarySnapshots(
 		context.Background(),
 	))
 	_, err = sc.f.boundaryRow(t, sc.epochs[1])
 	require.ErrorIs(t, err, models.ErrGovernanceBoundarySnapshotNotRetained)
+	older, err := sc.f.boundaryRow(t, sc.epochs[0])
+	require.NoError(t, err)
+	require.Equal(t, sc.rows[0], older)
 	got, err := sc.f.db.GetSyncState(pendingRatificationSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, string(raw), got)
-	require.False(t, errors.Is(err, errGovernanceBoundaryUnreachable))
+	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
 }
 
 // liveSetOutput is a live output staked to a credential, with the outputs
@@ -518,20 +549,12 @@ func newDRepRebuildScenario(
 					Active:     true,
 				},
 			))
-			for credential, vote := range map[*[]byte]uint8{
-				&drepScenarioFirst:  models.VoteYes,
-				&drepScenarioLapsed: models.VoteNo,
-			} {
-				require.NoError(t, f.db.SetGovernanceVote(
-					context.Background(), &models.GovernanceVote{
-						ProposalID:      withdrawal.ID,
-						VoterType:       models.VoterTypeDRep,
-						VoterCredential: *credential,
-						Vote:            vote,
-						AddedSlot:       start + 30,
-					}, nil,
-				))
-			}
+			addDRepVote(
+				t, f, withdrawal, drepScenarioFirst, models.VoteYes, start+30,
+			)
+			addDRepVote(
+				t, f, withdrawal, drepScenarioLapsed, models.VoteNo, start+30,
+			)
 		},
 		afterBoundary: func(
 			t *testing.T, f *treasuryRolloverFixture, i int, epoch models.Epoch,
@@ -595,5 +618,106 @@ func TestRebuildGovernanceBoundarySnapshotDRepExpiryRenewed(t *testing.T) {
 
 	sc := newDRepRebuildScenario(t, drepScenarioOptions{renewLapsed: true})
 	require.NotEmpty(t, sc.rows[0].Ratified)
+	requireRebuiltRowsMatchLive(t, sc)
+}
+
+func TestRebuildGovernanceBoundarySnapshotDijkstraOrdering(t *testing.T) {
+	t.Parallel()
+
+	sc := newRebuildScenarioWith(t, rebuildOptions{
+		protocolMajor: lcommon.ProtocolVersionDijkstra,
+	})
+	require.NotEmpty(t, sc.rows[0].Ratified)
+	requireRebuiltRowsMatchLive(t, sc)
+}
+
+func addDRepVote(
+	t *testing.T,
+	f *treasuryRolloverFixture,
+	proposal *models.GovernanceProposal,
+	credential []byte,
+	vote uint8,
+	slot uint64,
+) {
+	t.Helper()
+	require.NoError(t, f.db.SetGovernanceVote(
+		context.Background(), &models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeDRep,
+			VoterCredential: credential,
+			Vote:            vote,
+			AddedSlot:       slot,
+		}, nil,
+	))
+}
+
+// delegatorInactivityScenario runs two boundaries where a second treasury
+// withdrawal, proposed after the first boundary, is voted for by the one DRep
+// that holds stake. CIP-0163 activates at the first boundary with no window,
+// so every delegator's stake has lapsed by the second boundary and the
+// second withdrawal ratifies only without the gate.
+func delegatorInactivityScenario(
+	t *testing.T,
+	delegatorInactivity bool,
+) (*rebuildScenario, *models.GovernanceProposal) {
+	t.Helper()
+	const ada = uint64(1_000_000)
+	var late *models.GovernanceProposal
+	sc := newRebuildScenarioWith(t, rebuildOptions{
+		delegatorInactivity: delegatorInactivity,
+		prepare: func(
+			t *testing.T,
+			f *treasuryRolloverFixture,
+			withdrawal *models.GovernanceProposal,
+		) {
+			f.currentPParams.DRepVotingThresholds.TreasuryWithdrawal =
+				cbor.Rat{Rat: big.NewRat(1, 2)}
+			addDRepVote(
+				t, f, withdrawal, repeatByte(28, 0xd1), models.VoteYes,
+				f.currentEpoch.StartSlot+30,
+			)
+		},
+		afterBoundary: func(
+			t *testing.T, f *treasuryRolloverFixture, i int, epoch models.Epoch,
+		) {
+			if i != 0 {
+				return
+			}
+			destination, destinationReturn, _ := f.rewardAddress(t, 0x95)
+			late = f.addProposal(
+				t, 0x96, epoch.StartSlot+20,
+				map[*lcommon.Address]uint64{destination: 1 * ada},
+				destinationReturn, 1*ada, false,
+			)
+			addDRepVote(
+				t, f, late, repeatByte(28, 0xd1), models.VoteYes,
+				epoch.StartSlot+30,
+			)
+		},
+	})
+	return sc, late
+}
+
+func ratifiedTxHashes(row *models.GovernanceBoundarySnapshot) [][]byte {
+	var out [][]byte
+	for _, ref := range row.Ratified {
+		out = append(out, ref.TxHash)
+	}
+	return out
+}
+
+// TestRebuildGovernanceBoundarySnapshotDelegatorInactivity checks that a
+// replayed boundary runs CIP-0163 as the live one did: the activation at the
+// first boundary gates the delegators' stake out of the second boundary's
+// RATIFY.
+func TestRebuildGovernanceBoundarySnapshotDelegatorInactivity(t *testing.T) {
+	t.Parallel()
+
+	ungated, late := delegatorInactivityScenario(t, false)
+	require.Contains(t, ratifiedTxHashes(ungated.rows[1]), late.TxHash)
+
+	sc, late := delegatorInactivityScenario(t, true)
+	require.NotEmpty(t, sc.rows[0].Ratified)
+	require.NotContains(t, ratifiedTxHashes(sc.rows[1]), late.TxHash)
 	requireRebuiltRowsMatchLive(t, sc)
 }
