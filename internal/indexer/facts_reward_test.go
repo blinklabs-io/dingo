@@ -347,3 +347,72 @@ func TestMetadataFactsDefersGovernanceSnapshotTheLedgerStillWrites(t *testing.T)
 		"the deferred snapshot is copied once the ledger writes it")
 	require.Equal(t, 1, count(9))
 }
+
+func TestMetadataFactsDefersGovernanceSnapshotBeforeTheLedgerWritesItsRow(t *testing.T) {
+	t.Parallel()
+	src, srcRaw := newFactsDB(t)
+	dst, dstRaw := newFactsDB(t)
+	f, err := NewMetadataFacts(src, dst)
+	require.NoError(t, err)
+
+	_, err = srcRaw.Exec(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		models.RatificationPendingKey,
+		`{"epoch":10,"boundary_slot":100,"id":1,"snapshot":true}`)
+	require.NoError(t, err)
+
+	copyRange := func(from, through uint64) {
+		writeFacts(t, f, func(txn *database.Txn) error {
+			return f.CopyFacts(context.Background(), txn, from, through)
+		})
+	}
+	copyRange(0, 150)
+
+	_, err = srcRaw.Exec(`INSERT INTO governance_boundary_snapshot
+		(epoch, boundary_slot, snapshot) VALUES (10, 100, x'02')`)
+	require.NoError(t, err)
+	_, err = srcRaw.Exec(`DELETE FROM sync_state WHERE sync_key = ?`,
+		models.RatificationPendingKey)
+	require.NoError(t, err)
+	copyRange(151, 200)
+
+	require.Equal(t, 1, scalar[int](
+		t, dstRaw,
+		`SELECT COUNT(*) FROM governance_boundary_snapshot WHERE epoch = 10`,
+	), "a boundary deferred before its row existed is copied once written")
+}
+
+func TestMetadataFactsDefersStakeInputsBeforeTheLedgerWritesTheirRows(t *testing.T) {
+	t.Parallel()
+	src, srcRaw := newFactsDB(t)
+	dst, dstRaw := newFactsDB(t)
+	f, err := NewMetadataFacts(src, dst)
+	require.NoError(t, err)
+
+	_, err = srcRaw.Exec(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		models.RewardStakeInputsPendingKey,
+		`{"entries":[{"epoch":10,"boundary_slot":100}]}`)
+	require.NoError(t, err)
+
+	copyRange := func(from, through uint64) {
+		writeFacts(t, f, func(txn *database.Txn) error {
+			return f.CopyFacts(context.Background(), txn, from, through)
+		})
+	}
+	copyRange(0, 150)
+
+	_, err = srcRaw.Exec(`INSERT INTO reward_stake_input
+		(epoch, pool_key_hash, credential_tag, staking_key, stake, owner,
+		 registered, captured_slot, boundary_slot)
+		VALUES (10, ?, 0, ?, '7', 0, 1, 100, 100)`,
+		rewardTestPool, rewardTestKey)
+	require.NoError(t, err)
+	_, err = srcRaw.Exec(`UPDATE sync_state SET value = ? WHERE sync_key = ?`,
+		`{"entries":[]}`, models.RewardStakeInputsPendingKey)
+	require.NoError(t, err)
+	copyRange(151, 200)
+
+	require.Equal(t, 1, scalar[int](
+		t, dstRaw,
+		`SELECT COUNT(*) FROM reward_stake_input WHERE epoch = 10`,
+	), "stake inputs deferred before their rows existed are copied once written")
+}

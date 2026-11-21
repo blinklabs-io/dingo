@@ -4799,7 +4799,7 @@ never by row id, from `metadata.FactTables`:
   `drep_dormancy_history`, `drep_expiry_epoch_event` and `account_drep_clear`;
   `governance_boundary_snapshot` is copied whole by its epoch key as well. A
   deferred boundary commits before the ledger writes that row, so a copy that
-  reaches the boundary while `dingo:governance:ratify-pending` names its epoch
+  reaches the boundary while `dingo:governance:ratify-pending` names its epoch, whether or not the row exists yet,
   holds the epoch in the IndexerDB's `dingo:indexer:governance-snapshots-deferred`
   list and copies the row at its boundary slot once the record is gone;
 - patched onto rows block replay wrote: the delegation, activity and expiry

@@ -168,7 +168,9 @@ func (f *MetadataFacts) deferSnapshots(
 	}
 	changed := false
 	for _, d := range deferred {
-		if !slices.Contains(entries, d) {
+		if !slices.ContainsFunc(entries, func(e pendingStakeInput) bool {
+			return e.Epoch == d.Epoch
+		}) {
 			entries = append(entries, d)
 			changed = true
 		}

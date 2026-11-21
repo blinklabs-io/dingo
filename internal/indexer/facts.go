@@ -351,22 +351,38 @@ func (f *MetadataFacts) copyTable(
 	// complete when read, so the rows read afterwards are whole.
 	var skip map[uint64]struct{}
 	slotColumn, deferKey := "captured_slot", DeferredStakeInputsKey
+	var pending []pendingStakeInput
 	switch table.Name {
 	case stakeInputTable.Name:
-		pending, err := f.pendingStakeInputEpochs()
+		entries, err := f.ledgerPendingStakeInputs()
 		if err != nil {
 			return err
 		}
-		skip = pending
+		pending = entries
 	case governanceSnapshotTableName:
 		// A deferred boundary commits before its governance snapshot row is
 		// written, so the segment copy cannot hold the row yet.
-		pending, err := f.pendingGovernanceSnapshotEpochs()
+		entries, err := f.ledgerPendingGovernanceSnapshots()
 		if err != nil {
 			return err
 		}
-		skip = pending
+		pending = entries
 		slotColumn, deferKey = "boundary_slot", DeferredGovernanceSnapshotsKey
+	}
+	if len(pending) > 0 {
+		skip = make(map[uint64]struct{}, len(pending))
+		var inRange []pendingStakeInput
+		for _, e := range pending {
+			skip[e.Epoch] = struct{}{}
+			if e.BoundarySlot >= from && e.BoundarySlot <= through {
+				inRange = append(inRange, e)
+			}
+		}
+		// The ledger commits a boundary before it writes the rows, so a
+		// pending boundary in this segment may have no row to defer by.
+		if err := f.deferSnapshots(dst, deferKey, inRange); err != nil {
+			return err
+		}
 	}
 	var cursor int64
 	restarts := 0
