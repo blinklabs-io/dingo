@@ -167,15 +167,15 @@ func TestQueryShelleyCurrentProtocolParams_DijkstraPersistedRow(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	dijkstraEraId := uint(eras.DijkstraEraDesc.Id)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, dijkstraEraId, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, dijkstraEraId, 1, 100, nil,
 	))
 	historicalCbor, err := cbor.Encode(dijkstraQueryPParams(25600))
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		historicalCbor, 300, 3, dijkstraEraId, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{

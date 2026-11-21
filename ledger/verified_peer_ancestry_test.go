@@ -75,6 +75,7 @@ func newVerifiedAncestryFixtureAt(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	OpenLiveSetForTest(t, db)
 	manager, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
@@ -127,6 +128,7 @@ func newVerifiedAncestryFixtureAt(
 		},
 	}
 	f.ls.slotsPerKESPeriod.Store(slotsPerKES)
+	fxAttachLedgerDB(t, f.ls)
 	f.ls.config.PeerHeaderLookupFunc = func(
 		conn ouroboros.ConnectionId, hash []byte,
 	) (ChainsyncEvent, []byte, bool) {

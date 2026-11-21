@@ -901,7 +901,7 @@ func newUtxorpcConnectHarness(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               livesettest.NewFrom(t, db),
+		UtxoSet:               livesettest.OpenLedgerDB(t, db),
 		ChainManager:          cm,
 		EventBus:              nil,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2146,27 +2146,37 @@ func seedBetaReadStatePool(
 ) lcommon.PoolKeyHash {
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, h.DB.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, h.DB.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: "mark",
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(stake),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	// The distribution is a ledger read, so the pool and its stake go into
+	// the ledger's LedgerDB set as a block registering the pool and the
+	// boundary capture after it would leave them.
+	set := livesettest.OpenLedgerDB(t, h.DB)
+	reg := ledger.CleanPoolRegistration(&models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  vrfKeyHash,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	})
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Pools: []ledger.PoolChange{{
+			Slot:  1,
+			State: ledger.PoolState{Pool: pkh.Bytes(), Params: reg},
+		}},
+		PoolEvents: []ledger.PoolEventChange{{
+			Pool:  pkh.Bytes(),
+			Event: ledger.PoolEvent{Slot: 1, Registration: reg},
+		}},
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:        snapshotEpoch,
+				SnapshotType: "mark",
+				PoolKeyHash:  pkh.Bytes(),
+				TotalStake:   dbtypes.Uint64(stake),
+				CapturedSlot: 1,
+			},
+		}},
+	}))
 	return pkh
 }
 

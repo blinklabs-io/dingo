@@ -59,29 +59,34 @@ func (ls *LedgerState) TachysDistribution(
 			return cached.distribution, nil
 		}
 	}
-	txn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
-	if txn == nil {
-		return nil, errors.New("metadata transaction unavailable")
+	// The distribution and the total are read through one pinned view, so a
+	// snapshot recapture between the two reads cannot pair one capture's
+	// pools with another's total.
+	view, release, err := ls.NewPinnedView(ctx)
+	if err != nil {
+		return nil, err
 	}
 	released := false
 	defer func() {
 		if released {
 			return
 		}
-		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+		if releaseErr := release(); releaseErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf(
 					"release Tachys distribution transaction: %w",
-					rollbackErr,
+					releaseErr,
 				),
 			)
 		}
 	}()
-	view := ls.NewView(txn)
 	dist, err := view.GetStakeDistribution(snapshotEpoch)
 	if err != nil {
 		return nil, err
+	}
+	if ls.tachysStakeReadHook != nil {
+		ls.tachysStakeReadHook()
 	}
 	totalStake, err := view.GetTotalActiveStake(snapshotEpoch)
 	if err != nil {
@@ -101,13 +106,13 @@ func (ls *LedgerState) TachysDistribution(
 	if err != nil {
 		return nil, err
 	}
-	if err := txn.Rollback(); err != nil {
+	released = true
+	if err := release(); err != nil {
 		return nil, fmt.Errorf(
 			"release Tachys distribution transaction: %w",
 			err,
 		)
 	}
-	released = true
 	if ls.tachysDistributionLoadedHook != nil {
 		ls.tachysDistributionLoadedHook()
 	}

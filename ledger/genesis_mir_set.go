@@ -41,12 +41,12 @@ type MIRCert struct {
 	Rewards  []models.MIRReward
 }
 
-// CertHistoryReader serves genesis key delegations from the set. MIR certificate
-// history remains in the metadata store.
+// CertHistoryReader serves genesis key delegations and MIR certificates from
+// the set.
 type CertHistoryReader interface {
 	// GenesisMIRLoaded reports whether the reader holds every genesis key
 	// delegation and MIR certificate up to its tip; until it does, reads
-	// stay on the metadata store.
+	// are unserved.
 	GenesisMIRLoaded() (bool, error)
 	// GenesisDelegations returns every delegation, oldest first.
 	GenesisDelegations() ([]models.GenesisDelegation, error)
@@ -254,11 +254,68 @@ func (s stagingLedgerDB) GetGenesisDelegationsInSlotRange(
 	return got, setErr
 }
 
-// GetMIRCertsInSlotRange returns certificates in [startSlot, endSlot), oldest first.
+// mirCertView returns every MIR certificate as txn sees the set, oldest
+// first: the committed rows, cut back by each staged rollback, with the
+// staged batches' certificates laid over them.
+func (ls *LedgerState) mirCertView(
+	r CertHistoryReader,
+	txn ledgerdb.Txn,
+) ([]MIRCert, error) {
+	rows, err := r.MIRCerts()
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range ls.stagedOps(txn) {
+		if o.rollbackTo != nil {
+			to := *o.rollbackTo
+			rows = slices.DeleteFunc(rows, func(c MIRCert) bool {
+				return c.Slot > to
+			})
+		}
+		for _, c := range o.mirCerts {
+			rows = slices.DeleteFunc(rows, func(d MIRCert) bool {
+				return d.Slot == c.Slot && d.Position == c.Position
+			})
+			rows = append(rows, c)
+		}
+	}
+	slices.SortFunc(rows, func(a, b MIRCert) int {
+		return cmp.Or(
+			cmp.Compare(a.Slot, b.Slot),
+			cmp.Compare(a.Position, b.Position),
+		)
+	})
+	return rows, nil
+}
+
+// GetMIRCertsInSlotRange returns the set's certificates in
+// [startSlot, endSlot), oldest first. An effect's ID is its rank in the
+// answer, counted from one.
 func (s stagingLedgerDB) GetMIRCertsInSlotRange(
 	ctx context.Context,
 	startSlot, endSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.MIREffect, error) {
-	return s.LedgerDB.GetMIRCertsInSlotRange(ctx, startSlot, endSlot, txn)
+	r := s.ls.certHistoryReader(txn)
+	if r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyMIRGenesis)
+	}
+	rows, err := s.ls.mirCertView(r, txn)
+	if err != nil {
+		return nil, err
+	}
+	effects := []models.MIREffect{}
+	for _, c := range rows {
+		if c.Slot < startSlot || c.Slot >= endSlot {
+			continue
+		}
+		effects = append(effects, models.MIREffect{
+			ID:        uint(len(effects) + 1),
+			AddedSlot: c.Slot,
+			Pot:       c.Pot,
+			OtherPot:  c.OtherPot,
+			Rewards:   slices.Clone(c.Rewards),
+		})
+	}
+	return effects, nil
 }

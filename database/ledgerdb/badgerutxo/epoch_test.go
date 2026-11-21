@@ -55,7 +55,7 @@ func snapshotEpochs(t *testing.T, s *badgerutxo.Store, epochs ...uint64) []strin
 	t.Helper()
 	var out []string
 	for _, e := range epochs {
-		rows, err := s.Snapshots(e, "")
+		rows, err := s.Snapshots(e, "", 0)
 		require.NoError(t, err)
 		for _, r := range rows {
 			out = append(out, string(rune('0'+r.Epoch))+r.Type+string(r.Pool))

@@ -15,6 +15,7 @@
 package node
 
 import (
+	"bytes"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -189,19 +191,21 @@ func TestLoadRefusesALedgerWithoutItsUtxoSet(t *testing.T) {
 	require.ErrorContains(t, err, "has drained ledger-state families")
 }
 
-// TestLoadWithDBRefusesAnUnfinishedImport latches a family and leaves an
-// import into the live UTxO set still writing, as an interrupted Mithril sync
-// does. Only that import can finish it, so load must stop before it replays.
+// TestLoadWithDBRefusesAnUnfinishedImport leaves an import into the LedgerDB
+// set still writing, as an interrupted Mithril sync does. Only that import can
+// finish it, so load must stop before it replays.
 func TestLoadWithDBRefusesAnUnfinishedImport(t *testing.T) {
 	t.Parallel()
 	db := newFileTestDB(t)
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyNonces,
-	))
-	began, err := db.BeginDrainedImport(t.Context())
+	set, err := utxoset.Open(utxoset.Config{
+		Dir: utxoset.DirFor(db.DataDir()), Only: true,
+	})
 	require.NoError(t, err)
-	require.True(t, began)
-	db.EndDrainedImport(t.Context())
+	require.NoError(t, set.LoadUtxoSet(
+		ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
+		func(func([]byte, uint32, []byte) error) error { return nil },
+	))
+	require.NoError(t, set.Close())
 	require.NoError(t, db.SetSyncState("sync_status", "in_progress", nil))
 
 	err = LoadWithDB(
@@ -211,5 +215,5 @@ func TestLoadWithDBRefusesAnUnfinishedImport(t *testing.T) {
 		"unused",
 		db,
 	)
-	require.ErrorIs(t, err, database.ErrDrainedImportPending)
+	require.ErrorIs(t, err, badgerutxo.ErrImportPending)
 }

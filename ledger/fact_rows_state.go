@@ -240,7 +240,7 @@ func (ls *LedgerState) poolStakeSnapshotFactRows(
 	}}
 	for _, e := range sortedEpochs(view, nil) {
 		for _, typ := range rewardSnapshotTypes {
-			rows, err := ls.snapshotView(r, nil, e.EpochId, typ)
+			rows, err := ls.snapshotView(r, nil, e.EpochId, typ, 0)
 			if err != nil {
 				return metadata.FactRows{}, err
 			}

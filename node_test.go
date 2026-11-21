@@ -1514,7 +1514,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -1599,7 +1599,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -2392,7 +2392,7 @@ func newStartupCleanupProducerNodeWithGenesisStart(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      chainManager,
 		EventBus:          eventBus,
 		CardanoNodeConfig: cardanoCfg,
@@ -2715,7 +2715,8 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 	require.True(t, needed)
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: openTestUtxoSet(t),
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
@@ -4461,9 +4462,11 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
 	require.NoError(t, err)
 	require.True(t, needed)
+	set := openTestUtxoSet(t)
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: set,
 		config: Config{
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -4491,19 +4494,24 @@ func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_stake_snapshot
-    (epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-     delegator_count, captured_slot, calculation_version)
-VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
-		650, make([]byte, 28), models.RewardStakeCalculationVersion-1,
-	)
-	require.NoError(t, err)
+	set := openTestUtxoSet(t)
+	tip := ocommon.NewPoint(100, make([]byte, 32))
+	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:              650,
+				SnapshotType:       models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:        make([]byte, 28),
+				CapturedSlot:       100,
+				CalculationVersion: models.RewardStakeCalculationVersion - 1,
+			},
+		}},
+	}))
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: set,
 		config: Config{
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),

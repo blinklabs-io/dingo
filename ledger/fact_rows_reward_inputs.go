@@ -438,28 +438,11 @@ func (ls *LedgerState) rewardCreditRoundFactRows(
 }
 
 // RewardPrecomputeCursors returns each retained reward precompute cursor as
-// stored, by snapshot epoch: from the live UTxO set once the reward outputs
-// are drained into it, from the metadata store's sync state otherwise.
+// the LedgerDB set stores it, by snapshot epoch.
 func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
-	var epochs []uint64
-	if ls.FactTableDrained("reward_pool_output") {
-		_, set, err := ls.rewardDerivedExport()
-		if err != nil {
-			return nil, err
-		}
-		epochs = set
-	} else {
-		keys, err := ls.ledgerDB().ListSyncStateKeysByPrefix(
-			models.RewardPrecomputeCursorPrefix, nil,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for _, k := range keys {
-			if epoch, ok := cursorEpochOfKey(k); ok {
-				epochs = append(epochs, epoch)
-			}
-		}
+	_, epochs, err := ls.rewardDerivedExport()
+	if err != nil {
+		return nil, err
 	}
 	out := make(map[uint64]string, len(epochs))
 	for _, epoch := range epochs {

@@ -222,7 +222,7 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 		anchor.block,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash,
 		anchorPoint.Slot,
 		anchorNonce,
@@ -257,6 +257,7 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 			),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 	ls.publishSnapshotsLocked()
 

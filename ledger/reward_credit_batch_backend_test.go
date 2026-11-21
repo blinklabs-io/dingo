@@ -146,7 +146,7 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 				}
 				require.NoError(
 					t,
-					db.CreateAccount(context.Background(), nil, account),
+					seedCreateAccount(t, db, context.Background(), nil, account),
 				)
 				for u := range 3 {
 					txID := make([]byte, 32)
@@ -383,7 +383,7 @@ func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
 	for i := range n {
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: rewardBatchKey(0x31, i),
 				Pool:       rewardBatchKey(0x41, i%7),
 				Reward:     types.Uint64(1_000 + i),
@@ -542,7 +542,7 @@ func TestSaveRewardStakeInputsBatchUpsertsLikeRowByRow(t *testing.T) {
 			} {
 				inputs := build(base)
 				require.NoError(
-					t, db.Metadata().SaveRewardStakeInputs(inputs, nil),
+					t, seedDB(t, db).SaveRewardStakeInputs(inputs, nil),
 				)
 				want := make(map[string]*models.RewardStakeInput)
 				for index, input := range inputs {
@@ -605,7 +605,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			for i := range n {
 				require.NoError(
 					t,
-					db.CreateAccount(context.Background(), nil, &models.Account{
+					seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 						StakingKey: rewardBatchKey(0xf1, i),
 						Pool:       pool,
 						Drep:       drep,
@@ -759,7 +759,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		backend rewardRaceBackend,
 		perPool bool,
 	) string {
-		db, raw, _ := backend.open(t)
+		db, _, _ := backend.open(t)
 		ls := &LedgerState{
 			db:         db,
 			currentEra: eras.ShelleyEraDesc,
@@ -770,6 +770,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 				),
 			},
 		}
+		attachTestLiveSet(t, ls)
 		seedMultiPoolRewardInputs(t, db, pools, delegators, 7)
 		if perPool {
 			ls.rewardPrecomputeChunkPoolsOverride = 2
@@ -784,55 +785,16 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 			}))
 		}
 		for _, index := range deregistered {
-			ref := models.NewStakeCredentialRef(
-				0, chunkedFixtureCredential(0x60, index),
+			fxDeregisterStake(
+				t, db, chunkedFixtureCredential(0x60, index), 300+index,
 			)
-			require.NoError(t, db.Metadata().DeactivateAccounts(
-				nil, []models.StakeCredentialRef{ref}, 300+uint64(index),
-			))
-			_, err := raw.Exec(backendRebind(backend.name, `
-INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
-VALUES (?, ?, 0, '2000000')`), 300+index, ref.Key)
-			require.NoError(t, err)
 		}
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
 		}))
 		settleRewardCredits(t, ls)
-		var sb strings.Builder
-		for _, query := range []string{
-			`SELECT slot, treasury, reserves FROM network_state ORDER BY slot`,
-			`SELECT epoch, treasury, reserves, fees, rewards FROM reward_ada_pots
-ORDER BY epoch`,
-			`SELECT pool_key_hash, total_reward, leader_reward, member_reward_total,
-    undistributed, unspendable FROM reward_pool_output ORDER BY pool_key_hash`,
-			`SELECT credential_tag, staking_key, pool_key_hash, reward_type, amount,
-    spendable, guarded FROM reward_account_output
-ORDER BY credential_tag, staking_key, pool_key_hash, reward_type`,
-		} {
-			rows, err := raw.Query(query)
-			require.NoError(t, err)
-			cols, err := rows.Columns()
-			require.NoError(t, err)
-			for rows.Next() {
-				values := make([]any, len(cols))
-				ptrs := make([]any, len(cols))
-				for i := range values {
-					ptrs[i] = &values[i]
-				}
-				require.NoError(t, rows.Scan(ptrs...))
-				for _, v := range values {
-					if b, ok := v.([]byte); ok {
-						v = fmt.Sprintf("%x", b)
-					}
-					fmt.Fprintf(&sb, "%v|", v)
-				}
-				sb.WriteString("\n")
-			}
-			require.NoError(t, rows.Close())
-		}
-		return sb.String() + dumpRewardBatchTables(t, raw)
+		return ledgerDBDigest(t, ls)
 	}
 	for _, backend := range rewardBatchBackends() {
 		t.Run(backend.name, func(t *testing.T) {
@@ -989,13 +951,13 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	nonce := testHashBytes("reward-epoch")
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200, 3, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 1_000, nil,
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newRewardCalculationTestNodeConfig(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1034,7 +996,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		[]chain.RawBlock{ancestor, abandoned},
 	))
 	for _, block := range []chain.RawBlock{ancestor, abandoned} {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			block.Hash, block.Slot, nonce, true, nil,
 		))
 	}

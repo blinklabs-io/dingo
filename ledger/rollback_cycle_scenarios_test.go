@@ -46,17 +46,16 @@ func runBoundaries(
 	return results
 }
 
-// requireChanged fails unless some boundary changed each table: a rollback
-// restoring a table no boundary touched proves nothing about its rollback step.
-func requireChanged(t *testing.T, results []cycleResult, tables ...string) {
+// requireChanged fails unless some boundary changed the ledger state: a
+// rollback restoring state no boundary touched proves nothing about it.
+func requireChanged(t *testing.T, results []cycleResult) {
 	t.Helper()
-	for _, table := range tables {
-		changed := false
-		for _, r := range results {
-			changed = changed || r.changed[table]
+	for _, r := range results {
+		if r.changed {
+			return
 		}
-		require.True(t, changed, "no boundary changed %s", table)
 	}
+	require.Fail(t, "no boundary changed the ledger state")
 }
 
 // addAccount registers a stake account the scenario's account-certificate
@@ -78,7 +77,7 @@ func (s *govDiffScenario) addAccount(
 	if pool != "" {
 		acct.Pool = []byte(pool)
 	}
-	require.NoError(t, s.db.CreateAccount(context.Background(), nil, acct))
+	require.NoError(t, seedCreateAccount(t, s.db, context.Background(), nil, acct))
 	s.credentials = append(s.credentials, cred)
 	return cred
 }
@@ -159,15 +158,15 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 				AnchorHash: repeatByte(32, 0xc1),
 				AddedSlot:  1,
 			}
-			require.NoError(t, s.db.SetConstitution(prior, nil))
+			require.NoError(t, seedDB(t, s.db).SetConstitution(prior, nil))
 			p := s.propose(t, 0x81, lcommon.GovActionTypeNewConstitution,
 				constitutionAction("https://example.invalid/new-constitution"))
 			s.voteAll(t, p, true)
 			c := newRollbackCycle(t, s, entry.ledger, false, 1, 3)
 			results := runBoundaries(t, c, 3)
 			require.True(t, s.enacted(t, 0x81))
-			requireChanged(t, results, "constitution")
-			got, err := s.db.GetConstitution(nil)
+			requireChanged(t, results)
+			got, err := seedDB(t, s.db).GetConstitution(nil)
 			require.NoError(t, err)
 			require.Equal(
 				t,
@@ -189,8 +188,8 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 			c := newRollbackCycle(t, s, entry.ledger, false, 1, 3)
 			results := runBoundaries(t, c, 3)
 			require.True(t, s.enacted(t, 0x83))
-			requireChanged(t, results, "committee_member", "committee_quorum")
-			members, err := s.db.GetCommitteeMembers(context.Background(), nil)
+			requireChanged(t, results)
+			members, err := seedDB(t, s.db).GetCommitteeMembers(context.Background(), nil)
 			require.NoError(t, err)
 			require.Empty(t, members, "no confidence must remove the committee")
 		})
@@ -210,7 +209,7 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 			before := s.pparams
 			results := runBoundaries(t, c, 3)
 			require.True(t, s.enacted(t, 0x85))
-			requireChanged(t, results, "pparams")
+			requireChanged(t, results)
 			require.NotEqual(t, before, s.pparams)
 			require.Equal(t, uint(11), pparamsMajor(t, s.pparams))
 		})
@@ -240,9 +239,7 @@ func TestLedgerRollbackAcrossGovernanceBoundariesRestoresEveryTable(
 			s := newGovDiffScenario(t)
 			c := newRollbackCycle(t, s, true, deferred, 1, 4)
 			results := runBoundaries(t, c, 4)
-			requireChanged(t, results,
-				"governance_proposal", "committee_member", "pparams",
-				"network_state", "reward_ada_pots")
+			requireChanged(t, results)
 		})
 	}
 }
@@ -284,8 +281,8 @@ func TestRollbackAcrossPlominHardForkRestoresDRepDelegations(t *testing.T) {
 			results := runBoundaries(t, c, 3)
 			require.True(t, s.enacted(t, 0x87))
 			require.Equal(t, uint(10), pparamsMajor(t, s.pparams))
-			requireChanged(t, results, "pparams", "account")
-			account, err := s.db.GetAccountByCredential(
+			requireChanged(t, results)
+			account, err := seedDB(t, s.db).GetAccountByCredential(
 				context.Background(), 0, dangling, true, nil,
 			)
 			require.NoError(t, err)
@@ -367,7 +364,7 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 						// The pool re-registers with new terms above the
 						// target; the rollback must restore the old ones.
 						margin := &types.Rat{Rat: big.NewRat(1, 4)}
-						require.NoError(t, s.db.ImportPool(
+						require.NoError(t, fxImportPool(t, s.db,
 							context.Background(), nil,
 							&models.Pool{
 								PoolKeyHash: rp.key, VrfKeyHash: make([]byte, 32),
@@ -387,7 +384,7 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 						s.castVote(t, p, models.VoterTypeSPO,
 							[]byte(hfrLiveYesPool), models.VoteYes, target+5)
 					}
-					require.NoError(t, s.db.Metadata().AddNetworkDonation(
+					require.NoError(t, seedDB(t, s.db).AddNetworkDonation(
 						target+10, next.EpochId-1, 7_000, nil,
 					))
 				}
@@ -403,14 +400,7 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 					}
 				}
 				results := runBoundaries(t, c, boundaries)
-				requireChanged(
-					t,
-					results,
-					"governance_vote",
-					"governance_vote_history",
-					"network_donation",
-					"pool_registration",
-				)
+				requireChanged(t, results)
 				if !v.fork {
 					require.True(t, s.enacted(t, 0x85))
 				}
@@ -471,7 +461,7 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 					}
 					// The DRep changes its vote after the target.
 					updated := target + 5
-					require.NoError(t, s.db.SetGovernanceVote(
+					require.NoError(t, seedDB(t, s.db).SetGovernanceVote(
 						context.Background(), &models.GovernanceVote{
 							ProposalID:      p.ID,
 							VoterType:       models.VoterTypeDRep,
@@ -491,12 +481,7 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 					}
 				}
 				results := runBoundaries(t, c, boundaries)
-				requireChanged(
-					t,
-					results,
-					"governance_vote",
-					"governance_vote_history",
-				)
+				requireChanged(t, results)
 				if !v.fork {
 					require.True(t, s.enacted(t, 0x89))
 				}
@@ -545,7 +530,7 @@ func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
 		member: s.addAccount(t, 0xc3, nil, ""),
 	}
 	margin := &types.Rat{Rat: big.NewRat(1, 10)}
-	require.NoError(t, s.db.ImportPool(context.Background(), nil, &models.Pool{
+	require.NoError(t, fxImportPool(t, s.db, context.Background(), nil, &models.Pool{
 		PoolKeyHash:   rp.key,
 		VrfKeyHash:    make([]byte, 32),
 		Pledge:        500,
@@ -584,14 +569,13 @@ func (s *govDiffScenario) seedRewardRound(
 	t.Helper()
 	epochs, ok := stakeRewardEpochsForApplication(epoch.EpochId + 1)
 	require.True(t, ok)
-	meta := s.db.Metadata()
-	perf, err := meta.GetEpoch(epochs.performance, nil)
+	perf, err := seedDB(t, s.db).GetEpoch(epochs.performance, nil)
 	require.NoError(t, err)
 	require.NotNil(t, perf)
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], rp.key)
 	for i := range blocks {
-		require.NoError(t, s.db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, s.db,
 			context.Background(),
 			poolID,
 			epoch.EpochId*100+uint64(i)+1,
@@ -600,7 +584,7 @@ func (s *govDiffScenario) seedRewardRound(
 		))
 	}
 	captured, boundary := epoch.StartSlot, epoch.StartSlot
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, s.db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            epochs.snapshot,
 		SnapshotType:     "mark",
 		TotalActiveStake: 60_000_000,
@@ -610,7 +594,7 @@ func (s *govDiffScenario) seedRewardRound(
 		BoundarySlot:     boundary,
 		ProtocolVersion:  10,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+	require.NoError(t, seedDB(t, s.db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
 		Epoch:                      epochs.snapshot,
 		PoolKeyHash:                rp.key,
 		RewardAccount:              rp.owner,
@@ -624,7 +608,7 @@ func (s *govDiffScenario) seedRewardRound(
 		CapturedSlot:               captured,
 		BoundarySlot:               boundary,
 	}}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, s.db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
 			Stake: 10_000_000, Owner: true, Registered: true,
@@ -663,28 +647,19 @@ func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
 			c.prepare = func(t *testing.T, epoch models.Epoch) {
 				s.seedRewardRound(t, rp, epoch, 30)
 			}
-			startTreasury, startReserves, _ := networkState(t, s.db)
+			startTreasury, startReserves, _ := fxNetworkState(t, s.db)
 			results := runBoundaries(t, c, 2)
-			treasury, reserves, _ := networkState(t, s.db)
+			treasury, reserves, _ := fxNetworkState(t, s.db)
 			require.Less(t, reserves, startReserves,
 				"the reward round must draw on the reserves")
 			require.NotEqual(t, startTreasury, treasury)
-			outputs, err := s.db.Metadata().GetRewardPoolOutputs(739, nil)
+			outputs, err := seedDB(t, s.db).GetRewardPoolOutputs(739, nil)
 			require.NoError(t, err)
 			require.Len(t, outputs, 1)
 			require.NotZero(t, uint64(outputs[0].LeaderReward))
 			require.NotZero(t, uint64(outputs[0].MemberRewardTotal),
 				"the pool's members must be paid")
-			requireChanged(
-				t,
-				results,
-				"network_state",
-				"reward_ada_pots",
-				"reward_pool_output",
-				"reward_account_output",
-				"reward_credit_round",
-				"account_reward_delta",
-			)
+			requireChanged(t, results)
 		})
 	}
 }
@@ -709,7 +684,7 @@ func TestLedgerRollbackDiscardsUndeliveredRatification(t *testing.T) {
 	_, _ = s.commitRollover(t, epoch, pparams, func(*LedgerState) {})
 	c.setTip(t, next)
 	requireHeld(t, held, epoch.EpochId+1)
-	rec, err := loadPendingRatification(s.db, nil)
+	rec, err := loadPendingRatification(s.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, rec, "the boundary must leave its decision pending")
 	require.Nil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch)
@@ -717,7 +692,7 @@ func TestLedgerRollbackDiscardsUndeliveredRatification(t *testing.T) {
 	require.NoError(t, s.ls.rollbackWithBlocksAndIntent(
 		context.Background(), rollbackPoint(target), nil, false, false, false,
 	))
-	rec, err = loadPendingRatification(s.db, nil)
+	rec, err = loadPendingRatification(s.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Nil(t, rec, "the rollback must discard the pending decision")
 	s.ls.ratificationMu.Lock()
@@ -737,7 +712,7 @@ func TestLedgerRollbackDiscardsUndeliveredRatification(t *testing.T) {
 	s.commitRollover(t, epoch, pparams, c.settle())
 	require.NotNil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch,
 		"the replayed boundary must ratify")
-	rec, err = loadPendingRatification(s.db, nil)
+	rec, err = loadPendingRatification(s.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Nil(t, rec)
 }

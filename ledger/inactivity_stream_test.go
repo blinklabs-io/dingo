@@ -57,14 +57,14 @@ func TestStreamModeDerivesAccountExpiration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, last, tip)
 
-	liveAcct, err := live.db.GetAccountByCredential(
+	liveAcct, err := seedDB(t, live.db).GetAccountByCredential(
 		t.Context(), 0, stakeKey, true, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(window), liveAcct.ExpirationEpoch,
 		"the live path must renew the witnessed credential in epoch 0")
 
-	streamAcct, err := stream.db.GetAccountByCredential(
+	streamAcct, err := seedDB(t, stream.db).GetAccountByCredential(
 		t.Context(), 0, stakeKey, true, nil,
 	)
 	require.NoError(t, err)

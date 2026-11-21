@@ -105,7 +105,7 @@ func newRecoveryRollbackEventFixture(
 	require.NoError(t, cm.SetLedger(ls))
 
 	for i := range blocks {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			blocks[i].Hash,
 			blocks[i].Slot,
 			testHashBytes(fmt.Sprintf("recovery-nonce-%d", i)),
@@ -123,6 +123,7 @@ func newRecoveryRollbackEventFixture(
 	}
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = testHashBytes("recovery-nonce-2")
 	ls.publishSnapshotsLocked()
 

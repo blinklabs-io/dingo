@@ -27,8 +27,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -115,15 +113,16 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	noProgress := func(ImportProgress) {}
 	ctx := context.Background()
-	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
+	_, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx, cfg, state.Tip.Slot, noProgress, false,
 	))
 
-	pots, err := db.Metadata().GetRewardAdaPots(state.Epoch, nil)
+	pots, err := ledgerDBFor(t, db).GetRewardAdaPots(state.Epoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots,
 		"the imported epoch needs an ADA pots row, or the first reward "+
@@ -168,6 +167,7 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	cfg = importTargetForTest(t, cfg)
 	current, previous := distinctConwayPParams(t)
 	cfg.State.PParamsData = current
 	cfg.State.PrevPParamsData = previous
@@ -186,7 +186,7 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 		),
 	)
 
-	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
+	pots, err := ledgerDBFor(t, db).GetRewardAdaPots(epoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.NotNil(t, pots.ImportedEpochFees,
@@ -222,6 +222,7 @@ func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	cfg = importTargetForTest(t, cfg)
 	snapshots := &ParsedSnapShots{Fee: snapshotFee}
 
 	err = seedImportedRewardBasis(
@@ -233,7 +234,7 @@ func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "less than the snapshot fee pot")
 
-	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
+	pots, err := ledgerDBFor(t, db).GetRewardAdaPots(epoch, nil)
 	require.NoError(t, err)
 	require.Nil(t, pots,
 		"a refused basis must not leave a pots row behind")
@@ -370,9 +371,9 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state.Tip)
 
-	store := db.Metadata()
+	cfg := importTargetForTest(t, ImportConfig{Database: db, State: state})
 	require.NoError(t, importBlocksMade(
-		store,
+		cfg.LedgerDB,
 		state.Epoch,
 		state.BlocksPrev,
 		state.BlocksCur,
@@ -383,10 +384,7 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 	// The expected values are spelled out rather than compared against the
 	// parsed state, so a parse that returned nothing could not satisfy this by
 	// agreeing with itself.
-	prev, prevTotal, prevKnown, err := store.GetImportedPoolBlockCounts(
-		state.Epoch-1, nil,
-	)
-	require.NoError(t, err)
+	prev, prevTotal, prevKnown := importedBlockCounts(t, cfg, state.Epoch-1)
 	require.True(t, prevKnown)
 	assert.Equal(t, map[string]uint64{
 		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
@@ -394,10 +392,7 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 	}, prev)
 	assert.Equal(t, uint64(167), prevTotal)
 
-	cur, curTotal, curKnown, err := store.GetImportedPoolBlockCounts(
-		state.Epoch, nil,
-	)
-	require.NoError(t, err)
+	cur, curTotal, curKnown := importedBlockCounts(t, cfg, state.Epoch)
 	require.True(t, curKnown)
 	assert.Equal(t, map[string]uint64{
 		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
@@ -407,10 +402,7 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 
 	// An epoch the snapshot says nothing about must read as unknown, so the
 	// reward round can tell "not imported" from "imported as zero".
-	_, _, olderKnown, err := store.GetImportedPoolBlockCounts(
-		state.Epoch-2, nil,
-	)
-	require.NoError(t, err)
+	_, _, olderKnown := importedBlockCounts(t, cfg, state.Epoch-2)
 	assert.False(t, olderKnown)
 }
 
@@ -424,10 +416,10 @@ func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	store := db.Metadata()
+	cfg := importTargetForTest(t, ImportConfig{Database: db})
 
 	require.NoError(t, importBlocksMade(
-		store,
+		cfg.LedgerDB,
 		12,
 		map[string]uint64{},
 		map[string]uint64{},
@@ -435,8 +427,7 @@ func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
 		nil,
 	))
 
-	counts, total, known, err := store.GetImportedPoolBlockCounts(11, nil)
-	require.NoError(t, err)
+	counts, total, known := importedBlockCounts(t, cfg, 11)
 	assert.True(
 		t,
 		known,
@@ -484,7 +475,8 @@ func TestImportBlocksMadeReplacesAnEpochRatherThanMerging(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	store := db.Metadata()
+	cfg := importTargetForTest(t, ImportConfig{Database: db})
+	store := cfg.LedgerDB
 
 	poolA := string(make([]byte, credentialHashSize))
 	poolBKey := make([]byte, credentialHashSize)
@@ -508,8 +500,7 @@ func TestImportBlocksMadeReplacesAnEpochRatherThanMerging(t *testing.T) {
 		nil,
 	))
 
-	cur, total, known, err := store.GetImportedPoolBlockCounts(9, nil)
-	require.NoError(t, err)
+	cur, total, known := importedBlockCounts(t, cfg, 9)
 	require.True(t, known)
 	assert.Equal(t, map[string]uint64{poolA: 5}, cur)
 	assert.Equal(t, uint64(5), total)
@@ -553,16 +544,17 @@ func TestPersistImportedCommitteeCertificatesWritesRows(t *testing.T) {
 	}
 
 	const slot = uint64(197789347)
+	cfg := importTargetForTest(t, ImportConfig{Database: db})
 	require.NotPanics(t, func() {
 		require.NoError(t, persistImportedCommitteeCertificates(
-			context.Background(), db, certState, slot, nil, 0,
+			cfg.LedgerDB, certState, slot, nil,
 		))
 	})
 
 	// The authorization must be readable back by the same cold-credential
 	// lookup the Conway unknown-voter rule uses.
-	member, err := db.Metadata().GetCommitteeMember(
-		uint8(cold.Type), cold.Hash, 0, nil,
+	member, err := cfg.LedgerDB.GetCommitteeMember(
+		t.Context(), uint8(cold.Type), cold.Hash, 0, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, member)
@@ -600,7 +592,7 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 		treasury = uint64(87_920_693_660_807)
 		reserves = uint64(14_914_270_613_432_674)
 	)
-	err = importTip(context.Background(), ImportConfig{
+	err = importTip(context.Background(), importTargetForTest(t, ImportConfig{
 		Database: db,
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -619,10 +611,10 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 		EpochLength: func(uint) (uint, uint, error) {
 			return 1, 100, nil
 		},
-	})
+	}))
 	require.NoError(t, err)
 
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := ledgerDBFor(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(123_456), state.Slot)
@@ -637,13 +629,9 @@ func TestOpCertStorePreservesFullCounterDomain(t *testing.T) {
 
 	poolKeyHash := testPoolKeyHash(bytes.Repeat([]byte{0x7a}, 28))
 
-	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
-		poolKeyHash, uint64(math.MaxInt64)+1, 100, nil,
-	))
-	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
-		poolKeyHash, math.MaxUint64, 101, nil,
-	))
-	sequence, found, err := db.LatestPoolOpCertSequence(
+	require.NoError(t, ledgerDBFor(t, db).UpdatePoolOpCertSequence(t.Context(), poolKeyHash, uint64(math.MaxInt64)+1, 100, nil))
+	require.NoError(t, ledgerDBFor(t, db).UpdatePoolOpCertSequence(t.Context(), poolKeyHash, math.MaxUint64, 101, nil))
+	sequence, found, err := ledgerDBFor(t, db).LatestPoolOpCertSequence(
 		context.Background(),
 		poolKeyHash,
 		nil,
@@ -1200,10 +1188,11 @@ func conwayGovStateWithPulsing(
 }
 
 func govImportConfigForTest(
+	t *testing.T,
 	db *database.Database,
 	govStateData []byte,
 ) ImportConfig {
-	return ImportConfig{
+	return importTargetForTest(t, ImportConfig{
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
@@ -1217,7 +1206,7 @@ func govImportConfigForTest(
 		EpochLength: func(uint) (uint, uint, error) {
 			return 1, 100, nil
 		},
-	}
+	})
 }
 
 func committeeWithMember(t *testing.T, hash []byte, expiry uint64) any {
@@ -1256,11 +1245,11 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(context.Background(), nil)
+	members, err := ledgerDBFor(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
@@ -1327,7 +1316,7 @@ func TestImportGovStateRejectsCommitteeMismatch(t *testing.T) {
 	)
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	)
 	require.EqualError(t, err,
@@ -1363,11 +1352,11 @@ func TestImportGovStateAcceptsCommitteeChangeInRsEnacted(t *testing.T) {
 	)
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(context.Background(), nil)
+	members, err := ledgerDBFor(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, activeHash, members[0].ColdCredHash)
@@ -1399,11 +1388,11 @@ func TestImportGovStateAcceptsNoConfidenceInRsEnacted(t *testing.T) {
 	)
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(context.Background(), nil)
+	members, err := ledgerDBFor(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, activeHash, members[0].ColdCredHash)
@@ -1416,17 +1405,17 @@ func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
 	require.NoError(t, err)
 	drepCredential := bytes.Repeat([]byte{0x91}, 28)
 	returnCredential := bytes.Repeat([]byte{0x92}, 28)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, ledgerDBFor(t, db).ImportDrep(&models.Drep{
 		Credential: drepCredential,
 		Active:     true,
-	}))
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	}, 0, nil))
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&models.Account{
 		StakingKey: returnCredential,
 		Drep:       drepCredential,
 		DrepType:   models.DrepTypeAddrKeyHash,
 		AddedSlot:  1,
 		Active:     true,
-	}))
+	}, nil))
 	returnAddress, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeNoneKey,
 		lcommon.AddressNetworkTestnet,
@@ -1466,16 +1455,16 @@ func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
 	)
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	))
 
-	imported, err := db.GetGovernanceProposal(context.Background(), proposalTxHash, 0, nil)
+	imported, err := ledgerDBFor(t, db).GetGovernanceProposal(context.Background(), proposalTxHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), imported.Deposit)
 	state, err := governance.LoadDRepVotingState(
 		context.Background(),
-		dbadapter.New(db),
+		ledgerDBFor(t, db),
 		nil,
 		500,
 		false,
@@ -1510,7 +1499,7 @@ func TestImportGovStateRejectsMismatchWithNonCommitteeRsEnacted(
 	)
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	)
 	require.EqualError(t, err,
@@ -1538,7 +1527,7 @@ func TestImportGovStateRejectsAbsentEnactState(t *testing.T) {
 	govStateData := conwayGovStateWithPulsing(t, committee, pulsing)
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	)
 	require.EqualError(t, err,
@@ -1563,7 +1552,7 @@ func TestImportGovStateRejectsUnknownEnactedActionTypes(t *testing.T) {
 	)
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	)
 	require.EqualError(t, err,
@@ -1618,6 +1607,7 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importGovState(
 		context.Background(),
@@ -1667,9 +1657,7 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			row, err := db.Metadata().GetGovernanceProposal(
-				c.txHash, c.actionIdx, nil,
-			)
+			row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), c.txHash, c.actionIdx, nil)
 			require.NoError(t, err)
 			require.NotNil(t, row, "synthetic row missing for %s", c.name)
 			assert.Equal(
@@ -1696,7 +1684,7 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 			// GetLastEnactedGovernanceProposal must surface the
 			// synthetic row for its purpose; that's the lookup
 			// epoch.go performs at every boundary tick.
-			root, err := db.GetLastEnactedGovernanceProposal(
+			root, err := ledgerDBFor(t, db).GetLastEnactedGovernanceProposal(
 				context.Background(),
 				c.queryGroup,
 				nil,
@@ -1756,6 +1744,7 @@ func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importGovState(
 		context.Background(),
@@ -1763,7 +1752,7 @@ func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 		func(ImportProgress) {},
 	))
 
-	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, row)
 	require.NotNil(t, row.RatifiedEpoch)
@@ -1805,6 +1794,7 @@ func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importGovState(
 		context.Background(),
@@ -1812,9 +1802,7 @@ func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	row, err := db.Metadata().GetGovernanceProposal(
-		cm.TxHash, cm.ActionIndex, nil,
-	)
+	row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), cm.TxHash, cm.ActionIndex, nil)
 	require.NoError(t, err)
 	require.NotNil(t, row)
 	assert.Equal(t, govActionTypeUpdateCommittee, row.ActionType)
@@ -1848,6 +1836,7 @@ func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importGovState(
 		context.Background(),
@@ -1862,7 +1851,7 @@ func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
 		{govActionTypeNoConfidence, govActionTypeUpdateCommittee},
 		{govActionTypeNewConstitution},
 	} {
-		root, err := db.GetLastEnactedGovernanceProposal(
+		root, err := ledgerDBFor(t, db).GetLastEnactedGovernanceProposal(
 			context.Background(),
 			group,
 			nil,

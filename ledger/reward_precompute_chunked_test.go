@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -87,7 +86,6 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 ) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
-	meta := db.Metadata()
 	const rewardSnapshotEpoch = uint64(1)
 	partial := &models.RewardStakeInput{
 		Epoch:         rewardSnapshotEpoch,
@@ -99,10 +97,10 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 		CapturedSlot:  100,
 		BoundarySlot:  100,
 	}
-	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{partial}, nil))
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{partial}, nil))
 	require.NoError(t, markRewardStakeInputsPending(
-		dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
+		ls.ledgerDB(), nil, rewardSnapshotEpoch, 100,
 	))
 
 	txn := db.Transaction(context.Background(), true)
@@ -112,11 +110,11 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "returned no rows")
 
-	inputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
+	inputs, err := seedDB(t, db).GetRewardStakeInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1, "empty reconstruction must not delete partial inputs")
 	require.Equal(t, partial.Stake, inputs[0].Stake)
-	pending, err := loadRewardStakeInputsPending(dbadapter.New(db), nil)
+	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
 }
@@ -126,11 +124,10 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 ) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
-	meta := db.Metadata()
 	const rewardSnapshotEpoch = uint64(1)
-	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
 	require.NoError(t, markRewardStakeInputsPending(
-		dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
+		ls.ledgerDB(), nil, rewardSnapshotEpoch, 100,
 	))
 
 	var fatalErr error
@@ -150,7 +147,7 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 	require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
 
-	pending, err := loadRewardStakeInputsPending(dbadapter.New(db), nil)
+	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the unrecoverable snapshot must remain marked incomplete")
@@ -164,11 +161,10 @@ func TestApplyStakeRewardsValidationOnlyDoesNotStopNode(t *testing.T) {
 		t.Run(fmt.Sprintf("validationOnly=%t", validationOnly), func(t *testing.T) {
 			t.Parallel()
 			ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
-			meta := db.Metadata()
 			const rewardSnapshotEpoch = uint64(1)
-			require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+			require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
 			require.NoError(t, markRewardStakeInputsPending(
-				dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
+				ls.ledgerDB(), nil, rewardSnapshotEpoch, 100,
 			))
 			ls.metrics.init(prometheus.NewRegistry())
 			var fatalErr error
@@ -205,7 +201,6 @@ func seedMultiPoolRewardInputs(
 	protocolMajor uint,
 ) {
 	t.Helper()
-	meta := db.Metadata()
 
 	const (
 		rewardSnapshotEpoch = uint64(1)
@@ -225,18 +220,18 @@ func seedMultiPoolRewardInputs(
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		100, performanceEpoch, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200, potsEpoch, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 1_000, nil,
 	))
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 100, performanceEpoch, eras.ShelleyEraDesc.Id, nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Fees:         1_000,
@@ -255,17 +250,18 @@ func seedMultiPoolRewardInputs(
 		copy(poolID[:], poolKey)
 		require.NoError(
 			t,
-			db.UpdatePoolOpCertSequence(
+			fxMintBlock(
+				t, db,
 				context.Background(),
 				poolID,
 				1,
-				140,
+				140+uint64(p), //nolint:gosec // the fixture has few pools
 				nil,
 			),
 		)
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: rewardAccount,
 				Active:     true,
 			}),
@@ -292,7 +288,7 @@ func seedMultiPoolRewardInputs(
 			)
 			require.NoError(
 				t,
-				db.CreateAccount(context.Background(), nil, &models.Account{
+				seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 					StakingKey: member,
 					Active:     true,
 				}),
@@ -341,7 +337,7 @@ func seedMultiPoolRewardInputs(
 		)
 	})
 
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: types.Uint64(totalActiveStake),
@@ -351,8 +347,8 @@ func seedMultiPoolRewardInputs(
 		BoundarySlot:     100,
 		ProtocolVersion:  protocolMajor,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs(poolInputs, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs(stakeInputs, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(poolInputs, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs(stakeInputs, nil))
 }
 
 // rewardPrecomputeOutputsSnapshot is the comparable, order-independent shape
@@ -370,13 +366,12 @@ func snapshotRewardPrecomputeOutputs(
 	rewardSnapshotEpoch, potsEpoch uint64,
 ) rewardPrecomputeOutputsSnapshot {
 	t.Helper()
-	meta := db.Metadata()
 
-	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	poolByKey := make(map[string]models.RewardPoolOutput, len(poolOutputs))
 	for _, output := range poolOutputs {
@@ -385,7 +380,7 @@ func snapshotRewardPrecomputeOutputs(
 		poolByKey[string(output.PoolKeyHash)] = cp
 	}
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -548,7 +543,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, done, "fixture must need more than one chunk to complete")
 
-	partialPoolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+	partialPoolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		rewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -559,7 +554,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 		"only the first chunk should have committed",
 	)
 
-	pots, err := db.Metadata().GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.Equal(
 		t, types.Uint64(0), pots.Rewards,
@@ -607,11 +602,11 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	)
 	mutateInput := func(t *testing.T, db *database.Database) {
 		t.Helper()
-		inputs, err := db.Metadata().GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+		inputs, err := seedDB(t, db).GetRewardPoolInputs(rewardSnapshotEpoch, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, inputs)
 		inputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 5)}
-		require.NoError(t, db.Metadata().SaveRewardPoolInputs(inputs, nil))
+		require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(inputs, nil))
 	}
 	buildChangedPartial := func(
 		t *testing.T,
@@ -646,7 +641,7 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, done)
 	oldCursor, err := loadRewardPrecomputeCursor(
-		dbadapter.New(resumedDB), nil, rewardSnapshotEpoch,
+		seedDB(t, resumedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, oldCursor)
@@ -698,7 +693,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 		}
 	}
 	oldCursor, err := loadRewardPrecomputeCursor(
-		dbadapter.New(db), nil, rewardSnapshotEpoch,
+		ls.ledgerDB(), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, oldCursor)
@@ -714,7 +709,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 	require.True(t, ok)
 	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
 	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
-		dbadapter.New(db), nil, newRound,
+		ls.ledgerDB(), nil, newRound,
 	)
 	require.NoError(t, err)
 	require.Nil(t, cursor, "changed guard settings must invalidate the completed cursor")
@@ -723,7 +718,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 	done, err := ls.stakeRewardPrecomputeChunkStep(newRound)
 	require.NoError(t, err)
 	require.False(t, done, "changed guard settings must restart Pass 2")
-	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		rewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -764,10 +759,10 @@ func TestChunkedRewardPrecomputeRestartsOnGenerationChange(t *testing.T) {
 	// The bump happened after the first chunk committed and the run then
 	// observed it at the top of the second chunk step, so it stopped with
 	// exactly the first chunk's rows on disk and no completion marker.
-	partial, err := db.Metadata().GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	partial, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, partial, 2)
-	pots, err := db.Metadata().GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.Equal(t, types.Uint64(0), pots.Rewards)
 
@@ -802,7 +797,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	)
 	degenerate := func(t *testing.T) (*LedgerState, *database.Database) {
 		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
-		require.NoError(t, db.Metadata().SaveRewardAdaPots(
+		require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
 			&models.RewardAdaPots{
 				Epoch:        potsEpoch,
 				Treasury:     5_000,
@@ -826,8 +821,9 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	want := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
 	)
-	wantState, err := monolithicDB.Metadata().GetNetworkState(nil)
+	wantState, err := seedDB(t, monolithicDB).GetNetworkState(nil)
 	require.NoError(t, err)
+	require.NotNil(t, wantState)
 
 	chunked, chunkedDB := degenerate(t)
 	chunked.rewardPrecomputeChunkPoolsOverride = 3
@@ -835,7 +831,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 		newEpoch, capturedSlot, boundarySlot,
 	))
 	cursor, err := loadRewardPrecomputeCursor(
-		dbadapter.New(chunkedDB), nil, rewardSnapshotEpoch,
+		seedDB(t, chunkedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, cursor)
@@ -848,8 +844,9 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.Equal(t, want, snapshotRewardPrecomputeOutputs(
 		t, chunkedDB, rewardSnapshotEpoch, potsEpoch,
 	))
-	gotState, err := chunkedDB.Metadata().GetNetworkState(nil)
+	gotState, err := seedDB(t, chunkedDB).GetNetworkState(nil)
 	require.NoError(t, err)
+	require.NotNil(t, gotState)
 	require.Equal(t, wantState.Reserves, gotState.Reserves)
 	require.Equal(t, wantState.Treasury, gotState.Treasury)
 }
@@ -920,18 +917,18 @@ func TestChunkedRewardPrecomputeLeavesCreditedRoundOutputs(t *testing.T) {
 	)
 	require.Len(t, credited.poolOutputs, poolCount)
 
-	inputs, err := db.Metadata().GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+	inputs, err := seedDB(t, db).GetRewardPoolInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, inputs)
 	inputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 5)}
-	require.NoError(t, db.Metadata().SaveRewardPoolInputs(inputs, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(inputs, nil))
 	retry, ok, err := ls.resolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot+500, boundarySlot,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	require.NoError(t, db.Metadata().AddAppliedRewardCreditRound(
+	require.NoError(t, seedDB(t, db).AddAppliedRewardCreditRound(
 		models.RewardCreditRound{
 			SnapshotEpoch: rewardSnapshotEpoch,
 			BoundarySlot:  boundarySlot,

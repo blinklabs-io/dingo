@@ -35,7 +35,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/ledgerstate"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -125,7 +124,8 @@ type Reconcile struct {
 	// nil resolves nothing.
 	ResolveRewardInputs func(context.Context, ledgerdb.LedgerDB) error
 	// FinishImport completes a pending import of ledger state into the set;
-	// nil uses FinishDrainedImport.
+	// nil does nothing, and the set refuses to reconcile while one is
+	// pending.
 	FinishImport func(context.Context) error
 	// Publish receives the drained families when they are read and each
 	// time the drain latches one, so readers stop falling back to rows that
@@ -161,14 +161,10 @@ type Reconcile struct {
 // families in SQL. A caller may defer deletion of redundant migration-source
 // UTxO rows until its managed services are available.
 func (r Reconcile) Run(ctx context.Context) error {
-	finish := r.FinishImport
-	if finish == nil {
-		finish = func(ctx context.Context) error {
-			return FinishDrainedImport(ctx, r.DB, r.Set, r.Logger)
+	if r.FinishImport != nil {
+		if err := r.FinishImport(ctx); err != nil {
+			return err
 		}
-	}
-	if err := finish(ctx); err != nil {
-		return err
 	}
 	if err := r.rewindMetadataLedger(ctx); err != nil {
 		return err
@@ -206,41 +202,6 @@ func (r Reconcile) Run(ctx context.Context) error {
 		}
 	}
 	return DrainLedgerState(ctx, r.DB, r.Set, r.Logger, r.Guard, r.Publish)
-}
-
-// FinishDrainedImport completes an import of ledger state into the live UTxO
-// set that a crash left after its SQL rows were written and before the set
-// loaded them. An import that is still writing, which leaves sync_status set,
-// is refused: only the import that began it can finish it.
-func FinishDrainedImport(
-	ctx context.Context,
-	db *database.Database,
-	set *utxoset.Set,
-	logger *slog.Logger,
-) error {
-	_, pending, err := db.DrainedImportPending(ctx)
-	if err != nil || !pending {
-		return err
-	}
-	status, err := db.GetSyncState("sync_status", nil)
-	if err != nil {
-		return fmt.Errorf("read sync status: %w", err)
-	}
-	if status != "" {
-		return database.ErrDrainedImportPending
-	}
-	if set == nil {
-		return errors.New(
-			"an import of ledger state into the live UTxO set is pending and the set is not open",
-		)
-	}
-	if logger != nil {
-		logger.Info(
-			"finishing an import of ledger state into the live UTxO set",
-			"component", "node",
-		)
-	}
-	return ledgerstate.FinishDrainedImport(ctx, db, set)
 }
 
 // SecurityParam returns the Shelley genesis security parameter, the value of

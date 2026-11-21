@@ -1170,7 +1170,20 @@ func (s *Store) loadFamily(
 	feed func(put func(k, v []byte) error) error,
 	invalidate ...[]byte,
 ) error {
-	if err := s.dropPrefix([]byte{tag}); err != nil {
+	return s.writeFamily(s.dropPrefix, tag, marker, name, feed, invalidate...)
+}
+
+// writeFamily replaces the rows under tag with the ones feed supplies, after
+// drop removes the held ones, and marks the family loaded.
+func (s *Store) writeFamily(
+	drop func(prefixes ...[]byte) error,
+	tag byte,
+	marker []byte,
+	name string,
+	feed func(put func(k, v []byte) error) error,
+	invalidate ...[]byte,
+) error {
+	if err := drop([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
 	}
 	if len(invalidate) > 0 {

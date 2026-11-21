@@ -154,6 +154,7 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	ls.evaluateProtocolVersionBump(t.Context())
@@ -258,6 +259,7 @@ func TestEvaluateProtocolVersionBump_NoUpdateStaysUnknown(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	ls.evaluateProtocolVersionBump(t.Context())
@@ -300,9 +302,7 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0xaa}, updateCbor, 10, 0, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, updateCbor, 10, 0))
 
 	pparams := &babbage.BabbageProtocolParameters{
 		ProtocolMajor: 8,
@@ -342,6 +342,7 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// Before the fix is exercised: transitionInfo is still Unknown, so the
@@ -424,9 +425,7 @@ func newQuorumMetVersionBumpLedger(
 		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0xaa}, updateCbor, 10, 0, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, updateCbor, 10, 0))
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.BabbageEraDesc,
@@ -449,6 +448,7 @@ func newQuorumMetVersionBumpLedger(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls
 }
@@ -541,9 +541,7 @@ func TestEvaluateProtocolVersionBump_SupersededBeforeDeadlineNeverKnown(
 
 	nonBumpCbor, err := cbor.Encode(map[uint64]any{0: uint64(44)})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0xaa}, nonBumpCbor, 35, 0, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, nonBumpCbor, 35, 0))
 	ls.currentTip = tips[1]
 	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(
@@ -577,9 +575,7 @@ func TestEvaluateProtocolVersionBump_PostDeadlineProposalKeepsTransition(
 
 	nonBumpCbor, err := cbor.Encode(map[uint64]any{0: uint64(44)})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0xaa}, nonBumpCbor, 50, 1, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, nonBumpCbor, 50, 1))
 	ls.currentTip = tips[2]
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	ls.evaluateProtocolVersionBump(t.Context())
@@ -624,14 +620,14 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 		[]chain.RawBlock{preDeadline, pastDeadline},
 	))
 	for _, block := range []chain.RawBlock{preDeadline, pastDeadline} {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			block.Hash, block.Slot, testHashBytes("nonce"), true, nil,
 		))
 	}
 
 	// The rollback reloads the epoch and its pparams from the database, so
 	// both must be stored for the re-evaluation to have a Babbage epoch.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, testHashBytes("epoch-nonce"), nil, nil, nil,
 		eras.BabbageEraDesc.Id, 1000, 100, nil,
 	))
@@ -643,20 +639,18 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	}
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 0, 0, eras.BabbageEraDesc.Id, nil,
 	))
 	bumpCbor, err := cbor.Encode(map[uint64]any{
 		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0xaa}, bumpCbor, 10, 0, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, bumpCbor, 10, 0))
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: cfg,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -692,6 +686,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	ls.Unlock()
 	require.NoError(t, db.SetTip(tipOf(pastDeadline), nil))
+	fxJournalChain(t, ls)
 	require.Equal(t, hardfork.TransitionKnown, evaluate().State)
 
 	// Clear what the evaluation above was seeded with, so the assertions
@@ -768,6 +763,7 @@ func TestBlocksAppliedFromSlot(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	assert.Equal(t, uint64(2), ls.blocksAppliedFromSlot(t.Context(), 40))
 	assert.Equal(

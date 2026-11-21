@@ -183,7 +183,7 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 
 	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: ""})
 	require.NoError(tb, err)
-	set := NewMemLiveSetForTest()
+	set := OpenLiveSetForTest(tb, db)
 	added := make([]UtxoOutput, 0, len(funding))
 	for _, fu := range funding {
 		encoded, err := cbor.Encode(fu.output)

@@ -346,24 +346,53 @@ func (s *Store) Epochs() ([]EpochRow, error) {
 }
 
 // Snapshots returns the snapshot rows of epoch, of typ when it is not
-// empty, in key order.
-func (s *Store) Snapshots(epoch uint64, typ string) ([]SnapshotRow, error) {
+// empty, in key order, which within a type is pool order. A positive limit
+// stops the read after that many rows.
+func (s *Store) Snapshots(
+	epoch uint64,
+	typ string,
+	limit int,
+) ([]SnapshotRow, error) {
 	prefix := snapshotEpochPrefix(epoch)
 	if typ != "" {
 		prefix = snapshotTypePrefix(epoch, typ)
 	}
 	var out []SnapshotRow
 	err := s.view(func(txn *badger.Txn) error {
-		return eachPrefix(txn, prefix, func(k, v []byte) error {
-			r, err := decodeSnapshotKey(k, v)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			if limit > 0 && len(out) >= limit {
+				return nil
+			}
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			r, err := decodeSnapshotKey(it.Item().KeyCopy(nil), v)
 			if err != nil {
 				return err
 			}
 			out = append(out, r)
-			return nil
-		})
+		}
+		return nil
 	})
 	return out, err
+}
+
+// EachSnapshot calls fn with every snapshot row, in key order.
+func (s *Store) EachSnapshot(fn func(SnapshotRow) error) error {
+	return s.view(func(txn *badger.Txn) error {
+		return eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
+			r, err := decodeSnapshotKey(k, v)
+			if err != nil {
+				return err
+			}
+			return fn(r)
+		})
+	})
 }
 
 // LoadEpochState replaces the store's epoch and snapshot rows and its era
@@ -399,8 +428,7 @@ func (s *Store) LoadEpochState(
 			if err := txn.Set(eraSwitchKey, eraSwitch.encode()); err != nil {
 				return err
 			}
-		} else if !s.merging.Load() {
-			// A merge keeps the last switch the set recorded.
+		} else {
 			if err := txn.Delete(eraSwitchKey); err != nil {
 				return err
 			}

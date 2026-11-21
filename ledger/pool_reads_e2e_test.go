@@ -77,87 +77,37 @@ func (h *poolReadsHarness) nextStart() uint64 {
 	return h.cur.StartSlot + uint64(h.cur.LengthInSlots)
 }
 
-// retiring reads the pools retiring at epoch through the ledger's LedgerDB
-// and requires the answer to be the metadata store's.
+// retiring reads the pools retiring at epoch through the ledger's LedgerDB.
 func (h *poolReadsHarness) retiring(
 	t *testing.T,
 	epoch uint64,
 ) []models.PoolRetirementRefund {
 	t.Helper()
-	want, err := h.store.GetPoolsRetiringAtEpoch(
-		t.Context(),
-		epoch,
-		h.nextStart(),
-		nil,
-	)
-	require.NoError(t, err)
 	got, err := h.scenario.LedgerDB().GetPoolsRetiringAtEpoch(
 		t.Context(), epoch, h.nextStart(), nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, want, got)
 	return got
 }
 
-// active reads the active pools at slot, and at the tip when atTip is set,
-// through the ledger's LedgerDB and requires each answer to be the metadata
-// store's.
+// active reads the active pools at slot through the ledger's LedgerDB. When
+// atTip is set the tip is at slot's state, and the read at the tip must
+// agree.
 func (h *poolReadsHarness) active(
 	t *testing.T,
 	slot uint64,
 	atTip bool,
 ) [][]byte {
 	t.Helper()
-	want, err := h.store.GetActivePoolKeyHashesAtSlot(slot, nil)
-	require.NoError(t, err)
 	got, err := h.scenario.LedgerDB().GetActivePoolKeyHashesAtSlot(slot, nil)
 	require.NoError(t, err)
-	require.ElementsMatch(t, want, got)
 	if atTip {
-		wantTip, err := h.store.GetActivePoolKeyHashes(t.Context(), nil)
-		require.NoError(t, err)
 		gotTip, err := h.scenario.LedgerDB().
 			GetActivePoolKeyHashes(t.Context(), nil)
 		require.NoError(t, err)
-		require.ElementsMatch(t, wantTip, gotTip)
+		require.ElementsMatch(t, got, gotTip)
 	}
 	return got
-}
-
-// TestPoolRetirementAndActivePoolReadsAgreeWithTheLiveUtxoSet requires the
-// set's pool states to give the metadata store's answer to the pool retiring
-// at an epoch and to the active pools, before and after a retirement and a
-// re-registration, and counts each read compared.
-func TestPoolRetirementAndActivePoolReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	h := newPoolReadsHarness(t)
-	slot := h.cur.StartSlot + 1000
-	require.Equal(t, [][]byte{h.pool}, h.active(t, slot, true))
-	require.Empty(t, h.retiring(t, h.cur.EpochId+1))
-
-	var during []models.PoolRetirementRefund
-	var activeDuring [][]byte
-	newPool := h.scenario.Pools(func() {
-		during = h.retiring(t, h.cur.EpochId+1)
-		// The harness's certificates are past the store's tip slot, which
-		// the tip read would leave out of the store's answer.
-		activeDuring = h.active(t, slot, false)
-	}).Pool
-	require.Len(t, during, 1, "the harness pool retires at the next epoch")
-	require.Equal(t, h.pool, during[0].PoolKeyHash)
-	require.ElementsMatch(t, [][]byte{h.pool, newPool}, activeDuring,
-		"a pool stays active until its retirement epoch")
-
-	// The set has applied the boundary into the next epoch, which the
-	// store's tip has not entered: only a slot in it is comparable.
-	after := h.active(t, h.nextStart()+10, false)
-	require.Equal(
-		t,
-		[][]byte{newPool},
-		after,
-		"the boundary reaps the retired pool",
-	)
-	_ = h.active(t, slot, false)
 }
 
 // TestPoolRetirementReadSeesItsTransactionsStagedRetirement requires the

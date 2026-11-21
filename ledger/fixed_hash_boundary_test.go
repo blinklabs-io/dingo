@@ -15,105 +15,54 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
 
-type fixedHashMetadataStore struct {
-	metadata.MetadataStore
-	pool                *models.Pool
-	dreps               []*models.Drep
-	activePoolKeyHashes [][]byte
-	poolRows            []models.Pool
-	getPoolCalls        int
-}
-
-func (s *fixedHashMetadataStore) GetPool(
-	_ lcommon.PoolKeyHash,
-	_ bool,
-	_ types.Txn,
-) (*models.Pool, error) {
-	s.getPoolCalls++
-	return s.pool, nil
-}
-
-func (s *fixedHashMetadataStore) GetPoolStatus(
-	_ lcommon.PoolKeyHash,
-	_ types.Txn,
-) (models.PoolStatus, error) {
-	if s.pool == nil {
-		return models.PoolStatus{}, nil
-	}
-	return models.PoolStatus{
-		Exists: true,
-		Active: len(s.pool.Registration) > 0,
-	}, nil
-}
-
-func (s *fixedHashMetadataStore) GetPoolRegistrationsEffectiveForEpoch(
-	_ []lcommon.PoolKeyHash,
-	_ uint64,
-	_ uint64,
-	_ uint64,
-	_ types.Txn,
-) ([]models.PoolRegistration, error) {
-	if s.pool == nil {
-		return nil, nil
-	}
-	return s.pool.Registration, nil
-}
-
-func (s *fixedHashMetadataStore) GetActiveDreps(
-	_ types.Txn,
-) ([]*models.Drep, error) {
-	return s.dreps, nil
-}
-
-func (s *fixedHashMetadataStore) GetActivePoolKeyHashes(
-	_ types.Txn,
-) ([][]byte, error) {
-	return s.activePoolKeyHashes, nil
-}
-
-func (s *fixedHashMetadataStore) GetPools(
-	_ []lcommon.PoolKeyHash,
-	_ types.Txn,
-) ([]models.Pool, error) {
-	return s.poolRows, nil
-}
-
-func newFixedHashBoundaryDB(
-	t *testing.T,
-	configure func(*fixedHashMetadataStore),
-) *database.Database {
+// newFixedHashBoundaryLedger builds a ledger over an empty database and its
+// LedgerDB set.
+func newFixedHashBoundaryLedger(t *testing.T) *LedgerState {
 	t.Helper()
-	var store fixedHashMetadataStore
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			configure(&store)
-			return &store
-		},
-	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	return db
+	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
+	require.NoError(t, ls.ledgerDB().SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1000, 100, nil,
+	))
+	return ls
+}
+
+// seedFixedHashBoundaryPool writes pool's first registration to ls's set as
+// the registration in force, keeping every hash at the length the test gave
+// it.
+func seedFixedHashBoundaryPool(ls *LedgerState, pool *models.Pool) {
+	reg := pool.Registration[0]
+	reg.AddedSlot = 1
+	ls.stageLedgerChanges(nil, LedgerChanges{
+		Pools: []PoolChange{{
+			Slot:  1,
+			State: PoolState{Pool: pool.PoolKeyHash, Params: &reg},
+		}},
+		PoolEvents: []PoolEventChange{{
+			Pool:  pool.PoolKeyHash,
+			Event: PoolEvent{Slot: 1, Registration: &reg},
+		}},
+	})
 }
 
 func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 	t.Parallel()
 
-	for _, field := range []string{"operator", "vrf", "reward account", "owner"} {
+	for _, field := range []string{"vrf", "reward account", "owner"} {
 		t.Run(field, func(t *testing.T) {
 			t.Parallel()
 			pool := &models.Pool{
@@ -130,9 +79,6 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 				}},
 			}
 			switch field {
-			case "operator":
-				reg := &pool.Registration[0]
-				reg.PoolKeyHash = reg.PoolKeyHash[:lcommon.Blake2b224Size-1]
 			case "vrf":
 				reg := &pool.Registration[0]
 				reg.VrfKeyHash = reg.VrfKeyHash[:lcommon.Blake2b256Size-1]
@@ -144,15 +90,11 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 				pool.Registration[0].Owners[0].KeyHash =
 					ownerKeyHash[:lcommon.Blake2b224Size-1]
 			}
-			db := newFixedHashBoundaryDB(
-				t,
-				func(store *fixedHashMetadataStore) {
-					store.pool = pool
-				},
-			)
-			txn := db.Transaction(context.Background(), false)
+			ls := newFixedHashBoundaryLedger(t)
+			seedFixedHashBoundaryPool(ls, pool)
+			txn := ls.db.Transaction(context.Background(), false)
 			defer txn.Release()
-			view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
+			view := &LedgerView{ls: ls, txn: txn}
 
 			_, _, err := view.PoolCurrentState(lcommon.PoolKeyHash{})
 			require.Error(t, err)
@@ -163,14 +105,18 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 
 func TestLedgerViewDRepRegistrationsRejectsMalformedCredential(t *testing.T) {
 	t.Parallel()
-	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.dreps = []*models.Drep{
-			{Credential: make([]byte, lcommon.Blake2b224Size-1)},
-		}
-	})
-	txn := db.Transaction(context.Background(), false)
+	ls := newFixedHashBoundaryLedger(t)
+	ls.stageLedgerChanges(nil, LedgerChanges{DReps: []DRepChange{{
+		Slot: 1,
+		Drep: models.Drep{
+			Credential: make([]byte, lcommon.Blake2b224Size-1),
+			AddedSlot:  1,
+			Active:     true,
+		},
+	}}})
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
-	view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
+	view := &LedgerView{ls: ls, txn: txn}
 
 	_, err := view.DRepRegistrations()
 	require.Error(t, err)
@@ -188,31 +134,6 @@ func TestPoolKeyHashesFromStakeSnapshotRejectsMalformedKey(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
 }
 
-func TestPoolVrfKeyHashesRejectsMalformedReturnedPoolKey(t *testing.T) {
-	t.Parallel()
-	poolKey := make([]byte, lcommon.Blake2b224Size-1)
-	vrfKey := make([]byte, lcommon.Blake2b256Size)
-	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.poolRows = []models.Pool{{
-			PoolKeyHash: poolKey,
-			Registration: []models.PoolRegistration{{
-				VrfKeyHash: vrfKey,
-			}},
-		}}
-	})
-	ls := &LedgerState{db: db}
-
-	_, err := ls.poolVrfKeyHashes(
-		context.Background(),
-		[]lcommon.PoolKeyHash{{}},
-		nil,
-		nil,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "registered pool key")
-	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
-}
-
 func TestPoolKeyHashesFromActivePoolBytesRejectsMalformedKey(t *testing.T) {
 	t.Parallel()
 	_, err := poolKeyHashesFromActivePoolBytes([][]byte{
@@ -225,12 +146,15 @@ func TestPoolKeyHashesFromActivePoolBytesRejectsMalformedKey(t *testing.T) {
 
 func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	t.Parallel()
-	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.activePoolKeyHashes = [][]byte{
-			make([]byte, lcommon.Blake2b224Size-1),
-		}
+	ls := newFixedHashBoundaryLedger(t)
+	poolKey := make([]byte, lcommon.Blake2b224Size-1)
+	seedFixedHashBoundaryPool(ls, &models.Pool{
+		PoolKeyHash: poolKey,
+		Registration: []models.PoolRegistration{{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  make([]byte, lcommon.Blake2b256Size),
+		}},
 	})
-	ls := &LedgerState{db: db}
 
 	_, err := ls.queryLedgerPeerSnapshot(
 		context.Background(),
@@ -244,30 +168,27 @@ func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
 }
 
-// PoolCurrentState reads the pool's stored state through GetPoolStatus and the
-// epoch-effective registration lookup: it never loads the pool and its
-// certificate history through GetPool.
-func TestLedgerViewPoolCurrentStateDoesNotReadPool(t *testing.T) {
+// PoolCurrentState returns the registration in force for a registered pool.
+func TestLedgerViewPoolCurrentStateReturnsTheRegistration(t *testing.T) {
 	t.Parallel()
-	pool := &models.Pool{
-		PoolKeyHash: make([]byte, lcommon.Blake2b224Size),
+	poolKey := bytes.Repeat([]byte{0x21}, lcommon.Blake2b224Size)
+	vrfKey := bytes.Repeat([]byte{0x22}, lcommon.Blake2b256Size)
+	ls := newFixedHashBoundaryLedger(t)
+	seedFixedHashBoundaryPool(ls, &models.Pool{
+		PoolKeyHash: poolKey,
 		Registration: []models.PoolRegistration{{
-			PoolKeyHash:   make([]byte, lcommon.Blake2b224Size),
-			VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
+			PoolKeyHash:   poolKey,
+			VrfKeyHash:    vrfKey,
 			RewardAccount: make([]byte, lcommon.Blake2b224Size),
 		}},
-	}
-	var spy *fixedHashMetadataStore
-	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.pool = pool
-		spy = store
 	})
-	txn := db.Transaction(context.Background(), false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
-	view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
+	view := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 
-	cert, _, err := view.PoolCurrentState(lcommon.PoolKeyHash{})
+	cert, _, err := view.PoolCurrentState(lcommon.NewBlake2b224(poolKey))
 	require.NoError(t, err)
 	require.NotNil(t, cert)
-	require.Zero(t, spy.getPoolCalls)
+	require.Equal(t, poolKey, cert.Operator.Bytes())
+	require.Equal(t, vrfKey, cert.VrfKeyHash.Bytes())
 }

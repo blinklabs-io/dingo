@@ -109,11 +109,6 @@ type Set struct {
 	// sqlDrained is set once the metadata store has drained a ledger-state
 	// family: its rows can no longer rebuild the set, whatever Only says.
 	sqlDrained atomic.Bool
-	// mergeOverDrained is set while a merge loads the rows an import wrote
-	// to a metadata store that had drained the families: those rows carry
-	// none of the history the store lost, so the set's own rows are what the
-	// import's upserts would have found.
-	mergeOverDrained atomic.Bool
 	// ckptDir, ckptKeep and ckptMu describe where checkpoints are written;
 	// ckptWrite serializes writers.
 	ckptMu    sync.Mutex
@@ -139,8 +134,6 @@ type Set struct {
 	dir string
 	// rollBackAhead rolls a set ahead of the ledger back from its journal.
 	rollBackAhead bool
-	// merge notes the snapshot rows a merge loads; nil outside a merge.
-	merge *mergeState
 	// pruneJournal trims the rollback journal; a field so a test can fail
 	// it, which a healthy store never does right after a commit.
 	pruneJournal func(beforeSlot uint64) error
@@ -457,6 +450,7 @@ func (s *Set) ApplyLedgerChanges(
 			delegations,
 			inputRows,
 			derivedRows,
+			stateMarkRows(lc),
 		),
 	})
 	if err != nil {
@@ -677,12 +671,6 @@ func (s *Set) SetDrainedFamilies(drained nodesettings.FamilyMask) {
 	s.store.RefuseLoadsFor(drained)
 }
 
-// SetMergeOverDrained records that the next ledger-state merge loads rows a
-// drained metadata store was given by an import.
-func (s *Set) SetMergeOverDrained(on bool) {
-	s.mergeOverDrained.Store(on)
-}
-
 // Reconcile makes the set equal to the ledger's live set before the ledger
 // applies anything. The set's tip is always a point at which it equalled the
 // ledger, so a set at the ledger tip is already equal. A set behind it is
@@ -702,23 +690,21 @@ func (s *Set) Reconcile(
 	if err := s.finishPendingRestore(ctx); err != nil {
 		return err
 	}
+	if _, pending, err := s.store.ImportPending(); err != nil {
+		return fmt.Errorf("utxoset: read the import mark: %w", err)
+	} else if pending {
+		return badgerutxo.ErrImportPending
+	}
 	if err := s.reconcileOutputs(ctx, ldb, resume); err != nil {
 		return err
 	}
 	return s.LoadLedgerState(ctx, ldb)
 }
 
-// LoadLedgerState loads into the set the block nonces, epoch state, network
-// state, protocol parameters and accounts it lacks, from the metadata store. Reconcile calls it once the outputs agree
-// with the ledger.
+// LoadLedgerState loads into the set the ledger-state families it lacks, from
+// the metadata store of a database that kept them there. Reconcile calls it
+// once the outputs agree with the ledger.
 func (s *Set) LoadLedgerState(ctx context.Context, ldb ledgerdb.LedgerDB) error {
-	pending, err := s.store.MergePending()
-	if err != nil {
-		return fmt.Errorf("utxoset: read the merge mark: %w", err)
-	}
-	if pending {
-		return s.mergeLedgerState(ctx, ldb)
-	}
 	return s.loadFamilies(ctx, ldb)
 }
 
@@ -742,6 +728,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureInactivity(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
@@ -802,6 +791,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureGovernance(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureRatifyPending(ctx, ldb); err != nil {
 		return err
 	}
 	return s.ensurePParamUpdates(ctx, ldb)

@@ -36,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -146,6 +145,7 @@ func committeeTestView(
 			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls.NewView(nil), db
 }
@@ -176,16 +176,35 @@ func storeCommitteeUpdateProposalInTxn(
 	txn *database.Txn,
 ) {
 	t.Helper()
+	require.NoError(
+		t,
+		seedDB(t, db).SetGovernanceProposal(
+			context.Background(),
+			committeeUpdateProposal(t, seed, credential, expiry),
+			dbadapter.Txn(txn),
+		),
+	)
+}
+
+// committeeUpdateProposal is an active UpdateCommittee proposal that adds
+// credential with the given term expiry.
+func committeeUpdateProposal(
+	t *testing.T,
+	seed byte,
+	credential lcommon.Credential,
+	expiry uint64,
+) *models.GovernanceProposal {
+	t.Helper()
 	action, err := lcommon.NewUpdateCommitteeGovAction(
 		nil,
 		nil,
-		map[*lcommon.Credential]uint64{&credential: uint64(expiry)},
+		map[*lcommon.Credential]uint64{&credential: expiry},
 		cbor.Rat{Rat: big.NewRat(2, 3)},
 	)
 	require.NoError(t, err)
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
-	proposal := &models.GovernanceProposal{
+	return &models.GovernanceProposal{
 		TxHash:        governanceTestHash(seed),
 		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 		ProposedEpoch: 0,
@@ -194,10 +213,6 @@ func storeCommitteeUpdateProposalInTxn(
 		ReturnAddress: make([]byte, 29),
 		GovActionCbor: encoded,
 	}
-	require.NoError(
-		t,
-		db.SetGovernanceProposal(context.Background(), proposal, txn),
-	)
 }
 
 func seedCommitteeAuthorization(
@@ -233,6 +248,12 @@ func seedCommitteeCredentialAuthorization(
 	slot uint64,
 ) {
 	t.Helper()
+	if seedLedgerOf(db) != nil {
+		committeeSeedAuthorization(
+			t, db, coldCredential, hotCredential, uint(certificateID), slot,
+		)
+		return
+	}
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -277,6 +298,12 @@ func seedCommitteeCredentialResignation(
 	slot uint64,
 ) {
 	t.Helper()
+	if seedLedgerOf(db) != nil {
+		committeeSeedResignation(
+			t, db, coldCredential, uint(certificateID), slot,
+		)
+		return
+	}
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -430,7 +457,7 @@ func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 			{ColdCredentialTag: 0, ColdCredHash: hash[:], ExpiresEpoch: 41},
 			{ColdCredentialTag: 1, ColdCredHash: hash[:], ExpiresEpoch: 42},
 		}, nil),
@@ -573,7 +600,7 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 				}
 				require.NoError(
 					t,
-					db.SetCommitteeMembers(context.Background(), members, nil),
+					seedDB(t, db).SetCommitteeMembers(context.Background(), members, nil),
 				)
 
 				member, err := lv.CommitteeHotCredentialMember(hot)
@@ -635,7 +662,7 @@ func TestLedgerViewCommitteeProposalFollowsProposalSet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, member, "expired proposal left the set before its drop")
 
-	proposal, err := db.GetGovernanceProposal(
+	proposal, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(),
 		governanceTestHash(0x92),
 		0,
@@ -647,17 +674,21 @@ func TestLedgerViewCommitteeProposalFollowsProposalSet(t *testing.T) {
 	proposal.DroppedEpoch = &dropped
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(context.Background(), proposal, nil),
+		seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 	member, err = lv.ls.NewView(nil).CommitteeCredentialMember(cold)
 	require.NoError(t, err)
 	require.Nil(t, member, "dropped proposal still authorizes")
 }
 
+// Members that share a hash under different credential tags stay distinct
+// through an abandoned write, a soft delete of one, and the rollback that
+// undoes the delete.
 func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 	t.Parallel()
 
-	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	view, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	ls := view.ls
 	hash := committeeTestCredential(0xa1).Credential
 	members := []*models.CommitteeMember{
 		{
@@ -676,88 +707,89 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), members, txn),
+		seedDB(t, db).SetCommitteeMembers(context.Background(), members, txn),
 	)
 	require.NoError(t, txn.Rollback())
 	txn.Release()
 
-	stored, err := db.GetCommitteeMembers(context.Background(), nil)
+	stored, err := seedDB(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, stored)
 
-	require.NoError(
-		t,
-		db.SetCommitteeMembers(context.Background(), members, nil),
-	)
-	require.NoError(t, db.SoftDeleteCommitteeMembers(
-		context.Background(),
-		[]models.CommitteeCredential{{
-			CredentialTag: 1,
-			Credential:    hash[:],
-		}},
-		50,
-		nil,
-	))
-	stored, err = db.GetCommitteeMembers(context.Background(), nil)
+	fxTip(t, ls, fxPoint(5))
+	fxBlock(t, ls, fxPoint(10), func(
+		ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
+		return ldb.SetCommitteeMembers(context.Background(), members, txn)
+	})
+	fxBlock(t, ls, fxPoint(50), func(
+		ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
+		return ldb.SoftDeleteCommitteeMembers(
+			context.Background(),
+			[]models.CommitteeCredential{{
+				CredentialTag: 1,
+				Credential:    hash[:],
+			}},
+			50,
+			txn,
+		)
+	})
+	stored, err = seedDB(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	require.Equal(t, uint8(0), stored[0].ColdCredentialTag)
 
-	require.NoError(
-		t,
-		db.DeleteCommitteeMembersAfterSlot(context.Background(), 49, nil),
-	)
-	stored, err = db.GetCommitteeMembers(context.Background(), nil)
+	fxRollback(t, ls, fxPoint(10))
+	stored, err = seedDB(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 2)
 }
 
+// A rollback below a member's re-election restores the term start the
+// earlier election recorded, a zero slot included.
 func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 	t.Parallel()
 
-	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	view, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	ls := view.ls
 	cold := committeeTestCredential(0xa2)
-	require.NoError(t, db.SetCommitteeMembers(
-		context.Background(),
-		[]*models.CommitteeMember{{
-			ColdCredentialTag: uint8(cold.CredType),
-			ColdCredHash:      cold.Credential[:],
-			ExpiresEpoch:      20,
-			TermStartSlot:     0,
-			TermStartSlotSet:  true,
-			AddedSlot:         10,
-		}},
-		nil,
-	))
-
+	elect := func(expires, termStart, slot uint64) {
+		t.Helper()
+		fxBlock(t, ls, fxPoint(slot), func(
+			ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+		) error {
+			return ldb.SetCommitteeMembers(
+				context.Background(),
+				[]*models.CommitteeMember{{
+					ColdCredentialTag: uint8(cold.CredType),
+					ColdCredHash:      cold.Credential[:],
+					ExpiresEpoch:      expires,
+					TermStartSlot:     termStart,
+					TermStartSlotSet:  true,
+					AddedSlot:         slot,
+				}},
+				txn,
+			)
+		})
+	}
 	assertTermStart := func(wantStart uint64) {
 		t.Helper()
-		members, err := db.GetCommitteeMembers(context.Background(), nil)
+		members, err := seedDB(t, db).GetCommitteeMembers(context.Background(), nil)
 		require.NoError(t, err)
 		require.Len(t, members, 1)
 		require.Equal(t, wantStart, members[0].TermStartSlot)
 		require.True(t, members[0].TermStartSlotSet)
 	}
+
+	fxTip(t, ls, fxPoint(5))
+	elect(20, 0, 10)
 	assertTermStart(0)
 
-	require.NoError(t, db.SetCommitteeMembers(
-		context.Background(),
-		[]*models.CommitteeMember{{
-			ColdCredentialTag: uint8(cold.CredType),
-			ColdCredHash:      cold.Credential[:],
-			ExpiresEpoch:      30,
-			TermStartSlot:     15,
-			TermStartSlotSet:  true,
-			AddedSlot:         20,
-		}},
-		nil,
-	))
+	elect(30, 15, 20)
 	assertTermStart(15)
 
-	require.NoError(
-		t,
-		db.DeleteCommitteeMembersAfterSlot(context.Background(), 15, nil),
-	)
+	fxRollback(t, ls, fxPoint(10))
 	assertTermStart(0)
 }
 
@@ -772,7 +804,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		)
 		cold := committeeTestCredential(0x11).Credential
 		hot := committeeTestCredential(0x12).Credential
-		require.NoError(t, db.SetCommitteeMembers(
+		require.NoError(t, seedDB(t, db).SetCommitteeMembers(
 			context.Background(),
 			[]*models.CommitteeMember{{
 				ColdCredHash: cold[:],
@@ -819,7 +851,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 			)
 			credential := committeeTestCredential(0x31)
 			hot := committeeTestCredential(0x32).Credential
-			require.NoError(t, db.SetCommitteeMembers(
+			require.NoError(t, seedDB(t, db).SetCommitteeMembers(
 				context.Background(),
 				[]*models.CommitteeMember{{
 					ColdCredHash: credential.Credential[:],
@@ -876,15 +908,11 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		)
 		credential := committeeTestCredential(0x51)
 		storeCommitteeUpdateProposal(t, db, 0x52, credential, 80)
-		raw, err := dbtest.RawSQLiteMetadata(t, db)
-		require.NoError(t, err)
-		_, err = raw.Exec(
-			"UPDATE governance_proposal SET deposit = ?",
-			"not-an-amount",
-		)
-		require.NoError(t, err)
+		fault := errors.New("synthetic proposal read fault")
+		fxFaultedLedger(t, lv.ls, SetFaultsForTest{Proposal: fault})
 
 		member, err := lv.CommitteeMember(credential.Credential)
+		require.ErrorIs(t, err, fault)
 		require.ErrorContains(t, err, "get governance proposal set")
 		require.Nil(t, member)
 	})
@@ -898,7 +926,7 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	pparams := &conway.ConwayProtocolParameters{}
 	initialView, db := committeeTestView(t, pparams)
 	seated := committeeTestCredential(0x61)
-	require.NoError(t, db.SetCommitteeMembers(
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(
 		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredHash: seated.Credential[:],
@@ -912,7 +940,13 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 		require.NoError(t, txn.Rollback())
 		txn.Release()
 	})
-	storeCommitteeUpdateProposalInTxn(t, db, 0x63, proposed, 90, txn)
+	// The proposal is staged through the ledger whose view reads it: an
+	// uncommitted change is visible only to the transaction that staged it.
+	require.NoError(t, initialView.ls.ledgerDB().SetGovernanceProposal(
+		context.Background(),
+		committeeUpdateProposal(t, 0x63, proposed, 90),
+		dbadapter.Txn(txn),
+	))
 	lv := initialView.ls.NewView(txn)
 
 	certificates := []lcommon.Certificate{
@@ -1052,20 +1086,18 @@ func seedCommitteeMemberTerm(
 	termStartSlot uint64,
 ) {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO committee_member (
-    cold_cred_hash, cold_credential_tag, expires_epoch,
-    term_start_slot, term_start_slot_set, added_slot
-) VALUES (?, ?, ?, ?, TRUE, ?)`,
-		coldCredential.Credential[:],
-		coldCredential.CredType,
-		expiresEpoch,
-		termStartSlot,
-		termStartSlot,
-	)
-	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(
+		t.Context(),
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(coldCredential.CredType),
+			ColdCredHash:      coldCredential.Credential[:],
+			ExpiresEpoch:      expiresEpoch,
+			TermStartSlot:     termStartSlot,
+			TermStartSlotSet:  true,
+			AddedSlot:         termStartSlot,
+		}},
+		nil,
+	))
 }
 
 // TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot proves the
@@ -1164,7 +1196,7 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	)
 
 	seated := committeeTestCredential(0x91)
-	require.NoError(t, db.SetCommitteeMembers(
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(
 		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: uint8(seated.CredType),
@@ -1186,9 +1218,9 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	// authoritatively empty, not unknown, so authority must survive.
 	require.NoError(
 		t,
-		db.SoftDeleteAllCommitteeMembers(context.Background(), 10, nil),
+		seedDB(t, db).SoftDeleteAllCommitteeMembers(context.Background(), 10, nil),
 	)
-	seatedNow, err := db.GetCommitteeMembers(context.Background(), nil)
+	seatedNow, err := seedDB(t, db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, seatedNow, "no member may remain seated")
 
@@ -1233,10 +1265,10 @@ func enactTestUpdateCommittee(
 	}
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(context.Background(), proposal, nil),
+		seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 	_, err = governance.EnactProposal(context.Background(), &governance.EnactmentContext{
-		DB:      dbadapter.New(db),
+		DB:      seedDB(t, db),
 		Epoch:   0,
 		Slot:    slot,
 		PParams: pparams,
@@ -1332,7 +1364,7 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 	elected := committeeTestCredential(0xd3)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredentialTag: uint8(elected.CredType),
 			ColdCredHash:      elected.Credential[:],
 			ExpiresEpoch:      10,
@@ -1367,7 +1399,7 @@ func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredentialTag: uint8(cold.CredType),
 			ColdCredHash:      cold.Credential[:],
 			ExpiresEpoch:      10,
@@ -1414,7 +1446,7 @@ func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredentialTag: uint8(cold.CredType),
 			ColdCredHash:      cold.Credential[:],
 			ExpiresEpoch:      10,
@@ -1467,7 +1499,7 @@ func TestValidateTxConwayAcceptsAuthorizedPendingCommitteeVoterAtPV10(
 	elected := committeeTestCredential(0xda)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredentialTag: uint8(elected.CredType),
 			ColdCredHash:      elected.Credential[:],
 			ExpiresEpoch:      10,
@@ -1560,7 +1592,7 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 				seedCommitteeCredentialAuthorization(t, db, cold, oldHot, 1, 1)
 				require.NoError(
 					t,
-					db.SetCommitteeMembers(
+					seedDB(t, db).SetCommitteeMembers(
 						context.Background(),
 						[]*models.CommitteeMember{{
 							ColdCredentialTag: uint8(cold.CredType),
@@ -1638,14 +1670,14 @@ func validateCommitteeUpdateVoteRejectedAtVersion(t *testing.T, version uint) {
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredentialTag: uint8(cold.CredType),
 			ColdCredHash:      cold.Credential[:],
 			ExpiresEpoch:      10,
 		}}, nil),
 	)
 	storeCommitteeUpdateProposal(t, db, 0xd7, cold, 10)
-	require.NoError(t, db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
 	var actionTxID [32]byte
 	copy(actionTxID[:], governanceTestHash(0xd7))
 	actionID := &lcommon.GovActionId{TransactionId: actionTxID}
@@ -1763,7 +1795,7 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 	coldB := committeeTestCredential(0xc2)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 			{
 				ColdCredentialTag: uint8(coldA.CredType),
 				ColdCredHash:      coldA.Credential[:],
@@ -1853,7 +1885,7 @@ func TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx(
 	coldB := committeeTestCredential(0xd2)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 			{
 				ColdCredentialTag: uint8(coldA.CredType),
 				ColdCredHash:      coldA.Credential[:],
@@ -1967,7 +1999,7 @@ func TestConwayKnownVoterRuleResolvesEveryAuthorizerOfSharedHotCredential(
 				}
 				require.NoError(
 					t,
-					db.SetCommitteeMembers(context.Background(), seated, nil),
+					seedDB(t, db).SetCommitteeMembers(context.Background(), seated, nil),
 				)
 				seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
 				if tc.sharer == sharerSeated {
@@ -2033,6 +2065,7 @@ func constitutionTestView(t *testing.T) (*LedgerView, *database.Database) {
 		db:             db,
 		currentPParams: &conway.ConwayProtocolParameters{},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return &LedgerView{ls: ls}, db
 }
@@ -2096,7 +2129,7 @@ func TestLedgerViewConstitutionWithPolicyHash(t *testing.T) {
 	lv, db := constitutionTestView(t)
 	anchorHash := bytes.Repeat([]byte{0xa1}, lcommon.Blake2b256Size)
 	policyHash := bytes.Repeat([]byte{0xa2}, lcommon.Blake2b224Size)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/with-guardrails",
 		AnchorHash: anchorHash,
 		PolicyHash: policyHash,
@@ -2131,7 +2164,7 @@ func TestLedgerViewConstitutionWithoutPolicyHash(t *testing.T) {
 
 	lv, db := constitutionTestView(t)
 	anchorHash := bytes.Repeat([]byte{0xb1}, lcommon.Blake2b256Size)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/no-guardrails",
 		AnchorHash: anchorHash,
 		AddedSlot:  10,
@@ -2168,14 +2201,14 @@ func TestLedgerViewConstitutionLatestEnactedWins(t *testing.T) {
 	t.Parallel()
 
 	lv, db := constitutionTestView(t)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/first",
 		AnchorHash: bytes.Repeat([]byte{0xc1}, lcommon.Blake2b256Size),
 		PolicyHash: bytes.Repeat([]byte{0xc2}, lcommon.Blake2b224Size),
 		AddedSlot:  10,
 	}, nil))
 	secondAnchor := bytes.Repeat([]byte{0xc3}, lcommon.Blake2b256Size)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/second",
 		AnchorHash: secondAnchor,
 		AddedSlot:  20,
@@ -2224,7 +2257,7 @@ func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
 	t.Parallel()
 
 	lv, db := constitutionTestView(t)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/unreadable",
 		AnchorHash: bytes.Repeat([]byte{0xd1}, lcommon.Blake2b256Size),
 		PolicyHash: bytes.Repeat([]byte{0xd2}, lcommon.Blake2b224Size),
@@ -2237,13 +2270,11 @@ func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec("DROP TABLE constitution")
-	require.NoError(t, err)
+	fault := errors.New("synthetic constitution read fault")
+	fxFaultedLedger(t, lv.ls, SetFaultsForTest{Committee: fault})
 
 	got, err = lv.Constitution()
-	require.Error(t, err)
+	require.ErrorIs(t, err, fault)
 	require.Nil(t, got)
 	require.NotErrorIs(t, err, governance.ErrConstitutionUnavailable)
 
@@ -2272,7 +2303,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      NewMemLiveSetForTest(),
+		UtxoSet:      OpenLiveSetForTest(t, db),
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2283,13 +2314,13 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	drepStakeCred := bytes.Repeat([]byte{0x22}, 28)
 	returnStakeCred := bytes.Repeat([]byte{0x33}, 28)
 
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 	}))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: drepStakeCred,
 			Drep:       drepCred,
 			DrepType:   models.DrepTypeAddrKeyHash,
@@ -2303,7 +2334,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: returnStakeCred,
 			Drep:       drepCred,
 			DrepType:   models.DrepTypeAddrKeyHash,
@@ -2322,7 +2353,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
+		seedDB(t, db).SetGovernanceProposal(
 			context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        bytes.Repeat([]byte{0x55}, 32),
@@ -2392,6 +2423,7 @@ func governanceTestView(
 	t.Helper()
 	db := newTestDB(t)
 	ls := &LedgerState{db: db, currentPParams: pparams}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return &LedgerView{ls: ls}, db
 }
@@ -2428,7 +2460,7 @@ func storeGovernanceTestProposal(
 	}
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(context.Background(), proposal, nil),
+		seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 }
 
@@ -2536,11 +2568,12 @@ func TestLedgerViewGovPurposeRoots(t *testing.T) {
 func TestLedgerViewGovPurposeRootsPropagatesDatabaseError(t *testing.T) {
 	t.Parallel()
 
-	lv, db := governanceTestView(t, &conway.ConwayProtocolParameters{})
-	require.NoError(t, dbtest.CloseDatabase(db))
+	lv, _ := governanceTestView(t, &conway.ConwayProtocolParameters{})
+	fault := errors.New("synthetic proposal read fault")
+	fxFaultedLedger(t, lv.ls, SetFaultsForTest{Proposal: fault})
 
 	roots, err := lv.GovPurposeRoots()
-	require.Error(t, err)
+	require.ErrorIs(t, err, fault)
 	require.Nil(t, roots)
 }
 
@@ -2549,7 +2582,7 @@ func TestLedgerViewGovernanceActionExpiryIsInclusive(t *testing.T) {
 
 	pparams := &conway.ConwayProtocolParameters{}
 	lv, db := governanceTestView(t, pparams)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1_000, 10, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	id := governanceTestID(0x21, 0)
@@ -2590,7 +2623,7 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 		},
 	}
 	lv, db := governanceTestView(t, pparams)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1_000, 10, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	enactedEpoch := uint64(10)
@@ -2666,7 +2699,7 @@ func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
 			},
 		}
 		lv, db := governanceTestView(t, pparams)
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			0, 0, nil, nil, nil, nil, 0, 1, 1_000, nil,
 		))
 		ancestorID := governanceTestID(0x41, 0)
@@ -2730,7 +2763,7 @@ func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
 			},
 		}
 		lv, db := governanceTestView(t, pparams)
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			0, 0, nil, nil, nil, nil, 0, 1, 1_000, nil,
 		))
 		maxBlockBodySize := uint(90_112)
@@ -2808,7 +2841,7 @@ func TestLedgerViewDecodesHistoricalParameterActionForCurrentEra(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			lv, db := governanceTestView(t, test.pparams)
-			require.NoError(t, db.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 			))
 			id := governanceTestID(0x51, 0)
@@ -2869,6 +2902,7 @@ func mirQuorumTestView(
 		currentPParams: &shelley.ShelleyProtocolParameters{},
 		config:         LedgerStateConfig{CardanoNodeConfig: cfg},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls.NewView(nil)
 }
@@ -3068,7 +3102,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 		t,
 		[3]ed25519.PublicKey{pub(0), pub(1), pub(2)},
 	)
-	seedGenesisDelegation(t, redelegated.ls.db, models.GenesisDelegation{
+	fxGenesisDelegation(t, redelegated.ls.db, models.GenesisDelegation{
 		GenesisHash:         bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
 		GenesisDelegateHash: lcommon.Blake2b224Hash(pub(3)).Bytes(),
 		VrfKeyHash:          bytes.Repeat([]byte{0xcc}, lcommon.Blake2b256Size),
@@ -3133,77 +3167,6 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 	}
 }
 
-// errInjectingMetadataStore wraps a real metadata.MetadataStore and forces
-// specific lookups to fail with a caller-supplied error instead of
-// delegating to the wrapped store, reproducing a genuine non-not-found
-// storage fault (a timeout, a lost connection) without corrupting on-disk
-// rows.
-type errInjectingMetadataStore struct {
-	metadata.MetadataStore
-	getPoolErr                error
-	getAccountByCredentialErr error
-	getGovernanceProposalErr  error
-	getCommitteeMembersErr    error
-}
-
-func (s *errInjectingMetadataStore) GetCommitteeMembersIncludeDeleted(
-	txn types.Txn,
-) ([]*models.CommitteeMember, error) {
-	if s.getCommitteeMembersErr != nil {
-		return nil, s.getCommitteeMembersErr
-	}
-	return s.MetadataStore.GetCommitteeMembersIncludeDeleted(txn)
-}
-
-func (s *errInjectingMetadataStore) GetPool(
-	pkh lcommon.PoolKeyHash,
-	includeInactive bool,
-	txn types.Txn,
-) (*models.Pool, error) {
-	if s.getPoolErr != nil {
-		return nil, s.getPoolErr
-	}
-	return s.MetadataStore.GetPool(pkh, includeInactive, txn)
-}
-
-func (s *errInjectingMetadataStore) GetPoolStatus(
-	pkh lcommon.PoolKeyHash,
-	txn types.Txn,
-) (models.PoolStatus, error) {
-	if s.getPoolErr != nil {
-		return models.PoolStatus{}, s.getPoolErr
-	}
-	return s.MetadataStore.GetPoolStatus(pkh, txn)
-}
-
-func (s *errInjectingMetadataStore) GetAccountByCredential(
-	credentialTag uint8,
-	stakeKey []byte,
-	includeInactive bool,
-	txn types.Txn,
-) (*models.Account, error) {
-	if s.getAccountByCredentialErr != nil {
-		return nil, s.getAccountByCredentialErr
-	}
-	return s.MetadataStore.GetAccountByCredential(
-		credentialTag,
-		stakeKey,
-		includeInactive,
-		txn,
-	)
-}
-
-func (s *errInjectingMetadataStore) GetGovernanceProposal(
-	txHash []byte,
-	actionIndex uint32,
-	txn types.Txn,
-) (*models.GovernanceProposal, error) {
-	if s.getGovernanceProposalErr != nil {
-		return nil, s.getGovernanceProposalErr
-	}
-	return s.MetadataStore.GetGovernanceProposal(txHash, actionIndex, txn)
-}
-
 // newDiscardLoggerLedgerState builds a bare *LedgerState wired only to db,
 // with a non-nil discard logger so the boolean predicates' error-path
 // logging (lv.ls.config.Logger.Error) does not panic on a zero-value
@@ -3217,23 +3180,11 @@ func newDiscardLoggerLedgerState(db *database.Database) *LedgerState {
 	return ls
 }
 
-// newStorageFaultTestDB builds a real dingo database (the same badger blob
-// and sqlite metadata composition dbtest.NewDatabase uses) with its metadata
-// store wrapped by errs, so a specific lookup returns errs's error instead of
-// the real store's result.
-func newStorageFaultTestDB(
-	t *testing.T,
-	errs errInjectingMetadataStore,
-) *database.Database {
+// newStorageFaultTestDB builds the database a storage-fault fixture opens
+// its faulted LedgerDB set over.
+func newStorageFaultTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
-		func(store metadata.MetadataStore) metadata.MetadataStore {
-			errs.MetadataStore = store
-			return &errs
-		},
-	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	return db
 }
@@ -3248,10 +3199,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 	t.Run("IsStakeCredentialRegistered", func(t *testing.T) {
 		t.Parallel()
 		stubErr := errors.New("synthetic account lookup fault")
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-			getAccountByCredentialErr: stubErr,
-		})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxFaultedLedger(t, ls, SetFaultsForTest{Account: stubErr})
 		lv := &LedgerView{ls: ls}
 		cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x01}}
 
@@ -3265,8 +3215,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 		"IsStakeCredentialRegistered not-found is not a fault",
 		func(t *testing.T) {
 			t.Parallel()
-			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			db := newStorageFaultTestDB(t)
 			ls := newDiscardLoggerLedgerState(db)
+			fxAttachLedgerDB(t, ls)
 			lv := &LedgerView{ls: ls}
 			cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x01}}
 
@@ -3280,10 +3231,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 	t.Run("IsRewardAccountRegistered", func(t *testing.T) {
 		t.Parallel()
 		stubErr := errors.New("synthetic account lookup fault")
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-			getAccountByCredentialErr: stubErr,
-		})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxFaultedLedger(t, ls, SetFaultsForTest{Account: stubErr})
 		lv := &LedgerView{ls: ls}
 		cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x02}}
 
@@ -3297,8 +3247,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 		"IsRewardAccountRegistered not-found is not a fault",
 		func(t *testing.T) {
 			t.Parallel()
-			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			db := newStorageFaultTestDB(t)
 			ls := newDiscardLoggerLedgerState(db)
+			fxAttachLedgerDB(t, ls)
 			lv := &LedgerView{ls: ls}
 			cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x02}}
 
@@ -3312,10 +3263,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 	t.Run("IsPoolRegistered", func(t *testing.T) {
 		t.Parallel()
 		stubErr := errors.New("synthetic pool lookup fault")
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-			getPoolErr: stubErr,
-		})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxFaultedLedger(t, ls, SetFaultsForTest{Pool: stubErr})
 		lv := &LedgerView{ls: ls}
 
 		registered := lv.IsPoolRegistered(lcommon.PoolKeyHash{0x03})
@@ -3326,8 +3276,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 
 	t.Run("IsPoolRegistered not-found is not a fault", func(t *testing.T) {
 		t.Parallel()
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxAttachLedgerDB(t, ls)
 		lv := &LedgerView{ls: ls}
 
 		registered := lv.IsPoolRegistered(lcommon.PoolKeyHash{0x03})
@@ -3339,10 +3290,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 	t.Run("GovActionExists", func(t *testing.T) {
 		t.Parallel()
 		stubErr := errors.New("synthetic governance proposal lookup fault")
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-			getGovernanceProposalErr: stubErr,
-		})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxFaultedLedger(t, ls, SetFaultsForTest{Proposal: stubErr})
 		lv := &LedgerView{ls: ls}
 
 		exists := lv.GovActionExists(lcommon.GovActionId{})
@@ -3353,8 +3303,9 @@ func TestLedgerViewPredicatesRecordStorageFaultNotRuleVerdict(t *testing.T) {
 
 	t.Run("GovActionExists not-found is not a fault", func(t *testing.T) {
 		t.Parallel()
-		db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+		db := newStorageFaultTestDB(t)
 		ls := newDiscardLoggerLedgerState(db)
+		fxAttachLedgerDB(t, ls)
 		lv := &LedgerView{ls: ls}
 
 		exists := lv.GovActionExists(lcommon.GovActionId{})
@@ -3484,9 +3435,7 @@ func newFakeEraLedgerState(
 func TestValidateTxSurfacesStorageFaultOverNilVerdict(t *testing.T) {
 	t.Parallel()
 	stubErr := errors.New("synthetic account lookup fault")
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getAccountByCredentialErr: stubErr,
-	})
+	db := newStorageFaultTestDB(t)
 	cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x04}}
 	ls := newFakeEraLedgerState(db, func(
 		tx lcommon.Transaction,
@@ -3497,6 +3446,7 @@ func TestValidateTxSurfacesStorageFaultOverNilVerdict(t *testing.T) {
 		_ = view.IsStakeCredentialRegistered(cred)
 		return nil
 	}, nil)
+	fxFaultedLedger(t, ls, SetFaultsForTest{Account: stubErr})
 
 	tx := &conway.ConwayTransaction{TxIsValid: true}
 	err := ls.ValidateTx(tx)
@@ -3516,15 +3466,14 @@ func TestValidateTxSurfacesStorageFaultOverNilVerdict(t *testing.T) {
 func TestValidateTxSurfacesStorageFaultOverPoolRetirementVerdict(t *testing.T) {
 	t.Parallel()
 	stubErr := errors.New("synthetic pool lookup fault")
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getPoolErr: stubErr,
-	})
+	db := newStorageFaultTestDB(t)
 	poolKeyHash := lcommon.PoolKeyHash{0x05}
 	ls := newFakeEraLedgerState(
 		db,
 		shelley.UtxoValidatePoolCertificates,
 		nil,
 	)
+	fxFaultedLedger(t, ls, SetFaultsForTest{Pool: stubErr})
 
 	tx := &conway.ConwayTransaction{
 		TxIsValid: true,
@@ -3564,9 +3513,7 @@ func TestValidateTxSurfacesStorageFaultOverPoolRetirementVerdict(t *testing.T) {
 func TestEvaluateTxSurfacesStorageFaultOverNilVerdict(t *testing.T) {
 	t.Parallel()
 	stubErr := errors.New("synthetic pool lookup fault")
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getPoolErr: stubErr,
-	})
+	db := newStorageFaultTestDB(t)
 	poolKeyHash := lcommon.PoolKeyHash{0x06}
 	ls := newFakeEraLedgerState(db, nil, func(
 		tx lcommon.Transaction,
@@ -3576,6 +3523,7 @@ func TestEvaluateTxSurfacesStorageFaultOverNilVerdict(t *testing.T) {
 		_ = view.IsPoolRegistered(poolKeyHash)
 		return 0, lcommon.ExUnits{}, nil, nil
 	})
+	fxFaultedLedger(t, ls, SetFaultsForTest{Pool: stubErr})
 
 	tx := &conway.ConwayTransaction{TxIsValid: true}
 	_, _, _, err := ls.EvaluateTx(tx)
@@ -3593,9 +3541,7 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 ) {
 	t.Parallel()
 	stubErr := errors.New("synthetic account lookup fault")
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getAccountByCredentialErr: stubErr,
-	})
+	db := newStorageFaultTestDB(t)
 	cred := lcommon.Credential{Credential: lcommon.Blake2b224{0x07}}
 	ls := newFakeEraLedgerState(db, func(
 		tx lcommon.Transaction,
@@ -3606,6 +3552,7 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 		_ = view.IsStakeCredentialRegistered(cred)
 		return nil
 	}, nil)
+	fxFaultedLedger(t, ls, SetFaultsForTest{Account: stubErr})
 
 	tx := &conway.ConwayTransaction{TxIsValid: true}
 	err := ls.WithTxValidationSession(context.Background(), func(
@@ -3631,9 +3578,7 @@ func TestWithTxValidationSessionKeepsCommitteeStorageFaultRetryable(
 ) {
 	t.Parallel()
 	stubErr := errors.New("synthetic committee lookup fault")
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getCommitteeMembersErr: stubErr,
-	})
+	db := newStorageFaultTestDB(t)
 	ls := newFakeEraLedgerState(db, func(
 		_ lcommon.Transaction,
 		_ uint64,
@@ -3647,6 +3592,7 @@ func TestWithTxValidationSessionKeepsCommitteeStorageFaultRetryable(
 		_, err := provider.CommitteeStateAvailable()
 		return err
 	}, nil)
+	fxFaultedLedger(t, ls, SetFaultsForTest{Committee: stubErr})
 
 	err := ls.WithTxValidationSession(t.Context(), func(
 		validate func(
@@ -3671,7 +3617,7 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	db := newStorageFaultTestDB(t)
 	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
 	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
 		TxId:      input.Id().Bytes(),
@@ -3746,7 +3692,7 @@ func TestWithTxValidationSessionClassifiesOnlyKnownSemanticVerdicts(
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			db := newStorageFaultTestDB(t)
 			ls := newFakeEraLedgerState(db, func(
 				_ lcommon.Transaction,
 				_ uint64,
@@ -3755,6 +3701,7 @@ func TestWithTxValidationSessionClassifiesOnlyKnownSemanticVerdicts(
 			) error {
 				return tc.validationErr
 			}, nil)
+			fxAttachLedgerDB(t, ls)
 
 			err := ls.WithTxValidationSession(t.Context(), func(
 				validate func(
@@ -3802,7 +3749,7 @@ func TestDijkstraValidationKeepsMissingProviderStateRetryable(t *testing.T) {
 		{
 			name: "malformed constitution",
 			setup: func(t *testing.T, db *database.Database) {
-				require.NoError(t, db.SetConstitution(&models.Constitution{
+				require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 					AnchorURL:  "https://example.invalid/malformed",
 					AnchorHash: []byte{0x01},
 					AddedSlot:  1,
@@ -3836,11 +3783,12 @@ func TestDijkstraValidationKeepsMissingProviderStateRetryable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			db := newStorageFaultTestDB(t)
 			if tc.setup != nil {
 				tc.setup(t, db)
 			}
 			ls := newFakeEraLedgerState(db, nil, nil)
+			fxAttachLedgerDB(t, ls)
 			era := eras.DijkstraEraDesc
 			era.ValidateTxFunc = func(
 				_ lcommon.Transaction,
@@ -3959,16 +3907,9 @@ func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
 	t *testing.T,
 ) {
 	t.Parallel()
-	ls, lastByron, _ := newByronShelleyBoundaryLedger(t)
-	parentTip := ls.currentTip
-	parentTip.Point = ocommon.Point{}
-	parentTip.BlockNumber = 0
-	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(parentTip.Point, nil))
-	require.NoError(t, ls.db.SetTip(parentTip, nil))
-	ls.currentTip = parentTip
-	ls.currentTipBlockNonce = nil
-	ls.validationEnabled = false
-	ls.publishSnapshotsLocked()
+	// The fixture's ledger stands at the last Byron block, so the block it
+	// applies next is the first Shelley one.
+	ls, _, next := newByronShelleyBoundaryLedger(t)
 
 	durableCommit := make(chan struct{})
 	releasePublication := make(chan struct{})
@@ -3977,7 +3918,7 @@ func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
 		<-releasePublication
 	}
 	results := make(chan readChainResult, 1)
-	results <- readChainResult{blocks: []gledger.Block{lastByron}}
+	results <- readChainResult{blocks: []gledger.Block{next}}
 	close(results)
 	applyDone := make(chan error, 1)
 
@@ -4006,7 +3947,7 @@ func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
 	})
 	require.NoError(t, err)
 	require.NoError(t, <-applyDone)
-	require.Equal(t, lastByron.SlotNumber(), ls.currentTip.Point.Slot)
+	require.Equal(t, next.SlotNumber(), ls.currentTip.Point.Slot)
 }
 
 func TestTxValidationCommitDoesNotWaitForLedgerWriteLock(t *testing.T) {
@@ -4061,9 +4002,7 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stubErr := errors.New("synthetic pool lookup fault")
-			db := newStorageFaultTestDB(t, errInjectingMetadataStore{
-				getPoolErr: stubErr,
-			})
+			db := newStorageFaultTestDB(t)
 			verdictErr := errors.New("pool not registered verdict")
 			called := false
 			testEra := eras.ByronEraDesc
@@ -4088,6 +4027,7 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 				},
 				currentEra: testEra,
 			}
+			fxFaultedLedger(t, ls, SetFaultsForTest{Pool: stubErr})
 			tx := omockledger.NewTransactionBuilder()
 			tx.WithId(bytes.Repeat([]byte{0x36}, 32))
 			tx.WithType(byron.TxTypeByron)
@@ -4142,7 +4082,9 @@ func newTreasuryViewTestLedger(
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
-	return &LedgerState{db: db}, db
+	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
+	return ls, db
 }
 
 func requireTreasuryValue(
@@ -4161,17 +4103,17 @@ func TestLedgerViewTreasuryValueReadsValidationTransaction(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newTreasuryViewTestLedger(t, "")
-	require.NoError(t, db.Metadata().SetNetworkState(100, 900, 10, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(100, 900, 10, nil))
 	requireTreasuryValue(t, ls, nil, 100)
 
 	rollbackErr := errors.New("test rollback")
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		require.NoError(t, db.Metadata().SetNetworkState(
+		require.NoError(t, ls.ledgerDB().SetNetworkState(
 			250,
 			750,
 			20,
-			txn.Metadata(),
+			txn,
 		))
 		requireTreasuryValue(t, ls, txn, 250)
 		return rollbackErr
@@ -4180,19 +4122,27 @@ func TestLedgerViewTreasuryValueReadsValidationTransaction(t *testing.T) {
 	requireTreasuryValue(t, ls, nil, 100)
 }
 
+// A view inside the transaction that stages a chain rollback reads the
+// treasury the rollback leaves, and so does every read after it commits.
 func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newTreasuryViewTestLedger(t, "")
-	require.NoError(t, db.Metadata().SetNetworkState(100, 900, 10, nil))
-	require.NoError(t, db.Metadata().SetNetworkState(60, 900, 20, nil))
+	fxTip(t, ls, fxPoint(5))
+	for _, state := range []struct{ treasury, slot uint64 }{
+		{100, 10}, {60, 20},
+	} {
+		fxBlock(t, ls, fxPoint(state.slot), func(
+			ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+		) error {
+			return ldb.SetNetworkState(state.treasury, 900, state.slot, txn)
+		})
+	}
 	requireTreasuryValue(t, ls, nil, 60)
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := db.DeleteNetworkStateAfterSlot(context.Background(), 10, txn); err != nil {
-			return err
-		}
+		ls.stageUtxoSetRollback(dbadapter.Txn(txn), fxPoint(10))
 		value, err := ls.NewView(txn).TreasuryValue()
 		if err != nil {
 			return err
@@ -4202,21 +4152,22 @@ func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 		}
 		return nil
 	}))
+	require.False(t, ls.utxoSetFailed.Load(), "the set must roll back")
 	requireTreasuryValue(t, ls, nil, 100)
 }
 
 func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newTreasuryViewTestLedger(t, "")
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
 	paramsData, err := cbor.Encode(mithrilRewardConwayPParams())
 	require.NoError(t, err)
 	nonce := make([]byte, 32)
 	const treasury = uint64(87_920_693_660_807)
-	require.NoError(t, importLedgerStateForTest(
-		t, ls,
+	fxImportThenOpen(
+		t, db,
 		ledgerstate.ImportConfig{
-			Database: db,
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
 			),
@@ -4244,7 +4195,9 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 				return 1, 100, nil
 			},
 		},
-	))
+	)
+	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	requireTreasuryValue(t, ls, nil, treasury)
 }
 
@@ -4261,19 +4214,13 @@ func TestLedgerViewTreasuryValuePropagatesStorageErrors(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newTreasuryViewTestLedger(t, t.TempDir())
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		"INSERT INTO network_state (treasury, reserves, slot) VALUES (?, ?, ?)",
-		"not-a-number",
-		"0",
-		1,
-	)
-	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).SetNetworkState(1, 0, 1, nil))
+	fault := errors.New("synthetic network state read fault")
+	fxFaultedLedger(t, ls, SetFaultsForTest{NetworkState: fault})
 
 	value, err := ls.NewView(nil).TreasuryValue()
 	require.ErrorContains(t, err, "get treasury network state")
-	require.ErrorContains(t, err, "invalid syntax")
+	require.ErrorIs(t, err, fault)
 	require.Zero(t, value)
 }
 
@@ -4315,7 +4262,7 @@ func runProposalSetBoundary(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-		DB:           dbadapter.New(db),
+		DB:           seedDB(t, db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -4348,7 +4295,7 @@ func TestProposalSetKeepsExpiredActionUntilItIsDropped(t *testing.T) {
 	pparams := proposalSetTestPParams()
 	lv, db := governanceTestView(t, pparams)
 	for epoch := uint64(10); epoch <= 12; epoch++ {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*100, epoch, nil, nil, nil, nil, 0, 1, 100, nil,
 		))
 	}
@@ -4450,7 +4397,7 @@ func TestProposalSetKeepsExpiredActionUntilItIsDropped(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, state, "dropped subtree still resolvable")
 		require.False(t, lv.GovActionExists(id))
-		proposal, err := db.GetGovernanceProposal(
+		proposal, err := seedDB(t, db).GetGovernanceProposal(
 			context.Background(),
 			id.TransactionId[:], id.GovActionIdx, nil,
 		)
@@ -4522,7 +4469,7 @@ func TestPreprodVoteOnDescendantOfExpiredActionIsValid(t *testing.T) {
 	lv, db := governanceTestView(t, pparams)
 	for epoch := uint64(parentEpoch); epoch <= boundaryEpoch; epoch++ {
 		start := boundary312 - (boundaryEpoch-epoch)*epochLength
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			start, epoch, nil, nil, nil, nil, 0, 1, epochLength, nil,
 		))
 	}
@@ -4623,21 +4570,6 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
-	for _, tag := range []uint8{0, 1} {
-		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:    key,
-			CredentialTag: tag,
-			Reward:        types.Uint64(100 + uint64(tag)),
-			Active:        true,
-		}))
-	}
-	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
-		StakingKey: inactive,
-		Reward:     55,
-		Active:     false,
-	}))
 	lv := &LedgerView{
 		ls: &LedgerState{
 			db: db,
@@ -4646,6 +4578,22 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 			},
 		},
 	}
+	fxAttachLedgerDB(t, lv.ls)
+	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
+	for _, tag := range []uint8{0, 1} {
+		require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+			StakingKey:    key,
+			CredentialTag: tag,
+			Reward:        types.Uint64(100 + uint64(tag)),
+			Active:        true,
+		}))
+	}
+	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+		StakingKey: inactive,
+		Reward:     55,
+		Active:     false,
+	}))
 	credential := func(tag uint, value []byte) lcommon.Credential {
 		return lcommon.Credential{
 			CredType:   tag,
@@ -4674,7 +4622,7 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 		})
 	}
 	zero := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: zero,
 		Reward:     0,
 		Active:     true,
@@ -4685,16 +4633,15 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.Zero(t, *got)
 
 	overflow := bytes.Repeat([]byte{0xa5}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: overflow,
 		Reward:     types.Uint64(math.MaxUint64),
 		Active:     true,
 	}))
-	require.NoError(t, db.Metadata().SetPendingRewardCreditRounds(
-		[]models.RewardCreditRound{{SnapshotEpoch: 8, BoundarySlot: 50}},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SaveRewardAccountOutputs(
+	fxSeed(t, db, LedgerChanges{RewardRounds: []RewardRoundChange{{
+		Round: models.RewardCreditRound{SnapshotEpoch: 8, BoundarySlot: 50},
+	}}})
+	require.NoError(t, seedDB(t, db).SaveRewardAccountOutputs(
 		[]*models.RewardAccountOutput{{
 			StakingKey:    overflow,
 			PoolKeyHash:   bytes.Repeat([]byte{0xa6}, lcommon.Blake2b224Size),
@@ -4717,9 +4664,10 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsupported stake credential tag")
 
-	require.NoError(t, dbtest.CloseDatabase(db))
+	fault := errors.New("synthetic account read fault")
+	fxFaultedLedger(t, lv.ls, SetFaultsForTest{Account: fault})
 	_, err = lv.RewardAccountBalance(credential(0, key))
-	require.Error(t, err)
+	require.ErrorIs(t, err, fault)
 }
 
 func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
@@ -4727,6 +4675,15 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+	fxAttachLedgerDB(t, lv.ls)
 	sharedHash := bytes.Repeat([]byte{0xb1}, lcommon.AddressHashSize)
 	credential := func(tag uint, value []byte) lcommon.Credential {
 		return lcommon.Credential{
@@ -4752,9 +4709,8 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 		lcommon.CredentialTypeAddrKeyHash,
 		bytes.Repeat([]byte{0xbc}, lcommon.AddressHashSize),
 	)
-	persistViewStakeRegistration(t, db, keyCredential, 2_000_000, 100, 0xb2)
-	persistViewStakeRegistration(t, db, scriptCredential, 3_000_000, 101, 0xb3)
-	persistViewStakeRegistration(t, db, zeroCredential, 0, 102, 0xb7)
+	// The imported key credential registered before the snapshot the import
+	// was taken at.
 	persistViewStakeRegistration(
 		t,
 		db,
@@ -4763,6 +4719,9 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 		90,
 		0xba,
 	)
+	persistViewStakeRegistration(t, db, keyCredential, 2_000_000, 100, 0xb2)
+	persistViewStakeRegistration(t, db, scriptCredential, 3_000_000, 101, 0xb3)
+	persistViewStakeRegistration(t, db, zeroCredential, 0, 102, 0xb7)
 	persistViewImportedStakeAccount(
 		t,
 		db,
@@ -4784,6 +4743,8 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 		4_500_000,
 		105,
 	)
+	beforeRegistration := fxPoint(105)
+	fxTip(t, lv.ls, beforeRegistration)
 	persistViewStakeRegistration(
 		t,
 		db,
@@ -4794,19 +4755,11 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 	)
 
 	inactiveHash := bytes.Repeat([]byte{0xb4}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey:    inactiveHash,
 		CredentialTag: 0,
 		Active:        false,
 	}))
-	lv := &LedgerView{
-		ls: &LedgerState{
-			db: db,
-			config: LedgerStateConfig{
-				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-			},
-		},
-	}
 
 	for _, tc := range []struct {
 		name string
@@ -4855,7 +4808,7 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 		})
 	}
 
-	importHistory, err := db.GetAccountRegistrationHistoryByCredential(context.Background(),
+	importHistory, err := seedDB(t, db).GetAccountRegistrationHistoryByCredential(context.Background(),
 		1,
 		importedScriptCredential.Credential[:],
 		10,
@@ -4866,8 +4819,7 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, importHistory)
 
-	require.NoError(t, db.DeleteCertificatesAfterSlot(context.Background(), 105, nil))
-	require.NoError(t, db.RestoreAccountStateAtSlot(context.Background(), 105, nil))
+	fxRollback(t, lv.ls, beforeRegistration)
 	depositAfterRollback, err := lv.StakeCredentialDeposit(
 		importedThenRegisteredCredential,
 	)
@@ -4878,9 +4830,10 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 	_, err = lv.StakeCredentialDeposit(lcommon.Credential{CredType: 2})
 	require.ErrorContains(t, err, "unsupported stake credential tag")
 
-	require.NoError(t, dbtest.CloseDatabase(db))
+	fault := errors.New("synthetic account read fault")
+	fxFaultedLedger(t, lv.ls, SetFaultsForTest{Account: fault})
 	_, err = lv.StakeCredentialDeposit(keyCredential)
-	require.Error(t, err)
+	require.ErrorIs(t, err, fault)
 }
 
 func persistViewImportedStakeAccount(
@@ -4894,13 +4847,13 @@ func persistViewImportedStakeAccount(
 	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
 	require.NoError(t, err)
 	importDeposit := types.Uint64(deposit)
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	fxImportAccount(t, db, &models.Account{
 		StakingKey:    credential.Credential[:],
 		CredentialTag: credentialTag,
 		AddedSlot:     slot,
 		Active:        true,
 		ImportDeposit: &importDeposit,
-	}, nil))
+	})
 }
 
 func persistViewStakeRegistration(
@@ -4934,13 +4887,12 @@ func persistViewStakeRegistration(
 	})
 	tx, err := builder.Build()
 	require.NoError(t, err)
-	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
-		tx,
+	fxApplyTx(
+		t, db, tx,
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,
 		map[int]uint64{0: deposit},
-		nil, 0,
-	))
+	)
 }
 
 // TestLedgerViewPoolCurrentStatePendingRetirement proves PoolCurrentState's
@@ -4965,6 +4917,7 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 			},
 		},
 	}
+	fxAttachLedgerDB(t, lv.ls)
 
 	poolKeyHash := lcommon.PoolKeyHash(
 		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xb1}, 28)),
@@ -4994,13 +4947,7 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 	registrationCert := func(seed byte) *lcommon.PoolRegistrationCertificate {
 		return &lcommon.PoolRegistrationCertificate{
@@ -5074,6 +5021,7 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	lv := &LedgerView{ls: ls}
 
 	poolKeyHash := lcommon.PoolKeyHash(
@@ -5121,13 +5069,7 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 
 	// A genesis registration predating both keys under test makes the
@@ -5193,6 +5135,7 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	lv := &LedgerView{ls: ls}
 
 	poolKeyHash := lcommon.PoolKeyHash(
@@ -5236,13 +5179,7 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 
 	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
@@ -5302,6 +5239,7 @@ func TestLedgerViewSeparatesCurrentAndFuturePoolState(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	lv := &LedgerView{ls: ls}
 
 	poolKeyHash := lcommon.PoolKeyHash(
@@ -5349,13 +5287,7 @@ func TestLedgerViewSeparatesCurrentAndFuturePoolState(
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 
 	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
@@ -5484,13 +5416,7 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 
 	applyRegistration(10, 0x01, poolP, keyA) // pre-epoch: P's active key
@@ -5545,13 +5471,7 @@ func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 			Slot: slot,
 			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
 		}
-		require.NoError(
-			t,
-			db.SetTransactionMetadataOnly(
-				context.Background(),
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
-			),
-		)
+		fxApplyTx(t, db, tx, point, 0, map[int]uint64{0: 500_000_000})
 	}
 
 	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
@@ -5644,6 +5564,7 @@ func TestLedgerStateValidateTxPinsEpochStartSlot(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.Lock()
 	ls.currentEpoch = models.Epoch{StartSlot: 77}
@@ -5707,6 +5628,7 @@ func TestLedgerStateEvaluateTxPinsEpochStartSlot(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.Lock()
 	ls.currentEpoch = models.Epoch{StartSlot: 88}
@@ -6028,14 +5950,11 @@ func TestEpochRolloverSeatsMemberWithOnlyItsClosingEpochAuthorization(
 				RatifiedEpoch: &ratifiedEpoch,
 				RatifiedSlot:  &ratifiedSlot,
 			}
-			require.NoError(t, f.db.SetGovernanceProposal(context.Background(), update, nil))
-			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-			require.NoError(t, err)
-			_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, cold.Credential[:], hot, 2, tc.authSlot)
-			require.NoError(t, err)
+			require.NoError(t, seedDB(t, f.db).SetGovernanceProposal(context.Background(), update, nil))
+			committeeSeedAuthorization(t, f.db, cold, lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(hot),
+			}, 2, tc.authSlot)
 			withdrawAddress, returnAddress, _ := f.rewardAddress(t, 0xd6)
 			withdrawal := f.addProposal(
 				t,
@@ -6052,7 +5971,7 @@ INSERT INTO auth_committee_hot (
 			require.NotNil(t, enacted.EnactedSlot)
 
 			state, err := governance.LoadCommitteeVotingState(context.Background(),
-				dbadapter.New(f.db), nil, result.NewCurrentEpoch.EpochId,
+				f.ls.ledgerDB(), nil, result.NewCurrentEpoch.EpochId,
 			)
 			require.NoError(t, err)
 			wantActive := 1
@@ -6078,7 +5997,7 @@ INSERT INTO auth_committee_hot (
 			require.NoError(t, err)
 			require.Equal(t, tc.hasHot, member != nil)
 
-			members, err := f.db.GetCommitteeMembers(context.Background(), nil)
+			members, err := seedDB(t, f.db).GetCommitteeMembers(context.Background(), nil)
 			require.NoError(t, err)
 			var seated *models.CommitteeMember
 			for _, member := range members {
@@ -6133,14 +6052,8 @@ func TestCommitteeEnactmentRollbackRestoresPendingAuthorization(t *testing.T) {
 		RatifiedEpoch: &ratifiedEpoch,
 		RatifiedSlot:  &ratifiedSlot,
 	}
-	require.NoError(t, f.db.SetGovernanceProposal(context.Background(), update, nil))
-	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, cold.Credential[:], hot.Credential[:], 2, 520)
-	require.NoError(t, err)
+	require.NoError(t, seedDB(t, f.db).SetGovernanceProposal(context.Background(), update, nil))
+	committeeSeedAuthorization(t, f.db, cold, hot, 2, 520)
 
 	type committeeAnswers struct {
 		hotKnown bool
@@ -6174,7 +6087,27 @@ INSERT INTO auth_committee_hot (
 		colds:    []lcommon.Credential{cold},
 	}, before)
 
-	result := f.rollover(t, f.currentEpoch, f.currentPParams)
+	// The boundary commits as the first block of the next epoch, so the
+	// rollback below it undoes the enactment along the set's journal.
+	boundary := f.currentEpoch.StartSlot + uint64(f.currentEpoch.LengthInSlots)
+	lastOfEpoch := fxPoint(boundary - 1)
+	fxTip(t, f.ls, lastOfEpoch)
+	seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, f.currentPParams)
+	var result *EpochRolloverResult
+	fxBlock(t, f.ls, fxPoint(boundary), func(
+		_ ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
+		var err error
+		result, err = f.ls.processEpochRollover(
+			context.Background(),
+			dbadapter.Unwrap(txn),
+			f.currentEpoch,
+			eras.ConwayEraDesc,
+			f.currentPParams,
+		)
+		return err
+	})
+	require.Equal(t, boundary, result.NewCurrentEpoch.StartSlot)
 	require.Equal(t, committeeAnswers{
 		hotKnown: true,
 		colds:    []lcommon.Credential{cold},
@@ -6184,9 +6117,7 @@ INSERT INTO auth_committee_hot (
 		result.NewCurrentEpoch.StartSlot,
 	))
 
-	boundary := result.NewCurrentEpoch.StartSlot
-	require.NoError(t, f.db.DeleteCommitteeMembersAfterSlot(context.Background(), boundary-1, nil))
-	require.NoError(t, f.db.DeleteGovernanceProposalsAfterSlot(context.Background(), boundary-1, nil))
+	fxRollback(t, f.ls, lastOfEpoch)
 	require.Equal(
 		t,
 		before,
@@ -6208,7 +6139,7 @@ func seatExpiredCommitteeMember(
 	cold lcommon.Credential,
 ) {
 	t.Helper()
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredentialTag: uint8(cold.CredType),
 		ColdCredHash:      cold.Credential[:],
 		ExpiresEpoch:      1,
@@ -6457,7 +6388,7 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			hot, hotKey := committeeTestVotingKey(0x92)
 			malformed := make([]byte, length)
 			copy(malformed, pending.Credential[:])
-			require.NoError(t, db.SetCommitteeMembers(context.Background(),
+			require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(),
 				[]*models.CommitteeMember{{
 					ColdCredentialTag: uint8(pending.CredType),
 					ColdCredHash:      malformed,
@@ -6548,19 +6479,23 @@ func TestLedgerViewCommitteeMemberRejectsMalformedStoredIdentity(t *testing.T) {
 		for _, lookup := range lookups {
 			t.Run(tc.name+"/"+lookup.name, func(t *testing.T) {
 				t.Parallel()
-				lv, db := committeeTestView(
+				lv, _ := committeeTestView(
 					t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
 				)
-				raw, err := dbtest.RawSQLiteMetadata(t, db)
-				require.NoError(t, err)
-				_, err = raw.Exec(`
-INSERT INTO committee_member (
-    cold_cred_hash, cold_credential_tag, expires_epoch,
-    term_start_slot, term_start_slot_set, added_slot
-) VALUES (?, ?, ?, ?, TRUE, ?)`, tc.hash, tc.tag, 10, 1, 1)
-				require.NoError(t, err)
+				fxFaultedLedger(t, lv.ls, SetFaultsForTest{
+					TamperCommittee: func(st *CommitteeState) {
+						st.Members = append(st.Members, models.CommitteeMember{
+							ColdCredHash:      tc.hash,
+							ColdCredentialTag: tc.tag,
+							ExpiresEpoch:      10,
+							TermStartSlot:     1,
+							TermStartSlotSet:  true,
+							AddedSlot:         1,
+						})
+					},
+				})
 
-				err = lookup.call(lv, committeeTestCredential(0xaf))
+				err := lookup.call(lv, committeeTestCredential(0xaf))
 				require.Error(t, err)
 				require.ErrorIs(
 					t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
@@ -6609,19 +6544,21 @@ func TestLedgerViewCommitteeAuthorizationRejectsMalformedStoredIdentity(
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			lv, db := committeeTestView(
+			lv, _ := committeeTestView(
 				t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
 			)
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
-			_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential_tag, cold_credential, hot_credential_tag,
-    host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?, ?)`,
-				tc.coldTag, tc.cold, tc.hotTag, tc.hot, 1, 1,
-			)
-			require.NoError(t, err)
+			fxFaultedLedger(t, lv.ls, SetFaultsForTest{
+				TamperCommittee: func(st *CommitteeState) {
+					st.Auths = append(st.Auths, models.AuthCommitteeHot{
+						ColdCredentialTag: tc.coldTag,
+						ColdCredential:    tc.cold,
+						HotCredentialTag:  tc.hotTag,
+						HotCredential:     tc.hot,
+						CertificateID:     1,
+						AddedSlot:         1,
+					})
+				},
+			})
 
 			member, err := lv.CommitteeHotCredentialMember(
 				committeeTestCredential(0xbf),
@@ -6692,14 +6629,16 @@ func TestLedgerViewDRepDelegationRejectsMalformedStoredState(t *testing.T) {
 			_, db := committeeTestView(
 				t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
 			)
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
 			stake := bytes.Repeat([]byte{0xd4}, lcommon.Blake2b224Size)
-			_, err = raw.Exec(`
-INSERT INTO account (
-    staking_key, drep, reward, active, added_slot, credential_tag, drep_type
-) VALUES (?, ?, '0', TRUE, 1, 0, ?)`, stake, tc.drep, tc.drepType)
-			require.NoError(t, err)
+			require.NoError(t, seedCreateAccount(
+				t, db, t.Context(), nil, &models.Account{
+					StakingKey: stake,
+					Drep:       tc.drep,
+					DrepType:   tc.drepType,
+					Active:     true,
+					AddedSlot:  1,
+				},
+			))
 
 			ls := newFakeEraLedgerState(db, func(
 				_ lcommon.Transaction,
@@ -6717,7 +6656,8 @@ INSERT INTO account (
 				})
 				return err
 			}, nil)
-			err = ls.WithTxValidationSession(t.Context(), func(
+			fxAttachLedgerDB(t, ls)
+			err := ls.WithTxValidationSession(t.Context(), func(
 				validate func(
 					lcommon.Transaction,
 					map[utxoref.Key]struct{},
@@ -6733,6 +6673,10 @@ INSERT INTO account (
 			})
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+			require.NotErrorIs(
+				t, err, ErrDrainedFamilyUnserved,
+				"the fault must be the malformed row, not a set that is not open",
+			)
 			var semanticErr *semanticTxValidationError
 			require.False(t, errors.As(err, &semanticErr))
 		})
@@ -6758,14 +6702,15 @@ func TestLedgerViewDRepDelegationPreservesAbsence(t *testing.T) {
 		lv, db := committeeTestView(
 			t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
 		)
-		raw, err := dbtest.RawSQLiteMetadata(t, db)
-		require.NoError(t, err)
 		stake := bytes.Repeat([]byte{0xd6}, lcommon.Blake2b224Size)
-		_, err = raw.Exec(`
-INSERT INTO account (
-    staking_key, reward, active, added_slot, credential_tag, drep_type
-) VALUES (?, '0', TRUE, 1, 0, ?)`, stake, models.DrepTypeAddrKeyHash)
-		require.NoError(t, err)
+		require.NoError(t, seedCreateAccount(
+			t, db, t.Context(), nil, &models.Account{
+				StakingKey: stake,
+				DrepType:   models.DrepTypeAddrKeyHash,
+				Active:     true,
+				AddedSlot:  1,
+			},
+		))
 
 		delegation, err := lv.DRepDelegation(lcommon.Credential{
 			CredType:   lcommon.CredentialTypeAddrKeyHash,
@@ -6782,20 +6727,26 @@ func TestWithTxValidationSessionKeepsMalformedVrfPoolKeyRetryable(
 ) {
 	t.Parallel()
 
-	db, _ := newStoredHashDB(t, func(store *storedHashStore) {
-		store.poolByVrfKeyHash = &models.Pool{
-			PoolKeyHash: bytes.Repeat([]byte{0xd7}, lcommon.Blake2b224Size-1),
-		}
-	})
+	db := newStorageFaultTestDB(t)
+	vrfKey := lcommon.Blake2b256{0xd8}
 	ls := newFakeEraLedgerState(db, func(
 		_ lcommon.Transaction,
 		_ uint64,
 		state lcommon.LedgerState,
 		_ lcommon.ProtocolParameters,
 	) error {
-		_, _, err := state.IsVrfKeyInUse(lcommon.Blake2b256{0xd8})
+		_, _, err := state.IsVrfKeyInUse(vrfKey)
 		return err
 	}, nil)
+	shortPoolKey := bytes.Repeat([]byte{0xd7}, lcommon.Blake2b224Size-1)
+	fxFaultedLedger(t, ls, SetFaultsForTest{
+		ExtraPoolHistory: map[string][]PoolEvent{
+			string(shortPoolKey): {{Registration: &models.PoolRegistration{
+				PoolKeyHash: shortPoolKey,
+				VrfKeyHash:  vrfKey.Bytes(),
+			}}},
+		},
+	})
 
 	err := ls.WithTxValidationSession(t.Context(), func(
 		validate func(
@@ -6811,6 +6762,10 @@ func TestWithTxValidationSessionKeepsMalformedVrfPoolKeyRetryable(
 	})
 
 	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	require.NotErrorIs(
+		t, err, ErrDrainedFamilyUnserved,
+		"the fault must be the malformed row, not a set that is not open",
+	)
 	var semanticErr *semanticTxValidationError
 	require.False(t, errors.As(err, &semanticErr))
 }
@@ -6821,7 +6776,7 @@ func TestLedgerViewCommitteeProposalDecodeRecordsStorageFault(t *testing.T) {
 	pparams := committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin)
 	lv, db := committeeTestView(t, pparams)
 	cold := committeeTestCredential(0x94)
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(
 		context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        governanceTestHash(0x95),
@@ -6923,6 +6878,10 @@ func seedImportedDrep(
 	active bool,
 ) {
 	t.Helper()
+	if seedLedgerOf(db) != nil {
+		drepSeedRegistered(t, db, cred, &deposit, slot, active)
+		return
+	}
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
 	hash := append([]byte(nil), cred.Credential[:]...)
@@ -7041,7 +7000,7 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 	cred := drepRefundTestCredential(0xd4)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: tag,
 		Credential:    append([]byte(nil), cred.Credential[:]...),
 		AddedSlot:     100,
@@ -7066,7 +7025,7 @@ func TestDRepRegistrationRecordsMalformedStoredAnchor(t *testing.T) {
 	cred := drepRefundTestCredential(0xd5)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.CreateDrep(t.Context(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, t.Context(), nil, &models.Drep{
 		CredentialTag: tag,
 		Credential:    append([]byte(nil), cred.Credential[:]...),
 		AnchorURL:     "https://example.invalid/malformed",
@@ -7119,7 +7078,7 @@ func seedActiveDrepWithoutRegistration(
 	t.Helper()
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.InsertDrepIfAbsent(context.Background(),
+	require.NoError(t, seedDB(t, db).InsertDrepIfAbsent(context.Background(),
 		tag,
 		cred.Credential[:],
 		slot,
@@ -7130,7 +7089,7 @@ func seedActiveDrepWithoutRegistration(
 	))
 	// The recovery path really does leave no registration row behind; if it
 	// ever starts writing one this test is measuring the wrong thing.
-	recorded, err := db.GetDrepLastRegistrationDeposit(context.Background(),
+	recorded, err := seedDB(t, db).GetDrepLastRegistrationDeposit(context.Background(),
 		tag,
 		cred.Credential[:],
 		nil,
@@ -7401,34 +7360,51 @@ func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
 			proposals: 2, drepVotes: 3, spoVotes: 3, ccMembers: 3,
 		}, "")
 		key := epochBoundaryBenchHash(0x30, 1)
-		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-		require.NoError(t, err)
-		var pool []byte
-		require.NoError(t, raw.QueryRow(
-			`SELECT pool FROM account WHERE credential_tag = 0 AND staking_key = ?`,
-			key,
-		).Scan(&pool))
-		deregisterSlot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000
-		_, err = raw.Exec(`
-UPDATE account SET active = 0, pool = NULL, added_slot = ?
-WHERE credential_tag = 0 AND staking_key = ?`, deregisterSlot, key)
-		require.NoError(t, err)
-		_, err = raw.Exec(`
-UPDATE reward_live_stake SET registered = 0, pool_key_hash = NULL,
-    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
-			deregisterSlot, key,
+		cred := lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(key),
+		}
+		registered, err := seedDB(t, f.db).GetAccountByCredential(
+			context.Background(), 0, key, false, nil,
 		)
 		require.NoError(t, err)
-		_, err = raw.Exec(`
-INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
-VALUES (?, ?, 0, '2000000')`, deregisterSlot, key)
-		require.NoError(t, err)
-		require.NoError(t, raw.Close())
+		pool := bytes.Clone(registered.Pool)
+		require.NotEmpty(t, pool)
+		applyCerts := func(slot uint64, seed byte, certs ...lcommon.Certificate) {
+			t.Helper()
+			builder := mockledger.NewTransactionBuilder()
+			builder.WithId(bytes.Repeat([]byte{seed}, 32))
+			builder.WithValid(true)
+			input, err := mockledger.NewSimpleTransactionInput(
+				bytes.Repeat([]byte{seed + 2}, 32), 0,
+			)
+			require.NoError(t, err)
+			builder.WithInputs(input)
+			output, err := mockledger.NewTransactionOutputBuilder().
+				WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+				WithLovelace(1_000_000).
+				Build()
+			require.NoError(t, err)
+			builder.WithOutputs(output)
+			builder.WithCertificates(certs...)
+			tx, err := builder.Build()
+			require.NoError(t, err)
+			fxApplyTx(
+				t, f.db, tx,
+				ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 1}, 32)),
+				0, nil,
+			)
+		}
+		deregisterSlot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000
+		applyCerts(deregisterSlot, 0x71, &lcommon.StakeDeregistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeStakeDeregistration),
+			StakeCredential: cred,
+		})
 
 		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 			epochBoundaryBenchPrecomputeEvent(),
 		))
-		precomputed, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		precomputed, err := seedDB(t, f.db).GetRewardAccountOutputs(8, nil)
 		require.NoError(t, err)
 		var targetAmount uint64
 		for _, output := range precomputed {
@@ -7441,34 +7417,23 @@ VALUES (?, ?, 0, '2000000')`, deregisterSlot, key)
 		require.Positive(t, targetAmount)
 
 		if reregister {
-			raw, err = dbtest.RawSQLiteMetadata(t, f.db)
-			require.NoError(t, err)
-			registerSlot := deregisterSlot + 1_000
-			_, err = raw.Exec(`
-UPDATE account SET active = 1, pool = ?, added_slot = ?
-WHERE credential_tag = 0 AND staking_key = ?`, pool, registerSlot, key)
-			require.NoError(t, err)
-			_, err = raw.Exec(`
-UPDATE reward_live_stake SET registered = 1, pool_key_hash = ?,
-    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
-				pool, registerSlot, key,
+			applyCerts(
+				deregisterSlot+1_000, 0x73,
+				&lcommon.StakeRegistrationCertificate{
+					CertType:        uint(lcommon.CertificateTypeStakeRegistration),
+					StakeCredential: cred,
+				},
+				&lcommon.StakeDelegationCertificate{
+					CertType:        uint(lcommon.CertificateTypeStakeDelegation),
+					StakeCredential: &cred,
+					PoolKeyHash:     lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool)),
+				},
 			)
-			require.NoError(t, err)
-			_, err = raw.Exec(`
-INSERT INTO registration (staking_key, credential_tag, added_slot)
-VALUES (?, 0, ?)`, key, registerSlot)
-			require.NoError(t, err)
-			_, err = raw.Exec(`
-INSERT INTO stake_delegation
-    (staking_key, credential_tag, pool_key_hash, added_slot)
-VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
-			require.NoError(t, err)
-			require.NoError(t, raw.Close())
 		}
 
 		f.rollover(t)
 		f.ls.waitEpochBoundaryBenchBackground()
-		account, err := f.db.GetAccountByCredential(context.Background(), 0, key, true, nil)
+		account, err := seedDB(t, f.db).GetAccountByCredential(context.Background(), 0, key, true, nil)
 		require.NoError(t, err)
 		var balance *uint64
 		if account.Active {
@@ -7483,7 +7448,7 @@ VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
 			require.NoError(t, err)
 			require.NotNil(t, balance)
 		}
-		outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		outputs, err := seedDB(t, f.db).GetRewardAccountOutputs(8, nil)
 		require.NoError(t, err)
 		var spendable bool
 		for _, output := range outputs {
@@ -7491,7 +7456,7 @@ VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
 				spendable = output.Spendable
 			}
 		}
-		state, err := f.db.Metadata().GetNetworkState(nil)
+		state, err := seedDB(t, f.db).GetNetworkState(nil)
 		require.NoError(t, err)
 		return outcome{
 			storedReward: uint64(account.Reward), balance: balance,
@@ -7539,9 +7504,9 @@ func TestEmptyGenesisCommitteeLookupFailure(t *testing.T) {
 	ls, _ := genesisConstitutionTestState(t)
 	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = nil
 	wantErr := errors.New("committee storage unavailable")
-	ls.db = newStorageFaultTestDB(t, errInjectingMetadataStore{
-		getCommitteeMembersErr: wantErr,
-	})
+	ls.db = newStorageFaultTestDB(t)
+	ls.config.UtxoSet = nil
+	fxFaultedLedger(t, ls, SetFaultsForTest{Committee: wantErr})
 	available, err := ls.NewView(nil).CommitteeStateAvailable()
 	require.ErrorIs(t, err, wantErr)
 	require.False(t, available)
@@ -7623,7 +7588,7 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 
 	coldKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
 	require.NoError(t, err)
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 		{
 			ColdCredentialTag: 0,
 			ColdCredHash:      coldKey,
@@ -7676,7 +7641,7 @@ func TestCreateGenesisBlockConstitutionEnactmentWins(t *testing.T) {
 
 	enactedAnchor := bytes.Repeat([]byte{0xe1}, lcommon.Blake2b256Size)
 	enactedScript := bytes.Repeat([]byte{0xe2}, lcommon.Blake2b224Size)
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/enacted",
 		AnchorHash: enactedAnchor,
 		PolicyHash: enactedScript,
@@ -7722,7 +7687,7 @@ func newTreasuryRolloverFixture(
 	cfg.ShelleyGenesisHash = treasuryRolloverGenesisHash
 	cfg.ShelleyGenesis().MaxLovelaceSupply = 45_000_000_000_000_000
 	currentEpoch := newTestEpoch(5, 500, 100, eras.ConwayEraDesc.Id)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot,
 		currentEpoch.EpochId,
 		currentEpoch.Nonce,
@@ -7734,7 +7699,7 @@ func newTreasuryRolloverFixture(
 		currentEpoch.LengthInSlots,
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(treasury, 1_000, 499, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(treasury, 1_000, 499, nil))
 
 	pparams := donationTestConwayPParams(10)
 	pparams.MinCommitteeSize = 1
@@ -7744,12 +7709,12 @@ func newTreasuryRolloverFixture(
 
 	coldCredential := repeatByte(28, 0xc1)
 	hotCredential := repeatByte(28, 0xc2)
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: currentEpoch.EpochId + 20,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
+	require.NoError(t, seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -7771,6 +7736,7 @@ INSERT INTO auth_committee_hot (
 			)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	return &treasuryRolloverFixture{
 		ls:             ls,
 		db:             db,
@@ -7809,7 +7775,7 @@ func (f *treasuryRolloverFixture) proposal(
 	proposal *models.GovernanceProposal,
 ) *models.GovernanceProposal {
 	t.Helper()
-	loaded, err := f.db.GetGovernanceProposal(context.Background(),
+	loaded, err := seedDB(t, f.db).GetGovernanceProposal(context.Background(),
 		proposal.TxHash,
 		proposal.ActionIndex,
 		nil,
@@ -7863,6 +7829,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	const (
 		initialTreasury = uint64(1_000)
@@ -7887,7 +7854,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.NoError(t, err)
 	withdrawAddrBytes, err := withdrawAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
@@ -7901,7 +7868,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.NoError(t, err)
 	ratifiedEpoch := endedEpoch
 	ratifiedSlot := uint64(400)
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        make([]byte, 32),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -7918,20 +7885,30 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	}, nil))
 
 	// Initial treasury/reserves and the ending epoch's donation.
-	require.NoError(t, db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		initialTreasury, initialReserves, 1, nil,
 	))
-	require.NoError(t, db.Metadata().AddNetworkDonation(
-		70, endedEpoch, donation, nil,
-	))
+	beforeDonation := fxPoint(1)
+	fxTip(t, ls, beforeDonation)
+	fxBlock(t, ls, fxPoint(70), func(
+		ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
+		return ldb.AddNetworkDonation(70, endedEpoch, donation, txn)
+	})
 
-	runBoundary := func() uint64 {
+	// The boundary commits as the block at boundarySlot the first time. Its
+	// replay commits under no new point, as a boundary replayed before the
+	// tip advanced does.
+	runBoundary := func(point *ocommon.Point) uint64 {
 		t.Helper()
 		var providerTreasury uint64
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if point != nil {
+				ls.stageUtxoSet(dbadapter.Txn(txn), point)
+			}
 			if _, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-				DB:           dbadapter.New(db),
+				DB:           ls.ledgerDB(),
 				Txn:          txn,
 				PrevEpoch:    endedEpoch,
 				NewEpoch:     endedEpoch + 1,
@@ -7959,17 +7936,18 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 		return providerTreasury
 	}
 
-	require.Equal(t, uint64(900), runBoundary())
+	boundary := fxPoint(boundarySlot)
+	require.Equal(t, uint64(900), runBoundary(&boundary))
 
 	// Withdrawal (400) was applied against the pre-donation treasury (1000),
 	// then the donation (300) was added: 1000 - 400 + 300 = 900.
-	treasury, reserves, _ := networkState(t, db)
+	treasury, reserves, _ := fxNetworkState(t, db)
 	assert.Equal(t, uint64(900), treasury,
 		"treasury = initial - withdrawal + donation")
 	assert.Equal(t, initialReserves, reserves)
 
 	// The withdrawal credited the registered reward account.
-	account, err := db.GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
+	account, err := seedDB(t, db).GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),
@@ -7979,26 +7957,24 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	// the boundary after reward application rewrites the absolute pot row.
 	// The enacted proposal and reward credit are replay-idempotent, while the
 	// provider must still expose the same post-withdrawal, post-donation value.
-	require.NoError(t, db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		initialTreasury,
 		initialReserves,
 		boundarySlot,
 		nil,
 	))
-	require.Equal(t, uint64(900), runBoundary())
+	require.Equal(t, uint64(900), runBoundary(nil))
 	requireTreasuryValue(t, ls, nil, 900)
 
-	account, err = db.GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
+	account, err = seedDB(t, db).GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),
 		"boundary replay must not double-credit the withdrawal")
 
-	// Rewinding before both the donation block and boundary restores the
-	// earlier pot row. These are the same slot-keyed deletes used by the
-	// database rollback path.
-	require.NoError(t, db.DeleteNetworkStateAfterSlot(context.Background(), 1, nil))
-	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(context.Background(), 1, nil))
+	// Rewinding before both the donation block and the boundary restores the
+	// earlier pot row along the set's journal.
+	fxRollback(t, ls, beforeDonation)
 	requireTreasuryValue(t, ls, nil, initialTreasury)
 }
 
@@ -8041,6 +8017,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 			db := newTestDB(t)
 			ls := previewWedgeLedgerState(t)
 			ls.db = db
+			fxAttachLedgerDB(t, ls)
 
 			var probeErr error
 			var probed bool
@@ -8307,6 +8284,15 @@ func seedStakeRegistration(
 	certDeposits := map[int]uint64{}
 	if deposit != nil {
 		certDeposits[0] = *deposit
+	}
+	if seedLedgerOf(db) != nil {
+		fxApplyTx(
+			t, db, tx,
+			ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
+			0,
+			certDeposits,
+		)
+		return
 	}
 	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
 		tx,
@@ -8739,7 +8725,7 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 			f.ls.currentPParams = params
 			require.NoError(
 				t,
-				f.db.SetEpoch(
+				seedDB(t, f.db).SetEpoch(
 					500,
 					5,
 					f.currentEpoch.Nonce,
@@ -8756,7 +8742,7 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 			var observed []uint64
 			f.ls.SetEpochBoundarySnapshotStakeHook(
 				func(txn ledgerdb.Txn, _ event.EpochTransitionEvent) error {
-					account, err := f.db.GetAccountByCredential(
+					account, err := f.ls.ledgerDB().GetAccountByCredential(
 						t.Context(),
 						0,
 						credential,
@@ -8819,7 +8805,7 @@ func TestGenesisKeyDelegationThroughEraValidation(t *testing.T) {
 	)
 	// Genesis key 0x11 certified a new delegate at slot 100, which stays
 	// pending for the whole stability window.
-	seedGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
+	fxGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
 		GenesisHash:         genesisKey(0x11),
 		GenesisDelegateHash: delegateOf(3).Bytes(),
 		VrfKeyHash:          bytes.Repeat([]byte{0xf1}, lcommon.Blake2b256Size),

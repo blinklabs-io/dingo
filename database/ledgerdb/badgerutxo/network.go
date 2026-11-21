@@ -15,6 +15,7 @@
 package badgerutxo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -255,4 +256,27 @@ func (s *Store) NetworkStateLoaded() (bool, error) {
 		return err
 	})
 	return ok, err
+}
+
+// DeleteDonationsForEpoch deletes the donation rows of epoch. A ledger-state
+// import replaces them with the snapshot's total for the epoch; the set
+// cannot roll back below the snapshot, so nothing is journaled.
+func (s *Store) DeleteDonationsForEpoch(epoch uint64) error {
+	return s.update(func(txn *badger.Txn) error {
+		var keys [][]byte
+		err := eachPrefix(txn, []byte{DonationTag}, func(k, v []byte) error {
+			_, e, _, err := decodeSlotPair(k, v)
+			if err != nil {
+				return err
+			}
+			if e == epoch {
+				keys = append(keys, bytes.Clone(k))
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return deleteKeys(txn, keys)
+	})
 }

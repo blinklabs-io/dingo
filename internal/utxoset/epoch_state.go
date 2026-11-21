@@ -250,12 +250,14 @@ func DecodeEpochRows(rows []badgerutxo.EpochRow) ([]models.Epoch, error) {
 }
 
 // PoolStakeSnapshots returns epoch's snapshot rows of typ, every type when
-// typ is empty.
+// typ is empty, in pool order within a type. A positive limit stops the read
+// after that many rows.
 func (s *Set) PoolStakeSnapshots(
 	epoch uint64,
 	typ string,
+	limit int,
 ) ([]*models.PoolStakeSnapshot, error) {
-	rows, err := s.store.Snapshots(epoch, typ)
+	rows, err := s.store.Snapshots(epoch, typ, limit)
 	if err != nil {
 		return nil, err
 	}

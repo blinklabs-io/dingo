@@ -195,16 +195,6 @@ func (ls *LedgerState) DrainedFamilies() nodesettings.FamilyMask {
 	return nodesettings.FamilyMask(ls.drainedFamilies.Load())
 }
 
-// familyDrained reports whether the metadata store no longer holds f's rows.
-func (ls *LedgerState) familyDrained(f nodesettings.Family) bool {
-	return ls.DrainedFamilies().Has(f)
-}
-
-// familiesDrained reports whether any family of mask is drained.
-func (ls *LedgerState) familiesDrained(mask nodesettings.FamilyMask) bool {
-	return slices.ContainsFunc(mask.Families(), ls.familyDrained)
-}
-
 func (ls *LedgerState) unavailableAsOf(what string) error {
 	return fmt.Errorf(
 		"%w: the live UTxO set cannot read %s",

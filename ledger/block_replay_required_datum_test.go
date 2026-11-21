@@ -64,7 +64,7 @@ func newReplayTestLedger(
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                testLogger(),

@@ -17,7 +17,6 @@ package indexer
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -149,32 +147,14 @@ func outputResolver(
 	}
 }
 
-// CaptureAnchorDigest implements AnchorFacts. The ledger's core-mode sweep
-// later hard-deletes outputs spent after the anchor, so its set at the anchor
-// can be digested only until then; the digest is taken when the anchor is
-// recorded and kept with it.
+// CaptureAnchorDigest implements AnchorFacts. The ledger can rebuild its set
+// at the anchor only while its journal reaches back that far, so the digest
+// is taken when the anchor is recorded and kept with it.
 func (f *MetadataFacts) CaptureAnchorDigest(
 	ctx context.Context,
 	anchor uint64,
 ) (metadata.UtxoSetDigest, error) {
-	if f.anchorState != nil {
-		digest, err := f.anchorState.AnchorUtxoDigest(ctx, anchor)
-		if err != nil {
-			return metadata.UtxoSetDigest{}, fmt.Errorf(
-				"digest ledger UTxO set: %w", err,
-			)
-		}
-		return digest, nil
-	}
-	srcStore, ok := f.src.Metadata().(metadata.AnchorStateStore)
-	if !ok {
-		return metadata.UtxoSetDigest{}, errors.New(
-			"indexer: ledger metadata store cannot digest its UTxO set",
-		)
-	}
-	digest, err := srcStore.LiveUtxoDigestWithOutputs(
-		ctx, anchor, outputResolver(ctx, f.src), nil,
-	)
+	digest, err := f.ledger.AnchorUtxoDigest(ctx, anchor)
 	if err != nil {
 		return metadata.UtxoSetDigest{}, fmt.Errorf(
 			"digest ledger UTxO set: %w", err,
@@ -184,9 +164,6 @@ func (f *MetadataFacts) CaptureAnchorDigest(
 }
 
 var _ AnchorFacts = (*MetadataFacts)(nil)
-
-// journalPage bounds the reward journal rows read per statement.
-const journalPage = 20_000
 
 type credential struct {
 	key string
@@ -202,12 +179,6 @@ func (f *MetadataFacts) CopyAnchorState(
 	dst *database.Txn,
 	anchor uint64,
 ) error {
-	srcStore, ok := f.src.Metadata().(metadata.AnchorStateStore)
-	if !ok && f.anchorState == nil {
-		return errors.New(
-			"indexer: ledger metadata store cannot export anchor state",
-		)
-	}
 	dstStore, ok := f.dst.Metadata().(metadata.AnchorStateStore)
 	if !ok {
 		return errors.New(
@@ -216,8 +187,7 @@ func (f *MetadataFacts) CopyAnchorState(
 	}
 	// The journal and the balances are read at one point of the ledger, which
 	// keeps moving while the writer runs.
-	source := f.anchorState
-	var readTxn types.Txn
+	source := metadata.AnchorStateSource(f.ledger)
 	if viewer, ok := source.(metadata.AnchorStateViewer); ok {
 		view, release, err := viewer.AnchorStateView(ctx)
 		if err != nil {
@@ -225,9 +195,6 @@ func (f *MetadataFacts) CopyAnchorState(
 		}
 		defer release()
 		source = view
-	} else if source == nil {
-		readTxn = f.src.Metadata().ReadTransaction(ctx)
-		defer readTxn.Rollback() //nolint:errcheck // a read-only transaction
 	}
 	// Signed: credits add and withdrawals subtract, and a total that would
 	// take a balance below zero means the journal and the balance disagree.
@@ -247,56 +214,14 @@ func (f *MetadataFacts) CopyAnchorState(
 		}
 		return nil
 	}
-	if source != nil {
-		if err := source.EachAnchorRewardJournal(
-			ctx, anchor, note,
-		); err != nil {
-			return err
-		}
-	} else {
-		var cursor int64
-		for {
-			entries, next, err := srcStore.ReadRewardJournalAfter(
-				ctx, anchor, cursor, journalPage, readTxn,
-			)
-			if err != nil {
-				return err
-			}
-			for _, e := range entries {
-				if err := note(e); err != nil {
-					return err
-				}
-			}
-			if next == 0 {
-				break
-			}
-			cursor = next
-		}
+	if err := source.EachAnchorRewardJournal(ctx, anchor, note); err != nil {
+		return err
 	}
 	var cursor []byte
 	for {
-		var (
-			accounts []metadata.ImportedAccount
-			next     []byte
-			err      error
+		accounts, next, err := source.AnchorImportedAccounts(
+			ctx, anchor, cursor, factPageRows,
 		)
-		if source != nil {
-			accounts, next, err = source.AnchorImportedAccounts(
-				ctx, anchor, cursor, factPageRows,
-			)
-		} else {
-			var id int64
-			if len(cursor) != 0 {
-				id = int64(binary.BigEndian.Uint64(cursor)) //nolint:gosec // an id
-			}
-			var nextID int64
-			accounts, nextID, err = srcStore.ReadImportedAccounts(
-				ctx, anchor, id, factPageRows, readTxn,
-			)
-			if nextID != 0 {
-				next = binary.BigEndian.AppendUint64(nil, uint64(nextID)) //nolint:gosec // an id
-			}
-		}
 		if err != nil {
 			return err
 		}
@@ -331,22 +256,9 @@ func (f *MetadataFacts) CopyAnchorState(
 	}
 }
 
-// RequireAnchorState implements AnchorFacts. A drained accounts family leaves
-// the imported accounts and their reward journal in the live UTxO set, which
-// serves them when it loaded them before the drain; a ledger with no such
-// source, or whose set lost them to a drain that came first, cannot.
+// RequireAnchorState implements AnchorFacts.
 func (f *MetadataFacts) RequireAnchorState(ctx context.Context) error {
-	mask, err := f.src.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return fmt.Errorf("read drained ledger families: %w", err)
-	}
-	if !mask.Has(nodesettings.FamilyAccounts) {
-		return nil
-	}
-	if f.anchorState == nil {
-		return ErrAnchorUnserved
-	}
-	if err := f.anchorState.AnchorStateReady(ctx); err != nil {
+	if err := f.ledger.AnchorStateReady(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrAnchorUnserved, err)
 	}
 	return nil
@@ -360,27 +272,9 @@ func (f *MetadataFacts) CopyAnchorOpCerts(
 	dst *database.Txn,
 	anchor uint64,
 ) error {
-	var counters []metadata.OpCertCounter
-	if f.anchorOps != nil {
-		var err error
-		if counters, err = f.anchorOps.AnchorOpCertCounters(
-			ctx, anchor,
-		); err != nil {
-			return err
-		}
-	} else {
-		srcStore, ok := f.src.Metadata().(metadata.AnchorStateStore)
-		if !ok {
-			return errors.New(
-				"indexer: ledger metadata store cannot export op-cert counters",
-			)
-		}
-		var err error
-		if counters, err = srcStore.ReadOpCertCountersAt(
-			ctx, anchor, nil,
-		); err != nil {
-			return err
-		}
+	counters, err := f.ledger.AnchorOpCertCounters(ctx, anchor)
+	if err != nil {
+		return err
 	}
 	for _, c := range counters {
 		if len(c.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
@@ -406,12 +300,6 @@ func (f *MetadataFacts) VerifyAnchor(
 	replayedTransactions uint64,
 	captured *metadata.UtxoSetDigest,
 ) error {
-	srcStore, ok := f.src.Metadata().(metadata.AnchorStateStore)
-	if !ok {
-		return errors.New(
-			"indexer: ledger metadata store cannot digest its UTxO set",
-		)
-	}
 	dstStore, ok := f.dst.Metadata().(metadata.AnchorStateStore)
 	if !ok {
 		return errors.New(
@@ -428,56 +316,22 @@ func (f *MetadataFacts) VerifyAnchor(
 			ErrAnchorMismatch, applied, replayedTransactions,
 		)
 	}
-	var want, got metadata.UtxoSetDigest
-	if captured != nil {
-		want = *captured
-		got, err = dstStore.LiveUtxoDigestWithOutputs(
-			ctx, anchor, outputResolver(ctx, f.dst), nil,
+	if captured == nil {
+		// No digest was captured when the anchor was recorded, and the
+		// ledger's journal may no longer reach back to it.
+		slog.Warn(
+			"skipping the anchor UTxO set comparison: no digest of the "+
+				"ledger's UTxO set at the anchor was captured",
+			"component", "indexer", "anchor_slot", anchor,
 		)
-		if err != nil {
-			return fmt.Errorf("digest indexer UTxO set: %w", err)
-		}
-	} else {
-		// No digest was captured when the anchor was recorded. The ledger's
-		// core-mode sweep hard-deletes spent rows past the anchor, so its
-		// digest at the anchor is then missing rows the replay rightly
-		// holds, and the two cannot be compared.
-		inMetadata := true
-		if f.anchorState != nil {
-			var err error
-			if inMetadata, err = f.anchorState.AnchorUtxoInMetadata(anchor); err != nil {
-				return fmt.Errorf("locate the ledger UTxO set: %w", err)
-			}
-		}
-		if !inMetadata {
-			slog.Warn(
-				"skipping the anchor UTxO set comparison: the ledger no "+
-					"longer holds its UTxO set at the anchor",
-				"component", "indexer", "anchor_slot", anchor,
-			)
-			return nil
-		}
-		floor, err := f.src.ConsumedUtxoPruneFloor(nil)
-		if err != nil {
-			return err
-		}
-		if floor > anchor {
-			slog.Warn(
-				"skipping the anchor UTxO set comparison: the ledger "+
-					"database has removed spent outputs past the anchor",
-				"component", "indexer", "anchor_slot", anchor,
-				"consumed_utxo_prune_floor", floor,
-			)
-			return nil
-		}
-		want, err = srcStore.LiveUtxoDigest(ctx, anchor, nil)
-		if err != nil {
-			return fmt.Errorf("digest ledger UTxO set: %w", err)
-		}
-		got, err = dstStore.LiveUtxoDigest(ctx, anchor, nil)
-		if err != nil {
-			return fmt.Errorf("digest indexer UTxO set: %w", err)
-		}
+		return nil
+	}
+	want := *captured
+	got, err := dstStore.LiveUtxoDigestWithOutputs(
+		ctx, anchor, outputResolver(ctx, f.dst), nil,
+	)
+	if err != nil {
+		return fmt.Errorf("digest indexer UTxO set: %w", err)
 	}
 	if want.Count != got.Count || !bytes.Equal(want.Digest[:], got.Digest[:]) {
 		return fmt.Errorf(
