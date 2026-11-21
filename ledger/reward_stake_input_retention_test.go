@@ -326,3 +326,34 @@ func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
 	defer p.mu.Unlock()
 	return p.utxoFloorSlot
 }
+
+func TestPendingRewardInputWriteRejectsMalformedRecord(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	staged := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: ls}
+	valid, err := FormatRewardStakeInputsPending(
+		[]RewardStakeInputsPendingEntry{{Epoch: 1, BoundarySlot: 100}},
+	)
+	require.NoError(t, err)
+	for _, invalid := range []string{"{", "null", "{}", `{"entries":{}}`, `{"entries":[],"unknown":1}`} {
+		t.Run(invalid, func(t *testing.T) {
+			require.NoError(
+				t,
+				staged.SetSyncState(rewardStakeInputsPendingKey, valid, nil),
+			)
+			require.Error(
+				t,
+				staged.SetSyncState(rewardStakeInputsPendingKey, invalid, nil),
+			)
+			got, err := db.Metadata().
+				GetSyncState(rewardStakeInputsPendingKey, nil)
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				valid,
+				got,
+				"rejected pending record must not overwrite durable state",
+			)
+		})
+	}
+}

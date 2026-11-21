@@ -724,7 +724,7 @@ func (w *Writer) replay(ctx context.Context, anchor indexerdb.Tip) error {
 			return err
 		}
 		done, err := w.step(ctx, &anchor, false)
-		if errors.Is(err, errForked) {
+		if errors.Is(err, errForked) || errors.Is(err, errBatchShrunk) {
 			continue
 		}
 		if err != nil {
