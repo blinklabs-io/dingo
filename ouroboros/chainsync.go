@@ -2577,33 +2577,39 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			tip.BlockNumber,
 		) {
 			// A connection with a due or fired re-intersection is already
-			// being recycled; its in-flight headers must not take the shared
-			// window from another stale peer. A later-onset future-header
-			// timer withholds every header until it fires, so it is replaced.
+			// being recycled, so its in-flight headers stay withheld. A
+			// later-onset future-header timer is replaced by this immediate
+			// recovery. When another connection owns the shared recycle
+			// window, however, this header continues through verification and
+			// observation: the cooldown limits re-intersections, not candidate
+			// progress, and this may be a competing chain streaming forward
+			// from its negotiated intersection.
 			now := time.Now()
-			if o.headerResyncDueOrFired(ctx.ConnectionId, now) ||
-				!o.claimBehindTipRecycle(now) {
+			if o.headerResyncDueOrFired(ctx.ConnectionId, now) {
 				return nil
 			}
-			// The connection may already have left the connection manager,
-			// or another schedule may have won; neither recycles anything.
-			if !o.scheduleHeaderResync(
-				ctx.ConnectionId,
-				now,
-				event.ChainsyncResyncReasonBehindLocalTip,
-			) {
-				o.releaseBehindTipRecycle(now)
-				return nil
+			if o.claimBehindTipRecycle(now) {
+				// The connection may already have left the connection manager,
+				// or another schedule may have won. In either case no recovery
+				// owns this header, so it continues through normal admission.
+				if !o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					now,
+					event.ChainsyncResyncReasonBehindLocalTip,
+				) {
+					o.releaseBehindTipRecycle(now)
+				} else {
+					o.config.Logger.Debug(
+						"chainsync: cursor far behind the local tip",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"block_number", v.BlockNumber(),
+						"peer_tip_block_number", tip.BlockNumber,
+						"connection_id", ctx.ConnectionId.String(),
+					)
+					return nil
+				}
 			}
-			o.config.Logger.Debug(
-				"chainsync: cursor far behind the local tip",
-				"component", "ouroboros",
-				"slot", blockSlot,
-				"block_number", v.BlockNumber(),
-				"peer_tip_block_number", tip.BlockNumber,
-				"connection_id", ctx.ConnectionId.String(),
-			)
-			return nil
 		}
 		// Raw observer history does not seed an admitted candidate frontier.
 		// Starting above the applied suffix would leave a gap that cannot
@@ -4104,7 +4110,8 @@ func (o *Ouroboros) chainsyncCursorCondemned(
 	o.chainsyncReintersectMu.Lock()
 	defer o.chainsyncReintersectMu.Unlock()
 	run := o.chainsyncReintersecting[ctx.ConnectionId]
-	return run != nil && run.client == ctx.Client && !run.settled
+	return run != nil && run.client == ctx.Client && !run.settled &&
+		!run.preserveReplies
 }
 
 // chainsyncCursorEpoch counts connId's in-place re-intersects. A callback
@@ -4239,6 +4246,17 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					len(connIds),
 				)
 				for _, connId := range connIds {
+					// The peer may already have rolled its live protocol cursor
+					// back to the same point and started streaming the competing
+					// branch while ledger recovery was running. Re-intersecting
+					// that cursor condemns its pipelined descendants until the
+					// drain completes, which can take one block per outstanding
+					// AwaitReply. Keep the ordered stream that already continues
+					// from the authoritative rollback point instead.
+					if o.chainsyncState != nil &&
+						o.chainsyncState.ClientProtocolChainContains(connId, e.Point) {
+						continue
+					}
 					if o.localRollbackReintersectsInbound(ctx, connId, e.Reason) {
 						continue
 					}
@@ -4400,6 +4418,23 @@ type chainsyncReintersectRun struct {
 	// again is set when the client found an intersection that was not
 	// settled because a resync had been absorbed; the run re-intersects.
 	again bool
+	// preserveReplies keeps validating the ordered replies already requested
+	// when a local verification-context change caused the re-intersection.
+	// Those descendants can resolve the deferred competing chain while the
+	// request window drains. Cursor-gap and rollback recoveries leave this
+	// false because their old replies no longer describe a usable cursor.
+	preserveReplies bool
+}
+
+func chainsyncReintersectPreservesReplies(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonHeaderValidationRecovery,
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+		event.ChainsyncResyncReasonForecastCorroborationRecovery:
+		return true
+	default:
+		return false
+	}
 }
 
 // startChainsyncReintersect re-intersects connId's chainsync client in the
@@ -4429,6 +4464,8 @@ func (o *Ouroboros) startChainsyncReintersect(
 	if prev := o.chainsyncReintersecting[connId]; prev != nil &&
 		prev.client == client && !prev.settled {
 		prev.absorbed = true
+		prev.preserveReplies = prev.preserveReplies &&
+			chainsyncReintersectPreservesReplies(reason)
 		o.chainsyncReintersectMu.Unlock()
 		o.config.Logger.Debug(
 			"chainsync re-intersect already running",
@@ -4437,7 +4474,10 @@ func (o *Ouroboros) startChainsyncReintersect(
 		)
 		return true
 	}
-	run := &chainsyncReintersectRun{client: client}
+	run := &chainsyncReintersectRun{
+		client:          client,
+		preserveReplies: chainsyncReintersectPreservesReplies(reason),
+	}
 	o.chainsyncReintersecting[connId] = run
 	o.chainsyncReintersectMu.Unlock()
 	go func() {

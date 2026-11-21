@@ -63,9 +63,8 @@ func PoolRegistrationSupersedes(latest, effective *models.PoolRegistration) bool
 	return latest.RegistrationIndex > effective.RegistrationIndex
 }
 
-// CleanPoolRegistration copies r without the metadata store's row IDs,
-// deposit and Leios registration-epoch bookkeeping, which the set does not
-// keep with the registration.
+// CleanPoolRegistration copies the fields held in live pool state, including
+// the Leios key registration epoch used to interpret the key's age.
 func CleanPoolRegistration(
 	r *models.PoolRegistration,
 ) *models.PoolRegistration {
@@ -82,6 +81,7 @@ func CleanPoolRegistration(
 		MetadataHash:               r.MetadataHash,
 		LeiosKeyPublic:             r.LeiosKeyPublic,
 		LeiosKeyPossessionProof:    r.LeiosKeyPossessionProof,
+		LeiosKeyRegistrationEpoch:  r.LeiosKeyRegistrationEpoch,
 		Pledge:                     r.Pledge,
 		Cost:                       r.Cost,
 		AddedSlot:                  r.AddedSlot,

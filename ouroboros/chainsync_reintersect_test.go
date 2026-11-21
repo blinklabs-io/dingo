@@ -822,6 +822,49 @@ func TestDrainedRepliesOfReintersectingClientAreDropped(t *testing.T) {
 	require.NotNil(t, evt.Data.(ledger.ChainsyncEvent).BlockHeader)
 }
 
+// A verification-context recovery replays a withheld header, but its ordered
+// pipelined descendants can be verified against the newly published state
+// while Reintersect drains its old request window. Dropping them freezes the
+// competing candidate for one block per outstanding AwaitReply.
+func TestDeferredRecoveryKeepsDrainedCandidateReplies(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	f.rollback(t, ocommon.Point{})
+	for {
+		select {
+		case <-f.ledgerCh:
+			continue
+		default:
+		}
+		break
+	}
+	client := &ochainsync.Client{}
+	cb := ochainsync.CallbackContext{ConnectionId: f.conn, Client: client}
+	f.o.chainsyncReintersectMu.Lock()
+	f.o.chainsyncReintersecting[f.conn] = &chainsyncReintersectRun{
+		client: client,
+		preserveReplies: chainsyncReintersectPreservesReplies(
+			event.ChainsyncResyncReasonHeaderValidationRecovery,
+		),
+	}
+	f.o.chainsyncReintersectMu.Unlock()
+
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		cb, 0, newTestBlockHeader(100, 1, 0xaa), ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, []byte("advertised")),
+			BlockNumber: 2,
+		}, time.Now(),
+	))
+	require.EqualValues(t, 1, f.verified.Load(),
+		"a verification recovery must keep authenticating its ordered replies")
+	evt := testutil.RequireReceive(
+		t, f.ledgerCh, 5*time.Second,
+		"the verified descendant must remain available to chain selection",
+	)
+	require.NotNil(t, evt.Data.(ledger.ChainsyncEvent).BlockHeader)
+}
+
 // "Rollback point not found" means the peer's cursor and the local view of its
 // chain no longer line up: a header that does not fit and whose ancestry the
 // node does not hold, or a rollback to a point it does not hold. A fresh
@@ -921,6 +964,40 @@ func TestLocalRollbackWithoutPeerHistoryReintersectsInboundInPlace(
 	)
 	require.Same(t, conn, f.cm.GetConnectionById(f.connId),
 		"a local rollback must keep the inbound connection")
+}
+
+// A competing peer can roll its protocol cursor back to the same point that
+// the ledger then adopts and immediately stream descendants. Re-intersecting
+// that already-correct cursor would condemn every pipelined descendant while
+// the old request window drains, freezing its chain-selection frontier.
+func TestLocalRollbackPreservesCursorAlreadyStreamingFromPoint(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	session := f.state.ClientSession(f.connId)
+	f.state.RecordClientProtocolPoint(f.connId, session, f.intersect)
+	next := newTestBlockHeader(f.intersect.Slot+1, 4, 0xa5)
+	f.state.RecordClientRollForward(
+		f.connId,
+		session,
+		ocommon.NewPoint(next.SlotNumber(), next.Hash().Bytes()),
+		next.Era().Id,
+		false,
+		4,
+	)
+	require.True(t, f.state.ClientProtocolChainContains(f.connId, f.intersect))
+	findsBefore := f.findIntersects.Load()
+	forwardsBefore := f.rollForwards.Load()
+
+	f.publishLocalRollback(f.intersect)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.rollForwards.Load() > forwardsBefore },
+		5*time.Second,
+		"the existing cursor must keep streaming",
+	)
+	require.Equal(t, findsBefore, f.findIntersects.Load(),
+		"a cursor already continuing from the rollback point must not re-intersect")
+	require.True(t, f.connected())
 }
 
 // An outbound connection is still closed so peer governance redials it from

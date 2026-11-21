@@ -820,7 +820,9 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting.
+rejected without waiting. A competing header that verifies after the wait is
+admitted on the same ChainSync session, so its descendants can make that fork
+long enough to replace the incumbent through ordinary chain selection.
 Queue admission has the same tolerance: a verdict that a tip publication expires
 between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
@@ -3393,6 +3395,8 @@ configures a certificate validator, so the era decides). A drained
 pools-history family answers it from the certificate history, whose events
 keep the effective slot. Otherwise, and for any
 other snapshot slot, the certificate history supplies the answer after migration.
+The live pool registration carries the Leios key registration epoch with its
+key material, so the key age follows the same state transition and rollback.
 The op-cert counter reads (`LatestPoolOpCertSequence`, `...After`,
 `...AtOrBefore`, `...InRange` and `LatestPoolOpCertSequences`) are
 answered from the set once it reports the counters loaded.
@@ -3828,7 +3832,9 @@ stake inputs without replaying blocks, so an idle chain does not delay their
 publication until another block arrives. The ledger journals a round's credits lazily, so credits dated
 before the writer's segment are re-read at the boundary slot of every round
 that still holds unfolded outputs, and each applied credit marks its output
-folded. With the
+folded. Each bounded journal page is ordered by credential, slot and source
+before it is applied, matching the reward journal's credential-leading unique
+index without retaining a whole reward round in memory. With the
 accounts family drained the journal is the live UTxO set's reward records,
 which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The
@@ -9806,7 +9812,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   publication that makes it stale removes the candidate from corroboration and
   triggers recovery. A verified winning fork releases its old generation pin
   before rolling back, then re-intersects so the fork suffix is verified against
-  the generation the rollback publishes. Genesis-overlay parameters remain
+  the generation the rollback publishes. If the peer's ordered protocol cursor
+  has already rolled back to the same point and is streaming descendants, local
+  rollback recovery preserves that cursor: re-intersecting it would discard the
+  pipelined competing suffix until the old request window drained.
+  Re-intersections caused only by a changed or deferred verification context
+  likewise keep verifying their already-requested ordered replies while the
+  mini-protocol drains; a later rollback or cursor-gap recovery condemns them.
+  Genesis-overlay parameters remain
   authoritative for later slots within the applied epoch and era, so a tip
   earlier within that epoch does not by itself defer the overlay decision;
   headers requiring a different epoch or era's parameters remain deferred until
@@ -23025,6 +23038,14 @@ witness was orphaned would be mis-restored to a far-past registration epoch or
 reset to 0. Explicit membership is required because a deregistered account row
 may exist at activation without being stamped. Because the marker gates the
 whole stamp, later rollovers never repeat it.
+When the accounts family is served by the live set, the activation write also
+stores membership and `A` in each stamped account record. The account journal
+therefore restores both fields with the expiration on rollback, and the reward
+application guard reads the floor from the same set-owned state as the account
+and witness history instead of consulting the drained SQL relation. Startup
+adds this provenance to legacy account encodings from the SQL membership, or
+from the exact pre-boundary journal view when activation occurred after drain;
+it does not continue with an unavailable, inexact floor.
 Rolling back before epoch `A` clears expiration for the exact membership set,
 returns its credentials, deletes the membership rows, and unions those
 credentials with credentials witnessed after the rollback point. The ledger then
@@ -24514,16 +24535,20 @@ applied ledger tip by more than the security parameter `k` in block number,
 while the peer's advertised tip does not, holds a stale cursor and is resynced
 the same way, but only while chain selection has no best peer (`GetBestPeer()`
 is nil, read through `ChainsyncHasBestPeer`), with
-`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a connection can
-never contribute: the ledger discards its headers as stale and chain selection
-skips the peer, while it holds an ingress slot that a peer at the tip could use.
-The check runs in the callback after `reconcileChainsyncIngressAdmission`, so an
-observer promoted with a cursor left far behind is resynced on its first header.
+`ChainsyncResyncReasonBehindLocalTip` and no peer denial. Re-intersection can
+move a stale cursor closer, while an honest peer whose chain left the local
+chain at an older intersection must still be allowed to stream its competing
+candidate forward. The check runs in the callback after
+`reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor left
+far behind is resynced on its first header.
 The shared per-connection timer marker allows one resync per connection until it
 reconnects. At most one such recycle is requested across all connections per 30
 seconds (`claimBehindTipRecycle`), so a gap with many lagging honest peers does
 not recycle all of them at once and leave only a near-tip peer; over a sustained
-gap they are still recycled one window at a time. A connection whose
+gap they are still recycled one window at a time. A header whose connection
+cannot take that shared window continues through verification and candidate
+observation, so the churn bound cannot freeze a competing peer's delivered
+frontier. A connection whose
 re-intersection has fired or is already due does not take that window; a
 future-header timer with a later onset is replaced by an immediate one, since it
 withholds every header until it fires. A claim that schedules nothing (the

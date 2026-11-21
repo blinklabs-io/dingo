@@ -15,6 +15,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"testing"
@@ -163,6 +164,49 @@ func TestMetadataFactsKeepsAnUnfoldedOutputPending(t *testing.T) {
 	require.Equal(t, "40", r.reward(t))
 	require.Zero(t, r.journalRows(t))
 	require.False(t, r.outputFolded(t))
+}
+
+func TestMetadataFactsOrdersRewardJournalPageByCredential(t *testing.T) {
+	t.Parallel()
+	src, srcRaw := newFactsDB(t)
+	dst, dstRaw := newFactsDB(t)
+	f, err := NewMetadataFacts(src, dst)
+	require.NoError(t, err)
+
+	keys := [][]byte{
+		[]byte("stake-z-credential-0123456789"),
+		[]byte("stake-a-credential-0123456789"),
+		[]byte("stake-m-credential-0123456789"),
+	}
+	for _, key := range keys {
+		_, err = dstRaw.Exec(`INSERT INTO account
+			(staking_key, credential_tag, added_slot, created_slot, reward, active)
+			VALUES (?, 0, 1, 1, '0', 1)`, key)
+		require.NoError(t, err)
+	}
+	for i, key := range keys {
+		_, err = srcRaw.Exec(`INSERT INTO account_reward_delta
+			(staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal)
+			VALUES (?, 0, ?, '1', 10, 0)`, key, bytes.Repeat([]byte{byte(i + 1)}, 32))
+		require.NoError(t, err)
+	}
+
+	writeFacts(t, f, func(txn *database.Txn) error {
+		_, err := f.applyJournalRange(context.Background(), txn, 10, 10, 0)
+		return err
+	})
+	rows, err := dstRaw.Query(`SELECT staking_key
+		FROM account_reward_delta ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got [][]byte
+	for rows.Next() {
+		var key []byte
+		require.NoError(t, rows.Scan(&key))
+		got = append(got, key)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, [][]byte{keys[1], keys[2], keys[0]}, got)
 }
 
 func TestMetadataFactsDefersStakeInputsTheLedgerStillWrites(t *testing.T) {

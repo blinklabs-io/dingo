@@ -744,6 +744,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
 		return err
 	}
+	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
+		return err
+	}
 	if err := s.ensureDrepState(ctx, ldb); err != nil {
 		return err
 	}

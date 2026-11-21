@@ -142,6 +142,13 @@ type Account struct {
 	// Drep.ExpiryEpoch. Set/bumped by RenewAccountExpirations and the one-time
 	// activation stamp; only read when the delegator-inactivity gate is on.
 	ExpirationEpoch uint64
+	// InactivityActivation records that this account was active when the
+	// one-time CIP-0163 activation stamp ran. The epoch is the activation
+	// floor used when retained witness history predates that stamp. These
+	// fields are owned by the live set; SQL stores the same relation in
+	// account_inactivity_activation.
+	InactivityActivation      bool
+	InactivityActivationEpoch uint64
 }
 
 // AccountInactivityActivation records the exact reward-account credentials
@@ -174,7 +181,8 @@ func (r StakeCredentialRef) MapKey() string {
 // credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
 // TxHash so rollback can restore the cleared reward balance.
 //
-// The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
+// The unique index idx_account_reward_delta_credential_slot_kind_source
+// includes AddedSlot.
 // Withdrawal writers use TxHash and the credential as their logical replay key,
 // regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) use an
 // event discriminator in TxHash when one is available and otherwise use the
@@ -202,7 +210,7 @@ type AccountRewardDelta struct {
 	// needs both this rule marker and the boundary's era.
 
 	// Not indexed: it is only ever read alongside added_slot for a single
-	// boundary slot, which idx_account_reward_delta_credential/added_slot
+	// boundary slot, which the credential-leading unique and added-slot indexes
 	// already narrow.
 	PostSnapshot bool
 }
