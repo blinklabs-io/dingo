@@ -5117,7 +5117,14 @@ journal before it kept them). Then:
    anchor, streamed in pages in (transaction hash, output index) order, equals
    the digest of the ledger database's set (outputs added at or before the
    anchor and not spent at or before it). Each output's stored CBOR (assets,
-   inline datum, reference script) is part of the digest. The ledger's digest
+   inline datum, reference script) is part of the digest, hashed as a snapshot
+   import stores it so that block bytes and imported bytes of one output agree:
+   a legacy array output (including a Byron output's inline address) in map
+   form, the value in the MemPack form (zero quantities and then empty
+   policies dropped, a bare coin when no assets remain, policies and asset
+   names in bytewise order, shortest integer heads), and the address, datum
+   and reference script with shortest length heads around an inline datum's
+   and a native script's own bytes. The ledger's digest
    is taken when the anchor is recorded and kept as `indexer_anchor_digest`,
    because the ledger's core-mode sweep deletes spent rows and the set at the
    anchor cannot be digested once its `consumed_utxo_prune_floor` is past it.
