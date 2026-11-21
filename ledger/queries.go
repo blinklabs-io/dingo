@@ -293,9 +293,10 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
 // answerable by every point-aware query type below -- not just that it is
 // still on this node's chain (verifyPointOnChain), but that it is not older
-// than the strictest per-query-type retention floor (UTxO whole/by-ref via
-// checkUtxoRetentionWindow, stake/pool distribution via
-// PoolStakeDistribution's own recency check, current protocol parameters
+// than the strictest per-query-type retention floor (the live UTxO journal
+// via liveUtxoView, consumed UTxO rows via checkUtxoRetentionWindow,
+// stake and pool distribution via PoolStakeDistribution's own recency check,
+// current protocol parameters
 // via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
 // via queryHardFork's HardForkCurrentEraQuery case, which independently
 // returns ErrHistoricalStateUnavailable and so must be covered here too).
@@ -362,6 +363,21 @@ func (ls *LedgerState) VerifyPointQueryable(
 	}
 	if err := ls.checkMithrilTrustBoundary(at); err != nil {
 		return err
+	}
+	utxoView, err := ls.liveUtxoView(at, txn)
+	if err != nil {
+		if errors.Is(err, ErrUtxoAsOfUnavailable) {
+			return fmt.Errorf(
+				"%w: live UTxO history does not reach slot %d: %w",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				err,
+			)
+		}
+		return err
+	}
+	if utxoView != nil {
+		utxoView.Close()
 	}
 	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 		return err
