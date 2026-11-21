@@ -19,15 +19,20 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/drainfix"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -52,16 +57,31 @@ func stateHash(slot uint64) []byte {
 
 func newReimportFixture(t *testing.T) *reimportFixture {
 	t.Helper()
+	return newReimportFixtureWith(t, database.ImmutableConfig{}, nil)
+}
+
+// newReimportFixtureWith is newReimportFixture for a database with the given
+// ImmutableDB configuration, on which setup runs before the state is loaded.
+func newReimportFixtureWith(
+	t *testing.T,
+	immutableCfg database.ImmutableConfig,
+	setup func(*database.Database),
+) *reimportFixture {
+	t.Helper()
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardano.EmbeddedConfigPath("preview"), "preview", cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DataDir:   t.TempDir(),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Immutable: immutableCfg,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	if setup != nil {
+		setup(db)
+	}
 	set, err := utxoset.Open(utxoset.Config{
 		Dir: t.TempDir(), Only: true, Authoritative: true,
 	})
@@ -73,7 +93,7 @@ func newReimportFixture(t *testing.T) *reimportFixture {
 		states:  map[string]uint64{},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, _, _, err = importLedgerState(
+	_, _, err = importLedgerState(
 		t.Context(), db, logger, nodeCfg,
 		verifiedAncillaryStateAt(t, "1000", minimalLedgerState(t, 1000, stateHash(1000))),
 		false, 1000, set, nil,
@@ -303,4 +323,90 @@ func TestReimportLedgerStateRecordsTheSwapBeforeItFinishes(t *testing.T) {
 	require.Equal(t, database.LedgerReimportPointMark(ocommon.Point{
 		Slot: 2000, Hash: stateHash(2000),
 	}), got)
+}
+
+// newReimportFixtureWithImmutableTip is newReimportFixture for a database
+// whose ImmutableDB records its tip at slot 2000.
+func newReimportFixtureWithImmutableTip(t *testing.T) *reimportFixture {
+	t.Helper()
+	return newReimportFixtureWith(
+		t,
+		database.ImmutableConfig{Enabled: true, ChunkSlots: 1000},
+		func(db *database.Database) {
+			files, hashes := validImmutableChunk(t, 2000, 2, common.Blake2b256{})
+			dir := t.TempDir()
+			for name, content := range files {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(dir, filepath.Base(name)), content, 0o640,
+				))
+			}
+			cm, err := chain.NewManager(t.Context(), db, nil)
+			require.NoError(t, err)
+			_, err = node.CopyImmutableBlocks(
+				t.Context(), cm.PrimaryChain(), immutableBlocksIn(t, dir),
+			)
+			require.NoError(t, err)
+			tip, err := database.BlockByPoint(
+				t.Context(), db, ocommon.NewPoint(2000, hashes[1]),
+			)
+			require.NoError(t, err)
+			_, err = db.PromoteThrough(t.Context(), tip.ID)
+			require.NoError(t, err)
+			own, ok := db.ImmutablePoint()
+			require.True(t, ok)
+			require.Equal(t, uint64(2000), own.Slot)
+		},
+	)
+}
+
+// TestReimportLedgerStateSelectsBelowTheImmutableDBTip requires a re-import
+// below a local tip that is past the recorded ImmutableDB tip to select a
+// state at or below that ImmutableDB tip, from the same artifact when it holds
+// one and from the next artifact when it does not.
+func TestReimportLedgerStateSelectsBelowTheImmutableDBTip(t *testing.T) {
+	t.Parallel()
+
+	t.Run("older state in the same artifact", func(t *testing.T) {
+		t.Parallel()
+		f := newReimportFixtureWithImmutableTip(t)
+		f.addArtifact("both", 2100)
+		f.onChain[2100], f.onChain[1800] = true, true
+		cfg := f.config(t, 2500)
+		cfg.bootstrap = func(
+			context.Context, BootstrapConfig,
+		) (*BootstrapResult, error) {
+			return verifiedAncillaryTree(t, map[string][]byte{
+				"ledger/2100/state": minimalLedgerState(t, 2100, stateHash(2100)),
+				"ledger/1800/state": minimalLedgerState(t, 1800, stateHash(1800)),
+			}), nil
+		}
+
+		point, err := ReimportLedgerState(t.Context(), cfg)
+		require.NoError(t, err)
+		require.Equal(t, ocommon.NewPoint(1800, stateHash(1800)), point)
+		requireReimportMarksCleared(t, f.db)
+	})
+
+	t.Run("state in the next artifact", func(t *testing.T) {
+		t.Parallel()
+		f := newReimportFixtureWithImmutableTip(t)
+		f.addArtifact("above", 2100)
+		f.addArtifact("good", 1800)
+		f.onChain[2100], f.onChain[1800] = true, true
+
+		point, err := ReimportLedgerState(t.Context(), f.config(t, 2500))
+		require.NoError(t, err)
+		require.Equal(t, ocommon.NewPoint(1800, stateHash(1800)), point)
+		require.Equal(t, []string{"above", "good"}, f.pinned)
+		requireReimportMarksCleared(t, f.db)
+	})
+}
+
+func requireReimportMarksCleared(t *testing.T, db *database.Database) {
+	t.Helper()
+	for _, key := range []string{"sync_status", database.LedgerReimportSyncKey} {
+		v, err := db.GetSyncState(key, nil)
+		require.NoError(t, err)
+		require.Empty(t, v, key)
+	}
 }

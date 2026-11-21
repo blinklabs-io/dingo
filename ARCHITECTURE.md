@@ -3434,8 +3434,8 @@ and come in (added slot, tag, hash) order where the store's come in
 insertion order; no consumer depends on either: the lookups match by
 credential, take the latest term by slot, or count, and the store's active
 members and hot authorizations have no order at all.
-The Mithril import and gap-block paths write these tables around the
-decorator; they rebuild the set through its bootstrap, which clears the
+The Mithril import writes these tables around the
+decorator; it rebuilds the set through its bootstrap, which clears the
 rows and their marker.
 
 Governance proposals and votes follow the same pattern, keyed by transaction
@@ -3532,7 +3532,7 @@ truncates the set with the databases (`WithUtxoSetBackup`,
 `WithTruncateUtxoSet`), and the live node closes the set around a restore or
 truncate and reopens it before the rebuilt ledger is built. See the live UTxO
 set sections of DATABASE.md for the marker, the manifest fields and the
-Mithril gap invalidation.
+Mithril import's governance invalidation.
 
 The set is always present and is the only copy: `LedgerStateConfig.UtxoSet`
 is required, and `NewLedgerState` refuses a ledger without one. The ledger
@@ -3736,7 +3736,7 @@ the metadata store whether live stake is drained
 (`Store.SetRewardLiveStakeDrained`): the store then no longer refreshes,
 rebuilds or probes `reward_live_stake`, so no account or UTxO write, rollback,
 resume or startup check touches the table. A Mithril
-import or catch-up, a backfill and a gap replay into a database with a latch
+import or catch-up and a backfill into a database with a latch
 bit or a drain marker are refused (`Database.RefuseLedgerStateRewrite`), the
 MCP raw-SQL tools refuse a table of a drained family, and the standalone
 Koios parity reader refuses a database drained of a family it reads.
@@ -5588,8 +5588,8 @@ registrations include the accumulated count when computing their initial
 expiry, while PV10 and later use the already-adjusted expiry model. Processing
 a governance proposal resets the consecutive dormant count, and both boundary
 increments and resets are slot-journaled for rollback.
-Backfill and gap replay of blocks at or below a Mithril anchor do not run
-these rules: they record each DRep's activity epoch but keep the imported
+Backfill of blocks at or below a Mithril anchor does not run
+these rules: it records each DRep's activity epoch but keeps the imported
 expiry and dormancy counter, which already account for every epoch the replay
 covers.
 
@@ -7397,21 +7397,21 @@ and governance updates run in that same order inside the block's single
 database transaction. Direct-deposit credits use the body hash in the reward
 rollback journal, so rollback and replay restore the account balance with the
 rest of the block. An invalid batch applies only the enclosing transaction's
-collateral outcome. Historical backfill and Mithril gap indexing also persist
-the child and enclosing body hashes and process governance per body; they do
+collateral outcome. Historical backfill also persists
+the child and enclosing body hashes and processes governance per body; it does
 not reapply direct deposits to account balances already represented by their
 imported state.
 
 Persisting a ParameterChange proposal re-applies the era's proposal rule to the
 whole enclosing transaction once, under the protocol parameters transaction
 validation used for it: the previous era's for a block of that era applied
-after the ledger advanced. Historical backfill and Mithril gap indexing select
+after the ledger advanced. Historical backfill selects
 parameters by epoch, and the epoch that starts an era is recorded with the
-successor era, so for a block of an earlier era than its epoch they take the
+successor era, so for a block of an earlier era than its epoch it takes the
 parameters, and the era, of that block's era's last epoch
 (`ledger.PreviousEraEpoch`); its certificate deposits use them too. Live
-application, replay with or without validation,
-historical backfill and Mithril gap indexing therefore fail a block that
+application, replay with or without validation
+and historical backfill therefore fail a block that
 carries a proposal the rule refuses, and no `governance_proposal` row is
 written for it. Ledger-state snapshot import is the exception: it stores the
 proposals the snapshot holds without running the rule.
@@ -7421,9 +7421,9 @@ block's slot and select one parameter set for the block's era. Proposal expiry
 and live DRep activity therefore use that same selection as proposal validation
 when an era-1 block is applied after the ledger has advanced. Rollback restores
 the current- and previous-era parameter snapshots before blocks re-enter this
-same replay path. Historical backfill and Mithril gap indexing also keep the
-block-slot epoch, but use the selected block-era parameters only for proposal
-validation, proposal lifetime, and certificate deposits: their DRep processing
+same replay path. Historical backfill also keeps the
+block-slot epoch, but uses the selected block-era parameters only for proposal
+validation, proposal lifetime, and certificate deposits: its DRep processing
 records historical activity while preserving the expiry imported in the
 ledger-state snapshot.
 
@@ -15169,8 +15169,9 @@ immutable import marker only while the pending repair marker remains; ordinary
 API-mode metadata replacement is rejected. A certified artifact may trail the
 local tip. Repair verifies that the artifact's immutable tip is an ancestor of
 the local chain and that the selected state is not earlier than the database's
-existing stable Mithril ledger point. A selected state beyond the local tip
-goes through the existing gap validation.
+existing stable Mithril ledger point. The state is selected at or below the
+last block of the artifact's immutable files, the signed ancillary chunk
+included, as for any import.
 Before replay, every repair rolls metadata back to the selected state slot,
 including restoring UTxOs spent afterward. When the local tip is beyond the
 certified tip, repair also verifies that state point on the local chain and
@@ -15615,7 +15616,7 @@ Every read of a bootstrapped tree goes through one of them:
 | tree | opened by | read by |
 |---|---|---|
 | immutable | `chunkDirIn` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
-| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore` bounded by the ImmutableDB tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | held for cleanup; the immutable lookup derives its handle from it |
 
 The v2 pipelined copy reads through the same handle extraction is writing
@@ -15847,18 +15848,34 @@ signed (`AncillaryVerified`) that yields no usable state at any slot fails the
 import, since emptying a signed tree is destruction rather than planting and
 nothing else vouches for a replacement.
 
-A verified ancillary tree holding only states newer than the certified
-ImmutableDB tip is the one case that is not treated as "yields no usable
-state": `selectLedgerStateSnapshot` (`mithril/sync_import.go`) retries such a
-tree with `ledgerstate.OpenNewestSnapshot`, which runs the same
-symlink/substitution-safe search. The selected slot and the parsed state's own
-tip must both remain within one Shelley stability window (3k/f) of the
-certified tip. That artifact-relative ceiling keeps the separately signed
-ancillary archive from selecting an unrelated future state. The relay gap
-fetch also stops after twice the Shelley security parameter in blocks, before
-retaining another block's CBOR, so its memory use is bounded. The ancillary
-manifest still authenticates the state bytes, while these two bounds establish
-their permitted relationship to the certified artifact.
+A ledger state is loaded only at or below the tip of the ImmutableDB the
+import builds, as the reference node discards a ledger snapshot more recent
+than its ImmutableDB tip. That ImmutableDB holds two things. The certified
+immutable files end at the certified tip. The ancillary archive also carries
+the immutable file after them, which the aggregator's node was still appending
+to, and its chunk, primary and secondary are covered by the signed ancillary
+manifest. `readAncillaryChunk` (`mithril/ancillary_chunk.go`) reads that file
+against the manifest digests, keeping the blocks up to the first that does not
+read back, since the file is copied while it is written. `landAncillaryChunk`
+stores those blocks after the certified ones through the same raw-block copy
+(`node.CopyImmutableBlocks`). An import that moved the certified chunk files
+into the database's ImmutableDB also appends them through the database's own
+chunk writer (`Database.PromoteThroughLocked`), so the recorded tip is the
+chunk's last block. Any database that records an ImmutableDB tip is promoted
+the same way, including a catch-up or repair that copied block bodies, so no
+state loads above the recorded tip; `requireStateInImmutableDB` refuses one
+that would. A chunk that does not continue the stored chain is an error.
+
+`selectLedgerStateSnapshot` (`mithril/sync_import.go`) then picks the newest
+state at or before that tip, and `requireStateInImmutableDB` checks the
+state's point is a stored block before anything is loaded. A state later than
+the tip is passed over for an older one in the tree; when there is none the
+import fails with `ErrLedgerStateTooRecent`. The ancillary signature
+authenticates the state bytes and does not widen this bound. An artifact
+whose ancillary tree was not verified against a signed manifest contributes no
+chunk, so its bound is the certified tip. Blocks after the selected state, in
+the ImmutableDB or beyond it, go through ordinary ledger replay and chain
+sync; the import fetches nothing from a relay.
 
 A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
@@ -16258,10 +16275,9 @@ contacted.
   file holding the history-expiry cutoff, `ledger slot − StabilityWindow` (3k/f
   from the Shelley genesis, `ledger.ShelleyStabilityWindow`, which the pruner's
   `StabilityWindow` also uses from Shelley on), downloads the ancillary archive
-  and verifies its Ed25519 manifest, parses the ledger state, and fetches any
-  blocks between the certified tip and a ledger state beyond it from a relay.
-  The same stability-window slot ceiling and security-parameter block limit used
-  by full sync apply here. No file below the cutoff's is requested. Probing
+  and verifies its Ed25519 manifest, reads the signed immutable file after the
+  certified tip from it, and parses the newest ledger state at or before that
+  file's last block. No file below the cutoff's is requested. Probing
   stops after `maxCutoffProbes` (16) files; the files below the lowest probe
   then come through a windowed feed from file 0, and that is logged. All of that
   is read-only; the restore's first write then records, in one metadata
@@ -16269,8 +16285,9 @@ contacted.
   `sync_status=in_progress` (a fresh database first has stray copies of the
   first two deleted), and does what `dingo mithril sync` does, through shared
   helpers: bulk-load pragmas and deferred indexes, block load
-  (`node.CopyImmutableBlocks`), ledger import (`importPreparedLedgerState`,
-  checkpointed by `"{digest}:{slot}"`), gap blocks, the stable ledger tip,
+  (`node.CopyImmutableBlocks`, then the signed ancillary chunk's blocks),
+  ledger import (`importPreparedLedgerState`,
+  checkpointed by `"{digest}:{slot}"`), the stable ledger tip,
   `finishMithrilImport` (critical index rebuild, planner statistics, the
   completion clear and the `mithril_ledger_slot`/`mithril_ledger_hash` trust
   boundary), then `mithril_immutable_max`, which makes `WasBootstrapped` true.
@@ -16388,11 +16405,11 @@ confirms either that the local chain tip is an ancestor of the target artifact's
 chain, or that the local chain is already ahead and its tip descends from the
 artifact tip; divergence aborts untouched. An ahead local chain short-circuits
 as up-to-date (advancing the marker) only when no sync is in progress. While
-resuming an interrupted catch-up, an ahead local chain is expected — the
-interrupted run's volatile gap-fill stored blocks past the artifact's sealed
-range — so the import proceeds instead of returning early, letting the
-idempotent pipeline finish gap-block transaction processing, the deferred index
-rebuild, and the sync-state cleanup that the interrupted run never reached. It
+resuming an interrupted catch-up, an ahead local chain is expected (the
+interrupted run stored the signed ancillary chunk's blocks past the artifact's
+certified range), so the import proceeds instead of returning early, letting
+the idempotent pipeline finish the deferred index rebuild and the sync-state
+cleanup that the interrupted run never reached. It
 then forward-copies the missing blocks and imports the new ledger state as a
 replacement boundary. The ledger import reconciles stale live rows
 (`ImportConfig.Reconcile`): the new snapshot is the complete ledger state at its
@@ -16655,13 +16672,13 @@ catching up), and only an explicit `SkipLeaderStakeThresholdCheck` test or
 embedder override skips the check.
 
 Mithril sync only uses a ledger state as the local trust anchor when its point
-is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
-contain a newer ledger state and volatile blocks signed by the ancillary
-publisher, but that signature authenticates the archive; it does not establish
-Ouroboros consensus validity for the volatile suffix. State-file selection is
-therefore capped at the certified immutable tip, the selected point is checked
-against the copied immutable chain, and sync fails closed when no such state is
-available.
+is a block at or below the tip of the ImmutableDB the import builds: the
+certified immutable files followed by the signed ancillary chunk. State-file
+selection is capped at that tip, the selected point is checked against the
+stored chain, and sync fails closed when no such state is available. Once the
+state is loaded the node is in the position of one that synced to that
+ImmutableDB tip: it replays the immutable blocks after the state, and a
+rollback is refused only below the immutable tip.
 
 The ledger refuses any rollback below the selected stable ledger slot
 (`mithrilLedgerSlot`), since intermediate UTxO states before that imported
@@ -16693,9 +16710,7 @@ consumed UTxO it cannot find or reconstruct from the blob store. By default
 for an unrecoverable input, because a normal from-origin node is expected to
 hold complete producer history. A non-genesis chainsync intersection without a
 Mithril snapshot may explicitly set `StrictUtxoValidation: false` when
-pre-intersect UTxOs are intentionally absent. Gap-block ingestion, which
-closes the range between the snapshot and the chain tip, consumes no inputs
-from the metadata store: the live UTxO set is already at or past that range.
+pre-intersect UTxOs are intentionally absent.
 
 That default recovery is deliberately one-sided: it only fires when the produced
 `utxo` row is *absent* from the metadata store, and it rebuilds it from the
@@ -16723,12 +16738,11 @@ and Leios endorser-block apply, where an absent producer is legitimately
 recovered, so this remains the primary prevention of that wedge while the
 K-guard and the non-convergence recovery hold remain as backstops.
 
-Certified immutable blocks after the selected anchor remain in the primary
+Immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
 node startup therefore replays that stable suffix through the ordinary ledger
-path. Blocks beyond the ImmutableDB tip are not imported from ancillary
-volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
-validates them normally. API-mode historical metadata backfill is capped at the
+path. Blocks beyond the ImmutableDB tip are not imported or pre-processed;
+chainsync/blockfetch obtains and validates them normally. API-mode historical metadata backfill is capped at the
 anchor so it cannot pre-apply and thereby bypass the ledger path for either
 suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
 resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
@@ -16745,7 +16759,7 @@ finalization, while allowing native PV10 cleanup of dangling replay-only
 targets. The global HARDFORK operation retains its cleared-account count and
 existing semantics. Protocol version 9 keeps its historical reverse set.
 Replayed DRep activity
-(backfill and gap blocks) records only the activity epoch and keeps the
+(backfill) records only the activity epoch and keeps the
 snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are
 resolved per epoch as replay reaches it, enacting the boundary's classic updates
@@ -16780,28 +16794,22 @@ aggregate `MaxBlockExUnits`, and operational-certificate counter checks;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 
-`processGapBlocks`, `SetGapBlockTransaction`, and
-`LedgerState.healMithrilGapBlockNonces` remain compatibility/recovery machinery
-for databases produced by older releases that advanced
-`mithril_ledger_slot` across an unvalidated gap. New imports do not create that
-shape: nonce folding and transaction effects after the stable anchor are
-produced by ordinary ledger replay. Compatibility gap fetches accept a relay
-batch only when it is non-empty, hash-linked from the requested start point,
-and terminates at the exact requested end point; a mismatch falls through to
-the next bootstrap peer before any block is stored.
+`LedgerState.healMithrilGapBlockNonces` remains recovery machinery for
+databases produced by older releases that advanced `mithril_ledger_slot`
+across blocks fetched from a relay. Imports no longer create that shape: nonce
+folding and transaction effects after the stable anchor are produced by
+ordinary ledger replay. `SetGapBlockTransaction`, which stored those blocks'
+transactions, has no caller in the import.
 
-When that compatibility path replays a gap transaction, it applies governance
-effects in ledger order: votes, DRep registration/update activity, proposals,
-then DRep deregistration cleanup. A deregistration-only transaction still clears
-that DRep's votes on active proposals. Conway certificate-state import also
-preserves the dormant-epoch count from both nested VState and historical
-flattened committee-state encodings, applying it to active DRep expiries. Once
-the flattened parser selects a DRep map, a decode error in any DRep key, expiry,
-anchor (URL, or a hash that is not 32 bytes), deposit or delegator fails the
-import; it must not checkpoint partial governance state as complete. Live
-application, backfill and gap replay require Conway protocol parameters only for
-transactions that read them (`governance.TransactionRequiresConwayParameters`);
-a transaction that only deregisters DReps applies without them.
+Conway certificate-state import preserves the dormant-epoch count from both
+nested VState and historical flattened committee-state encodings, applying it
+to active DRep expiries. Once the flattened parser selects a DRep map, a decode
+error in any DRep key, expiry, anchor (URL, or a hash that is not 32 bytes),
+deposit or delegator fails the import; it must not checkpoint partial
+governance state as complete. Live application and backfill require Conway
+protocol parameters only for transactions that read them
+(`governance.TransactionRequiresConwayParameters`); a transaction that only
+deregisters DReps applies without them.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,

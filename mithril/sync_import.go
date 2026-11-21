@@ -22,8 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,66 +32,16 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
-	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
 	mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey = "mithril_ledger_hash"
 )
-
-// ancillarySlotLimit returns the highest slot an ancillary ledger state may
-// carry: one Shelley stability window past the certified tip.
-func ancillarySlotLimit(
-	nodeCfg *cardano.CardanoNodeConfig,
-	certifiedTipSlot uint64,
-) (uint64, error) {
-	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
-		return 0, errors.New(
-			"bounding ancillary ledger state requires Shelley genesis",
-		)
-	}
-	window, err := dledger.ShelleyStabilityWindow(nodeCfg.ShelleyGenesis())
-	if err != nil {
-		return 0, fmt.Errorf("calculate ancillary gap window: %w", err)
-	}
-	if certifiedTipSlot > math.MaxUint64-window {
-		return 0, errors.New("ancillary gap slot bound overflows uint64")
-	}
-	return certifiedTipSlot + window, nil
-}
-
-// ancillaryBlockLimit returns the most blocks the relay gap fetch may
-// retain: twice the Shelley security parameter.
-func ancillaryBlockLimit(nodeCfg *cardano.CardanoNodeConfig) (int, error) {
-	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
-		return 0, errors.New(
-			"bounding ancillary gap blocks requires Shelley genesis",
-		)
-	}
-	k := nodeCfg.ShelleyGenesis().SecurityParam
-	if k <= 0 {
-		return 0, errors.New("ancillary gap security parameter is zero")
-	}
-	if k > math.MaxInt/2 {
-		return 0, errors.New("ancillary gap block bound overflows int")
-	}
-	return 2 * k, nil
-}
-
-// slotLimitFunc resolves the ancillary slot ceiling on demand, so a path
-// that never accepts state past the certified tip needs no Shelley genesis.
-type slotLimitFunc func() (uint64, error)
-
-func resolveSlotLimit(f slotLimitFunc) (uint64, error) {
-	if f == nil {
-		return 0, errors.New("ancillary slot limit is required")
-	}
-	return f()
-}
 
 // epochLengthFromConfig returns an EpochLengthFunc that resolves
 // era parameters from the Cardano node config.
@@ -213,8 +161,9 @@ func updateMithrilReadyState(
 	return nil
 }
 
-// selectLedgerStateSnapshot searches result's ancillary tree for the ledger
-// state to import.
+// selectLedgerStateSnapshot searches result's ancillary tree for the newest
+// ledger state at or before immutableTipSlot, the slot of the last block the
+// import puts in the ImmutableDB.
 //
 // It is searched through the handle the bootstrap vetted it with, and
 // discovery hands back the state and UTxO table already open rather than
@@ -222,148 +171,83 @@ func updateMithrilReadyState(
 // downstream: the bytes imported come from the files that were verified, and
 // no name is resolved between checking and reading.
 //
-// beyondCertifiedTip reports true only when the returned snapshot's slot is
-// known to exceed maxTrustedSlot because a verified ancillary tree's own
-// signed manifest vouches for it directly — the one case importLedgerState's
-// caller may accept a ledger state past the certified ImmutableDB tip.
+// A state later than immutableTipSlot is passed over for an older one, and
+// when the tree holds no older one the error is ErrLedgerStateTooRecent. The
+// ancillary signature does not change that: a state is loaded only where the
+// blocks behind it are in the ImmutableDB.
 func selectLedgerStateSnapshot(
 	logger *slog.Logger,
 	result *BootstrapResult,
-	maxTrustedSlot uint64,
-	slotLimit slotLimitFunc,
+	immutableTipSlot uint64,
 ) (
 	snapshot *ledgerstate.SnapshotFiles,
 	stateDir string,
 	signedBy map[string]string,
-	beyondCertifiedTip bool,
 	err error,
 ) {
-	type searchTree struct {
-		name string
-		root *os.Root
-		// digests is the signed ancillary manifest's digest map, present
-		// exactly when verified is set. Discovery hands back open files, and
-		// these are what the selected ones are re-checked against before
-		// anything is parsed.
-		digests map[string]string
-		// verified reports that this tree's contents were checked against the
-		// signed ancillary manifest. Nothing is looked at after one of these.
-		verified bool
-	}
-	searchTrees := []searchTree{}
-	if result.AncillaryRoot != nil {
-		// A tree claiming a signature but carrying no digest map cannot have
-		// its selected files re-checked, so the claim would stand on a check
-		// that ran earlier and closed every file it looked at. Refused rather
-		// than downgraded to an unverified read of a tree the flag says is
-		// verified.
-		if result.AncillaryVerified && len(result.AncillaryDigests) == 0 {
-			return nil, "", nil, false, errors.New(
-				"ancillary tree is marked verified but carries no signed " +
-					"manifest digests to check its files against",
-			)
-		}
-		searchTrees = append(searchTrees, searchTree{
-			result.AncillaryDir,
-			result.AncillaryRoot,
-			result.AncillaryDigests,
-			result.AncillaryVerified,
-		})
-	}
-	if len(searchTrees) == 0 {
+	if result.AncillaryRoot == nil {
 		if !result.CertificateVerified {
-			return nil, "", nil, false, errors.New(
+			return nil, "", nil, errors.New(
 				"bootstrap produced no ancillary ledger state to import",
 			)
 		}
-		return nil, "", nil, false, errors.New(
+		return nil, "", nil, errors.New(
 			"bootstrap result carries no verified directory handle to " +
 				"import ledger state from",
 		)
 	}
-
-	for _, tree := range searchTrees {
-		files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
-			tree.root,
-			maxTrustedSlot,
-		)
-		if findErr == nil {
-			return files, tree.name, tree.digests, false, nil
-		}
-		// A tree holding something unusable — a symlink, a substitution, a
-		// state that exists but will not open — fails the import rather than
-		// being treated as empty.
-		if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
-			return nil, "", nil, false, fmt.Errorf(
-				"inspecting ledger state in %s: %w", tree.name, findErr,
-			)
-		}
-		if tree.verified {
-			// A verified ancillary tree holding only states newer than the
-			// certified tip is ordinary, not adversarial: the aggregator
-			// packages the ancillary ledger state from the source node's
-			// volatile database, and that can move past the certified
-			// ImmutableDB boundary between the two being packaged. The
-			// manifest signature already vouches for this exact state, so
-			// accepting it is not the "moved from a signed tree to an
-			// unsigned one" downgrade the refusal below exists to prevent —
-			// nothing is substituted, and the caller still compares this slot
-			// against the certified tip before deciding whether to honor it.
-			newest, newestSlot, newestErr := ledgerstate.OpenNewestSnapshot(
-				tree.root,
-			)
-			if newestErr == nil {
-				limit, limitErr := resolveSlotLimit(slotLimit)
-				if limitErr == nil && newestSlot > limit {
-					limitErr = fmt.Errorf(
-						"ancillary ledger state slot %d exceeds artifact-relative limit %d",
-						newestSlot, limit,
-					)
-				}
-				if limitErr != nil {
-					newest.Close()
-					return nil, "", nil, false, limitErr
-				}
-				logger.Info(
-					"ancillary ledger state is newer than the certified "+
-						"tip; accepting it on the ancillary manifest's own "+
-						"signature",
-					"component", "mithril",
-					"dir", tree.name,
-					"slot", newestSlot,
-					"max_trusted_slot", maxTrustedSlot,
-				)
-				return newest, tree.name, tree.digests, true, nil
-			}
-			if !errors.Is(newestErr, ledgerstate.ErrNoUsableLedgerState) {
-				return nil, "", nil, false, fmt.Errorf(
-					"inspecting ledger state in %s: %w", tree.name, newestErr,
-				)
-			}
-			// Genuinely nothing here at any slot: the tree the signature
-			// covers was truly emptied or never populated, which is exactly
-			// the case this guard exists for. Falling through would move the
-			// import from a tree the ancillary key signed to one nothing
-			// vouches for, and whoever emptied the first would have chosen
-			// the second.
-			return nil, "", nil, false, fmt.Errorf(
-				"verified ancillary data in %s has no usable ledger state; "+
-					"refusing to import one from elsewhere: %w",
-				tree.name, findErr,
-			)
-		}
-		logger.Debug(
-			"ledger state not found in directory",
-			"component", "mithril",
-			"dir", tree.name,
-			"error", findErr,
+	// A tree claiming a signature but carrying no digest map cannot have
+	// its selected files re-checked, so the claim would stand on a check
+	// that ran earlier and closed every file it looked at. Refused rather
+	// than downgraded to an unverified read of a tree the flag says is
+	// verified.
+	if result.AncillaryVerified && len(result.AncillaryDigests) == 0 {
+		return nil, "", nil, errors.New(
+			"ancillary tree is marked verified but carries no signed " +
+				"manifest digests to check its files against",
 		)
 	}
-
-	return nil, "", nil, false, fmt.Errorf(
-		"no ledger state at or before certified ImmutableDB tip slot %d; "+
-			"refusing to trust a volatile ancillary ledger state: %w",
-		maxTrustedSlot, ledgerstate.ErrNoUsableLedgerState,
+	files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
+		result.AncillaryRoot,
+		immutableTipSlot,
+	)
+	if findErr == nil {
+		return files, result.AncillaryDir, result.AncillaryDigests, nil
+	}
+	// A tree holding something unusable (a symlink, a substitution, a state
+	// that exists but will not open) fails the import rather than being
+	// treated as empty.
+	if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
+		return nil, "", nil, fmt.Errorf(
+			"inspecting ledger state in %s: %w", result.AncillaryDir, findErr,
+		)
+	}
+	newest, newestSlot, newestErr := ledgerstate.OpenNewestSnapshot(
+		result.AncillaryRoot,
+	)
+	if newestErr != nil {
+		if !errors.Is(newestErr, ledgerstate.ErrNoUsableLedgerState) {
+			return nil, "", nil, fmt.Errorf(
+				"inspecting ledger state in %s: %w",
+				result.AncillaryDir, newestErr,
+			)
+		}
+		return nil, "", nil, fmt.Errorf(
+			"no ledger state at or before ImmutableDB tip slot %d in %s: %w",
+			immutableTipSlot, result.AncillaryDir, findErr,
+		)
+	}
+	newest.Close()
+	logger.Warn(
+		"discarding ancillary ledger state later than the ImmutableDB tip",
+		"component", "mithril",
+		"dir", result.AncillaryDir,
+		"slot", newestSlot,
+		"immutable_tip_slot", immutableTipSlot,
+	)
+	return nil, "", nil, fmt.Errorf(
+		"%w: state slot %d, ImmutableDB tip slot %d: %w",
+		ErrLedgerStateTooRecent, newestSlot, immutableTipSlot, findErr,
 	)
 }
 
@@ -379,29 +263,25 @@ func importLedgerState(
 	nodeCfg *cardano.CardanoNodeConfig,
 	result *BootstrapResult,
 	reconcile bool,
-	maxTrustedSlot uint64,
+	immutableTipSlot uint64,
 	utxoSet ledgerstate.UtxoSetLoader,
 	onLedger func(ledgerstate.ImportProgress),
 	beforeImport ...func(*preparedLedgerStateImport) error,
 ) (
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
-	beyondCertifiedTip bool,
 	err error,
 ) {
 	prepared, err := prepareLedgerStateImport(
-		logger, result, maxTrustedSlot,
-		func() (uint64, error) {
-			return ancillarySlotLimit(nodeCfg, maxTrustedSlot)
-		},
+		logger, result, immutableTipSlot,
 	)
 	if err != nil {
-		return 0, nil, false, err
+		return 0, nil, err
 	}
 	defer prepared.Close()
 	for _, hook := range beforeImport {
 		if err := hook(prepared); err != nil {
-			return 0, nil, false, err
+			return 0, nil, err
 		}
 	}
 	return importPreparedLedgerState(
@@ -411,10 +291,14 @@ func importLedgerState(
 }
 
 type preparedLedgerStateImport struct {
-	snapshot           *ledgerstate.SnapshotFiles
-	state              *ledgerstate.RawLedgerState
-	stateDir           string
-	beyondCertifiedTip bool
+	snapshot *ledgerstate.SnapshotFiles
+	state    *ledgerstate.RawLedgerState
+	stateDir string
+}
+
+// point is the block the prepared ledger state was taken at.
+func (p *preparedLedgerStateImport) point() ocommon.Point {
+	return ocommon.NewPoint(p.state.Tip.Slot, p.state.Tip.BlockHash)
 }
 
 func (p *preparedLedgerStateImport) Close() {
@@ -426,14 +310,12 @@ func (p *preparedLedgerStateImport) Close() {
 func prepareLedgerStateImport(
 	logger *slog.Logger,
 	result *BootstrapResult,
-	maxTrustedSlot uint64,
-	slotLimit slotLimitFunc,
+	immutableTipSlot uint64,
 ) (_ *preparedLedgerStateImport, err error) {
-	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
+	snapshot, stateDir, signedBy, err := selectLedgerStateSnapshot(
 		logger,
 		result,
-		maxTrustedSlot,
-		slotLimit,
+		immutableTipSlot,
 	)
 	if err != nil {
 		return nil, err
@@ -451,7 +333,7 @@ func prepareLedgerStateImport(
 		"found ledger state file",
 		"component", "mithril",
 		"path", lstatePath,
-		"max_trusted_slot", maxTrustedSlot,
+		"immutable_tip_slot", immutableTipSlot,
 	)
 
 	// Read once, from the file discovery opened. There is no name here to
@@ -504,23 +386,13 @@ func prepareLedgerStateImport(
 			"parsed ledger state has no tip (Origin snapshot)",
 		)
 	}
-	if state.Tip.Slot > maxTrustedSlot {
-		if !beyondCertifiedTip {
-			return nil, fmt.Errorf(
-				"ancillary ledger state tip slot %d exceeds its selected slot boundary %d",
-				state.Tip.Slot, maxTrustedSlot,
-			)
-		}
-		limit, limitErr := resolveSlotLimit(slotLimit)
-		if limitErr != nil {
-			return nil, limitErr
-		}
-		if state.Tip.Slot > limit {
-			return nil, fmt.Errorf(
-				"ancillary ledger state tip slot %d exceeds artifact-relative limit %d",
-				state.Tip.Slot, limit,
-			)
-		}
+	// The directory a state sits in names its slot; the state itself is what
+	// says where it was taken.
+	if state.Tip.Slot > immutableTipSlot {
+		return nil, fmt.Errorf(
+			"%w: state slot %d, ImmutableDB tip slot %d",
+			ErrLedgerStateTooRecent, state.Tip.Slot, immutableTipSlot,
+		)
 	}
 
 	nonceHex := "neutral"
@@ -538,10 +410,9 @@ func prepareLedgerStateImport(
 		"epoch_nonce", nonceHex,
 	)
 	return &preparedLedgerStateImport{
-		snapshot:           snapshot,
-		state:              state,
-		stateDir:           stateDir,
-		beyondCertifiedTip: beyondCertifiedTip,
+		snapshot: snapshot,
+		state:    state,
+		stateDir: stateDir,
 	}, nil
 }
 
@@ -558,13 +429,11 @@ func importPreparedLedgerState(
 ) (
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
-	beyondCertifiedTip bool,
 	err error,
 ) {
 	// The prepared object keeps the selected files open from verification
 	// through import, so the UTxO table and state are the checked files.
 	state := prepared.state
-	beyondCertifiedTip = prepared.beyondCertifiedTip
 
 	// Build import key for resume tracking. A catch-up reconcile must run the
 	// full import pass (so its snapshot key set is complete), so resume is
@@ -623,9 +492,9 @@ func importPreparedLedgerState(
 			},
 		},
 	); err != nil {
-		return 0, nil, false, fmt.Errorf("importing ledger state: %w", err)
+		return 0, nil, fmt.Errorf("importing ledger state: %w", err)
 	}
-	return state.Tip.Slot, state.Tip.BlockHash, beyondCertifiedTip, nil
+	return state.Tip.Slot, state.Tip.BlockHash, nil
 }
 
 // importCheckpointKey is the checkpoint key an import of the state at slot

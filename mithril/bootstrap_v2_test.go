@@ -510,6 +510,10 @@ type v2FixtureOptions struct {
 	validLedgerStateUTxOMap cbor.RawMessage
 	ancillaryLedgerState    []byte
 	ancillaryLedgerSlot     uint64
+	// ancillaryChunk, keyed by "chunk", "primary" and "secondary", is the
+	// immutable trio after the certified one that the ancillary archive
+	// carries, instead of placeholder bytes.
+	ancillaryChunk map[string][]byte
 	// ancillaryHonorsRange serves the ancillary archive with Range support,
 	// so resuming a fully cached file yields 416 with the total size, the way
 	// object storage does.
@@ -800,6 +804,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	for _, ext := range []string{"chunk", "primary", "secondary"} {
 		name := fmt.Sprintf("immutable/%05d.%s", nextTrio, ext)
 		ancillaryFiles[name] = fmt.Appendf(nil, "ancillary-%s", name)
+		if content, ok := opts.ancillaryChunk[ext]; ok {
+			ancillaryFiles[name] = content
+		}
 	}
 	manifest := ancillaryManifest{Data: map[string]string{}}
 	for name, content := range ancillaryFiles {
