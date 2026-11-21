@@ -2780,7 +2780,7 @@ UTxO changes. Their tags and markers are declared in
 | `p` + era, epoch, sequence (8 bytes each, big-endian) | a `pparams` row: added slot (8 bytes, big-endian), then the row's CBOR |
 | `q` + added slot, sequence (8 bytes each, big-endian) | era and epoch of `pparams` row sequence, for rollback |
 | `mpseq` | the next `pparams` sequence number |
-| `c` + credential tag (1 byte) + key | an account: DRep type, active flag, reward, added slot, created slot and expiration epoch, then pool and DRep (length-prefixed) |
+| `c` + credential tag (1 byte) + key | an account: DRep type, active flag, reward, added slot, created slot and expiration epoch, then pool and DRep (length-prefixed), an inactivity-activation membership flag and its activation epoch. A legacy value ending after the DRep decodes with no activation membership |
 | `b` + pool length (1 byte) + pool + credential | an active account delegating to that pool; empty value |
 | `v` + DRep type (1 byte) + DRep length (1 byte) + DRep + credential | an active account delegating to that DRep; empty value |
 | `k` + slot (8 bytes, big-endian) + primary key | the state journal: the row under that key (an account, a DRep, a DRep delegator link, the dormancy counter) before its first change at that slot: `0` for absent, else `1` and the value |
@@ -2829,6 +2829,7 @@ UTxO changes. Their tags and markers are declared in
 | `x` + slot (8 bytes, big-endian) + transaction index (4 bytes, big-endian) + genesis key hash | a `pparam_update` row: target epoch (8 bytes, big-endian), then the proposal's CBOR |
 | `mppupd` | set once every protocol parameter update proposal is loaded |
 | `maccounts2` | set once the accounts are complete; the earlier `maccounts` marked an account-only journal key and makes the set reload them |
+| `maccountact` | set once account rows and their retained journal states carry the CIP-0163 activation membership and floor. A legacy set loads the SQL membership; when the accounts family was already drained, it reconstructs membership from the journal state immediately before the activation boundary and refuses an inexact reconstruction below the journal floor |
 | `mjfloor` | the lowest slot whose later changes the state journal still holds, as a big-endian `uint64`: a computed row is exact as of slot `s` only when `s + 1` is at least this value. Journal pruning and every row load raise it before they drop journal entries |
 | `mnonce2`, `mepoch2`, `mnet`, `mpparams` | set once the nonces, the epoch and snapshot rows, the network state and donation rows, or the protocol parameter rows are complete |
 | `E` + epoch (8 bytes, big-endian) + kind (1 byte) + pool key hash | kind 0: the blocks the pool minted in the epoch (8 bytes, big-endian). With kind 1 and no pool: the blocks counted in the epoch and the first slot a block may still be counted at (8 bytes each); kind 2: the fees the epoch collected (8 bytes) |

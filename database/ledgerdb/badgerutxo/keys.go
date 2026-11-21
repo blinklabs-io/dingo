@@ -217,6 +217,9 @@ var (
 	// account-only journal key, which are reloaded rather than read.
 	accountsKey       = []byte("maccounts2")
 	legacyAccountsKey = []byte("maccounts")
+	// accountInactivityActivationKey is set once legacy account rows and
+	// their retained journal states carry CIP-0163 activation provenance.
+	accountInactivityActivationKey = []byte("maccountact")
 	// epochStateKey is set once the store holds every epoch and pool stake
 	// snapshot row up to its tip. legacyEpochStateKey marked rows without an
 	// era field, which are reloaded rather than read. eraSwitchKey holds the

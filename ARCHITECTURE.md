@@ -23027,6 +23027,14 @@ witness was orphaned would be mis-restored to a far-past registration epoch or
 reset to 0. Explicit membership is required because a deregistered account row
 may exist at activation without being stamped. Because the marker gates the
 whole stamp, later rollovers never repeat it.
+When the accounts family is served by the live set, the activation write also
+stores membership and `A` in each stamped account record. The account journal
+therefore restores both fields with the expiration on rollback, and the reward
+application guard reads the floor from the same set-owned state as the account
+and witness history instead of consulting the drained SQL relation. Startup
+adds this provenance to legacy account encodings from the SQL membership, or
+from the exact pre-boundary journal view when activation occurred after drain;
+it does not continue with an unavailable, inexact floor.
 Rolling back before epoch `A` clears expiration for the exact membership set,
 returns its credentials, deletes the membership rows, and unions those
 credentials with credentials witnessed after the rollback point. The ledger then
