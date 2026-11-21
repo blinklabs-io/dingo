@@ -3889,8 +3889,9 @@ rows, so a replay from genesis builds it as it indexes. The writer trims it in
 each batch that adds a checkpoint, to the base row at the oldest retained
 checkpoint (`indexerdb.Store.PruneScriptLockedSupply`): a writer rollback never
 lands below that checkpoint, and one to the chain's origin rebuilds the
-aggregate from the restored rows. The consensus store keeps no `utxo` rows, so
-its table stays empty and unread.
+aggregate from the restored rows. The consensus store keeps its live set in the
+LedgerDB and nothing reads its table; rows written while it still held `utxo`
+rows stay after the ledger-state drain deletes them.
 
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the

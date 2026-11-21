@@ -36,7 +36,8 @@ import (
 // rows, by the primitives that insert an output or move one between live and
 // spent. Only a store that holds utxo rows has anything to count: the
 // IndexerDB does, while a consensus store keeps its live set in the LedgerDB
-// and leaves the table empty.
+// and nothing reads its table, which keeps whatever rows were written before
+// the ledger-state drain deleted its utxo rows.
 const (
 	scriptSupplyLatestQuery = `-- name: GetLatestScriptLockedSupply :one
 SELECT slot, amount FROM script_locked_supply ORDER BY slot DESC LIMIT 1`
