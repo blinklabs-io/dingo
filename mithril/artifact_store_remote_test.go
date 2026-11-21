@@ -460,7 +460,16 @@ func TestRemoteStoresServeSnapshotsEndToEnd(t *testing.T) {
 					assert.Equal(t, hashes[1], result.Snapshot.Digest)
 					entries, err := os.ReadDir(result.ImmutableDir)
 					require.NoError(t, err)
-					assert.Len(t, entries, 9)
+					assert.Len(t, entries, 6)
+					for _, ext := range []string{
+						"chunk", "primary", "secondary",
+					} {
+						_, err = os.Stat(filepath.Join(
+							result.AncillaryDir,
+							"immutable", "00002."+ext,
+						))
+						require.NoError(t, err)
+					}
 					_, err = os.Stat(filepath.Join(
 						result.AncillaryDir, "ledger", "100", "state",
 					))

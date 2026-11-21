@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -651,9 +652,8 @@ func TestSnapshotBackfillResumeRefusesForeignBlocks(t *testing.T) {
 	}
 }
 
-func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
-	t.Parallel()
-
+func newSnapshotFixtureWithAncillaryTrio(t *testing.T) snapshotFixture {
+	t.Helper()
 	opts := v2FixtureOptions{
 		immutableFileNumber: 9,
 		validAllImmutables:  true,
@@ -673,16 +673,22 @@ func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
 		t, ledger.Slot, ledger.Hash, singleUTxOMap(t),
 	)
 	opts.ancillaryLedgerSlot = ledger.Slot
-	fixture := snapshotFixture{
+	return snapshotFixture{
 		v2Fixture: newV2Fixture(t, opts),
 		chain:     chain,
 		ledger:    ledger,
 	}
+}
+
+func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSnapshotFixtureWithAncillaryTrio(t)
 	db := newSyncModeTestDB(t)
 	foreign := models.Block{
 		Slot:     1050,
 		Hash:     bytes.Repeat([]byte{0xee}, 32),
-		PrevHash: chain.last[opts.immutableFileNumber].Hash,
+		PrevHash: fixture.chain.last[9].Hash,
 		Cbor:     []byte{0x80},
 		Number:   1,
 		Type:     2,
@@ -707,10 +713,53 @@ func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
 		t.Context(), fixture.config(t, db, 150),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, ledger, point)
+	assert.Equal(t, fixture.ledger, point)
 	assert.NotContains(t, storedSlots(t, db), foreign.Slot)
 	assert.Contains(t, storedSlots(t, db), uint64(1098))
 	assert.Contains(t, storedSlots(t, db), uint64(1099))
+}
+
+func TestSnapshotBackfillReplacesOnlyVolatileConflictingTail(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSnapshotFixtureWithAncillaryTrio(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.DiscardHandler),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: snapshotChunkSlots,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	interruptDuringBlockLoad(t, fixture, db)
+	recent, err := database.BlocksRecent(t.Context(), db, 1)
+	require.NoError(t, err)
+	require.Len(t, recent, 1)
+	floor := recent[0]
+	_, err = db.PromoteThrough(t.Context(), floor.ID)
+	require.NoError(t, err)
+	foreign := models.Block{
+		Slot:     1050,
+		Hash:     bytes.Repeat([]byte{0xee}, 32),
+		PrevHash: floor.Hash,
+		Cbor:     []byte{0x80},
+		Number:   floor.Number + 1,
+		Type:     2,
+	}
+	require.NoError(t, db.BlockCreate(foreign, nil))
+
+	point, err := RunSnapshotBackfill(
+		t.Context(), fixture.config(t, db, 150),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ledger, point)
+	assert.NotContains(t, storedSlots(t, db), foreign.Slot)
+	assert.Contains(t, storedSlots(t, db), floor.Slot)
+	assert.Contains(t, storedSlots(t, db), uint64(1099))
+	gotFloor, ok := db.ImmutableFloorIndex()
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, gotFloor, floor.ID)
 }
 
 // The progress token moves with the phase, the stored tip and the ledger
