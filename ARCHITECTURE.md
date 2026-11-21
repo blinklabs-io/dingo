@@ -2010,6 +2010,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
+├── sdk/                 # Plugin SDK, a separate Go module
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -2559,6 +2560,7 @@ Phase 1: Stop accepting new work
   Chainsync stall recycler and chain-selected-to-none worker (both
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
+  legacy SQL UTxO row cleanup worker (first quiesce stop),
   block forger, leader election, Leios pipeline and vote managers,
   snapshot manager, database lifecycle manager
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
@@ -2592,6 +2594,17 @@ storage. Ouroboros is not in this list: an NtC client can acquire a
 LocalStateQuery snapshot until its connection drains, so shutdown closes
 Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
 there skips the phase-3 storage closes like an unfinished phase-1 wait.
+The legacy SQL UTxO row cleanup worker finishes a set-only migration that
+`reconcileUtxoSet` committed and marked with `DeferUtxoRowCleanup`: the cutover
+returns once the mark is durable, and the worker deletes the redundant SQL rows
+in bounded batches, clearing the migration progress record only after the last
+batch so a restart resumes it. `Run` starts it after every other service
+(`startInitialUtxoMigrationCleanup`, under `liveLifecycleMu` so it serializes
+with live restore and truncate). It has its own context, because restore and
+truncate stop storage users without cancelling the node context. It is the
+first quiesce stop, so it is cancelled and joined before storage closes during
+shutdown, restore and truncate; `reinitializeAndResume` starts it again against
+the reopened storage. A cancelled run leaves the progress record in place.
 Each wait is routed through `stopWithDeadline` with whatever remains of the
 one shutdown deadline, not a fresh timeout per component, so a goroutine that
 never observes
@@ -5029,7 +5042,8 @@ the context deadline (a `DurableClose` store closes to completion instead),
 `quiesceForLiveLifecycleOp`'s call to
 `ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp` (which wraps its own
 `ouroboros.ErrLeiosPersistDrainUnconfirmed`), and `quiesceForLiveLifecycleOp`'s
-own component stops. Those stops — the block forger, leader election, both Leios
+own component stops. Those stops — the legacy SQL UTxO row cleanup worker, the
+block forger, leader election, both Leios
 managers, the snapshot manager, and the database lifecycle manager, enumerated
 in one place by `quiesceComponentStops` so the set is visible and testable
 rather than spread across inline call sites — each cancel their own context and
@@ -16696,10 +16710,11 @@ state is loaded the node is in the position of one that synced to that
 ImmutableDB tip: it replays the immutable blocks after the state, and a
 rollback is refused only below the immutable tip.
 
-The ledger refuses any rollback below the selected stable ledger slot
-(`mithrilLedgerSlot`), since intermediate UTxO states before that imported
-state cannot be reconstructed. Mithril sync persists the full boundary point in
-`sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
+The ledger refuses any rollback below the selected stable ledger slot, since
+intermediate UTxO states before an imported state cannot be reconstructed.
+Every ledger-state loader records that point through
+`SetImportedLedgerStateBoundary`; the persisted `mithril_ledger_slot` and
+`mithril_ledger_hash` names remain for database compatibility. Outbound
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
@@ -16881,8 +16896,10 @@ before startup and runs the full lazy rebuild as background maintenance; the
 rebuild paths clear the marker only after the full manifest has been rebuilt.
 Mithril completion cleanup leaves the deferred-index marker, post-backfill
 statistics marker, and forge fences untouched, and deletes transient keys
-individually. It writes `mithril_ledger_slot` and `mithril_ledger_hash` after
-cleanup. This preserves the pending marker set by `BuildCritical` so a
+individually. It records the generic imported-ledger-state boundary after
+cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
+remain for database compatibility. This preserves the pending marker set by
+`BuildCritical` so a
 bootstrapped database still builds the lazy manifest. Core-mode startup still
 repairs the full manifest synchronously before serving. Both repair entry points
 also restore any missing critical index when no cycle is pending at all: the
@@ -16906,11 +16923,15 @@ including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
-primary and secondary file each. Production digests every file with SHA-256,
+primary and secondary file each. The newest trio is treated as the unfinished
+immutable file: it and the newest ledger state are placed in the signed
+ancillary archive, while only the preceding complete trios are certified.
+Production digests every certified file with SHA-256,
 derives the digest-list merkle root and artifact hash with the same
 `computeMMRRoot`/`ComputeHash` the client verifies against, then writes one
-`NNNNN.tar.zst` per file trio, `digests.tar.zst`, and `ancillary.tar.zst`
-holding the newest ledger state and an Ed25519-signed manifest
+`NNNNN.tar.zst` per certified file trio, `digests.tar.zst`, and
+`ancillary.tar.zst` holding the unfinished trio, newest ledger state and an
+Ed25519-signed manifest
 (`mithril.server.ancillarySigningKeyFile`). The beacon epoch is the epoch of
 that ledger state. The archives are re-hashed as they are written, so a file
 rewritten after its digest was taken fails the run. `artifact.json` is written
@@ -21540,6 +21561,13 @@ Package isolation is enforced by direction, ownership, and composition:
   should expose server logic through local interfaces. Concrete adapters to
   `ledger`, `database`, and `mempool` are integration boundaries and should
   remain narrow.
+- `sdk/` is the plugin SDK, a separate Go module
+  (`github.com/blinklabs-io/dingo/sdk`) that plugins build against without
+  depending on the node. No SDK package imports the node module or any of its
+  `internal/` packages, and only packages under `sdk/cardano/` import
+  gouroboros, so every other contract stays chain-neutral. The module is
+  released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
+  contract versioned `v0` and experimental, until a 1.0 is declared.
 
 ### Import Boundary Check
 
@@ -21549,6 +21577,10 @@ Reviewed critical package boundaries are enforced by
 ```shell
 make import-boundaries
 ```
+
+The same check enforces the `sdk/` module's two import rules
+(`internal/architecture/sdk_boundary_test.go`). It reads the files directly,
+because the root module's `./...` stops at `sdk/go.mod`.
 
 `make lint` also runs the boundary check before the standard linters, so local
 pre-commit and CI quality paths catch forbidden local imports automatically.

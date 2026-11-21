@@ -2559,10 +2559,10 @@ func (a Adapter) ListSyncStateKeysByPrefix(
 	return a.db.ListSyncStateKeysByPrefix(prefix, dbTxn(txn))
 }
 
-func (a Adapter) MithrilTrustBoundarySlotStrict(
+func (a Adapter) ImportedLedgerStateBoundarySlotStrict(
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	return a.db.MithrilTrustBoundarySlotStrict(dbTxn(txn))
+	return a.db.ImportedLedgerStateBoundarySlotStrict(dbTxn(txn))
 }
 
 func (a Adapter) OldestRetainedSlot() (uint64, bool) {

@@ -1032,7 +1032,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// anchor, and ledger replay applies those itself: a historical pass
 		// over them would journal their withdrawals without the debit, and
 		// replay would then skip the debit as already applied.
-		anchor, anchorErr := b.db.MithrilTrustBoundarySlotStrict(nil)
+		anchor, anchorErr := b.db.ImportedLedgerStateBoundarySlotStrict(nil)
 		if anchorErr != nil {
 			return fmt.Errorf("reading Mithril ledger anchor: %w", anchorErr)
 		}

@@ -520,8 +520,9 @@ func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
 	n := &Node{snapshotMgr: &snapshot.Manager{}}
 
 	stops := n.quiesceComponentStops()
-	require.Len(t, stops, 1)
-	assert.Equal(t, "snapshot manager", stops[0].name)
+	require.Len(t, stops, 2)
+	assert.Equal(t, "legacy SQL UTxO row cleanup", stops[0].name)
+	assert.Equal(t, "snapshot manager", stops[1].name)
 }
 
 // TestQuiesceEscalatesAStopThatNeverReturns drives the production quiesce path

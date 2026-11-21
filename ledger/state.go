@@ -3494,7 +3494,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// import and must not be re-validated during chainsync replay.
 	// The strict accessor separates an absent key from a recorded empty
 	// value, which GetSyncState alone reports identically.
-	mls, err := ls.ledgerDB().MithrilTrustBoundarySlotStrict(nil)
+	mls, err := ls.ledgerDB().ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", mithrilLedgerSlotSyncKey, err)
 	}

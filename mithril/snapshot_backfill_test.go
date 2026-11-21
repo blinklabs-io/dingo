@@ -35,7 +35,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -648,6 +650,116 @@ func TestSnapshotBackfillResumeRefusesForeignBlocks(t *testing.T) {
 			require.ErrorIs(t, err, errStoredChainOffCertified)
 		})
 	}
+}
+
+func newSnapshotFixtureWithAncillaryTrio(t *testing.T) snapshotFixture {
+	t.Helper()
+	opts := v2FixtureOptions{
+		immutableFileNumber: 9,
+		validAllImmutables:  true,
+		chunkSlots:          snapshotChunkSlots,
+	}
+	chain := readStreamChain(t, opts)
+	var prev lcommon.Blake2b256
+	copy(prev[:], chain.last[opts.immutableFileNumber].Hash)
+	files, hashes := validImmutableChunk(t, 1099, 2, prev)
+	opts.ancillaryChunk = map[string][]byte{
+		"chunk":     files["immutable/00000.chunk"],
+		"primary":   files["immutable/00000.primary"],
+		"secondary": files["immutable/00000.secondary"],
+	}
+	ledger := ocommon.NewPoint(1099, hashes[len(hashes)-1])
+	opts.ancillaryLedgerState = minimalLedgerStateWithUTxOMap(
+		t, ledger.Slot, ledger.Hash, singleUTxOMap(t),
+	)
+	opts.ancillaryLedgerSlot = ledger.Slot
+	return snapshotFixture{
+		v2Fixture: newV2Fixture(t, opts),
+		chain:     chain,
+		ledger:    ledger,
+	}
+}
+
+func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSnapshotFixtureWithAncillaryTrio(t)
+	db := newSyncModeTestDB(t)
+	foreign := models.Block{
+		Slot:     1050,
+		Hash:     bytes.Repeat([]byte{0xee}, 32),
+		PrevHash: fixture.chain.last[9].Hash,
+		Cbor:     []byte{0x80},
+		Number:   1,
+		Type:     2,
+	}
+	require.NoError(t, db.BlockCreate(foreign, nil))
+	require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
+		Backend:             BackendV2,
+		Network:             fixture.artifact.Network,
+		Digest:              fixture.artifact.Hash,
+		Epoch:               fixture.artifact.Beacon.Epoch,
+		ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
+		CertificateHash:     fixture.artifact.CertificateHash,
+	}))
+	require.NoError(t, db.SetSyncState(
+		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+
+	point, err := RunSnapshotBackfill(
+		t.Context(), fixture.config(t, db, 150),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ledger, point)
+	assert.NotContains(t, storedSlots(t, db), foreign.Slot)
+	assert.Contains(t, storedSlots(t, db), uint64(1098))
+	assert.Contains(t, storedSlots(t, db), uint64(1099))
+}
+
+func TestSnapshotBackfillReplacesOnlyVolatileConflictingTail(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSnapshotFixtureWithAncillaryTrio(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.DiscardHandler),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: snapshotChunkSlots,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	interruptDuringBlockLoad(t, fixture, db)
+	recent, err := database.BlocksRecent(t.Context(), db, 1)
+	require.NoError(t, err)
+	require.Len(t, recent, 1)
+	floor := recent[0]
+	_, err = db.PromoteThrough(t.Context(), floor.ID)
+	require.NoError(t, err)
+	foreign := models.Block{
+		Slot:     1050,
+		Hash:     bytes.Repeat([]byte{0xee}, 32),
+		PrevHash: floor.Hash,
+		Cbor:     []byte{0x80},
+		Number:   floor.Number + 1,
+		Type:     2,
+	}
+	require.NoError(t, db.BlockCreate(foreign, nil))
+
+	point, err := RunSnapshotBackfill(
+		t.Context(), fixture.config(t, db, 150),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ledger, point)
+	assert.NotContains(t, storedSlots(t, db), foreign.Slot)
+	assert.Contains(t, storedSlots(t, db), floor.Slot)
+	assert.Contains(t, storedSlots(t, db), uint64(1099))
+	gotFloor, ok := db.ImmutableFloorIndex()
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, gotFloor, floor.ID)
 }
 
 // The progress token moves with the phase, the stored tip and the ledger

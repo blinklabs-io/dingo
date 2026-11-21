@@ -2052,23 +2052,10 @@ type ChainStore interface {
 	// ListSyncStateKeysByPrefix returns every sync_state key beginning with
 	// prefix.
 	ListSyncStateKeysByPrefix(prefix string, txn Txn) ([]string, error)
-	// MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
-	// the underlying read error instead of swallowing it as "no boundary
-	// recorded" — for a caller that must fail closed (refuse the operation)
-	// rather than fail open when the boundary can't be verified. A malformed
-	// stored value is also propagated as an error here (unlike
-	// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
-	// persisted boundary must not be indistinguishable from "no snapshot was
-	// ever imported" for a caller enforcing a safety check, or the check is
-	// defeated exactly when it matters most.
-	//
-	// That includes a recorded empty value. GetSyncState reports an absent key
-	// as the empty string, so an empty return alone cannot tell "no snapshot
-	// was ever imported" from "a boundary row exists and holds nothing"; only
-	// the second is malformed, and the two are separated here by asking the
-	// sync_state keyspace whether the row exists at all. The extra query runs
-	// only on that path.
-	MithrilTrustBoundarySlotStrict(txn Txn) (uint64, error)
+	// ImportedLedgerStateBoundarySlotStrict returns the boundary of ledger
+	// state loaded without replaying the blocks below it. It fails closed on
+	// unreadable or malformed persisted state.
+	ImportedLedgerStateBoundarySlotStrict(txn Txn) (uint64, error)
 	// OldestRetainedSlot returns the slot of the oldest block whose body is
 	// still stored, as last computed by RefreshOldestRetainedSlot. ok is false
 	// before the first refresh, when history expiry has never run, when the

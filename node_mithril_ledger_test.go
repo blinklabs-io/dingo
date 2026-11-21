@@ -306,9 +306,9 @@ func TestCoordinatorRealLedgerAbort(t *testing.T) {
 
 	n.liveLifecycleMu.Lock()
 	stops := n.quiesceComponentStops()
-	require.NotEmpty(t, stops)
-	require.Equal(t, "mithril catch-up", stops[0].name)
-	require.NoError(t, stops[0].stop())
+	require.GreaterOrEqual(t, len(stops), 2)
+	require.Equal(t, "mithril catch-up", stops[1].name)
+	require.NoError(t, stops[1].stop())
 	requireIngestFree(t, tl)
 	n.liveLifecycleMu.Unlock()
 

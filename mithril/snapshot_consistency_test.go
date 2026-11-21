@@ -179,7 +179,7 @@ func TestAggregatorDoesNotListSnapshotPrunedDuringCertification(t *testing.T) {
 func TestPruneSnapshotsRemovesMetadataRewrittenDuringRemoval(t *testing.T) {
 	t.Parallel()
 	inner, _ := newLocalStore(t)
-	hashes := createSnapshots(t, inner, 1, 2)
+	hashes := createSnapshots(t, inner, 2, 3)
 	old, err := readSnapshot(context.Background(), inner, hashes[0])
 	require.NoError(t, err)
 	store := &hookStore{ArtifactStore: inner}
@@ -278,7 +278,7 @@ func TestRemoveIncompleteSnapshotRespectsCompletedSnapshot(t *testing.T) {
 func TestPublishSnapshotUnlistsMetadataAfterContextCancellation(t *testing.T) {
 	t.Parallel()
 	inner, _ := newLocalStore(t)
-	hash := createSnapshots(t, inner, 1)[0]
+	hash := createSnapshots(t, inner, 2)[0]
 	snapshot, err := readSnapshot(t.Context(), inner, hash)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -296,7 +296,7 @@ func TestPublishSnapshotUnlistsMetadataAfterContextCancellation(t *testing.T) {
 func TestRemoveSnapshotUnlistsMetadataAfterArchiveCheckError(t *testing.T) {
 	t.Parallel()
 	inner, _ := newLocalStore(t)
-	hash := createSnapshots(t, inner, 1)[0]
+	hash := createSnapshots(t, inner, 2)[0]
 	snapshot, err := readSnapshot(t.Context(), inner, hash)
 	require.NoError(t, err)
 	hooked := &hookStore{ArtifactStore: inner}
@@ -328,7 +328,7 @@ func TestRemoveSnapshotUnlistsMetadataAfterArchiveCheckError(t *testing.T) {
 func TestRemoveSnapshotPreservesMetadataReadErrorAfterUnlisting(t *testing.T) {
 	t.Parallel()
 	inner, _ := newLocalStore(t)
-	hash := createSnapshots(t, inner, 1)[0]
+	hash := createSnapshots(t, inner, 2)[0]
 	snapshot, err := readSnapshot(t.Context(), inner, hash)
 	require.NoError(t, err)
 	hooked := &hookStore{ArtifactStore: inner}

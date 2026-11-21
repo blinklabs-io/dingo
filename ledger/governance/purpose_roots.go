@@ -121,7 +121,7 @@ func isMithrilBootstrapped(
 	db ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	slot, err := db.MithrilTrustBoundarySlotStrict(txn)
+	slot, err := db.ImportedLedgerStateBoundarySlotStrict(txn)
 	if err != nil {
 		return false, err
 	}
