@@ -331,6 +331,7 @@ type Config struct {
 	forgeEBSelectionReserve                                                             time.Duration
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
+	blockPipelineEnabledSet                                                             bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
@@ -919,6 +920,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Apply options
 	for _, opt := range opts {
 		opt(&c)
+	}
+	if !c.blockPipelineEnabledSet {
+		c.cfg.BlockPipelineEnabled = internalconfig.BlockPipelineEnabledByDefault(
+			c.cfg,
+		)
 	}
 	c.syncCompatFields()
 	return c
@@ -2138,11 +2144,13 @@ func (c *Config) PlannerStatsRefreshEnabled() bool {
 }
 
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
-// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
-// by default. See LedgerStateConfig.BlockPipelineEnabled.
+// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting;
+// enabled by default in core mode except on Musashi. See
+// LedgerStateConfig.BlockPipelineEnabled.
 func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlockPipelineEnabled = enabled
+		c.cfg.SetBlockPipelineEnabled(enabled)
+		c.blockPipelineEnabledSet = true
 	}
 }
 
