@@ -1065,16 +1065,8 @@ func ImportLedgerState(
 				"(already completed)",
 			"component", "ledgerstate",
 		)
-		// The checkpoint may predate the root verifier, so verify the
-		// seeded roots even though the phase is not re-run.
-		if cfg.State.GovStateData != nil &&
-			cfg.State.EraIndex >= EraConway {
-			if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
-				return fmt.Errorf(
-					"verifying per-purpose governance roots: %w",
-					err,
-				)
-			}
+		if err := resumeCompletedGovState(ctx, cfg); err != nil {
+			return err
 		}
 	}
 
@@ -4636,6 +4628,44 @@ func importGovState(
 	})
 
 	return nil
+}
+
+// resumeCompletedGovState covers what a resumed import must still do when its
+// checkpoint says the governance phase ran. The checkpoint may predate the
+// root verifier and the boundary snapshot, so the seeded roots are verified
+// and a missing boundary snapshot is written from the snapshot's own state.
+func resumeCompletedGovState(ctx context.Context, cfg ImportConfig) error {
+	if cfg.State.GovStateData == nil || cfg.State.EraIndex < EraConway {
+		return nil
+	}
+	if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
+		return fmt.Errorf(
+			"verifying per-purpose governance roots: %w",
+			err,
+		)
+	}
+	govState, _, err := parseImportedGovState(cfg)
+	if err != nil {
+		return err
+	}
+	if govState == nil {
+		return nil
+	}
+	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
+	existing, err := cfg.Database.GetGovernanceBoundarySnapshotAtSlot(
+		ctx,
+		boundarySlot,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("read imported governance boundary snapshot: %w", err)
+	}
+	if existing != nil &&
+		existing.Epoch == cfg.State.Epoch &&
+		existing.BoundarySlot == boundarySlot {
+		return nil
+	}
+	return importGovernanceBoundarySnapshot(ctx, cfg, govState, boundarySlot)
 }
 
 func importGovernanceBoundarySnapshot(

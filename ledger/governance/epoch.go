@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -836,6 +837,11 @@ func decideRatification(
 	if err != nil {
 		return nil, fmt.Errorf("get post-enactment constitution: %w", err)
 	}
+	postEnactmentPParams, err := cbor.Encode(conwayPParams)
+	if err != nil {
+		return nil, fmt.Errorf("encode post-enactment pparams: %w", err)
+	}
+	verdicts.BoundarySnapshot.PostEnactmentPParams = postEnactmentPParams
 	verdicts.BoundarySnapshot.Committee = governanceCommitteeMembers(committee)
 	verdicts.BoundarySnapshot.CommitteeQuorum = ccQuorum.RatString()
 	verdicts.BoundarySnapshot.Constitution = cloneConstitution(constitution)
@@ -1196,15 +1202,48 @@ func applyRatification(
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
 	}
 	if decision.BoundarySnapshot != nil {
+		// A replayed boundary decides no new expirations because its
+		// proposals are already marked, and the save replaces the row, so the
+		// expirations stored at this boundary are the ones to retain.
+		snapshot := *decision.BoundarySnapshot
+		snapshot.Expired = boundaryExpiredRefs(
+			decision.Expired,
+			replayedExpired,
+		)
 		if err := in.DB.SaveGovernanceBoundarySnapshot(
 			ctx,
-			decision.BoundarySnapshot,
+			&snapshot,
 			in.Txn,
 		); err != nil {
 			return 0, fmt.Errorf("save governance boundary snapshot: %w", err)
 		}
 	}
 	return expiredOrphanCount, nil
+}
+
+// boundaryExpiredRefs lists the decided expirations in decision order,
+// followed by any other proposal already stored as expired at the boundary.
+func boundaryExpiredRefs(
+	decided []*models.GovernanceProposal,
+	stored []*models.GovernanceProposal,
+) []models.GovernanceActionRef {
+	all := make([]*models.GovernanceProposal, 0, len(decided)+len(stored))
+	all = append(all, decided...)
+	all = append(all, stored...)
+	seen := make(map[string]struct{}, len(all))
+	unique := all[:0:0]
+	for _, p := range all {
+		if p == nil {
+			continue
+		}
+		key := proposalIdentityKey(p)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, p)
+	}
+	return governanceActionRefs(unique)
 }
 
 func governanceActionRefs(

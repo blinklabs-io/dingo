@@ -259,3 +259,47 @@ func TestMetadataFactsReadsAFoldedCreditOnceAcrossLaterSegments(t *testing.T) {
 	require.Equal(t, 1, counter.journalRows,
 		"later segments must read only credits journaled since the last read")
 }
+
+func TestMetadataFactsDefersGovernanceSnapshotTheLedgerStillWrites(t *testing.T) {
+	t.Parallel()
+	src, srcRaw := newFactsDB(t)
+	dst, dstRaw := newFactsDB(t)
+	f, err := NewMetadataFacts(src, dst)
+	require.NoError(t, err)
+
+	_, err = srcRaw.Exec(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		models.RatificationPendingKey,
+		`{"epoch":10,"boundary_slot":100,"id":1,"snapshot":true}`)
+	require.NoError(t, err)
+	_, err = srcRaw.Exec(`INSERT INTO governance_boundary_snapshot
+		(epoch, boundary_slot, snapshot) VALUES (9, 80, x'01'), (10, 100, x'02')`)
+	require.NoError(t, err)
+
+	copyRange := func(from, through uint64) {
+		writeFacts(t, f, func(txn *database.Txn) error {
+			return f.CopyFacts(context.Background(), txn, from, through)
+		})
+	}
+	count := func(epoch int) int {
+		return scalar[int](
+			t, dstRaw,
+			`SELECT COUNT(*) FROM governance_boundary_snapshot WHERE epoch = ?`,
+			epoch,
+		)
+	}
+
+	copyRange(0, 150)
+	require.Equal(t, 1, count(9), "a finished snapshot is copied")
+	require.Zero(t, count(10), "a snapshot the ledger has yet to write is not")
+
+	copyRange(151, 200)
+	require.Zero(t, count(10), "still pending in a later segment")
+
+	_, err = srcRaw.Exec(`DELETE FROM sync_state WHERE sync_key = ?`,
+		models.RatificationPendingKey)
+	require.NoError(t, err)
+	copyRange(201, 250)
+	require.Equal(t, 1, count(10),
+		"the deferred snapshot is copied once the ledger writes it")
+	require.Equal(t, 1, count(9))
+}

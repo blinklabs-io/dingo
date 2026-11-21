@@ -188,3 +188,39 @@ func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "GovRelation has 3 elements")
 }
+
+// A checkpoint written before the boundary snapshot existed skips
+// importGovState, so the resume must write the snapshot itself and leave an
+// existing one alone.
+func TestResumeCompletedGovStateBackfillsBoundarySnapshot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cfg := govImportConfigForTest(db, govStateWithRoots(
+		t, [4]*ParsedGovActionId{}, false,
+	))
+	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
+	load := func() *models.GovernanceBoundarySnapshot {
+		snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+			context.Background(), boundarySlot, nil,
+		)
+		require.NoError(t, err)
+		return snapshot
+	}
+	require.Nil(t, load())
+
+	require.NoError(t, resumeCompletedGovState(context.Background(), cfg))
+	snapshot := load()
+	require.NotNil(t, snapshot)
+	require.Equal(t, cfg.State.Epoch, snapshot.Epoch)
+	require.Equal(t, boundarySlot, snapshot.BoundarySlot)
+	require.NotEmpty(t, snapshot.ImportedRatifyState)
+
+	snapshot.RatificationTreasury = 77
+	require.NoError(t, db.SaveGovernanceBoundarySnapshot(
+		context.Background(), snapshot, nil,
+	))
+	require.NoError(t, resumeCompletedGovState(context.Background(), cfg))
+	require.EqualValues(t, 77, load().RatificationTreasury)
+}

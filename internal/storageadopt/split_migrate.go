@@ -540,6 +540,18 @@ func (m *splitMigration) prepareCopy(
 	if err != nil {
 		return fmt.Errorf("read pending stake inputs: %w", err)
 	}
+	pendingRatify, err := source.Metadata().GetSyncState(
+		models.RatificationPendingKey, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("read pending ratification: %w", err)
+	}
+	deferredGovernance, err := indexer.DeferredGovernanceSnapshotsFromPending(
+		pendingRatify,
+	)
+	if err != nil {
+		return err
+	}
 	checkpoints, err := m.checkpointsBelow(ctx, source, tip)
 	if err != nil {
 		return err
@@ -554,6 +566,14 @@ func (m *splitMigration) prepareCopy(
 		if pending != "" {
 			if err := idx.Metadata().SetSyncState(
 				indexer.DeferredStakeInputsKey, pending, txn.Metadata(),
+			); err != nil {
+				return err
+			}
+		}
+		if deferredGovernance != "" {
+			if err := idx.Metadata().SetSyncState(
+				indexer.DeferredGovernanceSnapshotsKey,
+				deferredGovernance, txn.Metadata(),
 			); err != nil {
 				return err
 			}

@@ -268,7 +268,7 @@ func (f *MetadataFacts) CopyFacts(
 		}
 		f.sampled = high
 	}
-	if err := f.copyDeferredStakeInputs(ctx, dst); err != nil {
+	if err := f.copyDeferredBoundaryRows(ctx, dst); err != nil {
 		return err
 	}
 	rounds, err := f.finishedRewardRounds()
@@ -332,7 +332,10 @@ func (f *MetadataFacts) RollbackFacts(
 	if err := f.dropCopiedRewardOutputsAfter(dst, point.Slot); err != nil {
 		return err
 	}
-	return f.dropDeferredStakeInputsAfter(dst, point.Slot)
+	if err := f.dropDeferredStakeInputsAfter(dst, point.Slot); err != nil {
+		return err
+	}
+	return f.dropDeferredAfter(dst, DeferredGovernanceSnapshotsKey, point.Slot)
 }
 
 func (f *MetadataFacts) copyTable(
@@ -346,12 +349,23 @@ func (f *MetadataFacts) copyTable(
 	// pending set is read before the rows: an epoch absent from it was
 	// complete when read, so the rows read afterwards are whole.
 	var skip map[uint64]struct{}
-	if table.Name == stakeInputTable.Name {
+	slotColumn, deferKey := "captured_slot", DeferredStakeInputsKey
+	switch table.Name {
+	case stakeInputTable.Name:
 		pending, err := f.pendingStakeInputEpochs()
 		if err != nil {
 			return err
 		}
 		skip = pending
+	case governanceSnapshotTableName:
+		// A deferred boundary commits before its governance snapshot row is
+		// written, so the segment copy cannot hold the row yet.
+		pending, err := f.pendingGovernanceSnapshotEpochs()
+		if err != nil {
+			return err
+		}
+		skip = pending
+		slotColumn, deferKey = "boundary_slot", DeferredGovernanceSnapshotsKey
 	}
 	var cursor int64
 	restarts := 0
@@ -374,11 +388,11 @@ func (f *MetadataFacts) copyTable(
 			return err
 		}
 		if len(skip) > 0 {
-			deferred, err := dropPendingEpochs(&rows, skip)
+			deferred, err := dropPendingEpochs(&rows, skip, slotColumn)
 			if err != nil {
 				return err
 			}
-			if err := f.deferStakeInputs(dst, deferred); err != nil {
+			if err := f.deferSnapshots(dst, deferKey, deferred); err != nil {
 				return err
 			}
 		}
