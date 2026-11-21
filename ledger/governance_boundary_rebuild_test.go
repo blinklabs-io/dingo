@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -720,4 +721,33 @@ func TestRebuildGovernanceBoundarySnapshotDelegatorInactivity(t *testing.T) {
 	require.NotEmpty(t, sc.rows[0].Ratified)
 	require.NotContains(t, ratifiedTxHashes(sc.rows[1]), late.TxHash)
 	requireRebuiltRowsMatchLive(t, sc)
+}
+
+// TestRebuildGovernanceBoundarySnapshotsPrunedRewardBasisEndsPass removes the
+// reward basis a boundary's replay needs, as retention pruning does. The
+// stores can then no longer restore that boundary, so the pass ends without
+// failing startup, leaves every row absent, and touches no live state.
+func TestRebuildGovernanceBoundarySnapshotsPrunedRewardBasisEndsPass(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	sc := newRebuildScenario(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, sc.f.db)
+	require.NoError(t, err)
+	for _, table := range []string{"reward_ada_pots", "reward_snapshot"} {
+		_, err = raw.Exec("DELETE FROM " + table)
+		require.NoError(t, err)
+	}
+	before := sc.f.liveState(t, sc.withdrawal)
+
+	require.ErrorIs(t, sc.rebuild(1), errGovernanceBoundaryUnreachable)
+	require.NoError(t, sc.f.ls.rebuildGovernanceBoundarySnapshots(
+		context.Background(),
+	))
+	for _, epoch := range sc.epochs {
+		_, err := sc.f.boundaryRow(t, epoch)
+		require.ErrorIs(t, err, models.ErrGovernanceBoundarySnapshotNotRetained)
+	}
+	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
 }

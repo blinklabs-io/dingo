@@ -35,10 +35,11 @@ var errGovernanceBoundaryUnreachable = errors.New(
 // transaction. A boundary already holding a row is skipped, which makes the
 // pass idempotent and resumable after a crash between boundaries.
 //
-// A boundary the stores cannot restore, because the live UTxO set's journal no
-// longer reaches it, its target lies below the Mithril trust boundary, or the
-// consumed-output sweep removed what the restore needs, ends the pass; its row
-// and every older one stay absent and reads of them report
+// A boundary the stores cannot restore ends the pass: the live UTxO set's
+// journal no longer reaches it, its target lies below the Mithril trust
+// boundary, the consumed-output sweep removed what the restore needs, or
+// retention pruned the reward basis its rollover reads. Its row and every
+// older one stay absent and reads of them report
 // models.ErrGovernanceBoundarySnapshotNotRetained.
 func (ls *LedgerState) rebuildGovernanceBoundarySnapshots(
 	ctx context.Context,
@@ -304,6 +305,14 @@ func (ls *LedgerState) replayGovernanceBoundaryInTxn(
 		true,
 		&boundaryReplay{spoState: spo},
 	); err != nil {
+		if errors.Is(err, errRequiredStakeRewardBasisUnavailable) ||
+			errors.Is(err, errRewardStakeInputsUnrecoverable) {
+			// Retention pruned the reward basis the boundary's reward
+			// round reads, so the stores cannot restore it.
+			return nil, fmt.Errorf(
+				"%w: %w", errGovernanceBoundaryUnreachable, err,
+			)
+		}
 		return nil, err
 	}
 	snapshot, err := ls.db.GetGovernanceBoundarySnapshotAtSlot(

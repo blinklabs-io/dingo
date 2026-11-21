@@ -23810,8 +23810,8 @@ POOLREAP precedes SNAP.
    `boundaryReplay`: validation-only, but RATIFY decides and applies at once
    against the committed `mark` rows read before the truncation. The saved row
    is read back and stored in a fresh transaction. A boundary the journal, the
-   Mithril trust boundary or the consumed-output prune floor cannot reach stops
-   the pass, leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and
+   Mithril trust boundary or the consumed-output prune floor cannot reach, or
+   whose reward basis retention has pruned, stops the pass, leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and
    every older epoch.
 
    A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
