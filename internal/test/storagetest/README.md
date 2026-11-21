@@ -119,9 +119,8 @@ was written.
 Each plugin's `TestBlobStoreUnreachableEndpointFailsWithoutHanging` /
 `TestMetadataStoreUnreachableHostFailsWithoutHanging` test needs none of the
 above: it points at a closed local port, so it always runs, everywhere.
-`gcs`'s bad-credentials test also always runs. Production GCS uses the gRPC
-transport; setting `STORAGE_EMULATOR_HOST` selects the SDK's HTTP transport for
-an emulator without changing real-bucket behavior.
+Production GCS uses the gRPC transport; setting `STORAGE_EMULATOR_HOST` selects
+the SDK's HTTP transport for an emulator without changing real-bucket behavior.
 
 ## Running locally
 

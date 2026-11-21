@@ -93,26 +93,34 @@ func newTestGCSStore(t *testing.T) *BlobStoreGCS {
 	require.NoError(t, err)
 	require.NoError(t, store.Start())
 	t.Cleanup(func() { require.NoError(t, store.Stop()) })
-	t.Cleanup(func() { cleanupTestGCSStore(t, store) })
+	t.Cleanup(func() { require.NoError(t, cleanupTestGCSStore(store)) })
 	return store
 }
 
-func cleanupTestGCSStore(t *testing.T, store *BlobStoreGCS) {
-	t.Helper()
+func cleanupTestGCSStore(store *BlobStoreGCS) error {
 	txn := store.NewTransaction(true)
 	defer txn.Rollback() //nolint:errcheck
 	it := store.NewIterator(txn, types.BlobIteratorOptions{})
-	require.NotNil(t, it)
+	if it == nil {
+		return errors.New("GCS cleanup iterator is nil")
+	}
 	defer it.Close()
 	for it.Valid() {
 		item := it.Item()
 		if item != nil {
-			require.NoError(t, store.Delete(txn, item.Key()))
+			if err := store.Delete(txn, item.Key()); err != nil {
+				return fmt.Errorf("delete GCS test object: %w", err)
+			}
 		}
 		it.Next()
 	}
-	require.NoError(t, it.Err())
-	require.NoError(t, txn.Commit())
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("iterate GCS test objects: %w", err)
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit GCS test cleanup: %w", err)
+	}
+	return nil
 }
 
 func TestBlobStoreConformance(t *testing.T) {
@@ -132,15 +140,23 @@ func TestBlobStoreResourceLifecycle(t *testing.T) {
 		store, err := NewWithOptions(WithBucket(bucket), WithPrefix(prefix))
 		require.NoError(t, err)
 		require.NoError(t, store.Start())
-		defer store.Stop() //nolint:errcheck
+		stopped := false
+		defer func() {
+			if stopped {
+				return
+			}
+			cleanupErr := cleanupTestGCSStore(store)
+			stopErr := store.Stop()
+			require.NoError(t, errors.Join(cleanupErr, stopErr))
+		}()
 
 		txn := store.NewTransaction(true)
 		require.NoError(t, store.Set(txn, []byte("key"), []byte("value")))
 		require.NoError(t, txn.Commit())
-		cleanup := store.NewTransaction(true)
-		require.NoError(t, store.Delete(cleanup, []byte("key")))
-		require.NoError(t, cleanup.Commit())
-		require.NoError(t, store.Stop())
+		require.NoError(t, cleanupTestGCSStore(store))
+		stopErr := store.Stop()
+		stopped = true
+		require.NoError(t, stopErr)
 	})
 }
 
