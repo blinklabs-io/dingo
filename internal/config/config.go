@@ -494,13 +494,27 @@ type KoiosParityConfig struct {
 	// AllowPrivateAddresses permits a private, loopback, or special-use
 	// BaseURL. Leave false for the default outbound request guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
-	// Strict stops/cancels the node on the first Koios/tool error or
-	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The exceptions are an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet) and
-	// a fetch that fails on Koios's daily quota; both are logged and
-	// recorded, and the epoch is retried, but neither stops the node.
-	Strict bool `yaml:"strict"                envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// Strict stops/cancels the node on the first tool error, local cache
+	// error or non-pass parity result, rather than logging it and continuing
+	// normal operation. Three failures are logged, recorded and retried
+	// instead: an epoch whose only significant mismatches are reference_lag
+	// (Koios's data has not caught up yet) and a fetch that fails on Koios's
+	// daily quota never stop the node, and a Koios request that failed
+	// because Koios is unavailable (a transport error, timeout, 5xx or
+	// exhausted 408 budget) stops it only after UnavailableRetryLimit
+	// consecutive attempts.
+	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// UnavailableRetryLimit bounds how many consecutive attempts at one
+	// epoch's check may fail because Koios is unavailable (a transport
+	// error, timeout, 5xx or exhausted 408 budget; daily-quota exhaustion
+	// never counts).
+	// In strict mode the attempt that reaches it stops the node; in
+	// non-strict mode it is logged at ERROR and the check keeps retrying. A
+	// Koios answer, including one that is still reference lag, resets the
+	// count. A failed check is retried every ten minutes at the fastest, so
+	// the default of 144 is at least about 24 hours of continuous
+	// unavailability. 0 selects the default.
+	UnavailableRetryLimit int `yaml:"unavailableRetryLimit" envconfig:"DINGO_KOIOS_PARITY_UNAVAILABLE_RETRY_LIMIT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
