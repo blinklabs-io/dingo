@@ -20,21 +20,129 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/reversekey"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
+	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 )
+
+func gcsTestBackendConfigured() bool {
+	if os.Getenv("STORAGE_EMULATOR_HOST") != "" ||
+		os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+		return true
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(
+		home, ".config", "gcloud", "application_default_credentials.json",
+	))
+	return err == nil
+}
+
+func requireGCSTestBucket(t *testing.T) string {
+	t.Helper()
+	required := os.Getenv("DINGO_REQUIRE_GCS_TESTS") == "1"
+	if !gcsTestBackendConfigured() {
+		if required {
+			t.Fatal("GCS validation is required but no backend is configured")
+		}
+		t.Skip("GCS backend not configured")
+	}
+	bucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
+	if bucket == "" {
+		if required {
+			t.Fatal(
+				"GCS validation is required but DINGO_TEST_GCS_BUCKET is empty",
+			)
+		}
+		t.Skip("DINGO_TEST_GCS_BUCKET is not set")
+	}
+	return bucket
+}
+
+func newTestGCSStore(t *testing.T) *BlobStoreGCS {
+	t.Helper()
+	prefix := fmt.Sprintf(
+		"dingo-tests/%d/%d/",
+		os.Getpid(),
+		time.Now().UnixNano(),
+	)
+	store, err := NewWithOptions(
+		WithBucket(requireGCSTestBucket(t)),
+		WithPrefix(prefix),
+		WithLogger(slog.New(slog.NewJSONHandler(io.Discard, nil))),
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start())
+	t.Cleanup(func() { require.NoError(t, store.Stop()) })
+	t.Cleanup(func() { cleanupTestGCSStore(t, store) })
+	return store
+}
+
+func cleanupTestGCSStore(t *testing.T, store *BlobStoreGCS) {
+	t.Helper()
+	txn := store.NewTransaction(true)
+	defer txn.Rollback() //nolint:errcheck
+	it := store.NewIterator(txn, types.BlobIteratorOptions{})
+	require.NotNil(t, it)
+	defer it.Close()
+	for it.Valid() {
+		item := it.Item()
+		if item != nil {
+			require.NoError(t, store.Delete(txn, item.Key()))
+		}
+		it.Next()
+	}
+	require.NoError(t, it.Err())
+	require.NoError(t, txn.Commit())
+}
+
+func TestBlobStoreConformance(t *testing.T) {
+	t.Parallel()
+	storagetest.RunBlobStoreConformance(t, func(t *testing.T) blob.BlobStore {
+		return newTestGCSStore(t)
+	})
+}
+
+func TestBlobStoreResourceLifecycle(t *testing.T) {
+	t.Parallel()
+	bucket := requireGCSTestBucket(t)
+	storagetest.AssertRepeatedLifecycleIsSafe(t, 5, func(t *testing.T) {
+		prefix := fmt.Sprintf(
+			"dingo-lifecycle/%d/%d/", os.Getpid(), time.Now().UnixNano(),
+		)
+		store, err := NewWithOptions(WithBucket(bucket), WithPrefix(prefix))
+		require.NoError(t, err)
+		require.NoError(t, store.Start())
+		defer store.Stop() //nolint:errcheck
+
+		txn := store.NewTransaction(true)
+		require.NoError(t, store.Set(txn, []byte("key"), []byte("value")))
+		require.NoError(t, txn.Commit())
+		cleanup := store.NewTransaction(true)
+		require.NoError(t, store.Delete(cleanup, []byte("key")))
+		require.NoError(t, cleanup.Commit())
+		require.NoError(t, store.Stop())
+	})
+}
 
 // fakeCloser stands in for the real *storage.Writer, which needs a live GCS
 // bucket (or credentials) to construct at all. joinCloseErr is tested against
