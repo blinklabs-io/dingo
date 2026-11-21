@@ -121,6 +121,7 @@ func (n *Node) openIndexerWriter(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, writer.Stop(ctx), db.Close())
 	}
+	n.warnMainnetIndexerCapacity(store, localIndexerCapacity)
 	n.indexerDB, n.indexerWriter, n.indexerStore = db, writer, store
 	return nil
 }
