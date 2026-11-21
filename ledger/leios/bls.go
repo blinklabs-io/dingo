@@ -187,8 +187,31 @@ func verifySignatureWithDST(
 // checks only field lengths (LeiosKey.validate), not the proof itself --
 // callers must not treat an on-chain leios_key as usable until this passes.
 func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
-	_, err := verifiedLeiosKey(key)
+	return VerifyLeiosKeyProofForDomain(key, lcommon.DijkstraBlsProofDomainPop)
+}
+
+// VerifyLeiosKeyProofForDomain verifies key's proof under exactly the given
+// domain; the other domain is never tried.
+func VerifyLeiosKeyProofForDomain(
+	key *lcommon.LeiosKey,
+	domain lcommon.DijkstraBlsProofDomain,
+) error {
+	_, err := verifiedLeiosKey(key, domain)
 	return err
+}
+
+func keyProofDST(domain lcommon.DijkstraBlsProofDomain) (string, error) {
+	switch domain {
+	case lcommon.DijkstraBlsProofDomainPop:
+		return LeiosPoPDST, nil
+	case lcommon.DijkstraBlsProofDomainLegacySig:
+		return LeiosVoteDST, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported Dijkstra BLS proof domain %d",
+			domain,
+		)
+	}
 }
 
 // verifiedLeiosKeyCacheMax bounds verifiedLeiosKeys. A committee holds 900
@@ -208,16 +231,25 @@ var verifiedLeiosKeys = struct {
 }{keys: make(map[verifiedLeiosKeyID]*bls12381.G2Affine)}
 
 type verifiedLeiosKeyID struct {
+	domain    lcommon.DijkstraBlsProofDomain
 	publicKey [VotePublicKeySize]byte
 	proof     [lcommon.LeiosBlsPossessionProofSize]byte
 }
 
 // verifiedLeiosKey returns key's decoded public key once its proof of
-// possession verifies under the Leios PoP domain. The returned point is
-// shared and must not be modified.
-func verifiedLeiosKey(key *lcommon.LeiosKey) (*bls12381.G2Affine, error) {
+// possession verifies under domain. The returned point is shared and must not
+// be modified. The cache is keyed by domain: a proof verified under one domain
+// must not satisfy a lookup under the other.
+func verifiedLeiosKey(
+	key *lcommon.LeiosKey,
+	domain lcommon.DijkstraBlsProofDomain,
+) (*bls12381.G2Affine, error) {
 	if key == nil {
 		return nil, errors.New("nil leios key")
+	}
+	dst, err := keyProofDST(domain)
+	if err != nil {
+		return nil, err
 	}
 	if len(key.PublicKey) != VotePublicKeySize {
 		return nil, fmt.Errorf(
@@ -227,7 +259,7 @@ func verifiedLeiosKey(key *lcommon.LeiosKey) (*bls12381.G2Affine, error) {
 		)
 	}
 	cacheable := len(key.PossessionProof) == lcommon.LeiosBlsPossessionProofSize
-	var id verifiedLeiosKeyID
+	id := verifiedLeiosKeyID{domain: domain}
 	if cacheable {
 		copy(id.publicKey[:], key.PublicKey)
 		copy(id.proof[:], key.PossessionProof)
@@ -251,7 +283,7 @@ func verifiedLeiosKey(key *lcommon.LeiosKey) (*bls12381.G2Affine, error) {
 		&pub,
 		key.PublicKey,
 		key.PossessionProof,
-		LeiosPoPDST,
+		dst,
 	); err != nil {
 		return nil, fmt.Errorf("leios key proof of possession: %w", err)
 	}

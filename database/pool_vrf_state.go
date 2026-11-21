@@ -37,7 +37,7 @@ func (d *Database) GetPoolVrfState(
 	txn *Txn,
 ) (*models.Pool, error) {
 	store, ok := d.metadata.(poolVrfStateStore)
-	if !ok {
+	if !ok || d.poolsDrained() {
 		return d.GetPool(ctx, pkh, true, txn)
 	}
 	if txn == nil {

@@ -102,13 +102,17 @@ func newRequiredDatumFixture(
 		&f.spendTxId:      spendOutput,
 		&f.collateralTxId: collateralOutput,
 	} {
+		address := keyAddrBytes
+		if txId == &f.spendTxId {
+			address = scriptAddrBytes
+		}
 		encoded, err := cbor.Encode(output)
 		require.NoError(t, err)
 		require.NoError(
 			t,
 			f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 				if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId: *txId, OutputIdx: 0, AddedSlot: 1,
+					TxId: *txId, OutputIdx: 0, AddedSlot: 1, Address: address,
 				}); err != nil {
 					return err
 				}
@@ -193,6 +197,7 @@ func conwayTestBlock(
 		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot
@@ -260,7 +265,7 @@ func newRequiredDatumLedger(
 	t.Helper()
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
-	return &LedgerState{
+	ls := &LedgerState{
 		db:         db,
 		activeEras: []eras.EraDesc{era},
 		config: LedgerStateConfig{
@@ -269,8 +274,9 @@ func newRequiredDatumLedger(
 		},
 		currentEra: era,
 	}
+	attachTestLiveSet(t, ls)
+	return ls
 }
-
 func TestLedgerProcessBlockConwayRejectsMissingRequiredSpendingDatum(
 	t *testing.T,
 ) {

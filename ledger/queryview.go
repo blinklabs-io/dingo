@@ -23,12 +23,15 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 // ErrQueryViewClosed is returned by QueryView.Query once the view has been
 // closed, whether by its owner or by a forced expiry.
 var ErrQueryViewClosed = errors.New("ledger query view is closed")
+
+var errQueryViewSetPending = errors.New("committed live ledger changes pending")
 
 // QueryView is a read-only snapshot of the ledger that a LocalStateQuery
 // session holds between Acquire and Release. Every query answered through it
@@ -44,7 +47,7 @@ var ErrQueryViewClosed = errors.New("ledger query view is closed")
 type QueryView struct {
 	ls  *LedgerState
 	at  QueryPoint
-	txn *database.Txn
+	txn ledgerdb.Txn
 	// transitionInfo freezes the in-memory forecast that accompanied the
 	// database snapshot. Era-history queries must not observe a later forecast
 	// while every persisted input remains pinned at Acquire.
@@ -71,8 +74,8 @@ type QueryView struct {
 // caller can map the ErrPointNotOnChain and ErrHistoricalStateUnavailable
 // sentinels to protocol-level Acquire failures.
 //
-// The snapshot is a database.NewReadSnapshotContext: its blob and metadata
-// views are opened at one commit boundary, and it counts against the read
+// The metadata, blob and live-set views open at one commit boundary. The
+// coordinated database snapshot counts against the read
 // snapshot admission cap, which keeps one metadata read connection free for
 // the rest of the node however many views are held. When the cap is reached
 // AcquireQueryView waits for a view to close, and returns ctx's error if ctx
@@ -93,6 +96,19 @@ func (ls *LedgerState) AcquireQueryView(
 			return nil, err
 		}
 		txn, cancelView, err := ls.openQueryViewSnapshot(ctx)
+		if errors.Is(err, errQueryViewSetPending) {
+			// Historical views need the journal entries as well as the
+			// outputs, so an overlay of pending changes is insufficient.
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf(
+					"wait for live ledger changes: %w",
+					ctx.Err(),
+				)
+			case <-time.After(5 * time.Millisecond):
+				continue
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -167,10 +183,14 @@ func (ls *LedgerState) waitPendingBoundaryJob(
 // only the open.
 func (ls *LedgerState) openQueryViewSnapshot(
 	ctx context.Context,
-) (*database.Txn, context.CancelFunc, error) {
+) (ledgerdb.Txn, context.CancelFunc, error) {
 	viewCtx, cancelView := context.WithCancel(context.WithoutCancel(ctx))
 	stopWatch := context.AfterFunc(ctx, cancelView)
-	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
+	txn, _, err := database.NewReadSnapshotWithAnchorContext(
+		viewCtx, ls.db, func(txn *database.Txn) error {
+			return ls.pinSetReadsResult(txn, true)
+		},
+	)
 	if !stopWatch() {
 		// ctx ended while the snapshot was opening and cancelled viewCtx,
 		// which also ends a transaction that did open. err names the stage
@@ -189,6 +209,17 @@ func (ls *LedgerState) openQueryViewSnapshot(
 	if err != nil {
 		cancelView()
 		return nil, nil, err
+	}
+	if pin := ls.pinOf(txn); pin != nil && len(pin.batches) > 0 {
+		err := txn.Rollback()
+		cancelView()
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"release pending live ledger snapshot: %w",
+				err,
+			)
+		}
+		return nil, nil, errQueryViewSetPending
 	}
 	return txn, cancelView, nil
 }
@@ -251,7 +282,7 @@ func (v *QueryView) detachForUtxoWhole() (QueryPoint, bool) {
 	}
 	point := v.at
 	if !point.pinned() {
-		tip, err := v.ls.db.GetTip(v.txn)
+		tip, err := v.ls.ledgerDB().GetTip(v.txn)
 		if err != nil || len(tip.Point.Hash) == 0 {
 			return QueryPoint{}, false
 		}

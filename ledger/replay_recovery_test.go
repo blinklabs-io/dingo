@@ -66,6 +66,9 @@ func newReplayRecoveryLedgerState(
 	config LedgerStateConfig,
 ) (*LedgerState, error) {
 	t.Helper()
+	if config.UtxoSet == nil {
+		config.UtxoSet = NewMemLiveSetForTest()
+	}
 	ls, err := NewLedgerState(config)
 	if ls != nil {
 		t.Cleanup(func() { require.NoError(t, ls.Close()) })
@@ -1060,6 +1063,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		failingBlock.Slot,
 	))
 
+	seedTestOutputCBOR(t, db, producerTxHash, 0, 100)
+
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
 			failingBlock.Slot,
@@ -1399,7 +1404,10 @@ func TestAtTipRollbackPreflightExcludesCompetingBlockAdd(t *testing.T) {
 	_, _, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)
+	// An intent that leads the applied tip means the ledger never applied the
+	// discarded blocks, so the durable tip is empty as well as the live one.
 	ls.currentTip = ochainsync.Tip{}
+	require.NoError(t, db.SetTip(ochainsync.Tip{}, nil))
 	committed, err := ls.rollbackPrimaryChainWithinSecurityParam(target)
 	require.NoError(t, err)
 	assert.False(t, committed)
@@ -3706,6 +3714,7 @@ func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
 			BlockPoint: ocommon.NewPoint(100, testHashBytes("current")),
@@ -3921,6 +3930,8 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		AddedSlot: producerBlock.Slot,
 	}))
 
+	seedTestLiveOutput(t, ls, producerTxHash, 1, 11688720)
+
 	validationErr := &txValidationError{
 		BlockPoint: currentTip.Point,
 		TxHash:     testHashBytes("script-data-hash-failing-tx"),
@@ -4126,6 +4137,8 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 		Amount:    types.Uint64(1_000_000),
 		AddedSlot: 10,
 	}))
+
+	seedTestLiveOutput(t, ls, presentTx, 0, 1_000_000)
 
 	index := &replayRecoveryChainIndex{
 		Txs: make(map[string]replayRecoveryChainTx),
@@ -5388,5 +5401,55 @@ func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 		t,
 		f.ls.currentTip.Point.Slot,
 		uint64(pruneFixtureFloorSlot),
+	)
+}
+
+// TestRecoveryRewindHaltsWhenRefusedByImmutableFloor pins the ImmutableDB
+// floor as a terminal refusal. A promoted block's removal is refused for as
+// long as the database holds it, so a recovery rewind below the immutable tip
+// is no more reachable on the next pipeline restart than one beyond K, and
+// must stop the pipeline rather than be retried forever.
+func TestRecoveryRewindHaltsWhenRefusedByImmutableFloor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	raw := seedTestChain(t, cm.PrimaryChain(), "halt-immutable-floor", 3)
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	refuse := func(ocommon.Point) (bool, error) {
+		return false, fmt.Errorf(
+			"rollback: %w", database.ErrRollbackBelowImmutableTip,
+		)
+	}
+	var lastErr error
+	for range maxRecoveryRewindRejections + 1 {
+		_, lastErr = ls.rewindPrimaryChainForRecoveryWithRollback(
+			target, refuse,
+		)
+		require.ErrorIs(t, lastErr, database.ErrRollbackBelowImmutableTip)
+		if errors.Is(lastErr, errHaltLedgerPipeline) {
+			return
+		}
+	}
+	t.Fatalf(
+		"a recovery rewind refused by the immutable floor must stop the "+
+			"pipeline rather than be retried forever: %v",
+		lastErr,
 	)
 }

@@ -588,3 +588,101 @@ func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 	requireCommitBarrierFree(t, db)
 	requireDestructiveTransitionBarrierFree(t, db)
 }
+
+func TestReadSnapshotAnchorBlocksAConcurrentCommit(t *testing.T) {
+	t.Parallel()
+	events := []string{}
+	db := &Database{
+		metadata: &orderedSnapshotMetadata{events: &events},
+		blobRef:  newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
+	}
+	writer := &Txn{db: db, readWrite: true, metadataTxn: &commitFailingTxn{}}
+	require.NoError(t, acquireCommitBarrier(t.Context(), writer, true))
+	t.Cleanup(writer.Release)
+	committed := make(chan error, 1)
+	anchored := false
+	txn, _, err := NewReadSnapshotWithAnchorContext(
+		t.Context(),
+		db,
+		func(snapshot *Txn) error {
+			anchored = true
+			db.commitPhase.mu.Lock()
+			paused := db.commitPhase.held
+			db.commitPhase.mu.Unlock()
+			require.True(
+				t,
+				paused,
+				"the additional view shares the database commit boundary",
+			)
+			require.NotNil(t, snapshot.Metadata())
+			require.NotNil(t, snapshot.Blob())
+			go func() { committed <- writer.Commit() }()
+			testutil.WaitForCondition(t, func() bool {
+				if writer.lock.TryLock() {
+					writer.lock.Unlock()
+					return false
+				}
+				return true
+			}, 5*time.Second, "writer reached the paused commit phase")
+			state := make(chan bool, 1)
+			go func() { state <- writer.CommitPublished() }()
+			require.False(t, testutil.RequireReceive(
+				t,
+				state,
+				5*time.Second,
+				"commit-state inspection must not wait behind the paused writer",
+			))
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(txn.Release)
+	require.True(t, anchored)
+	require.NoError(t, testutil.RequireReceive(t, committed, 5*time.Second,
+		"writer resumes after the additional store is anchored"))
+	require.True(t, writer.IsCommitted())
+}
+
+func TestReadSnapshotAnchorFailureReleasesItsResources(t *testing.T) {
+	t.Parallel()
+	anchorErr := errors.New("additional store unavailable")
+	rollbackErr := errors.New("metadata rollback failed")
+	metadataTxn := &anchorRollbackTxn{rollbackErr: rollbackErr}
+	db := &Database{metadata: &anchorRollbackMetadata{txn: metadataTxn}}
+	released := false
+	txn, _, err := NewReadSnapshotWithAnchorContext(
+		t.Context(),
+		db,
+		func(snapshot *Txn) error {
+			snapshot.OnFinish(func() { released = true })
+			return anchorErr
+		},
+	)
+	require.Nil(t, txn)
+	require.ErrorIs(t, err, anchorErr)
+	require.ErrorIs(t, err, rollbackErr)
+	require.True(t, released)
+	requireCommitBarrierFree(t, db)
+	requireDestructiveTransitionBarrierFree(t, db)
+}
+
+func TestReadSnapshotAnchorPanicReleasesItsResources(t *testing.T) {
+	t.Parallel()
+	db := &Database{
+		metadata: &anchorRollbackMetadata{txn: &anchorRollbackTxn{}},
+	}
+	released := false
+	require.PanicsWithValue(t, "anchor failed", func() {
+		_, _, _ = NewReadSnapshotWithAnchorContext(
+			t.Context(),
+			db,
+			func(snapshot *Txn) error {
+				snapshot.OnFinish(func() { released = true })
+				panic("anchor failed")
+			},
+		)
+	})
+	require.True(t, released)
+	requireCommitBarrierFree(t, db)
+	requireDestructiveTransitionBarrierFree(t, db)
+}

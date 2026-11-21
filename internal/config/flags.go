@@ -254,6 +254,12 @@ var flagSpecs = []flagSpec{
 		"peer-sharing",
 		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers, else true; false for block producers)",
 	),
+	stringFlag(
+		"AdvertiseAddress",
+		"advertise-address",
+		"",
+		"public IP:port shared with peers as this node's own address (PeerSharing)",
+	),
 
 	// APIs
 	stringFlag(
@@ -591,6 +597,24 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
+	// ImmutableDB
+	intFlag(
+		"ImmutableDB.PromoteBatch",
+		"immutable-db-promote-batch",
+		"blocks promoted to the ImmutableDB per step",
+	),
+	durationFlag(
+		"ImmutableDB.PromoteFrequency",
+		"immutable-db-promote-frequency",
+		"how often block bodies are promoted to the ImmutableDB",
+	),
+	// Indexer
+	uintFlag(
+		"Indexer.MaxReadyLagBlocks",
+		"indexer-max-ready-lag-blocks",
+		"blocks the IndexerDB may trail the ledger tip before current-state endpoints report not ready",
+	),
+
 	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(
@@ -748,7 +772,11 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
-	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections (0 = unlimited)"),
+	intFlag(
+		"MaxNtCConns",
+		"max-ntc-conns",
+		"max node-to-client connections (0 = unlimited)",
+	),
 	intFlag(
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
@@ -905,6 +933,16 @@ var flagSpecs = []flagSpec{
 		"ledger-prefetch-ahead-enabled",
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default on)",
 	),
+	intFlag(
+		"LedgerUtxoCheckpointEpochs",
+		"ledger-utxo-checkpoint-epochs",
+		"write a checkpoint of the live UTxO set at an epoch boundary every this many epochs, for recovery when its journal cannot bring it to the ledger; 0 writes none (default 1)",
+	),
+	intFlag(
+		"LedgerUtxoCheckpointKeep",
+		"ledger-utxo-checkpoint-keep",
+		"how many live UTxO set checkpoints to retain (default 2)",
+	),
 	boolFlag(
 		"LedgerValidateAheadEnabled",
 		"ledger-validate-ahead-enabled",
@@ -961,6 +999,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"host:port of a bursa KES agent's remote sign listener; implies sign mode. TLS 1.3 by default (mutual TLS only when a client certificate is set); --shelley-kes-agent-plaintext selects plain TCP",
 	),
+	stringSliceFlag(
+		"ShelleyKESAgentAddresses",
+		"shelley-kes-agent-addresses",
+		"ordered host:port list of bursa KES agent remote sign listeners; signs through the first that admits this node and moves to the next when a sign fails on the link (replaces --shelley-kes-agent-address)",
+	),
 	stringFlag(
 		"ShelleyKESAgentClientCertFile",
 		"shelley-kes-agent-client-cert-file",
@@ -983,6 +1026,12 @@ var flagSpecs = []flagSpec{
 		"ShelleyKESAgentPlaintext",
 		"shelley-kes-agent-plaintext",
 		"run the remote KES agent link over plain TCP",
+	),
+	stringFlag(
+		"ShelleyKESAgentProfile",
+		"shelley-kes-agent-profile",
+		"",
+		"remote KES agent profile to sign for, named when the agent admits a session",
 	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
@@ -1055,7 +1104,11 @@ var flagSpecs = []flagSpec{
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
-	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
+	boolFlag(
+		"CIP0203Enabled",
+		"cip-0203-enabled",
+		"include the build version in forged block headers (CIP-0203)",
+	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(
@@ -1108,13 +1161,13 @@ var flagSpecs = []flagSpec{
 		"LeiosVoteSigningKeyFile",
 		"leios-vote-signing-key-file",
 		"",
-		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
+		"path to a Cardano text-envelope BLS12-381 Leios vote signing key, a JSON array of such envelopes, or a legacy raw hex scalar",
 	),
 	// Mithril
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+		"sync from Mithril inside serve while behind the certified tip",
 	),
 	intFlag(
 		"Mithril.WindowChunks",

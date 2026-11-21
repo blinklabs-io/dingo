@@ -16,13 +16,18 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	"github.com/prometheus/client_golang/prometheus"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,6 +36,19 @@ func withImmutableSlot(o *Ouroboros, slot uint64) {
 	o.leiosImmutableSlot = func(context.Context) (uint64, bool, error) {
 		return slot, true, nil
 	}
+}
+
+// pinLeiosEB marks an endorser block certified by an immutable ranking block,
+// moving it into the immutable partition of the Leios store.
+func pinLeiosEB(t *testing.T, db *database.Database, slot uint64, hash []byte) {
+	t.Helper()
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	_, err = store.Pin(
+		leiosdb.Ref{Slot: slot, Hash: hash},
+		leiosdb.Ref{Slot: slot + 1, Hash: hash},
+	)
+	require.NoError(t, err)
 }
 
 type leiosRetentionRecord struct {
@@ -87,10 +105,7 @@ func TestLeiosPersistenceGCDefaultPrunesUncertifiedBehindImmutableTip(
 			record.slot, record.hash, []byte("manifest"), txs,
 		))
 	}
-	require.NoError(
-		t,
-		db.SetLeiosEBCertified(staleCertified.slot, staleCertified.hash, nil),
-	)
+	pinLeiosEB(t, db, staleCertified.slot, staleCertified.hash)
 
 	o.runLeiosPersistenceGC(context.Background(), nil)
 
@@ -183,31 +198,38 @@ func TestLeiosPersistenceWriterKeepsCertifiedBehindFrontier(t *testing.T) {
 	withImmutableSlot(o, 100)
 	o.leiosPersistGCOnce.Do(func() {})
 	db := o.leiosDatabase()
-	certifiedPoint, certifiedRaw, certifiedData, _ := leiosPersistTestEntry(
+	certifiedPoint, certifiedRaw, certifiedData := leiosPersistTestEntry(
 		t, 10, 1, 4,
 	)
-	require.NoError(
-		t,
-		db.SetLeiosEBCertified(certifiedPoint.Slot, certifiedPoint.Hash, nil),
-	)
-	uncertifiedPoint, uncertifiedRaw, uncertifiedData, _ := leiosPersistTestEntry(
+	pinLeiosEB(t, db, certifiedPoint.Slot, certifiedPoint.Hash)
+	uncertifiedPoint, uncertifiedRaw, uncertifiedData := leiosPersistTestEntry(
 		t, 11, 1, 4,
 	)
 	o.leiosPersistStoreMu.Lock()
 	o.leiosPersistPruneBeforeSlot = 100
 	o.leiosPersistStoreMu.Unlock()
-	o.enqueueLeiosPersist(certifiedPoint, certifiedRaw, certifiedData)
-	o.enqueueLeiosPersist(uncertifiedPoint, uncertifiedRaw, uncertifiedData)
+	_, err := o.persistLeiosEndorserBlock(
+		certifiedPoint,
+		certifiedRaw,
+		certifiedData,
+	)
+	require.NoError(t, err)
+	_, err = o.persistLeiosEndorserBlock(
+		uncertifiedPoint,
+		uncertifiedRaw,
+		uncertifiedData,
+	)
+	require.NoError(t, err, "a write below the frontier is skipped, not failed")
 	require.NoError(t, o.Close())
 
-	_, err := db.GetLeiosEBManifest(certifiedPoint.Hash, certifiedPoint.Slot)
+	_, err = db.GetLeiosEBManifest(certifiedPoint.Hash, certifiedPoint.Slot)
 	require.NoError(t, err, "certified endorser block was not persisted")
 	_, err = db.GetLeiosEBManifest(uncertifiedPoint.Hash, uncertifiedPoint.Slot)
 	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
 }
 
-// leios-fetch answers an uncertified endorser block behind the immutable point
-// as unknown, whether the data is cached or only persisted; a certified one,
+// leios-fetch answers an unpinned endorser block behind the immutable point
+// as unknown, whether the data is cached or only persisted; a pinned one,
 // and one at or after the immutable point, is still served.
 func TestLeiosFetchServerRefusesUncertifiedBehindImmutableTip(t *testing.T) {
 	t.Parallel()
@@ -240,7 +262,7 @@ func TestLeiosFetchServerRefusesUncertifiedBehindImmutableTip(t *testing.T) {
 			c.slot, hash, raw, []cbor.RawMessage{tx},
 		))
 		if c.certified {
-			require.NoError(t, db.SetLeiosEBCertified(c.slot, hash, nil))
+			pinLeiosEB(t, db, c.slot, hash)
 		}
 		cases = append(cases, served{
 			point:  leiosRetentionRecord{c.slot, hash},
@@ -319,4 +341,99 @@ func TestLeiosFetchServerRefusesCachedUncertifiedBehindImmutableTip(
 	)
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 	require.Nil(t, txsMsg)
+}
+
+// A failed immutable-point lookup prunes nothing, even with a configured
+// window: the frontier must never pass the endorser block a certifying ranking
+// block is applying, whose records commit before that block does.
+func TestLeiosPersistenceGCConfiguredWindowSkipsFailedImmutableLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	o.leiosImmutableSlot = func(context.Context) (uint64, bool, error) {
+		return 0, false, errors.New("chain read failed")
+	}
+	db := o.leiosDatabase()
+	old := leiosRetentionRecord{150, leiosRetentionHash(1)}
+	newest := leiosRetentionRecord{300, leiosRetentionHash(2)}
+	for _, record := range []leiosRetentionRecord{old, newest} {
+		require.NoError(t, db.SetLeiosEB(
+			record.slot, record.hash, []byte("manifest"), nil,
+		))
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	requireLeiosEBPersisted(t, o, old, true)
+	requireLeiosEBPersisted(t, o, newest, true)
+	o.leiosPersistStoreMu.Lock()
+	defer o.leiosPersistStoreMu.Unlock()
+	require.Zero(t, o.leiosPersistPruneBeforeSlot)
+}
+
+// With the pin walk wired, an unpinned endorser block is refused only once the
+// walk has passed it: below the live immutable slot but above the pin
+// watermark it may be certified by a block the walk has not reached, and a
+// stalled walk must not turn serving into refusal.
+func TestLeiosFetchServerServesUnwalkedEndorserBlockBehindImmutableTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	withImmutableSlot(o, 100)
+	o.leiosPinAdvance = func(context.Context) error {
+		return errors.New("walk stalled")
+	}
+	store, err := o.leiosDatabase().LeiosDB()
+	require.NoError(t, err)
+	require.NoError(t, store.AdvancePinnedThrough(
+		leiosdb.Ref{Slot: 40, Hash: leiosRetentionHash(8)},
+	))
+	tx, ref := testLeiosManifestTx(t, 1)
+	raw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	hash := lcommon.Blake2b256Hash(raw).Bytes()
+	for _, slot := range []uint64{30, 50} {
+		require.NoError(t, o.leiosDatabase().SetLeiosEB(
+			slot, hash, raw, []cbor.RawMessage{tx},
+		))
+	}
+
+	// Slot 50 is above the pin watermark (40), so the walk has not decided it.
+	msg, err := o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{}, ocommon.NewPoint(50, hash),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	// Slot 30 is below it and unpinned: the walk decided it is uncertified.
+	msg, err = o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{}, ocommon.NewPoint(30, hash),
+	)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockNotFound)
+	require.Nil(t, msg)
+}
+
+// A failing pin walk is an error and is counted, not only logged at a level
+// that reads as transient.
+func TestLeiosPersistenceGCCountsPinWalkFailures(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.registerer = newTrackingRegisterer(prometheus.NewRegistry())
+	o.initLeiosMetrics()
+	withImmutableSlot(o, 100)
+	o.leiosPinAdvance = func(context.Context) error {
+		return errors.New("walk failed")
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	require.Equal(t, 2.0, promtest.ToFloat64(o.leiosMetrics.pinWalkFailures))
 }

@@ -21,6 +21,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -108,7 +109,7 @@ func (ls *LedgerState) newMidEpochEraGateAt(
 func (g *midEpochEraGate) requiredEra(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prev ochainsync.Tip,
 ) (uint, error) {
 	countFrom, ok := ls.votingCountStartSlot(g.era.Id, g.epoch)
@@ -196,7 +197,7 @@ func (ls *LedgerState) applyMidEpochEraSwitch(
 		results []*EraTransitionResult
 		newEra  uint
 	)
-	err := ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
+	err := ls.SubmitAsyncDBTxn(ctx, func(txn ledgerdb.Txn) error {
 		var err error
 		_, newEra, results, _, _, err = ls.prepareEraTransitionsForEpoch(
 			ctx, txn, transitionEpoch, era, pparams, path, false,
@@ -207,7 +208,7 @@ func (ls *LedgerState) applyMidEpochEraSwitch(
 		if len(results) == 0 {
 			return errors.New("no era transition produced")
 		}
-		if err := ls.db.SetEpoch(
+		if err := ls.ledgerDB().SetEpoch(
 			epoch.StartSlot, epoch.EpochId,
 			epoch.Nonce, epoch.EvolvingNonce, epoch.CandidateNonce,
 			epoch.LastEpochBlockNonce,
@@ -215,7 +216,7 @@ func (ls *LedgerState) applyMidEpochEraSwitch(
 		); err != nil {
 			return fmt.Errorf("set switched epoch: %w", err)
 		}
-		return ls.db.SetMidEpochEraSwitch(database.MidEpochEraSwitch{
+		return ls.ledgerDB().SetMidEpochEraSwitch(database.MidEpochEraSwitch{
 			Epoch:   epoch.EpochId,
 			Slot:    block.SlotNumber(),
 			FromEra: era.Id,

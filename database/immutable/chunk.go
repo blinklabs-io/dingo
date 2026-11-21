@@ -17,6 +17,7 @@ package immutable
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"math"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -112,8 +113,11 @@ func (c *chunk) Next() (*Block, error) {
 		// The era tag identifies an EBB exactly. The index position and
 		// BlockOrEbb cannot: the first entry of every chunk is occupied at
 		// relative slot 0, and an EBB's BlockOrEbb is its epoch number.
-		IsEbb: blkType == byron.BlockTypeByronEbb,
-		Cbor:  blkBytes,
+		IsEbb:  blkType == byron.BlockTypeByronEbb,
+		Cbor:   blkBytes,
+		Offset: uint64(currOffset), // #nosec G115 -- validBlockSpan rejects negatives
+		Size:   uint32(blockSize),  // #nosec G115 -- bounded by maxBlockSize in validBlockSpan
+		CRC:    crc32.ChecksumIEEE(blockData),
 	}
 	if last {
 		c.currentEntry = nil

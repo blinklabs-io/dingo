@@ -17,9 +17,10 @@ package database
 import (
 	"encoding/binary"
 	"errors"
+	"path/filepath"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -165,334 +166,124 @@ func mustCborForLeiosTest(t *testing.T, value any) cbor.RawMessage {
 	return cbor.RawMessage(data)
 }
 
-// TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords covers both branches of the
-// prefix scan, in particular the legacy one: SetLeiosEB only ever writes
-// current-format "em"+hash+slot keys, so the branch that reads the slot out
-// of the first eight value bytes -- the path that exists solely for nodes
-// upgrading across the key format change -- was otherwise unexercised.
-func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
+// MaxLeiosEBSlot answers from the slot-ordered keys, so the highest slot is
+// found whichever order records were written in, and a block pinned into the
+// immutable partition still counts.
+func TestMaxLeiosEBSlotSpansBothPartitions(t *testing.T) {
 	t.Parallel()
 
 	d := newTestDB(t)
 	manifestRaw := []byte("manifest bytes")
 
-	// No manifests persisted at all: no evidence, not an error.
 	got, err := d.MaxLeiosEBSlot()
 	require.NoError(t, err)
-	require.Equal(t, uint64(0), got)
+	require.Equal(t, uint64(0), got, "no manifests is not an error")
 
-	// Current format: the slot is the last eight bytes of the key.
-	require.NoError(
-		t,
-		d.SetLeiosEBManifest(700, randomHash(t), manifestRaw),
-	)
+	require.NoError(t, d.SetLeiosEB(700, randomHash(t), manifestRaw, nil))
+	require.NoError(t, d.SetLeiosEB(200, randomHash(t), manifestRaw, nil))
 	got, err = d.MaxLeiosEBSlot()
 	require.NoError(t, err)
 	require.Equal(t, uint64(700), got)
 
-	// Legacy format: the key carries no slot, so the maximum can only be
-	// found by reading it out of the value. Dropping the legacy branch of
-	// the switch leaves this at 700.
-	writeLegacyLeiosEB(t, d, 900, randomHash(t), manifestRaw, nil)
-	got, err = d.MaxLeiosEBSlot()
+	store, err := d.LeiosDB()
 	require.NoError(t, err)
-	require.Equal(t, uint64(900), got)
-
-	// The scan takes a maximum, not a last-seen: neither format may lower
-	// an already-higher slot, whichever order the keys sort in.
-	writeLegacyLeiosEB(t, d, 100, randomHash(t), manifestRaw, nil)
-	require.NoError(
-		t,
-		d.SetLeiosEBManifest(200, randomHash(t), manifestRaw),
-	)
+	pinned := leiosdb.Ref{Slot: 900, Hash: randomHash(t)}
+	require.NoError(t, d.SetLeiosEB(900, pinned.Hash, manifestRaw, nil))
+	_, err = store.Pin(pinned, leiosdb.Ref{Slot: 901, Hash: randomHash(t)})
+	require.NoError(t, err)
 	got, err = d.MaxLeiosEBSlot()
 	require.NoError(t, err)
 	require.Equal(t, uint64(900), got)
 }
 
-func TestPruneLeiosEBBeforeSlotRetainsBoundaryAndUnknownLegacySlots(
-	t *testing.T,
-) {
+// A write below the collection watermark is refused rather than stored for the
+// next collection to delete, and a pinned block stays writable so a
+// content-pending pin can be repaired.
+func TestSetLeiosEBRefusesBehindCollectionWatermark(t *testing.T) {
 	t.Parallel()
 
 	d := newTestDB(t)
-	txs := []cbor.RawMessage{mustCborForLeiosTest(t, "tx")}
-	oldCurrent := randomHash(t)
-	boundaryCurrent := randomHash(t)
-	newCurrent := randomHash(t)
-	for _, record := range []struct {
-		slot uint64
-		hash []byte
-	}{
-		{slot: 10, hash: oldCurrent},
-		{slot: 20, hash: boundaryCurrent},
-		{slot: 30, hash: newCurrent},
-	} {
-		require.NoError(t, d.SetLeiosEB(
-			record.slot,
-			record.hash,
-			[]byte("manifest"),
-			txs,
-		))
-	}
-
-	oldLegacy := randomHash(t)
-	newLegacy := randomHash(t)
-	malformedLegacy := randomHash(t)
-	writeLegacyLeiosEB(t, d, 19, oldLegacy, []byte("old"), txs)
-	writeLegacyLeiosEB(t, d, 21, newLegacy, []byte("new"), txs)
-
-	// An unreadable legacy manifest has no safe retention slot. Its paired
-	// transaction list must be preserved with it rather than treated as an
-	// orphan.
-	blob := d.Blob()
-	malformedTxn := d.BlobTxn(true)
-	defer malformedTxn.Rollback() //nolint:errcheck
-	malformedTxs, err := cbor.Encode(txs)
+	store, err := d.LeiosDB()
 	require.NoError(t, err)
-	require.NoError(t, blob.Set(
-		malformedTxn.Blob(),
-		types.LegacyLeiosEBManifestKey(malformedLegacy),
-		[]byte{1, 2, 3},
-	))
-	require.NoError(t, blob.Set(
-		malformedTxn.Blob(),
-		types.LegacyLeiosEBTxsKey(malformedLegacy),
-		malformedTxs,
-	))
-	require.NoError(t, malformedTxn.Commit())
-
-	// Legacy transaction bodies with no manifest are safe to remove as an
-	// orphan.
-	orphanLegacy := randomHash(t)
-	orphanTxn := d.BlobTxn(true)
-	defer orphanTxn.Rollback() //nolint:errcheck
-	require.NoError(t, blob.Set(
-		orphanTxn.Blob(),
-		types.LegacyLeiosEBTxsKey(orphanLegacy),
-		malformedTxs,
-	))
-	require.NoError(t, orphanTxn.Commit())
-
-	deleted, err := d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	_, err = store.GarbageCollect(t.Context(), 100)
 	require.NoError(t, err)
-	require.Equal(t, 5, deleted)
 
-	for _, record := range []struct {
-		slot uint64
-		hash []byte
-	}{
-		{slot: 10, hash: oldCurrent},
-		{slot: 19, hash: oldLegacy},
-	} {
-		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
-		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
-		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
-		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
-	}
-	for _, record := range []struct {
-		slot uint64
-		hash []byte
-	}{
-		{slot: 20, hash: boundaryCurrent},
-		{slot: 30, hash: newCurrent},
-		{slot: 21, hash: newLegacy},
-	} {
-		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
-		require.NoError(t, err)
-		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
-		require.NoError(t, err)
-	}
-
-	readTxn := d.BlobTxn(false)
-	defer readTxn.Release()
-	_, err = blob.Get(
-		readTxn.Blob(),
-		types.LegacyLeiosEBTxsKey(malformedLegacy),
-	)
-	require.NoError(t, err)
-	_, err = blob.Get(readTxn.Blob(), types.LegacyLeiosEBTxsKey(orphanLegacy))
+	hash := randomHash(t)
+	err = d.SetLeiosEB(99, hash, []byte("m"), nil)
+	require.ErrorIs(t, err, leiosdb.ErrBehindImmutableTip)
+	_, err = d.GetLeiosEBManifest(hash, 99)
 	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 
-	// The same cutoff is safe to apply repeatedly after its first sweep.
-	deleted, err = d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, d.SetLeiosEB(100, hash, []byte("m"), nil))
+	pinnedHash := randomHash(t)
+	_, err = store.Pin(
+		leiosdb.Ref{Slot: 50, Hash: pinnedHash},
+		leiosdb.Ref{Slot: 51, Hash: randomHash(t)},
+	)
 	require.NoError(t, err)
-	require.Zero(t, deleted)
+	require.NoError(t, d.SetLeiosEB(50, pinnedHash, []byte("m"), []cbor.RawMessage{}))
 }
 
-type leiosPruneBatch struct {
-	keyCount   int
-	valueBytes int
-}
-
-type leiosPruneTrackingStore struct {
-	blob.BlobStore
-	valueSizes map[string]int
-	batches    []leiosPruneBatch
-}
-
-type leiosPruneTrackingTxn struct {
-	types.Txn
-	store      *leiosPruneTrackingStore
-	readWrite  bool
-	keyCount   int
-	valueBytes int
-}
-
-func (s *leiosPruneTrackingStore) NewTransaction(
-	readWrite bool,
-) types.Txn {
-	return &leiosPruneTrackingTxn{
-		Txn:       s.BlobStore.NewTransaction(readWrite),
-		store:     s,
-		readWrite: readWrite,
-	}
-}
-
-func (s *leiosPruneTrackingStore) NewIterator(
-	txn types.Txn,
-	opts types.BlobIteratorOptions,
-) types.BlobIterator {
-	trackedTxn := txn.(*leiosPruneTrackingTxn)
-	return s.BlobStore.NewIterator(trackedTxn.Txn, opts)
-}
-
-func (s *leiosPruneTrackingStore) Delete(
-	txn types.Txn,
-	key []byte,
-) error {
-	trackedTxn := txn.(*leiosPruneTrackingTxn)
-	if err := s.BlobStore.Delete(trackedTxn.Txn, key); err != nil {
-		return err
-	}
-	trackedTxn.keyCount++
-	trackedTxn.valueBytes += s.valueSizes[string(key)]
-	return nil
-}
-
-func (t *leiosPruneTrackingTxn) Commit() error {
-	if err := t.Txn.Commit(); err != nil {
-		return err
-	}
-	if t.readWrite {
-		t.store.batches = append(t.store.batches, leiosPruneBatch{
-			keyCount:   t.keyCount,
-			valueBytes: t.valueBytes,
-		})
-	}
-	return nil
-}
-
-func (t *leiosPruneTrackingTxn) Rollback() error {
-	return t.Txn.Rollback()
-}
-
-func TestPruneLeiosEBBeforeSlotBoundsCloudCompensationBatchSize(
-	t *testing.T,
-) {
+// The endorser block records no longer touch the shared blob store.
+func TestSetLeiosEBLeavesSharedBlobStoreUntouched(t *testing.T) {
 	t.Parallel()
 
 	d := newTestDB(t)
-	originalStore := d.Blob()
-	const valueSize = 512 << 10
-	manifest := make([]byte, valueSize)
-	valueSizes := make(map[string]int)
-	for slot := uint64(1); slot <= 4; slot++ {
-		hash := randomHash(t)
-		require.NoError(t, d.SetLeiosEBManifest(slot, hash, manifest))
-		valueSizes[string(types.LeiosEBManifestKey(hash, slot))] = len(manifest)
-	}
+	require.NoError(t, d.SetLeiosEB(
+		10, randomHash(t), []byte("m"), []cbor.RawMessage{{0x01}},
+	))
+	require.NoError(t, d.PutLeiosClosure(10, randomHash(t), []byte("closure")))
 
-	trackingStore := &leiosPruneTrackingStore{
-		BlobStore:  originalStore,
-		valueSizes: valueSizes,
+	txn := d.BlobTxn(false)
+	defer txn.Release()
+	blob := txn.BlobStore()
+	it := blob.NewIterator(txn.Blob(), types.BlobIteratorOptions{Prefix: []byte("e")})
+	defer it.Close()
+	for it.Seek([]byte("e")); it.ValidForPrefix([]byte("e")); it.Next() {
+		t.Errorf("shared blob store holds endorser-block key %x", it.Item().Key())
 	}
-	_, drain := d.SetBlobStore(trackingStore)
-	defer func() {
-		drain()
-		_, restoreDrain := d.SetBlobStore(originalStore)
-		restoreDrain()
-	}()
-
-	deleted, err := d.PruneLeiosEBBeforeSlot(t.Context(), 5)
-	require.NoError(t, err)
-	require.Equal(t, 4, deleted)
-	// The four 512 KiB objects would stage 2 MiB of prior values in one cloud
-	// compensation log with the former 256-key batch. A singleton transaction
-	// keeps each log to one actual object value.
-	require.Len(t, trackingStore.batches, 4)
-	for _, batch := range trackingStore.batches {
-		require.Equal(t, 1, batch.keyCount)
-		require.LessOrEqual(t, batch.valueBytes, valueSize)
+	bit := blob.NewIterator(txn.Blob(), types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	})
+	defer bit.Close()
+	for bit.Seek([]byte(types.BlockBlobKeyPrefix)); bit.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); bit.Next() {
+		t.Errorf("shared blob store holds a closure block %x", bit.Item().Key())
 	}
 }
 
-func TestPruneLeiosEBBeforeSlotKeepsCertifiedOccurrences(t *testing.T) {
-	t.Parallel()
-
-	d := newTestDB(t)
-	txs := []cbor.RawMessage{mustCborForLeiosTest(t, "tx")}
-	uncertified := randomHash(t)
-	marked := randomHash(t)
-	blobOnly := randomHash(t)
-	legacyMarked := randomHash(t)
-	for _, hash := range [][]byte{uncertified, marked, blobOnly} {
-		require.NoError(t, d.SetLeiosEB(10, hash, []byte("manifest"), txs))
-	}
-	writeLegacyLeiosEB(t, d, 5, legacyMarked, []byte("legacy"), txs)
-
-	require.NoError(t, d.SetLeiosEBCertified(10, marked, nil))
-	require.NoError(t, d.SetLeiosEBCertified(5, legacyMarked, nil))
-	// Ledger apply writes the standalone closure blob before the ranking
-	// block's remaining checks, so it survives a rejected ranking block and
-	// does not certify.
-	require.NoError(t, d.SetGenesisCbor(10, blobOnly, []byte("closure"), nil))
-
-	_, err := d.PruneLeiosEBBeforeSlot(t.Context(), 20)
-	require.NoError(t, err)
-
-	for _, hash := range [][]byte{uncertified, blobOnly} {
-		_, err = d.GetLeiosEBManifest(hash, 10)
-		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
-		_, err = d.GetLeiosEBTxs(hash, 10)
-		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
-	}
-	for _, record := range []struct {
-		slot uint64
-		hash []byte
-	}{
-		{slot: 10, hash: marked},
-		{slot: 5, hash: legacyMarked},
-	} {
-		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
-		require.NoError(t, err)
-		gotTxs, err := d.GetLeiosEBTxs(record.hash, record.slot)
-		require.NoError(t, err)
-		require.Equal(t, txs, gotTxs)
-	}
-}
-
-// A rollback removes the certifying ranking block of every endorser block at or
-// after its point, so their markers go with it; earlier markers stay.
-func TestTruncateAfterSlotRemovesLeiosCertificationFromRollbackSlot(
-	t *testing.T,
-) {
+// A rollback removes the pins certified by the removed ranking blocks and
+// lowers the watermarks so the re-applied chain can pin and store again;
+// pins certified at or before the rollback point stay.
+func TestTruncateAfterSlotRollsBackLeiosPins(t *testing.T) {
 	t.Parallel()
 
 	d := newTestDB(t)
 	const rollbackSlot = uint64(1_500)
 	target := testIndexedBlock(rollbackSlot, 1, 0x15)
 	require.NoError(t, d.BlockCreate(target, nil))
-	hashes := map[uint64][]byte{
-		rollbackSlot - 1: randomHash(t),
-		rollbackSlot:     randomHash(t),
-		rollbackSlot + 1: randomHash(t),
-	}
-	for slot, hash := range hashes {
-		require.NoError(t, d.SetLeiosEBCertified(slot, hash, nil))
-	}
+	store, err := d.LeiosDB()
+	require.NoError(t, err)
 
-	_, _, err := d.TruncateAfterSlot(
+	type pin struct {
+		eb, cert leiosdb.Ref
+		kept     bool
+	}
+	pins := []pin{
+		{eb: leiosdb.Ref{Slot: 1498, Hash: randomHash(t)}, cert: leiosdb.Ref{Slot: 1499, Hash: randomHash(t)}, kept: true},
+		{eb: leiosdb.Ref{Slot: 1499, Hash: randomHash(t)}, cert: leiosdb.Ref{Slot: 1500, Hash: target.Hash}, kept: true},
+		{eb: leiosdb.Ref{Slot: 1500, Hash: randomHash(t)}, cert: leiosdb.Ref{Slot: 1501, Hash: randomHash(t)}},
+		{eb: leiosdb.Ref{Slot: 1510, Hash: randomHash(t)}, cert: leiosdb.Ref{Slot: 1511, Hash: randomHash(t)}},
+	}
+	for _, p := range pins {
+		require.NoError(t, d.SetLeiosEB(p.eb.Slot, p.eb.Hash, []byte("m"), []cbor.RawMessage{}))
+		_, err := store.Pin(p.eb, p.cert)
+		require.NoError(t, err)
+	}
+	require.NoError(t, store.AdvancePinnedThrough(pins[3].cert))
+	_, err = store.GarbageCollect(t.Context(), 1_505)
+	require.NoError(t, err)
+
+	_, _, err = d.TruncateAfterSlot(
 		t.Context(),
 		ocommon.Point{Slot: rollbackSlot, Hash: target.Hash},
 		0,
@@ -500,27 +291,169 @@ func TestTruncateAfterSlotRemovesLeiosCertificationFromRollbackSlot(
 	)
 	require.NoError(t, err)
 
-	for slot, hash := range hashes {
-		certified, err := d.IsLeiosEBCertified(slot, hash)
+	for _, p := range pins {
+		pinned, err := d.IsLeiosEBPinned(p.eb.Slot, p.eb.Hash)
 		require.NoError(t, err)
-		require.Equal(t, slot < rollbackSlot, certified, "slot %d", slot)
+		require.Equal(t, p.kept, pinned, "eb slot %d", p.eb.Slot)
 	}
+	wm, err := store.Watermarks()
+	require.NoError(t, err)
+	require.Equal(t, rollbackSlot, wm.PinnedThrough.Slot)
+	require.Equal(t, rollbackSlot, wm.GCBefore)
 }
 
-func TestIsLeiosEBCertifiedIsPerOccurrence(t *testing.T) {
+func TestIsLeiosEBPinnedIsPerOccurrence(t *testing.T) {
 	t.Parallel()
 
 	d := newTestDB(t)
 	hash := randomHash(t)
-	certified, err := d.IsLeiosEBCertified(10, hash)
+	pinned, err := d.IsLeiosEBPinned(10, hash)
 	require.NoError(t, err)
-	require.False(t, certified)
+	require.False(t, pinned)
 
-	require.NoError(t, d.SetLeiosEBCertified(10, hash, nil))
-	certified, err = d.IsLeiosEBCertified(10, hash)
+	store, err := d.LeiosDB()
 	require.NoError(t, err)
-	require.True(t, certified)
-	certified, err = d.IsLeiosEBCertified(11, hash)
+	_, err = store.Pin(
+		leiosdb.Ref{Slot: 10, Hash: hash},
+		leiosdb.Ref{Slot: 11, Hash: randomHash(t)},
+	)
 	require.NoError(t, err)
-	require.False(t, certified)
+	pinned, err = d.IsLeiosEBPinned(10, hash)
+	require.NoError(t, err)
+	require.True(t, pinned)
+	pinned, err = d.IsLeiosEBPinned(11, hash)
+	require.NoError(t, err)
+	require.False(t, pinned)
+}
+
+// An offset into a certified closure resolves from the LeiosDB when the blob
+// store has no block at the closure's (slot, hash), and a legacy synthetic
+// block in the blob store still wins.
+func TestOffsetResolutionFallsBackToLeiosClosure(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	cache := d.CborCache()
+	store, err := d.LeiosDB()
+	require.NoError(t, err)
+	hash := randomHash(t)
+	closure := []byte("0123456789")
+	require.NoError(t, store.PutClosure(leiosdb.Ref{Slot: 12, Hash: hash}, closure))
+
+	txn := d.BlobTxn(false)
+	defer txn.Release()
+	got, err := cache.getBlockCbor(d.Blob(), txn.Blob(), 12, hash)
+	require.NoError(t, err)
+	require.Equal(t, closure, got)
+
+	legacyHash := randomHash(t)
+	require.NoError(t, d.SetGenesisCbor(13, legacyHash, []byte("legacy"), nil))
+	require.NoError(t, store.PutClosure(leiosdb.Ref{Slot: 13, Hash: legacyHash}, []byte("leiosdb")))
+	got, err = cache.getBlockCbor(d.Blob(), d.BlobTxn(false).Blob(), 13, legacyHash)
+	require.NoError(t, err)
+	require.Equal(t, []byte("legacy"), got)
+
+	_, err = cache.getBlockCbor(d.Blob(), d.BlobTxn(false).Blob(), 14, randomHash(t))
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
+// A node that never handles an endorser block must not grow a Leios store
+// from an offset read that misses the shared blob store.
+func TestLeiosClosureFallbackDoesNotCreateStore(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.leiosClosure(7, make([]byte, 32))
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	require.NoDirExists(t, filepath.Join(dataDir, leiosdb.SubdirName))
+
+	// Once the store is open the same read finds a stored closure.
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	ref := leiosdb.Ref{Slot: 7, Hash: make([]byte, 32)}
+	require.NoError(t, store.PutClosure(ref, []byte("closure")))
+	got, err := db.leiosClosure(7, make([]byte, 32))
+	require.NoError(t, err)
+	require.Equal(t, []byte("closure"), got)
+}
+
+// A chain rollback on a node that never handled an endorser block has no pins
+// to demote and must not create the Leios store.
+func TestRollbackLeiosPinsDoesNotCreateStore(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	point := ocommon.Point{Slot: 40, Hash: make([]byte, 32)}
+
+	n, err := db.RollbackLeiosPins(point)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.NoDirExists(t, filepath.Join(dataDir, leiosdb.SubdirName))
+
+	// With a store present the rollback demotes the pins above the point.
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	eb := leiosdb.Ref{Slot: 50, Hash: randomHash(t)}
+	require.NoError(t, store.PutVolatile(
+		eb, leiosdb.Content{Manifest: []byte("manifest")},
+	))
+	_, err = store.Pin(eb, leiosdb.Ref{Slot: 51, Hash: randomHash(t)})
+	require.NoError(t, err)
+	n, err = db.RollbackLeiosPins(point)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+// A closed Database does not reopen its Leios store behind the caller's back.
+func TestLeiosDBDoesNotReopenAfterClose(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+	require.NoError(t, err)
+	_, err = db.LeiosDB()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = db.LeiosDB()
+	require.ErrorIs(t, err, leiosdb.ErrClosed)
+	_, err = db.leiosClosure(7, make([]byte, 32))
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
+// Close returns only once the owned Leios store has flushed: records written
+// before it are readable by a fresh store opened on the same data directory.
+func TestDatabaseCloseFlushesLeiosDB(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+	require.NoError(t, err)
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	eb := leiosdb.Ref{Slot: 77, Hash: randomHash(t)}
+	require.NoError(t, store.PutVolatile(
+		eb, leiosdb.Content{Manifest: []byte("manifest")},
+	))
+	require.NoError(t, store.PutClosure(eb, []byte("closure")))
+	require.NoError(t, db.Close())
+	_, err = store.Get(eb)
+	require.ErrorIs(t, err, leiosdb.ErrClosed)
+
+	reopened, err := leiosdb.Open(leiosdb.Options{DataDir: dataDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	content, err := reopened.Get(eb)
+	require.NoError(t, err)
+	require.Equal(t, []byte("manifest"), content.Manifest)
+	closure, err := reopened.GetClosure(eb)
+	require.NoError(t, err)
+	require.Equal(t, []byte("closure"), closure)
 }

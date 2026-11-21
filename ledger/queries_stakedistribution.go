@@ -22,7 +22,7 @@ import (
 	"math/big"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -80,7 +80,7 @@ type stakeDistributionEntry = struct {
 // numerator is paired with the reserves that were genuinely true at that
 // same point rather than whatever is live now.
 func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	live, err := ls.liveStakeDistribution(ctx, at, txn)
 	if err != nil {
@@ -143,19 +143,18 @@ func (d *liveStakeDistribution) fraction(stake uint64) *cbor.Rat {
 func (ls *LedgerState) liveStakeDistribution(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*liveStakeDistribution, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
-	metaTxn := txn.Metadata()
 
 	var targetSlot uint64
 	if at.pinned() {
 		targetSlot = at.Slot
 	} else {
-		tip, err := ls.db.GetTip(txn)
+		tip, err := ls.ledgerDB().GetTip(txn)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +168,7 @@ func (ls *LedgerState) liveStakeDistribution(
 		return nil, errEpochNotResolved(at)
 	}
 
-	calc := snapshot.NewCalculator(ls.db)
+	calc := snapshot.NewCalculator(ls.ledgerDB(), ls.config.Logger)
 	live, err := calc.CalculateStakeDistributionInTxn(
 		ctx, txn, targetSlot,
 	)
@@ -195,7 +194,7 @@ func (ls *LedgerState) liveStakeDistribution(
 		epoch,
 		networkStateAsOfSlot,
 		true,
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -224,17 +223,18 @@ func (ls *LedgerState) liveStakeDistribution(
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
 
-	// A pinned caller's VRF lookup must be bounded to the same slot its
-	// stake and circulation were reconstructed at -- otherwise a pool that
-	// re-registers with a new VRF key between the pinned slot and now would
-	// have its historical stake paired with a key it did not yet hold.
-	// Left nil for a live query, which keeps
-	// poolVrfKeyHashes' unbounded "latest registration" behavior.
-	var vrfAsOfSlot *uint64
+	// A pinned caller's stake is reconstructed at targetSlot, so its VRF key
+	// is the registration in force at that slot. A live caller is told the key
+	// header validation requires of a block at the tip, which is the electing
+	// snapshot's.
+	var vrfByPool map[lcommon.PoolKeyHash]ledger.Blake2b256
 	if at.pinned() {
-		vrfAsOfSlot = &targetSlot
+		vrfByPool, err = ls.poolVrfKeyHashes(ctx, keyHashes, &targetSlot, txn)
+	} else {
+		vrfByPool, err = ls.electingPoolVrfKeyHashes(
+			ctx, keyHashes, targetSlot, epoch, txn,
+		)
 	}
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, vrfAsOfSlot, metaTxn)
 	if err != nil {
 		return nil, err
 	}

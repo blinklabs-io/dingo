@@ -14,10 +14,17 @@
 
 package kupo
 
-import "github.com/blinklabs-io/dingo/internal/apiconfig"
+import (
+	"net"
+
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+)
 
 // Config holds resolved Kupo-compatible HTTP listener configuration.
 type Config struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen             func(string, string) (net.Listener, error)
 	ListenAddress      string
 	CORSAllowedOrigins []string
 	TLS                apiconfig.EffectiveTLS

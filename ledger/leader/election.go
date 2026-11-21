@@ -294,6 +294,11 @@ type Election struct {
 	// schedule computation at once.
 	computeGate chan struct{}
 
+	// obs is ObserveSlot's bookkeeping, guarded by obsMu. Lock order is obsMu
+	// then mu; nothing takes obsMu while holding mu.
+	obsMu sync.Mutex
+	obs   slotObservation
+
 	// wg owns only the worker loops. The cancellation coordinator joins
 	// them before closing lifecycleDone; it must never join itself. Start
 	// cannot reuse this group until the previous generation has drained.
@@ -628,6 +633,9 @@ func (e *Election) epochTransitionLoop(
 				"error", err,
 			)
 		}
+		// A schedule precomputed for the new epoch becomes the current one
+		// here, whether or not the refresh above stored anything.
+		e.publishScheduleGauges()
 	}
 }
 
@@ -1321,9 +1329,23 @@ func (e *Election) computeTachysSchedule(
 	return schedule, nil
 }
 
-// storeSchedule saves a computed schedule under a brief write lock and
-// prunes old epochs from the cache.
+// storeSchedule saves a computed or persisted schedule and refreshes the
+// schedule gauges from it.
 func (e *Election) storeSchedule(
+	epoch uint64,
+	schedule *Schedule,
+	generation uint64,
+) bool {
+	if !e.cacheSchedule(epoch, schedule, generation) {
+		return false
+	}
+	e.publishScheduleGauges()
+	return true
+}
+
+// cacheSchedule saves a schedule under a brief write lock and prunes old
+// epochs from the cache.
+func (e *Election) cacheSchedule(
 	epoch uint64,
 	schedule *Schedule,
 	generation uint64,

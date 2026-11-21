@@ -17,6 +17,8 @@ package governance
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -234,7 +236,7 @@ func TestProcessProposalsRecordsTransactionPosition(t *testing.T) {
 		stabilityTestEpoch,
 		6,
 		testConwayProtocolParameters(),
-		db,
+		dbadapter.New(db),
 		nil,
 		nil,
 	))

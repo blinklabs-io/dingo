@@ -306,6 +306,15 @@ type Ouroboros struct {
 	// too short to have one. It is nil without a ledger, which disables every
 	// immutable-tip-relative Leios retention and serving rule.
 	leiosImmutableSlot func(context.Context) (slot uint64, found bool, err error)
+	// leiosPinAdvance pins the endorser blocks certified by ranking blocks up
+	// to the immutable point into the immutable partition of the Leios store.
+	// The collection worker runs it before every collection, because a pin
+	// is what keeps a certified endorser block out of the collector's reach.
+	// Nil without a ledger, which leaves collection bounded only by the
+	// immutable point.
+	leiosPinAdvance func(context.Context) error
+	// leiosGCSignal wakes the collection worker when the primary chain moves.
+	leiosGCSignal chan struct{}
 	// chainsyncHasBestPeer reports whether chain selection currently has a
 	// best peer. Nil means none. Tests override it without a node.
 	chainsyncHasBestPeer func() bool
@@ -355,7 +364,8 @@ type Ouroboros struct {
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration
 	// chainsyncReintersectTimeout bounds how long a resync waits for a client
-	// to drain and re-intersect in place before the connection is closed.
+	// to drain and re-intersect in place before the connection is closed. On
+	// an inbound connection it bounds only building the intersect points.
 	chainsyncReintersectTimeout time.Duration
 	// chainsyncReintersecting holds the latest in-place re-intersect of each
 	// connection, so overlapping resyncs do not stack.
@@ -502,6 +512,15 @@ type Ouroboros struct {
 	leiosBackfillSourcesMu sync.Mutex
 	leiosBackfillSources   map[string]*leiosBackfillPointSources
 	leiosBackfillSourceSeq uint64
+	// leiosPendingOffers holds offers that arrived before their election was
+	// observed, keyed by occurrence, until that election is observed.
+	leiosPendingOffersMu sync.Mutex
+	leiosPendingOffers   map[string]map[leiosPendingOfferKey]leiosPendingOffer
+	leiosPendingOfferSeq uint64
+	// leiosPeerOffers holds, per LeiosNotify connection, what its peer has
+	// announced and offered, which decides whether a received offer is valid.
+	leiosPeerOffersMu sync.Mutex
+	leiosPeerOffers   map[string]*leiosPeerOfferState
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -548,55 +567,35 @@ type Ouroboros struct {
 	// cannot reset the distinct-announcement budget.
 	leiosAnnouncementElections map[string]map[string]struct{}
 
-	// Asynchronous best-effort persistence of fetched endorser blocks to the
-	// blob store for historical serving. The blob write (CBOR encode + commit)
-	// is moved off the leios-fetch hot path onto a single background writer so
-	// it does not serialize against block application during catch-up. Jobs
-	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
-	// supersedes a manifest-only one for the same occurrence — which also
-	// elides the backfiller's duplicate manifest write, while two live
-	// occurrences of the same hash at different slots persist independently.
-	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
-	// in one writer generation while stop and reset hold the exclusive lock.
+	// Endorser blocks are written to the LeiosDB synchronously by
+	// persistLeiosEndorserBlock. leiosPersistLifecycleMu is held shared only to
+	// register a write and exclusively by Close and the live-lifecycle pause,
+	// which then wait for registered writes to finish.
 	leiosPersistLifecycleMu sync.RWMutex
-	leiosPersistOnce        sync.Once
-	leiosPersistStopOnce    sync.Once
-	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
-	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
-	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistClosed is guarded by leiosPersistMu. It is permanent: Close
+	// and the live-lifecycle pause both set it, and a write is refused once it
+	// is.
+	leiosPersistClosed bool
+	// leiosPersistInflight counts registered writes; leiosPersistIdle is
+	// closed when it returns to zero. A channel rather than a WaitGroup
+	// because a waiter may time out and writes keep registering afterwards.
+	leiosPersistInflight int
+	leiosPersistIdle     chan struct{}
+	leiosPersistStoreMu  sync.Mutex
 	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
 	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
 	// frontier under the same lock, then scans and prunes without holding it.
 	leiosPersistPruneBeforeSlot uint64
-	leiosPersistPending         map[string]*leiosPersistJob
-	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
-	// of leiosPersistPending's job sizes plus every reservation whose payload
-	// copy is still in flight. leiosPersistReserved counts those in-flight
-	// reservations so they also occupy a leiosPersistMaxPending slot. Both
-	// are guarded by leiosPersistMu and are reset with the pending map in
-	// startLeiosPersistWriter; see leiosPersistMaxQueueBytes.
-	leiosPersistBytes    int
-	leiosPersistReserved int
-	leiosPersistSignal   chan struct{}
-	leiosPersistStop     chan struct{}
-	leiosPersistDone     chan struct{}
-	leiosPersistDropped  atomic.Uint64
 	// The optional blob-store GC has its own worker so full prefix scans never
-	// stall persistence writes. It is paused with the writer before live storage
-	// replacement and restarted after the next persisted endorser block.
+	// stall persistence writes. It is stopped before live storage replacement
+	// and never restarted on the same instance.
 	leiosPersistGCOnce     sync.Once
 	leiosPersistGCStopOnce sync.Once
 	leiosPersistGCStarted  atomic.Bool
 	leiosPersistGCMu       sync.Mutex
 	leiosPersistGCStop     chan struct{}
 	leiosPersistGCDone     chan struct{}
-	// leiosPersistAfterReserve, when non-nil, runs between the byte
-	// reservation and the payload copy. Tests use it to unwind or to stall
-	// inside that window, which allocation failure alone would reach only
-	// nondeterministically.
-	leiosPersistAfterReserve func()
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -631,8 +630,11 @@ type OuroborosConfig struct {
 	NetworkMagic           uint32
 	NodeToNodeNetworkMagic uint32
 	PeerSharing            bool
-	IntersectTip           bool
-	PromRegistry           prometheus.Registerer
+	// AdvertiseAddress is the "IP:port" included in PeerSharing replies as
+	// this node's own address. Empty means none is advertised.
+	AdvertiseAddress string
+	IntersectTip     bool
+	PromRegistry     prometheus.Registerer
 	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
 	// block reply after a peer enters a server-agency state. Values below
 	// the protocol maximum are raised to the protocol maximum.
@@ -799,6 +801,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosMinOfferLead is how many slots an endorser block must lie above
+	// the immutable tip for this node to offer it to a peer. A peer disconnects
+	// a node that offers an endorser block below the peer's own immutable tip.
+	LeiosMinOfferLead uint64
 	// LeiosPersistenceRetentionSlots sets how many slots behind the highest
 	// persisted endorser block uncertified historical-serving Leios records
 	// are kept. Zero prunes an uncertified record once the immutable point of
@@ -986,6 +992,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
+		leiosGCSignal:           make(chan struct{}, 1),
 		config:                  cfg,
 		registerer:              newTrackingRegisterer(cfg.PromRegistry),
 		eventBus:                cfg.EventBus,
@@ -1051,6 +1058,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
 		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
+		leiosPendingOffers: make(
+			map[string]map[leiosPendingOfferKey]leiosPendingOffer,
+		),
 		leiosSelectedHeaders: make(
 			map[string]map[string]map[string]selectedLeiosHeader,
 		),
@@ -1096,6 +1106,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			point, found, err := o.ledgerState.ImmutablePoint(ctx)
 			return point.Slot, found, err
 		}
+		o.leiosPinAdvance = o.ledgerState.AdvanceLeiosPins
 		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
 		if k := o.ledgerState.SecurityParam(); k > 0 {
 			o.chainsyncHeaderHistoryLimit = k + 1
@@ -1129,6 +1140,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.subscribeTracked(ledger.BlockEventType, o.signalLeiosGC)
 	o.subscribeDeferredHeaderRecovery()
 	o.restoreLeiosVerifiedEbSlot()
 	return o
@@ -1521,6 +1533,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.forgetLeiosPeerOfferStates()
 	o.chainsyncReintersectMu.Lock()
 	delete(o.chainsyncCursorEpochs, connId)
 	delete(o.chainsyncLostCursorReintersects, connId)

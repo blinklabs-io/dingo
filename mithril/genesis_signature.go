@@ -20,6 +20,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+
+	"filippo.io/edwards25519"
 )
 
 // VerifyGenesisCertificateSignature verifies a genesis certificate signature
@@ -57,7 +59,7 @@ func VerifyGenesisCertificateSignature(
 			continue
 		}
 		for _, msg := range messageCandidates {
-			if ed25519.Verify(pubKey, msg, sig) {
+			if verifyEd25519Strict(pubKey, msg, sig) {
 				return verifyGenesisSignedFields(cert)
 			}
 		}
@@ -119,4 +121,25 @@ func decodeByteCandidates(data string, includeRaw bool) [][]byte {
 		addCandidate(decoded)
 	}
 	return candidates
+}
+
+// verifyEd25519Strict verifies as ed25519-dalek's verify_strict, which
+// Mithril uses for genesis and ancillary manifest signatures. Unlike
+// crypto/ed25519 it rejects a small-order public key or R: with a
+// small-order key and S = 0, every message verifies.
+func verifyEd25519Strict(pub, msg, sig []byte) bool {
+	if len(pub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	identity := edwards25519.NewIdentityPoint()
+	for _, enc := range [][]byte{pub, sig[:32]} {
+		p, err := new(edwards25519.Point).SetBytes(enc)
+		if err != nil {
+			return false
+		}
+		if new(edwards25519.Point).MultByCofactor(p).Equal(identity) == 1 {
+			return false
+		}
+	}
+	return ed25519.Verify(pub, msg, sig)
 }

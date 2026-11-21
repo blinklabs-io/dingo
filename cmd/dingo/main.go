@@ -30,6 +30,7 @@ import (
 
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/node"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/tracing"
@@ -116,6 +117,11 @@ func commonRun(
 		"version: "+version.GetVersionString(),
 		"component", programName,
 	)
+	// Before any command opens the consensus store: opening an API-mode store
+	// in core mode would otherwise latch the mode before its rows are copied.
+	if err := node.MigrateToSplit(ctx, cfg, logger); err != nil {
+		return nil, fmt.Errorf("migrate to the split indexer layout: %w", err)
+	}
 	return logger, nil
 }
 

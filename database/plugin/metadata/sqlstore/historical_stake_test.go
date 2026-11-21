@@ -208,8 +208,8 @@ func TestTransactionLedgerContextCanBeReplayed(t *testing.T) {
 		depositHeldRegistration(depositHeldPoolKey(0xd3)), 0)
 	var id int64
 	require.NoError(t, store.writeDB.QueryRow(`SELECT id FROM "transaction"`).Scan(&id))
-	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99))
-	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99))
+	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99, true))
+	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99, true))
 }
 
 func TestHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {

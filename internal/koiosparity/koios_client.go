@@ -422,6 +422,16 @@ func markKoiosError(err, mark error) error {
 	return &koiosMarkedError{err: err, mark: mark}
 }
 
+// ErrKoiosQuotaExceeded marks the Koios daily tier quota being exhausted. It
+// wraps ErrKoiosPermanent, since retrying within the same call cannot help,
+// but unlike the other permanent failures it clears on Koios's daily reset
+// without any operator change, so the observer treats it as a reference
+// outage rather than a fatal validation failure.
+var ErrKoiosQuotaExceeded = fmt.Errorf(
+	"%w: daily tier quota exceeded",
+	ErrKoiosPermanent,
+)
+
 // ErrTxInfoMissing marks a GetTxInfos failure caused only by Koios returning
 // no result for a requested hash. Koios indexes a block after a node serves
 // it, so near the chain tip a later request can succeed where this one did
@@ -1138,7 +1148,7 @@ func (k *KoiosClient) getAttempts(
 				return nil, markKoiosError(
 					fmt.Errorf(
 						"%w: koios daily tier quota exceeded on %s: %s (%s)",
-						ErrKoiosPermanent,
+						ErrKoiosQuotaExceeded,
 						path,
 						bodyStr,
 						hint,
@@ -1360,7 +1370,7 @@ func (k *KoiosClient) postAttempts(
 				return nil, markKoiosError(
 					fmt.Errorf(
 						"%w: koios daily tier quota exceeded on %s: %s (%s)",
-						ErrKoiosPermanent,
+						ErrKoiosQuotaExceeded,
 						path,
 						bodyStr,
 						hint,

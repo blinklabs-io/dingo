@@ -27,7 +27,7 @@ import (
 
 func TestGetUtxosWithHistoryFiltersAndHydratesLifecycle(t *testing.T) {
 	t.Parallel()
-	store := newManagementTestStore(t)
+	store := withAPIStorage(newManagementTestStore(t))
 
 	createdHashes := [][]byte{
 		bytes.Repeat([]byte{0x01}, 32),
@@ -116,6 +116,7 @@ INSERT INTO transaction_metadata_label (
 	// hash.
 	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{0x04}, 32),
+		Address:    []byte{0x04},
 		PaymentKey: paymentB,
 		AddedSlot:  40,
 		Amount:     4_000_000,
@@ -307,6 +308,7 @@ INSERT INTO transaction_metadata_label (
 	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
 		CollateralReturnForTxID: &producerID,
 		TxId:                    createdHashes[0],
+		Address:                 []byte{0x09},
 		PaymentKey:              paymentA,
 		AddedSlot:               10,
 		Amount:                  9_000_000,

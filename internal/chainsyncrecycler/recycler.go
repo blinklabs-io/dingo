@@ -643,8 +643,9 @@ func (r *Recycler) checkLocalTipPlateau(
 	// on an abandoned fork so fetched blocks "do not fit on current chain
 	// tip") by rolling the ledger back to the latest common ancestor. The two
 	// call sites in ledger/chainsync.go only fire on
-	// ErrRollbackExceedsSecurityParam; sub-K fork resolutions leave no error
-	// to trigger reconcile. This is a purely local repair -- it does not touch
+	// ErrRollbackExceedsSecurityParam or ErrRollbackBelowImmutableTip; sub-K
+	// fork resolutions above the immutable tip leave no error to trigger
+	// reconcile. This is a purely local repair -- it does not touch
 	// the peer connection -- so it is safe, and the only available recovery,
 	// even with a single eligible upstream (e.g. a one-relay devnet/leios
 	// topology), which would otherwise wedge here permanently.

@@ -241,6 +241,7 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockReceivedHashes = nil
+	ls.blockfetchProgressContributors = nil
 	ls.resetBatchDeliveryLocked()
 	ls.batchBlocksApplied = 0
 	ls.blockfetchBatchRollbackGeneration = next.rollbackGeneration

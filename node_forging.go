@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -640,6 +641,14 @@ func (n *Node) initBlockForger(
 	return nil
 }
 
+// The election is what the forger reports slots to, and the forger and the
+// forged-block tracker are what the ledger reports settled slot battles to.
+var (
+	_ forging.SlotObserver             = (*leader.Election)(nil)
+	_ ledger.SlotBattleOutcomeRecorder = (*forging.BlockForger)(nil)
+	_ ledger.SlotBattleOutcomeRecorder = (*ownForgedBlocks)(nil)
+)
+
 // poolForging is one pool's running leader election and block forger.
 type poolForging struct {
 	election nodeconsensus.LeaderScheduler
@@ -782,9 +791,10 @@ func (n *Node) newPoolForger(
 	if n.config.leiosForgingEnabled() &&
 		n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
-			mgr:              n.leiosPipelineManager,
-			chain:            n.chainManager.PrimaryChain(),
-			endorserBlockTxs: n.ouroboros().EndorserBlockClosureTxsByHash,
+			mgr:                        n.leiosPipelineManager,
+			chain:                      n.chainManager.PrimaryChain(),
+			endorserBlockTxs:           n.ouroboros().EndorserBlockClosureTxsByHash,
+			endorserBlockQuorumRefusal: n.leiosEndorserBlockQuorumRefusalForSlot,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
@@ -898,6 +908,7 @@ func (n *Node) newPoolForger(
 		EraParams: n.ledgerState,
 	}
 	applyForgeTuning(&forgerCfg, &n.config)
+	n.applyLeiosAdaptiveTuning(&forgerCfg)
 	forger, err := forging.NewBlockForger(forgerCfg)
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -943,8 +954,22 @@ type mempoolTransactionSource interface {
 	RemoveTxsByHash(hashes []string)
 }
 
+// blockCandidateSource is implemented by mempools that order transactions for
+// block production by a configured selection policy.
+type blockCandidateSource interface {
+	BlockCandidates() []mempool.MempoolTransaction
+}
+
+// mempoolTransactions returns the pending transactions in the order block
+// production should try them. Only forging reads this order; relay and the
+// query APIs keep admission order.
 func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
-	txs := source.Transactions()
+	var txs []mempool.MempoolTransaction
+	if candidates, ok := source.(blockCandidateSource); ok {
+		txs = candidates.BlockCandidates()
+	} else {
+		txs = source.Transactions()
+	}
 	result := make([]mempoolTxView, len(txs))
 	for i, tx := range txs {
 		result[i] = mempoolTxView{
@@ -1079,7 +1104,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetStakeDistribution(epoch)
+	return a.ledgerState.NewView(dbadapter.Txn(txn)).GetStakeDistribution(epoch)
 }
 
 // GetPoolAndTotalActiveStake reads the sigma numerator and denominator for
@@ -1135,7 +1160,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			)
 		}
 	}()
-	view := a.ledgerState.NewView(txn)
+	view := a.ledgerState.NewView(dbadapter.Txn(txn))
 	poolKey := hex.EncodeToString(poolKeyHash)
 	poolStake, err = view.GetPoolStake(epoch, poolKeyHash)
 	if err != nil {
@@ -1356,6 +1381,10 @@ func (a *slotClockAdapter) PrimaryChainTipRelationAndHeader(
 	return a.ledgerState.PrimaryChainTipRelationAndHeader(point)
 }
 
+func (a *slotClockAdapter) SlotToTime(slot uint64) (time.Time, error) {
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1382,6 +1411,9 @@ type leiosPipelineAdapter struct {
 	mgr              *leios.PipelineManager
 	chain            leiosParentChain
 	endorserBlockTxs func(ebHash []byte, ebSlot uint64) ([]cbor.RawMessage, bool)
+	// endorserBlockQuorumRefusal, when set, returns why the committee rules
+	// out an endorser block for a slot, or "" when it does not.
+	endorserBlockQuorumRefusal func(slot uint64) string
 }
 
 type leiosParentChain interface {
@@ -1393,12 +1425,25 @@ type leiosParentChain interface {
 	) (models.Block, error)
 }
 
+func (a *leiosPipelineAdapter) MayPrepareEndorserBlock(slot uint64) (bool, string, error) {
+	if a.endorserBlockQuorumRefusal == nil {
+		return false, leiosEBSkipQuorumUnresolved, nil
+	}
+	reason := a.endorserBlockQuorumRefusal(slot)
+	return reason == "", reason, nil
+}
+
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
 	slot uint64,
 ) (bool, string, error) {
 	dec, err := a.mgr.MayProduceEndorserBlock(slot)
 	if err != nil {
 		return false, "", err
+	}
+	if dec.Allowed && a.endorserBlockQuorumRefusal != nil {
+		if reason := a.endorserBlockQuorumRefusal(slot); reason != "" {
+			return false, reason, nil
+		}
 	}
 	return dec.Allowed, dec.Reason, nil
 }

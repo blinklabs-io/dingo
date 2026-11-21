@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
@@ -43,6 +44,8 @@ type Server struct {
 	node                 KupoNode
 	listener             *apilistener.Listener
 	responseWriteTimeout time.Duration
+	// ready gates IndexerDB-backed routes; nil serves every route.
+	ready apiready.Check
 }
 
 // New creates a Kupo-compatible server.
@@ -55,10 +58,14 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 	}
 	logger = logger.With("component", "kupo")
 	return &Server{
-		config:               cfg,
-		logger:               logger,
-		node:                 node,
-		listener:             apilistener.New("Kupo API", logger),
+		config: cfg,
+		logger: logger,
+		node:   node,
+		listener: apilistener.NewWithListenerFactory(
+			"Kupo API",
+			logger,
+			cfg.Listen,
+		),
 		responseWriteTimeout: responseWriteTimeout,
 	}
 }
@@ -81,7 +88,14 @@ func (s *Server) handler() http.Handler {
 	}
 	mux.HandleFunc("/", s.handleNotFound)
 
-	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
+	gated := apiready.Middleware(
+		s.ready, classifyRoute,
+		func(w http.ResponseWriter, status int, message string) {
+			writeError(w, status, errors.New(message))
+		},
+		mux,
+	)
+	limited := http.MaxBytesHandler(s.boundWrites(gated), maxRequestBodyBytes)
 	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
 		ExposeHeaders:  corsExposeHeaders,
@@ -124,6 +138,24 @@ func (w *progressResponseWriter) Write(p []byte) (int, error) {
 		w.logger.Debug("could not bound Kupo response write", "error", err)
 	}
 	return w.ResponseWriter.Write(p)
+}
+
+// RoutePatterns returns every method-and-path pattern the API registers.
+func RoutePatterns() []string {
+	rec := &patternRecorder{}
+	for _, prefix := range []string{"", "/v1"} {
+		registerRoutes(rec, prefix, &Server{})
+	}
+	return rec.patterns
+}
+
+type patternRecorder struct{ patterns []string }
+
+func (r *patternRecorder) HandleFunc(
+	pattern string,
+	_ func(http.ResponseWriter, *http.Request),
+) {
+	r.patterns = append(r.patterns, pattern)
 }
 
 func registerRoutes(mux interface {

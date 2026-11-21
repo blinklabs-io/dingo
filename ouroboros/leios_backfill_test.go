@@ -257,6 +257,7 @@ func TestLeiosBackfillPointSelectorUsesActiveAnnouncingPeer(t *testing.T) {
 	})
 	point := ocommon.Point{Slot: 200, Hash: bytes.Repeat([]byte{0x04}, 32)}
 	for _, conn := range []*ouroboros.Connection{first, active, third} {
+		o.leiosPeerAnnouncedForTest(conn.Id(), nil, point)
 		require.NoError(t, o.leiosnotifyClientNotification(
 			oleiosnotify.CallbackContext{
 				ConnectionId: conn.Id(),

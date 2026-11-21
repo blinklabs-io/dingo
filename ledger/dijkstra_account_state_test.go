@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -100,7 +101,10 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 
 	apply := func() {
 		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-			return ApplyDijkstraDirectDeposits(context.Background(), db, deposit, 2, txn)
+			return ApplyDijkstraDirectDeposits(
+				context.Background(), dbadapter.New(db), deposit, 2,
+				dbadapter.Txn(txn),
+			)
 		}))
 	}
 	apply()

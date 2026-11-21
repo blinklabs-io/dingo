@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"testing"
@@ -195,6 +196,7 @@ func TestNewOuroborosWiresHeaderCheckpointFromLedgerConfig(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           livesettest.New(),
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeCfg,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

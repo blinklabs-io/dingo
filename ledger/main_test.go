@@ -18,6 +18,7 @@ import (
 	"flag"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"testing"
 )
@@ -25,6 +26,12 @@ import (
 const maxDefaultTestParallelism = 16
 
 func TestMain(m *testing.M) {
+	// Each test's Badger stores leave a memtable arena or two as garbage on
+	// close; collecting at half the default growth keeps the many parallel
+	// tests from holding a runner's worth of it between collections.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(50)
+	}
 	if runtime.GOMAXPROCS(0) > maxDefaultTestParallelism {
 		if err := flag.Set(
 			"test.parallel",

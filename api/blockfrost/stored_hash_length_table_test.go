@@ -19,18 +19,14 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"io"
-	"log/slog"
 	"slices"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -214,38 +210,37 @@ func (s *malformedHashStore) GetAccountDelegationHistoryByCredential(
 	return s.delegations, nil
 }
 
+// RebuildAddressTransactionIndex forwards the capability an API-mode database
+// requires of its metadata store, which embedding the interface hides.
+func (s *malformedHashStore) RebuildAddressTransactionIndex(
+	ctx context.Context,
+	rebuild func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+) error {
+	return s.MetadataStore.(metadata.AddressTransactionIndexRebuilder).
+		RebuildAddressTransactionIndex(ctx, rebuild)
+}
+
 func newMalformedHashAdapter(
 	t *testing.T,
 	store *malformedHashStore,
 	seed func(db *database.Database),
 ) *NodeAdapter {
 	t.Helper()
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+	adapter, raw, db := newDBBackedAdapterWithIndexer(
 		t,
-		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			return store
+		dbtest.IndexerOptions{
+			WrapMetadata: func(
+				inner metadata.MetadataStore,
+			) metadata.MetadataStore {
+				store.MetadataStore = inner
+				return store
+			},
 		},
 	)
-	require.NoError(t, err)
-	// Account resolves its active epoch from the ledger's epoch cache.
-	require.NoError(t, db.Metadata().SetEpoch(
-		0, 0, nil, nil, nil, nil, 6, 1, 1000, nil,
-	))
+	seedEpochs(t, adapter, raw, 0, 1)
 	if seed != nil {
 		seed(db)
 	}
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
 	return adapter
 }
 

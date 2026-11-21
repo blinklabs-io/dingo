@@ -28,6 +28,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3308,6 +3309,7 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 // instant, so tests can put the forge either comfortably inside its slot or
 // past the end of it without sleeping.
 type retryTestSlotClock struct {
+	slotLength          time.Duration
 	currentSlot         uint64
 	chainTipSlot        uint64
 	chainTipHash        []byte
@@ -3357,6 +3359,15 @@ func (c *retryTestSlotClock) PrimaryChainTip() ocommon.Point {
 		return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 	}
 	return c.ChainTip()
+}
+
+func (c *retryTestSlotClock) SlotToTime(slot uint64) (time.Time, error) {
+	length := c.slotLength
+	if length == 0 {
+		length = time.Second
+	}
+	delta := int64(slot) - int64(c.currentSlot) - 1
+	return c.slotEnd.Add(time.Duration(delta) * length), nil
 }
 
 func (c *retryTestSlotClock) NextSlotTime() (time.Time, error) {
@@ -5295,11 +5306,10 @@ func TestCheckAndForgeProductionBoundsEBSelectionWithoutASlotClock(
 		PromRegistry: prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
-	fakeNow := time.Now()
-	forger.now = func() time.Time { return fakeNow }
-	validator.onValidate = func(int) {
-		fakeNow = fakeNow.Add(200 * time.Millisecond)
-	}
+	start := time.Now()
+	var elapsed atomic.Int64
+	forger.now = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+	validator.onValidate = func(int) { elapsed.Add(int64(200 * time.Millisecond)) }
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.NotEmpty(t, leiosCaster.txBodies)
@@ -5340,16 +5350,16 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 		selectionTime = 55 * time.Millisecond
 	)
 	start := time.Now()
-	fakeNow := start
+	var elapsed atomic.Int64
 	validator := &sessionMockTxValidator{}
-	validator.onValidate = func(int) { fakeNow = fakeNow.Add(perTxCost) }
+	validator.onValidate = func(int) { elapsed.Add(int64(perTxCost)) }
 
 	selected, truncated, err := selectValidLeiosTransactions(
 		context.Background(),
 		leiosCandidateTxs(t, candidates),
 		validator,
 		leiosSelectionLimits{
-			now:      func() time.Time { return fakeNow },
+			now:      func() time.Time { return start.Add(time.Duration(elapsed.Load())) },
 			deadline: start.Add(selectionTime),
 		},
 		leiosSelectionBasis{},
@@ -5613,11 +5623,10 @@ func TestLeiosEBSelectionTruncationIsCounted(t *testing.T) {
 	)
 	// Every candidate consumes a tenth of a second of the budget, so the
 	// pass cannot get through all ten inside the slot.
-	fakeNow := time.Now()
-	forger.now = func() time.Time { return fakeNow }
-	validator.onValidate = func(int) {
-		fakeNow = fakeNow.Add(100 * time.Millisecond)
-	}
+	start := time.Now()
+	var elapsed atomic.Int64
+	forger.now = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+	validator.onValidate = func(int) { elapsed.Add(int64(100 * time.Millisecond)) }
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.NotEmpty(t, caster.txBodies)

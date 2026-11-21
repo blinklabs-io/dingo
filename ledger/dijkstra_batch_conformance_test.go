@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -505,10 +506,10 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 			Do(func(txn *database.Txn) error {
 				return ApplyDijkstraDirectDeposits(
 					context.Background(),
-					db,
+					dbadapter.New(db),
 					tx,
 					2,
-					txn,
+					dbadapter.Txn(txn),
 				)
 			}),
 	)

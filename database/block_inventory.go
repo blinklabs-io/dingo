@@ -121,7 +121,15 @@ func scanBlockInventory(
 		if err != nil {
 			continue
 		}
-		if _, err := item.ValueCopy(nil); err != nil {
+		// A promoted block is retained; classify it from the stored marker
+		// instead of reading its body out of the chunk files.
+		var valueErr error
+		if raw, ok := item.(types.RawValueItem); ok {
+			_, valueErr = raw.RawValueCopy(nil)
+		} else {
+			_, valueErr = item.ValueCopy(nil)
+		}
+		if err := valueErr; err != nil {
 			if errors.Is(err, types.ErrHistoryExpired) {
 				continue
 			}

@@ -120,6 +120,22 @@ func (s *Schedule) IsLeaderForSlot(slot uint64) bool {
 	return found
 }
 
+// countLeaderSlotsBetween returns the number of leader slots in the inclusive
+// range [from, to].
+func (s *Schedule) countLeaderSlotsBetween(from, to uint64) uint64 {
+	if s == nil || from > to {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	lo, _ := slices.BinarySearch(s.LeaderSlots, from)
+	hi, found := slices.BinarySearch(s.LeaderSlots, to)
+	if found {
+		hi++
+	}
+	return uint64(hi - lo) // #nosec G115 -- hi >= lo, both within the slice
+}
+
 // SlotCount returns the number of slots where this pool is leader.
 func (s *Schedule) SlotCount() int {
 	if s == nil {

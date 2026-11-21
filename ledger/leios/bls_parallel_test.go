@@ -84,7 +84,7 @@ func TestVerifiedLeiosKeyNeverCachesAForgedProof(t *testing.T) {
 		require.Error(t, VerifyLeiosKeyProofOfPossession(forged))
 		require.NoError(t, VerifyLeiosKeyProofOfPossession(keys[0]))
 	}
-	pub, err := verifiedLeiosKey(keys[0])
+	pub, err := verifiedLeiosKey(keys[0], lcommon.DijkstraBlsProofDomainPop)
 	require.NoError(t, err)
 	encoded := pub.Bytes()
 	require.True(t, bytes.Equal(encoded[:], keys[0].PublicKey))

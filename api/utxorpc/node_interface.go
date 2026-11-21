@@ -20,7 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -47,7 +47,6 @@ type UtxorpcLedgerState interface {
 	// OldestRetainedSlot returns the slot of the oldest block whose body is
 	// still stored, with ok=false when that is not known. It does no I/O.
 	OldestRetainedSlot() (slot uint64, ok bool)
-	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	EvaluateTxContext(
 		ctx context.Context,
 		tx lcommon.Transaction,
@@ -87,7 +86,7 @@ type UtxorpcLedgerState interface {
 		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 		maxPools int,
 	) (*ledger.PoolStakeDistribution, error)
 	// PrimaryChainTip is the tip of the chain FollowTip's iterator reads. It
@@ -99,19 +98,7 @@ type UtxorpcLedgerState interface {
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
-	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
-	UtxosByRefsBounded(
-		ctx context.Context,
-		refs []models.UtxoId,
-		maxBytes int64,
-	) ([]models.Utxo, error)
-	UtxosByAddressBoundedPage(
-		ctx context.Context,
-		q *models.UtxoWithOrderingQuery,
-		maxCandidates int,
-		maxBytes int64,
-	) (models.UtxoAddressPage, error)
 }
 
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC

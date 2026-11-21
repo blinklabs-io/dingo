@@ -37,11 +37,15 @@ type AccountDelegationHistoryRow struct {
 // AccountRegistrationHistoryRow holds registration
 // history query results for a stake account.
 type AccountRegistrationHistoryRow struct {
-	AddedSlot  uint64
-	BlockIndex uint32
-	CertIndex  uint32
-	TxHash     []byte
-	Action     string
+	AddedSlot uint64
+	// EffectiveSlot is the slot a Leios closure's certificate takes effect
+	// at, the closure's context slot, when it differs from AddedSlot. Zero
+	// means the certificate takes effect at AddedSlot.
+	EffectiveSlot uint64
+	BlockIndex    uint32
+	CertIndex     uint32
+	TxHash        []byte
+	Action        string
 	// Deposit is the registration deposit (or refund, for
 	// deregistrations) in lovelace. Zero for certificate types
 	// that do not record an explicit deposit.
@@ -71,6 +75,22 @@ type AccountRegistrationHistoryRow struct {
 // exists in local history, so AddedSlot is the baseline boundary and Deposit
 // may be nil for a legacy baseline whose import discarded the historical value.
 type AccountImportRegistration struct {
+	AddedSlot uint64
+	Deposit   *uint64
+}
+
+// AccountImportBaselineRow is an account_import_baseline row as
+// GetAccountImportRegistrationByCredential reads it, whether or not it is
+// active. An inactive baseline is the state a newer snapshot left the account
+// in, and reads as no registration.
+type AccountImportBaselineRow struct {
+	CredentialTag uint8
+	StakingKey    []byte
+	// Pool, Drep and DrepType are the delegations the import recorded.
+	Pool      []byte
+	Drep      []byte
+	DrepType  uint64
+	Active    bool
 	AddedSlot uint64
 	Deposit   *uint64
 }

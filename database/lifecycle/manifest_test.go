@@ -390,3 +390,23 @@ func TestCheckGateMatch(t *testing.T) {
 		})
 	}
 }
+
+// A snapshot whose block bodies live in ImmutableDB chunk files is refused
+// for a node that expires history, before the restore replaces anything.
+func TestCheckCompatibilityRefusesImmutableSnapshotWithHistoryExpiry(t *testing.T) {
+	t.Parallel()
+	m := lifecycle.Manifest{
+		StorageMode:         "core",
+		Network:             "preview",
+		ImmutableIndexBytes: 64,
+	}
+	expiry := nodesettings.Values{"history_expiry_active": nodesettings.LatchOn}
+	err := m.CheckCompatibility("", "", "core", "preview", expiry)
+	require.ErrorContains(t, err, "historyExpiry off")
+	require.NoError(t, m.CheckCompatibility(
+		"", "", "core", "preview",
+		nodesettings.Values{"history_expiry_active": nodesettings.LatchOff},
+	))
+	m.ImmutableIndexBytes = 0
+	require.NoError(t, m.CheckCompatibility("", "", "core", "preview", expiry))
+}

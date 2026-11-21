@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 )
 
@@ -150,10 +149,7 @@ func (t nodeMithrilTuning) begin(
 	// run whether or not it succeeded.
 	var dropped bool
 	catchUp, catchUpDropped := store.(metadata.CatchUpIndexManager)
-	// API storage keeps the catch-up droppable indexes: they serve its
-	// address and history queries.
-	catchUpDropped = catchUpDropped && scope.catchUpIndexes &&
-		t.db.Config().StorageMode != types.StorageModeAPI
+	catchUpDropped = catchUpDropped && scope.catchUpIndexes
 	if catchUpDropped {
 		dropped = true
 		if err := catchUp.DropCatchUpIndexesContext(ctx); err != nil {

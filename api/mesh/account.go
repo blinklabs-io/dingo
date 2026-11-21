@@ -155,8 +155,12 @@ func (s *Server) resolveBalancePoint(
 	hasIndex := id != nil && id.Index != nil
 	if !hasHash && !hasIndex {
 		tip := s.config.Chain.Tip()
+		blockID, err := s.tipBlockID(tip)
+		if err != nil {
+			return balancePoint{}, wrapErr(ErrInternal, err)
+		}
 		return balancePoint{
-			blockID: s.tipBlockID(tip),
+			blockID: blockID,
 			slot:    tip.Point.Slot,
 		}, nil
 	}
@@ -165,11 +169,12 @@ func (s *Server) resolveBalancePoint(
 	if meshErr != nil {
 		return balancePoint{}, meshErr
 	}
+	blockID, err := blockIdentifier(block)
+	if err != nil {
+		return balancePoint{}, wrapErr(ErrInternal, err)
+	}
 	return balancePoint{
-		blockID: &BlockIdentifier{
-			Index: int64(block.Number), // #nosec G115
-			Hash:  hex.EncodeToString(block.Hash),
-		},
+		blockID:    blockID,
 		slot:       block.Slot,
 		historical: true,
 	}, nil

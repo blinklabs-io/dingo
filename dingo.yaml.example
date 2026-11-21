@@ -94,10 +94,14 @@
       # the CBOR of the decoded outputs the pool keeps for it. Left commented
       # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
-      # leios run mode and for the Musashi network (by name or magic). An
-      # explicit value here overrides both defaults, so a leios or Musashi
-      # node would silently run with the smaller capacity — uncomment only to
-      # pin a specific size for every run mode.
+      # leios run mode and for the Musashi network (by name or magic). The
+      # 25 MiB default applies only while the current epoch's Leios committee
+      # can reach its quorum threshold with registered voting keys; until
+      # then the pool keeps the 1 MiB capacity, as it does without Leios.
+      # An explicit value here overrides both defaults and never changes
+      # with the committee, so a leios or Musashi node would silently run
+      # with the smaller capacity — uncomment only to pin a specific size
+      # for every run mode.
       # capacity: 1048576
       # FIFO begins oldest-first eviction here. DAG never evicts and applies
       # TxSubmission backpressure as it approaches rejectionWatermark.
@@ -108,6 +112,11 @@
       # by peer relay, so API load never delays relay. Submissions wait for a
       # slot rather than being refused. 0 uses the peer pool's size.
       # maxApiSubmissions: 0
+      # Order in which block production takes pending transactions.
+      # "admission" (default) keeps arrival order. "feeDensity" takes the
+      # highest fee per byte first, never ahead of a transaction it depends
+      # on. Relay and API listings keep arrival order either way.
+      # selection: admission
   # api:
     # blockfrost:
       # provider: "builtin"
@@ -327,6 +336,18 @@
 # CLI: --port
 # relayPort: 3001
 
+# Public IP:port that other nodes can reach this node's NtN listener at. When
+# set and peer sharing is enabled, it is included first in PeerSharing replies as
+# this node's own address. It does not change what the node listens on: use it
+# when the public address differs from bindAddr and relayPort, such as behind
+# NAT or a load balancer. Must be an IP literal (no hostname) that is globally
+# routable; leave unset to advertise no address. The value below is an RFC 5737
+# documentation address, which validation rejects: replace it with the node's
+# real public address.
+#
+# CLI: --advertise-address  Env: DINGO_ADVERTISE_ADDRESS
+# advertiseAddress: "203.0.113.10:3001"
+
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
 #   block producers and relay nodes. Only MCP can serve API requests in core mode.
@@ -408,7 +429,9 @@
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
-# while retaining local indexes and metadata. Bark fallback is optional.
+# in the blob store while retaining local indexes and metadata, in either
+# storage mode. Bark fallback is optional. It turns the ImmutableDB off, and a
+# database whose block bodies already moved into the ImmutableDB refuses it.
 # historyExpiry:
   # Can be overridden with DINGO_HISTORY_EXPIRY_ENABLED
   # CLI: --history-expiry-enabled
@@ -416,6 +439,38 @@
   # Can be overridden with DINGO_HISTORY_EXPIRY_FREQUENCY
   # CLI: --history-expiry-frequency
   # frequency: 1h
+
+# ImmutableDB. Block bodies more than k blocks behind the ledger's applied tip
+# move from the blob store into cardano-node compatible chunk files under
+# <dataDir>/immutable (a temporary directory without a data directory, the
+# object store for S3 and GCS); block indexes and metadata stay in the blob
+# store. It runs unless historyExpiry.enabled is set; a node that expires
+# history keeps its block bodies in the blob store and promotes nothing. A
+# database written by a release without it is moved at startup, in batches
+# that resume after a stop, and the move is refused while the volume lacks the
+# free space it needs. Older binaries refuse a database that has moved.
+# immutableDb:
+  # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_BATCH
+  # CLI: --immutable-db-promote-batch
+  # Accepted range: 0 to 100000; the promoter also limits a batch to one blob
+  # transaction.
+  # promoteBatch: 1000
+  # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_FREQUENCY
+  # CLI: --immutable-db-promote-frequency
+  # promoteFrequency: 1m
+
+# API rows. In API storage mode on an on-disk database they live in an
+# IndexerDB under <dataDir>/indexer, filled asynchronously by one writer that
+# follows the ledger, and the consensus store runs in core mode. A database
+# written by a release that kept them in the consensus store is moved at
+# startup. With historyExpiry.enabled, expiry never passes the block the
+# IndexerDB writer last indexed.
+# indexer:
+  # Blocks the IndexerDB may trail the ledger tip before current-state API
+  # endpoints report not ready.
+  # Can be overridden with DINGO_INDEXER_MAX_READY_LAG_BLOCKS
+  # CLI: --indexer-max-ready-lag-blocks
+  # maxReadyLagBlocks: 100
 
 # Optional CIP-26 off-chain token registry sync (API storage mode only).
 # When enabled, Dingo periodically pulls the community token registry and
@@ -626,11 +681,22 @@
 #   # Or plain TCP, taking no pin or client certificate (the agent's
 #   # counterpart is kes_agent.attested_plaintext):
 #   # shelleyKesAgentPlaintext: true
+#   # Or list several agents in order, in place of shelleyKesAgentAddress:
+#   # the node signs through the first that admits it and moves to the next
+#   # when a sign fails on the link, keeping that next one admitted ahead of
+#   # each leader slot. The transport settings apply to every address.
+#   # shelleyKesAgentAddresses:
+#   #   - "kes-agent-a.example:3443"
+#   #   - "kes-agent-b.example:3443"
+#   # The agent profile to sign for, named when the agent admits a session.
+#   # An agent with one profile needs none.
+#   # shelleyKesAgentProfile: "pool-a"
 #   # Or forge for several pools, each with its own keys and KES source
-#   # (replaces the shelley* settings above; YAML only, not with Leios):
-#   # A remote shelleyKesAgentAddress serves one pool only, so each pool
-#   # signing remotely needs its own agent address; a local socket can
-#   # serve several pools through its profiles.
+#   # (replaces the shelley* settings above; YAML only, not with Leios
+#   # forging):
+#   # Pools that share a remote agent address must each set
+#   # shelleyKesAgentProfile, to different profiles; a local socket serves
+#   # several pools through its profiles.
 #   # blockProducerPools:
 #   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"
@@ -639,6 +705,14 @@
 #   #   - shelleyVrfKey: "/keys/pool-b/vrf.skey"
 #   #     shelleyKesKey: "/keys/pool-b/kes.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-b/opcert.cert"
+#   #   - shelleyVrfKey: "/keys/pool-c/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-c/opcert.cert"
+#   #     shelleyKesAgentAddress: "kes-agent.example:3443"
+#   #     shelleyKesAgentProfile: "pool-c"
+#   #   - shelleyVrfKey: "/keys/pool-d/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-d/opcert.cert"
+#   #     shelleyKesAgentAddress: "kes-agent.example:3443"
+#   #     shelleyKesAgentProfile: "pool-d"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
 #   #   blockCacheSize: 0
 #   #   indexCacheSize: 0
@@ -733,24 +807,34 @@
 # CLI: --start-era
 # startEra: ""
 
-# Leios voting (experimental, leios runMode only)
+# Leios voting (experimental; runs with the Leios runtime: leios runMode,
+# the Musashi or Dijkstra network, or a Dijkstra startEra)
 #
 # leiosVoteSigningKeyFile is the path to a Cardano text-envelope BLS12-381
-# vote signing key generated by `cardano-cli dijkstra node key-gen-BLS`.
-# Legacy raw hex 32-byte scalar files are also accepted; the file must not
-# be group/other readable.
-# When set on a block producer whose pool is a member of the epoch's
-# stake-truncated voting committee, the node signs and emits one Leios
-# vote per observed endorser block.
+# vote signing key generated by `cardano-cli dijkstra node key-gen-BLS`, or to
+# a JSON array of such envelopes. Legacy raw hex 32-byte scalar files are also
+# accepted; the file must not be group/other readable.
+# When set on a block producer, the node signs and emits one Leios vote per
+# observed endorser block for each seat of the epoch's stake-truncated voting
+# committee that its keys hold.
 #
-# The signing key must match the pool's proof-of-possession-verified on-chain
-# registration. A pool without a usable on-chain key is keyless and cannot emit
-# a vote or contribute verified stake to a certificate. Static voter-key
-# overrides are intentionally unsupported in reference-compatible mode.
-# A rotated key becomes usable only when the stake snapshot containing the new
-# pool registration becomes the committee snapshot. Keep the old signing key
-# configured until that boundary, then replace this file and restart dingo;
-# signing-key files are loaded only during block-producer startup.
+# A file with one key binds it to this producer's pool (the first pool of
+# blockProducerPools): the key must match the
+# pool's proof-of-possession-verified on-chain registration. A pool without a
+# usable on-chain key is keyless and cannot emit a vote or contribute verified
+# stake to a certificate. Static voter-key overrides are intentionally
+# unsupported in reference-compatible mode.
+#
+# A file with several keys is matched to committee seats by registered key,
+# as the reference node's --shelley-bls-key does. Each key votes at the
+# smallest seat whose registered key equals it, and a key that holds no seat
+# casts nothing. To rotate a key without a gap, list the old and the new key:
+# a rotated key becomes usable only when the stake snapshot containing the new
+# pool registration becomes the committee snapshot, and until then only the
+# old key matches the seat. A bundle of many pools' keys votes for every seat
+# it covers, so a producer forging for several pools lists every pool's key.
+# Several keys are not checked against any pool's registration.
+# Signing-key files are loaded only during block-producer startup.
 #
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
@@ -821,6 +905,43 @@
 # environment variable
 # CLI: --ledger-prefetch-ahead-enabled
 # ledgerPrefetchAheadEnabled: true
+
+# The live UTxO set and the ledger state it computes live in a Badger store
+# under <databasePath>/ledger/utxo on every on-disk database. A database written
+# by a release that kept them in the metadata store is moved at startup: the
+# set is built from the SQL rows, checked against them, marked, and the rows
+# are deleted in batches. The move resumes after a crash and is refused, with
+# the figure needed, while the volume lacks the free space for the set. A store
+# left behind the ledger is caught up at startup by rolling the ledger back to
+# it. Counted in the dingo_utxo_set_* metrics.
+
+# Write a checkpoint of the live UTxO set, with every ledger-state family it
+# holds, at the first epoch boundary after this many epochs since the last, for
+# recovery when the set's rollback journal cannot bring it to the ledger (a set
+# behind a Mithril trust boundary or the consumed-output prune floor, a failed
+# commit older than the journal, a ledger tip below the journal). Recovery
+# restores the newest checkpoint at or below the ledger tip and replays the
+# blocks the node stores; with no usable checkpoint it re-imports a signed
+# ledger state from the network's Mithril aggregator, and never downloads
+# blocks. 0 writes none (default: 1).
+#
+# Disk: each checkpoint is about the size of the live UTxO set
+# (<databasePath>/ledger/utxo), kept in <databasePath>/ledger/utxo-checkpoints,
+# so ledgerUtxoCheckpointKeep checkpoints take that many times the set's size,
+# and writing one needs the free space of one more while it runs. The size is
+# reported as dingo_database_size_bytes{store="utxoset_checkpoint"}.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_CHECKPOINT_EPOCHS environment
+# variable
+# CLI: --ledger-utxo-checkpoint-epochs
+# ledgerUtxoCheckpointEpochs: 1
+
+# How many live UTxO set checkpoints to keep (default: 2).
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_CHECKPOINT_KEEP environment
+# variable
+# CLI: --ledger-utxo-checkpoint-keep
+# ledgerUtxoCheckpointKeep: 2
 
 # Verify the witness signatures of every validated block of a block-apply
 # chunk on worker goroutines while earlier blocks of the chunk validate and
@@ -1173,8 +1294,8 @@
 # mithril:
   # Make `dingo serve` sync from Mithril while it is behind the aggregator's
   # certified immutable tip, falling back to Ouroboros on any failure.
-  # Requires core storage mode. With historyExpiry.enabled false the node
-  # replays certified blocks; with it true it restores a snapshot and
+  # Works in core and API storage modes. With historyExpiry.enabled false the
+  # node replays certified blocks; with it true it restores a snapshot and
   # backfills. `dingo mithril sync` works regardless of this setting.
   # Default: false
   # enabled: false

@@ -35,17 +35,18 @@ import (
 )
 
 // seedCertifiedEndorserBlock stores a Dijkstra announcing block and its
-// certifying child, plus the endorser block the certifier represents, and
-// returns the fixture with the endorser transaction's hash.
+// certifying child, plus the endorser block the certifier represents, records
+// the certifier as the IndexerDB tip and returns the fixture with the endorser
+// transaction's hash.
 func seedCertifiedEndorserBlock(
 	t *testing.T,
-	db *database.Database,
+	adapter *NodeAdapter,
 ) (*testfixtures.CertifiedEndorserBlock, string) {
 	t.Helper()
 	f, err := testfixtures.GenerateCertifiedEndorserBlock(100)
 	require.NoError(t, err)
 	for _, block := range []gledger.Block{f.Announcer, f.Certifier} {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash:     block.Hash().Bytes(),
 			PrevHash: block.PrevHash().Bytes(),
 			Slot:     block.SlotNumber(),
@@ -55,10 +56,11 @@ func seedCertifiedEndorserBlock(
 			Cbor:     block.Cbor(),
 		}, nil))
 	}
-	require.NoError(t, db.SetLeiosEB(
+	require.NoError(t, adapter.ledgerState.Database().SetLeiosEB(
 		f.Announcer.SlotNumber(), f.EndorserHash.Bytes(), f.Manifest,
 		f.Transactions,
 	))
+	setIndexedThrough(t, adapter, f.Certifier)
 	tx, err := safedecode.DijkstraBlockTransaction(f.Transactions[0])
 	require.NoError(t, err)
 	return f, tx.Hash().String()
@@ -66,8 +68,8 @@ func seedCertifiedEndorserBlock(
 
 func TestNodeAdapterCertifiedEndorserBlockTransactions(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
-	f, txHash := seedCertifiedEndorserBlock(t, db)
+	adapter, raw, _ := newDBBackedAdapter(t)
+	f, txHash := seedCertifiedEndorserBlock(t, adapter)
 	ctx := context.Background()
 	certifierHash := f.Certifier.Hash().String()
 
@@ -110,13 +112,13 @@ func TestNodeAdapterCertifiedEndorserBlockTransactions(t *testing.T) {
 
 func TestNodeAdapterCertifiedEndorserBlockMissingBody(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	seedCertifiedEndorserBlock(t, db)
+	adapter, _, _ := newDBBackedAdapter(t)
+	seedCertifiedEndorserBlock(t, adapter)
 	// A certifier without a retained endorser block must surface an error
 	// rather than report an empty block.
 	other, err := testfixtures.GenerateCertifiedEndorserBlock(200)
 	require.NoError(t, err)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash:     other.Announcer.Hash().Bytes(),
 		PrevHash: other.Announcer.PrevHash().Bytes(),
 		Slot:     other.Announcer.SlotNumber(),
@@ -125,7 +127,7 @@ func TestNodeAdapterCertifiedEndorserBlockMissingBody(t *testing.T) {
 		Type:     uint(other.Announcer.Type()),
 		Cbor:     other.Announcer.Cbor(),
 	}, nil))
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash:     other.Certifier.Hash().Bytes(),
 		PrevHash: other.Certifier.PrevHash().Bytes(),
 		Slot:     other.Certifier.SlotNumber(),
@@ -134,6 +136,12 @@ func TestNodeAdapterCertifiedEndorserBlockMissingBody(t *testing.T) {
 		Type:     uint(other.Certifier.Type()),
 		Cbor:     other.Certifier.Cbor(),
 	}, nil))
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			other.Certifier.SlotNumber(), other.Certifier.Hash().Bytes(),
+		),
+		BlockNumber: 4,
+	})
 	_, err = adapter.BlockTransactionHashes(
 		context.Background(), other.Certifier.Hash().String(),
 	)
@@ -206,20 +214,13 @@ func TestNodeAdapterCertifiedEndorserBlockBlockInfo(t *testing.T) {
 		cardano.EmbeddedConfigPath("preview"),
 	)
 	require.NoError(t, err)
-	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
-	f, txHash := seedCertifiedEndorserBlock(t, db)
+	adapter, raw, _ := newDBBackedAdapter(t, nodeConfig)
+	f, txHash := seedCertifiedEndorserBlock(t, adapter)
 	ctx := context.Background()
 	certifierHash := f.Certifier.Hash().String()
 
-	_, err = raw.Exec(
-		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (0, 0, 86400, 1000, 6)`,
-	)
-	require.NoError(t, err)
-	require.NoError(
-		t,
-		adapter.ledgerState.PrepareEpochCacheForStartup(ctx),
-	)
-	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+	seedEpochs(t, adapter, raw, 0, 1)
+	setChainTip(t, adapter, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			f.Certifier.SlotNumber(),
 			f.Certifier.Hash().Bytes(),
@@ -256,8 +257,8 @@ func TestNodeAdapterCertifiedEndorserBlockBlockInfo(t *testing.T) {
 
 func TestNodeAdapterBlockAddressesRepeatedEndorserTransaction(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
-	f, txHash := seedCertifiedEndorserBlock(t, db)
+	adapter, raw, _ := newDBBackedAdapter(t)
+	f, txHash := seedCertifiedEndorserBlock(t, adapter)
 	ctx := context.Background()
 
 	// The first certified block applied the endorser transaction, so its row
@@ -285,7 +286,7 @@ func TestNodeAdapterBlockAddressesRepeatedEndorserTransaction(t *testing.T) {
 	)
 	require.NoError(t, err)
 	for _, block := range []*dijkstra.DijkstraBlock{announcer2, certifier2} {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash:     block.Hash().Bytes(),
 			PrevHash: block.PrevHash().Bytes(),
 			Slot:     block.SlotNumber(),
@@ -295,10 +296,11 @@ func TestNodeAdapterBlockAddressesRepeatedEndorserTransaction(t *testing.T) {
 			Cbor:     block.Cbor(),
 		}, nil))
 	}
-	require.NoError(t, db.SetLeiosEB(
+	require.NoError(t, adapter.ledgerState.Database().SetLeiosEB(
 		announcer2.SlotNumber(), f.EndorserHash.Bytes(), f.Manifest,
 		f.Transactions,
 	))
+	setIndexedThrough(t, adapter, certifier2)
 
 	hashes, err := adapter.BlockTransactionHashes(ctx, certifier2.Hash().String())
 	require.NoError(t, err)

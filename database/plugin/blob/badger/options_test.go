@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,4 +35,28 @@ func TestNewRejectsOnDiskCompressionWithoutBlockCache(t *testing.T) {
 		err,
 		"badger block cache size must be greater than zero when compression is enabled",
 	)
+}
+
+func TestWithSubdirSelectsStoreDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		subdir string
+		want   string
+	}{
+		{subdir: "", want: "blob"},
+		{subdir: "leios", want: "leios"},
+	} {
+		store, err := New(
+			WithDataDir(dir),
+			WithSubdir(tc.subdir),
+			WithBlockCacheSize(1<<20),
+			WithValueLogFileSize(16<<20),
+			WithMemTableSize(8<<20),
+			WithGc(false),
+		)
+		require.NoError(t, err)
+		require.NoError(t, store.Close())
+		require.DirExists(t, filepath.Join(dir, tc.want))
+	}
 }

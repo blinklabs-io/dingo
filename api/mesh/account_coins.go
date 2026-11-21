@@ -70,7 +70,11 @@ func (s *Server) handleAccountCoins(
 		stream.writePage,
 	)
 	if err == nil {
-		err = stream.finish(s.tipBlockID(tip))
+		var blockID *BlockIdentifier
+		blockID, err = s.tipBlockID(tip)
+		if err == nil {
+			err = stream.finish(blockID)
+		}
 	}
 	if err == nil {
 		return

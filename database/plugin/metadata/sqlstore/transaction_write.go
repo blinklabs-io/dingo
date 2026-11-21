@@ -25,9 +25,11 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,7 +55,14 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // (and therefore to one caller transaction), because database/sql statements
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
-	leiosAPIRowsOnly     bool
+	leiosAPIRowsOnly bool
+	// debitWithdrawals makes a historical-replay withdrawal debit the
+	// account balance as live apply does. It is set by the caller per
+	// transaction and survives Reset.
+	debitWithdrawals bool
+	// debitWithdrawalsSet records that the caller chose debitWithdrawals,
+	// which a certified closure honours: its default is to debit.
+	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
@@ -503,6 +512,11 @@ type transactionRowOps struct {
 	insertIdentityReturning func(hash any) *sql.Row
 	exec                    func(query string, args ...any) (sql.Result, error)
 	queryRow                func(query string, args ...any) *sql.Row
+	// refreshAddressOrder asks for the address-page position of the
+	// transaction's outputs to be refreshed after its application row is
+	// written. API storage mode sets it; a staged UTxO overlay does not,
+	// because it refreshes when it writes the staged rows.
+	refreshAddressOrder bool
 }
 
 // insertIdentityRow returns the id of the identity row of hash, inserting the
@@ -564,16 +578,23 @@ func insertTransactionRows(
 	if err != nil {
 		return 0, false, err
 	}
-	if affected > 0 {
-		return id, true, nil
+	created := affected > 0
+	if !created {
+		if _, err := ops.exec(
+			appliedTransactionUpdateSQL,
+			args[1], args[8], args[3], args[6], id,
+		); err != nil {
+			return 0, false, fmt.Errorf("update applied transaction: %w", err)
+		}
 	}
-	if _, err := ops.exec(
-		appliedTransactionUpdateSQL,
-		args[1], args[8], args[3], args[6], id,
-	); err != nil {
-		return 0, false, fmt.Errorf("update applied transaction: %w", err)
+	if ops.refreshAddressOrder {
+		// An output stored before its producer was applied, or applied at
+		// another position, still carries its old address-page position.
+		if _, err := ops.exec(fillUtxoAddressOrderByTransactionSQL, id); err != nil {
+			return 0, false, fmt.Errorf("refresh UTxO address order: %w", err)
+		}
 	}
-	return id, false, nil
+	return id, created, nil
 }
 
 // cachedTransactionRowOps runs the transaction row statements through the
@@ -583,6 +604,7 @@ func (s *Store) cachedTransactionRowOps(
 	db queryer,
 ) transactionRowOps {
 	return transactionRowOps{
+		refreshAddressOrder: s.storageMode == types.StorageModeAPI,
 		insertIdentity: func(hash any) (sql.Result, error) {
 			return s.execCached(ctx, db, transactionIdentityInsertSQL, hash)
 		},
@@ -644,6 +666,7 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		dialect = "mysql"
 	}
 	id, isNew, err := insertTransactionRows(dialect, transactionRowOps{
+		refreshAddressOrder: a.apiRowsOnly() && a.overlay == nil,
 		insertIdentity: func(hash any) (sql.Result, error) {
 			a.countInsert()
 			return a.transactionInsert.ExecContext(ctx, hash)
@@ -676,6 +699,15 @@ func (a *transactionBatchAccumulator) resetStatement() {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+}
+
+// SetDebitWithdrawals selects whether withdrawals applied through this
+// accumulator on the historical-replay path debit the account's reward
+// balance. A replay that also replays the reward credits needs the debit; one
+// that trusts an imported balance must not apply it.
+func (a *transactionBatchAccumulator) SetDebitWithdrawals(debit bool) {
+	a.debitWithdrawals = debit
+	a.debitWithdrawalsSet = true
 }
 
 func (a *transactionBatchAccumulator) Reset() {
@@ -1144,7 +1176,9 @@ func (s *Store) setTransactionWithAccumulator(
 				collateralFee uint64
 				err           error
 			)
-			if overlay != nil {
+			if s.liveUtxo != nil {
+				collateralFee, err = s.liveCollateralFee(txn, transaction)
+			} else if overlay != nil {
 				collateralFee, err = overlay.collateralFee(
 					ctx, db, transaction,
 				)
@@ -1203,7 +1237,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}
 			if ledgerContextSlot != nil {
-				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot); err != nil {
+				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot, !s.poolsDrained()); err != nil {
 					return err
 				}
 			}
@@ -1315,6 +1349,40 @@ func (s *Store) setTransactionWithAccumulator(
 					return nil
 				}
 				return nil
+			}
+			if s.liveUtxo != nil {
+				// The live UTxO set holds the outputs. reward_live_stake still
+				// carries their stake: produced outputs add theirs from the
+				// row models, spent inputs subtract theirs from the set as
+				// this transaction sees it.
+				produced, err := liveProducedStakeDeltas(producedModels)
+				if err != nil {
+					return err
+				}
+				consumed, err := s.liveConsumedStakeDeltas(txn, transaction)
+				if err != nil {
+					return err
+				}
+				deltas := mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumed,
+					produced,
+				)
+				// Applied now, never queued for a batch flush: the live set
+				// is staged only after this write, so a credential re-sum
+				// here sees the set before this transaction and must add
+				// the transaction's own change, which a flush after staging
+				// would count twice.
+				if err := s.refreshRewardLiveStakeDeltas(
+					context.WithValue(ctx, liveUtxoPreWriteKey{}, true),
+					db, deltas, point.Slot,
+				); err != nil {
+					return err
+				}
+				if batchedAccumulator != nil {
+					return nil
+				}
+				return staged.flush(ctx, db, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1629,10 +1697,9 @@ func (s *Store) SetGapBlockTransaction(
 	txn types.Txn,
 	protocolMajor uint64,
 ) error {
-	// Gap ingestion intentionally has no available input state, so this is
-	// equivalent to SetTransaction with the consumed-input update suppressed.
-	// The transaction, its certificates, and its produced outputs are all
-	// persisted.
+	// Gap ingestion stores the transaction and its certificates only: the
+	// UTxO set and its stake are the LedgerDB UTxO set's, already at or past
+	// this block.
 	//
 	// certDeposits may be partial or nil: the caller calculates it from the
 	// era's CertDepositFunc, which has no entry for a certificate whose
@@ -1673,10 +1740,8 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				var err error
-				certificateRefs, err = s.applyTransactionCertificates(
+				if _, err := s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -1687,90 +1752,11 @@ func (s *Store) SetGapBlockTransaction(
 					allowUnknownDeposits,
 					false,
 					protocolMajor,
-				)
-				if err != nil {
+				); err != nil {
 					return err
 				}
 			}
-			collateralReturn := transaction.CollateralReturn()
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
-			for _, produced := range transaction.Produced() {
-				model, err := models.UtxoLedgerToModel(produced, point.Slot)
-				if err != nil {
-					return fmt.Errorf(
-						"convert output %d: %w",
-						produced.Id.Index(),
-						err,
-					)
-				}
-				id := uint(transactionID)
-				if collateralReturn != nil &&
-					produced.Output == collateralReturn {
-					model.CollateralReturnForTxID = &id
-				} else {
-					model.TransactionID = &id
-				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return err
-				}
-				if len(model.StakingKey) > 0 {
-					gain, err := producedStakeCredentialDelta(
-						model.CredentialTag,
-						model.StakingKey,
-						model.Amount,
-						inserted,
-					)
-					if err != nil {
-						return err
-					}
-					producedStakeDeltas = append(producedStakeDeltas, gain)
-				}
-			}
-			// Merge as setTransactionWithAccumulator does: certificateRefs
-			// and producedStakeDeltas are each already deduped/summed
-			// against themselves, but not against each other, and a
-			// certificate touching the same credential as one of this gap
-			// block's produced outputs would otherwise apply that
-			// credential's delta twice instead of once net.
-			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					producedStakeDeltas,
-				),
-				point.Slot,
-			)
-		},
-	)
-}
-
-func (s *Store) RecomputeGapCollateralFee(
-	transaction lcommon.Transaction,
-	_ ocommon.Point,
-	txn types.Txn,
-) error {
-	if transaction.IsValid() {
-		return nil
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			fee, err := s.collateralFeeForTransaction(ctx, db, transaction)
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(
-				ctx,
-				`-- name: UpdateTransactionCollateralFee :exec
-UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
-				decimalUint64(types.Uint64(fee)),
-				transaction.Hash().Bytes(),
-			)
-			return err
+			return nil
 		},
 	)
 }
@@ -1800,8 +1786,10 @@ func (s *Store) SetGenesisTransaction(
 			for i := range outputs {
 				outputs[i].ID = 0
 				outputs[i].TransactionID = &transactionID
-				if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
-					return err
+				if s.liveUtxo == nil {
+					if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
+						return err
+					}
 				}
 				refs = append(refs, models.NewStakeCredentialRef(
 					outputs[i].CredentialTag,
@@ -1881,6 +1869,16 @@ SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 			}
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("scan transactions for rollback: %w", err)
+			}
+			// The delete below removes these transactions' certificate and
+			// context rows, the keys their pool certificates rank by. A
+			// drained pools family has no pool rows to refresh.
+			var poolHashes [][]byte
+			if !s.poolsDrained() {
+				poolHashes, err = poolHashesOfTransactions(ctx, db, txIDs)
+				if err != nil {
+					return err
+				}
 			}
 			refs := []models.StakeCredentialRef{}
 			for start := 0; start < len(txIDs); start += 400 {
@@ -1971,6 +1969,9 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 				); err != nil {
 					return err
 				}
+			}
+			if err := refreshPoolCurrentState(ctx, db, poolHashes); err != nil {
+				return err
 			}
 			// The stake lookup returns one row per spent UTxO; refresh each
 			// credential once.
@@ -2163,6 +2164,9 @@ func (s *Store) persistUtxoRelationsWithAddressRows(
 		return err
 	}
 	for i := range utxo.Assets {
+		if !s.storesUtxoAssets() {
+			break
+		}
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
 		asset.ID = 0
@@ -2239,6 +2243,9 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		return err
 	}
 	for i := range utxo.Assets {
+		if !s.storesUtxoAssets() {
+			break
+		}
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
 		asset.ID = 0
@@ -2372,6 +2379,9 @@ func (s *Store) applyTransactionWithdrawals(
 	txn types.Txn,
 	batchedAccumulator *transactionBatchAccumulator,
 ) error {
+	if s.familyDrained(nodesettings.FamilyAccounts) {
+		return nil
+	}
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
 			continue
@@ -2411,12 +2421,10 @@ func (s *Store) applyTransactionWithdrawals(
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
-		accountFound := true
 		if errors.Is(err, sql.ErrNoRows) {
 			if !historicalBackfill {
 				return models.ErrAccountNotFound
 			}
-			accountFound = false
 			// A historical withdrawal may be applied after deregistration,
 			// so an inactive account is still a valid historical account. It
 			// must be present; silently journaling a withdrawal with no account
@@ -2434,6 +2442,16 @@ func (s *Store) applyTransactionWithdrawals(
 		} else if err != nil {
 			return err
 		}
+		debit := !historicalBackfill ||
+			(batchedAccumulator != nil && batchedAccumulator.debitWithdrawals)
+		if !historicalBackfill && batchedAccumulator != nil &&
+			batchedAccumulator.leiosAPIRowsOnly &&
+			batchedAccumulator.debitWithdrawalsSet {
+			// A closure is not a historical replay, but the replay that
+			// reaches it chose whether withdrawals debit, for the blocks
+			// around it and for it alike.
+			debit = batchedAccumulator.debitWithdrawals
+		}
 		var exists bool
 		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
 			txHash,
@@ -2449,7 +2467,7 @@ func (s *Store) applyTransactionWithdrawals(
 		if err != nil {
 			return err
 		}
-		if !historicalBackfill && amount.Uint64() > previous {
+		if debit && amount.Uint64() > previous {
 			return fmt.Errorf(
 				"reward withdrawal amount %s exceeds account balance %d: %w",
 				amount.String(),
@@ -2462,12 +2480,11 @@ func (s *Store) applyTransactionWithdrawals(
 		}
 		// Historical API backfill replays withdrawals before the imported
 		// snapshot balance's intervening credits are available. Record the
-		// withdrawal history, but leave that trusted boundary balance untouched.
-		// accountFound is guaranteed true here whenever historicalBackfill is
-		// false (the account lookup above returns early otherwise); the extra
-		// check keeps this update from ever reactivating or fabricating a
-		// current stake-registration account.
-		if !historicalBackfill && accountFound {
+		// withdrawal history, but leave that trusted boundary balance untouched,
+		// unless the caller replays the credits too. A debited replay may reach
+		// an account deregistered since, which keeps its balance row; the
+		// lookup above returns early for a missing account otherwise.
+		if debit {
 			rewardAfter := previous - amount.Uint64()
 			if _, err := s.execCached(ctx, db, updateAccountRewardSQL,
 				strconv.FormatUint(rewardAfter, 10),
@@ -2486,7 +2503,7 @@ func (s *Store) applyTransactionWithdrawals(
 		); err != nil {
 			return err
 		}
-		if !historicalBackfill {
+		if debit {
 			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
 			pending, err := pendingUtxoStakeDelta(
 				ctx, db, txn, batchedAccumulator, ref,
@@ -2509,6 +2526,7 @@ func recordTransactionLedgerContext(
 	db queryer,
 	transactionID int64,
 	slot uint64,
+	refreshPools bool,
 ) error {
 	value, err := checkedInt64(slot)
 	if err != nil {
@@ -2516,7 +2534,18 @@ func recordTransactionLedgerContext(
 	}
 	_, err = db.ExecContext(ctx, `-- name: UpsertLeiosTransactionContext :exec
 INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
-	return err
+	if err != nil {
+		return err
+	}
+	// The context slot is the effective slot of the transaction's pool
+	// certificates, which pool_current_state ranks by. A drained pools
+	// family has no pool rows to refresh.
+	if !refreshPools {
+		return nil
+	}
+	return refreshPoolCurrentStateForTransactions(
+		ctx, db, []int64{transactionID},
+	)
 }
 
 // rollbackSpentStakeRefsIndex is the spender index the rollback stake lookup
@@ -2598,3 +2627,111 @@ INSERT INTO account_reward_delta (
 ON CONFLICT (
     withdrawal, tx_hash, credential_tag, staking_key, added_slot
 ) DO NOTHING`
+
+// SetLiveUtxoSource makes the store keep no utxo rows and resolve inputs
+// through src instead. Call it before the first write; a nil src restores
+// utxo rows.
+func (s *Store) SetLiveUtxoSource(src types.LiveUtxoSource) {
+	s.liveUtxo = src
+}
+
+// liveCollateralFee is collateralFeeForTransaction with each collateral
+// input's amount read from the live UTxO set.
+func (s *Store) liveCollateralFee(
+	txn types.Txn,
+	transaction lcommon.Transaction,
+) (uint64, error) {
+	return collateralFeeWithLookup(transaction, func(
+		input lcommon.TransactionInput,
+	) (string, bool, error) {
+		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(
+			txn, input.Id().Bytes(), input.Index(),
+		)
+		if err != nil || !ok {
+			return "", false, err
+		}
+		out, err := gledger.NewTransactionOutputFromCbor(cbor)
+		if err != nil {
+			return "", false, fmt.Errorf(
+				"decode collateral input %x#%d: %w",
+				input.Id().Bytes(), input.Index(), err,
+			)
+		}
+		return out.Amount().String(), true, nil
+	})
+}
+
+// liveUtxoTxnKey carries, in a write's context, the metadata transaction a
+// live UTxO source answers for.
+type liveUtxoTxnKey struct{}
+
+// liveUtxoPreWriteKey marks a stake refresh made inside a transaction write
+// before the live UTxO set holds that transaction's changes.
+type liveUtxoPreWriteKey struct{}
+
+func liveProducedStakeDeltas(
+	produced []models.Utxo,
+) ([]stakeCredentialDelta, error) {
+	ret := make([]stakeCredentialDelta, 0, len(produced))
+	for i := range produced {
+		m := &produced[i]
+		if len(m.StakingKey) == 0 {
+			continue
+		}
+		gain, err := producedStakeCredentialDelta(
+			m.CredentialTag, m.StakingKey, m.Amount, true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, gain)
+	}
+	return ret, nil
+}
+
+// liveConsumedStakeDeltas is the stake each live input of transaction takes
+// from its credential, read from the live UTxO set before transaction
+// applies. An input that is not live changes nothing.
+func (s *Store) liveConsumedStakeDeltas(
+	txn types.Txn,
+	transaction lcommon.Transaction,
+) ([]stakeCredentialDelta, error) {
+	inputs := uniqueConsumedInputs(transaction)
+	ret := make([]stakeCredentialDelta, 0, len(inputs))
+	for _, in := range inputs {
+		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(txn, in.Hash, in.Idx)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		out, err := gledger.NewTransactionOutputFromCbor(cbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode input %x#%d: %w",
+				in.Hash,
+				in.Idx,
+				err,
+			)
+		}
+		skh := out.Address().StakeKeyHash()
+		if skh == (lcommon.Blake2b224{}) {
+			continue
+		}
+		tag, _ := models.StakeCredentialTagFromAddress(out.Address())
+		amount, err := models.CheckedUint64FromBigInt(out.Amount())
+		if err != nil {
+			return nil, err
+		}
+		gain, err := producedStakeCredentialDelta(
+			tag, skh.Bytes(), types.Uint64(amount), true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		gain.delta = -gain.delta
+		ret = append(ret, gain)
+	}
+	return ret, nil
+}

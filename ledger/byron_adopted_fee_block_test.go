@@ -51,6 +51,7 @@ func processByronBlockWithPParams(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	block := &envelopeTestBlock{
 		header: &envelopeTestHeader{
 			cbor:   []byte{0x80},

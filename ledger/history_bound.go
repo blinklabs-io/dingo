@@ -18,5 +18,5 @@ package ledger
 // stored locally, as last computed by the history-expiry pruner. ok is false
 // when that is not known. It reads only memory.
 func (ls *LedgerState) OldestRetainedSlot() (slot uint64, ok bool) {
-	return ls.db.OldestRetainedSlot()
+	return ls.ledgerDB().OldestRetainedSlot()
 }

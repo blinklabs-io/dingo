@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"slices"
@@ -35,6 +36,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	dingleios "github.com/blinklabs-io/dingo/ledger/leios"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -51,6 +53,8 @@ import (
 )
 
 type fakeLeiosAnnouncementLedger struct {
+	receiptMatches bool
+	receiptCalls   int
 	currentSlot    uint64
 	currentSlotErr error
 	slotTime       time.Time
@@ -131,6 +135,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:       db,
+		UtxoSet:        livesettest.New(),
 		ChainManager:   cm,
 		EnableDijkstra: true,
 		Logger: slog.New(
@@ -467,11 +472,11 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		EnableLeios:        true,
 		EnableLeiosTxFetch: true,
 	})
+	offered := ocommon.NewPoint(99, bytes.Repeat([]byte{0xaa}, 32))
+	o.leiosPeerAnnouncedForTest(conn.Id(), nil, offered)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockTxsOffer(
-			ocommon.NewPoint(99, bytes.Repeat([]byte{0xaa}, 32)),
-		),
+		oleiosnotify.NewMsgBlockTxsOffer(offered),
 	)
 	require.NoError(t, err)
 }
@@ -1052,12 +1057,6 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 		),
 	)
 
-	// Endorser-block persistence is asynchronous: storeLeiosEndorserBlock
-	// queues the blob write on a background writer. Drain it so the blob store
-	// reflects the stored block before we force the DB-reload path by clearing
-	// the in-memory cache below.
-	o.StopLeiosPersistWriter()
-
 	o.leiosMu.Lock()
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()
@@ -1543,7 +1542,6 @@ func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
 		time.Second,
 		"closure waiter cancellation",
 	))
-	o.StopLeiosPersistWriter()
 	_, err = o.leiosDatabase().GetLeiosEBTxs(point.Hash, point.Slot)
 	require.Error(t, err)
 }
@@ -1776,7 +1774,6 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 	relayOffer, _ := o.leiosEBLog.next("relay")
 	require.Nil(t, relayOffer, "malformed persisted transactions must not be relayed")
-	o.StopLeiosPersistWriter()
 }
 
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
@@ -3540,4 +3537,39 @@ func TestLeiosReloadDiscardsLegacyWrappedPersistedTxs(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, data.completeTxCache())
 	require.Empty(t, data.txsRaw)
+}
+
+func (f *fakeLeiosAnnouncementLedger) MatchesLeiosAnnouncement(context.Context, lcommon.BlockHeader, []byte, [][]byte) bool {
+	f.receiptCalls++
+	return f.receiptMatches
+}
+
+func TestValidateLeiosEndorserBlockForHeaderReusesLocalReceipt(t *testing.T) {
+	t.Parallel()
+	for _, matches := range []bool{true, false} {
+		t.Run(fmt.Sprint(matches), func(t *testing.T) {
+			t.Parallel()
+			txRaw := testDijkstraTx(t, 0)
+			blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{TransactionReferences: []lcommon.LeiosTransactionReference{{TransactionHash: lcommon.Blake2b256Hash(txRaw), TransactionSize: uint32(len(txRaw))}}})
+			require.NoError(t, err)
+			point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
+			header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(testDijkstraAnnouncementHeaderRawFor(t, point.Slot, testEbHash(point), uint64(len(blockRaw))))
+			require.NoError(t, err)
+			validationLedger := &fakeLeiosAnnouncementLedger{receiptMatches: matches}
+			o := newTestOuroborosWithLeiosDB(t)
+			o.leiosAnnouncementLedger = validationLedger
+			o.ledgerState = newTestLedgerState(t)
+			setTestLedgerTip(t, o, ochainsync.Tip{Point: ocommon.NewPoint(point.Slot-1, header.PrevHash().Bytes())})
+			defer func() { require.NoError(t, o.Close()) }()
+			require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, []cbor.RawMessage{txRaw}, leiosStoreAuthoritative))
+			ctx := forging.WithLeiosValidationReceipt(t.Context(), validationLedger)
+			require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(ctx, header, header.PrevHash().Bytes()))
+			require.Equal(t, 1, validationLedger.receiptCalls)
+			expected := 1
+			if matches {
+				expected = 0
+			}
+			require.Equal(t, expected, validationLedger.txValidated)
+		})
+	}
 }

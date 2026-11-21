@@ -268,3 +268,206 @@ func TestLoadVoteSigningKeyFileRejectsOversized(t *testing.T) {
 	_, err := LoadVoteSigningKeyFile(path)
 	assert.Error(t, err)
 }
+
+func testVoteKeyEnvelope(t *testing.T, scalar uint64) string {
+	t.Helper()
+	raw := make([]byte, voteSigningKeySize)
+	new(big.Int).SetUint64(scalar).FillBytes(raw)
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, raw...)
+	return fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","description":"Leios BLS signing key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+}
+
+func testVoteKeyArray(t *testing.T, scalars ...uint64) string {
+	t.Helper()
+	envelopes := make([]string, 0, len(scalars))
+	for _, scalar := range scalars {
+		envelopes = append(envelopes, testVoteKeyEnvelope(t, scalar))
+	}
+	return "[" + strings.Join(envelopes, ",") + "]"
+}
+
+func requireKeysMatchScalars(
+	t *testing.T,
+	keys []*VoteSigningKey,
+	scalars ...uint64,
+) {
+	t.Helper()
+	require.Len(t, keys, len(scalars))
+	for i, scalar := range scalars {
+		expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", scalar))
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			expected.PublicKeyBytes(),
+			keys[i].PublicKeyBytes(),
+			"key %d keeps its file order",
+			i,
+		)
+	}
+}
+
+func TestParseVoteSigningKeysFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("array of envelopes keeps file order", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile(
+			[]byte(testVoteKeyArray(t, 42, 7, 9)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42, 7, 9)
+	})
+	t.Run("single envelope is one key", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile(
+			[]byte(testVoteKeyEnvelope(t, 42)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42)
+	})
+	t.Run("one-element array equals a bare envelope", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile(
+			[]byte(testVoteKeyArray(t, 42)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42)
+	})
+	t.Run("legacy raw hex scalar is one key", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile(
+			[]byte(fmt.Sprintf("%064x\n", 42)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42)
+	})
+	t.Run("empty array holds no keys", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile([]byte(" [ ] \n"))
+		require.NoError(t, err)
+		assert.Empty(t, keys)
+	})
+	t.Run("whitespace around the array is tolerated", func(t *testing.T) {
+		t.Parallel()
+		keys, err := parseVoteSigningKeysFile(
+			[]byte("\n  " + testVoteKeyArray(t, 3, 4) + "\n"),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 3, 4)
+	})
+	t.Run("one invalid element fails the whole file", func(t *testing.T) {
+		t.Parallel()
+		bad := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
+		_, err := parseVoteSigningKeysFile([]byte(
+			"[" + testVoteKeyEnvelope(t, 42) + "," + bad + "]",
+		))
+		require.ErrorIs(t, err, ErrInvalidSigningKey)
+		assert.ErrorContains(t, err, "key 1")
+	})
+	t.Run(
+		"a hex string is not an envelope inside an array",
+		func(t *testing.T) {
+			t.Parallel()
+			_, err := parseVoteSigningKeysFile([]byte(
+				fmt.Sprintf(`[%q]`, fmt.Sprintf("%064x", 42)),
+			))
+			assert.Error(t, err)
+		},
+	)
+	t.Run("null is not an empty array", func(t *testing.T) {
+		t.Parallel()
+		_, err := parseVoteSigningKeysFile([]byte("null"))
+		assert.Error(t, err)
+	})
+	t.Run("array element with trailing cbor is rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := make([]byte, voteSigningKeySize)
+		raw[len(raw)-1] = 42
+		cborBytes := append([]byte{0x58, voteSigningKeySize}, raw...)
+		cborBytes = append(cborBytes, 0x00)
+		bad := fmt.Sprintf(
+			`{"type":"BLS12-381 Signing Key","cborHex":"%s"}`,
+			hex.EncodeToString(cborBytes),
+		)
+		_, err := parseVoteSigningKeysFile([]byte("[" + bad + "]"))
+		assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	})
+}
+
+func TestLoadVoteSigningKeysFile(t *testing.T) {
+	t.Parallel()
+
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "bls.skey")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		testutil.RestrictFileToCurrentUser(t, path)
+		return path
+	}
+
+	t.Run("loads every key in the array", func(t *testing.T) {
+		t.Parallel()
+		keys, err := LoadVoteSigningKeysFile(
+			write(t, testVoteKeyArray(t, 42, 43)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42, 43)
+	})
+	t.Run("a bundle larger than one envelope fits", func(t *testing.T) {
+		t.Parallel()
+		scalars := make([]uint64, 0, 64)
+		for i := range uint64(64) {
+			scalars = append(scalars, i+1)
+		}
+		content := testVoteKeyArray(t, scalars...)
+		require.Greater(t, len(content), voteSigningKeyFileMaxSize)
+		keys, err := LoadVoteSigningKeysFile(write(t, content))
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, scalars...)
+	})
+	t.Run("legacy single key files still load", func(t *testing.T) {
+		t.Parallel()
+		keys, err := LoadVoteSigningKeysFile(
+			write(t, fmt.Sprintf("%064x\n", 42)),
+		)
+		require.NoError(t, err)
+		requireKeysMatchScalars(t, keys, 42)
+	})
+	t.Run("error names the file", func(t *testing.T) {
+		t.Parallel()
+		path := write(t, `[{"type":"Node KES Signing Key","cborHex":"582001"}]`)
+		_, err := LoadVoteSigningKeysFile(path)
+		require.ErrorIs(t, err, ErrInvalidSigningKey)
+		assert.ErrorContains(t, err, path)
+	})
+	t.Run("a file beyond the bundle bound is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := LoadVoteSigningKeysFile(write(
+			t,
+			fmt.Sprintf(
+				"%064x",
+				42,
+			)+strings.Repeat(
+				" ",
+				voteSigningKeysFileMaxSize,
+			),
+		))
+		assert.ErrorContains(t, err, "exceeds")
+	})
+	t.Run("loose permissions are refused", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("file permission checks are not enforced on windows")
+		}
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "bls.skey")
+		require.NoError(
+			t,
+			os.WriteFile(path, []byte(testVoteKeyArray(t, 42, 43)), 0o644),
+		)
+		_, err := LoadVoteSigningKeysFile(path)
+		assert.Error(t, err)
+	})
+}

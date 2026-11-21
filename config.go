@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -30,6 +31,9 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/version"
@@ -76,6 +80,13 @@ func (m StorageMode) IsAPI() bool {
 type HistoryExpiryConfig struct {
 	Enabled   bool
 	Frequency time.Duration
+}
+
+// ImmutableDBConfig controls promotion of block bodies older than the security
+// parameter into cardano-node compatible chunk files.
+type ImmutableDBConfig struct {
+	PromoteBatch     int
+	PromoteFrequency time.Duration
 }
 
 // KoiosParityConfig controls the optional in-process Koios reward-parity
@@ -209,6 +220,8 @@ type MidnightConfig struct {
 }
 
 type Config struct {
+	apiListenerFactory func(string, string) (net.Listener, error)
+
 	// cfg holds the internal configuration that was parsed from YAML/env/CLI.
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
@@ -217,6 +230,12 @@ type Config struct {
 	// WithPluginSelection mempool config carrying one, or a loaded internal
 	// config), so the Leios default never replaces it.
 	mempoolCapacitySet bool
+
+	// mempoolCapacityLeiosDefault records that the Leios mempool capacity
+	// came from the Leios or Musashi default rather than from the operator.
+	// Only that default follows whether the epoch's committee can reach its
+	// quorum; an explicit capacity is fixed.
+	mempoolCapacityLeiosDefault bool
 
 	// Runtime-only fields that are not loaded from YAML/env:
 	promRegistry      prometheus.Registerer
@@ -248,7 +267,9 @@ type Config struct {
 	localStateQueryViewMaxLifetime time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                         string
+	dataDir string
+	// splitIndexer is set when the IndexerDB holds the API rows.
+	splitIndexer                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
@@ -272,11 +293,14 @@ type Config struct {
 	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	immutableDB                                                                         ImmutableDBConfig
 	mithrilCatchUp                                                                      MithrilCatchUpFactory
+	mithrilLedgerReimport                                                               MithrilLedgerReimportFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
+	advertiseAddress                                                                    string
 	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
@@ -308,8 +332,10 @@ type Config struct {
 	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
-	shelleyKESAgentPlaintext                                                            bool
 	blockProducerPools                                                                  []BlockProducerPool
+	shelleyKESAgentPlaintext                                                            bool
+	shelleyKESAgentProfile                                                              string
+	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -319,6 +345,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
@@ -335,6 +362,8 @@ type Config struct {
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
 	storageMode                                                                         StorageMode
+	indexerMaxReadyLagBlocks                                                            uint64
+	indexerWriterFactory                                                                IndexerWriterFactory
 	cacheBlockLRUEntries, cacheHotUtxoEntries, cacheHotTxEntries                        int
 	cacheHotTxMaxBytes                                                                  int64
 }
@@ -613,6 +642,13 @@ func (n *Node) configValidate() error {
 	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
 		return err
 	}
+	if n.config.cfg.AdvertiseAddress != "" {
+		if err := internalconfig.ValidateAdvertiseAddress(
+			n.config.cfg.AdvertiseAddress,
+		); err != nil {
+			return fmt.Errorf("invalid advertise address: %w", err)
+		}
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -640,8 +676,8 @@ func (n *Node) configValidate() error {
 			"WithBlockProducerPools replaces WithShelleyVRFKey, " +
 				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
 				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
-				"WithShelleyKESAgentRemote and WithShelleyKESAgentPlaintext; " +
-				"set them in each pool",
+				"WithShelleyKESAgentRemote, WithShelleyKESAgentPlaintext and " +
+				"WithShelleyKESAgentProfile; set them in each pool",
 		)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
@@ -831,6 +867,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// reads and signature checks with earlier blocks of its chunk.
 			LedgerPrefetchAheadEnabled: true,
 			LedgerValidateAheadEnabled: true,
+			LedgerUtxoCheckpointEpochs: 1,
+			LedgerUtxoCheckpointKeep:   2,
 			Plugins: internalconfig.PluginsConfig{
 				Consensus: hostplugin.Selection{
 					Provider: "praos",
@@ -926,12 +964,16 @@ func (c *Config) syncCompatFields() {
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
+	c.advertiseAddress = c.cfg.AdvertiseAddress
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
 	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
+	// storageMode is the ledger's own store's mode, which is core when the
+	// IndexerDB holds the API rows.
+	c.splitIndexer = c.cfg.SplitIndexer()
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
-		c.cfg.StorageMode,
+		c.cfg.ConsensusStorageMode(),
 	)
 	// Leios run mode and the Musashi testnet (which enables Leios networking
 	// without changing the run mode) both default to the larger mempool.
@@ -944,10 +986,15 @@ func (c *Config) syncCompatFields() {
 		c.cfg.Plugins.Mempool.Config["capacity"] = int64(
 			internalconfig.DefaultMempoolCapacityLeios,
 		)
+		c.mempoolCapacityLeiosDefault = true
 	}
 	c.historyExpiry = HistoryExpiryConfig{
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
 		Frequency: c.cfg.HistoryExpiry.Frequency,
+	}
+	c.immutableDB = ImmutableDBConfig{
+		PromoteBatch:     c.cfg.ImmutableDB.PromoteBatch,
+		PromoteFrequency: c.cfg.ImmutableDB.PromoteFrequency,
 	}
 	// c.cfg.KoiosParity.Accounts is already a fully-resolved bool by this
 	// point (defaulted by WithKoiosParity or internal/config's LoadConfig),
@@ -1040,8 +1087,10 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
 	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
-	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
+	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
+	c.shelleyKESAgentProfile = c.cfg.ShelleyKESAgentProfile
+	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1050,6 +1099,8 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
+	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
@@ -1082,21 +1133,31 @@ func WithPluginSelection(
 			// The selection replaces the whole mempool config, so its
 			// capacity is explicit exactly when the caller supplied one.
 			_, c.mempoolCapacitySet = selection.Config["capacity"]
-			if selection.Config == nil &&
-				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
-				selection.Config = map[string]any{
-					"capacity": int64(
-						internalconfig.DefaultMempoolCapacityPraos,
-					),
-				}
+			if c.mempoolCapacitySet {
+				c.mempoolCapacityLeiosDefault = false
 			}
 		}
 		selection.Config = clonePluginConfig(selection.Config)
+		// The clone keeps the caller's map unchanged. A built-in selection
+		// without a capacity takes the Praos default, which syncCompatFields
+		// raises to the Leios default where that applies; without it the
+		// pool would run with no capacity at all.
+		if capability == hostplugin.CapabilityMempool &&
+			!c.mempoolCapacitySet &&
+			(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
+			selection.Config["capacity"] = int64(
+				internalconfig.DefaultMempoolCapacityPraos,
+			)
+		}
 		switch capability {
 		case hostplugin.CapabilityStorageBlob:
 			c.cfg.Plugins.Storage.Blob = selection
 		case hostplugin.CapabilityStorageMetadata:
 			c.cfg.Plugins.Storage.Metadata = selection
+		case hostplugin.CapabilityStorageImmutable:
+			// The ImmutableDB has a single built-in provider and no
+			// selection.
+			return
 		case hostplugin.CapabilityConsensus:
 			c.cfg.Plugins.Consensus = selection
 		case hostplugin.CapabilityMempool:
@@ -1277,6 +1338,9 @@ func NewConfigFromInternal(
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
+		// Only the default ApplyDefaults chose follows the committee's
+		// quorum; a configured capacity is fixed.
+		mempoolCapacityLeiosDefault: cfg.MempoolCapacityDefaulted(),
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1409,6 +1473,14 @@ func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	}
 }
 
+// WithAdvertiseAddress sets the public "IP:port" shared with peers as this
+// node's own address in PeerSharing replies. Empty advertises nothing.
+func WithAdvertiseAddress(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.AdvertiseAddress = addr
+	}
+}
+
 // WithPrometheusRegistry specifies a prometheus.Registerer instance to add metrics to. In most cases, prometheus.DefaultRegistry would be
 // a good choice to get metrics working
 func WithPrometheusRegistry(registry prometheus.Registerer) ConfigOptionFunc {
@@ -1482,7 +1554,25 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
 		c.mempoolCapacitySet = true
+		c.mempoolCapacityLeiosDefault = false
 	}
+}
+
+// WithMempoolCapacityDefaulted records that the capacity in the mempool plugin
+// selection is the Leios default rather than one the operator set. Only that
+// default follows whether the epoch's Leios committee can reach its quorum;
+// a capacity the operator set stays fixed. Apply it after the mempool plugin
+// selection, which clears the record for a selection that carries a capacity.
+func WithMempoolCapacityDefaulted(defaulted bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolCapacityLeiosDefault = defaulted
+	}
+}
+
+// MempoolCapacityLeiosDefault reports whether the mempool capacity is the
+// Leios default, which follows the committee's quorum.
+func (c *Config) MempoolCapacityLeiosDefault() bool {
+	return c.mempoolCapacityLeiosDefault
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark
@@ -1864,6 +1954,25 @@ func WithShelleyKESAgentRemote(
 	}
 }
 
+// BlockProducerPool is one pool a block producer forges for: its VRF key and
+// operational certificate files and one KES source.
+type BlockProducerPool = internalconfig.BlockProducerPool
+
+// WithBlockProducerPools lists every pool this block producer forges for, each
+// with its own VRF key, operational certificate and KES source. It replaces
+// the single-pool WithShelleyVRFKey, WithShelleyKESKey,
+// WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
+// WithShelleyKESAgentMode, WithShelleyKESAgentRemote,
+// WithShelleyKESAgentPlaintext and WithShelleyKESAgentProfile options; New
+// refuses a config that sets any of them beside the pools.
+// WithShelleyKESAgentSignTimeout and WithShelleyKeyWatchInterval apply to
+// every pool.
+func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockProducerPools = slices.Clone(pools)
+	}
+}
+
 // WithShelleyKESAgentPlaintext runs the remote KES agent link over plain TCP
 // (CARDANO_SHELLEY_KES_AGENT_PLAINTEXT), for setups where something else
 // secures it, such as a service mesh sidecar. A server pin and a client
@@ -1874,28 +1983,34 @@ func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
 	}
 }
 
-// BlockProducerPool is one pool a block producer forges for: its VRF key and
-// operational certificate files and one KES source.
-type BlockProducerPool = internalconfig.BlockProducerPool
-
-// WithBlockProducerPools lists every pool this block producer forges for, each
-// with its own VRF key, operational certificate and KES source. It replaces
-// the single-pool WithShelleyVRFKey, WithShelleyKESKey,
-// WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
-// WithShelleyKESAgentMode, WithShelleyKESAgentRemote and
-// WithShelleyKESAgentPlaintext options; New refuses a config that sets any of
-// them beside the pools. WithShelleyKESAgentSignTimeout and
-// WithShelleyKeyWatchInterval apply to every pool.
-func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
+// WithShelleyKESAgentAddresses lists the remote KES agents in order
+// (CARDANO_SHELLEY_KES_AGENT_ADDRESSES). The node signs through the first one
+// that admits it and moves to the next when a sign fails on the link,
+// keeping that next one admitted ahead of each leader slot. It replaces the
+// address of WithShelleyKESAgentRemote, which is the same as a one-entry
+// list; the transport settings apply to every address.
+func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlockProducerPools = slices.Clone(pools)
+		c.cfg.ShelleyKESAgentAddresses = slices.Clone(addresses)
 	}
 }
 
-// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
-// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
-// block producer whose pool is a Leios committee member, the node emits
-// votes for endorser blocks. Experimental, leios runMode only.
+// WithShelleyKESAgentProfile names the remote KES agent profile to sign for
+// (CARDANO_SHELLEY_KES_AGENT_PROFILE), sent when the agent admits a session.
+// An agent that serves several pools on one listener binds each session to
+// the profile it names; one with a single profile needs none.
+func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentProfile = profile
+	}
+}
+
+// WithLeiosVoteSigningKeyFile specifies the path to a BLS12-381 Leios vote
+// signing key file (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE): a Cardano text
+// envelope, a JSON array of envelopes, or a legacy raw hex scalar. When set on
+// a block producer, the node emits votes for endorser blocks for the committee
+// seats the keys hold. Experimental; runs with the Leios runtime (leios
+// runMode, the Musashi or Dijkstra network, or a Dijkstra start era).
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
@@ -2018,9 +2133,10 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 }
 
 // WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
-// maintenance, run before block processing starts and after each epoch
-// rollover. Enabled by default; pass false only as an escape hatch. Other
-// metadata backends are unaffected.
+// maintenance, run during startup and after each epoch rollover. Shared API
+// storage runs the startup pass after its listeners start so maintenance does
+// not delay availability. Enabled by default; pass false only as an escape
+// hatch. Other metadata backends are unaffected.
 func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.PlannerStatsRefreshEnabled = enabled
@@ -2061,6 +2177,15 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerUtxoCheckpoint writes a checkpoint of the live UTxO set every
+// epochs epochs and keeps the newest keep of them; zero epochs writes none.
+func WithLedgerUtxoCheckpoint(epochs, keep int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoCheckpointEpochs = epochs
+		c.cfg.LedgerUtxoCheckpointKeep = keep
 	}
 }
 
@@ -2238,12 +2363,34 @@ func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
 	}
 }
 
+// WithMithrilLedgerReimport supplies the Mithril re-import a node falls back
+// to when its live UTxO set cannot be brought to the ledger from a checkpoint.
+// It is independent of mithril.enabled: the network's aggregator is used. A
+// nil reimporter from the factory leaves that recovery without a source.
+func WithMithrilLedgerReimport(
+	factory MithrilLedgerReimportFactory,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilLedgerReimport = factory
+	}
+}
+
 // WithHistoryExpiry configures local immutable block history expiry.
 func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.HistoryExpiry = internalconfig.HistoryExpiryConfig{
 			Enabled:   cfg.Enabled,
 			Frequency: cfg.Frequency,
+		}
+	}
+}
+
+// WithImmutableDB configures promotion of block bodies into chunk files.
+func WithImmutableDB(cfg ImmutableDBConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ImmutableDB = internalconfig.ImmutableDBConfig{
+			PromoteBatch:     cfg.PromoteBatch,
+			PromoteFrequency: cfg.PromoteFrequency,
 		}
 	}
 }
@@ -2428,6 +2575,16 @@ func WithChainsyncHeaderStrategy(
 	}
 }
 
+// WithAPIListenerFactory supplies sockets to the built-in Blockfrost, Kupo,
+// Mesh and UTxO RPC servers. Nil uses net.Listen. Each successful call transfers
+// ownership to the server; the caller retains ownership of unused reservations.
+// The factory must support every API start, including restarts.
+func WithAPIListenerFactory(
+	listen func(string, string) (net.Listener, error),
+) ConfigOptionFunc {
+	return func(c *Config) { c.apiListenerFactory = listen }
+}
+
 // WithMeshPort specifies the port for the Mesh (Coinbase
 // Rosetta) compatible REST API server. The server binds
 // to the node's bindAddr on this port. 0 disables the
@@ -2435,6 +2592,66 @@ func WithChainsyncHeaderStrategy(
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Mesh.Config["port"] = port
+	}
+}
+
+// IndexerWriter fills the IndexerDB from the ledger's canonical chain.
+type IndexerWriter interface {
+	// Start begins following the ledger. It returns once the writer runs.
+	Start(ctx context.Context) error
+	// Wake asks the writer to look for new blocks. Signals coalesce.
+	Wake()
+	// Stop ends the writer and waits for an in-flight batch to finish or
+	// roll back, so the stores it writes can then close.
+	Stop(ctx context.Context) error
+	// RollbackTo removes everything the IndexerDB holds past target, a block
+	// of the ledger's canonical chain, and does nothing when its tip is not
+	// past target. It runs while the writer is not started and while the
+	// ledger still stores the blocks being abandoned.
+	RollbackTo(ctx context.Context, target indexerdb.Tip) error
+}
+
+// IndexerWriterDeps are what the node hands an IndexerWriterFactory.
+type IndexerWriterDeps struct {
+	// Consensus is the ledger's database, read for blocks, the tip and the
+	// ledger facts. Indexer is the IndexerDB's own database.
+	Consensus, Indexer *database.Database
+	// FactRows, when set, supplies the ledger-fact rows the writer copies,
+	// for a ledger that keeps them outside the consensus metadata store. It
+	// defaults to that store.
+	FactRows     metadata.FactRowReader
+	NodeConfig   *cardano.CardanoNodeConfig
+	Logger       *slog.Logger
+	PromRegistry prometheus.Registerer
+	// SlotTime converts a slot to wall-clock time, for the lag in seconds.
+	SlotTime                   func(uint64) (time.Time, error)
+	MaxReadyLagBlocks          uint64
+	DelegatorInactivityEnabled bool
+}
+
+// IndexerWriterFactory builds the writer of a split layout. It is a seam
+// because the writer's block indexing lives in a package that imports this
+// one.
+type IndexerWriterFactory func(IndexerWriterDeps) (IndexerWriter, error)
+
+// WithIndexerWriterFactory sets the writer a split layout runs.
+func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerWriterFactory = f
+	}
+}
+
+// WithIndexerMaxReadyLagBlocks sets how far behind the ledger tip the
+// IndexerDB may be while current-state endpoints are ready (split layout).
+func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerMaxReadyLagBlocks = blocks
 	}
 }
 
@@ -2447,7 +2664,7 @@ func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 			*c = NewConfig()
 		}
 		c.cfg.StorageMode = string(mode)
-		c.storageMode = mode
+		c.storageMode = StorageMode(c.cfg.ConsensusStorageMode())
 	}
 }
 
@@ -2925,6 +3142,11 @@ func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
 	return cfg
 }
 
+// ImmutableDB returns the ImmutableDB configuration.
+func (c *Config) ImmutableDB() internalconfig.ImmutableDBConfig {
+	return c.cfg.ImmutableDB
+}
+
 // HistoryExpiry returns the history expiry configuration.
 func (c *Config) HistoryExpiry() internalconfig.HistoryExpiryConfig {
 	return c.cfg.HistoryExpiry
@@ -3078,6 +3300,18 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
 }
 
+// LedgerUtxoCheckpointEpochs returns how many epochs pass between live UTxO
+// set checkpoints; zero writes none.
+func (c *Config) LedgerUtxoCheckpointEpochs() int {
+	return c.cfg.LedgerUtxoCheckpointEpochs
+}
+
+// LedgerUtxoCheckpointKeep returns how many live UTxO set checkpoints are
+// retained.
+func (c *Config) LedgerUtxoCheckpointKeep() int {
+	return c.cfg.LedgerUtxoCheckpointKeep
+}
+
 // LedgerValidateAheadEnabled returns whether state-independent validation
 // work runs ahead of the serial apply loop.
 func (c *Config) LedgerValidateAheadEnabled() bool {
@@ -3112,6 +3346,11 @@ func (c *Config) PeerSharing() *bool {
 	return c.cfg.PeerSharing
 }
 
+// AdvertiseAddress returns the address shared with peers as this node's own.
+func (c *Config) AdvertiseAddress() string {
+	return c.cfg.AdvertiseAddress
+}
+
 // Mithril returns the Mithril bootstrap configuration.
 func (c *Config) Mithril() internalconfig.MithrilConfig {
 	return c.cfg.Mithril
@@ -3143,7 +3382,9 @@ func (c *Config) genesisSelectionEligible() bool {
 // selector actually starts in, once the node has resolved it from the
 // configuration and the caught-up marker. It is called once per node start,
 // before the selector is built.
-func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+func WithGenesisSelectionResolved(
+	fn func(genesisSelectionMode bool),
+) ConfigOptionFunc {
 	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 

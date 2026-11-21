@@ -117,6 +117,20 @@ type BlobStore interface {
 	Sync() error
 }
 
+// SpaceReclaimer is implemented by stores that keep a superseded version of a
+// value until a later compaction merges it with the value that replaced it.
+//
+// Replacing a value with a smaller one, as block promotion does, therefore
+// frees nothing by itself: the old bytes stay in the store until a
+// compaction happens to cover both versions, which on a node that writes a
+// few MiB an hour is weeks away.
+type SpaceReclaimer interface {
+	// ReclaimSpace forces the compaction that drops superseded versions
+	// committed before the call. It returns once the work is done and is
+	// safe to call while the store is serving reads and writes.
+	ReclaimSpace() error
+}
+
 // WriteConflictDetector is implemented by stores whose write transactions
 // detect overlapping writes made after their read snapshot was opened.
 type WriteConflictDetector interface {

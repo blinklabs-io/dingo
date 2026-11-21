@@ -761,6 +761,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, false, err) {
+			return
+		}
 		o.reportFetchError(epoch, false, err)
 		return
 	}
@@ -790,6 +793,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, false, err) {
 			return
 		}
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
@@ -840,6 +846,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
+		if o.deferForHistory(epoch, true, err) {
+			return
+		}
 		o.reportFetchError(epoch, true, err)
 		return
 	}
@@ -854,6 +863,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportFetchError(epoch, true, err)
@@ -885,6 +897,9 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 				"error",
 				err,
 			)
+			return
+		}
+		if o.deferForHistory(epoch, true, err) {
 			return
 		}
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
@@ -951,6 +966,39 @@ func cancelled(ctx context.Context, err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
+// deferForHistory handles a fetch or check that stopped on
+// ErrTransactionHistoryPending: the IndexerDB an API node samples from trails
+// the ledger, so at an epoch boundary it has usually not indexed the epoch
+// that just closed. That is neither a parity result nor a failure, so nothing
+// is emitted and strict validation continues. The queue's ERROR status is
+// persisted and the epoch retried on the ERROR schedule, as reportError does,
+// so a restart before the retry still selects it. It reports false, leaving
+// err to reportError, for any other error and when the status cannot be
+// persisted.
+func (o *Observer) deferForHistory(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) bool {
+	if !errors.Is(err, ErrTransactionHistoryPending) {
+		return false
+	}
+	if persistErr := o.cache.RecordObserverError(
+		o.cfg.Network, epoch, accountsChecked,
+	); persistErr != nil {
+		return false
+	}
+	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
+	o.cfg.Logger.Info(
+		"koiosparity observer: transaction history not indexed yet, epoch deferred",
+		"network", o.cfg.Network,
+		"epoch", epoch,
+		"retry_in", o.cfg.ErrorRetryDelay,
+		"reason", err,
+	)
+	return true
+}
+
 // reportError records a genuine (non-shutdown) per-epoch check failure
 // (fetch failures go through reportFetchError, which shares this path but
 // classifies fatality by provenance): it logs and, in strict mode, fires FatalFunc via fail, and
@@ -970,7 +1018,12 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
-	o.reportErrorFatal(epoch, accountsChecked, err, true)
+	// Quota exhaustion from the check itself (the /tx_info sample) is not
+	// fatal: it clears on Koios's daily reset and the epoch is retried.
+	o.reportErrorFatal(
+		epoch, accountsChecked, err,
+		!errors.Is(err, ErrKoiosQuotaExceeded),
+	)
 }
 
 // reportFetchError reports a failure to fetch an epoch's Koios reference. The

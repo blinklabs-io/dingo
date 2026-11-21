@@ -18,10 +18,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 
+	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +43,29 @@ func newCLIDestinationRegistry() *lifecycle.DestinationRegistry {
 // maintenance commands. Each subcommand operates directly against the
 // configured data directory (like `load`/`mithril`) and must not be run
 // against a data directory a `dingo serve` process currently has open.
+// newDatabaseService builds the lifecycle service the offline commands share.
+// On the split layout a truncate rolls the IndexerDB back through the same
+// writer the node runs.
+func newDatabaseService(
+	cfg *config.Config,
+	registry *lifecycle.DestinationRegistry,
+	logger *slog.Logger,
+) *dblifecycle.Service {
+	svc := dblifecycle.NewService(cfg, registry, logger)
+	svc.SetIndexerRollbackFactory(func(
+		consensus, indexer *database.Database,
+	) (dblifecycle.IndexerRoller, error) {
+		return node.NewIndexerService(dingo.IndexerWriterDeps{
+			Consensus:                  consensus,
+			Indexer:                    indexer,
+			Logger:                     logger,
+			MaxReadyLagBlocks:          cfg.Indexer.MaxReadyLagBlocks,
+			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
+		})
+	})
+	return svc
+}
+
 func databaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "database",
@@ -68,7 +95,7 @@ func databaseSnapshotCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			svc := dblifecycle.NewService(
+			svc := newDatabaseService(
 				cfg,
 				newCLIDestinationRegistry(),
 				logger,
@@ -110,7 +137,7 @@ func databaseRestoreCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			svc := dblifecycle.NewService(
+			svc := newDatabaseService(
 				cfg,
 				newCLIDestinationRegistry(),
 				logger,
@@ -184,7 +211,7 @@ path, not a shallower local target.`,
 			// Truncate never resolves a cloud destination, so a nil
 			// registry here is fine — see DestinationRegistry's doc
 			// comment.
-			svc := dblifecycle.NewService(cfg, nil, logger)
+			svc := newDatabaseService(cfg, nil, logger)
 
 			blocksRemoved, err := svc.Truncate(cmd.Context(), target)
 			if err != nil {

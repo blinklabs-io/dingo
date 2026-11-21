@@ -272,6 +272,25 @@ CREATE TABLE reward_pool_output (
     UNIQUE (epoch, pool_key_hash)
 );
 
+CREATE TABLE reward_likelihood_state (
+    id INTEGER PRIMARY KEY,
+    epoch INTEGER NOT NULL UNIQUE,
+    reward_pot TEXT NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    boundary_slot INTEGER NOT NULL,
+    complete BOOLEAN NOT NULL
+);
+
+CREATE TABLE reward_pool_likelihood (
+    id INTEGER PRIMARY KEY,
+    epoch INTEGER NOT NULL,
+    pool_key_hash BLOB NOT NULL,
+    log_weights BLOB NOT NULL,
+    performance_estimate REAL NOT NULL,
+    boundary_slot INTEGER NOT NULL,
+    UNIQUE (epoch, pool_key_hash)
+);
+
 CREATE TABLE reward_account_output (
     staking_key BLOB NOT NULL,
     pool_key_hash BLOB NOT NULL,
@@ -463,10 +482,15 @@ CREATE TABLE asset (
 CREATE TABLE utxo_address (
     utxo_id INTEGER PRIMARY KEY,
     address BLOB NOT NULL,
+    tx_id INTEGER,
+    output_idx INTEGER,
+    slot INTEGER,
+    block_index INTEGER,
     FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_utxo_address_address ON utxo_address(address);
+CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (
     id INTEGER PRIMARY KEY,

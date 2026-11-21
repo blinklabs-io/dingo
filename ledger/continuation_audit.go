@@ -925,8 +925,7 @@ func (ls *LedgerState) continuationInputHasProducer(
 	if window.hasProducer(string(producerId)) {
 		return true, nil
 	}
-	utxo, err := ls.db.UtxoByRef(
-		ls.lifecycleContext(),
+	utxo, err := ls.utxoByRefForValidation(
 		producerId,
 		input.Index(),
 		nil,
@@ -937,7 +936,7 @@ func (ls *LedgerState) continuationInputHasProducer(
 	if utxo != nil {
 		return true, nil
 	}
-	producerTx, err := ls.db.GetTransactionByHash(
+	producerTx, err := ls.ledgerDB().GetTransactionByHash(
 		ls.lifecycleContext(),
 		producerId,
 		nil,

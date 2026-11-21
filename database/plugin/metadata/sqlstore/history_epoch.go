@@ -142,6 +142,9 @@ func (s *Store) GetPoolBlockHashesInSlotRange(
 	if len(poolKeyHash) == 0 {
 		return [][]byte{}, 0, nil
 	}
+	if s.tableDrained("pool_opcert_sequence") {
+		return nil, 0, errTableDrained("pool_opcert_sequence")
+	}
 	return s.blockHashesInSlotRange(
 		"JOIN pool_opcert_sequence pos ON pos.slot = bn.slot AND pos.pool_key_hash = ?",
 		[]any{poolKeyHash},
@@ -287,6 +290,9 @@ func (s *Store) GetEpochStakes(
 	txn types.Txn,
 ) ([]models.EpochStakeRow, int, error) {
 	ret := []models.EpochStakeRow{}
+	if err := s.refuseDrained("reward_stake_input"); err != nil {
+		return nil, 0, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err

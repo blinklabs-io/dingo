@@ -39,28 +39,34 @@ func (h *csjHarness) closeConn(connId ouroboros.ConnectionId) {
 	))
 }
 
-// An objector refused a jump, so it is on another chain or behind the dynamo,
-// and it holds no ingress slot. An agreed jumper vouched for the dynamo's
-// fragment, so it replaces a departed dynamo ahead of the objector.
+// An objector refused every jump, so it is on another chain or behind the
+// dynamo, and it holds no ingress slot. Its opening rollback can nevertheless
+// make it the selector's best peer while jumpers have no streamed frontier. An
+// agreed jumper vouched for the dynamo's fragment, so it replaces a departed
+// dynamo ahead of the objector.
 func TestChainsyncJumpingRotationPrefersAgreedJumperOverObjector(t *testing.T) {
 	t.Parallel()
 	h := newCsjHarness(t, true)
-	dynamo, jumpers := h.startDynamoAndJumpers(100, 100)
-	agreed, objector := jumpers[0], jumpers[1]
-	objector.tipBlock.Store(0)
-
-	h.fragment.Store(20)
-	h.deliver(dynamo.connId, 20)
+	dynamo := h.addPeer("dynamo", 100)
+	h.promote(dynamo)
+	dynamo.requireStreams(t, "dynamo")
+	h.fragment.Store(10)
+	agreed := h.addPeer("agreed", 100)
+	h.promote(agreed)
 	agreed.requireJump(t, "agreed jumper jump")
+	h.requireAgreement(agreed.connId, dynamo.connId, csjPoint(10))
+	objector := h.addPeer("objector", 0)
+	h.promote(objector)
 	objector.requireJump(t, "refused jump")
-	h.requireAgreement(agreed.connId, dynamo.connId, csjPoint(20))
 	require.Equal(
 		t,
 		objector.connId,
 		testutil.RequireReceive(t, h.rejections, 5*time.Second, "rejection"),
 	)
 	objector.requireStreams(t, "objector")
-	h.awaitRound()
+	h.o.csj.cfg.BestPeer = func() *ouroboros.ConnectionId {
+		return &objector.connId
+	}
 
 	h.closeConn(dynamo.connId)
 

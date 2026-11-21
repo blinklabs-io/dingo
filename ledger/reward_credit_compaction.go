@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
 
 // rewardCreditRoundsKeptUnfolded is how many of the newest credited rounds
@@ -149,11 +149,10 @@ func (ls *LedgerState) compactRewardCreditChunk(
 		return true, err
 	}
 	done := true
-	txn := ls.db.Transaction(ctx, true)
-	err = txn.Do(func(txn *database.Txn) error {
-		meta := ls.db.Metadata()
-		metaTxn := txn.Metadata()
-		rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
+	txn := ls.ledgerDB().Begin(ctx, true)
+	err = ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
+		ldb := ls.ledgerDB()
+		rounds, err := ldb.GetPendingRewardCreditRounds(txn)
 		if err != nil {
 			return err
 		}
@@ -161,8 +160,8 @@ func (ls *LedgerState) compactRewardCreditChunk(
 			return nil
 		}
 		for _, round := range rounds[:len(rounds)-rewardCreditRoundsKeptUnfolded] {
-			outputs, err := meta.ClaimUnfoldedRewardCredits(
-				round.SnapshotEpoch, limit, metaTxn,
+			outputs, err := ldb.ClaimUnfoldedRewardCredits(
+				round.SnapshotEpoch, limit, txn,
 			)
 			if err != nil {
 				return err
@@ -184,10 +183,10 @@ func (ls *LedgerState) compactRewardCreditChunk(
 }
 
 func (ls *LedgerState) rewardCreditRoundDue(ctx context.Context) (bool, error) {
-	txn := ls.db.Transaction(ctx, false)
+	txn := ls.ledgerDB().Begin(ctx, false)
 	defer txn.Release()
-	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(
-		txn.Metadata(),
+	rounds, err := ls.ledgerDB().GetPendingRewardCreditRounds(
+		txn,
 	)
 	if err != nil {
 		return false, err
@@ -195,8 +194,8 @@ func (ls *LedgerState) rewardCreditRoundDue(ctx context.Context) (bool, error) {
 	if len(rounds) <= rewardCreditRoundsKeptUnfolded {
 		return false, nil
 	}
-	return ls.db.Metadata().HasUnfoldedRewardCreditsThroughEpoch(
+	return ls.ledgerDB().HasUnfoldedRewardCreditsThroughEpoch(
 		rounds[len(rounds)-rewardCreditRoundsKeptUnfolded-1].SnapshotEpoch,
-		txn.Metadata(),
+		txn,
 	)
 }

@@ -116,7 +116,7 @@ SELECT ?, ?, id, 'unparseable' FROM utxo WHERE tx_id = (SELECT id FROM "transact
 // sorts last is never reached.
 func TestGetAccountAssetBalancesStopsAtLimits(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	stakingKey := bytes.Repeat([]byte{0x53}, 28)
 	accountAssetUtxo(t, store, stakingKey)
 
@@ -138,7 +138,7 @@ func TestGetAccountAssetBalancesStopsAtLimits(t *testing.T) {
 
 func TestGetAccountAddressTotalsStopsAtAssetLimits(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	stakingKey := bytes.Repeat([]byte{0x54}, 28)
 	accountAssetUtxo(t, store, stakingKey)
 
@@ -153,7 +153,7 @@ func TestGetAccountAddressTotalsStopsAtAssetLimits(t *testing.T) {
 
 func TestGetAccountAggregatesWithinLimits(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	stakingKey := bytes.Repeat([]byte{0x55}, 28)
 	policy := bytes.Repeat([]byte{0x56}, 28)
 	held := accountLimitsUtxo(t, 0x06, stakingKey)
@@ -205,7 +205,7 @@ func (q *statementRowsQueryer) QueryContext(
 
 func TestAccountAggregateLimits(t *testing.T) {
 	t.Parallel()
-	testAccountAggregateLimits(t, newMigratedSQLiteStore(t))
+	testAccountAggregateLimits(t, withAPIStorage(newMigratedSQLiteStore(t)))
 }
 
 // testAccountAggregateLimits runs the account aggregate bounds against any

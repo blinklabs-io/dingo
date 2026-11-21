@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -76,6 +77,23 @@ func validateHostPort(addr string) error {
 	return nil
 }
 
+// ValidateAdvertiseAddress checks that addr is an IP:port that remote nodes
+// can route to. The PeerSharing wire format carries IP literals only, and
+// peers drop non-routable addresses, so anything else would never be shared.
+func ValidateAdvertiseAddress(addr string) error {
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return errors.New("must be an IP literal and port, as IP:port")
+	}
+	if ap.Port() == 0 {
+		return errors.New("port must be in 1-65535")
+	}
+	if !peergov.IsRoutableIP(ap.Addr().Unmap().AsSlice()) {
+		return errors.New("must be a globally routable address")
+	}
+	return nil
+}
+
 // kesAgentAddressKey returns the listener a remote KES agent address names,
 // for spotting two pools that share one: an IP literal in its canonical form,
 // any other host lower-cased, and the port as a number, so a zero-padded port
@@ -99,21 +117,31 @@ func kesAgentAddressKey(addr string) string {
 }
 
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
-// KES source only, sign mode, and a transport that can work: the server pin
-// and the client certificate are optional, but need TLS, so plain TCP takes
-// neither, and a client certificate is set as a pair. Without an address,
-// any remote transport option is refused, so a mistyped remote
-// configuration cannot fall back to local or Unix-socket signing. prefix is
-// prepended to every setting name, so errors name the list entry they came
-// from.
+// KES source only, sign mode, every address host:port, and a transport that
+// can work: the server pin and the client certificate are optional, but need
+// TLS, so plain TCP takes neither, and a client certificate is set as a pair.
+// Without an address, any remote transport option is refused, so a mistyped
+// remote configuration cannot fall back to local or Unix-socket signing.
+// prefix is prepended to every setting name, so errors name the list entry
+// they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
-	if p.ShelleyKESAgentAddress == "" {
-		var errs []error
+	field := func(name string) string { return prefix + name }
+	var errs []error
+	if p.ShelleyKESAgentAddress != "" && len(p.ShelleyKESAgentAddresses) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s and %s are two ways to name the remote agents; set one",
+			field("shelleyKesAgentAddress"),
+			field("shelleyKesAgentAddresses"),
+		))
+	}
+	addresses := p.RemoteAgentAddresses()
+	if len(addresses) == 0 {
 		for _, opt := range []struct {
 			name string
 			set  bool
 		}{
 			{"shelleyKesAgentPlaintext", p.ShelleyKESAgentPlaintext},
+			{"shelleyKesAgentProfile", p.ShelleyKESAgentProfile != ""},
 			{
 				"shelleyKesAgentClientCertFile",
 				p.ShelleyKESAgentClientCertFile != "",
@@ -129,37 +157,49 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 		} {
 			if opt.set {
 				errs = append(errs, fmt.Errorf(
-					"%s%s requires %sshelleyKesAgentAddress",
-					prefix,
-					opt.name,
-					prefix,
+					"%s requires %s or %s",
+					field(opt.name),
+					field("shelleyKesAgentAddress"),
+					field("shelleyKesAgentAddresses"),
 				))
 			}
 		}
 		return errs
 	}
-	field := func(name string) string { return prefix + name }
-	var errs []error
 	if p.ShelleyKESKey != "" || p.ShelleyKESAgentSocket != "" {
+		name := field("shelleyKesAgentAddress")
+		if len(p.ShelleyKESAgentAddresses) > 0 {
+			name = field("shelleyKesAgentAddresses")
+		}
 		errs = append(errs, fmt.Errorf(
 			"blockProducer cannot set %s together with %s or %s",
-			field("shelleyKesAgentAddress"),
+			name,
 			field("shelleyKesKey"),
 			field("shelleyKesAgentSocket"),
 		))
 	}
-	if err := validateHostPort(p.ShelleyKESAgentAddress); err != nil {
-		errs = append(errs, fmt.Errorf(
-			"%s %q must be host:port: %w",
-			field("shelleyKesAgentAddress"),
-			p.ShelleyKESAgentAddress,
-			err,
-		))
+	for i, address := range addresses {
+		if err := validateHostPort(address); err != nil {
+			name := field("shelleyKesAgentAddress")
+			if len(p.ShelleyKESAgentAddresses) > 0 {
+				name = fmt.Sprintf(
+					"%s[%d]",
+					field("shelleyKesAgentAddresses"),
+					i,
+				)
+			}
+			errs = append(errs, fmt.Errorf(
+				"%s %q must be host:port: %w",
+				name,
+				address,
+				err,
+			))
+		}
 	}
 	if p.ShelleyKESAgentMode != "" && p.ShelleyKESAgentMode != "sign" {
 		errs = append(errs, fmt.Errorf(
-			"%s supports only shelleyKesAgentMode \"sign\", got %q",
-			field("shelleyKesAgentAddress"),
+			"a remote KES agent supports only %s \"sign\", got %q",
+			field("shelleyKesAgentMode"),
 			p.ShelleyKESAgentMode,
 		))
 	}
@@ -211,7 +251,7 @@ func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
 	// whole point of the agent -- so requiring both made an agent-only
 	// configuration impossible to start.
 	if p.ShelleyKESKey == "" && p.ShelleyKESAgentSocket == "" &&
-		p.ShelleyKESAgentAddress == "" {
+		len(p.RemoteAgentAddresses()) == 0 {
 		missing = append(missing, prefix+"shelleyKesKey")
 	}
 	if err := ValidateKESKeySources(
@@ -249,33 +289,14 @@ func (c *Config) validateBlockProducerPools() []error {
 				"shelleyOperationalCertificate, shelleyKesAgentSocket, "+
 				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
 				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
-				"shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext; "+
-				"set them in each pool",
+				"shelleyKesAgentServerSpkiSha256, shelleyKesAgentPlaintext and "+
+				"shelleyKesAgentProfile; set them in each pool",
 		))
 	}
 	opCerts := make(map[string]int, len(c.BlockProducerPools))
-	agentAddresses := make(map[string]int, len(c.BlockProducerPools))
 	for i, p := range c.BlockProducerPools {
 		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
 		errs = append(errs, validateBlockProducerPool(p, prefix)...)
-		// An attested KES agent session cannot name a profile, so Bursa
-		// allows one profile per attested listener and a remote agent
-		// address can serve one pool only. A local socket is not
-		// limited: it serves several pools through its profiles.
-		if addr := kesAgentAddressKey(p.ShelleyKESAgentAddress); addr != "" {
-			if j, dup := agentAddresses[addr]; dup {
-				errs = append(errs, fmt.Errorf(
-					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
-						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
-						"per attested listener and each pool needs its own agent address",
-					j,
-					i,
-					p.ShelleyKESAgentAddress,
-				))
-			} else {
-				agentAddresses[addr] = i
-			}
-		}
 		if p.ShelleyKESAgentMode != "" &&
 			p.ShelleyKESAgentMode != "serve-key" &&
 			p.ShelleyKESAgentMode != "sign" {
@@ -299,6 +320,59 @@ func (c *Config) validateBlockProducerPools() []error {
 			continue
 		}
 		opCerts[path] = i
+	}
+	return append(errs, c.validateSharedKESAgentAddresses()...)
+}
+
+// validateSharedKESAgentAddresses checks the pools that reach one remote KES
+// agent listener. The agent binds each session to the profile it names, so
+// pools that share a listener, through any entry of their address lists,
+// must each name a profile, and different ones. A local socket is not
+// checked: it serves several pools through its profiles.
+func (c *Config) validateSharedKESAgentAddresses() []error {
+	var errs []error
+	// users maps a listener to the pools that use it, in list order.
+	users := make(map[string][]int)
+	reported := make(map[[2]int]bool)
+	for i, p := range c.BlockProducerPools {
+		for _, address := range p.RemoteAgentAddresses() {
+			addr := kesAgentAddressKey(address)
+			if addr == "" {
+				continue
+			}
+			if slices.Contains(users[addr], i) {
+				continue
+			}
+			for _, j := range users[addr] {
+				if reported[[2]int{j, i}] {
+					continue
+				}
+				prev := c.BlockProducerPools[j].ShelleyKESAgentProfile
+				switch {
+				case prev == "" || p.ShelleyKESAgentProfile == "":
+					errs = append(errs, fmt.Errorf(
+						"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q, "+
+							"so each must set shelleyKesAgentProfile to the agent profile it signs for",
+						j,
+						i,
+						address,
+					))
+				case prev == p.ShelleyKESAgentProfile:
+					errs = append(errs, fmt.Errorf(
+						"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q "+
+							"and the same shelleyKesAgentProfile %q; each pool needs its own profile",
+						j,
+						i,
+						address,
+						prev,
+					))
+				default:
+					continue
+				}
+				reported[[2]int{j, i}] = true
+			}
+			users[addr] = append(users[addr], i)
+		}
 	}
 	return errs
 }
@@ -562,6 +636,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
+	if c.AdvertiseAddress != "" {
+		if err := ValidateAdvertiseAddress(c.AdvertiseAddress); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid advertiseAddress %q: %w",
+				c.AdvertiseAddress,
+				err,
+			))
+		}
+	}
+
 	// Mode enums
 	if !c.RunMode.Valid() {
 		errs = append(errs, fmt.Errorf(
@@ -581,6 +665,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid storageMode %q: must be %q or %q",
 			c.StorageMode, storageModeCore, storageModeAPI,
+		))
+	}
+
+	if c.LedgerUtxoCheckpointEpochs < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointEpochs must not be negative",
+		))
+	}
+	if c.LedgerUtxoCheckpointKeep < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointKeep must not be negative",
 		))
 	}
 
@@ -915,6 +1010,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			))
 		}
 	}
+	if value, ok := c.Plugins.Mempool.Config["selection"]; ok {
+		selection, isString := value.(string)
+		if !isString || (selection != MempoolSelectionAdmission &&
+			selection != MempoolSelectionFeeDensity) {
+			errs = append(errs, fmt.Errorf(
+				"invalid plugins.mempool.config.selection: %v (must be %q or %q)",
+				value,
+				MempoolSelectionAdmission,
+				MempoolSelectionFeeDensity,
+			))
+		}
+	}
 
 	if c.TokenRegistry.MaxDecompressedBytes < 0 {
 		errs = append(errs, fmt.Errorf(
@@ -995,17 +1102,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		errs = append(errs, c.validateBlockProducerPools()...)
-		// Leios voting and endorser-block production are wired for one pool:
-		// one vote key, one pipeline. A second pool would forge ranking
-		// blocks with no Leios support of its own. Musashi forges Leios
-		// headers whatever the run mode.
+		// Endorser-block production is wired for one pool and one pipeline:
+		// a second pool would forge ranking blocks with no Leios support of
+		// its own. Musashi forges Leios headers whatever the run mode. Voting
+		// is not refused: a vote key file holding several keys votes for
+		// every seat they hold, whichever pools the node forges for.
 		isMusashi := c.Network == ouroboros.NetworkCardanoMusashi.Name ||
 			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 		if len(c.BlockProducerPools) > 1 &&
-			(effectiveMode == RunModeLeios || isMusashi ||
-				c.LeiosVoteSigningKeyFile != "") {
+			(effectiveMode == RunModeLeios || isMusashi) {
 			errs = append(errs, errors.New(
-				"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
+				"blockProducerPools lists more than one pool, which Leios forging does not support",
 			))
 		}
 	}
@@ -1128,6 +1235,22 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// ApplyDefaults fills only an unset (zero) frequency, so a negative one
+	// was configured; the promoter would otherwise substitute its own.
+	if c.ImmutableDB.PromoteFrequency < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid immutableDb.promoteFrequency: %s (must be positive)",
+			c.ImmutableDB.PromoteFrequency,
+		))
+	}
+	if c.ImmutableDB.PromoteBatch < 0 ||
+		c.ImmutableDB.PromoteBatch > MaxImmutableDBPromoteBatch {
+		errs = append(errs, fmt.Errorf(
+			"invalid immutableDb.promoteBatch %d (want 0 to %d)",
+			c.ImmutableDB.PromoteBatch, MaxImmutableDBPromoteBatch,
+		))
+	}
+
 	// Chainsync; accepted strategy names come from
 	// AcceptedChainsyncStrategies, kept in sync with
 	// chainsync.ParseHeaderSyncStrategy by a parity test in cmd/dingo.
@@ -1232,11 +1355,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
 	// not gated by these settings.
 	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
-		if c.StorageMode == storageModeAPI {
-			errs = append(errs, errors.New(
-				"mithril.enabled requires core storage mode",
-			))
-		}
 		if c.Mithril.BatchChunks < 1 {
 			errs = append(errs, fmt.Errorf(
 				"invalid mithril.batchChunks %d: must be at least 1",

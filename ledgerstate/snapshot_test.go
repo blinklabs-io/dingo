@@ -1173,3 +1173,41 @@ func TestParseSnapshotDataRefusesByronEra(t *testing.T) {
 		}
 	}
 }
+
+// TestParseSnapshotDataRefusesPreConwayEras pins that a ledger state whose
+// current era is Shelley through Babbage is refused by name before any era
+// state is decoded. The import reads neither the pending classic parameter
+// update proposals nor the future parameters of those eras.
+func TestParseSnapshotDataRefusesPreConwayEras(t *testing.T) {
+	t.Parallel()
+	bound := []any{uint64(0), uint64(0), uint64(0)}
+	header := []any{[]any{}, []any{}}
+	for eraIndex := EraShelley; eraIndex < EraConway; eraIndex++ {
+		// Undecodable era payload: the refusal must precede era parsing.
+		eraState := []any{uint64(0)}
+		// Nested: eraIndex past entries, then the current one.
+		var nested any = []any{uint64(0), []any{bound, eraState}}
+		flat := []any{[]any{bound, eraState}}
+		for range eraIndex {
+			nested = []any{uint64(1), []any{bound, bound}, nested}
+			flat = append([]any{[]any{bound, bound}}, flat...)
+		}
+		telescopes := map[string]any{"nested": nested, "flat": flat}
+		for name, telescope := range telescopes {
+			for _, utxoHD := range []bool{false, true} {
+				var outer any = []any{telescope, header}
+				if utxoHD {
+					outer = []any{uint64(1), outer}
+				}
+				data, err := cbor.Encode(outer)
+				require.NoError(t, err)
+				_, err = parseSnapshotData(data)
+				require.ErrorIs(
+					t, err, ErrPreConwaySnapshotUnsupported,
+					"%s telescope, era %d, UTxO-HD %v",
+					name, eraIndex, utxoHD,
+				)
+			}
+		}
+	}
+}

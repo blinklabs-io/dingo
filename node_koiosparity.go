@@ -27,11 +27,31 @@ import (
 // CLI agree on where an unconfigured cache.db lives under a data directory.
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
+// koiosParitySource builds the observer's source over the node's own stores
+// (no export, no second Dingo sync, no new permanent table — see
+// koiosparity.DatabaseSource's doc comment). Reward state is read from the
+// consensus database through the ledger's LedgerDB. Transaction history is
+// read from the IndexerDB on an API node: the consensus database runs in
+// core mode there and retains none.
+func (n *Node) koiosParitySource() (*koiosparity.DatabaseSource, error) {
+	var source *koiosparity.DatabaseSource
+	var err error
+	if n.ledgerState != nil {
+		source, err = koiosparity.NewDatabaseSourceWithLedgerDB(
+			n.db, n.ledgerState.LedgerDB(),
+		)
+	} else {
+		source, err = koiosparity.NewDatabaseSource(n.db)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return source.WithTransactionHistory(n.indexerDB), nil
+}
+
 // startKoiosParityObserver wires the optional in-process Koios reward-parity
-// observer into the running node: it builds the narrow
-// reward-parity source adapter directly from n.db (no export, no second
-// Dingo sync, no new permanent table — see koiosparity.DatabaseSource's doc
-// comment), constructs the observer, subscribes it to
+// observer into the running node: it builds the narrow reward-parity source
+// adapter (koiosParitySource), constructs the observer, subscribes it to
 // event.EpochTransitionEventType on n.eventBus, and starts its background
 // processing loop.
 //
@@ -82,7 +102,7 @@ func (n *Node) startKoiosParityObserver() error {
 		)
 	}
 
-	source, err := koiosparity.NewDatabaseSource(n.db)
+	source, err := n.koiosParitySource()
 	if err != nil {
 		return fmt.Errorf("create koios parity reward source: %w", err)
 	}

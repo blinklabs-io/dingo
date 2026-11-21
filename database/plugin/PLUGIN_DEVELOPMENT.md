@@ -4,9 +4,9 @@ Dingo plugins are compiled-in Go providers registered explicitly on an
 application-owned `plugin.Host`. Registration never happens in `init`, provider
 configuration is decoded before construction, and the host owns `Start`/`Stop`.
 
-Storage contracts remain in `database/plugin/blob` and
-`database/plugin/metadata`; the generic `plugin` package does not import either
-domain. The same platform also hosts consensus, mempool, and API providers.
+Storage contracts remain in `database/plugin/blob`,
+`database/plugin/metadata` and `database/plugin/immutable`; the generic
+`plugin` package does not import any of these domains. The same platform also hosts consensus, mempool, and API providers.
 
 Consensus providers implement `consensus.Provider`. One resolved instance must
 make header authorization, leader scheduling, and chain comparison decisions
@@ -15,6 +15,25 @@ components: use `consensus.HeaderVerifier` for ledger-owned Praos checks and
 the scheduler factory supplied by composition. A provider must return stable,
 versioned network, database, and schedule identities. Register it explicitly in
 `internal/plugins/register.go`; do not register from `init`.
+
+The `storage.immutable` capability serves the ImmutableDB of promoted block
+bodies. A provider returns `immutable.ImmutableDB`: the chunk directory
+(`Dir`), the single writer (`Open`, returning an `immutable.Store` that
+appends, syncs, reads by location, looks up points and truncates), marker reads
+(`ReadBlockAt`), file listing (`ListFiles`) and streamed file reads
+(`ReadFile`). The built-in `chunkfile` provider in
+`database/plugin/immutable/chunkfile` is registered in every build. Builds
+with `dingo_extra_plugins` also register `s3` and `gcs` ImmutableDB
+providers, selected automatically with the matching blob provider and reusing
+its released bucket, namespace, and credentials configuration. Remote chunks
+are authoritative: only the writable tail is staged under the data directory,
+completed chunks are uploaded as chunk, secondary, then primary, and reads
+retain at most two idle cached chunks; active reads keep their leased files
+until completion. Snapshot file reads stream directly from the
+selected provider. Reserved ImmutableDB objects are excluded from blob-key
+iteration and blob-only backup. Remote providers require streamed
+object-file operations from the matching blob provider. Provider descriptors
+set `DurableClose`; host shutdown closes the open writer.
 
 ## Provider shape
 

@@ -21,17 +21,19 @@ import (
 	"log/slog"
 	"math"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // plominFixtureKeys holds the staking keys seeded by
@@ -362,12 +364,14 @@ func newTestLSForHardForkRule(
 	db *database.Database,
 ) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
+	return ls
 }
 
 // seedByronAvvmFixtures inserts two live Byron UTxOs — one at a redeem
@@ -441,11 +445,14 @@ func seedByronUtxoAt(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
+	addressBytes, err := addr.Bytes()
+	require.NoError(t, err)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,
 		AddedSlot: 100,
+		Address:   addressBytes,
 	}))
 	blob := db.Blob()
 	require.NotNil(t, blob)
@@ -691,4 +698,53 @@ func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, avvm,
 		"non-pv3 dispatch must not touch AVVM UTxOs")
+}
+
+// The AVVM removal changes the live UTxO set without a transaction, so it
+// publishes the removed outputs as a ledger.utxo event, and only once the
+// change commits.
+func TestApplyIntraEraHardForkRule_Pv3_PublishesAvvmRemovalAfterCommit(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, commit := range []bool{true, false} {
+		db := newTestDB(t)
+		avvmTxID, _ := seedByronAvvmFixtures(t, db)
+		bus := event.NewEventBus(nil, nil)
+		t.Cleanup(bus.Stop)
+		_, ch := bus.Subscribe(UtxoEventType)
+		ls := newTestLSForHardForkRule(t, db)
+		ls.config.EventBus = bus
+
+		const boundarySlot uint64 = 200
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, ls.applyIntraEraHardForkRule(
+			context.Background(), txn, 3, boundarySlot, 1,
+		))
+		testutil.RequireNoReceive(
+			t, ch, 50*time.Millisecond, "no reset before commit",
+		)
+		if !commit {
+			require.NoError(t, txn.Rollback())
+			testutil.RequireNoReceive(
+				t, ch, 50*time.Millisecond, "no reset after rollback",
+			)
+			continue
+		}
+		require.NoError(t, txn.Commit())
+		evt := testutil.RequireReceive(
+			t, ch, 2*time.Second, "AVVM removal event after commit",
+		)
+		change, ok := evt.Data.(UtxoEvent)
+		require.True(t, ok)
+		require.Equal(t, boundarySlot, change.Point.Slot)
+		require.Equal(t, UtxoChangeAvvmRemoval, change.Cause)
+		require.Empty(t, change.Added)
+		require.Equal(
+			t,
+			[]models.UtxoId{{Hash: avvmTxID, Idx: 0}},
+			change.Removed,
+		)
+	}
 }

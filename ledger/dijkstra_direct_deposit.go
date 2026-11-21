@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -76,10 +76,10 @@ func DijkstraDirectDepositEffects(
 // journal source so rollback removes the credit with that body.
 func ApplyDijkstraDirectDeposits(
 	ctx context.Context,
-	db *database.Database,
+	db ledgerdb.LedgerDB,
 	tx common.Transaction,
 	slot uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	effects, err := DijkstraDirectDepositEffects(tx)
 	if err != nil {

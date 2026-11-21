@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -414,16 +415,29 @@ func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
 				opts = append(opts, WithChainsyncMaxClients(test.configured))
 			}
 			n := &Node{config: NewConfig(opts...)}
-			assert.Equal(t, test.expectedCapacity, n.chainsyncConfig().MaxClients)
+			assert.Equal(
+				t,
+				test.expectedCapacity,
+				n.chainsyncConfig().MaxClients,
+			)
 		})
 	}
 	for _, count := range []int{1, 2} {
-		n := &Node{config: NewConfig(WithTopologyConfig(&topology.TopologyConfig{
-			LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
-				AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, count),
-			}},
-		}))}
-		assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
+		n := &Node{
+			config: NewConfig(WithTopologyConfig(&topology.TopologyConfig{
+				LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+					AccessPoints: make(
+						[]topology.TopologyConfigP2PAccessPoint,
+						count,
+					),
+				}},
+			})),
+		}
+		assert.Equal(
+			t,
+			chainsync.DefaultMaxClients,
+			n.chainsyncConfig().MaxClients,
+		)
 	}
 	mixed := &topology.TopologyConfig{
 		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
@@ -433,7 +447,11 @@ func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
 			AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, 2),
 		}},
 	}
-	assert.Equal(t, 4, (&Node{config: NewConfig(WithTopologyConfig(mixed))}).chainsyncConfig().MaxClients)
+	assert.Equal(
+		t,
+		4,
+		(&Node{config: NewConfig(WithTopologyConfig(mixed))}).chainsyncConfig().MaxClients,
+	)
 	n := &Node{config: NewConfig()}
 	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
 }
@@ -1496,6 +1514,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -1580,6 +1599,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -1758,6 +1778,11 @@ func newAPIPluginRuntimeNode(t *testing.T) *Node {
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithStorageMode(StorageModeAPI),
+		WithIndexerWriterFactory(
+			func(IndexerWriterDeps) (IndexerWriter, error) {
+				return &fakeIndexerWriter{wakes: make(chan struct{}, 8)}, nil
+			},
+		),
 		WithListeners(ListenerConfig{
 			ListenNetwork: "tcp",
 			ListenAddress: "127.0.0.1:0",
@@ -2367,6 +2392,7 @@ func newStartupCleanupProducerNodeWithGenesisStart(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           livesettest.New(),
 		ChainManager:      chainManager,
 		EventBus:          eventBus,
 		CardanoNodeConfig: cardanoCfg,
@@ -2422,6 +2448,11 @@ func newStartupCleanupRunNode(t *testing.T) *Node {
 		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithStorageMode(StorageModeAPI),
+		WithIndexerWriterFactory(
+			func(IndexerWriterDeps) (IndexerWriter, error) {
+				return &fakeIndexerWriter{wakes: make(chan struct{}, 8)}, nil
+			},
+		),
 		WithListeners(ListenerConfig{
 			ListenNetwork: "tcp",
 			ListenAddress: "127.0.0.1:0",
@@ -2486,7 +2517,7 @@ func TestRunDrainsLedgerWorkersWhenLedgerStartFails(t *testing.T) {
 		seen:    initialized,
 		onRecord: func(record slog.Record) {
 			switch record.Message {
-			case "database worker pool initialized":
+			case "midnight indexer started":
 				indexerAttached <- n.eventBus.HasSubscribers(ledger.BlockEventType)
 				cancel()
 			case "shutting down database worker pool":
@@ -2511,11 +2542,23 @@ func TestRunDrainsLedgerWorkersWhenLedgerStartFails(t *testing.T) {
 		return nil
 	})
 	require.ErrorContains(t, err, "database worker pool is shut down")
-	require.False(t, called, "startup rollback must stop accepting storage work")
+	require.False(
+		t,
+		called,
+		"startup rollback must stop accepting storage work",
+	)
 	require.Len(t, indexerAttached, 1)
-	require.True(t, <-indexerAttached, "indexer must subscribe before ledger startup")
+	require.True(
+		t,
+		<-indexerAttached,
+		"indexer must subscribe before ledger startup",
+	)
 	require.Len(t, indexerDrained, 1)
-	require.True(t, <-indexerDrained, "indexer must drain before ledger cleanup")
+	require.True(
+		t,
+		<-indexerDrained,
+		"indexer must drain before ledger cleanup",
+	)
 }
 
 // TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail covers the
@@ -2677,6 +2720,7 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	n.utxoSetReconciled = true
 	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
@@ -3232,6 +3276,42 @@ func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
 	assert.False(t, available)
 }
 
+func TestLedgerStateConfigMarksBlockfetchPeerFailedSynchronously(t *testing.T) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	require.True(t, state.AddClientConnId(connId))
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	require.True(t, config.MarkBlockfetchPeersFailedFunc(
+		[]ouroboros.ConnectionId{connId},
+	))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connId)
+	require.True(t, exists)
+	assert.True(t, observabilityOnly)
+
+	otherConnId := newNodeTestConnId(3002)
+	require.True(t, state.AddClientConnId(otherConnId))
+	n.liveLifecycleMu.Lock()
+	available := config.MarkBlockfetchPeersFailedFunc(
+		[]ouroboros.ConnectionId{otherConnId},
+	)
+	n.liveLifecycleMu.Unlock()
+	assert.False(t, available)
+	observabilityOnly, exists = state.ClientObservabilityOnly(otherConnId)
+	require.True(t, exists)
+	assert.False(t, observabilityOnly)
+}
+
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 
@@ -3241,7 +3321,8 @@ func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	)}
 
 	assert.True(t, node.config.blockProducer)
-	assert.Equal(t, StorageModeAPI, node.config.storageMode)
+	assert.True(t, node.config.splitIndexer)
+	assert.Equal(t, StorageModeCore, node.config.storageMode)
 	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }
 
@@ -3275,21 +3356,31 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 		assert.Empty(t, txs)
 	})
 
-	t.Run("endorser block data provider reports unavailable", func(t *testing.T) {
-		t.Parallel()
-		cfg := newConfig(t)
-		var (
-			manifest []byte
-			txs      []cbor.RawMessage
-			ok       bool
-		)
-		require.NotPanics(t, func() {
-			manifest, txs, ok = cfg.EndorserBlockDataProvider([]byte("eb-hash"), 660070)
-		})
-		assert.False(t, ok, "an endorser block must not be reported present")
-		assert.Empty(t, manifest)
-		assert.Empty(t, txs)
-	})
+	t.Run(
+		"endorser block data provider reports unavailable",
+		func(t *testing.T) {
+			t.Parallel()
+			cfg := newConfig(t)
+			var (
+				manifest []byte
+				txs      []cbor.RawMessage
+				ok       bool
+			)
+			require.NotPanics(t, func() {
+				manifest, txs, ok = cfg.EndorserBlockDataProvider(
+					[]byte("eb-hash"),
+					660070,
+				)
+			})
+			assert.False(
+				t,
+				ok,
+				"an endorser block must not be reported present",
+			)
+			assert.Empty(t, manifest)
+			assert.Empty(t, txs)
+		},
+	)
 
 	t.Run("endorser block fetcher returns an error", func(t *testing.T) {
 		t.Parallel()
@@ -4052,7 +4143,9 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 	}
 }
 
-func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
+func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(
+	t *testing.T,
+) {
 	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
 	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
@@ -4092,7 +4185,9 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 	select {
 	case <-loggerHandler.entered:
 	case <-time.After(time.Second):
-		t.Fatal("production chain-selector callback did not enter the blocking logger")
+		t.Fatal(
+			"production chain-selector callback did not enter the blocking logger",
+		)
 	}
 
 	queueFilled := make(chan struct{})
@@ -4123,7 +4218,9 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 	select {
 	case <-published:
 	case <-time.After(time.Second):
-		t.Fatal("required Node subscription did not resume publishing after callback recovery")
+		t.Fatal(
+			"required Node subscription did not resume publishing after callback recovery",
+		)
 	}
 
 	bus.Publish(
@@ -4137,14 +4234,21 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 				},
 			}),
 	)
-	require.Eventually(t, func() bool {
-		got := cs.GetPeerTip(referenceConn)
-		return got != nil && got.Tip.BlockNumber == 2
-	}, time.Second, 5*time.Millisecond,
-		"required Node subscription must process events after the callback drains")
+	require.Eventually(
+		t,
+		func() bool {
+			got := cs.GetPeerTip(referenceConn)
+			return got != nil && got.Tip.BlockNumber == 2
+		},
+		time.Second,
+		5*time.Millisecond,
+		"required Node subscription must process events after the callback drains",
+	)
 }
 
-func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
+func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(
+	t *testing.T,
+) {
 	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
 	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
@@ -4167,7 +4271,9 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 	select {
 	case <-loggerHandler.entered:
 	case <-time.After(time.Second):
-		t.Fatal("production fork diagnostic callback did not enter the blocking logger")
+		t.Fatal(
+			"production fork diagnostic callback did not enter the blocking logger",
+		)
 	}
 
 	queueFilled := make(chan struct{})
@@ -4189,7 +4295,9 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 	select {
 	case <-published:
 	case <-time.After(shortDeliveryBound + 2*time.Second):
-		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
+		t.Fatal(
+			"detachable fork diagnostic subscriber held publishers past its timeout",
+		)
 	}
 	loggerHandler.unblock()
 	// Detachment preserves events accepted before the timeout, so wait for that
@@ -4363,6 +4471,7 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
+	n.utxoSetReconciled = true
 	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	// Still needed: the scan was skipped, so no rebuild happened.
@@ -4402,6 +4511,7 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
+	n.utxoSetReconciled = true
 	err = n.backfillRewardLiveStake(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
@@ -4415,6 +4525,26 @@ func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 
 	assert.False(t, cfg.EnableLeiosVotes,
 		"prototype nodes must diffuse votes over leios-notify")
+}
+
+func TestNewOuroborosConfigCarriesLeiosMinOfferLead(t *testing.T) {
+	t.Parallel()
+
+	lead := uint64(1200)
+	n := &Node{config: NewConfig(
+		WithCardanoNodeConfig(&cardano.CardanoNodeConfig{
+			LeiosMinOfferLead: &lead,
+		}),
+	)}
+	assert.Equal(t, lead, n.newOuroborosConfig(true, 0, 0).LeiosMinOfferLead)
+
+	n = &Node{config: NewConfig()}
+	assert.Equal(
+		t,
+		cardano.DefaultLeiosMinOfferLead,
+		n.newOuroborosConfig(true, 0, 0).LeiosMinOfferLead,
+		"an unconfigured node uses the reference default",
+	)
 }
 
 // The behind-tip chainsync resync is gated on chain selection having no best

@@ -785,6 +785,19 @@ func (q *Queries) DeleteNetworkStateAfterSlot(ctx context.Context, slot int64) e
 	return err
 }
 
+const deleteOrphanRewardPoolLikelihoods = `-- name: DeleteOrphanRewardPoolLikelihoods :exec
+DELETE FROM reward_pool_likelihood
+WHERE NOT EXISTS (
+    SELECT 1 FROM reward_likelihood_state
+    WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
+)
+`
+
+func (q *Queries) DeleteOrphanRewardPoolLikelihoods(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteOrphanRewardPoolLikelihoods)
+	return err
+}
+
 const deletePParamUpdatesAfterSlot = `-- name: DeletePParamUpdatesAfterSlot :exec
 DELETE FROM pparam_update
 WHERE added_slot > ?
@@ -891,6 +904,15 @@ func (q *Queries) DeleteRewardAdaPotsAfterSlot(ctx context.Context, capturedSlot
 	return err
 }
 
+const deleteRewardLikelihoodStatesAfterSlot = `-- name: DeleteRewardLikelihoodStatesAfterSlot :exec
+DELETE FROM reward_likelihood_state WHERE boundary_slot > ?
+`
+
+func (q *Queries) DeleteRewardLikelihoodStatesAfterSlot(ctx context.Context, boundarySlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardLikelihoodStatesAfterSlot, boundarySlot)
+	return err
+}
+
 const deleteRewardPoolInputsAfterSlot = `-- name: DeleteRewardPoolInputsAfterSlot :exec
 DELETE FROM reward_pool_input
 WHERE captured_slot > ? OR boundary_slot > ?
@@ -912,6 +934,15 @@ DELETE FROM reward_pool_input WHERE epoch = ?
 
 func (q *Queries) DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error {
 	_, err := q.db.ExecContext(ctx, deleteRewardPoolInputsForEpoch, epoch)
+	return err
+}
+
+const deleteRewardPoolLikelihoodsForEpoch = `-- name: DeleteRewardPoolLikelihoodsForEpoch :exec
+DELETE FROM reward_pool_likelihood WHERE epoch = ?
+`
+
+func (q *Queries) DeleteRewardPoolLikelihoodsForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardPoolLikelihoodsForEpoch, epoch)
 	return err
 }
 
@@ -2996,6 +3027,50 @@ func (q *Queries) GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaP
 	return i, err
 }
 
+const getRewardLikelihoodStateAtSlot = `-- name: GetRewardLikelihoodStateAtSlot :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE boundary_slot <= ?
+ORDER BY boundary_slot DESC, epoch DESC
+LIMIT 1
+`
+
+func (q *Queries) GetRewardLikelihoodStateAtSlot(ctx context.Context, boundarySlot int64) (RewardLikelihoodState, error) {
+	row := q.db.QueryRowContext(ctx, getRewardLikelihoodStateAtSlot, boundarySlot)
+	var i RewardLikelihoodState
+	err := row.Scan(
+		&i.ID,
+		&i.Epoch,
+		&i.RewardPot,
+		&i.CapturedSlot,
+		&i.BoundarySlot,
+		&i.Complete,
+	)
+	return i, err
+}
+
+const getRewardLikelihoodStateBeforeEpoch = `-- name: GetRewardLikelihoodStateBeforeEpoch :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE epoch < ?
+ORDER BY epoch DESC
+LIMIT 1
+`
+
+func (q *Queries) GetRewardLikelihoodStateBeforeEpoch(ctx context.Context, epoch int64) (RewardLikelihoodState, error) {
+	row := q.db.QueryRowContext(ctx, getRewardLikelihoodStateBeforeEpoch, epoch)
+	var i RewardLikelihoodState
+	err := row.Scan(
+		&i.ID,
+		&i.Epoch,
+		&i.RewardPot,
+		&i.CapturedSlot,
+		&i.BoundarySlot,
+		&i.Complete,
+	)
+	return i, err
+}
+
 const getRewardPoolInputs = `-- name: GetRewardPoolInputs :many
 SELECT margin, pool_key_hash, reward_account, blocks_produced,
        total_blocks_in_epoch, id, epoch, pledge, delegated_stake,
@@ -3030,6 +3105,44 @@ func (q *Queries) GetRewardPoolInputs(ctx context.Context, epoch int64) ([]Rewar
 			&i.DelegatorCount,
 			&i.RewardAccountCredentialTag,
 			&i.CapturedSlot,
+			&i.BoundarySlot,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getRewardPoolLikelihoods = `-- name: GetRewardPoolLikelihoods :many
+SELECT id, epoch, pool_key_hash, log_weights, performance_estimate,
+       boundary_slot
+FROM reward_pool_likelihood
+WHERE epoch = ?
+ORDER BY pool_key_hash ASC
+`
+
+func (q *Queries) GetRewardPoolLikelihoods(ctx context.Context, epoch int64) ([]RewardPoolLikelihood, error) {
+	rows, err := q.db.QueryContext(ctx, getRewardPoolLikelihoods, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RewardPoolLikelihood{}
+	for rows.Next() {
+		var i RewardPoolLikelihood
+		if err := rows.Scan(
+			&i.ID,
+			&i.Epoch,
+			&i.PoolKeyHash,
+			&i.LogWeights,
+			&i.PerformanceEstimate,
 			&i.BoundarySlot,
 		); err != nil {
 			return nil, err
@@ -3659,6 +3772,7 @@ INSERT INTO drep (
 ON CONFLICT (credential_tag, credential) DO UPDATE SET
     anchor_url = excluded.anchor_url,
     anchor_hash = excluded.anchor_hash,
+    expiry_epoch = excluded.expiry_epoch,
     active = excluded.active
 RETURNING id
 `
@@ -4215,6 +4329,39 @@ func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsPa
 	return id, err
 }
 
+const saveRewardLikelihoodState = `-- name: SaveRewardLikelihoodState :one
+INSERT INTO reward_likelihood_state (
+    epoch, reward_pot, captured_slot, boundary_slot, complete
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    reward_pot = excluded.reward_pot,
+    captured_slot = excluded.captured_slot,
+    boundary_slot = excluded.boundary_slot,
+    complete = excluded.complete
+RETURNING id
+`
+
+type SaveRewardLikelihoodStateParams struct {
+	Epoch        int64
+	RewardPot    string
+	CapturedSlot int64
+	BoundarySlot int64
+	Complete     bool
+}
+
+func (q *Queries) SaveRewardLikelihoodState(ctx context.Context, arg SaveRewardLikelihoodStateParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, saveRewardLikelihoodState,
+		arg.Epoch,
+		arg.RewardPot,
+		arg.CapturedSlot,
+		arg.BoundarySlot,
+		arg.Complete,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const saveRewardPoolInput = `-- name: SaveRewardPoolInput :one
 INSERT INTO reward_pool_input (
     margin, pool_key_hash, reward_account, blocks_produced,
@@ -4270,6 +4417,38 @@ func (q *Queries) SaveRewardPoolInput(ctx context.Context, arg SaveRewardPoolInp
 		arg.DelegatorCount,
 		arg.RewardAccountCredentialTag,
 		arg.CapturedSlot,
+		arg.BoundarySlot,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const saveRewardPoolLikelihood = `-- name: SaveRewardPoolLikelihood :one
+INSERT INTO reward_pool_likelihood (
+    epoch, pool_key_hash, log_weights, performance_estimate, boundary_slot
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    log_weights = excluded.log_weights,
+    performance_estimate = excluded.performance_estimate,
+    boundary_slot = excluded.boundary_slot
+RETURNING id
+`
+
+type SaveRewardPoolLikelihoodParams struct {
+	Epoch               int64
+	PoolKeyHash         []byte
+	LogWeights          []byte
+	PerformanceEstimate float64
+	BoundarySlot        int64
+}
+
+func (q *Queries) SaveRewardPoolLikelihood(ctx context.Context, arg SaveRewardPoolLikelihoodParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, saveRewardPoolLikelihood,
+		arg.Epoch,
+		arg.PoolKeyHash,
+		arg.LogWeights,
+		arg.PerformanceEstimate,
 		arg.BoundarySlot,
 	)
 	var id int64

@@ -673,3 +673,59 @@ func TestAddAccountRewardsByCredentialRespectsSQLiteParameterLimit(
 	require.NoError(t, err)
 	require.Equal(t, uint64(len(credits)), uint64(account.Reward))
 }
+
+// IterateAccounts visits every account row, inactive ones included, with
+// its stored fields.
+func TestIterateAccountsVisitsEveryRow(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	_, err := store.writeDB.Exec(`INSERT INTO account
+ (staking_key, credential_tag, pool, active, reward, added_slot, created_slot)
+ VALUES (?, 0, ?, TRUE, '7', 12, 10), (?, 1, NULL, FALSE, '0', 20, 20)`,
+		[]byte{1}, []byte{9}, []byte{2})
+	require.NoError(t, err)
+	got := map[string]models.Account{}
+	require.NoError(t, store.IterateAccounts(nil, func(a *models.Account) error {
+		got[string(a.StakingKey)] = *a
+		return nil
+	}))
+	require.Len(t, got, 2)
+	require.Equal(t, []byte{9}, got["\x01"].Pool)
+	require.Equal(t, uint64(7), uint64(got["\x01"].Reward))
+	require.Equal(t, uint64(10), got["\x01"].CreatedSlot)
+	require.True(t, got["\x01"].Active)
+	require.False(t, got["\x02"].Active)
+	require.Equal(t, uint8(1), got["\x02"].CredentialTag)
+}
+
+// IterateDreps visits every DRep row, inactive ones included, and
+// IterateLiveDrepDelegators only the links not yet removed.
+func TestIterateDrepsAndLiveDelegators(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	_, err := store.writeDB.Exec(`INSERT INTO drep
+ (credential_tag, credential, anchor_url, added_slot, last_activity_epoch, expiry_epoch, active)
+ VALUES (0, ?, 'u', 5, 2, 22, TRUE), (1, ?, '', 6, 0, 0, FALSE)`,
+		[]byte{1}, []byte{2})
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`INSERT INTO drep_delegator
+ (drep_credential_tag, drep_credential, stake_credential_tag, stake_credential, added_slot, removed_slot)
+ VALUES (0, ?, 0, ?, 5, NULL), (0, ?, 0, ?, 5, 7)`,
+		[]byte{1}, []byte{8}, []byte{1}, []byte{9})
+	require.NoError(t, err)
+	dreps := map[string]models.Drep{}
+	require.NoError(t, store.IterateDreps(nil, func(d *models.Drep) error {
+		dreps[string(d.Credential)] = *d
+		return nil
+	}))
+	require.Len(t, dreps, 2)
+	require.Equal(t, uint64(22), dreps["\x01"].ExpiryEpoch)
+	require.False(t, dreps["\x02"].Active)
+	var links []string
+	require.NoError(t, store.IterateLiveDrepDelegators(nil,
+		func(drep, stake models.StakeCredentialRef) error {
+			links = append(links, string(drep.Key)+string(stake.Key))
+			return nil
+		}))
+	require.Equal(t, []string{"\x01\x08"}, links)
+}

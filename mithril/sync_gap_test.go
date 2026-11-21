@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -1003,12 +1004,6 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 	require.Nil(t, rootProposal)
-	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, childUtxo)
-	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	require.Nil(t, rootUtxo)
 }
 
 // Gap blocks are already reflected in the snapshot's ledger state, so a direct
@@ -1660,4 +1655,71 @@ func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
 	require.NoError(t, err)
 	require.NotNil(t, settled.ExpiredEpoch)
 	require.NotNil(t, settled.DroppedEpoch)
+}
+
+// gapSpendTx builds a transaction that spends input and pays fee; two fees
+// give two transactions that spend the same input and hash differently.
+func gapSpendTx(
+	t *testing.T,
+	input []byte,
+	fee uint64,
+) lcommon.Transaction {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{[]any{input, uint64(0)}},
+		1: []any{map[uint]any{0: addrBytes, 1: uint64(1_000_000)}},
+		2: fee,
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return tx
+}
+
+func processGapTx(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	blockSeed string,
+	tx lcommon.Transaction,
+) {
+	t.Helper()
+	point := ocommon.Point{Slot: slot, Hash: testGapHash32(blockSeed)}
+	var blockHash, txHash [32]byte
+	copy(blockHash[:], point.Hash)
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot: slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+		UtxoOffsets: map[database.UtxoRef]database.CborOffset{
+			{TxId: txHash, OutputIdx: 0}: {
+				BlockSlot: slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+	}
+	pparams := &dijkstra.DijkstraProtocolParameters{}
+	require.NoError(t, processGapBlockTransactions(
+		context.Background(), db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point, []lcommon.Transaction{tx}, offsets, 100,
+		dijkstra.EraIdDijkstra, pparams, &pparams.ConwayProtocolParameters,
+	))
 }

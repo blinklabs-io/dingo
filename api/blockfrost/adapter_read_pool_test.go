@@ -17,19 +17,16 @@ package blockfrost
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/require"
@@ -40,25 +37,13 @@ import (
 // snapshot open while issuing another read waits on itself.
 func newSingleReadConnAdapter(
 	t *testing.T,
-) (*NodeAdapter, *database.Database) {
+) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
-	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
-		Config:         &database.Config{DataDir: t.TempDir()},
-		MaxConnections: 1,
-	})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
+	adapter, raw, db := newDBBackedAdapterWithIndexer(
+		t, dbtest.IndexerOptions{MaxConnections: 1},
+	)
 	adapter.slotTime = testSlotTime
-	return adapter, db
+	return adapter, raw, db
 }
 
 // requireCompletes runs fn and fails if it has not returned within the
@@ -75,14 +60,12 @@ func requireCompletes(t *testing.T, msg string, fn func()) {
 
 func TestNodeAdapterListingsReleaseSnapshotBeforeNestedReads(t *testing.T) {
 	t.Parallel()
-	adapter, db := newSingleReadConnAdapter(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
+	adapter, raw, db := newSingleReadConnAdapter(t)
 	addr, _, _ := testKeyAddress(t, 0xa2, 0)
 	policy := bytes.Repeat([]byte{0xa3}, lcommon.AddressHashSize)
 	script := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
 
-	tx := seedAssetTransaction(t, raw, db, fill32(0x01), 1, 10, 0)
+	tx := seedAssetTransaction(t, raw, adapter, fill32(0x01), 1, 10, 0)
 	insertAdapterUtxo(t, raw, &models.Utxo{
 		TransactionID: &tx.ID,
 		TxId:          tx.Hash,
@@ -94,7 +77,7 @@ func TestNodeAdapterListingsReleaseSnapshotBeforeNestedReads(t *testing.T) {
 		},
 	})
 	storePointerOutputCbor(t, db, tx.Hash, 0, addr, 1_000_000)
-	_, err = raw.Exec(
+	_, err := raw.Exec(
 		`INSERT INTO utxo_reference_script (utxo_id, script_hash)
 SELECT id, ? FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		script,
@@ -114,7 +97,7 @@ VALUES (?, ?, 0, ?, ?, ?)`,
 		tx.BlockIndex,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 1}, nil))
+	setIndexerTip(t, adapter, ochainsync.Tip{BlockNumber: 1})
 
 	ctx := context.Background()
 	page := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}

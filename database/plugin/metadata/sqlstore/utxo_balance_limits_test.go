@@ -100,7 +100,7 @@ VALUES (?, ?, ?, 0, 4, 0, 'unparseable', 0)`,
 // cannot be parsed is never reached.
 func TestGetUtxoBalanceByAddressStopsAtAssetLimit(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	addr := balanceLimitsAddress(t, 0x41)
 	policy := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
 	held := balanceLimitsUtxo(t, addr, 0x05)
@@ -140,7 +140,7 @@ SELECT ?, ?, id, 'unparseable' FROM utxo WHERE tx_id = (SELECT id FROM "transact
 
 func TestGetUtxoBalanceByAddressWithinLimits(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	addr := balanceLimitsAddress(t, 0x51)
 	policy := bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize)
 	first := balanceLimitsUtxo(t, addr, 0x06)

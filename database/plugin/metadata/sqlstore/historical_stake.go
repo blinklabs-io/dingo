@@ -548,6 +548,9 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, nil, err
+	}
 	return s.getStakeByPoolsAtSlot(
 		poolKeyHashes, slot, 0, nil, expiryEpoch, inactivityPeriod, txn,
 	)
@@ -562,6 +565,9 @@ func (s *Store) GetEpochBoundaryStakeByPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, nil, err
+	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 		incomingEraID = nil
@@ -693,6 +699,9 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, err
+	}
 	ret := make(map[string]uint64)
 	if len(ownerKeys) == 0 {
 		return ret, nil
@@ -788,6 +797,9 @@ func (s *Store) GetRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, err
+	}
 	return s.getRewardStakeInputsForPools(
 		poolKeyHashes, slot, 0, false, nil,
 		expiryEpoch, inactivityPeriod, txn,
@@ -803,6 +815,9 @@ func (s *Store) GetEpochBoundaryRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, err
+	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 		incomingEraID = nil
@@ -972,6 +987,22 @@ func (s *Store) historicalStakeCTE(
 		reapSlot = boundarySlot
 	}
 	query, args := activeDelegationSQL(slot, reapSlot)
+	live := s.liveUtxo != nil
+	if live {
+		// Without utxo rows the UTxO side is the live set as this
+		// transaction sees it, which is the set at slot only when nothing
+		// has been applied after slot.
+		row, err := s.operationalQueries(db).GetTip(ctx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", nil, fmt.Errorf("read tip for live stake: %w", err)
+		}
+		if err == nil && row.Slot.Int64 > 0 && uint64(row.Slot.Int64) > slot {
+			return "", nil, fmt.Errorf(
+				"%w: slot %d is before the ledger tip at slot %d",
+				errLiveUtxoAsOf, slot, row.Slot.Int64,
+			)
+		}
+	}
 	// Stake held at a pointer address reaches its credential only in the eras
 	// that count it, and only through the position recorded in utxo_pointer.
 	// When it is not counted the query is exactly what it was before pointer
@@ -983,7 +1014,22 @@ func (s *Store) historicalStakeCTE(
 	if err != nil {
 		return "", nil, err
 	}
-	if countPointerStake {
+	if countPointerStake && live {
+		txn, _ := ctx.Value(liveUtxoTxnKey{}).(types.Txn)
+		pointers, err := s.liveUtxo.LivePointerStakes(txn)
+		if err != nil {
+			return "", nil, fmt.Errorf("read live pointer stake: %w", err)
+		}
+		if query, args, err = withLivePointers(query, args, pointers); err != nil {
+			return "", nil, err
+		}
+		slotValue, err := checkedInt64(slot)
+		if err != nil {
+			return "", nil, err
+		}
+		query += livePointerResolutionSQL
+		args = append(args, slotValue)
+	} else if countPointerStake {
 		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
 		if err != nil {
 			return "", nil, err
@@ -1021,7 +1067,22 @@ func (s *Store) historicalStakeCTE(
  OR active_delegation.expiration_epoch >= ?
  OR active_delegation.expiration_epoch IS NULL) AND `
 	}
-	query += `,
+	if live {
+		// reward_live_stake carries each credential's UTxO stake, one row
+		// per credential; callers sum rows per (pool, credential).
+		query += `,
+active_delegator_stake AS (
+ SELECT active_delegation.pool_key_hash,
+        active_delegation.credential_tag,
+        active_delegation.staking_key,
+        live_utxo.utxo_stake AS utxo_amount
+ FROM ` + delegationSource + `
+ LEFT JOIN reward_live_stake live_utxo
+   ON live_utxo.credential_tag = active_delegation.credential_tag
+  AND live_utxo.staking_key = active_delegation.staking_key
+ WHERE ` + expiryPredicate + predicate
+	} else {
+		query += `,
 active_delegator_stake AS (
  SELECT active_delegation.pool_key_hash,
         active_delegation.credential_tag,
@@ -1034,12 +1095,29 @@ active_delegator_stake AS (
   AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
-	args = append(args, slot, slot)
+		args = append(args, slot, slot)
+	}
 	if expiryEpoch > 0 {
 		args = append(args, expiryEpoch)
 	}
 	args = append(args, predicateArgs...)
-	if countPointerStake {
+	if countPointerStake && live {
+		query += `
+ UNION ALL
+ SELECT active_delegation.pool_key_hash,
+        active_delegation.credential_tag,
+        active_delegation.staking_key,
+        pointer_resolution.amount AS utxo_amount
+ FROM ` + delegationSource + `
+ JOIN pointer_resolution
+   ON pointer_resolution.credential_tag = active_delegation.credential_tag
+  AND pointer_resolution.staking_key = active_delegation.staking_key
+ WHERE ` + expiryPredicate + predicate
+		if expiryEpoch > 0 {
+			args = append(args, expiryEpoch)
+		}
+		args = append(args, predicateArgs...)
+	} else if countPointerStake {
 		// A pointer-held UTxO carries no staking_key, so it never joins the
 		// branch above and cannot be counted twice. Rows are summed per
 		// (pool, credential) by the callers, so UNION ALL adds stake without
@@ -1167,11 +1245,11 @@ WITH `
 	for _, source := range historicalDelegationSources {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %[2]s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %[3]s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -1186,12 +1264,29 @@ WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs
 	for _, source := range historicalRegistrationSources {
 		allHistoryTables = append(allHistoryTables, source.table)
 	}
+	// A credential an import baselined has no certificate history, and a later
+	// certificate overwrites its account row (added_slot, pool, active), so
+	// that row cannot describe the state at slot. The immutable baseline does.
+	// Only a credential with no baseline falls back to the account row.
+	delegationParts = append(delegationParts, `
+SELECT baseline.credential_tag, baseline.staking_key, baseline.pool,
+       baseline.added_slot, baseline.added_slot, 0, 0
+`+scopedFrom("account_import_baseline", "baseline")+`
+WHERE `+scopedWhere("baseline")+`baseline.added_slot <= ?
+  AND baseline.active = TRUE
+  AND baseline.pool IS NOT NULL AND length(baseline.pool) > 0`+
+		noHistorySQL("baseline", allHistoryTables))
+	args = append(args, slot)
+	for range allHistoryTables {
+		args = append(args, slot)
+	}
 	delegationParts = append(delegationParts, `
 SELECT account.credential_tag, account.staking_key, account.pool,
        account.added_slot, account.added_slot, 0, 0
 `+scopedFrom("account", "account")+`
 WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRUE
   AND account.pool IS NOT NULL AND length(account.pool) > 0`+
+		noBaselineSQL("account")+
 		noHistorySQL("account", allHistoryTables))
 	args = append(args, slot)
 	for range allHistoryTables {
@@ -1205,11 +1300,11 @@ WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRU
 	for _, source := range historicalRegistrationSources {
 		registrationParts = append(registrationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot,
-       event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			scopedFrom(source.table, "event"),
 			scopedWhere("event"),
@@ -1224,9 +1319,22 @@ WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc
 	for _, source := range historicalRegistrationSources {
 		registrationTables = append(registrationTables, source.table)
 	}
+	// created_slot is immutable, so it still dates the registration. The
+	// active flag is overwritten by a later certificate, so a baselined
+	// credential takes it from the baseline.
 	registrationParts = append(registrationParts, `
 SELECT account.credential_tag, account.staking_key,
-       CASE WHEN account.active THEN 1 ELSE 0 END,
+       CASE WHEN EXISTS (
+         SELECT 1 FROM account_import_baseline baseline
+         WHERE baseline.credential_tag = account.credential_tag
+           AND baseline.staking_key = account.staking_key
+       ) THEN (CASE WHEN EXISTS (
+         SELECT 1 FROM account_import_baseline baseline
+         WHERE baseline.credential_tag = account.credential_tag
+           AND baseline.staking_key = account.staking_key
+           AND baseline.active = TRUE
+       ) THEN 1 ELSE 0 END)
+       ELSE (CASE WHEN account.active THEN 1 ELSE 0 END) END,
        account.created_slot, account.created_slot, 0, 0
 `+scopedFrom("account", "account")+`
 WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
@@ -1478,6 +1586,15 @@ historical_expiration AS (
 )`, args, nil
 }
 
+func noBaselineSQL(alias string) string {
+	return fmt.Sprintf(`
+ AND NOT EXISTS (
+   SELECT 1 FROM account_import_baseline baseline
+   WHERE baseline.credential_tag = %[1]s.credential_tag
+     AND baseline.staking_key = %[1]s.staking_key
+ )`, alias)
+}
+
 func noHistorySQL(alias string, tables []string) string {
 	var ret strings.Builder
 	for _, table := range tables {
@@ -1508,6 +1625,9 @@ func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
 	boundarySlot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
+	if err := s.refuseDrained(rewardReadTables...); err != nil {
+		return nil, err
+	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 	}
@@ -1553,4 +1673,127 @@ SELECT DISTINCT pool_key_hash FROM active_delegator_stake`, args...)
 		ret = append(ret, hash)
 	}
 	return ret, rows.Err()
+}
+
+// IterateLeiosClosureUtxoEffects calls fn with each staked output a Leios
+// closure transaction created or spent whose context slot differs from its
+// applied slot. The stake queries above count an output from the effective
+// slot of its creating transaction and until the effective slot of its
+// spending one (lines 1080-1081 and 1122-1123: effective_created <= slot and
+// either unspent or effective_spent > slot); a set reads these rows to correct
+// a sum taken at the applied slots.
+func (s *Store) IterateLeiosClosureUtxoEffects(
+	txn types.Txn,
+	fn func(models.LeiosClosureUtxoEffect) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	for _, q := range []struct {
+		spent bool
+		query string
+	}{
+		{false, `
+SELECT t.hash, utxo.output_idx, utxo.added_slot, lc.slot,
+       utxo.credential_tag, utxo.staking_key, utxo.amount
+FROM utxo
+JOIN "transaction" t ON t.id = utxo.tx_id
+JOIN leios_transaction_context lc ON lc.transaction_id = utxo.tx_id
+WHERE utxo.staking_key IS NOT NULL AND length(utxo.staking_key) > 0
+  AND lc.slot <> utxo.added_slot`},
+		{true, `
+SELECT t.hash, utxo.output_idx, utxo.deleted_slot, lc.slot,
+       utxo.credential_tag, utxo.staking_key, utxo.amount
+FROM utxo
+JOIN "transaction" t ON t.id = utxo.tx_id
+JOIN leios_transaction_context lc ON lc.transaction_id = utxo.spent_at_tx_id
+WHERE utxo.staking_key IS NOT NULL AND length(utxo.staking_key) > 0
+  AND utxo.deleted_slot <> 0 AND lc.slot <> utxo.deleted_slot`},
+	} {
+		if err := func() error {
+			rows, err := db.QueryContext(ctx, q.query)
+			if err != nil {
+				return fmt.Errorf("iterate closure output effects: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				e := models.LeiosClosureUtxoEffect{Spent: q.spent}
+				var amount sql.NullString
+				if err := rows.Scan(
+					&e.TxHash, &e.Index, &e.Applied, &e.Effective,
+					&e.CredentialTag, &e.StakingKey, &amount,
+				); err != nil {
+					return fmt.Errorf("iterate closure output effects: %w", err)
+				}
+				e.Amount, err = parseNullUint64("closure output amount", amount)
+				if err != nil {
+					return err
+				}
+				if e.Amount == 0 {
+					continue
+				}
+				if err := fn(e); err != nil {
+					return err
+				}
+			}
+			return rows.Err()
+		}(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IterateStakeDelegationEvents calls fn with every pool delegation
+// certificate of every stake credential, with the slot it takes effect at:
+// the closure's context slot where its transaction is a Leios closure
+// transaction, else the applied slot, as the delegation events of the
+// historical stake queries read it (line 1263).
+func (s *Store) IterateStakeDelegationEvents(
+	txn types.Txn,
+	fn func(models.StakeDelegationEventRow) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	for _, source := range historicalDelegationSources {
+		query := fmt.Sprintf(`
+SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
+       event.added_slot,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot),
+       COALESCE(tx.block_index, 0), COALESCE(certs.cert_index, 0)
+FROM %s event
+JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE event.pool_key_hash IS NOT NULL`, source.table)
+		if err := func() error {
+			rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), source.certType)
+			if err != nil {
+				return fmt.Errorf("iterate stake delegation events: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var r models.StakeDelegationEventRow
+				var effective uint64
+				if err := rows.Scan(
+					&r.CredentialTag, &r.StakingKey, &r.PoolKeyHash,
+					&r.AddedSlot, &effective, &r.BlockIndex, &r.CertIndex,
+				); err != nil {
+					return fmt.Errorf("iterate stake delegation events: %w", err)
+				}
+				if effective != r.AddedSlot {
+					r.EffectiveSlot = effective
+				}
+				if err := fn(r); err != nil {
+					return err
+				}
+			}
+			return rows.Err()
+		}(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

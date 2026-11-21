@@ -128,6 +128,7 @@ var logProviderConfigFields = []string{
 // key registries all belong here; the key material behind a path does not
 // pass through Config at all.
 var logPlainConfigFields = []string{
+	"ServerCoreNamespace",
 	"API.TLS.CertFilePath",
 	"API.TLS.KeyFilePath",
 	"API.TLS.Mode",
@@ -145,6 +146,7 @@ var logPlainConfigFields = []string{
 	"BarkLifecycleOperatorCertificateFingerprints",
 	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
+	"AdvertiseAddress",
 	"BindAddr",
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
@@ -162,6 +164,8 @@ var logPlainConfigFields = []string{
 	"Chainsync.MaxClients",
 	"Chainsync.StallTimeout",
 	"Chainsync.Strategy",
+	"ImmutableDB.PromoteBatch",
+	"ImmutableDB.PromoteFrequency",
 	"DatabaseLifecycle.SnapshotCloudDestinationPrefix",
 	"DatabaseLifecycle.SnapshotDir",
 	"DatabaseLifecycle.SnapshotEnabled",
@@ -201,6 +205,7 @@ var logPlainConfigFields = []string{
 	"HealthReadyGapSlots",
 	"HistoryExpiry.Enabled",
 	"HistoryExpiry.Frequency",
+	"Indexer.MaxReadyLagBlocks",
 	"InactivityTimeout",
 	"InboundCooldown",
 	"InboundDuplexOnlyForHot",
@@ -226,6 +231,8 @@ var logPlainConfigFields = []string{
 	"LedgerCatchupTimeout",
 	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
+	"LedgerUtxoCheckpointEpochs",
+	"LedgerUtxoCheckpointKeep",
 	"LedgerValidateAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
@@ -330,10 +337,12 @@ var logPlainConfigFields = []string{
 	// material behind it is, and an operator diagnosing a misconfigured
 	// socket needs to see which path failed.
 	"ShelleyKESAgentAddress",
+	"ShelleyKESAgentAddresses",
 	"ShelleyKESAgentClientCertFile",
 	"ShelleyKESAgentClientKeyFile",
 	"ShelleyKESAgentMode",
 	"ShelleyKESAgentPlaintext",
+	"ShelleyKESAgentProfile",
 	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
 	"ShelleyKeyWatchInterval",
@@ -419,6 +428,7 @@ var providerConfigPlainKeys = []string{
 	"revalidationdeltacap",
 	// api/blockfrost admission limits
 	"maxconcurrentmutations", "maxconcurrentmutationsperclient",
+	"maxconcurrentpoollists", "maxconcurrentpoollistsperclient",
 	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }

@@ -42,6 +42,13 @@ var ErrTruncateNotStarted = errors.New(
 
 const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 
+// syncStatusSyncKey and syncStatusInProgress mirror the sync-state key and
+// value mithril writes while a sync or snapshot restore is unfinished.
+const (
+	syncStatusSyncKey    = "sync_status"
+	syncStatusInProgress = "in_progress"
+)
+
 // PendingTruncate records enough information to resume a truncate whose
 // batched blob deletion was interrupted before metadata was truncated.
 // Checksum protects every field that controls the resumed delete range. The
@@ -442,67 +449,35 @@ func ResolveTargetByNumber(
 	)
 }
 
-// Truncate reverts the database to target: target becomes the new chain
-// tip, every block with a strictly greater internal ID is removed from
-// the blob store, and every metadata row (and blob-referenced UTxO/tx
-// CBOR) added after target's slot is removed or restored to its
-// pre-target state via database.TruncateAfterSlot.
-//
-// Unlike Chain.Rollback, this does not reject a target beyond the
-// configured security parameter — that guard protects automatic rollback
-// during normal sync; an operator explicitly invoking Truncate (e.g. for
-// CIP-0135 disaster recovery from a long network partition) is the
-// informed-consent replacement for it. It still refuses to truncate to a
-// point before the Mithril trust boundary, if one is recorded: that
-// boundary reflects what UTxO history is actually available locally, not
-// a policy choice, and going below it would leave the database unable to
-// validate the first block past the (now missing) boundary.
-//
-// This is an offline operation in the sense that it performs no chain-
-// manager or in-memory ledger-state bookkeeping — it is safe to call
-// against a database not concurrently owned by a live Chain/LedgerState
-// (the offline CLI path, or the live path after quiescing the node).
-//
-// blocksRemoved is the number of blocks DeleteBlocksAfter actually found
-// and deleted in (target.ID, tipBlock.ID] — not simply tipBlock.ID -
-// target.ID, since that range is only an upper bound: a chain
-// bootstrapped/drained from a Mithril snapshot can leave gaps of
-// never-imported IDs in it (see DeleteBlocksAfter's own doc comment), and
-// subtracting index values there would wildly overcount how many blocks
-// actually existed to remove.
-//
-// DeleteBlocksAfter deletes blob-store blocks by ID range, while
-// database.TruncateAfterSlot deletes metadata by slot cutoff; these agree
-// for any normal chain (slots strictly increase with ID) except same-slot
-// blocks — notably Byron epoch boundary blocks — where a later block
-// sharing target's own slot would be removed from the blob store (ID >
-// target.ID) but retained in metadata (slot not > target.Slot),
-// diverging the two. Truncate refuses such a target outright (see the
-// same-slot check above) rather than let that divergence happen.
-func Truncate(
+// checkTruncateTarget runs every refusal Truncate makes before it records a
+// pending marker, without changing anything. noop reports a target that is
+// already the tip.
+func checkTruncateTarget(
 	ctx context.Context,
 	db *database.Database,
 	target models.Block,
-	batchSize int,
-	delegatorInactivityEnabled bool,
-	delegatorInactivity uint64,
-) (blocksRemoved uint64, err error) {
-	if pending, err := GetPendingTruncate(db); err != nil {
-		return 0, fmt.Errorf("truncate: %w", err)
-	} else if pending != nil {
-		return finishPendingTruncate(
-			ctx,
-			db,
-			*pending,
-			batchSize,
-			delegatorInactivityEnabled,
-			delegatorInactivity,
+) (tipBlock models.Block, mithrilFloor uint64, noop bool, err error) {
+	// A Mithril import records mithril_ledger_slot only when its sync
+	// completes, so while sync_status is in progress the boundary check below
+	// reads 0 and would let a target under the imported outputs through. A
+	// resumed import skips a completed UTxO phase and never rewrites them.
+	syncStatus, err := db.GetSyncState(syncStatusSyncKey, nil)
+	if err != nil {
+		return models.Block{}, 0, false, fmt.Errorf(
+			"%w: read sync status: %w", ErrTruncateNotStarted, err,
+		)
+	}
+	if syncStatus == syncStatusInProgress {
+		return models.Block{}, 0, false, fmt.Errorf(
+			"%w: a Mithril sync or snapshot restore is in progress and has "+
+				"not recorded its trust boundary; finish it before truncating",
+			ErrTruncateNotStarted,
 		)
 	}
 
 	metadataTip, err := db.GetTip(nil)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: get metadata tip: %w",
 			ErrTruncateNotStarted,
 			err,
@@ -510,14 +485,14 @@ func Truncate(
 	}
 	metadataTipBlock, err := database.BlockByPoint(ctx, db, metadataTip.Point)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: get metadata tip block: %w",
 			ErrTruncateNotStarted,
 			err,
 		)
 	}
 	if target.ID > metadataTipBlock.ID {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: target block (id=%d, slot=%d) is ahead of metadata tip (id=%d, slot=%d)",
 			ErrTruncateNotStarted,
 			target.ID,
@@ -529,20 +504,20 @@ func Truncate(
 
 	recentBlocks, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: get indexed blob tip: %w",
 			ErrTruncateNotStarted,
 			err,
 		)
 	}
 	if len(recentBlocks) == 0 {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: get indexed blob tip: %w",
 			ErrTruncateNotStarted,
 			models.ErrBlockNotFound,
 		)
 	}
-	tipBlock := recentBlocks[0]
+	tipBlock = recentBlocks[0]
 
 	// Confirm target is genuinely the block occupying its ID on the
 	// current genesis-to-tip lineage, not just numerically within range.
@@ -567,7 +542,7 @@ func Truncate(
 	// closed the same way a hash mismatch does.
 	onLineage, err := db.BlockByIndex(target.ID, nil)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: verify target is on the current chain: %w",
 			ErrTruncateNotStarted,
 			err,
@@ -575,7 +550,7 @@ func Truncate(
 	}
 	if onLineage.Slot != target.Slot ||
 		!bytes.Equal(onLineage.Hash, target.Hash) {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: target at id=%d (slot=%d, hash=%x) does not match the "+
 				"block on the current chain at that id (slot=%d, hash=%x) "+
 				"-- target is not an ancestor of the current tip",
@@ -589,7 +564,7 @@ func Truncate(
 	}
 
 	if target.ID == tipBlock.ID {
-		return 0, nil
+		return tipBlock, 0, true, nil
 	}
 
 	// Reject, rather than silently diverge, a target immediately followed
@@ -607,14 +582,14 @@ func Truncate(
 	// block either, so there is no same-slot metadata left to diverge.
 	nextBlock, err := db.BlockAtOrAfterIndex(target.ID+1, nil)
 	if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: check for a same-slot successor block: %w",
 			ErrTruncateNotStarted,
 			err,
 		)
 	}
 	if err == nil && nextBlock.Slot == target.Slot {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: target at id=%d (slot=%d) is immediately followed by "+
 				"another block (id=%d) at the exact same slot -- truncating "+
 				"here would remove that block from the blob store while "+
@@ -633,16 +608,16 @@ func Truncate(
 	// read must fail the truncate closed rather than being silently
 	// treated as "no boundary recorded" and letting an unverifiable
 	// truncate through.
-	mithrilFloor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	mithrilFloor, err = db.MithrilTrustBoundarySlotStrict(nil)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: could not verify Mithril trust boundary: %w",
 			ErrTruncateNotStarted,
 			err,
 		)
 	}
 	if mithrilFloor > 0 && target.Slot < mithrilFloor {
-		return 0, fmt.Errorf(
+		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: target slot %d is before the Mithril trust boundary (%d); "+
 				"the local database does not have complete history before that point",
 			ErrTruncateNotStarted,
@@ -681,7 +656,7 @@ func Truncate(
 			nil,
 		)
 		if err != nil {
-			return 0, fmt.Errorf(
+			return models.Block{}, 0, false, fmt.Errorf(
 				"%w: read consumed UTxO prune floor: %w",
 				ErrTruncateNotStarted,
 				err,
@@ -690,7 +665,7 @@ func Truncate(
 		if prunedFloorRaw != "" {
 			prunedFloor, perr := strconv.ParseUint(prunedFloorRaw, 10, 64)
 			if perr != nil {
-				return 0, fmt.Errorf(
+				return models.Block{}, 0, false, fmt.Errorf(
 					"%w: parse consumed UTxO prune floor marker %q: %w",
 					ErrTruncateNotStarted,
 					prunedFloorRaw,
@@ -698,7 +673,7 @@ func Truncate(
 				)
 			}
 			if prunedFloor > 0 && target.Slot < prunedFloor {
-				return 0, fmt.Errorf(
+				return models.Block{}, 0, false, fmt.Errorf(
 					"%w: target slot %d is older than this database's "+
 						"consumed-UTxO retention floor (%d); a UTxO spent "+
 						"between the target and that floor may already "+
@@ -711,6 +686,145 @@ func Truncate(
 				)
 			}
 		}
+	}
+	return tipBlock, mithrilFloor, false, nil
+}
+
+// CheckTruncate reports whether Truncate would accept target, running its
+// refusals without changing anything. A caller truncating a second store in
+// step with the ledger runs it first, so a refusal leaves both untouched.
+func CheckTruncate(
+	ctx context.Context,
+	db *database.Database,
+	target models.Block,
+	opts ...TruncateOption,
+) error {
+	var cfg truncateConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	if err := cfg.bindDrainedFamilies(ctx, db); err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	pending, err := GetPendingTruncate(db)
+	if err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	if pending != nil {
+		return checkPendingMithrilFloor(db, *pending)
+	}
+	if _, _, noop, err := checkTruncateTarget(ctx, db, target); err != nil {
+		return err
+	} else if noop {
+		return nil
+	}
+	if err := cfg.checkUtxoSet(ctx, db, target); err != nil {
+		return fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
+	}
+	return nil
+}
+
+// Truncate reverts the database to target: target becomes the new chain
+// tip, every block with a strictly greater internal ID is removed from
+// the blob store, and every metadata row (and blob-referenced UTxO/tx
+// CBOR) added after target's slot is removed or restored to its
+// pre-target state via database.TruncateAfterSlot.
+//
+// Unlike Chain.Rollback, this does not reject a target beyond the
+// configured security parameter — that guard protects automatic rollback
+// during normal sync; an operator explicitly invoking Truncate (e.g. for
+// CIP-0135 disaster recovery from a long network partition) is the
+// informed-consent replacement for it. It still refuses to truncate to a
+// point before the Mithril trust boundary, if one is recorded: that
+// boundary reflects what UTxO history is actually available locally, not
+// a policy choice, and going below it would leave the database unable to
+// validate the first block past the (now missing) boundary.
+//
+// This is an offline operation in the sense that it performs no chain-
+// manager or in-memory ledger-state bookkeeping — it is safe to call
+// against a database not concurrently owned by a live Chain/LedgerState
+// (the offline CLI path, or the live path after quiescing the node).
+//
+// blocksRemoved is the number of blocks DeleteBlocksAfter actually found
+// and deleted in (target.ID, tipBlock.ID] — not simply tipBlock.ID -
+// target.ID, since that range is only an upper bound: a chain
+// bootstrapped/drained from a Mithril snapshot can leave gaps of
+// never-imported IDs in it (see DeleteBlocksAfter's own doc comment), and
+// subtracting index values there would wildly overcount how many blocks
+// actually existed to remove.
+//
+// DeleteBlocksAfter deletes blob-store blocks by ID range, while
+// database.TruncateAfterSlot deletes metadata by slot cutoff; these agree
+// for any normal chain (slots strictly increase with ID) except same-slot
+// blocks — notably Byron epoch boundary blocks — where a later block
+// sharing target's own slot would be removed from the blob store (ID >
+// target.ID) but retained in metadata (slot not > target.Slot),
+// diverging the two. Truncate refuses such a target outright (see the
+// same-slot check above) rather than let that divergence happen.
+//
+// With WithTruncateUtxoSet, Truncate refuses a target below the set's
+// journal floor before any mutation and rolls the set back to target as the
+// first step of the mutation, so a truncate resumed from its pending marker
+// finds the set already there.
+func Truncate(
+	ctx context.Context,
+	db *database.Database,
+	target models.Block,
+	batchSize int,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
+	opts ...TruncateOption,
+) (blocksRemoved uint64, err error) {
+	var cfg truncateConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	// Errors on the pending-marker branch, including the refusals from
+	// checkPendingMithrilFloor, are deliberately NOT wrapped in
+	// ErrTruncateNotStarted even though this call changes nothing before
+	// them: a marker records a DeleteBlocksAfter that did not finish, so the
+	// database is not safe to resume normal service on, and node startup
+	// refuses it for the same reason. Binding the drained families runs
+	// before that branch because resuming reads them, so a bind failure is
+	// unwrapped too whenever a marker exists or cannot be read.
+	if err := cfg.bindDrainedFamilies(ctx, db); err != nil {
+		if pending, pendingErr := GetPendingTruncate(db); pendingErr != nil ||
+			pending != nil {
+			return 0, fmt.Errorf("truncate: %w", err)
+		}
+		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
+	}
+	if pending, err := GetPendingTruncate(db); err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
+	} else if pending != nil {
+		if err := checkPendingMithrilFloor(db, *pending); err != nil {
+			return 0, err
+		}
+		return finishPendingTruncate(
+			ctx,
+			db,
+			*pending,
+			batchSize,
+			delegatorInactivityEnabled,
+			delegatorInactivity,
+			cfg,
+		)
+	}
+
+	tipBlock, mithrilFloor, noop, err := checkTruncateTarget(ctx, db, target)
+	if err != nil {
+		return 0, err
+	}
+	if noop {
+		return 0, nil
+	}
+
+	if err := cfg.checkUtxoSet(ctx, db, target); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
 	}
 
 	// A context already cancelled before any mutation is attempted must be
@@ -752,7 +866,44 @@ func Truncate(
 		batchSize,
 		delegatorInactivityEnabled,
 		delegatorInactivity,
+		cfg,
 	)
+}
+
+// checkPendingMithrilFloor refuses to resume a marker whose recorded floor
+// no longer matches the database. A Mithril import that ran after the marker
+// was written raises the boundary and imports outputs at that slot; resuming
+// with the older floor would delete them. The marker is left in place.
+func checkPendingMithrilFloor(
+	db *database.Database,
+	pending PendingTruncate,
+) error {
+	syncStatus, err := db.GetSyncState(syncStatusSyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("truncate: read sync status: %w", err)
+	}
+	if syncStatus == syncStatusInProgress {
+		return errors.New(
+			"truncate: a Mithril sync or snapshot restore is in progress; " +
+				"finish it before resuming the pending truncate",
+		)
+	}
+	floor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	if err != nil {
+		return fmt.Errorf(
+			"truncate: could not verify Mithril trust boundary: %w", err,
+		)
+	}
+	if floor > pending.MithrilFloor {
+		return fmt.Errorf(
+			"truncate: Mithril trust boundary %d is above the pending "+
+				"truncate's recorded boundary %d; a Mithril import ran "+
+				"after the truncate was interrupted",
+			floor,
+			pending.MithrilFloor,
+		)
+	}
+	return nil
 }
 
 func finishPendingTruncate(
@@ -762,13 +913,26 @@ func finishPendingTruncate(
 	batchSize int,
 	delegatorInactivityEnabled bool,
 	delegatorInactivity uint64,
+	cfg truncateConfig,
 ) (uint64, error) {
+	if err := cfg.rollBackUtxoSet(ctx, db, ocommon.Point{
+		Slot: pending.TargetSlot,
+		Hash: pending.TargetHash,
+	}, pending.TargetID); err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
+	}
 	// Everything above this point is read-only validation; DeleteBlocksAfter
 	// is where on-disk mutation actually begins (and, for a truncate
 	// spanning more than one delete batch, may partially commit before an
 	// error or context cancellation is noticed) — so an error from here on
 	// is deliberately NOT wrapped in ErrTruncateNotStarted, unlike the
 	// validation failures above.
+	// Promoted blocks are removed with the rest of the range, so the
+	// ImmutableDB gives them up first; DeleteBlocksAfter itself refuses to
+	// delete below the immutable tip.
+	if err := db.LowerImmutableTip(pending.TargetID); err != nil {
+		return 0, fmt.Errorf("truncate: lower immutable tip: %w", err)
+	}
 	blocksDeleted, err := DeleteBlocksAfter(
 		ctx,
 		db,
@@ -784,115 +948,13 @@ func finishPendingTruncate(
 		Slot: pending.TargetSlot,
 		Hash: pending.TargetHash,
 	}
-	// CIP-0163: collect the reward-account credentials witnessed in the
-	// truncated-away blocks (added_slot > target.Slot) before
-	// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
-	// their rows, then recompute their expiration_epoch against the
-	// surviving chain once TruncateAfterSlot has restored account state.
-	// Both must run in the same write transaction as TruncateAfterSlot --
-	// this is the exact same CIP-0163 bookkeeping
-	// ledger.LedgerState.rollback applies for a normal (security-
-	// parameter-bounded) rollback; skipping it here would leave a
-	// CIP-0163-enabled network with incorrect stake/reward/DRep
-	// calculations after any offline or live truncate, since rolled-away
-	// activity could leave expiration_epoch renewed past what the
-	// surviving chain actually witnessed.
 	txn := db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
-		var affectedRefs []models.StakeCredentialRef
-		if delegatorInactivityEnabled {
-			var affErr error
-			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
-				ctx,
-				point.Slot,
-				txn,
-			)
-			if affErr != nil {
-				return fmt.Errorf(
-					"collect truncated-away witnessed accounts: %w",
-					affErr,
-				)
-			}
-		}
-		newTip, _, err := db.TruncateAfterSlot(
-			ctx,
-			point,
-			pending.MithrilFloor,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("truncate metadata: %w", err)
-		}
-		metadataStore := db.Metadata()
-		metadataTxn := txn.Metadata()
-		if err := metadataStore.DeleteMidnightAriadneRollbacksAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
+		if err := rewindMetadata(
+			ctx, db, txn, point, pending.MithrilFloor,
+			delegatorInactivityEnabled, delegatorInactivity,
 		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight Ariadne rollback journals: %w",
-				err,
-			)
-		}
-		if err := metadataStore.DeleteMidnightCandidateRemovalsAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
-		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight candidate removal journals: %w",
-				err,
-			)
-		}
-		if err := metadataStore.DeleteMidnightEpochTransitionsAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
-		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight epoch transition journals: %w",
-				err,
-			)
-		}
-		checkpoint, err := metadataStore.GetBackfillCheckpoint(
-			"midnight",
-			metadataTxn,
-		)
-		if err != nil {
-			return fmt.Errorf("truncate: read Midnight backfill checkpoint: %w", err)
-		}
-		if checkpoint != nil && checkpoint.LastSlot > point.Slot {
-			checkpoint.LastSlot = point.Slot
-			checkpoint.TotalSlots = 0
-			checkpoint.Completed = false
-			if err := metadataStore.SetBackfillCheckpoint(
-				checkpoint,
-				metadataTxn,
-			); err != nil {
-				return fmt.Errorf("truncate: rewind Midnight backfill checkpoint: %w", err)
-			}
-		}
-		if err := database.RecomputeAccountExpirationsAfterTruncate(
-			ctx,
-			db,
-			txn,
-			delegatorInactivityEnabled,
-			delegatorInactivity,
-			point.Slot,
-			affectedRefs,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute account expirations after truncate: %w",
-				err,
-			)
-		}
-		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
-			db,
-			txn,
-			point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute synthetic PlutusV2 cost model marker after truncate: %w",
-				err,
-			)
+			return err
 		}
 		if err := db.LowerRollbackHighWater(pending.TargetID, txn); err != nil {
 			return fmt.Errorf("truncate: %w", err)
@@ -906,4 +968,317 @@ func finishPendingTruncate(
 		return 0, fmt.Errorf("truncate: %w", err)
 	}
 	return blocksDeleted, nil
+}
+
+// rewindMetadata reverts the metadata store to point inside txn: the sweep an
+// operator truncate and the rewind of a released database share.
+//
+// CIP-0163: it collects the reward-account credentials witnessed in the
+// truncated-away blocks (added_slot > target.Slot) before
+// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
+// their rows, then recompute their expiration_epoch against the
+// surviving chain once TruncateAfterSlot has restored account state.
+// Both must run in the same write transaction as TruncateAfterSlot --
+// this is the exact same CIP-0163 bookkeeping
+// ledger.LedgerState.rollback applies for a normal (security-
+// parameter-bounded) rollback; skipping it here would leave a
+// CIP-0163-enabled network with incorrect stake/reward/DRep
+// calculations after any offline or live truncate, since rolled-away
+// activity could leave expiration_epoch renewed past what the
+// surviving chain actually witnessed.
+func rewindMetadata(
+	ctx context.Context,
+	db *database.Database,
+	txn *database.Txn,
+	point ocommon.Point,
+	mithrilFloor uint64,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
+) error {
+	var affectedRefs []models.StakeCredentialRef
+	if delegatorInactivityEnabled {
+		var affErr error
+		affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		)
+		if affErr != nil {
+			return fmt.Errorf(
+				"collect truncated-away witnessed accounts: %w",
+				affErr,
+			)
+		}
+	}
+	newTip, _, err := db.TruncateAfterSlot(
+		ctx,
+		point,
+		mithrilFloor,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("truncate metadata: %w", err)
+	}
+	metadataStore := db.Metadata()
+	metadataTxn := txn.Metadata()
+	if err := metadataStore.DeleteMidnightAriadneRollbacksAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight Ariadne rollback journals: %w",
+			err,
+		)
+	}
+	if err := metadataStore.DeleteMidnightCandidateRemovalsAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight candidate removal journals: %w",
+			err,
+		)
+	}
+	if err := metadataStore.DeleteMidnightEpochTransitionsAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight epoch transition journals: %w",
+			err,
+		)
+	}
+	checkpoint, err := metadataStore.GetBackfillCheckpoint(
+		"midnight",
+		metadataTxn,
+	)
+	if err != nil {
+		return fmt.Errorf("truncate: read Midnight backfill checkpoint: %w", err)
+	}
+	if checkpoint != nil && checkpoint.LastSlot > point.Slot {
+		checkpoint.LastSlot = point.Slot
+		checkpoint.TotalSlots = 0
+		checkpoint.Completed = false
+		if err := metadataStore.SetBackfillCheckpoint(
+			checkpoint,
+			metadataTxn,
+		); err != nil {
+			return fmt.Errorf("truncate: rewind Midnight backfill checkpoint: %w", err)
+		}
+	}
+	if err := database.RecomputeAccountExpirationsAfterTruncate(
+		ctx,
+		db,
+		txn,
+		delegatorInactivityEnabled,
+		delegatorInactivity,
+		point.Slot,
+		affectedRefs,
+	); err != nil {
+		return fmt.Errorf(
+			"recompute account expirations after truncate: %w",
+			err,
+		)
+	}
+	if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+		db,
+		txn,
+		point.Slot,
+	); err != nil {
+		return fmt.Errorf(
+			"recompute synthetic PlutusV2 cost model marker after truncate: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+// TruncateUtxoSet is a live UTxO set that Truncate keeps in step with the
+// database it truncates.
+type TruncateUtxoSet interface {
+	// Tip returns the point the set last recorded; ok is false for a set
+	// that has recorded none.
+	Tip() (point ocommon.Point, ok bool, err error)
+	// JournalFloor returns the oldest point the set can roll back to.
+	JournalFloor() (point ocommon.Point, ok bool, err error)
+	// CanRollbackTo reports whether the set can be rolled back to exactly
+	// point.
+	CanRollbackTo(point ocommon.Point) (bool, error)
+	// RollbackTo rolls the set back to point from its journal.
+	RollbackTo(point ocommon.Point) error
+}
+
+// TruncateCheckpoints is a live UTxO set that keeps checkpoints of itself.
+// Truncate uses them for a target below the set's journal: the set is left as
+// it is, and the next start restores the newest checkpoint at or below the
+// ledger's tip and has the ledger replay its stored blocks from there.
+type TruncateCheckpoints interface {
+	// CheckpointPoints lists the tips of the set's checkpoints, newest
+	// first.
+	CheckpointPoints() ([]ocommon.Point, error)
+}
+
+// TruncateOption configures Truncate.
+type TruncateOption func(*truncateConfig)
+
+type truncateConfig struct {
+	utxoSet TruncateUtxoSet
+}
+
+// WithTruncateUtxoSet makes Truncate roll set back with the database. The
+// set must not be written to while Truncate runs.
+func WithTruncateUtxoSet(set TruncateUtxoSet) TruncateOption {
+	return func(cfg *truncateConfig) { cfg.utxoSet = set }
+}
+
+// restorableCheckpoint reports whether a checkpoint of the set at or below
+// target lies on the chain target ends, and returns the slot of every
+// checkpoint whose block the chain stores, newest first. A checkpoint of
+// another fork cannot seed a replay of this chain.
+func (c truncateConfig) restorableCheckpoint(
+	ctx context.Context,
+	db *database.Database,
+	target ocommon.Point,
+	targetID uint64,
+) (ok bool, slots []uint64, err error) {
+	cps, isCheckpointed := c.utxoSet.(TruncateCheckpoints)
+	if !isCheckpointed {
+		return false, nil, nil
+	}
+	points, err := cps.CheckpointPoints()
+	if err != nil {
+		return false, nil, fmt.Errorf(
+			"list live UTxO set checkpoints: %w", err,
+		)
+	}
+	for _, p := range points {
+		block, err := database.BlockByHash(ctx, db, p.Hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return false, nil, fmt.Errorf(
+				"look up checkpoint block: %w", err,
+			)
+		}
+		if block.Slot != p.Slot {
+			continue
+		}
+		slots = append(slots, p.Slot)
+		if !ok && block.ID <= targetID && p.Slot <= target.Slot {
+			ok = true
+		}
+	}
+	return ok, slots, nil
+}
+
+// checkUtxoSet refuses a target the set cannot be brought to. A set at or
+// behind target needs no rollback: startup resumes it from its own tip. A set
+// ahead of target rolls back from its journal, or, below the journal, is
+// restored from a checkpoint at or below target.
+func (c truncateConfig) checkUtxoSet(
+	ctx context.Context,
+	db *database.Database,
+	target models.Block,
+) error {
+	if c.utxoSet == nil {
+		return nil
+	}
+	tip, ok, err := c.utxoSet.Tip()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set tip: %w", err)
+	}
+	if !ok || tip.Slot <= target.Slot {
+		return nil
+	}
+	can, err := c.utxoSet.CanRollbackTo(ocommon.Point{
+		Slot: target.Slot,
+		Hash: target.Hash,
+	})
+	if err != nil {
+		return fmt.Errorf("check live UTxO set journal: %w", err)
+	}
+	if can {
+		return nil
+	}
+	restorable, slots, err := c.restorableCheckpoint(
+		ctx, db, ocommon.Point{Slot: target.Slot, Hash: target.Hash}, target.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if restorable {
+		return nil
+	}
+	floor, _, err := c.utxoSet.JournalFloor()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set journal floor: %w", err)
+	}
+	// A target between the journal floor and the tip that the journal
+	// cannot reach is a point off the set's chain, not a depth problem.
+	if target.Slot >= floor.Slot {
+		return fmt.Errorf(
+			"target slot %d is not a point the live UTxO set's journal "+
+				"holds (journal floor slot %d, set tip slot %d)",
+			target.Slot, floor.Slot, tip.Slot,
+		)
+	}
+	earliest := floor.Slot
+	for _, s := range slots {
+		earliest = min(earliest, s)
+	}
+	return fmt.Errorf(
+		"target slot %d is below the live UTxO set's journal floor (slot %d, "+
+			"set tip slot %d) and no checkpoint of this chain is at or below "+
+			"it; the earliest reachable slot is %d",
+		target.Slot, floor.Slot, tip.Slot, earliest,
+	)
+}
+
+// rollBackUtxoSet rolls the set back to point from its journal when it is
+// ahead of it. A point below the journal that a checkpoint covers is left to
+// the next start, which restores that checkpoint: the truncate's own reads of
+// the set (nonces and epochs by slot) are answered by the set as it is, and a
+// restore here would remove the state those reads need.
+func (c truncateConfig) rollBackUtxoSet(
+	ctx context.Context,
+	db *database.Database,
+	point ocommon.Point,
+	targetID uint64,
+) error {
+	if c.utxoSet == nil {
+		return nil
+	}
+	tip, ok, err := c.utxoSet.Tip()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set tip: %w", err)
+	}
+	if !ok || tip.Slot <= point.Slot {
+		return nil
+	}
+	can, err := c.utxoSet.CanRollbackTo(point)
+	if err != nil {
+		return fmt.Errorf("check live UTxO set journal: %w", err)
+	}
+	if !can {
+		restorable, _, err := c.restorableCheckpoint(
+			ctx, db, point, targetID,
+		)
+		if err != nil {
+			return err
+		}
+		if restorable {
+			return nil
+		}
+		return fmt.Errorf(
+			"live UTxO set at slot %d cannot be rolled back to slot %d; "+
+				"its journal does not hold that point and no checkpoint "+
+				"is at or below it",
+			tip.Slot, point.Slot,
+		)
+	}
+	if err := c.utxoSet.RollbackTo(point); err != nil {
+		return fmt.Errorf("roll back live UTxO set: %w", err)
+	}
+	return nil
 }

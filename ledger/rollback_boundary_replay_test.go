@@ -27,6 +27,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -36,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -100,6 +103,11 @@ type boundaryReplayHarness struct {
 	poolHash  []byte
 	snapCalls int
 	next      models.Epoch
+	// mgr is the snapshot manager wired to the ledger's hooks.
+	mgr *snapshot.Manager
+	// blind wraps the metadata store under the ledger's LedgerDB when the
+	// set keeps epoch state.
+	blind *blindStore
 }
 
 func newBoundaryReplayHarness(t *testing.T) *boundaryReplayHarness {
@@ -112,10 +120,47 @@ func newBoundaryReplayHarnessWithDB(
 	db *database.Database,
 ) *boundaryReplayHarness {
 	t.Helper()
+	return newBoundaryReplayHarnessWithSet(t, db, nil)
+}
+
+// newBoundaryReplayHarnessWithSet is newBoundaryReplayHarnessWithDB with set
+// attached before the snapshot manager is wired, so the manager writes
+// through the ledger's LedgerDB to it.
+func newBoundaryReplayHarnessWithSet(
+	t *testing.T,
+	db *database.Database,
+	set UtxoSetWriter,
+) *boundaryReplayHarness {
+	t.Helper()
 
 	fixture := newChainsyncRollbackFixtureWithDB(t, db)
 	ls := fixture.ls
+	if set != nil {
+		// The set rolls back from its own journal, which reaches no further
+		// than the tip it held when its families were loaded, so it starts
+		// at the point the harness rolls back to.
+		require.NoError(t, set.ApplyUtxoChanges(&fixture.ancestorTip.Point, nil))
+		ls.config.UtxoSet = set
+	} else {
+		// A set that journals what it applies, so a rollback restores the
+		// outputs the harness adds.
+		ls.config.UtxoSet = NewMemLiveSetForTest()
+	}
 	h := &boundaryReplayHarness{t: t, fixture: fixture, ls: ls}
+	ls.installNonceSource()
+	ls.installEpochSource()
+	ls.installPoolSource()
+	if ls.keepsEpochState() {
+		// Every component that reads through the ledger's LedgerDB, the
+		// snapshot manager included, gets this one, so a test can later hide
+		// the metadata store's reads from all of them.
+		h.blind = &blindStore{
+			LedgerDB: dbadapter.New(ls.db),
+			denied:   map[string]bool{},
+		}
+		h.blind.off.Store(true)
+		ls.ldb = stagingLedgerDB{LedgerDB: h.blind, ls: ls}
+	}
 	ls.config.CardanoNodeConfig.ShelleyGenesisHash = "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
 
 	for epochID := uint64(0); epochID <= replayBoundaryEndedEra; epochID++ {
@@ -186,16 +231,16 @@ func newBoundaryReplayHarnessWithDB(
 		h.addUtxo(byte(0x10+i), key, 20_000_000, 0)
 	}
 
-	mgr := snapshot.NewManager(ls.db, nil, nil)
+	mgr := snapshot.NewManager(ls.LedgerDB(), nil, nil)
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return mgr.ComputeEpochBoundarySnapshot(
 				context.Background(), txn, evt,
 			)
 		},
 	)
 	ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			h.snapCalls++
 			return mgr.CaptureEpochBoundarySnapshot(
 				context.Background(), txn, evt,
@@ -204,7 +249,7 @@ func newBoundaryReplayHarnessWithDB(
 	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -214,6 +259,7 @@ func newBoundaryReplayHarnessWithDB(
 		},
 	)
 	epochBoundaryBenchWireDeferred(ls, mgr)
+	h.mgr = mgr
 
 	h.next = models.Epoch{
 		EpochId:       replayBoundaryNewEpoch,
@@ -225,6 +271,9 @@ func newBoundaryReplayHarnessWithDB(
 	return h
 }
 
+// addUtxo puts a live output of amount, staked to stakingKey and created at
+// slot, into the harness's in-memory live UTxO set. A scenario that attaches
+// a production set adds its stake itself.
 func (h *boundaryReplayHarness) addUtxo(
 	id byte,
 	stakingKey []byte,
@@ -232,14 +281,28 @@ func (h *boundaryReplayHarness) addUtxo(
 	slot uint64,
 ) {
 	h.t.Helper()
-	require.NoError(h.t, h.ls.db.CreateUtxo(
-		context.Background(), nil, &models.Utxo{
-			TxId:       bytes.Repeat([]byte{id}, 32),
-			OutputIdx:  0,
-			StakingKey: stakingKey,
-			Amount:     types.Uint64(amount),
-			AddedSlot:  slot,
-		},
+	if h.ls.keepsEpochState() {
+		return
+	}
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize), stakingKey,
+	)
+	require.NoError(h.t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr, OutputAmount: amount,
+	})
+	require.NoError(h.t, err)
+	require.NoError(h.t, h.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
+		Point: ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{id}, 32)},
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{id}, 32)},
+			Cbor: encoded,
+		}},
+	}}))
+	require.NoError(h.t, h.ls.db.RefreshRewardLiveStakeRefs(
+		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, stakingKey)},
+		slot, nil,
 	))
 }
 
@@ -247,9 +310,29 @@ func (h *boundaryReplayHarness) addUtxo(
 // it hands the rollover the ledger's own epoch label, commits, and then
 // publishes the result into the in-memory state.
 func (h *boundaryReplayHarness) applyBoundary() boundaryReplayEffects {
+	h.applyBoundaryQuiet()
+	return h.readEffects()
+}
+
+// applyBoundaryQuiet applies the rollover and publishes its result without
+// reading the metadata store back.
+func (h *boundaryReplayHarness) applyBoundaryQuiet() {
 	h.t.Helper()
 	ls := h.ls
 	h.snapCalls = 0
+	if !ls.keepsEpochState() {
+		// Without a production set the store answers the boundary's stake
+		// reads from the live outputs, which are the set at the snapshot
+		// slot only while the stored tip is not past it. A boundary applies
+		// before the first block of its epoch, so the stored tip steps back
+		// to the fixture's last block below the boundary for the rollover.
+		stored, err := ls.db.GetTip(nil)
+		require.NoError(h.t, err)
+		if stored.Point.Slot >= h.next.StartSlot {
+			require.NoError(h.t, ls.db.SetTip(h.fixture.ancestorTip, nil))
+			defer func() { require.NoError(h.t, ls.db.SetTip(stored, nil)) }()
+		}
+	}
 	var result *EpochRolloverResult
 	txn := ls.db.Transaction(context.Background(), true)
 	require.NoError(h.t, txn.Do(func(txn *database.Txn) error {
@@ -278,7 +361,6 @@ func (h *boundaryReplayHarness) applyBoundary() boundaryReplayEffects {
 	ls.ledgerEpoch = result.newLedgerEpoch
 	ls.checkpointWrittenForEpoch = result.CheckpointWrittenForEpoch
 	ls.Unlock()
-	return h.readEffects()
 }
 
 func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
@@ -342,6 +424,19 @@ func (h *boundaryReplayHarness) rollbackBeforeBoundary() {
 // tip already sits at the target, where only a repairing rollback truncates.
 func (h *boundaryReplayHarness) rollbackBeforeBoundaryRepairing(repair bool) {
 	h.t.Helper()
+	// A scenario that writes below the rollback target leaves a production
+	// set's tip there; the set rolls back along its own journal, so it is
+	// brought up to the target, which the ledger is already past.
+	if tipper, ok := h.ls.config.UtxoSet.(interface {
+		Tip() (ocommon.Point, bool, error)
+	}); ok {
+		target := h.fixture.ancestorTip.Point
+		tip, _, err := tipper.Tip()
+		require.NoError(h.t, err)
+		if tip.Slot < target.Slot {
+			require.NoError(h.t, h.ls.config.UtxoSet.ApplyUtxoChanges(&target, nil))
+		}
+	}
 	require.NoError(h.t, h.ls.rollbackWithBlocksAndIntent(
 		context.Background(),
 		h.fixture.ancestorTip.Point,
@@ -571,8 +666,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 	}
 	h.applyBoundary()
 
-	meta := h.ls.db.Metadata()
-	pending, err := loadRewardStakeInputsPending(meta, nil)
+	pending, err := loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the boundary must leave its snapshot's basis pending")
@@ -580,7 +674,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 
 	h.rollbackBeforeBoundary()
 
-	pending, err = loadRewardStakeInputsPending(meta, nil)
+	pending, err = loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending.Entries,
 		"the rollback deleted the snapshot the entry describes")

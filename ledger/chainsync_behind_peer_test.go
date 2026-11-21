@@ -101,6 +101,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

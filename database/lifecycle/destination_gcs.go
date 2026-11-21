@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -209,26 +210,28 @@ func (d *gcsDestination) uploadAuthenticatedSnapshot(
 		return snapshotUploadResult{}, err
 	}
 	defer finishSnapshotUpload(files, root, &result, &retErr)
-	for _, file := range files {
-		key := d.objectKey(file.name)
-		w := d.bucket.Object(key).NewWriter(ctx)
-		_, copyErr := io.Copy(w, file.file)
-		closeWErr := w.Close()
-		if copyErr != nil {
-			return snapshotUploadResult{}, fmt.Errorf(
-				"upload snapshot file %q to gcs object %q: %w",
-				file.name,
-				key,
-				copyErr,
-			)
-		}
-		if closeWErr != nil {
-			return snapshotUploadResult{}, fmt.Errorf(
-				"close gcs object %q after upload: %w",
-				key,
-				closeWErr,
-			)
-		}
+	if err := forEachSnapshotUploadFile(
+		ctx, root, files, snapshotUploadWorkers,
+		func(ctx context.Context, file snapshotUploadFile, f *os.File) error {
+			key := d.objectKey(file.name)
+			w := d.bucket.Object(key).NewWriter(ctx)
+			_, copyErr := io.Copy(w, f)
+			closeWErr := w.Close()
+			if copyErr != nil {
+				return fmt.Errorf(
+					"upload snapshot file %q to gcs object %q: %w",
+					file.name, key, copyErr,
+				)
+			}
+			if closeWErr != nil {
+				return fmt.Errorf(
+					"close gcs object %q after upload: %w", key, closeWErr,
+				)
+			}
+			return nil
+		},
+	); err != nil {
+		return snapshotUploadResult{}, err
 	}
 	key := d.objectKey(cloudMirrorMarkerName)
 	if err := d.bucket.Object(key).Delete(ctx); err != nil &&

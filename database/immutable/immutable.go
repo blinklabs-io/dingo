@@ -132,6 +132,12 @@ type Block struct {
 	Type  uint
 	Slot  uint64
 	IsEbb bool
+	// Offset and Size locate the block's wrapped bytes, [type, Cbor], in its
+	// chunk file, and CRC is their CRC-32 (IEEE). Set when read from a chunk
+	// file; a ImmutableDB marker records exactly these.
+	Offset uint64
+	Size   uint32
+	CRC    uint32
 }
 
 // New returns a new ImmutableDb using the specified data directory or an error
@@ -376,6 +382,45 @@ func (i *ImmutableDb) measureVerifiedEntry(
 		)
 	}
 	return size, nil
+}
+
+// VerifyChunkFiles hashes chunk num's chunk, primary and secondary files
+// against their certified digests in constant memory. It establishes only
+// that the files matched when read: a reader that parses them still goes
+// through the verified open, which serves the bytes it checked.
+func (i *ImmutableDb) VerifyChunkFiles(num uint64) error {
+	if i.digests == nil {
+		return errors.New(
+			"immutable DB: chunk verification requires a digest map",
+		)
+	}
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		name := ChunkName(num) + ext
+		expected, ok := i.digests[name]
+		if !ok {
+			return fmt.Errorf(
+				"%w: %s is not certified", ErrDigestMismatch, name,
+			)
+		}
+		var (
+			f   *os.File
+			err error
+		)
+		if i.root != nil {
+			f, err = i.root.Open(name)
+		} else {
+			f, err = os.Open(i.entryPath(name))
+		}
+		if err != nil {
+			return err
+		}
+		_, err = i.measureVerifiedEntry(f, name, expected)
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeEntry removes a file directly beneath the data directory.

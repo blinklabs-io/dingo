@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -171,12 +172,13 @@ func TestConvertBlockGenesisParent(t *testing.T) {
 
 	hash := testHash(0x34)
 
-	block := convertBlock(
+	block, err := convertBlock(
 		models.Block{Hash: hash, Number: 0, Slot: 0},
 		nil,
 		lcommon.AddressNetworkTestnet,
 		0,
 	)
+	require.NoError(t, err)
 
 	require.Equal(
 		t,
@@ -196,7 +198,7 @@ func TestConvertBlockParent(t *testing.T) {
 	hash := testHash(0x35)
 	prev := testHash(0x36)
 
-	block := convertBlock(
+	block, err := convertBlock(
 		models.Block{
 			Hash: hash, PrevHash: prev, Number: 10, Slot: 20,
 		},
@@ -204,6 +206,7 @@ func TestConvertBlockParent(t *testing.T) {
 		lcommon.AddressNetworkTestnet,
 		20000,
 	)
+	require.NoError(t, err)
 
 	require.Equal(
 		t,
@@ -211,6 +214,17 @@ func TestConvertBlockParent(t *testing.T) {
 		block.ParentBlockIdentifier,
 	)
 	require.Equal(t, int64(20000), block.Timestamp)
+}
+
+func TestConvertBlockRejectsAnIndexOutsideTheMeshRange(t *testing.T) {
+	t.Parallel()
+	_, err := convertBlock(
+		models.Block{Number: uint64(math.MaxInt64) + 1},
+		nil,
+		lcommon.AddressNetworkTestnet,
+		0,
+	)
+	require.ErrorContains(t, err, "exceeds the Mesh index range")
 }
 
 // TestConvertTransactionInvalidStatus covers phase-2 failures: every

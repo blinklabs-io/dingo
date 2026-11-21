@@ -99,7 +99,7 @@ func BenchmarkLeiosCommitteeCrypto(b *testing.B) {
 			resetVerifiedLeiosKeys()
 			errs := make([]error, seats)
 			parallelFor(seats, func(i int) {
-				_, errs[i] = verifiedLeiosKey(keys[i])
+				_, errs[i] = verifiedLeiosKey(keys[i], lcommon.DijkstraBlsProofDomainPop)
 			})
 			for _, err := range errs {
 				if err != nil {

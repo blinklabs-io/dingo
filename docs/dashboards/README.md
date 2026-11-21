@@ -201,6 +201,11 @@ until activated:
 | `dingo_forge_slots_per_kes_period` | Block producer credentials are loaded |
 | `dingo_forge_credentials_valid` | Block producer credentials are loaded; 0 when they could not sign at the current slot |
 | `dingo_forge_missed_leader_slots_total` | Forging is enabled; increments for each slot confirmed by leader selection without an adopted block of the node's own; excludes KES and tip safety refusals before leader selection |
+| `dingo_leader_scheduled_slots_elapsed_total` | Forging is enabled; increments for each scheduled leader slot the slot clock reaches, whether or not a block was forged (including slots skipped while syncing or at a stale tip). Slots before startup are not counted |
+| `dingo_leader_schedule_epoch`, `dingo_leader_schedule_leader_slots` | Forging is enabled; the current epoch and its scheduled leader slots, set when a schedule is computed or loaded from the store. 0 until the first schedule is known; they hold the previous epoch's values until the current epoch's schedule is cached |
+| `dingo_leader_next_slot` | Forging is enabled; absolute slot of the next scheduled leader slot, 0 when the cached schedules hold none |
+| `dingo_forge_slot_battle_outcomes_total` | Forging is enabled; `result="won"` or `"lost"` when a slot battle settles, a security parameter of blocks after it was detected, for the pool that forged the block |
+| `dingo_forge_remote_kes_signer_not_ready_total` | Forging is enabled; increments when the remote KES signer cannot be prepared ahead of a scheduled leader slot |
 | `dingo_database_size_bytes` | Database stores are initialized |
 | `database_blob_*` | Badger blob store is active |
 | `dingo_metrics_leios_*` other than `dingo_metrics_leios_eb_wait_*` | Leios is active: the network is Musashi, `runMode` is `leios`, or the node starts in the Dijkstra era. The `eb_wait` series exist on every node and stay at zero without Leios |

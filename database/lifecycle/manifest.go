@@ -49,7 +49,21 @@ import (
 //
 // Version 2 added the signed snapshot ID. A version 1 manifest carries no ID,
 // so a keyed verification rejects it; see ErrManifestLegacyFormat.
+//
+// Version 3 (ManifestFormatVersionImmutable) added the immutable index payload
+// and is written only for a snapshot that carries ImmutableDB chunk files, so
+// every other snapshot stays readable by builds that predate it. Restore
+// accepts both.
 const ManifestFormatVersion = 2
+
+// ManifestFormatVersionImmutable is the format version of a snapshot whose
+// manifest declares an immutable index, and the newest version this build
+// reads.
+const ManifestFormatVersionImmutable = 3
+
+// ManifestFormatVersionIndexer authenticates a provider-native IndexerDB
+// backup as part of the same snapshot as the ledger stores.
+const ManifestFormatVersionIndexer = 4
 
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
@@ -84,6 +98,32 @@ type manifestConfig struct {
 	// catalogReconcile restores provider-backed rows after a damaged local
 	// catalog has been rebuilt.
 	catalogReconcile func(context.Context, string) error
+	// utxoSet is consumed only by Snapshot.
+	utxoSet       UtxoSetBackuper
+	indexerBackup *indexerBackupSource
+}
+
+// UtxoSetBackuper is a live UTxO set that can stream a consistent copy of
+// itself.
+type UtxoSetBackuper interface {
+	Backup(ctx context.Context, w io.Writer) error
+}
+
+// WithUtxoSetBackup makes Snapshot include a copy of the live UTxO set. The
+// copy is taken under the same commit pause as the blob and metadata
+// backups.
+func WithUtxoSetBackup(set UtxoSetBackuper) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.utxoSet = set }
+}
+
+func snapshotUtxoSet(opts []ManifestOption) UtxoSetBackuper {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.utxoSet
 }
 
 func withSnapshotCatalogReconcile(
@@ -302,6 +342,11 @@ const (
 // data. It is written as JSON (not CBOR) since it is operator/tooling
 // facing metadata, not chain data.
 type Manifest struct {
+	IndexerBytes   int64  `json:"indexerBytes,omitempty"`
+	IndexerSHA256  string `json:"indexerSha256,omitempty"`
+	IndexerTipSlot uint64 `json:"indexerTipSlot,omitempty"`
+	IndexerTipHash string `json:"indexerTipHash,omitempty"`
+
 	FormatVersion int `json:"formatVersion"`
 
 	// ID is the snapshot ID, the base name of the snapshot directory or cloud
@@ -384,6 +429,28 @@ type Manifest struct {
 	// they existed.
 	BlobSHA256     string `json:"blobSha256,omitempty"`
 	MetadataSHA256 string `json:"metadataSha256,omitempty"`
+
+	// UtxoSetBytes/UtxoSetSHA256 describe the live UTxO set's backup file
+	// (UtxoSetBackupFileName), present only in a snapshot of a node that
+	// keeps the set. A manifest declaring it makes a restore load the set
+	// beside the restored database; one without it leaves the restored data
+	// directory without a set.
+	UtxoSetBytes  int64  `json:"utxoSetBytes,omitempty"`
+	UtxoSetSHA256 string `json:"utxoSetSha256,omitempty"`
+
+	// ImmutableIndexBytes/ImmutableIndexSHA256 declare the immutable index
+	// file (ImmutableIndexFileName), present when the snapshot carries
+	// ImmutableDB chunk files. The index in turn declares each chunk file's
+	// size and digest, which would not fit in the manifest.
+	ImmutableIndexBytes  int64  `json:"immutableIndexBytes,omitempty"`
+	ImmutableIndexSHA256 string `json:"immutableIndexSha256,omitempty"`
+
+	// LeiosBytes/LeiosSHA256 describe the LeiosDB backup file
+	// (LeiosBackupFileName), which holds the certified closures that offsets
+	// into endorser-block transactions resolve through. Both are empty for a
+	// snapshot of a node that has no LeiosDB, which then carries no such file.
+	LeiosBytes  int64  `json:"leiosBytes,omitempty"`
+	LeiosSHA256 string `json:"leiosSha256,omitempty"`
 
 	// Authentication is the hex HMAC-SHA256, under the operator trust key
 	// (WithManifestKey), of the manifest's JSON encoding with Checksum and
@@ -570,6 +637,9 @@ func (m Manifest) CheckCompatibility(
 	blobPlugin, metadataPlugin, storageMode, network string,
 	gates nodesettings.Values,
 ) error {
+	if gates["indexer_layout"] == "split" && m.StorageMode == "core" && m.IndexerSHA256 == "" {
+		return errors.New("snapshot has no IndexerDB payload for the split layout")
+	}
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err
 	}
@@ -589,6 +659,17 @@ func (m Manifest) CheckCompatibility(
 	}
 	if err := m.CheckGateMatch(gates); err != nil {
 		return err
+	}
+	// History expiry tombstones block bodies in the blob store, which chunk
+	// files cannot hold, so a node that expires history refuses to start on
+	// a database with an ImmutableDB. Refuse the restore before it replaces
+	// the running database with one.
+	if m.ImmutableIndexBytes > 0 &&
+		strings.HasPrefix(gates["history_expiry_active"], nodesettings.LatchOn) {
+		return errors.New(
+			"snapshot keeps block bodies in ImmutableDB chunk files, which " +
+				"history expiry cannot use: restore it with historyExpiry off",
+		)
 	}
 	return nil
 }
@@ -662,6 +743,12 @@ func prepareManifest(
 		return Manifest{}, nil, err
 	}
 	m.FormatVersion = ManifestFormatVersion
+	if m.ImmutableIndexSHA256 != "" {
+		m.FormatVersion = ManifestFormatVersionImmutable
+	}
+	if m.IndexerSHA256 != "" {
+		m.FormatVersion = ManifestFormatVersionIndexer
+	}
 	m.ID = snapshotIDForDir(dir)
 	m.Authentication = ""
 	if key := manifestKey(opts); len(key) > 0 {
@@ -815,12 +902,15 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parse manifest: %w", err)
 	}
-	if m.FormatVersion > ManifestFormatVersion {
+	if m.FormatVersion > ManifestFormatVersionIndexer {
 		return Manifest{}, fmt.Errorf(
 			"manifest has format version %d, newest supported is %d",
 			m.FormatVersion,
-			ManifestFormatVersion,
+			ManifestFormatVersionIndexer,
 		)
+	}
+	if err := m.validateIndexerPayload(); err != nil {
+		return Manifest{}, err
 	}
 	wantSum := m.Checksum
 	gotSum, err := m.checksum()

@@ -44,6 +44,7 @@ const watchShutdownTimeout = 30 * time.Second
 // the same instance can bring another one up on the same address -- which is
 // exactly what a capability restart does.
 type Listener struct {
+	listen func(string, string) (net.Listener, error)
 	// name identifies the server in errors and logs, e.g. "Mesh API". It is
 	// the subject of every message, so it reads as a noun phrase that "server"
 	// can follow.
@@ -79,10 +80,24 @@ type Listener struct {
 // New returns a Listener that names itself name in errors and logs. A nil
 // logger discards.
 func New(name string, logger *slog.Logger) *Listener {
+	return NewWithListenerFactory(name, logger, nil)
+}
+
+// NewWithListenerFactory uses listen to acquire each socket. Nil uses net.Listen.
+// A successful factory call transfers socket ownership to the listener, which
+// closes it on shutdown or if startup loses a race with shutdown.
+func NewWithListenerFactory(
+	name string,
+	logger *slog.Logger,
+	listen func(string, string) (net.Listener, error),
+) *Listener {
+	if listen == nil {
+		listen = net.Listen
+	}
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	return &Listener{name: name, logger: logger}
+	return &Listener{name: name, logger: logger, listen: listen}
 }
 
 // BeginStart marks a start as in flight and returns the channel the caller
@@ -509,7 +524,7 @@ func (l *Listener) Bind(
 			)
 		}
 	}
-	ln, err := net.Listen("tcp", srv.Addr)
+	ln, err := l.listen("tcp", srv.Addr)
 	if err != nil {
 		return false, fmt.Errorf(
 			"failed to listen for %s server: %w", l.name, err,

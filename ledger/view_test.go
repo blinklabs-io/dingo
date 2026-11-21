@@ -29,9 +29,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -1233,7 +1236,7 @@ func enactTestUpdateCommittee(
 		db.SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 	_, err = governance.EnactProposal(context.Background(), &governance.EnactmentContext{
-		DB:      db,
+		DB:      dbadapter.New(db),
 		Epoch:   0,
 		Slot:    slot,
 		PParams: pparams,
@@ -2269,6 +2272,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      NewMemLiveSetForTest(),
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2293,13 +2297,9 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       bytes.Repeat([]byte{0x44}, 32),
-		OutputIdx:  0,
-		StakingKey: drepStakeCred,
-		AddedSlot:  1,
-		Amount:     100,
-	}))
+	seedTestStakedOutput(
+		t, ls, bytes.Repeat([]byte{0x44}, 32), 0, drepStakeCred, 100,
+	)
 
 	require.NoError(
 		t,
@@ -3166,6 +3166,16 @@ func (s *errInjectingMetadataStore) GetPool(
 	return s.MetadataStore.GetPool(pkh, includeInactive, txn)
 }
 
+func (s *errInjectingMetadataStore) GetPoolStatus(
+	pkh lcommon.PoolKeyHash,
+	txn types.Txn,
+) (models.PoolStatus, error) {
+	if s.getPoolErr != nil {
+		return models.PoolStatus{}, s.getPoolErr
+	}
+	return s.MetadataStore.GetPoolStatus(pkh, txn)
+}
+
 func (s *errInjectingMetadataStore) GetAccountByCredential(
 	credentialTag uint8,
 	stakeKey []byte,
@@ -3678,6 +3688,9 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 		return err
 	}, nil)
 
+	set := newQuerySetHistory()
+	set.readErr = database.ErrUtxoCborUnavailable
+	ls.config.UtxoSet = set
 	err := ls.WithTxValidationSession(t.Context(), func(
 		validate func(
 			lcommon.Transaction,
@@ -4200,8 +4213,8 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 	require.NoError(t, err)
 	nonce := make([]byte, 32)
 	const treasury = uint64(87_920_693_660_807)
-	require.NoError(t, ledgerstate.ImportLedgerState(
-		context.Background(),
+	require.NoError(t, importLedgerStateForTest(
+		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
 			Logger: slog.New(
@@ -4302,7 +4315,7 @@ func runProposalSetBoundary(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -6039,7 +6052,7 @@ INSERT INTO auth_committee_hot (
 			require.NotNil(t, enacted.EnactedSlot)
 
 			state, err := governance.LoadCommitteeVotingState(context.Background(),
-				f.db, nil, result.NewCurrentEpoch.EpochId,
+				dbadapter.New(f.db), nil, result.NewCurrentEpoch.EpochId,
 			)
 			require.NoError(t, err)
 			wantActive := 1
@@ -7918,7 +7931,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			if _, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    endedEpoch,
 				NewEpoch:     endedEpoch + 1,
@@ -8742,13 +8755,13 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 			seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, params)
 			var observed []uint64
 			f.ls.SetEpochBoundarySnapshotStakeHook(
-				func(txn *database.Txn, _ event.EpochTransitionEvent) error {
+				func(txn ledgerdb.Txn, _ event.EpochTransitionEvent) error {
 					account, err := f.db.GetAccountByCredential(
 						t.Context(),
 						0,
 						credential,
 						false,
-						txn,
+						dbadapter.Unwrap(txn),
 					)
 					if err != nil {
 						return err

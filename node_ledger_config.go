@@ -71,6 +71,16 @@ func (n *Node) chainsyncSyncTarget(
 // n.chainSelector are all replaced by a live rebuild -- a method value
 // would pin the rebuilt ledger to the outgoing instance.
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
+	cfg := n.ledgerStateConfigBase()
+	// Assigned only when open: a nil *utxoset.Set in the interface field
+	// would read as configured, where NewLedgerState refuses a nil one.
+	if n.utxoSet != nil {
+		cfg.UtxoSet = n.utxoSet
+	}
+	return cfg
+}
+
+func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
 		Consensus:      n.selectedConsensusProvider(),
@@ -96,6 +106,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		WarmGenesisStake:   n.config.leiosRuntimeEnabled(),
+		LeiosStorage:       n.config.leiosRuntimeEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
 		// Parallel block-decode pipeline for the chainsync replay loop
 		// (phase 1 of the pipeline). Not consensus-affecting; off by default.
@@ -299,9 +310,21 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				if timeoutPenalty > 0 && len(excluded) > 0 {
 					state.RecordBlockfetchLatency(excluded[0], timeoutPenalty)
 				}
-				selected, found = state.SelectBlockfetchRetryPeer(excluded, rangeEnd)
+				selected, found = state.SelectBlockfetchRetryPeer(
+					excluded,
+					rangeEnd,
+				)
 			})
 			return selected, found, available
+		},
+		MarkBlockfetchPeersFailedFunc: func(
+			connIds []ouroboros.ConnectionId,
+		) bool {
+			return n.withLiveChainsyncState(func(state *chainsync.State) {
+				for _, connId := range connIds {
+					state.MarkClientFailed(connId)
+				}
+			})
 		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
@@ -458,7 +481,11 @@ func (n *Node) publishChainsyncState(state *chainsync.State) {
 func leiosCommitteeQueryError(err error) error {
 	if errors.Is(err, leios.ErrEmptyStakeDistribution) ||
 		errors.Is(err, leios.ErrZeroTotalActiveStake) {
-		return fmt.Errorf("%w: %w", ledger.ErrLeiosCommitteeNotYetAvailable, err)
+		return fmt.Errorf(
+			"%w: %w",
+			ledger.ErrLeiosCommitteeNotYetAvailable,
+			err,
+		)
 	}
 	return err
 }

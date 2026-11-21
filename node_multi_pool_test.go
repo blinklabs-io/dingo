@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -430,13 +431,33 @@ func TestReloadBlockProducerCredentialsReloadsEachPoolOnItsOwn(t *testing.T) {
 func TestPrepareMultiPoolRefusesLeiosWithSeveralPools(t *testing.T) {
 	t.Parallel()
 	n := &Node{config: Config{
+		cfg: &internalconfig.Config{RunMode: internalconfig.RunModeLeios},
+		blockProducerPools: []BlockProducerPool{
+			{ShelleyOperationalCertificate: "/a"},
+			{ShelleyOperationalCertificate: "/b"},
+		},
+	}}
+	require.ErrorContains(
+		t,
+		n.prepareMultiPool(),
+		"Leios forging does not support",
+	)
+}
+
+func TestPrepareMultiPoolAllowsAVoteKeyWithoutLeiosForging(t *testing.T) {
+	t.Parallel()
+	n := &Node{config: Config{
+		cfg:                     &internalconfig.Config{},
 		leiosVoteSigningKeyFile: "/keys/vote.skey",
 		blockProducerPools: []BlockProducerPool{
 			{ShelleyOperationalCertificate: "/a"},
 			{ShelleyOperationalCertificate: "/b"},
 		},
 	}}
-	require.ErrorContains(t, n.prepareMultiPool(), "Leios forging and voting")
+	err := n.prepareMultiPool()
+	if err != nil {
+		require.NotContains(t, err.Error(), "more than one pool")
+	}
 }
 
 // Not t.Parallel: it starts real forge loops and election workers, which the
