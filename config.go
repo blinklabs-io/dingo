@@ -256,6 +256,9 @@ type Config struct {
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir string
+	// malformedPluginSelections are capabilities WithPluginSelection could
+	// not store. The option cannot return an error, so New reports them.
+	malformedPluginSelections []hostplugin.Capability
 	// splitIndexer is set when the IndexerDB holds the API rows.
 	splitIndexer                    bool
 	bindAddr                        string
@@ -1128,6 +1131,7 @@ func (c *Config) pluginSelection(
 // capabilities replace their configuration fields. Any other well-formed
 // capability is stored by name for a host that declares it. The selection
 // is keyed by name, so the contract version in capability does not matter.
+// A malformed capability makes New fail.
 func WithPluginSelection(
 	capability hostplugin.Capability,
 	selection hostplugin.Selection,
@@ -1135,6 +1139,15 @@ func WithPluginSelection(
 	return func(c *Config) {
 		if c.cfg == nil {
 			*c = NewConfig()
+		}
+		// Name() routes by name alone, so a malformed capability such as
+		// "mempool/v01" must be stopped before it reaches a built-in field.
+		if !capability.Valid() {
+			c.malformedPluginSelections = append(
+				c.malformedPluginSelections,
+				capability,
+			)
+			return
 		}
 		name := capability.Name()
 		if name == hostplugin.CapabilityMempool.Name() {
@@ -1181,9 +1194,6 @@ func WithPluginSelection(
 		case hostplugin.CapabilityAPIMcp.Name():
 			c.cfg.Plugins.API.Mcp = selection
 		default:
-			if !capability.Valid() {
-				return
-			}
 			if c.cfg.Plugins.Extra == nil {
 				c.cfg.Plugins.Extra = make(
 					map[string]hostplugin.Selection,

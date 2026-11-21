@@ -417,6 +417,11 @@ func New(cfg Config) (*Node, error) {
 			return nil, fmt.Errorf("invalid plugin selection: %w", err)
 		}
 	}
+	for _, capability := range cfg.malformedPluginSelections {
+		if _, err := plugin.ParseCapability(string(capability)); err != nil {
+			return nil, fmt.Errorf("invalid plugin selection: %w", err)
+		}
+	}
 	var extraSelections map[string]plugin.Selection
 	if cfg.cfg != nil {
 		extraSelections = cfg.cfg.Plugins.Extra

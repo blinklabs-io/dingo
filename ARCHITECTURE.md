@@ -15,6 +15,9 @@ single parser. A host speaks one contract version per name: `NewHost` speaks
 the built-in set (`plugin.AllCapabilities`) and `Host.Declare` adds others.
 `Register` and `ValidateSelection` reject a capability the host does not speak,
 and when the name is spoken at another version the error names both versions.
+`Declare` also rejects a name nested under or containing a spoken name
+(`example` and `example.widget`), because the two would share a `plugins`
+subtree and an environment prefix.
 No capability list is closed in code, so a new plugin kind needs a `Declare`
 call and a provider registration, not a host edit.
 
@@ -26,13 +29,15 @@ YAML the name's segments nest under `plugins`, as `storage.blob` already does:
 selections keep their fixed fields; every other selection is collected into
 `PluginsConfig.Extra` by name. A mapping with a `provider` or `config` key is a
 selection, any other mapping is a namespace, and decoding stays strict: an
-unknown key, a malformed name, or `storage.immutable` (which has no selection)
-is a load error. `LoadConfig` applies the `DINGO_PLUGINS_<NAME>_*` overlay to
+unknown key, a duplicate key, a malformed name, a name nested with a built-in
+one (`consensus.foo`, `api`), or `storage.immutable` (which has no selection)
+is a load error reported at its source line. Aliases and merge keys resolve
+against the whole document. `LoadConfig` applies the `DINGO_PLUGINS_<NAME>_*` overlay to
 each extra selection present in the loaded YAML, and CLI flags still win. The
 precedence is CLI > environment > YAML > defaults. `Config.WithPluginSelection`
 stores a selection for a non-built-in capability by name. `Node.New` fails when
-a configured selection names a capability its host does not declare, rather
-than ignoring it. Out-of-tree providers must still be registered explicitly;
+a configured selection names a capability its host does not declare, or one
+passed to `WithPluginSelection` is malformed, rather than ignoring it. Out-of-tree providers must still be registered explicitly;
 there is no `init()` registration.
 
 `Node.New` validates plugin selections and node configuration before registering

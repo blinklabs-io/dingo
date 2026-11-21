@@ -78,3 +78,28 @@ func TestNewRejectsSelectionForCapabilityHostDoesNotDeclare(t *testing.T) {
 	require.ErrorContains(t, err, "invalid plugin selection")
 	require.ErrorContains(t, err, "example.widget")
 }
+
+func TestNewRejectsMalformedPluginSelection(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(NewConfig(
+		WithPluginSelection("Example.Widget", plugin.Selection{Provider: "x"}),
+	))
+	require.ErrorContains(t, err, "invalid plugin selection")
+	require.ErrorContains(t, err, "Example.Widget")
+}
+
+// A malformed capability whose name matches a built-in must not reach the
+// built-in field: Name() would otherwise route "mempool/v01" to mempool.
+func TestWithPluginSelectionMalformedBuiltInNameLeavesFieldAlone(t *testing.T) {
+	t.Parallel()
+
+	want := NewConfig().cfg.Plugins.Mempool.Provider
+	cfg := NewConfig(
+		WithPluginSelection("mempool/v01", plugin.Selection{Provider: "dag"}),
+	)
+	require.Equal(t, want, cfg.cfg.Plugins.Mempool.Provider)
+	_, err := New(cfg)
+	require.ErrorContains(t, err, "invalid plugin selection")
+	require.ErrorContains(t, err, "mempool/v01")
+}

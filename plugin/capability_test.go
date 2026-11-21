@@ -208,3 +208,35 @@ func TestDeclareRules(t *testing.T) {
 	_, ok = host.Contract("nope")
 	require.False(t, ok)
 }
+
+// A name that is a segment prefix of another would share its YAML subtree
+// under plugins and its environment prefix: DINGO_PLUGINS_EXAMPLE_ also
+// matches DINGO_PLUGINS_EXAMPLE_WIDGET_PROVIDER.
+func TestDeclareRejectsNestedNames(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string][]Capability{
+		"child of declared":      {"example/v0", "example.widget/v0"},
+		"parent of declared":     {"example.widget/v0", "example/v0"},
+		"child of built-in":      {"consensus.extra/v0"},
+		"parent of built-in":     {"api/v0"},
+		"deep child of built-in": {"storage.blob.cold/v0"},
+	}
+	for name, capabilities := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			host := NewHost()
+			last := capabilities[len(capabilities)-1]
+			for _, c := range capabilities[:len(capabilities)-1] {
+				require.NoError(t, host.Declare(c))
+			}
+			require.ErrorContains(t, host.Declare(last), "nests")
+			require.False(t, host.Speaks(last))
+		})
+	}
+
+	host := NewHost()
+	require.ErrorContains(t, host.Declare("a/v0", "a.b/v0"), "nests")
+	require.False(t, host.Speaks("a/v0"), "Declare is all or nothing")
+	require.NoError(t, host.Declare("example.widget/v0", "example.widgets/v0"))
+}

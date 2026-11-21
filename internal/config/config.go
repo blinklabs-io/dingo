@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1357,42 +1358,51 @@ type PluginsConfig struct {
 	Extra map[string]hostplugin.Selection `yaml:"-"`
 }
 
-// UnmarshalYAML decodes the built-in selections strictly, as a plain struct
-// decode would, and routes every other selection into Extra. A mapping is a
-// selection when it has a provider or config key; any other mapping is a
-// namespace whose keys extend the capability name. A key that is neither a
-// built-in field nor part of a selection is an error.
+// UnmarshalYAML decodes the built-in selections into their fields and routes
+// every other selection into Extra. A mapping is a selection when it has a
+// provider or config key, directly or through a merge key; any other mapping
+// is a namespace whose keys extend the capability name. A key that is neither
+// a built-in field nor part of a selection is an error.
+//
+// Decoding runs on the parsed nodes, never on re-encoded YAML: an alias may
+// refer to an anchor anywhere in the document only while the nodes keep their
+// links, and errors must report source lines. Node.Decode does not enforce
+// known fields, so checkPluginFields does that first.
 func (p *PluginsConfig) UnmarshalYAML(node *yaml.Node) error {
+	node = resolvePluginsAlias(node)
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: plugins must be a mapping", node.Line)
 	}
 	extras := make(map[string]*yaml.Node)
-	fixed, _, err := splitPluginsNode(node, "", extras)
+	fixed, _, err := splitPluginsNode(
+		node, "", extras, make(map[*yaml.Node]bool),
+	)
 	if err != nil {
 		return err
 	}
 	if fixed != nil {
-		data, err := yaml.Marshal(fixed)
-		if err != nil {
+		if err := checkPluginFields(
+			fixed, reflect.TypeFor[PluginsConfig](),
+		); err != nil {
 			return err
 		}
 		type fixedPlugins PluginsConfig
-		decoder := yaml.NewDecoder(bytes.NewReader(data))
-		decoder.KnownFields(true)
-		if err := decoder.Decode((*fixedPlugins)(p)); err != nil &&
-			!errors.Is(err, io.EOF) {
+		if err := fixed.Decode((*fixedPlugins)(p)); err != nil {
 			return err
 		}
 	}
-	for name, selectionNode := range extras {
-		data, err := yaml.Marshal(selectionNode)
-		if err != nil {
-			return err
+	for _, name := range slices.Sorted(maps.Keys(extras)) {
+		selectionNode, ok := extras[name]
+		if !ok || selectionNode == nil {
+			continue
+		}
+		if err := checkPluginFields(
+			selectionNode, reflect.TypeFor[hostplugin.Selection](),
+		); err != nil {
+			return fmt.Errorf("plugins selection %s: %w", name, err)
 		}
 		var selection hostplugin.Selection
-		decoder := yaml.NewDecoder(bytes.NewReader(data))
-		decoder.KnownFields(true)
-		if err := decoder.Decode(&selection); err != nil {
+		if err := selectionNode.Decode(&selection); err != nil {
 			return fmt.Errorf("plugins selection %s: %w", name, err)
 		}
 		if p.Extra == nil {
@@ -1417,9 +1427,89 @@ var builtinPluginSelectionPaths = map[string]struct{}{
 	"api.mcp":          {},
 }
 
-func isPluginSelectionNode(node *yaml.Node) bool {
+func resolvePluginsAlias(node *yaml.Node) *yaml.Node {
+	for node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	return node
+}
+
+func isMergeKey(key *yaml.Node) bool {
+	return key.Kind == yaml.ScalarNode && key.Value == "<<" &&
+		key.ShortTag() == "!!merge"
+}
+
+// pluginMappingEntries returns the key and value pairs of a mapping with its
+// merge keys applied: an explicit key wins over a merged one, and an earlier
+// merged mapping wins over a later one. visiting holds the mappings whose
+// merges are being expanded, so a merge that reaches its own mapping is an
+// error rather than unbounded recursion.
+func pluginMappingEntries(
+	node *yaml.Node,
+	visiting map[*yaml.Node]bool,
+) ([]*yaml.Node, error) {
+	if visiting[node] {
+		return nil, fmt.Errorf(
+			"line %d: merge key refers to the mapping that contains it",
+			node.Line,
+		)
+	}
+	visiting[node] = true
+	defer delete(visiting, node)
+	var explicit, merged []*yaml.Node
+	seen := make(map[string]bool)
+	explicitLine := make(map[string]int)
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		switch node.Content[i].Value {
+		key, value := node.Content[i], node.Content[i+1]
+		if !isMergeKey(key) {
+			// The decoder's duplicate-key check never sees a namespace
+			// or extra selection, which are taken apart here.
+			if line, ok := explicitLine[key.Value]; ok {
+				return nil, fmt.Errorf(
+					"line %d: mapping key %q already defined at line %d",
+					key.Line,
+					key.Value,
+					line,
+				)
+			}
+			explicitLine[key.Value] = key.Line
+			explicit = append(explicit, key, value)
+			seen[key.Value] = true
+			continue
+		}
+		value = resolvePluginsAlias(value)
+		sources := []*yaml.Node{value}
+		if value.Kind == yaml.SequenceNode {
+			sources = value.Content
+		}
+		for _, source := range sources {
+			source = resolvePluginsAlias(source)
+			if source.Kind != yaml.MappingNode {
+				return nil, fmt.Errorf(
+					"line %d: merge key value must be a mapping or a sequence of mappings",
+					source.Line,
+				)
+			}
+			pairs, err := pluginMappingEntries(source, visiting)
+			if err != nil {
+				return nil, err
+			}
+			merged = append(merged, pairs...)
+		}
+	}
+	for i := 0; i+1 < len(merged); i += 2 {
+		if seen[merged[i].Value] {
+			continue
+		}
+		seen[merged[i].Value] = true
+		explicit = append(explicit, merged[i], merged[i+1])
+	}
+	return explicit, nil
+}
+
+func isPluginSelection(pairs []*yaml.Node) bool {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		switch pairs[i].Value {
 		case "provider", "config":
 			return true
 		}
@@ -1427,22 +1517,34 @@ func isPluginSelectionNode(node *yaml.Node) bool {
 	return false
 }
 
-// splitPluginsNode walks the plugins mapping. It returns a copy holding only
-// what the struct decode must see, and collects selection nodes for
-// non-built-in capabilities into extras. The bool reports whether extras were
-// taken from beneath node, so a namespace emptied that way is dropped.
+// splitPluginsNode walks the plugins mapping. It returns a mapping holding
+// only what the struct decode must see, with namespace merge keys applied,
+// and collects selection nodes for non-built-in capabilities into extras. The
+// bool reports whether extras were taken from beneath node, so a namespace
+// emptied that way is dropped. onPath holds the namespaces being walked, so an
+// alias to an enclosing namespace is an error rather than unbounded recursion.
 func splitPluginsNode(
 	node *yaml.Node,
 	path string,
 	extras map[string]*yaml.Node,
+	onPath map[*yaml.Node]bool,
 ) (*yaml.Node, bool, error) {
-	if node.Kind == yaml.AliasNode && node.Alias != nil {
-		node = node.Alias
-	}
+	node = resolvePluginsAlias(node)
 	if node.Kind != yaml.MappingNode {
 		return node, false, nil
 	}
-	if path != "" && isPluginSelectionNode(node) {
+	if onPath[node] {
+		return nil, false, fmt.Errorf(
+			"line %d: plugins.%s refers to a mapping that contains it",
+			node.Line,
+			path,
+		)
+	}
+	pairs, err := pluginMappingEntries(node, make(map[*yaml.Node]bool))
+	if err != nil {
+		return nil, false, err
+	}
+	if path != "" && isPluginSelection(pairs) {
 		if _, ok := builtinPluginSelectionPaths[path]; ok {
 			return node, false, nil
 		}
@@ -1459,25 +1561,46 @@ func splitPluginsNode(
 		if err := validatePluginSelectionName(path); err != nil {
 			return nil, false, fmt.Errorf("line %d: %w", node.Line, err)
 		}
+		// A host cannot declare a name nested with a built-in one, and
+		// the built-in environment overlay would claim its variables.
+		for _, builtin := range hostplugin.AllCapabilities() {
+			name := builtin.Name()
+			if strings.HasPrefix(path, name+".") ||
+				strings.HasPrefix(name, path+".") {
+				return nil, false, fmt.Errorf(
+					"line %d: plugins.%s nests with built-in capability %s",
+					node.Line,
+					path,
+					name,
+				)
+			}
+		}
+		if _, ok := extras[path]; ok {
+			return nil, false, fmt.Errorf(
+				"line %d: plugins.%s is already defined",
+				node.Line,
+				path,
+			)
+		}
 		extras[path] = node
 		return nil, true, nil
 	}
+	onPath[node] = true
+	defer delete(onPath, node)
 	out := &yaml.Node{
-		Kind:        node.Kind,
-		Tag:         node.Tag,
-		Style:       node.Style,
-		Line:        node.Line,
-		Column:      node.Column,
-		HeadComment: node.HeadComment,
+		Kind:   yaml.MappingNode,
+		Tag:    node.Tag,
+		Line:   node.Line,
+		Column: node.Column,
 	}
 	tookExtras := false
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key, value := node.Content[i], node.Content[i+1]
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, value := pairs[i], pairs[i+1]
 		child := key.Value
 		if path != "" {
 			child = path + "." + key.Value
 		}
-		kept, took, err := splitPluginsNode(value, child, extras)
+		kept, took, err := splitPluginsNode(value, child, extras, onPath)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1491,6 +1614,51 @@ func splitPluginsNode(
 		return nil, true, nil
 	}
 	return out, tookExtras, nil
+}
+
+// checkPluginFields reports a mapping key that names no field of t, the check
+// a decoder enforcing known fields makes, with the key's source line. It
+// descends only into struct-typed fields, so free-form provider config maps
+// are not checked.
+func checkPluginFields(node *yaml.Node, t reflect.Type) error {
+	node = resolvePluginsAlias(node)
+	if node.Kind != yaml.MappingNode || t.Kind() != reflect.Struct {
+		return nil
+	}
+	fields := make(map[string]reflect.Type, t.NumField())
+	for field := range t.Fields() {
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("yaml"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fields[name] = field.Type
+	}
+	pairs, err := pluginMappingEntries(node, make(map[*yaml.Node]bool))
+	if err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key := pairs[i]
+		fieldType, ok := fields[key.Value]
+		if !ok {
+			return fmt.Errorf(
+				"line %d: field %s not found in type %s",
+				key.Line,
+				key.Value,
+				t,
+			)
+		}
+		if err := checkPluginFields(pairs[i+1], fieldType); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validatePluginSelectionName checks that name could be a capability name by

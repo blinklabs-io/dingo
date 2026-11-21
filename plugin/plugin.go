@@ -208,7 +208,9 @@ func NewHost() *Host {
 // Declare adds contracts the host speaks beyond the built-in set. Declaring a
 // contract the host already speaks is a no-op. A host speaks one version per
 // name, so declaring a different version of a spoken name is an error that
-// names both versions. Declare is all-or-nothing.
+// names both versions. A name may not nest under or contain another spoken
+// name: the two would share a configuration subtree under plugins and an
+// environment prefix. Declare is all-or-nothing.
 func (h *Host) Declare(capabilities ...Capability) error {
 	if h == nil {
 		return errors.New("plugin host is nil")
@@ -228,6 +230,18 @@ func (h *Host) Declare(capabilities ...Capability) error {
 					c,
 					spoken,
 				)
+			}
+		}
+		for _, spoken := range []map[string]Capability{h.contracts, pending} {
+			for other, contract := range spoken {
+				if strings.HasPrefix(name, other+".") ||
+					strings.HasPrefix(other, name+".") {
+					return fmt.Errorf(
+						"plugin capability %q nests with %q: their configuration and environment prefixes overlap",
+						c,
+						contract,
+					)
+				}
 			}
 		}
 		pending[name] = c

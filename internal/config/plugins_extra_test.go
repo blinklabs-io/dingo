@@ -162,3 +162,139 @@ func TestConfigLogRedactsExtraPluginSelections(t *testing.T) {
 	require.Contains(t, out, "basic")
 	require.Contains(t, out, "8080")
 }
+
+func TestPluginsYAMLAliasesAndMergeKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := decodePlugins(t, `
+api:
+  kupo: &base
+    provider: kupo
+    config:
+      port: 1442
+  mesh:
+    <<: *base
+    provider: mesh
+  utxorpc:
+    <<: *base
+example:
+  widget: &widget
+    <<: *base
+    provider: basic
+cardano:
+  query: *widget
+`)
+	require.NoError(t, err)
+	require.Equal(t, "mesh", cfg.API.Mesh.Provider)
+	require.Equal(t, 1442, cfg.API.Mesh.Config["port"])
+	require.Equal(t, "kupo", cfg.API.Utxorpc.Provider)
+	require.Equal(t, 1442, cfg.API.Utxorpc.Config["port"])
+	require.Equal(t, map[string]hostplugin.Selection{
+		"example.widget": {
+			Provider: "basic",
+			Config:   map[string]any{"port": 1442},
+		},
+		"cardano.query": {
+			Provider: "basic",
+			Config:   map[string]any{"port": 1442},
+		},
+	}, cfg.Extra)
+}
+
+func TestPluginsYAMLErrorsReportSourceLines(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		doc  string
+		line string
+	}{
+		"built-in selection": {
+			doc:  "mempool:\n  provider: fifo\n\n\napi:\n  kupo:\n    provder: x\n",
+			line: "line 7:",
+		},
+		"extra selection": {
+			doc:  "mempool:\n  provider: fifo\n\n\nexample:\n  widget:\n    provider: a\n    cnfig: {}\n",
+			line: "line 8:",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodePlugins(t, tt.doc)
+			require.ErrorContains(t, err, tt.line)
+		})
+	}
+}
+
+func TestPluginsYAMLRejectsSelfReferentialAlias(t *testing.T) {
+	t.Parallel()
+
+	for name, doc := range map[string]string{
+		"namespace": "example: &ns\n  widget: *ns\n",
+		"merge":     "example:\n  widget: &w\n    <<: *w\n    provider: a\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodePlugins(t, doc)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestPluginsYAMLAliasToAnchorOutsidePlugins(t *testing.T) {
+	t.Parallel()
+
+	var doc struct {
+		Shared  map[string]any `yaml:"shared"`
+		Plugins PluginsConfig  `yaml:"plugins"`
+	}
+	doc.Plugins = defaultPluginsConfig()
+	require.NoError(t, yaml.Unmarshal([]byte(`
+shared: &shared
+  port: 1442
+plugins:
+  api:
+    kupo:
+      provider: kupo
+      config: *shared
+  example:
+    widget:
+      provider: basic
+      config: *shared
+`), &doc))
+	require.Equal(t, 1442, doc.Plugins.API.Kupo.Config["port"])
+	require.Equal(t, 1442, doc.Plugins.Extra["example.widget"].Config["port"])
+}
+
+func TestPluginsYAMLRejectsDuplicateAndNestedSelections(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		doc  string
+		want string
+	}{
+		"duplicate namespace": {
+			doc:  "example:\n  widget:\n    provider: a\nexample:\n  widget:\n    provider: b\n",
+			want: "already defined",
+		},
+		"duplicate selection key": {
+			doc:  "example:\n  widget:\n    provider: a\n    provider: b\n",
+			want: "already defined",
+		},
+		"extra under a built-in name": {
+			doc:  "consensus:\n  foo:\n    provider: a\n",
+			want: "nests",
+		},
+		"extra above built-in names": {
+			doc:  "api:\n  provider: a\n",
+			want: "nests",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodePlugins(t, tt.doc)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}

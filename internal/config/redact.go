@@ -665,7 +665,7 @@ func mappedValue(
 // is rendered; the provider config is walked by key, so an unclassified key
 // is redacted. Any other shape is redacted whole.
 func selectionMapValue(v reflect.Value) slog.Value {
-	selections, ok := v.Interface().(map[string]hostplugin.Selection)
+	selections, ok := reflect.TypeAssert[map[string]hostplugin.Selection](v)
 	if !ok {
 		return redactedValue(v)
 	}
