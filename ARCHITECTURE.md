@@ -2653,7 +2653,10 @@ context detached from the shutdown deadline, and `Host.Stop` keeps waiting for
 it after the deadline passes, logging the store name and elapsed time at
 start, finish, and periodically while it runs. An overrun is reported as the
 warning `storage close finished after the shutdown deadline`,
-not as an error. Closing a large badger store can take minutes under I/O load
+not as an error. An ordinary provider stopped afterward still receives the
+original context; a successful stop does not turn the durable overrun into a
+shutdown error. Provider errors and cancellation during ordinary teardown remain
+errors. Closing a large badger store can take minutes under I/O load
 because it syncs every table file, and abandoning it risks leaving the store
 needing recovery, as cardano-node always closes its databases fully. `Node.Stop`
 therefore returns after `shutdownTimeout` plus the store close time, and the
@@ -3807,7 +3810,11 @@ below).
 `internal/indexer` holds the writer: one goroutine pulls
 canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
 `ChainSource` (`DatabaseSource` over the ledger database), and commits each
-batch's rows, ledger facts and new tip in one transaction. A `FactsSource`
+batch's rows, ledger facts and new tip in one transaction. A batch whose
+blob writes exceed one Badger transaction (`badger.ErrTxnTooBig`) is retried
+at half as many blocks, down to a single block, which fails as an ordinary
+error; each commit doubles the batch back toward its configured size. A
+`FactsSource`
 (`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
 by natural key, and the writer splits a batch at each boundary so a boundary's
 reward credits land between the blocks before and after it. Before each fact
