@@ -433,7 +433,7 @@ func TestRemoteStoresServeSnapshotsEndToEnd(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store, public := newStore(t)
-			hashes := createSnapshots(t, store, 1, 3)
+			hashes := createSnapshots(t, store, 2, 3)
 			removed, err := PruneSnapshots(context.Background(), store, 1)
 			require.NoError(t, err)
 			require.Equal(t, hashes[:1], removed)

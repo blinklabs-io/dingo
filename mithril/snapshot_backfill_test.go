@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -648,6 +649,68 @@ func TestSnapshotBackfillResumeRefusesForeignBlocks(t *testing.T) {
 			require.ErrorIs(t, err, errStoredChainOffCertified)
 		})
 	}
+}
+
+func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
+	t.Parallel()
+
+	opts := v2FixtureOptions{
+		immutableFileNumber: 9,
+		validAllImmutables:  true,
+		chunkSlots:          snapshotChunkSlots,
+	}
+	chain := readStreamChain(t, opts)
+	var prev lcommon.Blake2b256
+	copy(prev[:], chain.last[opts.immutableFileNumber].Hash)
+	files, hashes := validImmutableChunk(t, 1099, 2, prev)
+	opts.ancillaryChunk = map[string][]byte{
+		"chunk":     files["immutable/00000.chunk"],
+		"primary":   files["immutable/00000.primary"],
+		"secondary": files["immutable/00000.secondary"],
+	}
+	ledger := ocommon.NewPoint(1099, hashes[len(hashes)-1])
+	opts.ancillaryLedgerState = minimalLedgerStateWithUTxOMap(
+		t, ledger.Slot, ledger.Hash, singleUTxOMap(t),
+	)
+	opts.ancillaryLedgerSlot = ledger.Slot
+	fixture := snapshotFixture{
+		v2Fixture: newV2Fixture(t, opts),
+		chain:     chain,
+		ledger:    ledger,
+	}
+	db := newSyncModeTestDB(t)
+	foreign := models.Block{
+		Slot:     1050,
+		Hash:     bytes.Repeat([]byte{0xee}, 32),
+		PrevHash: chain.last[opts.immutableFileNumber].Hash,
+		Cbor:     []byte{0x80},
+		Number:   1,
+		Type:     2,
+	}
+	require.NoError(t, db.BlockCreate(foreign, nil))
+	require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
+		Backend:             BackendV2,
+		Network:             fixture.artifact.Network,
+		Digest:              fixture.artifact.Hash,
+		Epoch:               fixture.artifact.Beacon.Epoch,
+		ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
+		CertificateHash:     fixture.artifact.CertificateHash,
+	}))
+	require.NoError(t, db.SetSyncState(
+		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+
+	point, err := RunSnapshotBackfill(
+		t.Context(), fixture.config(t, db, 150),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, ledger, point)
+	assert.NotContains(t, storedSlots(t, db), foreign.Slot)
+	assert.Contains(t, storedSlots(t, db), uint64(1098))
+	assert.Contains(t, storedSlots(t, db), uint64(1099))
 }
 
 // The progress token moves with the phase, the stored tip and the ledger

@@ -539,6 +539,26 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
+	// The ancillary trio is as authoritative as the certified immutable
+	// archives: its manifest signs every byte. A local tail that forks within
+	// that trio cannot be extended by the signed blocks, so discard the partial
+	// restore before copying the artifact again instead of failing every retry
+	// on the same conflict.
+	if storedTip != nil && storedTip.Slot > certifiedTip.Slot &&
+		storedTip.Slot <= immutableTip.Slot &&
+		!blocksContain(ancillaryBlocks, *storedTip) {
+		logger.Warn(
+			"mithril: discarding local tail that conflicts with signed ancillary blocks",
+			"component", "mithril",
+			"stored_tip_slot", storedTip.Slot,
+			"certified_tip_slot", certifiedTip.Slot,
+			"ancillary_tip_slot", immutableTip.Slot,
+		)
+		if err := discardStoredBlocks(ctx, db, logger); err != nil {
+			return ocommon.Point{}, err
+		}
+		storedTip = nil
+	}
 	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
 	defer func() {
 		if err := cleanupBulkLoadPragmas(); err != nil {

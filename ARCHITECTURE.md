@@ -16680,10 +16680,11 @@ state is loaded the node is in the position of one that synced to that
 ImmutableDB tip: it replays the immutable blocks after the state, and a
 rollback is refused only below the immutable tip.
 
-The ledger refuses any rollback below the selected stable ledger slot
-(`mithrilLedgerSlot`), since intermediate UTxO states before that imported
-state cannot be reconstructed. Mithril sync persists the full boundary point in
-`sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
+The ledger refuses any rollback below the selected stable ledger slot, since
+intermediate UTxO states before an imported state cannot be reconstructed.
+Every ledger-state loader records that point through
+`SetImportedLedgerStateBoundary`; the persisted `mithril_ledger_slot` and
+`mithril_ledger_hash` names remain for database compatibility. Outbound
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
 databases fall back to reconstructing the boundary point from canonical local
@@ -16865,8 +16866,10 @@ before startup and runs the full lazy rebuild as background maintenance; the
 rebuild paths clear the marker only after the full manifest has been rebuilt.
 Mithril completion cleanup leaves the deferred-index marker, post-backfill
 statistics marker, and forge fences untouched, and deletes transient keys
-individually. It writes `mithril_ledger_slot` and `mithril_ledger_hash` after
-cleanup. This preserves the pending marker set by `BuildCritical` so a
+individually. It records the generic imported-ledger-state boundary after
+cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
+remain for database compatibility. This preserves the pending marker set by
+`BuildCritical` so a
 bootstrapped database still builds the lazy manifest. Core-mode startup still
 repairs the full manifest synchronously before serving. Both repair entry points
 also restore any missing critical index when no cycle is pending at all: the
@@ -16890,11 +16893,15 @@ including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
-primary and secondary file each. Production digests every file with SHA-256,
+primary and secondary file each. The newest trio is treated as the unfinished
+immutable file: it and the newest ledger state are placed in the signed
+ancillary archive, while only the preceding complete trios are certified.
+Production digests every certified file with SHA-256,
 derives the digest-list merkle root and artifact hash with the same
 `computeMMRRoot`/`ComputeHash` the client verifies against, then writes one
-`NNNNN.tar.zst` per file trio, `digests.tar.zst`, and `ancillary.tar.zst`
-holding the newest ledger state and an Ed25519-signed manifest
+`NNNNN.tar.zst` per certified file trio, `digests.tar.zst`, and
+`ancillary.tar.zst` holding the unfinished trio, newest ledger state and an
+Ed25519-signed manifest
 (`mithril.server.ancillarySigningKeyFile`). The beacon epoch is the epoch of
 that ledger state. The archives are re-hashed as they are written, so a file
 rewritten after its digest was taken fails the run. `artifact.json` is written

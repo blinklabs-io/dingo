@@ -5770,6 +5770,11 @@ post-Mithril-boundary strictness (see below).
 
 #### `sync_state` keys by Mithril mode
 
+`mithril_ledger_slot` and `mithril_ledger_hash` are legacy persisted names for
+the generic imported-ledger-state boundary. Every loader records that boundary
+through `database.SetImportedLedgerStateBoundary`; readers enforce the same
+replay, rollback and query rules regardless of which loader supplied the state.
+
 | Mode | Written while running | Left after completion |
 |---|---|---|
 | Manual (`dingo mithril sync`) | `mithril_pinned_artifact`, `sync_status` (`in_progress`; `backfill` is written by v0.94.2 API-mode syncs only), `mithril_catchup_active` on a catch-up, `mithril_reward_repair_active` on a repair, `metadata_indexes_pending` while deferred indexes are dropped | `mithril_ledger_slot`, `mithril_ledger_hash`, `mithril_immutable_max` |
