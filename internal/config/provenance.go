@@ -144,6 +144,13 @@ func isProvenanceField(path string) bool {
 	return ok
 }
 
+// SetBlockPipelineEnabled sets BlockPipelineEnabled as an operator-supplied
+// value, so later mode- or storage-derived defaulting leaves it alone.
+func (c *Config) SetBlockPipelineEnabled(enabled bool) {
+	c.BlockPipelineEnabled = enabled
+	c.recordProvenance("BlockPipelineEnabled", SourceFlag)
+}
+
 // SetProvenanceForTest directly sets a tracked field's recorded provenance,
 // bypassing CLI/env/YAML detection entirely.
 //

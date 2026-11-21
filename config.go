@@ -2149,7 +2149,7 @@ func (c *Config) PlannerStatsRefreshEnabled() bool {
 // LedgerStateConfig.BlockPipelineEnabled.
 func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlockPipelineEnabled = enabled
+		c.cfg.SetBlockPipelineEnabled(enabled)
 		c.blockPipelineEnabledSet = true
 	}
 }

@@ -522,6 +522,25 @@ func TestNewConfigBlockPipelineDefaults(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "explicit enable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithRunMode("dev"),
+				WithBlockPipelineEnabled(true),
+			},
+			want: true,
+		},
+		{
+			name: "explicit disable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithBlockPipelineEnabled(false),
+				WithRunMode("dev"),
+			},
+		},
+		{
+			name: "dev derives api default",
+			opts: []ConfigOptionFunc{WithRunMode("dev")},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

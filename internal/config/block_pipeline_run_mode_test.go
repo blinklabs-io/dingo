@@ -31,3 +31,14 @@ func TestBlockPipelineDefaultFollowsRunModeStorageOverride(t *testing.T) {
 	assert.Equal(t, storageModeAPI, cfg.StorageMode)
 	assert.False(t, cfg.BlockPipelineEnabled)
 }
+
+func TestSetBlockPipelineEnabledSurvivesRunModeOverride(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{RunMode: RunModeDev, StorageMode: storageModeCore}
+	cfg.SetBlockPipelineEnabled(true)
+
+	cfg.ApplyRunModeOverrides(RunModeDev)
+
+	assert.Equal(t, storageModeAPI, cfg.StorageMode)
+	assert.True(t, cfg.BlockPipelineEnabled)
+}
