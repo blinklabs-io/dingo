@@ -614,7 +614,7 @@ func TestAddressIndexBlockInclusionAndRollbackReadmission(t *testing.T) {
 		f := newRemovalFixture(t, useDAG, nil)
 		ctx := context.Background()
 		f.m.confirmedMu.Lock()
-		f.m.pendingConfirmed = map[string]struct{}{f.loner: {}}
+		f.m.pendingConfirmed = map[string]uint64{f.loner: 0}
 		f.m.confirmedMu.Unlock()
 		require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
 		require.Empty(t, f.hashesFor(f.addrC), "included in a block")
