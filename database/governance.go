@@ -43,11 +43,11 @@ func (d *Database) SaveGovernanceBoundarySnapshot(
 // epoch containing slot, which is the newest retained boundary at or before
 // slot provided it opens that same epoch.
 //
-// A Conway-or-later epoch with no retained row yields
+// A Conway-or-later epoch with no stored row yields
 // models.ErrGovernanceBoundarySnapshotNotRetained instead of the previous
-// epoch's snapshot: databases upgraded from before the snapshot table existed
-// have no row for boundaries that already passed, and that state cannot be
-// rebuilt. A nil snapshot with a nil error means no boundary applies, as for a
+// epoch's snapshot. The ledger rebuilds missing rows at start-up, so the error
+// remains only for a boundary whose pre-boundary state is no longer
+// restorable. A nil snapshot with a nil error means no boundary applies, as for a
 // slot in a pre-Conway epoch. A slot past the last stored epoch is matched
 // against that epoch: the newest row must open it or a later epoch. Without an
 // epoch table to check against, the newest row at or before slot is returned.

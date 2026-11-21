@@ -156,10 +156,12 @@ type GovernanceConstitution struct {
 }
 
 // ErrGovernanceBoundarySnapshotNotRetained reports that the epoch containing
-// the requested slot is a Conway-or-later epoch whose boundary snapshot was
-// never stored. Boundaries that passed before the snapshot table existed
-// cannot be reconstructed, so callers must report the state as unavailable
-// rather than substitute another epoch's snapshot or live voting state.
+// the requested slot is a Conway-or-later epoch whose boundary snapshot is not
+// stored and could not be rebuilt at start-up: the live UTxO set's journal, the
+// Mithril trust boundary or the consumed-output prune floor leaves the state
+// before that boundary unrecoverable. Callers must report the state as
+// unavailable rather than substitute another epoch's snapshot or live voting
+// state.
 var ErrGovernanceBoundarySnapshotNotRetained = errors.New(
 	"governance boundary snapshot not retained for epoch",
 )
