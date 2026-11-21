@@ -4801,6 +4801,11 @@ never by row id, from `metadata.FactTables`:
   `reward_pool_likelihood`, `imported_*`, `network_state`,
   `network_donation`, `pparams`, `drep_expiry_history`,
   `drep_dormancy_history`, `drep_expiry_epoch_event` and `account_drep_clear`;
+  `governance_boundary_snapshot` is copied whole by its epoch key as well. A
+  deferred boundary commits before the ledger writes that row, so a copy that
+  reaches the boundary while `dingo:governance:ratify-pending` names its epoch, whether or not the row exists yet,
+  holds the epoch in the IndexerDB's `dingo:indexer:governance-snapshots-deferred`
+  list and copies the row at its boundary slot once the record is gone;
 - patched onto rows block replay wrote: the delegation, activity and expiry
   columns of `account` and `drep`, and the outcome columns of
   `governance_proposal`; rows the IndexerDB does not hold are skipped. A
@@ -6382,6 +6387,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_proposal_order` | `proposal_id`, `tx_index` | PK `proposal_id` | Companion table recording a proposal's position in Conway submission order within its `added_slot`: the transaction's index in its block, or for a proposal imported from a ledger-state snapshot, its position in the snapshot's proposal sequence (all proposals of one epoch share that epoch's anchor slot). RATIFY and ENACT reads order equal-slot proposals by it, then by `action_index`. A companion table for the same reason as `governance_proposal_drop`. FK `proposal_id` references `governance_proposal.id` with cascade deletion, and `DeleteGovernanceProposalsAfterSlot` also deletes the rows of the proposals it removes explicitly. `SetGovernanceProposal` writes the row only when the caller supplies a position, so rewriting a loaded proposal without one keeps the stored position. The v33 migration backfills rows from each proposal's stored `transaction.block_index`; a proposal without a stored transaction (one imported before v33) has no row and keeps the pre-v33 `tx_hash` order until it leaves the proposal set, or until the database is rebuilt from a fresh import. |
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
+| `governance_boundary_snapshot` | `id`, `epoch`, `boundary_slot`, `snapshot` | PK `id`; unique `epoch`; index `boundary_slot` | Completed Conway pulser input and RATIFY outcome retained as a JSON blob. `boundary_slot` is the first slot of the opened epoch. An acquired-point read selects the newest row whose boundary is at or before the acquired slot and returns it only when it opens the epoch containing that slot (`Epoch` is the opened epoch, `boundary_slot` its first slot); a Conway-or-later epoch without a row yields `ErrGovernanceBoundarySnapshotNotRetained`, which only a boundary the startup rebuild could not restore (see migration `v74`) still produces. Native boundary processing stores the complete DRep distribution, post-ENACT committee, quorum, constitution, purpose roots and encoded protocol parameters, then the ordered ratified and expired action references, remaining treasury and delayed flag. The expired list keeps the expirations already stored for the boundary, so reprocessing a boundary does not drop them. The proposal action bodies complete the staged enact state. A ledger-state import additionally preserves the snapshot's encoded RatifyState and protocol parameters. Rollback and import reconciliation delete rows after their target slot. The table remains in metadata when the proposal and vote family is drained, and split IndexerDB transfer copies it by epoch. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
 | `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index`, `deleted` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v48), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. `deleted` marks a deletion entry written when a DRep deregistration soft-deletes the vote (migration v66). Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
@@ -6402,6 +6408,14 @@ anchor. Matching proposals remain members until the next boundary writes their
 infer the verdict epoch from the proposal's `expires_epoch`, and does not defer
 an already-recorded verdict until another ratification pass. Invalid expired
 sets reject the import before any phase writes; an empty set is valid.
+
+The retained DRep distribution is the complete pulser distribution rather than
+the proposal-specific active-voter denominator. It includes reward balances,
+live UTxO stake and active proposal deposits for credential DReps and the two
+predefined DReps; delegator inactivity does not remove a registered DRep from
+this snapshot. Boundary reprocessing replaces the epoch's row in the same
+transaction as proposal lifecycle changes, so an interrupted retry cannot
+combine a new verdict with an older distribution.
 
 ### Catch-up import rollback
 
@@ -6837,6 +6851,36 @@ flush, `SetUtxoAddress`) fills them from the stored `utxo` and
 the outputs of that transaction, so an output stored before its producer was
 applied moves to the applied position.
 `TestUtxoAddressOrderBackfillCopiesPagePosition` pins the backfill.
+
+Migration `v74` (`governance-boundary-snapshot`, integer version 74) adds
+`governance_boundary_snapshot`. The unique epoch key makes boundary replay an
+idempotent replacement; the boundary-slot index serves acquired-point lookup
+and rollback. The SQLite schema is translated to PostgreSQL and MySQL by the
+shared migration registry. The migration does not populate the table, so
+Conway boundaries that passed before the upgrade have no row. At every start,
+after any interrupted rollback or pending RATIFY has been recovered and before
+block processing resumes, the ledger rebuilds each missing Conway-or-later row
+newest first (`LedgerState.rebuildGovernanceBoundarySnapshots`). Each rebuild
+opens a write transaction, truncates it to the last block below the boundary
+with the same sweep a live rollback runs (`Database.TruncateAfterSlot`, with
+the live UTxO set's rollback staged as an overlay), replays the boundary's
+rollover with RATIFY forced on against the committed `mark` pool-stake rows of
+the opened epoch, reads back the row the shared governance code saved, rolls
+the transaction back, and stores the row in a fresh transaction if it is still
+absent. Nothing the replay writes survives, so the ledger state, tip and live
+UTxO set are unchanged. A boundary that already has a row is skipped, so the
+pass is idempotent and a crash between boundaries resumes where it stopped.
+The boundary named by `dingo:governance:ratify-pending` is skipped because its
+own job writes the row.
+A boundary the stores cannot restore ends the pass: the live UTxO set's journal
+no longer reaches the block below it, that block is below the Mithril trust
+boundary, the consumed-output sweep removed what the restore needs, or the
+committed `mark` snapshot is missing. Its row, and every older one, stay absent,
+and a lookup for a slot in such an epoch returns
+`models.ErrGovernanceBoundarySnapshotNotRetained`, never the previous epoch's
+row and never a substitute taken from live voting state; the error is not a
+storage failure. A ledger-state import resumed from a checkpoint that predates
+the snapshot writes the imported boundary row on resume.
 
 #### Mithril API reward-live-stake finalization
 

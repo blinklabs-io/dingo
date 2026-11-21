@@ -21,7 +21,111 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/ledger"
 )
+
+// SaveGovernanceBoundarySnapshot stores the completed Conway pulser input and
+// RATIFY outcome at an epoch boundary.
+func (d *Database) SaveGovernanceBoundarySnapshot(
+	ctx context.Context,
+	snapshot *models.GovernanceBoundarySnapshot,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		return d.governanceStore().SaveGovernanceBoundarySnapshot(
+			snapshot,
+			txn.Metadata(),
+		)
+	})
+}
+
+// GetGovernanceBoundarySnapshotAtSlot returns the boundary snapshot of the
+// epoch containing slot, which is the newest retained boundary at or before
+// slot provided it opens that same epoch.
+//
+// A Conway-or-later epoch with no stored row yields
+// models.ErrGovernanceBoundarySnapshotNotRetained instead of the previous
+// epoch's snapshot. The ledger rebuilds missing rows at start-up, so the error
+// remains only for a boundary whose pre-boundary state is no longer
+// restorable. A nil snapshot with a nil error means no boundary applies, as for a
+// slot in a pre-Conway epoch. A slot past the last stored epoch is matched
+// against that epoch: the newest row must open it or a later epoch. Without an
+// epoch table to check against, the newest row at or before slot is returned.
+func (d *Database) GetGovernanceBoundarySnapshotAtSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) (*models.GovernanceBoundarySnapshot, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	snapshot, err := d.governanceStore().GetGovernanceBoundarySnapshotAtSlot(
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	epoch, err := d.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return nil, fmt.Errorf("resolve epoch of slot %d: %w", slot, err)
+	}
+	if epoch != nil {
+		if snapshot != nil && snapshot.Epoch == epoch.EpochId {
+			return snapshot, nil
+		}
+		if epoch.EraId < ledger.EraIdConway {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"%w %d (slot %d)",
+			models.ErrGovernanceBoundarySnapshotNotRetained,
+			epoch.EpochId,
+			slot,
+		)
+	}
+	epochs, err := d.GetEpochs(txn)
+	if err != nil {
+		return nil, fmt.Errorf("list epochs for slot %d: %w", slot, err)
+	}
+	var last *models.Epoch
+	for i := range epochs {
+		if last == nil || epochs[i].StartSlot > last.StartSlot {
+			last = &epochs[i]
+		}
+	}
+	if last == nil || slot < last.StartSlot {
+		return snapshot, nil
+	}
+	if snapshot != nil && snapshot.Epoch >= last.EpochId {
+		return snapshot, nil
+	}
+	if last.EraId < ledger.EraIdConway {
+		return nil, nil
+	}
+	return nil, fmt.Errorf(
+		"%w after epoch %d (slot %d)",
+		models.ErrGovernanceBoundarySnapshotNotRetained,
+		last.EpochId,
+		slot,
+	)
+}
+
+// DeleteGovernanceBoundarySnapshotsAfterSlot removes boundary state discarded
+// by a rollback or a ledger-state import reconciliation.
+func (d *Database) DeleteGovernanceBoundarySnapshotsAfterSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		return d.governanceStore().DeleteGovernanceBoundarySnapshotsAfterSlot(
+			slot,
+			txn.Metadata(),
+		)
+	})
+}
 
 // DeleteGovernanceProposalsAfterSlot removes governance proposals added after
 // the given slot and clears deleted_slot for any that were soft-deleted after

@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,6 +58,12 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 		ExpiryEpoch:   20,
 		Active:        true,
 	}))
+	seedDRepStake(t, store, testBytes(28, 0x72), credential,
+		models.DrepTypeAddrKeyHash, 60, 0x73)
+	seedDRepStake(t, store, testBytes(28, 0x74), nil,
+		models.DrepTypeAlwaysAbstain, 40, 0x75)
+	seedDRepStake(t, store, testBytes(28, 0x76), nil,
+		models.DrepTypeAlwaysNoConfidence, 20, 0x77)
 
 	processBoundary := func() {
 		txn := db.MetadataTxn(context.Background(), true)
@@ -84,6 +91,128 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		t.Context(),
+		500,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Equal(t, uint64(5), snapshot.Epoch)
+	require.Equal(t, uint64(500), snapshot.BoundarySlot)
+	require.Len(t, snapshot.DRepDistribution, 3)
+	require.Equal(t, credential, snapshot.DRepDistribution[0].Credential)
+	require.Equal(t, uint64(60), snapshot.DRepDistribution[0].Stake)
+	require.Equal(t, uint8(models.DrepTypeAlwaysAbstain), snapshot.DRepDistribution[1].DRepType)
+	require.Equal(t, uint64(40), snapshot.DRepDistribution[1].Stake)
+	require.Equal(t, uint8(models.DrepTypeAlwaysNoConfidence), snapshot.DRepDistribution[2].DRepType)
+	require.Equal(t, uint64(20), snapshot.DRepDistribution[2].Stake)
+}
+
+func TestProcessEpochNativeBoundarySnapshotRetainsRatifyOutcome(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	require.NoError(t, store.SetNetworkState(100*ada, 20*ada, 1, nil))
+	require.NoError(t, db.SetConstitution(&models.Constitution{
+		AnchorURL:  "https://example.invalid/constitution",
+		AnchorHash: testBytes(32, 0xC1),
+		PolicyHash: testBytes(28, 0xC2),
+		AddedSlot:  1,
+	}, nil))
+	root := chainTestProposal(
+		lcommon.GovActionTypeParameterChange,
+		testBytes(32, 0xC3), nil, 200, 0, testBytes(29, 0),
+		chainTestParameterChange(t, 1),
+	)
+	enactedEpoch, enactedSlot := stabilityTestEpoch-3, uint64(200)
+	root.EnactedEpoch, root.EnactedSlot = &enactedEpoch, &enactedSlot
+	ratified := chainTestProposal(
+		lcommon.GovActionTypeTreasuryWithdrawal,
+		testBytes(32, 0xE1), nil, 400, 0, testBytes(29, 0),
+		chainTestWithdrawal(t, 0xE2, 120*ada),
+	)
+	expiring := chainTestProposal(
+		lcommon.GovActionTypeTreasuryWithdrawal,
+		testBytes(32, 0xE5), nil, 401, 0, testBytes(29, 0),
+		chainTestWithdrawal(t, 0xE6, 500*ada),
+	)
+	expiring.ExpiresEpoch = stabilityTestEpoch - 1
+	stored := chainTestStore(t, db, root, ratified, expiring)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, stored[1])
+
+	seedTestRunEpoch(t, db, stabilityTestEpoch, 50*ada)
+
+	boundarySlot := stabilityTestEpoch * 100
+	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		t.Context(), boundarySlot, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Equal(t, stabilityTestEpoch, snapshot.Epoch)
+	require.Equal(t, boundarySlot, snapshot.BoundarySlot)
+	require.Equal(t, []models.GovernanceCommitteeMember{{
+		ColdCredentialTag: 0,
+		ColdCredential:    testBytes(28, 0xD1),
+		ExpiresEpoch:      stabilityTestEpoch + 10,
+	}}, snapshot.Committee)
+	require.Equal(t, "2/3", snapshot.CommitteeQuorum)
+	require.Equal(t, &models.GovernanceConstitution{
+		AnchorURL:  "https://example.invalid/constitution",
+		AnchorHash: testBytes(32, 0xC1),
+		PolicyHash: testBytes(28, 0xC2),
+	}, snapshot.Constitution)
+	require.Len(t, snapshot.PurposeRoots, len(chainedPurposes))
+	require.Equal(t, &models.GovernanceActionRef{
+		TxHash: root.TxHash, ActionIndex: root.ActionIndex,
+	}, snapshot.PurposeRoots[0])
+	for _, ref := range snapshot.PurposeRoots[1:] {
+		require.Nil(t, ref)
+	}
+	require.Equal(t, []models.GovernanceActionRef{{
+		TxHash: ratified.TxHash, ActionIndex: ratified.ActionIndex,
+	}}, snapshot.Ratified)
+	require.Equal(t, []models.GovernanceActionRef{{
+		TxHash: expiring.TxHash, ActionIndex: expiring.ActionIndex,
+	}}, snapshot.Expired)
+	require.Equal(t, 100*ada+50*ada-120*ada, snapshot.RatificationTreasury)
+	require.False(t, snapshot.Delayed)
+	wantPParams, err := cbor.Encode(chainTestPParams())
+	require.NoError(t, err)
+	require.Equal(t, wantPParams, snapshot.PostEnactmentPParams)
+
+	// Replaying the boundary finds the expiration already stored and must
+	// keep it in the replaced row.
+	seedTestRunEpoch(t, db, stabilityTestEpoch, 50*ada)
+	replayed, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		t.Context(), boundarySlot, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.Expired, replayed.Expired)
+}
+
+func TestProcessEpochNativeBoundarySnapshotRecordsDelayingRatification(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	hardFork := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, 11, 400, 0xE7,
+	)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, hardFork)
+
+	seedTestRunEpoch(t, db, stabilityTestEpoch, 0)
+
+	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
+		t.Context(), stabilityTestEpoch*100, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Equal(t, []models.GovernanceActionRef{{
+		TxHash: hardFork.TxHash, ActionIndex: hardFork.ActionIndex,
+	}}, snapshot.Ratified)
+	require.True(t, snapshot.Delayed)
 }
 
 func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
@@ -1271,24 +1400,24 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 		{
 			name: "Conway",
 			pparams: func() lcommon.ProtocolParameters {
-				return &conway.ConwayProtocolParameters{
+				return testutil.CompleteRats(&conway.ConwayProtocolParameters{
 					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 						Major: 10,
 					},
-				}
+				})
 			},
 		},
 		{
 			name: "Dijkstra",
 			pparams: func() lcommon.ProtocolParameters {
-				return &gdijkstra.DijkstraProtocolParameters{
+				return testutil.CompleteRats(&gdijkstra.DijkstraProtocolParameters{
 					ConwayProtocolParameters: conway.ConwayProtocolParameters{
 						ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 							Major: gdijkstra.MinProtocolVersionDijkstra,
 						},
 					},
 					MaxRefScriptSizePerBlock: 1_000,
-				}
+				})
 			},
 		},
 	}
@@ -1405,11 +1534,11 @@ func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
 		PrevEpoch:    4,
 		NewEpoch:     5,
 		BoundarySlot: 500,
-		PParams: &conway.ConwayProtocolParameters{
+		PParams: testutil.CompleteRats(&conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 				Major: 10,
 			},
-		},
+		}),
 		UpdateFn: func(
 			pparams lcommon.ProtocolParameters,
 			_ any,
@@ -1580,6 +1709,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				CommitteeStakeCoverage:   testRatPtr(2, 3),
 				QuorumStakeThreshold:     testRatPtr(3, 5),
 			}
+			testutil.CompleteRats(pparams)
 
 			runEpoch := func(
 				prevEpoch uint64,
@@ -1705,6 +1835,7 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 			PpGovGroup:     newRat(1, 1),
 		},
 	}
+	testutil.CompleteRats(pparams)
 
 	runEpoch := func(
 		prevEpoch uint64,

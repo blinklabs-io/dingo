@@ -39,6 +39,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // SnapshotTip represents the chain tip recorded in the ledger state
@@ -792,6 +793,14 @@ func ImportLedgerState(
 		); err != nil {
 			return fmt.Errorf("deleting post-anchor governance votes: %w", err)
 		}
+		if err := cfg.Database.DeleteGovernanceBoundarySnapshotsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf(
+				"deleting post-anchor governance boundary snapshots: %w",
+				err,
+			)
+		}
 		if err := cfg.Database.DeleteGovernanceProposalsAfterSlot(
 			ctx, slot, txn,
 		); err != nil {
@@ -1056,16 +1065,8 @@ func ImportLedgerState(
 				"(already completed)",
 			"component", "ledgerstate",
 		)
-		// The checkpoint may predate the root verifier, so verify the
-		// seeded roots even though the phase is not re-run.
-		if cfg.State.GovStateData != nil &&
-			cfg.State.EraIndex >= EraConway {
-			if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
-				return fmt.Errorf(
-					"verifying per-purpose governance roots: %w",
-					err,
-				)
-			}
+		if err := resumeCompletedGovState(ctx, cfg); err != nil {
+			return err
 		}
 	}
 
@@ -4611,6 +4612,14 @@ func importGovState(
 			)
 		}
 	}
+	if err := importGovernanceBoundarySnapshot(
+		ctx,
+		cfg,
+		govState,
+		currentEpochSlot,
+	); err != nil {
+		return err
+	}
 
 	progress(ImportProgress{
 		Stage:       "governance",
@@ -4618,6 +4627,163 @@ func importGovState(
 		Description: "governance state imported",
 	})
 
+	return nil
+}
+
+// resumeCompletedGovState covers what a resumed import must still do when its
+// checkpoint says the governance phase ran. The checkpoint may predate the
+// root verifier and the boundary snapshot, so the seeded roots are verified
+// and a missing boundary snapshot is written from the snapshot's own state.
+func resumeCompletedGovState(ctx context.Context, cfg ImportConfig) error {
+	if cfg.State.GovStateData == nil || cfg.State.EraIndex < EraConway {
+		return nil
+	}
+	if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
+		return fmt.Errorf(
+			"verifying per-purpose governance roots: %w",
+			err,
+		)
+	}
+	govState, _, err := parseImportedGovState(cfg)
+	if err != nil {
+		return err
+	}
+	if govState == nil {
+		return nil
+	}
+	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
+	existing, err := cfg.Database.GetGovernanceBoundarySnapshotAtSlot(
+		ctx,
+		boundarySlot,
+		nil,
+	)
+	// An epoch with no retained row is the case this resume exists to fill.
+	if err != nil &&
+		!errors.Is(err, models.ErrGovernanceBoundarySnapshotNotRetained) {
+		return fmt.Errorf("read imported governance boundary snapshot: %w", err)
+	}
+	if err == nil && existing != nil &&
+		existing.Epoch == cfg.State.Epoch &&
+		existing.BoundarySlot == boundarySlot {
+		return nil
+	}
+	return importGovernanceBoundarySnapshot(ctx, cfg, govState, boundarySlot)
+}
+
+func importGovernanceBoundarySnapshot(
+	ctx context.Context,
+	cfg ImportConfig,
+	parsed *ParsedGovState,
+	boundarySlot uint64,
+) error {
+	govFields, err := decodeRawArray(cfg.State.GovStateData)
+	if err != nil {
+		return fmt.Errorf("decode imported governance boundary state: %w", err)
+	}
+	if len(govFields) != 7 {
+		return fmt.Errorf("imported governance state has %d fields, expected 7", len(govFields))
+	}
+	pulsingFields, err := decodeRawArray(govFields[6])
+	if err != nil {
+		return fmt.Errorf("decode imported DRep pulsing state: %w", err)
+	}
+	if len(pulsingFields) != 2 {
+		return fmt.Errorf("imported DRep pulsing state has %d fields, expected 2", len(pulsingFields))
+	}
+	snapshotFields, err := decodeRawArray(pulsingFields[0])
+	if err != nil {
+		return fmt.Errorf("decode imported pulsing snapshot: %w", err)
+	}
+	if len(snapshotFields) != 4 {
+		return fmt.Errorf("imported pulsing snapshot has %d fields, expected 4", len(snapshotFields))
+	}
+	wrappedDistribution := append([]byte{0x81}, snapshotFields[1]...)
+	var distribution olocalstatequery.DRepStakeDistrResult
+	if _, err := cbor.DecodeExact(wrappedDistribution, &distribution); err != nil {
+		return fmt.Errorf("decode imported DRep distribution: %w", err)
+	}
+	ratifyFields, err := decodeRawArray(pulsingFields[1])
+	if err != nil {
+		return fmt.Errorf("decode imported ratification state: %w", err)
+	}
+	if len(ratifyFields) != 4 {
+		return fmt.Errorf("imported ratification state has %d fields, expected 4", len(ratifyFields))
+	}
+	var delayed bool
+	if _, err := cbor.DecodeExact(ratifyFields[3], &delayed); err != nil {
+		return fmt.Errorf("decode imported ratification delayed flag: %w", err)
+	}
+	enactFields, err := decodeRawArray(ratifyFields[0])
+	if err != nil {
+		return fmt.Errorf("decode imported ratification enact state: %w", err)
+	}
+	if len(enactFields) != 7 {
+		return fmt.Errorf("imported ratification enact state has %d fields, expected 7", len(enactFields))
+	}
+	var treasury uint64
+	if len(enactFields[4]) > 0 && enactFields[4][0] != 0xf6 {
+		if _, err := cbor.DecodeExact(enactFields[4], &treasury); err != nil {
+			return fmt.Errorf("decode imported ratification treasury: %w", err)
+		}
+	}
+	snapshot := &models.GovernanceBoundarySnapshot{
+		Epoch:                cfg.State.Epoch,
+		BoundarySlot:         boundarySlot,
+		PostEnactmentPParams: append([]byte(nil), govFields[3]...),
+		FuturePParams:        append([]byte(nil), govFields[5]...),
+		RatificationTreasury: treasury,
+		Delayed:              delayed,
+		ImportedRatifyState:  append([]byte(nil), pulsingFields[1]...),
+		DRepDistribution: make(
+			[]models.DRepStakeDistributionEntry,
+			0,
+			len(distribution),
+		),
+		Ratified: make(
+			[]models.GovernanceActionRef,
+			0,
+			len(parsed.RatifiedGovActionIds),
+		),
+		Expired: make(
+			[]models.GovernanceActionRef,
+			0,
+			len(parsed.ExpiredGovActionIds),
+		),
+	}
+	for _, entry := range distribution {
+		if entry.Drep.Type < lcommon.DrepTypeAddrKeyHash ||
+			entry.Drep.Type > lcommon.DrepTypeNoConfidence {
+			return fmt.Errorf("imported DRep distribution type %d", entry.Drep.Type)
+		}
+		snapshot.DRepDistribution = append(
+			snapshot.DRepDistribution,
+			models.DRepStakeDistributionEntry{
+				Credential:    append([]byte(nil), entry.Drep.Credential...),
+				Stake:         entry.Stake,
+				DRepType:      uint8(entry.Drep.Type), //nolint:gosec // checked above
+				CredentialTag: uint8(entry.Drep.Type), //nolint:gosec // checked above
+			},
+		)
+	}
+	for _, action := range parsed.RatifiedGovActionIds {
+		snapshot.Ratified = append(snapshot.Ratified, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), action.TxHash...),
+			ActionIndex: action.ActionIndex,
+		})
+	}
+	for _, action := range parsed.ExpiredGovActionIds {
+		snapshot.Expired = append(snapshot.Expired, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), action.TxHash...),
+			ActionIndex: action.ActionIndex,
+		})
+	}
+	if err := cfg.Database.SaveGovernanceBoundarySnapshot(
+		ctx,
+		snapshot,
+		nil,
+	); err != nil {
+		return fmt.Errorf("save imported governance boundary snapshot: %w", err)
+	}
 	return nil
 }
 

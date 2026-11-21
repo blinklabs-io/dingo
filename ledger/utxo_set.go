@@ -1149,7 +1149,8 @@ func (ls *LedgerState) utxoSetBatchFor(meta types.Txn) *utxoSetBatch {
 }
 
 // stageUtxoSetRollback makes txn's batch roll the live UTxO set back to point
-// from its journal once txn commits, and record point as its tip.
+// from its journal once txn commits, and record point as its tip. A preview
+// the journal cannot serve stops the set following the ledger.
 func (ls *LedgerState) stageUtxoSetRollback(
 	txn ledgerdb.Txn,
 	point ocommon.Point,
@@ -1158,6 +1159,23 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		ls.applyUtxoSet(&utxoSetBatch{rollbackTo: &point, tip: &point})
 		return
 	}
+	if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil {
+		ls.failUtxoSet(
+			point.Slot,
+			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
+			err,
+		)
+	}
+}
+
+// stageUtxoSetRollbackChecked is stageUtxoSetRollback for a write
+// transaction, returning the error of a preview the journal cannot serve
+// instead of failing the set. A caller that returns the error must roll txn
+// back so the staged batch is dropped.
+func (ls *LedgerState) stageUtxoSetRollbackChecked(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
 	// The batch's tip is applied after the rollback, so its journal record
 	// lands after the records the rollback undoes.
 	ls.stageUtxoSet(txn, &point)
@@ -1174,7 +1192,7 @@ func (ls *LedgerState) stageUtxoSetRollback(
 	rb, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
 	r, readable := ls.config.UtxoSet.(UtxoSetReader)
 	if b == nil || !ok || !readable {
-		return
+		return nil
 	}
 	preview, err := rb.PreviewUtxoSetRollback(point)
 	if err == nil {
@@ -1187,13 +1205,7 @@ func (ls *LedgerState) stageUtxoSetRollback(
 	if err == nil {
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
-	if err != nil {
-		ls.failUtxoSet(
-			point.Slot,
-			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
-			err,
-		)
-	}
+	return err
 }
 
 // LiveUtxoStake implements types.LiveUtxoSource: the lovelace in live

@@ -199,6 +199,26 @@ type SlotRangeStore interface {
 // cluster, and ClearDanglingDRepDelegations is a hardfork transition that
 // updates both account state and the reverse delegator index.
 type GovernanceStore interface {
+	// SaveGovernanceBoundarySnapshot replaces the retained boundary state for
+	// snapshot.Epoch. Replaying the same epoch boundary is idempotent.
+	SaveGovernanceBoundarySnapshot(
+		*models.GovernanceBoundarySnapshot,
+		types.Txn,
+	) error
+
+	// GetGovernanceBoundarySnapshotAtSlot returns the newest retained
+	// boundary at or before slot, or nil when none is retained. The store
+	// does not check which epoch the row opens; database.Database does, and
+	// is the entry point for consumers.
+	GetGovernanceBoundarySnapshotAtSlot(
+		uint64,
+		types.Txn,
+	) (*models.GovernanceBoundarySnapshot, error)
+
+	// DeleteGovernanceBoundarySnapshotsAfterSlot removes boundaries newer
+	// than slot during rollback or snapshot reconciliation.
+	DeleteGovernanceBoundarySnapshotsAfterSlot(uint64, types.Txn) error
+
 	// Proposal and vote methods
 
 	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.

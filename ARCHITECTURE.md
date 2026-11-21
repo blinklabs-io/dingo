@@ -23798,6 +23798,22 @@ POOLREAP precedes SNAP.
    `WaitEpochBoundaryJob` before reading proposal deposits and active
    proposals.
 
+   At start-up, after the rollback intent and any pending RATIFY record are
+   recovered and before block processing resumes,
+   `rebuildGovernanceBoundarySnapshots` stores the governance boundary snapshot
+   of every Conway-or-later epoch that has none, newest first. Each boundary is
+   replayed in a write transaction that is always rolled back: it is truncated
+   to the last block below the boundary by the code a live rollback uses
+   (`truncateLedgerStateInTxn`, which stages the live UTxO set's rollback as an
+   overlay and returns, rather than fails the set on, a journal that does not
+   reach the target), then `processEpochRolloverWithOptions` runs with a
+   `boundaryReplay`: validation-only, but RATIFY decides and applies at once
+   against the committed `mark` rows read before the truncation. The saved row
+   is read back and stored in a fresh transaction. A boundary the journal, the
+   Mithril trust boundary or the consumed-output prune floor cannot reach, or
+   whose reward basis retention has pruned, stops the pass, leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and
+   every older epoch.
+
    A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
    leaves its mark snapshot to the same job. At the SNAP point the boundary
    only reads the stake rows of the pools POOLREAP is about to retire

@@ -9926,6 +9926,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		false,
+		nil,
 	)
 }
 
@@ -9955,7 +9956,16 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		false,
+		nil,
 	)
+}
+
+// boundaryReplay marks a rollover that rebuilds a past boundary's governance
+// outcome inside a transaction its caller discards. It behaves as a
+// validation-only rollover that also runs RATIFY at once, against the mark
+// distribution a retained snapshot holds for the boundary's epoch.
+type boundaryReplay struct {
+	spoState *governance.SPOVotingState
 }
 
 // processEpochRolloverWithOptions is the epoch rollover. validationOnly marks
@@ -9976,6 +9986,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
 	validationOnly bool,
+	replay *boundaryReplay,
 ) (*EpochRolloverResult, error) {
 	targetEpoch, err := epochAtSlot(
 		currentEpoch,
@@ -9997,6 +10008,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		validationOnly,
+		replay,
 	)
 }
 
@@ -10017,6 +10029,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
 	validationOnly bool,
+	replay *boundaryReplay,
 ) (result *EpochRolloverResult, err error) {
 	timePhase := ls.timeRolloverPhase
 	if validationOnly {
@@ -10390,6 +10403,9 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
 	var currentBoundarySPOState *governance.SPOVotingState
+	if replay != nil {
+		currentBoundarySPOState = replay.spoState
+	}
 	if !validationOnly && !snapDeferred &&
 		currentEra.Id < eras.DijkstraEraDesc.Id {
 		if err := timePhase(
@@ -10544,14 +10560,14 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	}
 	var deferredPlan *governance.RatificationPlan
 	applyRatification := func() error {
-		if validationOnly {
+		if validationOnly && replay == nil {
 			return nil
 		}
 		if plan := govOut.Ratification; plan != nil {
 			if err := timePhase(
 				currentEpoch.EpochId+1, "ratify", func() error {
 					if ls.ratifyAtBoundary ||
-						hardForkHere {
+						hardForkHere || replay != nil {
 						if currentBoundarySPOState == nil {
 							state, err := ls.currentBoundarySPOStakeState(
 								txn, currentEpoch, epochStartSlot, currentEra.Id,
@@ -10830,7 +10846,16 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		)
 	}
 
-	if snapshotAfterEnactment && !validationOnly {
+	if snapshotAfterEnactment && replay != nil {
+		// The retained mark distribution is the one Dijkstra's post-enactment
+		// SNAP produced, so RATIFY runs against it directly.
+		if plan := govOut.Ratification; plan != nil {
+			plan.SetBoundarySPOState(currentBoundarySPOState)
+		}
+		if err := applyRatification(); err != nil {
+			return nil, err
+		}
+	} else if snapshotAfterEnactment && !validationOnly {
 		// Dijkstra EPOCH moves SNAP after POOLREAP, enactment and HARDFORK.
 		// RATIFY must use this same mark distribution for its next pulser.
 		if err := ls.captureEpochBoundarySnapshotStake(

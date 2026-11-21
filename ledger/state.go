@@ -3345,6 +3345,12 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.resumePendingRatification(ctx); err != nil {
 		return err
 	}
+	// A Conway-or-later boundary that passed without a retained snapshot
+	// row, as on a database upgraded mid-window, is rebuilt from the stored
+	// chain before block processing resumes.
+	if err := ls.rebuildGovernanceBoundarySnapshots(ctx); err != nil {
+		return fmt.Errorf("rebuild governance boundary snapshots: %w", err)
+	}
 	// The subscription above cannot fire for an epoch that began before this
 	// process did, so catch up the in-progress epoch's reward round here.
 	// Without it, a node started mid-epoch calculates that round inline inside
@@ -5601,6 +5607,122 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	)
 }
 
+// truncateLedgerStateInTxn rolls the metadata, the live UTxO set's staged
+// view and the boundary-keyed side state in txn back to point, as a ledger
+// rollback does. liveSet reports that txn is a rollback that will commit: the
+// live UTxO set rollback preview failing then stops the set following the
+// ledger. A caller that throws txn away passes false and receives the preview
+// error instead, because failing the set would halt the node for work that
+// never reaches it.
+func (ls *LedgerState) truncateLedgerStateInTxn(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+	mithrilLedgerSlot uint64,
+	liveSet bool,
+) (ochainsync.Tip, []byte, error) {
+	// CIP-0163: capture the reward-account credentials witnessed in the
+	// rolled-away blocks (added_slot > rollback slot) before
+	// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
+	// their rows. Their expiration_epoch is recomputed against the
+	// surviving chain once TruncateAfterSlot has restored account
+	// state (see below). Gate off => skip.
+	var expiryAffectedRefs []models.StakeCredentialRef
+	if ls.config.DelegatorInactivityEnabled {
+		var affErr error
+		expiryAffectedRefs, affErr = ls.ledgerDB().
+			AccountsWitnessedAfterSlot(
+				ctx,
+				point.Slot,
+				txn,
+			)
+		if affErr != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"collect rolled-back witnessed accounts: %w",
+				affErr,
+			)
+		}
+	}
+	// The metadata store holds no utxo rows; the set rolls back from its
+	// own journal after the commit and its net change is published.
+	if liveSet {
+		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
+	} else if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil { //nolint:contextcheck // the change is never applied: the caller discards txn
+		return ochainsync.Tip{}, nil, err
+	}
+	var (
+		newTip   ochainsync.Tip
+		newNonce []byte
+		err      error
+	)
+	if ls.rollbackTruncateAfterSlotFunc != nil {
+		newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
+			point,
+			mithrilLedgerSlot,
+			txn,
+		)
+	} else {
+		newTip, newNonce, err = ls.ledgerDB().TruncateAfterSlot(
+			ctx,
+			point,
+			mithrilLedgerSlot,
+			txn,
+		)
+	}
+	if err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+	if err := ls.refreshUtxoSetRollbackStake(txn, point.Slot); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"refresh rolled-back UTxO stake: %w", err,
+		)
+	}
+	if err := ls.discardPendingRatificationAfterSlot(
+		txn, point.Slot,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"discard pending ratification: %w", err,
+		)
+	}
+	if err := discardRewardStakeInputsPendingAfterSlot(
+		ls.ledgerDB(), txn, point.Slot,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"discard pending reward stake inputs: %w", err,
+		)
+	}
+	// CIP-0163: now that TruncateAfterSlot has deleted the rolled-away
+	// certificate/withdrawal rows and restored the remaining account
+	// fields (both ahead of its own pool/DRep/governance/etc. sweep),
+	// recompute the expiration_epoch of the affected reward accounts
+	// against the surviving chain. Gate off => no-op.
+	if err := ls.recomputeAccountExpirationsAfterRollback(
+		ctx,
+		txn,
+		point.Slot,
+		expiryAffectedRefs,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"recompute account expirations after rollback: %w",
+			err,
+		)
+	}
+	// Undo the synthetic-PlutusV2-cost-model marker if this rollback
+	// crosses back before the epoch it was last confirmed cleared at;
+	// see database.RecomputeSyntheticV2CostModelMarkerAfterTruncate.
+	if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+		ls.db,
+		dbadapter.Unwrap(txn),
+		point.Slot,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"recompute synthetic PlutusV2 cost model marker after rollback: %w",
+			err,
+		)
+	}
+	return newTip, newNonce, nil
+}
+
 func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	ctx context.Context,
 	point ocommon.Point,
@@ -5854,94 +5976,15 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	finishValidationTransition := ls.beginTxValidationTransition()
 	defer finishValidationTransition()
 	err = ls.SubmitAsyncDBTxn(ctx, func(txn ledgerdb.Txn) error {
-		// CIP-0163: capture the reward-account credentials witnessed in the
-		// rolled-away blocks (added_slot > rollback slot) before
-		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
-		// their rows. Their expiration_epoch is recomputed against the
-		// surviving chain once TruncateAfterSlot has restored account
-		// state (see below). Gate off => skip.
-		var expiryAffectedRefs []models.StakeCredentialRef
-		if ls.config.DelegatorInactivityEnabled {
-			var affErr error
-			expiryAffectedRefs, affErr = ls.ledgerDB().
-				AccountsWitnessedAfterSlot(
-					ctx,
-					point.Slot,
-					txn,
-				)
-			if affErr != nil {
-				return fmt.Errorf(
-					"collect rolled-back witnessed accounts: %w",
-					affErr,
-				)
-			}
-		}
-		// The metadata store holds no utxo rows; the set rolls back from its
-		// own journal after the commit and its net change is published.
-		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
 		var err error
-		if ls.rollbackTruncateAfterSlotFunc != nil {
-			newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
-				point,
-				mithrilLedgerSlot,
-				txn,
-			)
-		} else {
-			newTip, newNonce, err = ls.ledgerDB().TruncateAfterSlot(
-				ctx,
-				point,
-				mithrilLedgerSlot,
-				txn,
-			)
-		}
-		if err != nil {
-			return err
-		}
-		if err := ls.refreshUtxoSetRollbackStake(txn, point.Slot); err != nil {
-			return fmt.Errorf("refresh rolled-back UTxO stake: %w", err)
-		}
-		// CIP-0163: now that TruncateAfterSlot has deleted the rolled-away
-		// certificate/withdrawal rows and restored the remaining account
-		// fields (both ahead of its own pool/DRep/governance/etc. sweep),
-		// recompute the expiration_epoch of the affected reward accounts
-		// against the surviving chain. Gate off => no-op.
-		if err := ls.discardPendingRatificationAfterSlot(
-			txn, point.Slot,
-		); err != nil {
-			return fmt.Errorf("discard pending ratification: %w", err)
-		}
-		if err := discardRewardStakeInputsPendingAfterSlot(
-			ls.ledgerDB(), txn, point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"discard pending reward stake inputs: %w", err,
-			)
-		}
-		if err := ls.recomputeAccountExpirationsAfterRollback(
+		newTip, newNonce, err = ls.truncateLedgerStateInTxn(
 			ctx,
 			txn,
-			point.Slot,
-			expiryAffectedRefs,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute account expirations after rollback: %w",
-				err,
-			)
-		}
-		// Undo the synthetic-PlutusV2-cost-model marker if this rollback
-		// crosses back before the epoch it was last confirmed cleared at;
-		// see database.RecomputeSyntheticV2CostModelMarkerAfterTruncate.
-		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
-			ls.db,
-			dbadapter.Unwrap(txn),
-			point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute synthetic PlutusV2 cost model marker after rollback: %w",
-				err,
-			)
-		}
-		return nil
+			point,
+			mithrilLedgerSlot,
+			true,
+		)
+		return err
 	}, true)
 	if err != nil {
 		return err
@@ -17291,6 +17334,7 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		true,
+		nil,
 	)
 	if err != nil {
 		return err
