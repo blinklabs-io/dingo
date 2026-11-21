@@ -715,6 +715,61 @@ func TestLiveUtxoSetRewardGuardKeepsActivationFloor(t *testing.T) {
 	require.Zero(t, rolledBack.InactivityActivationEpoch)
 }
 
+// TestReimportedAccountKeepsActivationFloor requires a ledger-state import
+// that writes an account the set already holds to keep the account's
+// activation membership and floor. A snapshot carries neither, and the
+// reward guard reads both from the account: without them the witness in the
+// preceding epoch expires the account before the reward snapshot.
+func TestReimportedAccountKeepsActivationFloor(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
+
+	var ref models.StakeCredentialRef
+	require.NoError(t, set.Accounts(func(a *models.Account) error {
+		if a.Active && a.CredentialTag == 0 && ref.Key == nil {
+			ref = models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
+		}
+		return nil
+	}))
+	require.NotNil(t, ref.Key)
+	scenario.WithdrawAtSlot(ref, scenario.RollbackSlot(), 0)
+	activationEpoch, boundary := scenario.ActivateInactivityAtBoundary(1)
+	held, err := set.Account(ref.Tag, ref.Key)
+	require.NoError(t, err)
+	require.True(t, held.InactivityActivation)
+	require.False(t, scenario.RewardAccountGuarded(
+		ref, activationEpoch+1, boundary,
+	))
+
+	imported := models.Account{
+		StakingKey:    ref.Key,
+		CredentialTag: ref.Tag,
+		Pool:          held.Pool,
+		Active:        true,
+		Reward:        held.Reward,
+		AddedSlot:     boundary,
+	}
+	importDB := ledger.NewImportLedgerDB(scenario.DB, set, nil)
+	txn := importDB.Begin(t.Context(), true)
+	require.NoError(t, importDB.ImportAccount(&imported, txn))
+	require.NoError(t, txn.Commit())
+	require.NoError(t, importDB.Err())
+
+	require.False(t, scenario.RewardAccountGuarded(
+		ref, activationEpoch+1, boundary,
+	), "the activation floor keeps the re-imported account reward-eligible")
+	kept, err := set.Account(ref.Tag, ref.Key)
+	require.NoError(t, err)
+	require.True(
+		t, kept.InactivityActivation,
+		"a re-imported account stays an activation member",
+	)
+	require.Equal(t, activationEpoch, kept.InactivityActivationEpoch)
+}
+
 // TestSetReadsOfAPinnedSnapshotAreTheSetAsOfThePin requires live-set reads of
 // a transaction pinned before later commits to answer the pin's DReps and
 // votes, as the ratification job's do: the scenario asserts the earlier

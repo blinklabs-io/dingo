@@ -83,7 +83,9 @@ func (s *ImportLedgerDB) Err() error {
 
 // ImportAccount writes account as the snapshot holds it, with the import
 // baseline its later history is measured from. An account the set already
-// holds keeps the slots and expiry it was first written with.
+// holds keeps the slots and expiry it was first written with, and its
+// inactivity activation membership and floor: a snapshot carries neither,
+// and the reward guard reads the floor from the account.
 func (s *ImportLedgerDB) ImportAccount(
 	account *models.Account,
 	txn ledgerdb.Txn,
@@ -106,6 +108,8 @@ func (s *ImportLedgerDB) ImportAccount(
 		next.AddedSlot = held.AddedSlot
 		next.CreatedSlot = held.CreatedSlot
 		next.ExpirationEpoch = held.ExpirationEpoch
+		next.InactivityActivation = held.InactivityActivation
+		next.InactivityActivationEpoch = held.InactivityActivationEpoch
 	}
 	baseline := ImportBaseline{
 		Ref: models.NewStakeCredentialRef(

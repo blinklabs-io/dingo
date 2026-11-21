@@ -208,3 +208,47 @@ func TestImportResumesAfterAStopAtEachPhase(t *testing.T) {
 		})
 	}
 }
+
+// TestCatchUpImportKeepsAccountActivationFloor requires a catch-up import to
+// keep the inactivity activation membership and floor of an account the set
+// already holds. A snapshot carries neither, and the reward guard reads the
+// floor from the account.
+func TestCatchUpImportKeepsAccountActivationFloor(t *testing.T) {
+	t.Parallel()
+	const activationEpoch = uint64(150)
+	db := newFixtureDB(t)
+	set := openFixtureSet(t)
+	require.NoError(t, importLedgerStateForTest(
+		t.Context(),
+		snapshotConfig(t, db, fixtureCatchUpSlot, false, set),
+	))
+	held, err := set.Account(0, fixtureStakingKey)
+	require.NoError(t, err)
+	require.NotNil(t, held)
+	stamped := *held
+	stamped.InactivityActivation = true
+	stamped.InactivityActivationEpoch = activationEpoch
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Accounts: []ledger.AccountChange{{
+			Slot: fixtureCatchUpSlot, Account: stamped,
+		}},
+	}))
+
+	const laterSlot = uint64(300_000)
+	require.NoError(t, importLedgerStateForTest(
+		t.Context(),
+		snapshotConfig(t, db, laterSlot, true, set),
+	))
+	kept, err := set.Account(0, fixtureStakingKey)
+	require.NoError(t, err)
+	require.NotNil(t, kept)
+	require.Equal(
+		t, uint64(4_000_000), uint64(kept.Reward),
+		"the catch-up must write the snapshot's account",
+	)
+	require.True(
+		t, kept.InactivityActivation,
+		"a re-imported account stays an activation member",
+	)
+	require.Equal(t, activationEpoch, kept.InactivityActivationEpoch)
+}
