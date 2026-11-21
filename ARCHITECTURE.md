@@ -3393,6 +3393,8 @@ configures a certificate validator, so the era decides). A drained
 pools-history family answers it from the certificate history, whose events
 keep the effective slot. Otherwise, and for any
 other snapshot slot, the certificate history supplies the answer after migration.
+The live pool registration carries the Leios key registration epoch with its
+key material, so the key age follows the same state transition and rollback.
 The op-cert counter reads (`LatestPoolOpCertSequence`, `...After`,
 `...AtOrBefore`, `...InRange` and `LatestPoolOpCertSequences`) are
 answered from the set once it reports the counters loaded.

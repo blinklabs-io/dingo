@@ -2789,7 +2789,7 @@ UTxO changes. Their tags and markers are declared in
 | `l` + DRep tag (1 byte) + DRep length (1 byte) + DRep + stake credential | a live link in a DRep's delegator set, as `drep_delegator` keeps it; empty value |
 | `zdormant` | the DRep dormancy counter (8 bytes, big-endian) |
 | `mdreps` | set once the DReps, links and dormancy counter are complete |
-| `w` + pool key hash | a registered pool's state (CBOR): the registration in effect, a re-registration waiting for the next epoch, the pending retirement epoch and the deposit held |
+| `w` + pool key hash | a registered pool's state (CBOR): the registration in effect, a re-registration waiting for the next epoch, the pending retirement epoch and the deposit held. Each registration includes its optional Leios key registration epoch; records written before that field was added decode it as absent |
 | `mpools` | set once every registered pool's state is loaded |
 | `y` + pool length (1 byte) + pool key hash + slot (8 bytes, big-endian) + position (8 bytes, big-endian) | a pool registration or retirement certificate: a retirement flag, the registration (as in `w`, with its added slot) and the retirement epoch; the position orders events inside a slot |
 | `mpoolhist2` | set once every pool certificate event is loaded with its effective slot; the earlier `mpoolhist` marked events without it and makes the set reload them |
