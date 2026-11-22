@@ -2396,11 +2396,10 @@ When `Node.Run()` is called, components are initialized in this order:
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
     block application after the startup pass can be re-analyzed before the
-    next rollover. The optimizer considers every table while retaining SQLite's
-    temporary sampling limit. An explicit optimizer mask must retain that bit;
-    omitting it permits unrestricted index analysis. The single write connection
-    is held during maintenance, so unrestricted analysis here would stop block
-    application for the duration of each scan. The tick shares the worker with
+    next rollover. Each pass analyzes every table under a temporary
+    `analysis_limit`, sampling each index rather than reading it whole. The
+    single write connection is held during maintenance, so unrestricted
+    analysis here would stop block application for the duration of each scan. The tick shares the worker with
     the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
@@ -3928,7 +3927,11 @@ the ledger database (`MetadataFacts` as `AnchorFacts`: applied-transaction
 count and a streamed digest of the live UTxO set at the anchor, through the
 `metadata.AnchorStateStore` capability) and applies the imported account state
 in one transaction with the phase marker (`Backfill` as `AnchorRestorer`, the
-history backfill's restore at its anchor). Each phase commits its own marker
+history backfill's restore at its anchor). Once that transaction commits, the
+writer takes one planner-statistics pass over the IndexerDB
+(`Writer.finalizePlannerStats`): the bounded form where the backend has one
+and the full refresh otherwise. A failure is logged, not returned, because the
+anchor is already durable. Each phase commits its own marker
 under `indexer_bootstrap`, so a stop resumes in the phase that has work left;
 `indexerdb.Store.ReadyServing` is not ready until the phase is `done` and the
 tip has passed the recorded anchor. A ledger that drained its accounts into

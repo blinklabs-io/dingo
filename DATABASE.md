@@ -130,21 +130,17 @@ maintenance does not delay API availability:
 statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then
-plans a full scan per lookup until the next run. Tables without statistics are
-eligible for analysis; other tables are reconsidered after substantial growth
-or shrinkage. The mask retains SQLite's temporary analysis-limit bit as well
-as its all-table check. Supplying an explicit mask without the limit bit
-disables that default and permits full index scans whenever a table is selected.
-Sampling limits this index work
-without changing the connection's configured analysis limit. The write pool
-has one connection, so writers still wait for the run. Sampled analysis updates
+plans a full scan per lookup until the next run. Every pass re-analyzes every
+table, however little it changed since the last one, and sampling bounds the
+index work of each. The write pool has one connection, so writers still wait
+for the run. Sampled analysis updates
 `sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
 full `ANALYZE` remains available for completed backfills. The run is skipped
 during a bulk load. A node-managed Mithril stream
 catch-up defers the epoch and periodic runs for its duration
-(`plannerstats.Manager.Defer`): on a database it is filling, nearly every table
-passes the growth threshold at each epoch, so each run costs more than the last,
-and one run after the catch-up replaces them. A fresh Mithril bootstrap restores
+(`plannerstats.Manager.Defer`): on a database it is filling, each run holds the
+write connection while its statistics go stale within the next epoch, and one
+run after the catch-up replaces them. A fresh Mithril bootstrap restores
 normal pragmas after rebuilding critical indexes, then uses this optimizer; if
 the backend does not support it or skips it, the full planner-statistics update
 runs instead. Resumed Mithril imports and other completed backfills retain the
@@ -157,12 +153,11 @@ statistics exist, when the presence check fails, or when the optimizer reports
 the operation unsupported or skipped, so existing statistics do not guarantee
 the incremental path.
 
-The growth rule never corrects `utxo` statistics taken over an imported
-ledger state. Every imported UTxO is unspent and shares one `added_slot`, so
-the statistics record `spent_at_tx_id` and `added_slot` as single values covering the whole
-table. Live operation then holds only about a security window of spent rows
-in a table that never grows anywhere near 25-fold, so those statistics are
-never revisited. Under them, the rollback sweep's stake-credential lookup for
+Statistics taken over an imported ledger state misdescribe `utxo`. Every
+imported UTxO is unspent and shares one `added_slot`, so the statistics record
+`spent_at_tx_id` and `added_slot` as single values covering the whole table,
+and live operation then holds only about a security window of spent rows, so
+sampled statistics stay close to that shape. Under them, the rollback sweep's stake-credential lookup for
 the UTxOs spent by rolled-back transactions
 (`SELECT credential_tag, staking_key FROM utxo WHERE spent_at_tx_id IN (...)`
 in `DeleteTransactionsAfterSlot`) planned a chunk holding a single
@@ -193,7 +188,7 @@ SQLite already re-plans a statement on the connection that ran the analysis, so
 the swap matters for statements whose cached plan could outlive the change on
 another connection, not for the write connection.
 
-The growth rule never revisits statistics that are wrong rather than small.
+Statistics can be wrong rather than small.
 A Mithril bootstrap analyzes `utxo` before any imported output has been
 spent, and the table stays near that size afterwards. A full index on the
 spender column (`spent_at_tx_id`) would then be recorded as one value covering
