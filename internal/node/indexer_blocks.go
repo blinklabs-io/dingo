@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	dledger "github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -134,12 +138,21 @@ func (b *Backfill) IndexBlocks(
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
 	}
-	for _, blk := range blocks {
+	dec := b.decodeBlocks(ctx, blocks)
+	defer dec.stop()
+	for i, blk := range blocks {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		select {
+		case <-dec.out[i].ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
-		if err := b.indexBlock(ctx, txn, acc, blk); err != nil {
+		err := b.indexBlock(ctx, txn, acc, blk, &dec.out[i])
+		dec.release(i)
+		if err != nil {
 			return fmt.Errorf("indexing block at slot %d: %w", blk.Slot, err)
 		}
 	}
@@ -150,16 +163,134 @@ func (b *Backfill) IndexBlocks(
 	return nil
 }
 
+// decodedBlock is a block decoded ahead of the write transaction, with the
+// offsets of its transactions when it has any. ready is closed once the
+// fields are set.
+type decodedBlock struct {
+	parsed     gledger.Block
+	offsets    *database.BlockIngestionResult
+	err        error
+	offsetsErr error
+	ready      chan struct{}
+}
+
+// blockDecoder decodes a batch's blocks ahead of the writer.
+type blockDecoder struct {
+	out []decodedBlock
+	// slots holds one token per block claimed by a worker and not yet
+	// released by the writer, bounding the decoded blocks held at once.
+	slots chan struct{}
+	quit  chan struct{}
+	wg    sync.WaitGroup
+}
+
+// decodeBlocks decodes a batch's blocks and computes their transaction
+// offsets on several goroutines, in block order, and returns at once. Both
+// depend only on the block bytes, so they need not run on the write
+// goroutine. The writer waits on each block's ready channel as it reaches
+// it, and errors stay with their block, so failures are reported where the
+// serial loop would have met them. The workers stay within decodeWindow
+// blocks of the writer, which calls release for each block it is done with.
+// The caller must call stop once the writer is done.
+func (b *Backfill) decodeBlocks(
+	ctx context.Context,
+	blocks []models.Block,
+) *blockDecoder {
+	workers := b.decodeWorkers
+	if workers <= 0 {
+		workers = max(runtime.GOMAXPROCS(0)/2, 1)
+	}
+	workers = min(workers, 8, len(blocks))
+	d := &blockDecoder{
+		out:   make([]decodedBlock, len(blocks)),
+		slots: make(chan struct{}, decodeWindow(workers)),
+		quit:  make(chan struct{}),
+	}
+	for i := range d.out {
+		d.out[i].ready = make(chan struct{})
+	}
+	var next atomic.Int64
+	for range workers {
+		d.wg.Go(func() {
+			for {
+				// Taking the token before claiming the index keeps the
+				// claimed blocks a contiguous run from the writer's
+				// position, so the block the writer waits on always holds a
+				// token and the window cannot deadlock.
+				select {
+				case d.slots <- struct{}{}:
+				case <-d.quit:
+					return
+				}
+				i := int(next.Add(1) - 1)
+				if i >= len(blocks) {
+					return
+				}
+				out := &d.out[i]
+				if !d.stopped() && ctx.Err() == nil {
+					blk := blocks[i]
+					out.parsed, out.err = models.DecodeBlockCbor(
+						blk.Type, blk.Cbor,
+						lcommon.VerifyConfig{SkipBodyHashValidation: true},
+					)
+					if out.err == nil && len(out.parsed.Transactions()) != 0 {
+						out.offsets, out.offsetsErr = b.computeBlockOffsets(
+							blk.Slot, blk.Hash, blk.Cbor, out.parsed,
+						)
+					}
+				}
+				close(out.ready)
+			}
+		})
+	}
+	return d
+}
+
+func (d *blockDecoder) stopped() bool {
+	select {
+	case <-d.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// release drops the writer's reference to block i, which it has received
+// from ready, and lets the workers claim one more block.
+func (d *blockDecoder) release(i int) {
+	d.out[i] = decodedBlock{}
+	<-d.slots
+}
+
+// stop ends the workers early and waits for them.
+func (d *blockDecoder) stop() {
+	close(d.quit)
+	d.wg.Wait()
+}
+
+// decodeWindow is how many blocks the decode workers may hold decoded or in
+// flight ahead of the writer.
+func decodeWindow(workers int) int {
+	return 2 * workers
+}
+
 func (b *Backfill) indexBlock(
 	ctx context.Context,
 	txn *database.Txn,
 	acc database.BatchAccumulator,
 	blk models.Block,
+	decoded *decodedBlock,
 ) error {
-	parsed, err := models.DecodeBlockCbor(
-		blk.Type, blk.Cbor,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
-	)
+	parsed, err := decoded.parsed, decoded.err
+	if err == nil && parsed == nil {
+		// A worker skipped this block after stop or cancellation.
+		if err = ctx.Err(); err == nil {
+			parsed, err = models.DecodeBlockCbor(
+				blk.Type, blk.Cbor,
+				lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("parsing block: %w", err)
 	}
@@ -237,7 +368,12 @@ func (b *Backfill) indexBlock(
 		return nil
 	}
 	txEraId, pp := b.blockEraParams(epochId, eraId, uint(parsed.Era().Id))
-	offsets, err := b.computeBlockOffsets(blk.Slot, blk.Hash, blk.Cbor, parsed)
+	offsets, err := decoded.offsets, decoded.offsetsErr
+	if offsets == nil && err == nil {
+		offsets, err = b.computeBlockOffsets(
+			blk.Slot, blk.Hash, blk.Cbor, parsed,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("computing offsets: %w", err)
 	}

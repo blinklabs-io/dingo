@@ -142,7 +142,7 @@ VALUES (?, ?, ?, '1')`,
 			})
 		}
 		require.NoError(t, flushAssetHoldings(
-			t.Context(), tx, rows, store.dialect.ParameterLimit(),
+			t.Context(), tx, nil, rows, store.dialect.ParameterLimit(),
 		))
 	})
 	control := measure(func(tx *sql.Tx, utxo uint64) {
