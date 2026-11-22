@@ -2043,7 +2043,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
-├── sdk/                 # Plugin SDK, a separate Go module
+├── sdk/                 # Plugin SDK, a separate Go module (chain role contracts, Cardano roles)
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -21683,6 +21683,22 @@ Package isolation is enforced by direction, ownership, and composition:
   gouroboros, so every other contract stays chain-neutral. The module is
   released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
   contract versioned `v0` and experimental, until a 1.0 is declared.
+- `sdk/chain/` holds the chain-neutral role contracts: `Ledger`, `Consensus`,
+  `Network` and the optional `Mempool`, plus `ChainID`, `Point`, `Tip` and the
+  `Payload` that carries a block, header or transaction between roles. A
+  payload holds a small decoded view, optionally the encoded bytes, and
+  optionally the chain's own decoded value. Two built-in roles pass the decoded
+  value through `chain.NativeOf` without encoding; an external role reads
+  `Bytes`, which encodes only then. Each role follows an existing seam: the
+  ledger handed to `ChainManager.SetLedger` and `mempool.TxValidator`, the
+  forger's `LeaderChecker`, `BlockValidator` and `BlockBroadcaster`, chain
+  selection's tip comparison, and the mempool `AddTransaction` and
+  `RemoveTransaction`.
+- `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
+  `NetworkRole`, `MempoolRole`) over small source interfaces whose methods the
+  node's `ledger.LedgerState`, forger, chain manager and mempool already have,
+  so the node module does not need to import the sdk. Nothing in the node calls
+  through these roles yet, so no existing path changes.
 
 ### Import Boundary Check
 
