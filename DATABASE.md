@@ -5306,7 +5306,8 @@ journal before it kept them). Then:
    and a native script's own bytes. A SQL store reads the set in one
    sorted statement into a file in the operating system's temporary
    directory (`TMPDIR`), roughly the size of the live set's keys, amounts
-   and credentials, and closes that cursor before resolving any output, so
+   and credentials and unlinked once open where the platform allows, and
+   closes that cursor before resolving any output, so
    resolvers can take their own read connections; outputs are then resolved
    and canonicalized in chunks on several goroutines and hashed in order. The
    ledger's digest
