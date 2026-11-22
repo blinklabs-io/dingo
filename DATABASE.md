@@ -6992,13 +6992,23 @@ nullable `tx_id`, `output_idx`, `slot` and `block_index` columns to
 position the output takes in an address page: the producing transaction's
 `applied_transaction.slot` and `block_index`, or the output's `added_slot` and
 `0` while its producer has no application row. A batched backfill (cursor: last
-`utxo_address.utxo_id`) fills existing rows before the index is built, and
-every writer of `utxo_address` (single-row upserts, the row batch, the overlay
-flush, `SetUtxoAddress`) fills them from the stored `utxo` and
+`utxo_address.utxo_id`) fills existing rows before the index is built. The
+row batch writes the position with the row when the output carries its
+producing transaction's row id and block index, as outputs produced by
+`setTransactionWithAccumulator` do: the transaction's application slot, which
+is the output's `added_slot`, and its block index, the values the fill would
+derive. Every other writer of `utxo_address` (single-row upserts, the row batch
+for outputs without those values, the overlay flush, `SetUtxoAddress`) inserts
+the address and then fills the position from the stored `utxo` and
 `applied_transaction` rows. Writing or replaying an application row refreshes
 the outputs of that transaction, so an output stored before its producer was
 applied moves to the applied position.
 `TestUtxoAddressOrderBackfillCopiesPagePosition` pins the backfill.
+
+Migration `v75` (`utxo-address-prefix-index-drop`, integer version 75) drops
+`idx_utxo_address_address` (`utxo_address(address)`). It is a strict prefix of
+`idx_utxo_address_order`, which serves every exact-address lookup.
+`TestUtxoAddressPrefixIndexDropMigration` pins the drop.
 
 #### Mithril API reward-live-stake finalization
 
