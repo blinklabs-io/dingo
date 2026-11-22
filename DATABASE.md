@@ -120,7 +120,9 @@ limit restored afterwards) on the write connection, outside any transaction, at 
 after each epoch rollover commits, and once a minute in between. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
-IndexerDB takes one more pass when it reaches the Mithril anchor. The consensus
+pass holds one write connection throughout, because `analysis_limit` is per
+connection. The IndexerDB takes one more pass when it reaches the Mithril
+anchor, a full `ANALYZE` on a backend without the bounded form. The consensus
 store runs the startup pass before block processing begins. An API node's
 IndexerDB, which holds the API history, has its own manager: the node starts
 its listeners first and runs that pass on the manager worker, so planner

@@ -417,3 +417,52 @@ func TestWriterTakesOneFinalPlannerStatsPassAtTheAnchor(t *testing.T) {
 	require.NoError(t, r.w.CatchUp(context.Background()))
 	require.Equal(t, []string{"anchor"}, probe.runs())
 }
+
+// fullPassProbe stands in for a backend with no incremental statistics form
+// (PostgreSQL, MySQL): OptimizePlannerStatsContext reports Supported=false and
+// only the full refresh does anything.
+type fullPassProbe struct {
+	metadata.MetadataStore
+	mu   sync.Mutex
+	full int
+}
+
+func (p *fullPassProbe) OptimizePlannerStatsContext(
+	context.Context, string,
+) (types.PlannerStatsResult, error) {
+	return types.PlannerStatsResult{}, nil
+}
+
+func (p *fullPassProbe) UpdatePlannerStatsContext(context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.full++
+	return nil
+}
+
+func (p *fullPassProbe) fullRuns() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.full
+}
+
+// A backend without the incremental form still gets its final pass at the
+// anchor, through the full refresh.
+func TestWriterFallsBackToAFullPlannerStatsPassAtTheAnchor(t *testing.T) {
+	t.Parallel()
+	probe := &fullPassProbe{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{}},
+		func(m metadata.MetadataStore) metadata.MetadataStore {
+			probe.MetadataStore = m
+			return probe
+		},
+	)
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(db, db, 10)
+	require.NoError(t, err)
+	r := newAnchorRigWithStore(t, 30, 12, store)
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, 1, probe.fullRuns())
+}

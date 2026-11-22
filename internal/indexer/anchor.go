@@ -846,17 +846,8 @@ func (w *Writer) finalizePlannerStats(ctx context.Context) {
 		return
 	}
 	start := time.Now()
-	var err error
-	switch updater := db.Metadata().(type) {
-	case metadata.IncrementalPlannerStatsUpdater:
-		// The bounded form samples every index; a full pass would read the
-		// whole IndexerDB.
-		_, err = updater.OptimizePlannerStatsContext(ctx, "anchor")
-	case metadata.ContextPlannerStatsUpdater:
-		err = updater.UpdatePlannerStatsContext(ctx)
-	case metadata.PlannerStatsUpdater:
-		err = updater.UpdatePlannerStats()
-	default:
+	err := runFinalPlannerStats(ctx, db.Metadata())
+	if errors.Is(err, errNoPlannerStats) {
 		return
 	}
 	if err != nil {
@@ -867,4 +858,31 @@ func (w *Writer) finalizePlannerStats(ctx context.Context) {
 		"indexer final planner statistics complete",
 		"duration", time.Since(start),
 	)
+}
+
+var errNoPlannerStats = errors.New("metadata store keeps no planner statistics")
+
+// runFinalPlannerStats prefers the bounded incremental form, which samples
+// every index where a full pass would read the whole IndexerDB, and falls back
+// to the full refresh on a backend without one.
+func runFinalPlannerStats(
+	ctx context.Context,
+	store metadata.MetadataStore,
+) error {
+	if updater, ok := store.(metadata.IncrementalPlannerStatsUpdater); ok {
+		result, err := updater.OptimizePlannerStatsContext(
+			ctx, types.PlannerStatsTriggerAnchor,
+		)
+		if err != nil || result.Supported {
+			return err
+		}
+	}
+	switch updater := store.(type) {
+	case metadata.ContextPlannerStatsUpdater:
+		return updater.UpdatePlannerStatsContext(ctx)
+	case metadata.PlannerStatsUpdater:
+		return updater.UpdatePlannerStats()
+	default:
+		return errNoPlannerStats
+	}
 }
