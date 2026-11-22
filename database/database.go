@@ -514,6 +514,12 @@ func (d *Database) MetadataTxn(ctx context.Context, readWrite bool) *Txn {
 	return NewMetadataOnlyTxn(ctx, d, readWrite)
 }
 
+// StagedTxn starts a transaction that holds no metadata write connection and
+// commits only what is staged on it for another store. See NewStagedTxn.
+func (d *Database) StagedTxn(ctx context.Context) *Txn {
+	return NewStagedTxn(ctx, d)
+}
+
 // withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction
 // when txn is nil. Callers keep ownership of transactions they provide.
 //

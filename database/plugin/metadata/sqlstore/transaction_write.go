@@ -65,6 +65,9 @@ type transactionBatchAccumulator struct {
 	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
+	// store routes the applied-transaction statements through the Store's
+	// prepared statements; nil runs them unprepared.
+	store                *Store
 	mysql                bool
 	sqlite               bool
 	backfillBatchLimits  func() (int64, int)
@@ -676,6 +679,9 @@ func (a *transactionBatchAccumulator) insertTransaction(
 			return a.transactionInsert.QueryRowContext(ctx, hash)
 		},
 		exec: func(query string, args ...any) (sql.Result, error) {
+			if a.store != nil {
+				return a.store.execCached(ctx, db, query, args...)
+			}
 			return db.ExecContext(ctx, query, args...)
 		},
 		queryRow: func(query string, args ...any) *sql.Row {
@@ -756,6 +762,7 @@ func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{
 		sqlite:        s.dialect.Name() == "sqlite",
 		sqlOperations: s.sqlOperations,
+		store:         s,
 	}
 }
 
@@ -788,7 +795,7 @@ func (s *Store) FlushBatch(
 					return s.flushOverlay(ctx, db, batched)
 				}
 				if err := batched.rows.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
@@ -944,6 +951,7 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 		sqlite:           s.dialect.Name() == "sqlite",
 		leiosAPIRowsOnly: true,
 		sqlOperations:    s.sqlOperations,
+		store:            s,
 	}
 }
 
@@ -957,6 +965,7 @@ func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulat
 		sqlite:               s.dialect.Name() == "sqlite",
 		validatedAPIRowsOnly: true,
 		sqlOperations:        s.sqlOperations,
+		store:                s,
 	}
 }
 
@@ -1165,7 +1174,7 @@ func (s *Store) setTransactionWithAccumulator(
 					maxRows,
 					func() error {
 						return staged.flush(
-							ctx, db, s.dialect.ParameterLimit(),
+							ctx, db, s, s.dialect.ParameterLimit(),
 						)
 					},
 					batchedAccumulator.backfillBatchFlushed,
@@ -1343,7 +1352,7 @@ func (s *Store) setTransactionWithAccumulator(
 					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
 						return err
 					}
-					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 						return err
 					}
 					return nil
@@ -1382,7 +1391,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if batchedAccumulator != nil {
 					return nil
 				}
-				return staged.flush(ctx, db, s.dialect.ParameterLimit())
+				return staged.flush(ctx, db, s, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1437,13 +1446,13 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if batchedAccumulator != nil &&
 				batchedAccumulator.apiRowsOnly() {
-				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+				if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
 			}
 			if batchedAccumulator == nil {
 				if err := staged.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
