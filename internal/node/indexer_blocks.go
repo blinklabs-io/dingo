@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	dledger "github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -134,12 +138,15 @@ func (b *Backfill) IndexBlocks(
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
 	}
-	for _, blk := range blocks {
+	decoded, stopDecode := b.decodeBlocks(ctx, blocks)
+	defer stopDecode()
+	for i, blk := range blocks {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		<-decoded[i].ready
 		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
-		if err := b.indexBlock(ctx, txn, acc, blk); err != nil {
+		if err := b.indexBlock(ctx, txn, acc, blk, &decoded[i]); err != nil {
 			return fmt.Errorf("indexing block at slot %d: %w", blk.Slot, err)
 		}
 	}
@@ -150,16 +157,83 @@ func (b *Backfill) IndexBlocks(
 	return nil
 }
 
+// decodedBlock is a block decoded ahead of the write transaction, with the
+// offsets of its transactions when it has any. ready is closed once the
+// fields are set.
+type decodedBlock struct {
+	parsed     gledger.Block
+	offsets    *database.BlockIngestionResult
+	err        error
+	offsetsErr error
+	ready      chan struct{}
+}
+
+// decodeBlocks decodes a batch's blocks and computes their transaction
+// offsets on several goroutines, in block order, and returns at once. Both
+// depend only on the block bytes, so they need not run on the write
+// goroutine. The writer waits on each block's ready channel as it reaches
+// it, and errors stay with their block, so failures are reported where the
+// serial loop would have met them. stop ends the workers early and waits for
+// them; the caller must call it once the writer is done.
+func (b *Backfill) decodeBlocks(
+	ctx context.Context,
+	blocks []models.Block,
+) (out []decodedBlock, stop func()) {
+	out = make([]decodedBlock, len(blocks))
+	for i := range out {
+		out[i].ready = make(chan struct{})
+	}
+	workers := min(max(runtime.GOMAXPROCS(0)/2, 1), 8, len(blocks))
+	var next atomic.Int64
+	var stopped atomic.Bool
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(blocks) {
+					return
+				}
+				d := &out[i]
+				if !stopped.Load() && ctx.Err() == nil {
+					blk := blocks[i]
+					d.parsed, d.err = models.DecodeBlockCbor(
+						blk.Type, blk.Cbor,
+						lcommon.VerifyConfig{SkipBodyHashValidation: true},
+					)
+					if d.err == nil && len(d.parsed.Transactions()) != 0 {
+						d.offsets, d.offsetsErr = b.computeBlockOffsets(
+							blk.Slot, blk.Hash, blk.Cbor, d.parsed,
+						)
+					}
+				}
+				close(d.ready)
+			}
+		})
+	}
+	return out, func() {
+		stopped.Store(true)
+		wg.Wait()
+	}
+}
+
 func (b *Backfill) indexBlock(
 	ctx context.Context,
 	txn *database.Txn,
 	acc database.BatchAccumulator,
 	blk models.Block,
+	decoded *decodedBlock,
 ) error {
-	parsed, err := models.DecodeBlockCbor(
-		blk.Type, blk.Cbor,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
-	)
+	parsed, err := decoded.parsed, decoded.err
+	if err == nil && parsed == nil {
+		// A worker skipped this block after stop or cancellation.
+		if err = ctx.Err(); err == nil {
+			parsed, err = models.DecodeBlockCbor(
+				blk.Type, blk.Cbor,
+				lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("parsing block: %w", err)
 	}
@@ -237,7 +311,12 @@ func (b *Backfill) indexBlock(
 		return nil
 	}
 	txEraId, pp := b.blockEraParams(epochId, eraId, uint(parsed.Era().Id))
-	offsets, err := b.computeBlockOffsets(blk.Slot, blk.Hash, blk.Cbor, parsed)
+	offsets, err := decoded.offsets, decoded.offsetsErr
+	if offsets == nil && err == nil {
+		offsets, err = b.computeBlockOffsets(
+			blk.Slot, blk.Hash, blk.Cbor, parsed,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("computing offsets: %w", err)
 	}
