@@ -1218,9 +1218,9 @@ type TransactionStore interface {
 	) (*models.Transaction, error)
 
 	// GetTransactionSlotByHash returns the slot of the block that
-	// contains the given tx hash. The bool result is false when no
-	// such transaction is recorded. Lighter than GetTransactionByHash
-	// because it skips loading inputs/outputs/witnesses.
+	// contains the applied transaction with the given hash. The bool
+	// result is false when no application row is recorded. Lighter than
+	// GetTransactionByHash because it skips loading inputs/outputs/witnesses.
 	GetTransactionSlotByHash(
 		[]byte, // hash
 		types.Txn,

@@ -8998,12 +8998,14 @@ WHERE r.transaction_id = tx.id;
 ```
 
 For a lightweight equivalent of `GetTransactionSlotByHash` or
-`GetTransactionIDByHash`:
+`GetTransactionIDByHash`, join the identity row to its application row. This
+deliberately returns no row for a hash that has only an identity row:
 
 ```sql
-SELECT id, slot
-FROM "transaction"
-WHERE hash = decode($1, 'hex');
+SELECT t.id, a.slot
+FROM "transaction" t
+JOIN applied_transaction a ON a.tx_id = t.id
+WHERE t.hash = decode($1, 'hex');
 ```
 
 ### `GetExistingTransactionHashes`

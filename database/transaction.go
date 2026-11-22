@@ -1353,6 +1353,26 @@ func (d *Database) GetTransactionByHash(
 	return d.transactionStore().GetTransactionByHash(hash, txn.Metadata())
 }
 
+// GetTransactionSlotByHash returns the slot of the applied transaction with
+// hash. Identity-only transaction rows are not applied transactions.
+func (d *Database) GetTransactionSlotByHash(
+	ctx context.Context,
+	hash []byte,
+	txn *Txn,
+) (uint64, bool, error) {
+	if len(hash) == 0 {
+		return 0, false, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.transactionStore().GetTransactionSlotByHash(
+		hash,
+		txn.Metadata(),
+	)
+}
+
 // GetTransactionMetadataByHash returns only the stored metadata blob for the
 // transaction with the given hash, without loading any associations. Returns
 // (nil, nil) when no such transaction exists or it carries no metadata.

@@ -457,6 +457,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 		}
 		validationCtx, cancelValidation := context.WithCancel(context.Background())
 		defer cancelValidation()
+		validationCtx = mempool.WithPeerSubmission(validationCtx)
 		go func() {
 			select {
 			case <-connDone:
@@ -762,6 +763,25 @@ func (o *Ouroboros) txsubmissionServerInit(
 							txsubmissionMaxAdmissionRetryStreak,
 							"error",
 							err,
+						)
+						continue
+					}
+					if errors.Is(
+						err,
+						mempool.ErrTransactionAlreadyApplied,
+					) {
+						o.config.Logger.Debug(
+							"ignored peer transaction already applied to ledger",
+							"component",
+							"network",
+							"protocol",
+							"tx-submission",
+							"role",
+							"server",
+							"connection_id",
+							ctx.ConnectionId.String(),
+							"tx_hash",
+							tx.Hash().String(),
 						)
 						continue
 					}

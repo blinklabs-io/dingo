@@ -626,6 +626,7 @@ func TestTxValidationExtendsAlonzoPlutusForecastFromTip(t *testing.T) {
 						_ func() bool,
 						_ func(func() error) (bool, error),
 						_ func([]models.UtxoId) ([]models.Utxo, error),
+						_ func([]byte) (bool, error),
 					) error {
 						return validate(tx, nil, nil, nil)
 					},

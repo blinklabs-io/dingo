@@ -61,6 +61,7 @@ var stagingPromoted = map[string]string{
 	"GetLiveUtxoLovelace":                     noFamilyRows,
 	"GetTip":                                  noFamilyRows,
 	"GetTransactionByHash":                    noFamilyRows,
+	"GetTransactionSlotByHash":                noFamilyRows,
 	"GetTransactionsByHashes":                 noFamilyRows,
 	"HasAnyGenesisCbor":                       noFamilyRows,
 	"HasGenesisCbor":                          noFamilyRows,

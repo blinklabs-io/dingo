@@ -16945,6 +16945,8 @@ type txValidationApplyFunc func(
 // no second connection.
 type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
 
+type txValidationAppliedFunc func(hash []byte) (bool, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -17019,6 +17021,7 @@ func (ls *LedgerState) WithTxValidationSessionAtSlot(
 // WithResolvingTxValidationSession is WithTxValidationSession for mempool
 // admission. resolve returns the live confirmed outputs among refs from the
 // session's database transaction, the snapshot its validations read.
+// isApplied reports whether a transaction has an applied row in that snapshot.
 func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
@@ -17030,6 +17033,7 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+		isApplied func(hash []byte) (bool, error),
 	) error,
 ) error {
 	return ls.withResolvingTxValidationSession(
@@ -17045,9 +17049,10 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			resolve txValidationResolveFunc,
+			isApplied txValidationAppliedFunc,
 			_ forging.TxRefScriptSizeFunc,
 		) error {
-			return fn(validate, stillCurrent, commitIfCurrent, resolve)
+			return fn(validate, stillCurrent, commitIfCurrent, resolve, isApplied)
 		},
 	)
 }
@@ -17081,6 +17086,7 @@ func (ls *LedgerState) WithLeiosSelectionSession(ctx context.Context,
 			_ func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ txValidationAppliedFunc,
 			refScriptSize forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, refScriptSize, stillCurrent)
@@ -17168,6 +17174,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			applyTx txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ txValidationAppliedFunc,
 			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
@@ -17344,6 +17351,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 		resolve txValidationResolveFunc,
+		isApplied txValidationAppliedFunc,
 		refScriptSize forging.TxRefScriptSizeFunc,
 	) error,
 ) error {
@@ -17543,6 +17551,14 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return ls.utxosByRefsForValidation(refs, txn)
 		}
+		isApplied := func(hash []byte) (bool, error) {
+			_, found, err := ls.ledgerDB().GetTransactionSlotByHash(
+				ctx,
+				hash,
+				txn,
+			)
+			return found, err
+		}
 		refScriptSize := func(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -17565,6 +17581,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		}
 		if err := fn(
 			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+			isApplied,
 			refScriptSize,
 		); err != nil {
 			return err
