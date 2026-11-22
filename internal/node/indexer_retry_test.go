@@ -17,8 +17,6 @@ package node
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -53,13 +51,8 @@ func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 ) {
 	t.Parallel()
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	consensus := newEquivalenceDB(t)
-	dir := copyImmutableChunkPrefix(t, equivalenceChunks)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dir, consensus,
-	))
+	consensus := chainStoreTemplate.openEquivalence(t)
 	ls, _ := openFactLedger(t, consensus)
 
 	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
