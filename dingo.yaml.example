@@ -457,6 +457,24 @@
 # barkEventMaxSubscribers: 0
 # barkEventMaxSubscribersPerClient: 0
 
+# Optional: follow the EventService of other nodes. Each event received is
+# republished on this node's EventBus as a bark.remote_event carrying the
+# source name and the remote node's own envelope. A source reconnects with
+# backoff and resumes after the last event it handled; the position is kept in
+# memory, so a restart continues from the remote node's current position.
+# Independent of barkEventEnabled. Set in YAML or with
+# dingo.WithBarkEventSources; there is no flag or environment variable. Default:
+# none.
+#   name           label on republished events; unique per source
+#   url            base URL of the remote node's Bark server (http or https)
+#   eventTypes     optional event types or patterns such as "peergov.*"
+#   originNodeIds  optional: only events created on these nodes
+# barkEventSources:
+#   - name: relay-a
+#     url: http://relay-a.example:9090
+#     eventTypes: ["peergov.*", "epoch.transition"]
+#     originNodeIds: ["relay-a"]
+
 # Explicitly enable Bark's remote LifecycleService (Stop, Restart, GetStatus).
 # Disabled by default. Requires a non-zero barkPort.
 # Can be overridden with DINGO_BARK_LIFECYCLE_ENABLED

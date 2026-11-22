@@ -21285,6 +21285,25 @@ fixed batch cap.
 Sync state, protocol parameter and database operation events are not in the
 registry because no internal event carries that data.
 
+**Remote event sources** (`bark/event_remote.go`) are the client side. For each
+entry of `barkEventSources`, `RemoteEvents` runs one `SubscribeWithAck`
+subscription against that node's EventService, filtered by the source's
+`eventTypes` and `originNodeIds`, and republishes every event on the local
+EventBus as `bark.remote_event` with a `RemoteEvent{Source, Event}` payload.
+The Event Service does not subscribe to that type, so a remote event is never
+sent back out to this node's own subscribers. The bark client reconnects with
+backoff and resumes after the last handled sequence, so a dropped connection
+neither loses nor repeats an event locally. The position is in memory: after a
+restart, or after the remote node answers `OUT_OF_RANGE`, a source continues
+from the remote node's current position and the events in between are not
+replayed. The remote node's sequence also restarts with its process, and a
+new run that has already passed the old position accepts it, so that run's
+earlier events are skipped without an error. The bark client retries
+silently, so each source logs a warning when its node stops answering and an
+info line when it answers or delivers an event again, once per outage.
+Sources are independent of `barkEventEnabled`, are set only in YAML
+or with `WithBarkEventSources`, and are started and stopped with the node.
+
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
 `Run()` does only when `barkLifecycleEnabled` is true. Bark owns transport and request validation (a negative `graceful_timeout` is

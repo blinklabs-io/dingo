@@ -921,6 +921,12 @@ type Config struct {
 	// BarkEventMaxSubscribersPerClient bounds concurrent EventService streams
 	// from one caller address. Zero or unset means unlimited.
 	BarkEventMaxSubscribersPerClient int `yaml:"barkEventMaxSubscribersPerClient" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT"`
+	// BarkEventSources lists other nodes whose Bark EventService this node
+	// follows. Each event received is republished on this node's EventBus
+	// as a bark.remote_event carrying the source name. It is set in YAML or
+	// with dingo.WithBarkEventSources, is not read from the environment,
+	// and defaults to none.
+	BarkEventSources []BarkEventSource `yaml:"barkEventSources" ignored:"true"`
 	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
@@ -2355,6 +2361,12 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.BarkEventSources = nil
+	for _, src := range cfg.BarkEventSources {
+		src.EventTypes = append([]string(nil), src.EventTypes...)
+		src.OriginNodeIDs = append([]string(nil), src.OriginNodeIDs...)
+		clone.BarkEventSources = append(clone.BarkEventSources, src)
+	}
 	clone.BlockProducerPools = append(
 		[]BlockProducerPool(nil),
 		cfg.BlockProducerPools...,
@@ -2958,6 +2970,21 @@ func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
 	}
 	cfg.TokenRegistry.HeaderSecrets = headers
 	return nil
+}
+
+// BarkEventSource names one node whose Bark EventService this node follows.
+type BarkEventSource struct {
+	// Name labels the source on republished events and in logs. It must be
+	// unique among sources.
+	Name string `yaml:"name"`
+	// URL is the base URL of the remote node's Bark server.
+	URL string `yaml:"url"`
+	// EventTypes selects event type names or category patterns such as
+	// "peergov.*". Empty selects every type the remote node serves.
+	EventTypes []string `yaml:"eventTypes"`
+	// OriginNodeIDs limits events to those created on the named nodes.
+	// Empty selects every origin.
+	OriginNodeIDs []string `yaml:"originNodeIds"`
 }
 
 // BlockProducerPool is one pool a block producer forges for: its VRF key,

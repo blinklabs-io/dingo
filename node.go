@@ -160,6 +160,7 @@ type Node struct {
 	bark                    *bark.Bark
 	eventNodeIDOnce         sync.Once
 	eventNodeIDValue        string
+	remoteEvents            *bark.RemoteEvents
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer
@@ -1859,6 +1860,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			if err := n.bark.Stop(context.Background()); err != nil {
 				n.config.logger.Error(
 					"failed to stop bark during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+
+	if err := n.startRemoteEvents(); err != nil { //nolint:contextcheck
+		return err
+	}
+	if n.remoteEvents != nil {
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.remoteEvents.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop remote event subscriber during cleanup",
 					"error",
 					err,
 				)
