@@ -4724,7 +4724,9 @@ a hard link to the output, the staged name removed and the directory synced.
 The link fails rather than replace a file created at the output while the
 export ran, which a rename would clobber, so the output directory must be on a
 file system with hard links. A failure or an interrupt removes the staged
-file. Only a Conway tip is exported.
+file. A process killed outright cannot, and the next export refuses the
+leftover `<output>.partial`, naming it, rather than delete a file another
+export may be writing; the operator removes it. Only a Conway tip is exported.
 
 The manifest summary carries the tool (`dingo <version>`), the creation time
 and the comment `profile=parity era=conway namespaces=utxo/v0 bootstrap=false`:

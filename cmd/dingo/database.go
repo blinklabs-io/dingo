@@ -249,7 +249,8 @@ no checkpoint, so nothing is retained once the command ends. The file is
 staged as <output>.partial, verified in full, and hard-linked into place,
 which never replaces a file created at --output meanwhile; a failure or an
 interrupt removes the staged file. The output directory must be on a file
-system that supports hard links.
+system that supports hard links. A staged file left by a killed export is
+refused, not overwritten; remove it once no export is running.
 
 Only a Conway state is exported, and only the utxo/v0 namespace. The file
 declares itself a parity export in its manifest (profile=parity,

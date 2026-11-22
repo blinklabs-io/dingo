@@ -382,3 +382,25 @@ func TestExportSCLSNeverReplacesAnOutputCreatedDuringTheExport(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 }
+
+// TestExportSCLSNamesALeftoverStagedFile requires a staged file left by an
+// interrupted export to be refused, kept, and named in the error with the
+// remedy.
+func TestExportSCLSNamesALeftoverStagedFile(t *testing.T) {
+	t.Parallel()
+	f := newSCLSFixture(t, EraConway, sclsRefs()...)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "state.scls")
+	require.NoError(t, os.WriteFile(out+".partial", []byte("left"), 0o600))
+	_, err := ExportSCLS(t.Context(), SCLSExportConfig{
+		Source: f.source(t), Output: out, Tool: "dingo test",
+	})
+	require.ErrorIs(t, err, os.ErrExist)
+	require.ErrorContains(t, err, out+".partial")
+	require.ErrorContains(t, err, "remove it")
+	got, err := os.ReadFile(out + ".partial")
+	require.NoError(t, err)
+	require.Equal(t, []byte("left"), got)
+	_, err = os.Stat(out)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}

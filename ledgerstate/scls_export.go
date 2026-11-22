@@ -176,6 +176,13 @@ func ExportSCLS(
 	f, err := os.OpenFile( // #nosec G304 -- the operator-chosen output path
 		partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
 	)
+	if errors.Is(err, fs.ErrExist) {
+		return res, fmt.Errorf(
+			"scls export: staged file %s %w: an interrupted export left it, "+
+				"or another export is writing it; remove it once no export runs",
+			partial, os.ErrExist,
+		)
+	}
 	if err != nil {
 		return res, fmt.Errorf("scls export: create staged file: %w", err)
 	}
