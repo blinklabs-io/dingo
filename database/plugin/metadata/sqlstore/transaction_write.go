@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -84,6 +85,9 @@ type transactionBatchAccumulator struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	// nonces holds block nonces queued by QueueBlockNonce, in application
+	// order, until FlushBatch writes them.
+	nonces []models.BlockNonce
 	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
 	// attached one; nil on the per-row path.
 	overlay *utxoOverlay
@@ -113,6 +117,7 @@ type transactionBatchCheckpoint struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	nonces          []models.BlockNonce
 	overlay         *utxoOverlay
 	overlayVersion  uint64
 }
@@ -156,6 +161,7 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
 		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
+		nonces:          slices.Clone(a.nonces),
 		overlay:         a.overlay,
 	}
 	if a.overlay != nil {
@@ -183,6 +189,7 @@ func (a *transactionBatchAccumulator) restore(
 	a.opCertOrder = append(
 		[]poolOpCertSequenceKey(nil),
 		checkpoint.opCertOrder...)
+	a.nonces = slices.Clone(checkpoint.nonces)
 	if len(checkpoint.stakeDeltas) > 0 {
 		a.stakeDeltas = make(
 			map[string]pendingStakeCredentialDelta,
@@ -717,12 +724,13 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.stakeDeltaOrder = nil
 	a.opCertSequences = nil
 	a.opCertOrder = nil
+	a.nonces = nil
 	a.overlay = nil
 }
 
 // Len reports pending metadata rows for the API backfill batch bound.
 func (a *transactionBatchAccumulator) Len() int {
-	length := len(a.stakeDeltaOrder) + len(a.opCertOrder)
+	length := len(a.stakeDeltaOrder) + len(a.opCertOrder) + len(a.nonces)
 	for i := range a.rows.entries {
 		length += len(a.rows.entries[i].rows)
 	}
@@ -777,7 +785,11 @@ func (s *Store) FlushBatch(
 		}
 	}
 	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
-		len(batched.opCertOrder) > 0 || batched.overlay != nil {
+		len(batched.opCertOrder) > 0 || len(batched.nonces) > 0 ||
+		batched.overlay != nil {
+		if err := s.flushBlockNonces(batched, txn); err != nil {
+			return err
+		}
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {

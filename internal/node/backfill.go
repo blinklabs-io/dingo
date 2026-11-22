@@ -709,12 +709,15 @@ func (b *Backfill) recoverNonce(point ocommon.Point) {
 // nonce for the given block. Updates b.runningNonce.
 // isCheckpoint should be true for the first block in each
 // epoch (must be computed before processEpochBoundary
-// updates lastEpochId).
+// updates lastEpochId). The row is queued in acc and written
+// by FlushBatch; the running nonce is held in memory, so
+// nothing reads it back from the database within a batch.
 func (b *Backfill) computeBlockNonce(
 	parsedBlock gledger.Block,
 	point ocommon.Point,
 	eraId uint,
 	isCheckpoint bool,
+	acc database.BatchAccumulator,
 	txn *database.Txn,
 ) error {
 	if !b.computeNonces {
@@ -740,9 +743,9 @@ func (b *Backfill) computeBlockNonce(
 	}
 	b.runningNonce = nonce
 
-	if err := b.db.SetBlockNonce(
+	if err := b.db.SetBlockNonceBatched(
 		point.Hash, point.Slot,
-		nonce, isCheckpoint, txn,
+		nonce, isCheckpoint, acc, txn,
 	); err != nil {
 		return fmt.Errorf(
 			"storing block nonce at slot %d: %w",
@@ -1401,7 +1404,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if !endSlotSet || blk.Slot < endSlot {
 			if nErr := b.computeBlockNonce(
 				parsedBlock, point, eraId,
-				isNewEpoch, batchTxn,
+				isNewEpoch, acc, batchTxn,
 			); nErr != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
