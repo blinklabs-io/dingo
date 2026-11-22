@@ -214,6 +214,48 @@ func TestEventSubscribeDeliversConvertedEvents(t *testing.T) {
 	require.Equal(t, "warm", data.GetNewState())
 }
 
+func TestEventSubscribePublishesEachEpochOnce(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, nil, false)
+	stream := openSubscribe(t, f, eventtype.EpochTransition)
+	publish := func(epoch uint64, nonce []byte) {
+		f.bus.Publish(
+			event.EpochTransitionEventType,
+			event.NewEvent(
+				event.EpochTransitionEventType,
+				event.EpochTransitionEvent{
+					PreviousEpoch: epoch - 1,
+					NewEpoch:      epoch,
+					BoundarySlot:  epoch * 100,
+					EpochNonce:    nonce,
+				},
+			),
+		)
+	}
+	receiveEpoch := func() uint64 {
+		t.Helper()
+		ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
+			if !stream.Receive() {
+				return nil, stream.Err()
+			}
+			return stream.Msg().GetEvent(), nil
+		})
+		var data eventv1alpha1.EpochTransitionEventData
+		require.NoError(t, ev.GetTypedData().UnmarshalTo(&data))
+		return data.GetNewEpoch()
+	}
+
+	// The internal stream deliberately emits a provisional clock event, the
+	// nonce-bearing block event, and the block event again after a rollback.
+	publish(5, nil)
+	publish(5, []byte{1})
+	publish(5, []byte{2})
+	publish(6, nil)
+
+	require.Equal(t, uint64(5), receiveEpoch())
+	require.Equal(t, uint64(6), receiveEpoch())
+}
+
 func TestEventSubscribeFilterExcludesOtherTypes(t *testing.T) {
 	f := newEventFixture(t, nil, false)
 	stream := openSubscribe(t, f, eventtype.MempoolAddTx)
