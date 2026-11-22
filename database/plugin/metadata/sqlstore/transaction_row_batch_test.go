@@ -1068,12 +1068,17 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
 
-	txHash := make([]byte, 32)
 	policyID := make([]byte, 28)
+	_, err = db.ExecContext(ctx, store.dialect.Rebind(
+		`INSERT INTO "transaction" (hash) VALUES (?)`), make([]byte, 32))
+	require.NoError(t, err)
+	var txID int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT id FROM "transaction"`).Scan(&txID))
 	rows := rowBatch{}
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("second"), []byte("fp2"), uint64(100), "-2", uint32(0))
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("first"), uint64(100), "5", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("second"), uint64(100), "-2", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("first"), uint64(100), "5", uint32(0))
 
 	require.NoError(t, rows.flush(ctx, db, store.dialect.ParameterLimit()))
 	var count int
@@ -1082,8 +1087,9 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	).Scan(&count))
 	require.Equal(t, 2, count)
 	var quantity string
-	require.NoError(t, db.QueryRowContext(ctx,
-		`SELECT quantity FROM asset_mint_burn WHERE name = ?`, []byte("second"),
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT m.quantity FROM asset_mint_burn m
+JOIN asset_identity i ON i.id = m.asset_id WHERE i.name = ?`, []byte("second"),
 	).Scan(&quantity))
 	require.Equal(t, "-2", quantity)
 }

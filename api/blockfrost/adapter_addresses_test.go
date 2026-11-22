@@ -285,10 +285,7 @@ func TestNodeAdapterAddressExtended(t *testing.T) {
 		Hash: fill32(0x21), Slot: 5, Valid: true, Metadata: metadata,
 	}
 	insertAdapterTransaction(t, raw, mint)
-	_, err = raw.Exec(`
-INSERT INTO asset_mint_burn (tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index)
-VALUES (?, ?, ?, ?, 5, '1', 0)`, mint.Hash, policy, nft, []byte("fp"))
-	require.NoError(t, err)
+	testutil.InsertAssetMintBurn(t, raw, mint.Hash, policy, nft, 5, 0, "1")
 
 	_, err = db.Metadata().UpsertTokenRegistryEntries(
 		t.Context(),

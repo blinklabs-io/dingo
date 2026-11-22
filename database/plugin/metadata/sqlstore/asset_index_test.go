@@ -38,12 +38,9 @@ func insertMintBurn(
 	quantity string,
 ) {
 	t.Helper()
-	_, err := db.Exec(`
-INSERT INTO asset_mint_burn (tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		txHash, policy, []byte(name), []byte("fp"), slot, quantity, txIndex,
+	testutil.InsertAssetMintBurn(
+		t, db, txHash, policy, []byte(name), slot, txIndex, quantity,
 	)
-	require.NoError(t, err)
 }
 
 func TestListMintedAssetsOrdersByFirstEvent(t *testing.T) {

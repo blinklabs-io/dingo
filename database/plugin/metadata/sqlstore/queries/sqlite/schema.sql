@@ -501,16 +501,18 @@ CREATE INDEX idx_utxo_address_address ON utxo_address(address);
 CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (
-    id INTEGER PRIMARY KEY,
-    tx_hash BLOB,
-    policy_id BLOB,
-    name BLOB,
-    fingerprint BLOB,
-    slot INTEGER,
-    quantity TEXT,
-    tx_index INTEGER,
-    UNIQUE (tx_hash, policy_id, name)
-);
+    transaction_id INTEGER NOT NULL,
+    asset_id INTEGER NOT NULL,
+    slot INTEGER NOT NULL,
+    tx_index INTEGER NOT NULL,
+    quantity TEXT NOT NULL,
+    PRIMARY KEY (transaction_id, asset_id),
+    FOREIGN KEY (transaction_id) REFERENCES "transaction"(id),
+    FOREIGN KEY (asset_id) REFERENCES asset_identity(id)
+) WITHOUT ROWID;
+
+CREATE INDEX idx_asset_mint_burn_asset_id ON asset_mint_burn(asset_id, slot, tx_index);
+CREATE INDEX idx_asset_mint_burn_slot ON asset_mint_burn(slot);
 
 CREATE TABLE account (
     staking_key BLOB,

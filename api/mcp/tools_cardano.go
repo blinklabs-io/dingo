@@ -1513,10 +1513,10 @@ func registerCardanoTools(
 		var mintQuery string
 		var mintArgs []any
 		if len(rawName) > 0 {
-			mintQuery = `SELECT tx_hash, slot FROM asset_mint_burn WHERE policy_id = ? AND name = ? ORDER BY slot ASC, tx_index ASC LIMIT 1`
+			mintQuery = `SELECT t.hash, m.slot FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id JOIN "transaction" AS t ON t.id = m.transaction_id WHERE i.policy_id = ? AND i.name = ? ORDER BY m.slot ASC, m.tx_index ASC LIMIT 1`
 			mintArgs = []any{policyBytes, rawName}
 		} else {
-			mintQuery = `SELECT tx_hash, slot FROM asset_mint_burn WHERE policy_id = ? ORDER BY slot ASC, tx_index ASC LIMIT 1`
+			mintQuery = `SELECT t.hash, m.slot FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id JOIN "transaction" AS t ON t.id = m.transaction_id WHERE i.policy_id = ? ORDER BY m.slot ASC, m.tx_index ASC LIMIT 1`
 			mintArgs = []any{policyBytes}
 		}
 		err = db.QueryRowContext(qCtx, mintQuery, mintArgs...).
@@ -1526,10 +1526,10 @@ func registerCardanoTools(
 		}
 
 		if len(rawName) > 0 {
-			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_mint_burn WHERE policy_id = ? AND name = ?`, policyBytes, rawName).
+			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id WHERE i.policy_id = ? AND i.name = ?`, policyBytes, rawName).
 				Scan(&mintCount)
 		} else {
-			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_mint_burn WHERE policy_id = ?`, policyBytes).Scan(&mintCount)
+			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id WHERE i.policy_id = ?`, policyBytes).Scan(&mintCount)
 		}
 
 		if err != nil {

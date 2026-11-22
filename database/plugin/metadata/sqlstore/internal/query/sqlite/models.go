@@ -64,14 +64,11 @@ type AssetIdentity struct {
 }
 
 type AssetMintBurn struct {
-	ID          int64
-	TxHash      []byte
-	PolicyID    []byte
-	Name        []byte
-	Fingerprint []byte
-	Slot        sql.NullInt64
-	Quantity    sql.NullString
-	TxIndex     sql.NullInt64
+	TransactionID int64
+	AssetID       int64
+	Slot          int64
+	TxIndex       int64
+	Quantity      string
 }
 
 type BackfillCheckpoint struct {

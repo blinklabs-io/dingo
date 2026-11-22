@@ -43,6 +43,9 @@ type rowShape struct {
 	// resolveAssets marks queued asset holdings, whose rows name an asset by
 	// (policy_id, name) and are written through flushAssetHoldings.
 	resolveAssets bool
+	// resolveMintBurn marks queued mint and burn events, whose rows name an
+	// asset by (policy_id, name) and are written through flushAssetMintBurn.
+	resolveMintBurn bool
 }
 
 var (
@@ -122,10 +125,10 @@ var (
 		name:  "InsertAssetMintBurnBatch",
 		table: "asset_mint_burn",
 		columns: []string{
-			"tx_hash", "policy_id", "name", "fingerprint", "slot",
-			"quantity", "tx_index",
+			"transaction_id", "policy_id", "name", "slot", "quantity",
+			"tx_index",
 		},
-		suffix: "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+		resolveMintBurn: true,
 	}
 )
 
@@ -366,6 +369,14 @@ func (b *rowBatch) flush(
 	for _, entry := range b.entries {
 		if entry.shape.resolveAssets {
 			if err := flushAssetHoldings(
+				ctx, db, entry.rows, parameterLimit,
+			); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.shape.resolveMintBurn {
+			if err := flushAssetMintBurn(
 				ctx, db, entry.rows, parameterLimit,
 			); err != nil {
 				return err

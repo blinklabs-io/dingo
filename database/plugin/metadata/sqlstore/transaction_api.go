@@ -66,6 +66,7 @@ func (s *Store) applyTransactionMetadataLabels(
 func (s *Store) applyTransactionAssetMintBurn(
 	transaction lcommon.Transaction,
 	hash []byte,
+	transactionID int64,
 	slot uint64,
 	index uint32,
 	rows *rowBatch,
@@ -81,10 +82,9 @@ func (s *Store) applyTransactionAssetMintBurn(
 	) {
 		rows.add(
 			assetMintBurnShape,
-			asset.TxHash,
+			transactionID,
 			asset.PolicyId,
 			asset.Name,
-			asset.Fingerprint,
 			asset.Slot,
 			asset.Quantity,
 			asset.TxIndex,

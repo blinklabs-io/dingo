@@ -1372,15 +1372,18 @@ func (q *Queries) GetActiveDreps(ctx context.Context) ([]Drep, error) {
 
 const getAssetMintBurnInfo = `-- name: GetAssetMintBurnInfo :one
 SELECT
-    (SELECT first_event.tx_hash
-     FROM asset_mint_burn AS first_event
-     WHERE first_event.policy_id = ? AND first_event.name = ?
+    (SELECT t.hash
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS first_event ON first_event.asset_id = i.id
+     JOIN "transaction" AS t ON t.id = first_event.transaction_id
+     WHERE i.policy_id = ? AND i.name = ?
      ORDER BY first_event.slot ASC, first_event.tx_index ASC,
-              first_event.id ASC
+              first_event.transaction_id ASC
      LIMIT 1) AS initial_tx_hash,
-    COUNT(*) AS event_count
-FROM asset_mint_burn AS events
-WHERE events.policy_id = ? AND events.name = ?
+    (SELECT COUNT(*)
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS events ON events.asset_id = i.id
+     WHERE i.policy_id = ? AND i.name = ?) AS event_count
 `
 
 type GetAssetMintBurnInfoParams struct {

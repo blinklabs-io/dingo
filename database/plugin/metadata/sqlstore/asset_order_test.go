@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -119,13 +120,9 @@ func testListMintedAssetsPastSlotFoldLimit(t *testing.T, store *Store) {
 	const slot = uint64(1) << 31
 	p1, p2 := assetPolicy(0x01), assetPolicy(0x02)
 	insert := func(txHash, policy []byte, slot uint64, txIndex uint32) {
-		_, err := store.writeDB.Exec(
-			store.dialect.Rebind(`INSERT INTO asset_mint_burn `+
-				`(tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index) `+
-				`VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			txHash, policy, []byte("a"), []byte("fp"), slot, "1", txIndex,
+		testutil.InsertAssetMintBurn(
+			t, store.writeDB, txHash, policy, []byte("a"), slot, txIndex, "1",
 		)
-		require.NoError(t, err)
 	}
 	insert(credentialHash(0x31), p2, slot, 1)
 	insert(credentialHash(0x32), p1, slot, 2)

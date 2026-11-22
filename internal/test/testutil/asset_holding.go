@@ -54,3 +54,42 @@ SELECT ?, id, ? FROM asset_identity WHERE policy_id = ? AND name = ?`,
 		tb.Fatalf("insert asset holding: %v", err)
 	}
 }
+
+// InsertAssetMintBurn records one mint or burn event of an asset in a
+// transaction. It creates the transaction identity row and the asset identity
+// the event names when they do not exist.
+func InsertAssetMintBurn(
+	tb testing.TB,
+	db SQLExecer,
+	txHash, policyID, name []byte,
+	slot, txIndex, quantity any,
+) {
+	tb.Helper()
+	if name == nil {
+		name = []byte{}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO "transaction" (hash)
+SELECT ? WHERE NOT EXISTS (SELECT 1 FROM "transaction" WHERE hash = ?)`,
+		txHash, txHash,
+	); err != nil {
+		tb.Fatalf("insert transaction identity: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO asset_identity (policy_id, name) VALUES (?, ?)
+ON CONFLICT (policy_id, name) DO NOTHING`,
+		policyID, name,
+	); err != nil {
+		tb.Fatalf("insert asset identity: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO asset_mint_burn
+    (transaction_id, asset_id, slot, tx_index, quantity)
+SELECT t.id, i.id, ?, ?, ?
+FROM "transaction" AS t, asset_identity AS i
+WHERE t.hash = ? AND i.policy_id = ? AND i.name = ?`,
+		slot, txIndex, quantity, txHash, policyID, name,
+	); err != nil {
+		tb.Fatalf("insert asset mint burn: %v", err)
+	}
+}

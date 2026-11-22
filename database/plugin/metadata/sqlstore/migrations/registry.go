@@ -115,6 +115,8 @@ const (
 	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	utxoEdgeClusteredSchemaRelease                      = "utxo-edge-clustered"
+	assetMintBurnIDsSchemaRelease                       = "asset-mint-burn-ids"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -309,6 +311,8 @@ var schemaVersions = []struct {
 	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
 	{Version: 74, Name: assetIdentityHoldingsSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: utxoEdgeClusteredSchemaRelease, Dir: "v75"},
+	{Version: 76, Name: assetMintBurnIDsSchemaRelease, Dir: "v76"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -493,6 +497,16 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
 			migration.BatchSize = assetIdentityHoldingsBatchSize
+		}
+		if version.Name == utxoEdgeClusteredSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoEdgeClusteredBackfill(dialect)
+			migration.BatchSize = utxoEdgeClusteredBatchSize
+		}
+		if version.Name == assetMintBurnIDsSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = assetMintBurnIDsBackfill(dialect)
+			migration.BatchSize = assetMintBurnIDsBatchSize
 		}
 		ret = append(ret, migration)
 	}

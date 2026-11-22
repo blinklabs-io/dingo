@@ -56,7 +56,6 @@ type AssetHolder struct {
 // full mint/burn history so the Blockfrost API can derive an asset's
 // initial_mint_tx_hash (earliest event) and mint_or_burn_count (row count).
 type AssetMintBurn struct {
-	ID          uint
 	TxHash      []byte
 	PolicyId    []byte
 	Name        []byte

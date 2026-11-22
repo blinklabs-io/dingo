@@ -360,13 +360,8 @@ var Manifest = []Index{
 		Notes:   "Mint/burn history rollback", Critical: true,
 	},
 	{
-		Name: "idx_asset_mint_burn_fingerprint", Table: "asset_mint_burn",
-		Columns: []string{"fingerprint"},
-		Notes:   "Mint/burn fingerprint index",
-	},
-	{
-		Name: "idx_asset_mint_burn_lookup", Table: "asset_mint_burn",
-		Columns: []string{"policy_id", "name", "slot"},
+		Name: "idx_asset_mint_burn_asset_id", Table: "asset_mint_burn",
+		Columns: []string{"asset_id", "slot", "tx_index"},
 		Notes:   "Mint/burn history query", Critical: true,
 	},
 	{

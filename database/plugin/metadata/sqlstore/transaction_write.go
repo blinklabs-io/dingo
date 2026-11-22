@@ -1250,6 +1250,7 @@ func (s *Store) setTransactionWithAccumulator(
 			s.applyTransactionAssetMintBurn(
 				transaction,
 				hash,
+				transactionID,
 				point.Slot,
 				index,
 				&staged,

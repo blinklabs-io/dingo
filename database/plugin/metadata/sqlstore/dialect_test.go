@@ -151,20 +151,11 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_asset_mint_burn_lookup` ON `asset_mint_burn` (`policy_id`(255), `name`(255), `slot`)",
+		"CREATE INDEX `idx_asset_mint_burn_asset_id` ON `asset_mint_burn` (`asset_id`, `slot`, `tx_index`)",
 		dialect.CreateIndexSQL(
-			"idx_asset_mint_burn_lookup",
+			"idx_asset_mint_burn_asset_id",
 			"asset_mint_burn",
-			[]string{"policy_id", "name", "slot"},
-		),
-	)
-	require.Equal(
-		t,
-		"CREATE INDEX `idx_asset_mint_burn_fingerprint` ON `asset_mint_burn` (`fingerprint`(255))",
-		dialect.CreateIndexSQL(
-			"idx_asset_mint_burn_fingerprint",
-			"asset_mint_burn",
-			[]string{"fingerprint"},
+			[]string{"asset_id", "slot", "tx_index"},
 		),
 	)
 	require.Equal(
