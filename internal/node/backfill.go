@@ -137,7 +137,11 @@ type Backfill struct {
 	// writeCheckpoint persists a checkpoint; tests replace it to inject
 	// failures. Nil uses the metadata store.
 	writeCheckpoint func(*models.BackfillCheckpoint) error
-	computeOffsets  func(
+	// decodeWorkers overrides the number of goroutines IndexBlocks decodes
+	// blocks on. Zero sizes it from GOMAXPROCS; tests set it to observe the
+	// workers independently of the host.
+	decodeWorkers  int
+	computeOffsets func(
 		uint64,
 		[]byte,
 		[]byte,
