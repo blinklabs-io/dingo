@@ -292,13 +292,19 @@ func vacuumWith(
 // FindIntersect/chain-sync path -- the same mechanism that already recovers
 // from an explicit rollback or from the pre-existing Badger-behind- metadata
 // race the Cross-Store Durability Contract section above documents.
+//
+// threads(4) lets SQLite's sorter use helper threads for the large sorts a
+// CREATE INDEX or a whole-table ORDER BY performs, such as the deferred
+// index rebuild at the end of a backfill; ordinary statements never sort
+// enough to use them.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=wal_autocheckpoint(10000)" +
 	"&_pragma=journal_size_limit(67108864)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
-	"&_pragma=mmap_size(268435456)"
+	"&_pragma=mmap_size(268435456)" +
+	"&_pragma=threads(4)"
 
 // sqliteWritePragmas is appended to the write pool's DSN only.
 //

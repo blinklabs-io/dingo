@@ -50,7 +50,7 @@ func TestSQLiteBulkModeTunesAndRestoresConnectionPragmas(t *testing.T) {
 	require.NoError(t, db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages))
 	require.Equal(t, 10000, pages)
 	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
-	require.Zero(t, workerThreads)
+	require.Equal(t, 4, workerThreads)
 }
 
 func TestPostgresRebind(t *testing.T) {
