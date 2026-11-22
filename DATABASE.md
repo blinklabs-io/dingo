@@ -4718,9 +4718,11 @@ fails the export. Each output's ledger CBOR goes through the go-scls typed
 `utxo/v0` payload codec, and a payload the codec rejects fails the export.
 
 The file is staged as `<output>.partial` (created exclusively; an existing
-output or staged file is refused), finalized, fsynced, verified in full
-(`scls.VerifyFull`) with its root compared to the writer's, then published by
-a hard link to the output, the staged name removed and the directory synced.
+output or staged file is refused) with mode 0666 less the umask, since it holds
+public ledger state rather than a node's private checkpoint. It is finalized,
+fsynced, verified in full (`scls.VerifyFull`) with its root compared to the
+writer's, then published by a hard link to the output, the staged name removed
+and the directory synced.
 The link fails rather than replace a file created at the output while the
 export ran, which a rename would clobber, so the output directory must be on a
 file system with hard links. A failure or an interrupt removes the staged

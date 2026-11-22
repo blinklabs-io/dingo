@@ -173,8 +173,10 @@ func ExportSCLS(
 	}
 
 	partial := cfg.Output + sclsPartialSuffix
-	f, err := os.OpenFile( // #nosec G304 -- the operator-chosen output path
-		partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
+	// The file is public ledger state, so it takes the umask like other command
+	// output rather than the owner-only mode of a node's private checkpoints.
+	f, err := os.OpenFile( // #nosec G302,G304 -- public output at an operator-chosen path
+		partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666,
 	)
 	if errors.Is(err, fs.ErrExist) {
 		return res, fmt.Errorf(
