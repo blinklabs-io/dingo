@@ -53,11 +53,13 @@ type fakeBlock struct {
 
 func (b fakeBlock) Type() int                           { return 7 }
 func (b fakeBlock) Transactions() []lcommon.Transaction { return nil }
-func (b fakeBlock) Hash() lcommon.Blake2b256            { return lcommon.Blake2b256{1} }
-func (b fakeBlock) PrevHash() lcommon.Blake2b256        { return lcommon.Blake2b256{2} }
-func (b fakeBlock) SlotNumber() uint64                  { return 42 }
-func (b fakeBlock) BlockNumber() uint64                 { return 9 }
-func (b fakeBlock) Cbor() []byte                        { return b.cbor }
+
+func (b fakeBlock) Hash() lcommon.Blake2b256 { return lcommon.Blake2b256{1} }
+
+func (b fakeBlock) PrevHash() lcommon.Blake2b256 { return lcommon.Blake2b256{2} }
+func (b fakeBlock) SlotNumber() uint64           { return 42 }
+func (b fakeBlock) BlockNumber() uint64          { return 9 }
+func (b fakeBlock) Cbor() []byte                 { return b.cbor }
 
 type ledgerSource struct {
 	gotTx lcommon.Transaction
@@ -250,6 +252,7 @@ func TestConsensusRole(t *testing.T) {
 	var gotA, gotB ochainsync.Tip
 	role, err := cardano.NewConsensusRole(
 		src,
+		src,
 		func(a, b ochainsync.Tip) chain.Comparison {
 			gotA, gotB = a, b
 			return chain.ComparisonBBetter
@@ -286,15 +289,18 @@ func TestConsensusRole(t *testing.T) {
 	}
 }
 
-func TestConsensusRoleWithoutComparerIsUnknown(t *testing.T) {
+func TestConsensusRoleRequiresComparer(t *testing.T) {
 	t.Parallel()
 
-	role, err := cardano.NewConsensusRole(&consensusSource{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := role.Compare(chain.Tip{}, chain.Tip{}); got != chain.ComparisonUnknown {
-		t.Fatalf("Compare = %d; want unknown", got)
+	src := &consensusSource{}
+	if _, err := cardano.NewConsensusRole(src, src, nil); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
+		t.Fatalf(
+			"NewConsensusRole without comparer: %v; want ErrNilSource",
+			err,
+		)
 	}
 }
 
@@ -357,7 +363,11 @@ func TestMempoolRolePassesTypeAndBytes(t *testing.T) {
 	}
 	if src.gotType != uint(conway.EraIdConway) ||
 		!bytes.Equal(src.gotRaw, raw) {
-		t.Fatalf("pool received type %d, %d bytes", src.gotType, len(src.gotRaw))
+		t.Fatalf(
+			"pool received type %d, %d bytes",
+			src.gotType,
+			len(src.gotRaw),
+		)
 	}
 	role.RemoveTx("abc")
 	if src.removed != "abc" {
@@ -368,16 +378,38 @@ func TestMempoolRolePassesTypeAndBytes(t *testing.T) {
 func TestRoleConstructorsRejectNilSources(t *testing.T) {
 	t.Parallel()
 
-	if _, err := cardano.NewLedgerRole(nil); !errors.Is(err, cardano.ErrNilSource) {
+	if _, err := cardano.NewLedgerRole(nil); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
 		t.Fatalf("ledger: %v", err)
 	}
-	if _, err := cardano.NewConsensusRole(nil, nil); !errors.Is(err, cardano.ErrNilSource) {
-		t.Fatalf("consensus: %v", err)
+	src := &consensusSource{}
+	compare := func(_, _ ochainsync.Tip) chain.Comparison {
+		return chain.ComparisonEqual
 	}
-	if _, err := cardano.NewNetworkRole(nil); !errors.Is(err, cardano.ErrNilSource) {
+	if _, err := cardano.NewConsensusRole(nil, src, compare); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
+		t.Fatalf("consensus without leader source: %v", err)
+	}
+	if _, err := cardano.NewConsensusRole(src, nil, compare); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
+		t.Fatalf("consensus without validator: %v", err)
+	}
+	if _, err := cardano.NewNetworkRole(nil); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
 		t.Fatalf("network: %v", err)
 	}
-	if _, err := cardano.NewMempoolRole(nil); !errors.Is(err, cardano.ErrNilSource) {
+	if _, err := cardano.NewMempoolRole(nil); !errors.Is(
+		err,
+		cardano.ErrNilSource,
+	) {
 		t.Fatalf("mempool: %v", err)
 	}
 }

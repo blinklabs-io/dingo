@@ -21695,10 +21695,14 @@ Package isolation is enforced by direction, ownership, and composition:
   selection's tip comparison, and the mempool `AddTransaction` and
   `RemoveTransaction`.
 - `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
-  `NetworkRole`, `MempoolRole`) over small source interfaces whose methods the
-  node's `ledger.LedgerState`, forger, chain manager and mempool already have,
-  so the node module does not need to import the sdk. Nothing in the node calls
-  through these roles yet, so no existing path changes.
+  `NetworkRole`, `MempoolRole`) over small source interfaces that the node's
+  own types already satisfy: `LedgerSource` and `ForgedBlockValidator` by
+  `ledger.LedgerState`, `LeaderSource` by the leader schedule and the forger's
+  `LeaderChecker`, `NetworkSink` by the forger's `BlockBroadcaster`, and
+  `MempoolSource` by `mempool.Mempool`. The node module does not import the
+  sdk, so `internal/architecture` compiles those pairings in a temporary
+  workspace holding both modules. Nothing in the node calls through these roles
+  yet, so no existing path changes.
 
 ### Import Boundary Check
 

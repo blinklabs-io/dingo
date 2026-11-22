@@ -19,9 +19,9 @@
 // roles exchange it without encoding. A payload that arrives as bytes only,
 // from an external role, is decoded when a role needs the value.
 //
-// The roles do not depend on the node. Each wraps a small source interface
-// whose methods are the ones the node's ledger, forger, chain manager and
-// mempool already have, so the node's own types satisfy them as they are.
+// The roles do not depend on the node. Each wraps small source interfaces
+// whose methods are the ones the node's ledger state, leader schedule, forger
+// and mempool already have, so the node's own types satisfy them as they are.
 package cardano
 
 import (

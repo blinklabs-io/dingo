@@ -23,7 +23,8 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
-// ErrNilSource is returned by a role constructor given a nil source.
+// ErrNilSource is returned by a role constructor given a nil source or
+// comparer.
 var ErrNilSource = errors.New("cardano: role source is nil")
 
 // LedgerSource is what the Cardano ledger role reads from the node's ledger
@@ -35,11 +36,16 @@ type LedgerSource interface {
 	ValidateTx(tx lcommon.Transaction) error
 }
 
-// ConsensusSource is what the Cardano consensus role reads from the node: the
-// forger's leader check and its forged-block validation.
-type ConsensusSource interface {
+// LeaderSource is the forger's leader check, which the node's leader schedule
+// provides.
+type LeaderSource interface {
 	ShouldProduceBlock(slot uint64) bool
 	NextLeaderSlot(fromSlot uint64) (uint64, bool)
+}
+
+// ForgedBlockValidator is the forger's check of a block it has built, run
+// before the block is adopted. The node's ledger state provides it.
+type ForgedBlockValidator interface {
 	ValidateForgedBlock(
 		ctx context.Context,
 		block lcommon.Block,
@@ -47,7 +53,10 @@ type ConsensusSource interface {
 	) error
 }
 
-// TipComparer compares two tips the way chain selection does.
+// TipComparer compares two tips the way chain selection does. A tip carries
+// only its point and block number, so a comparer that breaks equal-length ties
+// as chain selection does, by operational certificate or VRF output, looks up
+// that data itself.
 type TipComparer func(a, b ochainsync.Tip) chain.Comparison
 
 // NetworkSink is the forger's block broadcaster: it adds a block to the local
@@ -111,40 +120,44 @@ func (r *LedgerRole) ValidateTx(tx chain.Tx) error {
 
 // ConsensusRole implements chain.Consensus for Cardano.
 type ConsensusRole struct {
-	src     ConsensusSource
-	compare TipComparer
+	leader    LeaderSource
+	validator ForgedBlockValidator
+	compare   TipComparer
 }
 
 var _ chain.Consensus = (*ConsensusRole)(nil)
 
-// NewConsensusRole returns the Cardano consensus role over src. compare orders
-// tips; a nil compare reports every pair as chain.ComparisonUnknown.
+// NewConsensusRole returns the Cardano consensus role over the node's leader
+// schedule, its forged-block validator and a tip comparer. Every argument is
+// required: a role that could not order tips would never prefer another chain.
 func NewConsensusRole(
-	src ConsensusSource,
+	leader LeaderSource,
+	validator ForgedBlockValidator,
 	compare TipComparer,
 ) (*ConsensusRole, error) {
-	if src == nil {
+	if leader == nil || validator == nil || compare == nil {
 		return nil, ErrNilSource
 	}
-	return &ConsensusRole{src: src, compare: compare}, nil
+	return &ConsensusRole{
+		leader:    leader,
+		validator: validator,
+		compare:   compare,
+	}, nil
 }
 
 // Compare implements chain.Consensus.
 func (r *ConsensusRole) Compare(a, b chain.Tip) chain.Comparison {
-	if r.compare == nil {
-		return chain.ComparisonUnknown
-	}
 	return r.compare(toCardanoTip(a), toCardanoTip(b))
 }
 
 // ShouldProduceBlock implements chain.Consensus.
 func (r *ConsensusRole) ShouldProduceBlock(slot uint64) bool {
-	return r.src.ShouldProduceBlock(slot)
+	return r.leader.ShouldProduceBlock(slot)
 }
 
 // NextLeaderSlot implements chain.Consensus.
 func (r *ConsensusRole) NextLeaderSlot(fromSlot uint64) (uint64, bool) {
-	return r.src.NextLeaderSlot(fromSlot)
+	return r.leader.NextLeaderSlot(fromSlot)
 }
 
 // ValidateForgedBlock implements chain.Consensus.
@@ -156,7 +169,7 @@ func (r *ConsensusRole) ValidateForgedBlock(
 	if err != nil {
 		return err
 	}
-	return r.src.ValidateForgedBlock(ctx, decoded, decoded.Cbor())
+	return r.validator.ValidateForgedBlock(ctx, decoded, decoded.Cbor())
 }
 
 // NetworkRole implements chain.Network for Cardano.
@@ -209,4 +222,8 @@ func (r *MempoolRole) AddTx(ctx context.Context, tx chain.Tx) error {
 }
 
 // RemoveTx implements chain.Mempool.
-func (r *MempoolRole) RemoveTx(txHash string) { r.src.RemoveTransaction(txHash) }
+func (r *MempoolRole) RemoveTx(
+	txHash string,
+) {
+	r.src.RemoveTransaction(txHash)
+}
