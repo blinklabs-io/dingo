@@ -73,7 +73,9 @@ type MintedAsset struct {
 
 // ConvertMintToAssetMintBurnModels converts a transaction's mint field into a
 // slice of AssetMintBurn models, one per (policy, asset name) pair with a
-// non-zero net quantity. Returns nil when there is nothing minted or burned.
+// non-zero net quantity. Fingerprint is left empty: it derives from the policy
+// and name and is computed where the history is read. Returns nil when there
+// is nothing minted or burned.
 func ConvertMintToAssetMintBurnModels(
 	mint *lcommon.MultiAsset[lcommon.MultiAssetTypeMint],
 	txHash []byte,
@@ -91,18 +93,13 @@ func ConvertMintToAssetMintBurnModels(
 			if amount == nil || amount.Sign() == 0 {
 				continue
 			}
-			fingerprint := lcommon.NewAssetFingerprint(
-				policyIdBytes,
-				assetNameBytes,
-			)
 			rows = append(rows, AssetMintBurn{
-				TxHash:      append([]byte(nil), txHash...),
-				PolicyId:    policyIdBytes,
-				Name:        append([]byte(nil), assetNameBytes...),
-				Fingerprint: []byte(fingerprint.String()),
-				Slot:        slot,
-				Quantity:    amount.String(),
-				TxIndex:     txIndex,
+				TxHash:   append([]byte(nil), txHash...),
+				PolicyId: policyIdBytes,
+				Name:     append([]byte(nil), assetNameBytes...),
+				Slot:     slot,
+				Quantity: amount.String(),
+				TxIndex:  txIndex,
 			})
 		}
 	}
