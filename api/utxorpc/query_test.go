@@ -208,6 +208,8 @@ func testShelleyPParams() *shelley.ShelleyProtocolParameters {
 }
 
 func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
+	t.Parallel()
+
 	mainnet, ok := ouroboros.NetworkByName("mainnet")
 	require.True(t, ok, "expected mainnet network to exist")
 	preprod, ok := ouroboros.NetworkByName("preprod")
