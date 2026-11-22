@@ -139,34 +139,11 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f := &anchorFixture{}
 
-	dirAnchor := copyImmutableChunkPrefix(t, anchorChunks)
 	dirChain := copyImmutableChunkPrefix(t, chainChunks)
 
-	// The reference: a ledger database loaded to the anchor and indexed from
-	// genesis, read there and again at the end of the chain.
-	ref := newEquivalenceDB(t)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dirAnchor, ref,
-	))
-	anchorTip, err := ref.GetTip(nil)
-	require.NoError(t, err)
-	refLedger, closeRefLedger := openFactLedger(t, ref)
-	_, refRaw := indexFromGenesis(t, ref, refLedger, nil)
-	f.refAtAnchor = dumpTables(t, refRaw)
-	closeRefLedger()
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dirChain, ref,
-	))
-	// A second index from genesis, not the first one followed to the tip:
-	// the rows of an epoch whose reward round completed past the anchor are
-	// then the final ones.
-	refLedger, _ = openFactLedger(t, ref)
-	_, refRaw = indexFromGenesis(t, ref, refLedger, nil)
-	f.refAtTip = dumpTables(t, refRaw)
-	for _, name := range anchorSkipTables {
-		delete(f.refAtAnchor, name)
-		delete(f.refAtTip, name)
-	}
+	ref := anchorReference(t)
+	f.refAtAnchor, f.refAtTip = ref.atAnchor, ref.atTip
+	anchorTip := ref.anchorTip
 
 	dataDir := t.TempDir()
 	selections := internalplugins.StorageSelections{

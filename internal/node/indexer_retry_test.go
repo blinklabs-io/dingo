@@ -61,7 +61,6 @@ func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 		ctx, equivalenceLoadConfig(), logger, dir, consensus,
 	))
 	ls, _ := openFactLedger(t, consensus)
-	_, wantRaw := indexFromGenesis(t, consensus, ls, nil)
 
 	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
 	store, ledgerFacts, bf := equivalenceParts(t, consensus, idxDB, ls)
@@ -74,5 +73,5 @@ func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 	require.NoError(t, w.CatchUp(ctx))
 	require.GreaterOrEqual(t, facts.calls, 4)
 
-	requireSameTables(t, dumpTables(t, wantRaw), dumpTables(t, idxRaw))
+	requireSameTables(t, chainReference(t), dumpTables(t, idxRaw))
 }
