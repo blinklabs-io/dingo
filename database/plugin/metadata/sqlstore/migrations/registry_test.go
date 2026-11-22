@@ -43,7 +43,7 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := cachedRegistryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 74)
+			require.Len(t, registry, 75)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -73,7 +73,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 74)
+			require.Len(t, registry, 75)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -302,7 +302,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 74)
+	require.Len(t, registry, 75)
 
 	require.Contains(
 		t,
@@ -530,4 +530,17 @@ func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUtxoAddressPrefixIndexDropTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+	mysql, err := cachedMySQLRegistry()
+	require.NoError(t, err)
+	migration := mysql[74]
+	require.Equal(t, utxoAddressPrefixIndexDropSchemaRelease, migration.Name)
+	require.Equal(
+		t,
+		[]string{"DROP INDEX `idx_utxo_address_address` ON `utxo_address`"},
+		migration.SQL["mysql"].Expand,
+	)
 }

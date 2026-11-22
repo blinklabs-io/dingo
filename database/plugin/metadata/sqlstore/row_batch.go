@@ -20,6 +20,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // These conservative accounting weights include row/value descriptors and
@@ -117,6 +119,20 @@ var (
 		table:   "utxo_address",
 		columns: []string{"utxo_id", "address"},
 		suffix:  "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
+	}
+	// utxoAddressOrderedShape writes the row with the page position that
+	// fillUtxoAddressOrderByIDs would otherwise set by a second statement,
+	// for outputs whose producing transaction's row id and block position
+	// the writer already knows.
+	utxoAddressOrderedShape = rowShape{
+		name:  "UpsertUtxoAddressOrderedBatch",
+		table: "utxo_address",
+		columns: []string{
+			"utxo_id", "address", "tx_id", "output_idx", "slot", "block_index",
+		},
+		suffix: "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address, " +
+			"tx_id = excluded.tx_id, output_idx = excluded.output_idx, " +
+			"slot = excluded.slot, block_index = excluded.block_index",
 	}
 	assetMintBurnShape = rowShape{
 		name:  "InsertAssetMintBurnBatch",
@@ -300,7 +316,6 @@ func (b *rowBatch) dropUtxoAddress(id int64) {
 		}
 		clear(entry.rows[len(kept):])
 		entry.rows = kept
-		return
 	}
 }
 
@@ -397,7 +412,7 @@ func (b *rowBatch) flush(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
 			}
-			if entry.shape.table == "utxo_address" {
+			if entry.shape.name == utxoAddressShape.name {
 				ids := make([]int64, 0, end-start)
 				for _, row := range entry.rows[start:end] {
 					id, _ := row[0].(int64)
@@ -448,4 +463,32 @@ func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, pa
 	}
 	*b = deferred
 	return nil
+}
+
+// queueUtxoAddress queues utxo's address row, with its page position when
+// the producing transaction's row id and block position are known. The
+// position is the one utxoAddressOrderSet derives: the producing
+// transaction's application slot, which is the output's added slot, and its
+// block index.
+func queueUtxoAddress(
+	rows *rowBatch,
+	id int64,
+	address []byte,
+	utxo *models.Utxo,
+) {
+	txID := utxo.TransactionID
+	if txID == nil {
+		txID = utxo.CollateralReturnForTxID
+	}
+	if txID == nil || utxo.BlockIndex == nil {
+		rows.add(utxoAddressShape, id, address)
+		return
+	}
+	rows.add(
+		utxoAddressOrderedShape, id, address,
+		int64(*txID), //nolint:gosec // SQL INTEGER row id
+		int64(utxo.OutputIdx),
+		int64(utxo.AddedSlot), //nolint:gosec // SQL INTEGER slot
+		int64(*utxo.BlockIndex),
+	)
 }

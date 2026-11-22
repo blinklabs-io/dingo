@@ -6017,11 +6017,12 @@ rebuilding the rest of the deferred manifest. The durable `sync_state` marker
 still covers the complete cycle and is cleared only after all rebuildable
 indexes are present.
 
-The address- and script-hash-keyed API indexes `idx_utxo_address_address`
-(`utxo_address(address)`), `idx_utxo_address_order`
+The address- and script-hash-keyed API indexes `idx_utxo_address_order`
 (`utxo_address(address, slot, block_index, output_idx, tx_id)`) and
 `idx_redeemer_script_position`
-(`redeemer_script(script_hash, ...)`) are deferred and critical. Their keys
+(`redeemer_script(script_hash, ...)`) are deferred and critical. The order
+index leads with `address`, so it serves every exact-address lookup; a separate
+`utxo_address(address)` index is not kept. Their keys
 arrive in random order, so maintaining them row by row dirties a random leaf per
 insert during a backfill. None is a conflict target or read by the backfill's
 write path, all rebuild before the API reports ready, and none is
