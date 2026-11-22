@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -595,12 +596,13 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 	require.Equal(t, reference, resumed)
 }
 
-// TestChunkedRewardPrecomputeRestartsOnCapturedSlotChange pins that every
+// TestChunkedRewardPrecomputeAdoptsCursorCapturedSlot pins that every
 // derived row of an epoch carries one captured slot: a round interrupted at
 // one captured slot and resumed at another (the startup path captures at the
-// current tip) must restart rather than stamp the remaining pools with the
-// later slot. The fact copy skips an epoch by its first row's slot.
-func TestChunkedRewardPrecomputeRestartsOnCapturedSlotChange(t *testing.T) {
+// current tip) adopts the cursor's slot and keeps its committed chunk rather
+// than stamp the remaining pools with the later slot. The fact copy skips an
+// epoch by its first row's slot.
+func TestChunkedRewardPrecomputeAdoptsCursorCapturedSlot(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -648,9 +650,68 @@ func TestChunkedRewardPrecomputeRestartsOnCapturedSlotChange(t *testing.T) {
 		slots[o.CapturedSlot]++
 	}
 	require.Equal(
-		t, map[uint64]int{laterSlot: poolCount + len(accountOutputs)},
+		t, map[uint64]int{firstSlot: poolCount + len(accountOutputs)},
 		slots,
-		"every row of the epoch must share the resumed round's captured slot",
+		"every row of the epoch must share the interrupted round's captured slot",
+	)
+}
+
+// TestEpochBoundaryReusesBackgroundChunkAtOneSlot pins that the boundary
+// finishes an unfinished background round from its cursor, keeping the
+// committed chunk and its captured slot, instead of redoing Pass 2.
+func TestEpochBoundaryReusesBackgroundChunkAtOneSlot(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		boundarySlot        = uint64(1_200)
+		backgroundSlot      = uint64(200)
+	)
+	poolCount, delegatorsPerPool := 5, 2
+
+	ls, db := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, backgroundSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+
+	boundaryTxn := ls.ledgerDB().Begin(context.Background(), true)
+	require.NoError(t, ls.ledgerDB().Run(boundaryTxn, func(txn ledgerdb.Txn) error {
+		_, _, err := ls.boundaryStakeRewardApplication(
+			ls.lifecycleContext(), txn, newEpoch, boundarySlot,
+		)
+		return err
+	}))
+
+	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, poolCount)
+	accountOutputs, err := db.Metadata().GetRewardAccountOutputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	slots := map[uint64]int{}
+	for _, o := range poolOutputs {
+		slots[o.CapturedSlot]++
+	}
+	for _, o := range accountOutputs {
+		slots[o.CapturedSlot]++
+	}
+	require.Equal(
+		t, map[uint64]int{backgroundSlot: poolCount + len(accountOutputs)},
+		slots,
+		"the boundary must finish the background round at its captured slot",
 	)
 }
 
