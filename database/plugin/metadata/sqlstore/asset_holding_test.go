@@ -94,7 +94,7 @@ func TestNilAssetNameStoredAsEmpty(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.NoError(t, queued.flush(
-				t.Context(), store.writeDB, store.dialect.ParameterLimit(),
+				t.Context(), store.writeDB, nil, store.dialect.ParameterLimit(),
 			))
 		}},
 	} {

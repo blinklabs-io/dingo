@@ -327,6 +327,18 @@ func (s *Store) lazyTransactionStmt(
 		!cacheableForDialect(s.dialect.Name(), query) {
 		return nil, false
 	}
+	return s.transactionStmt(ctx, tx, query)
+}
+
+// transactionStmt returns tx's prepared statement for query, preparing it on
+// tx the first time. Preparing on the transaction needs no second connection,
+// so it is safe on the single-connection write pool. The statement lives until
+// tx finishes.
+func (s *Store) transactionStmt(
+	ctx context.Context,
+	tx *sql.Tx,
+	query string,
+) (*sql.Stmt, bool) {
 	s.stmtMu.Lock()
 	invalid := s.stmtsInvalidated
 	s.stmtMu.Unlock()
@@ -358,6 +370,46 @@ func (s *Store) lazyTransactionStmt(
 	}
 	s.txStmts[tx][stmt] = stmt
 	return stmt, true
+}
+
+// execBatch runs a row-batch INSERT. Inside a write transaction the statement
+// is prepared once per distinct text on that transaction and reused by every
+// later flush in it; each shape has one text per row count, bounded by the
+// dialect's parameter limit, and the cache dies with the transaction. Outside
+// a transaction, or with a nil Store, it is a plain ExecContext, because
+// preparing on the pool while a transaction holds its only connection would
+// deadlock.
+func (s *Store) execBatch(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) error {
+	if s != nil {
+		if tx, ok := unwrapQueryer(db).(*sql.Tx); ok {
+			if err := overlayReadBarrier(ctx, db, query); err != nil {
+				return err
+			}
+			// The statement is tx's own; database/sql closes it with tx.
+			if stmt, ok := s.transactionStmt(ctx, tx, query); ok { //nolint:sqlclosecheck
+				op, name := classifySQLStatement(query)
+				if s.sqlOperations != nil {
+					s.sqlOperations.WithLabelValues(op).Inc()
+				}
+				start := time.Now()
+				_, err := stmt.ExecContext(ctx, args...)
+				if s.sqlQueryDuration != nil {
+					s.sqlQueryDuration.WithLabelValues(op, name).
+						Observe(time.Since(start).Seconds())
+				}
+				if !isClosedStmtErr(err) {
+					return err
+				}
+			}
+		}
+	}
+	_, err := db.ExecContext(ctx, query, args...)
+	return err
 }
 
 // prepareLazily prepares and caches query if it is a cacheable hot statement

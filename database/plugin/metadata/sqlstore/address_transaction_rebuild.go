@@ -120,12 +120,17 @@ func (s *Store) RebuildAddressTransactionIndex(
 		if err := rows.flush(
 			ctx,
 			newDialectQueryer(tx, s.dialect.Name()),
-			s.dialect.ParameterLimit(),
+			s, s.dialect.ParameterLimit(),
 		); err != nil {
 			_ = tx.Rollback()
+			s.evictTxStmts(tx)
 			return fmt.Errorf("write address transaction rebuild batch: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		// This transaction bypasses sqlTxn, which would otherwise drop the
+		// statements prepared on it.
+		err = tx.Commit()
+		s.evictTxStmts(tx)
+		if err != nil {
 			return fmt.Errorf("commit address transaction rebuild batch: %w", err)
 		}
 	}
