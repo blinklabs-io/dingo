@@ -93,7 +93,15 @@ type Config struct {
 	// later tick instead of guaranteeing an unconditional size ceiling. Left
 	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
 	// same convention Maintenance/MaintenanceInterval already use.
-	Checkpoint         func(context.Context) error
+	Checkpoint func(context.Context) error
+	// BulkCheckpoint, when set, runs on the Checkpoint ticker in place of
+	// Checkpoint while bulk-load pragmas are active, which suppress
+	// Checkpoint. It must not take the writer lock: the import keeps
+	// committing on the write connection throughout. SQLite uses it for a
+	// PASSIVE checkpoint, because its write connection never checkpoints at
+	// commit and an import would otherwise leave its whole write set in the
+	// WAL.
+	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
 	// SyncCommits is an optional provider-owned hook that makes every commit
 	// that returned before it began durable. A provider whose commits are
@@ -264,6 +272,7 @@ type Store struct {
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
 	checkpoint       func(context.Context) error
+	bulkCheckpoint   func(context.Context) error
 	checkpointEvery  time.Duration
 	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
@@ -277,10 +286,11 @@ type Store struct {
 	bulkConn         *sql.Conn
 	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
 	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
-	// import can keep bulk mode active for hours; checkpointing the same SQLite
-	// database during that interval adds lock traffic without improving recovery,
+	// import can keep bulk mode active for hours; a writer-blocking checkpoint
+	// during that interval adds lock traffic without improving recovery,
 	// because the import is explicitly incomplete until its final ready-state
-	// transaction commits.
+	// transaction commits. Only bulkCheckpoint, which must not block the
+	// writer, runs then.
 	scheduledWorkMu    sync.Mutex
 	bulkMode           bool
 	bulkRestorePending bool
@@ -403,6 +413,7 @@ func New(config Config) (*Store, error) {
 		vacuum:                      config.Vacuum,
 		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
+		bulkCheckpoint:              config.BulkCheckpoint,
 		checkpointEvery:             config.CheckpointInterval,
 		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
@@ -917,8 +928,8 @@ func (s *Store) closeVacuumAdmission() {
 }
 
 // startCheckpointTicker runs s.checkpoint on its own ticker, independent of
-// maintenance and vacuum cadences. WAL checkpointing needs to run every 1-5
-// minutes to bound WAL growth, not once a day. Mirrors
+// maintenance and vacuum cadences. WAL checkpointing needs to run every few
+// seconds to bound WAL growth, not once a day. Mirrors
 // startMaintenance's admission/cancellation shape (checkpointState,
 // checkpointCancel, checkpointDone) exactly, as a distinct instance rather
 // than a shared one, so a slow VACUUM can never delay or skip a checkpoint
@@ -991,7 +1002,10 @@ func (s *Store) runCheckpoint(ctx context.Context) error {
 	defer s.scheduledWorkMu.Unlock()
 	if s.bulkMode {
 		if !s.bulkRestorePending {
-			return nil
+			if s.bulkCheckpoint == nil {
+				return nil
+			}
+			return s.bulkCheckpoint(ctx)
 		}
 		if err := s.restoreNormalPragmas(ctx); err != nil {
 			return fmt.Errorf("restoring normal pragmas: %w", err)

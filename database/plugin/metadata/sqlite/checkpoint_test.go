@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -121,7 +122,7 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		require.NoError(t, tx.Commit())
 	}
 	// Enough frames that a checkpoint has real work to do while it holds the
-	// writer lock; below wal_autocheckpoint's own 10000-page threshold.
+	// writer lock.
 	writeRows(0, 400)
 
 	// A reader opened after the initial writes is either at the WAL tip or,
@@ -291,6 +292,64 @@ func TestWriteConnectionDoesNotAutoCheckpoint(t *testing.T) {
 	require.Zero(t, autoCheckpointPages(), "in bulk mode")
 	require.NoError(t, dialect.RestoreNormalMode(t.Context(), writeDB))
 	require.Zero(t, autoCheckpointPages(), "after bulk mode")
+}
+
+// TestBulkModeCheckpointsWAL pins that the WAL is still backfilled while bulk
+// mode pauses the scheduled TRUNCATE: the write connection never checkpoints
+// at commit, so without it an import's whole write set stays in the WAL.
+func TestBulkModeCheckpointsWAL(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE bulk_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, err)
+	mainSize := func() int64 {
+		info, statErr := os.Stat(filepath.Join(dataDir, "metadata.sqlite"))
+		require.NoError(t, statErr)
+		return info.Size()
+	}
+	before := mainSize()
+
+	require.NoError(t, store.SetBulkLoadPragmas())
+	t.Cleanup(func() {
+		_ = store.RestoreNormalPragmas()
+	})
+	const rows = 400
+	payload := make([]byte, 4096)
+	tx, err := writeDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range rows {
+		_, err = tx.ExecContext(
+			t.Context(),
+			"INSERT INTO bulk_probe (n, payload) VALUES (?, ?)",
+			i,
+			payload,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return mainSize()-before >= rows*int64(len(payload))
+		},
+		3*checkpointInterval,
+		"bulk-mode WAL frames were not checkpointed into the database file",
+	)
 }
 
 func TestCheckpointWALSchedulesTruncateEveryNthTick(t *testing.T) {

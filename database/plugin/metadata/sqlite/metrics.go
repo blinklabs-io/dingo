@@ -39,9 +39,9 @@ const sqliteFileMetricNamePrefix = "dingo_database_sql_"
 //
 // The WAL gauge reports the -wal file's current size, not whether
 // checkpointing is keeping up: SQLite's PASSIVE, FULL, and RESTART
-// checkpoint modes (including the automatic checkpoint
-// checkpointWAL's periodic PASSIVE run -- see shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but
-// do not shrink the -wal file themselves. journal_size_limit(67108864) can
+// checkpoint modes (including checkpointWAL's periodic PASSIVE run -- see
+// shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but do
+// not shrink the -wal file themselves. journal_size_limit(67108864) can
 // shrink it to 64 MiB when SQLite resets the WAL, while checkpointWAL's
 // periodic TRUNCATE attempts (see shared_sqlstore.go) can bring it to zero.
 // Neither bounds an active WAL or one that cannot reset while a reader holds
@@ -71,8 +71,7 @@ func registerSQLiteFileMetrics(
 			"journal_size_limit can cap it at 64MiB after a WAL reset and "+
 			"a periodic TRUNCATE checkpoint can bring it to zero. Neither "+
 			"bounds an active WAL or one held by a reader, so a steady "+
-			"non-zero value (~40MB or more at the configured "+
-			"wal_autocheckpoint threshold) is expected and a persistent "+
+			"non-zero value is expected and a persistent "+
 			"reader can keep it above either limit.",
 		func() float64 {
 			info, err := os.Stat(walPath)

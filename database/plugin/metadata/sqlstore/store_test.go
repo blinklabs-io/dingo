@@ -202,6 +202,33 @@ func TestCheckpointRecoversFailedBulkModeRestore(t *testing.T) {
 	require.Equal(t, uint32(1), checkpointCalls.Load())
 }
 
+// TestBulkModeRunsBulkCheckpoint pins that the scheduled tick keeps running
+// the bulk-mode hook while the normal checkpoint is suppressed, so a provider
+// can keep the WAL bounded during an import.
+func TestBulkModeRunsBulkCheckpoint(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	var checkpointCalls, bulkCalls atomic.Uint32
+	store.checkpoint = func(context.Context) error {
+		checkpointCalls.Add(1)
+		return nil
+	}
+	store.bulkCheckpoint = func(context.Context) error {
+		bulkCalls.Add(1)
+		return nil
+	}
+
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.NoError(t, store.runCheckpoint(t.Context()))
+	require.Equal(t, uint32(1), bulkCalls.Load())
+	require.Zero(t, checkpointCalls.Load())
+
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.NoError(t, store.runCheckpoint(t.Context()))
+	require.Equal(t, uint32(1), bulkCalls.Load())
+	require.Equal(t, uint32(1), checkpointCalls.Load())
+}
+
 func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

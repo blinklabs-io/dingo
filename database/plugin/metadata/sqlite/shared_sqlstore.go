@@ -315,9 +315,8 @@ const sqliteReadPragmas = "&_pragma=wal_autocheckpoint(10000)"
 // checkpointTruncateEvery-th tick also attempts TRUNCATE once PASSIVE drains
 // the WAL, which keeps the TRUNCATE cadence at two minutes.
 //
-// A PASSIVE checkpoint (what SQLite's auto-checkpoint mechanism would run)
-// and PASSIVE -- like
-// FULL and RESTART -- backfills WAL frames into metadata.sqlite and lets
+// PASSIVE -- the mode SQLite's auto-checkpoint mechanism runs -- like
+// FULL and RESTART, backfills WAL frames into metadata.sqlite and lets
 // future writes reuse the reclaimed space, but does not shrink the -wal file
 // itself. journal_size_limit can shrink the file when SQLite resets the WAL;
 // SQLITE_CHECKPOINT_TRUNCATE can bring it to zero. Verified
@@ -327,9 +326,9 @@ const sqliteReadPragmas = "&_pragma=wal_autocheckpoint(10000)"
 // RESTART each left a 68062432-byte -wal file at exactly 68062432 bytes,
 // while TRUNCATE alone dropped it to 0. So dingo_database_sql_wal_bytes (a
 // plain os.Stat of that file -- see metrics.go) can never show a single
-// decrease under wal_autocheckpoint alone, no matter how well passive
+// decrease under PASSIVE checkpoints alone, no matter how well passive
 // checkpointing is working underneath -- the file's on-disk footprint is a
-// high-water mark under wal_autocheckpoint alone. The configured
+// high-water mark under PASSIVE checkpoints alone. The configured
 // journal_size_limit caps a reset WAL at 64 MiB; checkpointWAL is the path
 // that can bring it to zero, using a periodic, independent TRUNCATE
 // checkpoint attempt. This is best-effort, not an unconditional ceiling: a
@@ -387,33 +386,55 @@ func checkpointWAL(
 ) func(context.Context) error {
 	return checkpointWALEvery(
 		checkpointTruncateEvery,
-		func(ctx context.Context, truncate bool) error {
-			db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
-			if err != nil {
-				return fmt.Errorf("open WAL checkpoint connection: %w", err)
-			}
-			defer func() {
-				_ = db.Close()
-			}()
-
-			return checkpointTick(
-				ctx,
-				logger,
-				truncate,
-				func(ctx context.Context, mode string) (int, int, int, error) {
-					var busy, walLog, checkpointed int
-					row := db.QueryRowContext(
-						ctx,
-						fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
-					)
-					if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
-						return 0, 0, 0, err
-					}
-					return busy, walLog, checkpointed, nil
-				},
-			)
-		},
+		checkpointWALRunner(databaseURI, logger),
 	)
+}
+
+// passiveCheckpointWAL returns the Store.BulkCheckpoint callback: a PASSIVE
+// checkpoint on its own connection, which never takes the writer lock, so the
+// WAL is still backfilled while bulk mode suspends checkpointWAL.
+func passiveCheckpointWAL(
+	databaseURI string,
+	logger *slog.Logger,
+) func(context.Context) error {
+	run := checkpointWALRunner(databaseURI, logger)
+	return func(ctx context.Context) error {
+		return run(ctx, false)
+	}
+}
+
+// checkpointWALRunner returns a checkpointTick run against a dedicated
+// connection opened for the call.
+func checkpointWALRunner(
+	databaseURI string,
+	logger *slog.Logger,
+) func(context.Context, bool) error {
+	return func(ctx context.Context, truncate bool) error {
+		db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
+		if err != nil {
+			return fmt.Errorf("open WAL checkpoint connection: %w", err)
+		}
+		defer func() {
+			_ = db.Close()
+		}()
+
+		return checkpointTick(
+			ctx,
+			logger,
+			truncate,
+			func(ctx context.Context, mode string) (int, int, int, error) {
+				var busy, walLog, checkpointed int
+				row := db.QueryRowContext(
+					ctx,
+					fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
+				)
+				if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+					return 0, 0, 0, err
+				}
+				return busy, walLog, checkpointed, nil
+			},
+		)
+	}
 }
 
 // checkpointWALEvery returns a callback that calls run on every invocation,
@@ -689,6 +710,7 @@ func openSQLStoreWithDialect(
 		vacuum         func(context.Context) error
 		vacuumInterval time.Duration
 		checkpoint     func(context.Context) error
+		bulkCheckpoint func(context.Context) error
 		syncCommits    func(context.Context) error
 		backupTo       func(context.Context, string) error
 		restoreFrom    func(context.Context, string) error
@@ -785,6 +807,7 @@ func openSQLStoreWithDialect(
 			checkpointLogger = slog.Default()
 		}
 		checkpoint = checkpointWAL(databaseURI, checkpointLogger)
+		bulkCheckpoint = passiveCheckpointWAL(databaseURI, checkpointLogger)
 		syncCommits = syncCommitsWAL(databaseURI)
 		backupTo = func(ctx context.Context, dstPath string) error {
 			return backupSQLite(ctx, databasePath, dataDir, dstPath)
@@ -814,6 +837,7 @@ func openSQLStoreWithDialect(
 		Vacuum:                  vacuum,
 		VacuumInterval:          vacuumInterval,
 		Checkpoint:              checkpoint,
+		BulkCheckpoint:          bulkCheckpoint,
 		CheckpointInterval:      checkpointInterval,
 		SyncCommits:             syncCommits,
 		BackupTo:                backupTo,

@@ -6037,8 +6037,8 @@ write path, all rebuild before the API reports ready, and none is
 tables key by integer transaction id, which grows with the chain, so their
 inserts append.
 
-SQLite commits each missing index in its own transaction so
-`wal_autocheckpoint` can run between builds. An interrupted rebuild leaves
+SQLite commits each missing index in its own transaction so the WAL
+checkpointer can backfill completed builds while later ones run. An interrupted rebuild leaves
 completed indexes in place for the next run to skip; the marker is cleared only
 after a final transaction confirms the requested set is present. PostgreSQL and
 MySQL retain the single-transaction rebuild path.
@@ -7523,8 +7523,7 @@ its own connection instead, so several commits' worth of touches to a hot
 B-tree page coalesce into one checkpoint write. The read pool keeps
 `wal_autocheckpoint(10000)` via `sqliteReadPragmas`. `modernc.org/sqlite`
 applies a DSN's `_pragma` values in sorted order, so each DSN carries the
-pragma exactly once. Badger is opened
-with its default `SyncWrites=false` and a 128MiB memtable, so committed blob
+pragma exactly once. Badger is opened with its default `SyncWrites=false` and a 128MiB memtable, so committed blob
 writes can sit unflushed far longer — at chain tip dingo writes only a few MiB
 of blocks per hour, so the memtable may not rotate for hours. Without the sync
 barrier an unclean host shutdown leaves a durable metadata tip pointing at
@@ -7573,18 +7572,17 @@ live, actively-growing `metadata.sqlite`: with zero readers blocking it
 successful checkpoint), PASSIVE, FULL, and RESTART each left a
 68062432-byte `-wal` file at exactly 68062432 bytes, while TRUNCATE alone
 dropped it to 0. So the gauge — a plain `os.Stat` of that file — could never
-show reclaim under `wal_autocheckpoint` alone, no matter how well passive
+show reclaim under PASSIVE checkpoints alone, no matter how well passive
 checkpointing was working underneath; the file's on-disk footprint is a
-high-water mark under `wal_autocheckpoint` alone. With `journal_size_limit`
+high-water mark under PASSIVE checkpoints alone. With `journal_size_limit`
 configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
 operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
-hook alongside `Store.Maintenance`, on its own two-minute ticker independent
+hook alongside `Store.Maintenance`, on its own two-second ticker independent
 of the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`)
 runs `PRAGMA wal_checkpoint(PASSIVE)` every two seconds and attempts
 `PRAGMA wal_checkpoint(TRUNCATE)` on every 60th tick (two minutes). Before
 truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
-PASSIVE reports every WAL frame checkpointed. If a reader
-or writer prevents PASSIVE from draining the WAL, the truncation attempt is
+PASSIVE reports every WAL frame checkpointed. If a reader or writer prevents PASSIVE from draining the WAL, the truncation attempt is
 skipped. A reader at the WAL tip can still make TRUNCATE return `busy` even
 after PASSIVE drains the frames. In either case the file stays at its current
 size until a WAL reset or later TRUNCATE succeeds.
@@ -7596,17 +7594,18 @@ SQLite metadata writers. Both phases retain idempotent resume behavior; an
 interruption retries incomplete work without requiring their metadata
 transactions to overlap.
 
-Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
-checkpoint callback. Entering bulk mode first drains an in-flight callback, so
-the dedicated checkpoint connection cannot overlap the import's metadata
-writes; restoring normal pragmas re-enables the ticker. Bulk mode also caps
-SQLite auxiliary sorter threads at `min(4, GOMAXPROCS-1)` for index builds;
-normal-mode restore resets the setting to zero. The writer's
-`wal_autocheckpoint` stays 0 throughout the import and the scheduled
-checkpointer is paused, so the WAL is not backfilled until the bulk phase
-completes. If the caller's final pragma
-restore fails, the next scheduled checkpoint retries it and runs TRUNCATE only
-after recovery succeeds.
+Explicit bulk mode, used by Mithril ledger-state import and by unvalidated
+ledger replay, pauses this scheduled checkpoint callback. Entering bulk mode
+first drains an in-flight callback, so a TRUNCATE attempt cannot take the
+writer lock during the import's metadata writes; restoring normal pragmas
+re-enables it. Bulk mode also caps SQLite auxiliary sorter threads at
+`min(4, GOMAXPROCS-1)` for index builds; normal-mode restore resets the setting
+to zero. The writer's `wal_autocheckpoint` stays 0 throughout, so the same
+ticker runs `sqlstore.Config.BulkCheckpoint` instead: `passiveCheckpointWAL`
+issues PASSIVE on its own connection, which never takes the writer lock, and
+keeps backfilling committed import frames so the WAL does not hold the whole
+import. If the caller's final pragma restore fails, the next scheduled
+checkpoint retries it and runs TRUNCATE only after recovery succeeds.
 
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
@@ -7707,8 +7706,7 @@ SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
 `checkpointWAL`'s TRUNCATE attempts (see above) the gauge only grows. It is not
 strictly monotonic, though: a successful periodic TRUNCATE attempt can drop it
 back toward zero, while a persistently held reader snapshot can leave it at its
-~40MB-and-rising floor (the raised `wal_autocheckpoint` threshold above) until a
-later attempt succeeds.
+current size until a later attempt succeeds.
 
 **Write/read connection-pool metrics.** A live goroutine-dump/`pprof`
 investigation found `writeDB` — capped at `SetMaxOpenConns(1)` because SQLite
