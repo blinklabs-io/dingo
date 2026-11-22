@@ -87,7 +87,13 @@ ORDER BY t.id, i.id`
 			return BatchResult{}, err
 		}
 		if !hasLegacy {
-			// The swap already ran.
+			// The swap already ran, or stopped part way through.
+			if err := completeSwap(
+				ctx, batch, dialect,
+				"asset_mint_burn", "asset_mint_burn_clustered",
+			); err != nil {
+				return BatchResult{}, err
+			}
 			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 		}
 		var (
@@ -126,7 +132,7 @@ FROM (SELECT id FROM asset_mint_burn WHERE id > ? ORDER BY id LIMIT ?) AS b`),
 		}
 		done := count < int64(batch.Limit)
 		if done {
-			if err := swapAssetMintBurn(ctx, batch, cursor); err != nil {
+			if err := swapAssetMintBurn(ctx, batch, dialect, cursor); err != nil {
 				return BatchResult{}, err
 			}
 		}
@@ -150,6 +156,18 @@ func quotedTransactionTable(dialect string) string {
 func swapAssetMintBurn(
 	ctx context.Context,
 	batch Batch,
+	dialect string,
+	cursor assetMintBurnIDsCursor,
+) error {
+	return swapRebuiltTable(
+		ctx, batch, dialect, "asset_mint_burn", "asset_mint_burn_clustered",
+		func() error { return verifyAssetMintBurn(ctx, batch, cursor) },
+	)
+}
+
+func verifyAssetMintBurn(
+	ctx context.Context,
+	batch Batch,
 	cursor assetMintBurnIDsCursor,
 ) error {
 	var legacy, copied int64
@@ -170,14 +188,6 @@ func swapAssetMintBurn(
 				"copied %d, orphans %d, rows in copy %d",
 			legacy, cursor.Scanned, cursor.Copied, cursor.Orphans, copied,
 		)
-	}
-	for _, statement := range []string{
-		"DROP TABLE asset_mint_burn",
-		"ALTER TABLE asset_mint_burn_clustered RENAME TO asset_mint_burn",
-	} {
-		if _, err := batch.Tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("swap in asset_mint_burn: %w", err)
-		}
 	}
 	return nil
 }

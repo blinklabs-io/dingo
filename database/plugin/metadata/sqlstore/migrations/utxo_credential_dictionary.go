@@ -19,7 +19,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 const utxoCredentialDictionaryBatchSize = 50_000
@@ -410,35 +409,40 @@ func (b credentialBackfill) swap(
 	batch Batch,
 	cursor utxoCredentialCursor,
 ) (BatchResult, error) {
-	hasCopy, err := tableExists(ctx, batch, b.dialect, "utxo_dictionary")
-	if err != nil {
-		return BatchResult{}, err
-	}
-	if hasCopy {
+	verify := func() error {
 		if err := b.reconcile(
 			ctx, batch, "utxo", "utxo_dictionary",
 			cursor.UtxoScanned, cursor.UtxoCopied,
 		); err != nil {
-			return BatchResult{}, err
+			return err
 		}
-		if err := b.reconcile(
+		return b.reconcile(
 			ctx, batch, "address_transaction",
 			"address_transaction_dictionary",
 			cursor.AtxScanned, cursor.AtxCopied,
-		); err != nil {
-			return BatchResult{}, err
+		)
+	}
+	var err error
+	switch b.dialect {
+	case "mysql":
+		err = b.swapMySQL(ctx, batch, verify)
+	default:
+		var hasCopy bool
+		hasCopy, err = tableExists(ctx, batch, b.dialect, "utxo_dictionary")
+		if err != nil || !hasCopy {
+			break
 		}
-		switch b.dialect {
-		case "postgres":
+		if err = verify(); err != nil {
+			break
+		}
+		if b.dialect == "postgres" {
 			err = b.swapPostgres(ctx, batch)
-		case "mysql":
-			err = b.swapMySQL(ctx, batch)
-		default:
+		} else {
 			err = b.swapSQLite(ctx, batch)
 		}
-		if err != nil {
-			return BatchResult{}, fmt.Errorf("swap credential tables: %w", err)
-		}
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("swap credential tables: %w", err)
 	}
 	cursor.Phase, cursor.Last = credentialPhaseIdx, 0
 	return encodeCredentialCursor(cursor, 0)
@@ -575,57 +579,115 @@ SELECT GREATEST(
 	return b.exec(ctx, batch, statements...)
 }
 
+// credentialChildForeignKeys are the foreign keys to utxo(id) on MySQL when
+// this migration runs, as earlier migrations left them. The names of the edge
+// and address keys are those of the tables their rebuilds renamed into place.
+// The list is fixed because a rerun after the keys are dropped cannot read them
+// from the catalog.
+var credentialChildForeignKeys = []struct{ table, name, column string }{
+	{"asset_holding", "fk_asset_holding_utxo", "utxo_id"},
+	{"utxo_address", "fk_utxo_address_dictionary_utxo", "utxo_id"},
+	{"utxo_collateral_edge", "fk_utxo_collateral_edge_clustered_utxo", "utxo_id"},
+	{"utxo_pointer", "fk_utxo_pointer_utxo", "utxo_id"},
+	{"utxo_reference_edge", "fk_utxo_reference_edge_clustered_utxo", "utxo_id"},
+	{"utxo_reference_script", "fk_utxo_reference_script_utxo", "utxo_id"},
+}
+
+// swapMySQL replaces the legacy tables on MySQL, where every DDL statement
+// commits implicitly, so each step checks the catalog and the whole swap can be
+// rerun after a crash at any statement. The foreign keys come from the fixed
+// credentialChildForeignKeys list: a rerun after they are dropped cannot read them
+// back from the catalog. The copies' auto-increment counters are raised to the
+// legacy counters before the rename, while the legacy tables still exist.
 func (b credentialBackfill) swapMySQL(
 	ctx context.Context,
 	batch Batch,
+	verify func() error,
 ) error {
-	keys, err := childForeignKeys(ctx, batch, `
-SELECT k.table_name, k.constraint_name, k.column_name, r.delete_rule
-FROM information_schema.key_column_usage k
-JOIN information_schema.referential_constraints r
-  ON r.constraint_schema = k.constraint_schema
- AND r.constraint_name = k.constraint_name
- AND r.table_name = k.table_name
-WHERE k.table_schema = DATABASE() AND k.referenced_table_name = 'utxo'`)
+	hasCopy, err := tableExists(ctx, batch, b.dialect, "utxo_dictionary")
 	if err != nil {
 		return err
 	}
-	next := map[string]int64{}
-	for _, table := range []string{"utxo", "address_transaction"} {
-		var auto sql.NullInt64
-		if err := batch.Tx.QueryRowContext(ctx, `
+	hasLegacy, err := tableExists(ctx, batch, b.dialect, "utxo")
+	if err != nil {
+		return err
+	}
+	if hasCopy && hasLegacy {
+		if err := verify(); err != nil {
+			return err
+		}
+	}
+	pairs := [][2]string{
+		{"utxo", "utxo_dictionary"},
+		{"address_transaction", "address_transaction_dictionary"},
+	}
+	if hasCopy {
+		for _, pair := range pairs {
+			if err := b.carryAutoIncrement(
+				ctx, batch, pair[0], pair[1],
+			); err != nil {
+				return err
+			}
+		}
+		for _, fk := range credentialChildForeignKeys {
+			exists, err := mysqlConstraintExists(ctx, batch, fk.table, fk.name)
+			if err != nil {
+				return err
+			}
+			if exists {
+				if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
+					"` DROP FOREIGN KEY `"+fk.name+"`"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, pair := range pairs {
+		if err := swapRebuiltTable(
+			ctx, batch, b.dialect, pair[0], pair[1], nil,
+		); err != nil {
+			return err
+		}
+	}
+	for _, fk := range credentialChildForeignKeys {
+		exists, err := mysqlConstraintExists(ctx, batch, fk.table, fk.name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
+				"` ADD CONSTRAINT `"+fk.name+"` FOREIGN KEY (`"+fk.column+
+				"`) REFERENCES `utxo`(`id`) ON DELETE CASCADE"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// carryAutoIncrement raises the copy's next id to the legacy table's, when
+// the legacy table still exists, so an id once issued is not issued again.
+func (b credentialBackfill) carryAutoIncrement(
+	ctx context.Context,
+	batch Batch,
+	legacy, rebuilt string,
+) error {
+	hasLegacy, err := tableExists(ctx, batch, b.dialect, legacy)
+	if err != nil || !hasLegacy {
+		return err
+	}
+	var next sql.NullInt64
+	if err := batch.Tx.QueryRowContext(ctx, `
 SELECT auto_increment FROM information_schema.tables
-WHERE table_schema = DATABASE() AND table_name = ?`, table).Scan(&auto); err != nil {
-			return fmt.Errorf("read %s auto_increment: %w", table, err)
-		}
-		next[table] = auto.Int64
+WHERE table_schema = DATABASE() AND table_name = ?`, legacy).Scan(&next); err != nil {
+		return fmt.Errorf("read %s auto_increment: %w", legacy, err)
 	}
-	var statements []string
-	for _, fk := range keys {
-		statements = append(statements,
-			"ALTER TABLE `"+fk.table+"` DROP FOREIGN KEY `"+fk.name+"`")
+	if !next.Valid || next.Int64 <= 0 {
+		return nil
 	}
-	statements = append(
-		statements,
-		"DROP TABLE `utxo`",
-		"RENAME TABLE `utxo_dictionary` TO `utxo`",
-		"DROP TABLE `address_transaction`",
-		"RENAME TABLE `address_transaction_dictionary` TO `address_transaction`",
-	)
-	for table, value := range next {
-		if value > 0 {
-			statements = append(statements, fmt.Sprintf(
-				"ALTER TABLE `%s` AUTO_INCREMENT = %d", table, value,
-			))
-		}
-	}
-	for _, fk := range keys {
-		statements = append(statements,
-			"ALTER TABLE `"+fk.table+"` ADD CONSTRAINT `"+fk.name+
-				"` FOREIGN KEY (`"+fk.column+"`) REFERENCES `utxo`(`id`) "+
-				"ON DELETE "+strings.ToUpper(fk.onDelete))
-	}
-	return b.exec(ctx, batch, statements...)
+	return b.exec(ctx, batch, fmt.Sprintf(
+		"ALTER TABLE `%s` AUTO_INCREMENT = %d", rebuilt, next.Int64,
+	))
 }
 
 // buildIndex creates the position'th index. Each index is its own transaction

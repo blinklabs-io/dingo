@@ -40,6 +40,10 @@ type assetSplitEngine struct {
 	// tableExists reports whether the named table is in the test schema.
 	tableExists func(t *testing.T, name string) bool
 	indexExists func(t *testing.T, table, index string) bool
+	// dsn opens further connections to the test schema (MySQL only).
+	dsn string
+	// database is the name of the test schema (MySQL only).
+	database string
 }
 
 func (e *assetSplitEngine) query(q string) string {
@@ -132,6 +136,8 @@ func newMySQLAssetSplitEngine(
 	require.NoError(t, err)
 	return &assetSplitEngine{
 		dialect:     "mysql",
+		dsn:         cfg.FormatDSN(),
+		database:    database,
 		db:          db,
 		registry:    registry,
 		placeholder: func(int) string { return "?" },

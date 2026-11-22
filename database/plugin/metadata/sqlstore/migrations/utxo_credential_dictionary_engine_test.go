@@ -23,11 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// exerciseCredentialDictionary upgrades a database holding by-value utxo and
-// address_transaction rows on a real server, then replays the finished
-// migration, and checks the rows, the id counters, the foreign keys of the
-// tables that reference utxo and the rebuilt indexes.
-func exerciseCredentialDictionary(t *testing.T, e *assetSplitEngine) {
+// seedCredentialDictionary migrates to the version before the credential
+// dictionary and inserts by-value utxo and address_transaction rows.
+func seedCredentialDictionary(t *testing.T, e *assetSplitEngine) {
 	t.Helper()
 	e.run(t, e.registry[:utxoCredentialDictionaryVersion-1])
 	exec := func(query string, args ...any) {
@@ -60,6 +58,21 @@ INSERT INTO address_transaction (id, payment_key, staking_key, credential_tag,
                                  transaction_id, slot, tx_index, payment_script)
 VALUES (?, ?, ?, 0, ?, ?, 0, ?)`,
 			row.ID, row.Payment, row.Staking, row.ID, row.ID*10, false)
+	}
+
+}
+
+// exerciseCredentialDictionary upgrades a database holding by-value utxo and
+// address_transaction rows on a real server, then replays the finished
+// migration, and checks the rows, the id counters, the foreign keys of the
+// tables that reference utxo and the rebuilt indexes.
+func exerciseCredentialDictionary(t *testing.T, e *assetSplitEngine) {
+	t.Helper()
+	seedCredentialDictionary(t, e)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := e.db.Exec(e.query(query), args...)
+		require.NoError(t, err)
 	}
 
 	e.run(t, e.registry)

@@ -7058,9 +7058,18 @@ copy (cursor: phase and last legacy id, 50,000 rows per step) adds each range's
 credentials to the dictionary, adds an unrevealed `datum` row for each datum
 hash that has none, copies `utxo` rows, then `address_transaction` rows, and
 the swap compares row counts before it replaces either legacy table. On
-PostgreSQL and MySQL the swap drops the foreign keys that reference `utxo`,
-renames the copy and restores them with their names and `ON DELETE` rules;
-SQLite relies on the migration runner turning foreign keys off. The indexes
+PostgreSQL the swap drops the foreign keys that reference `utxo`, renames the
+copy and restores them with their names and `ON DELETE` rules, in the batch's
+transaction; SQLite relies on the migration runner turning foreign keys off.
+MySQL commits each DDL statement implicitly, so its swap is written to be rerun
+from any statement: it raises the copies' counters first, drops the foreign
+keys of the fixed `credentialChildForeignKeys` list that exist, renames each legacy
+table aside and its copy into place in one atomic `RENAME TABLE`, drops the
+renamed-aside table, and adds each listed foreign key that is missing. Every
+rebuild that swaps a table on MySQL (`v75` to `v80`) uses the same rename, and
+a rerun that finds the original gone renames the copy without a row count.
+`TestMySQLSwapResumesAfterCrash` interrupts each swap before every statement
+and requires the schema, foreign keys and rows of an uninterrupted run. The indexes
 are built after the swap, one per step: `idx_utxo_payment_key`
 (`payment_key_id`), `idx_utxo_staking_key` (`staking_key_id`, non-NULL only),
 `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key_id`,

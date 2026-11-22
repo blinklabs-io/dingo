@@ -62,7 +62,13 @@ ORDER BY b.slot, b.hash`
 			return BatchResult{}, err
 		}
 		if !hasLegacy {
-			// The swap already ran.
+			// The swap already ran, or stopped part way through.
+			if err := completeSwap(
+				ctx, batch, dialect,
+				"block_nonce", "block_nonce_clustered",
+			); err != nil {
+				return BatchResult{}, err
+			}
 			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 		}
 		var upper sql.NullInt64
@@ -88,14 +94,21 @@ SELECT MAX(slot) FROM (
 				Cursor: strconv.FormatInt(upper.Int64, 10), Rows: rows,
 			}, nil
 		}
-		if err := swapBlockNonce(ctx, batch); err != nil {
+		if err := swapBlockNonce(ctx, batch, dialect); err != nil {
 			return BatchResult{}, err
 		}
 		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 	}
 }
 
-func swapBlockNonce(ctx context.Context, batch Batch) error {
+func swapBlockNonce(ctx context.Context, batch Batch, dialect string) error {
+	return swapRebuiltTable(
+		ctx, batch, dialect, "block_nonce", "block_nonce_clustered",
+		func() error { return verifyBlockNonce(ctx, batch) },
+	)
+}
+
+func verifyBlockNonce(ctx context.Context, batch Batch) error {
 	var legacy, unkeyable, copied int64
 	if err := batch.Tx.QueryRowContext(
 		ctx, "SELECT COUNT(*) FROM block_nonce",
@@ -118,14 +131,6 @@ SELECT COUNT(*) FROM block_nonce WHERE slot IS NULL OR hash IS NULL`,
 				"without slot or hash %d, rows in copy %d",
 			legacy, unkeyable, copied,
 		)
-	}
-	for _, statement := range []string{
-		"DROP TABLE block_nonce",
-		"ALTER TABLE block_nonce_clustered RENAME TO block_nonce",
-	} {
-		if _, err := batch.Tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("swap in block_nonce: %w", err)
-		}
 	}
 	return nil
 }

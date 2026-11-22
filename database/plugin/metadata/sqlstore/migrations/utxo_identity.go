@@ -810,6 +810,14 @@ func (b identityBackfill) mysqlConstraintExists(
 	batch Batch,
 	table, name string,
 ) (bool, error) {
+	return mysqlConstraintExists(ctx, batch, table, name)
+}
+
+func mysqlConstraintExists(
+	ctx context.Context,
+	batch Batch,
+	table, name string,
+) (bool, error) {
 	var n int
 	if err := batch.Tx.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM information_schema.table_constraints

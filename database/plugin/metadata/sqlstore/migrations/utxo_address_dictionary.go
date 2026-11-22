@@ -80,7 +80,13 @@ ORDER BY u.utxo_id`
 			return BatchResult{}, err
 		}
 		if !hasLegacy {
-			// The swap already ran.
+			// The swap already ran, or stopped part way through.
+			if err := completeSwap(
+				ctx, batch, dialect,
+				"utxo_address", "utxo_address_dictionary",
+			); err != nil {
+				return BatchResult{}, err
+			}
 			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 		}
 		var (
@@ -117,7 +123,7 @@ FROM (SELECT utxo_id FROM utxo_address WHERE utxo_id > ?
 		}
 		done := count < int64(batch.Limit)
 		if done {
-			if err := swapUtxoAddress(ctx, batch, cursor); err != nil {
+			if err := swapUtxoAddress(ctx, batch, dialect, cursor); err != nil {
 				return BatchResult{}, err
 			}
 		}
@@ -130,6 +136,18 @@ FROM (SELECT utxo_id FROM utxo_address WHERE utxo_id > ?
 }
 
 func swapUtxoAddress(
+	ctx context.Context,
+	batch Batch,
+	dialect string,
+	cursor utxoAddressDictionaryCursor,
+) error {
+	return swapRebuiltTable(
+		ctx, batch, dialect, "utxo_address", "utxo_address_dictionary",
+		func() error { return verifyUtxoAddress(ctx, batch, cursor) },
+	)
+}
+
+func verifyUtxoAddress(
 	ctx context.Context,
 	batch Batch,
 	cursor utxoAddressDictionaryCursor,
@@ -152,14 +170,6 @@ func swapUtxoAddress(
 				"copied %d, rows in copy %d",
 			legacy, cursor.Scanned, cursor.Copied, copied,
 		)
-	}
-	for _, statement := range []string{
-		"DROP TABLE utxo_address",
-		"ALTER TABLE utxo_address_dictionary RENAME TO utxo_address",
-	} {
-		if _, err := batch.Tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("swap in utxo_address: %w", err)
-		}
 	}
 	return nil
 }

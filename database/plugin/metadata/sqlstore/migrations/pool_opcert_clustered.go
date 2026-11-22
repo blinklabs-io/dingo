@@ -68,7 +68,13 @@ ORDER BY c.id, o.slot`
 			return BatchResult{}, err
 		}
 		if !hasLegacy {
-			// The swap already ran.
+			// The swap already ran, or stopped part way through.
+			if err := completeSwap(
+				ctx, batch, dialect,
+				"pool_opcert_sequence", "pool_opcert_sequence_clustered",
+			); err != nil {
+				return BatchResult{}, err
+			}
 			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 		}
 		count, high, err := idRange(
@@ -101,7 +107,7 @@ ORDER BY c.id, o.slot`
 		}
 		done := count < int64(batch.Limit)
 		if done {
-			if err := swapPoolOpCert(ctx, batch, cursor); err != nil {
+			if err := swapPoolOpCert(ctx, batch, dialect, cursor); err != nil {
 				return BatchResult{}, err
 			}
 		}
@@ -118,6 +124,19 @@ ORDER BY c.id, o.slot`
 }
 
 func swapPoolOpCert(
+	ctx context.Context,
+	batch Batch,
+	dialect string,
+	cursor poolOpCertClusteredCursor,
+) error {
+	return swapRebuiltTable(
+		ctx, batch, dialect,
+		"pool_opcert_sequence", "pool_opcert_sequence_clustered",
+		func() error { return verifyPoolOpCert(ctx, batch, cursor) },
+	)
+}
+
+func verifyPoolOpCert(
 	ctx context.Context,
 	batch Batch,
 	cursor poolOpCertClusteredCursor,
@@ -140,14 +159,6 @@ func swapPoolOpCert(
 				"copied %d, without pool or slot %d, rows in copy %d",
 			legacy, cursor.Scanned, cursor.Copied, cursor.Unkeyable, copied,
 		)
-	}
-	for _, statement := range []string{
-		"DROP TABLE pool_opcert_sequence",
-		"ALTER TABLE pool_opcert_sequence_clustered RENAME TO pool_opcert_sequence",
-	} {
-		if _, err := batch.Tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("swap in pool_opcert_sequence: %w", err)
-		}
 	}
 	return nil
 }

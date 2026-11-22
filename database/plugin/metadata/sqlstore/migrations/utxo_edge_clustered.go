@@ -68,7 +68,13 @@ func utxoEdgeClusteredBackfill(dialect string) Backfill {
 			return BatchResult{}, err
 		}
 		if !hasClustered {
-			// The swap already ran for this table.
+			// The swap already ran for this table, or stopped before the
+			// replaced table was dropped.
+			if err := completeSwap(
+				ctx, batch, dialect, table, clustered,
+			); err != nil {
+				return BatchResult{}, err
+			}
 			return advanceEdgeTable(cursor, 0, len(utxoEdgeTables))
 		}
 		hasLegacy, err := tableExists(ctx, batch, dialect, table)
@@ -89,16 +95,11 @@ func utxoEdgeClusteredBackfill(dialect string) Backfill {
 			); err != nil {
 				return BatchResult{}, err
 			}
-			if _, err := batch.Tx.ExecContext(
-				ctx, "DROP TABLE "+table,
-			); err != nil {
-				return BatchResult{}, fmt.Errorf("drop legacy %s: %w", table, err)
-			}
 		}
-		if _, err := batch.Tx.ExecContext(
-			ctx, "ALTER TABLE "+clustered+" RENAME TO "+table,
+		if err := swapRebuiltTable(
+			ctx, batch, dialect, table, clustered, nil,
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("swap in %s: %w", table, err)
+			return BatchResult{}, err
 		}
 		return advanceEdgeTable(cursor, rows, len(utxoEdgeTables))
 	}
