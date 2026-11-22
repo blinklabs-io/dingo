@@ -264,7 +264,14 @@ connection; canceling it mid-transaction triggers `database/sql`'s documented
 auto-rollback of the underlying `*sql.Tx`, which is asynchronous to the
 `cancel()` call and (for `database/sql`'s pooling) discards rather than idles
 the aborted connection. `database/plugin/metadata/sqlstore/live_stake_test.go`
-covers both.
+covers both. A write transaction's statements receive `ctx` through
+`context.WithoutCancel`: a driver that watches a cancellable context per
+statement (`modernc.org/sqlite` starts a goroutine and installs a progress
+handler for each one) would otherwise pay that on every statement of a
+transaction issuing thousands. Cancellation then does not interrupt a running
+write statement; `dbFromTxn` returns `ctx.Err()` to the next store call, and the
+rollback above ends the transaction. Read transactions keep the cancellable
+`ctx`, so cancellation interrupts their statements.
 
 Two gaps in that propagation are deliberate:
 - The nil-`txn` "autocommit" path (`dbFromTxn(nil)`/`readDBFromTxn(nil)`, used
