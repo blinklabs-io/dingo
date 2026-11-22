@@ -3070,7 +3070,7 @@ row. A set without the `mpoolhist2` marker loads every pool's registrations and
 retirements from `MetadataStore.GetPools`; the rows carry no block or
 certificate index, so a loaded event's position is its rank in its slot by
 certificate ID, and a retirement without a certificate ranks last. Until the
-marker is set the reads stay on the metadata store. A Leios transaction
+marker is set the reads fail as unserved. A Leios transaction
 context moves the slot the active-pool, registration-at-slot,
 effective-window and retiring reads order by, so each `y` row also holds the
 certificate's effective slot (zero when it is the applied slot), which

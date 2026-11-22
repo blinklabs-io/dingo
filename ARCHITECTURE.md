@@ -24149,15 +24149,13 @@ connection for tens of seconds. Each batch runs in its own read-write
 transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
 still matches, no rollback generation changed since Pass 1 ran, and no epoch
 boundary has claimed the round (`rewardPrecomputeFence`, bumped under
-`rewardPrecomputeWriteMu` before the boundary transaction opens). Once
-`reward-inputs` and `reward-outputs` are both drained, a batch writes only
-changes staged for the live UTxO set, so it runs in `LedgerDB.BeginStaged`: a
-transaction whose metadata view is a read-pool transaction, which takes no
-write connection and does not queue block commits behind it. Otherwise the
-batch writes metadata rows and holds the write connection until it commits.
-Rollback and boundary ordering does not depend on the write connection in
-either case: both take `rewardPrecomputeWriteMu`, which the batch holds from
-its guard through commit. Each chunk
+`rewardPrecomputeWriteMu` before the boundary transaction opens). A batch
+writes only changes staged for the live UTxO set, so it runs in
+`LedgerDB.BeginStaged`: a transaction whose metadata view is a read-pool
+transaction, which takes no write connection and does not queue block commits
+behind it. Rollback and boundary ordering therefore cannot rely on the write
+connection: both take `rewardPrecomputeWriteMu`, which the batch holds from its
+guard through commit. Each chunk
 also sets the CIP-0163 `Guarded` flag from witness history at the snapshot's
 captured slot, and records each output's `Spendable` flag from account
 registration when it runs.
