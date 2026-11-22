@@ -259,7 +259,7 @@ VALUES (?, ?, 0, 1, 0, '1')`, id, id)
 		})
 	}
 	require.NoError(t, flushAssetHoldings(
-		t.Context(), recorder, rows, without.dialect.ParameterLimit(),
+		t.Context(), recorder, nil, rows, without.dialect.ParameterLimit(),
 	))
 	require.NoError(t, without.insertAssetHolding(
 		t.Context(), recorder, 9,

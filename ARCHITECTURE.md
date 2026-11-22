@@ -3923,7 +3923,11 @@ while the abandoned blocks are stored and otherwise to the newest tip
 checkpoint on the chain. A checkpoint left by the former history backfill
 seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
 from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
-the ledger resolve and check a closure through one loader.
+the ledger resolve and check a closure through one loader. `IndexBlocks`
+decodes a batch's blocks and computes their transaction offsets on worker
+goroutines, which stay a bounded number of blocks ahead of the writer; the
+writer takes each block in order, so a decode error fails the batch at its
+block.
 
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the

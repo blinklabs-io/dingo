@@ -983,7 +983,7 @@ func (s *Store) importUtxosDeferredSQLite(
 			return fmt.Errorf("hydrating imported UTxO: %w", err)
 		}
 	}
-	if err := deferredRows.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+	if err := deferredRows.flush(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 		return fmt.Errorf("flushing imported UTxO relations: %w", err)
 	}
 	return nil
