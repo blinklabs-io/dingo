@@ -8693,12 +8693,13 @@ written.
   declared size. A snapshot of a database with no promoted block has no index.
   Mithril sync holds the ImmutableDB lock for the duration of the import.
 - **Mithril chunks.** When the ImmutableDB is on, a Mithril
-  bootstrap of an empty database does not copy block bodies into Badger. Each
-  certified chunk's three files are renamed into `<dataDir>/immutable`, read
-  back there against the certified SHA-256 digests (a mismatch fails, and
+  bootstrap of an empty database does not copy block bodies into Badger.
+  Certified chunks are taken in groups of up to 64. Each group's chunk
+  files are renamed into `<dataDir>/immutable` and fsynced, and the
+  directory is fsynced once for the group. Each chunk is then read back
+  there against the certified SHA-256 digests (a mismatch fails, and
   deletes the chunk's files unless the recorded tip ends in that chunk, whose
-  committed markers name them), fsynced with the directory, and only then does one
-  commit per batch write `bi`, `bh` and `bp..._metadata`, a `DIM1` marker
+  committed markers name them), and only then does one commit per batch write `bi`, `bh` and `bp..._metadata`, a `DIM1` marker
   whose location comes from the chunk's secondary index and the CRC of the
   bytes read, and in API mode the `DOFF` offsets of produced UTxOs. Before the
   chunk's first batch commits, `im_state` advances to that chunk's last block:
@@ -8706,11 +8707,15 @@ written.
   has to cover the whole chunk while its blocks are still waiting for
   markers. A marker therefore never exceeds the recorded tip and never names
   a chunk file that is not yet durable, and after a kill the tip may cover
-  blocks the chain has not stored yet. Between the first rename and that tip
-  write the tip does not cover the chunk, so before any file moves the import
-  durably records the chunk in `<dataDir>/immutable/adopting.pending`
-  (written, fsynced and renamed into place with the directory fsynced) and
-  removes it once the tip covers the chunk. While it exists
+  blocks the chain has not stored yet. Between a group's first rename and the
+  tip write for its last chunk the tip does not cover every moved file, so
+  before any file of the group moves the import durably records the group's
+  first chunk in `<dataDir>/immutable/adopting.pending` (written, fsynced and
+  renamed into place with the directory fsynced) and removes it once the tip
+  covers the group's last chunk. The blob store is synced once per group,
+  after its last chunk commits. A chunk that fails inside a group moves the
+  later chunks' files back to the source directory, so the record is also
+  removed once the tip covers the failed chunk. While it exists
   `ReconcileImmutable` leaves the directory alone and promotion and snapshots
   refuse it with `ErrImmutableAdoptionPending`, so a kill at any point of
   adopting a chunk, including before the first chunk has a tip, never cuts

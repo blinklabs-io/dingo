@@ -566,7 +566,9 @@ func copyChunkFile(src, dst string) error {
 
 // adoptGroupChunks bounds how many chunks share one adopt record, one
 // directory sync and one blob-store sync. A crash redoes at most this many.
-const adoptGroupChunks = 64
+// It is a variable so a test can cross a group boundary with the few fixture
+// chunks it copies.
+var adoptGroupChunks = 64
 
 // adoptGroupChunk verifies and publishes one chunk of a group, then adopts
 // it. Only the group's last chunk clears the adopt record: until then later

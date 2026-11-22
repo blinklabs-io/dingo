@@ -1021,3 +1021,74 @@ func TestAdoptImmutableChunksMidGroupFailureReturnsLaterChunks(t *testing.T) {
 		require.ErrorIs(t, err, os.ErrNotExist, "chunk 2 left the ImmutableDB")
 	}
 }
+
+// Not t.Parallel: swaps the package-level adoptGroupChunks seam.
+//
+// Each group of chunks carries its own adopt record, naming its first chunk,
+// and reports once, after its last chunk. A run stopped in a later group
+// keeps the earlier group's chunks and resumes with the rest.
+func TestAdoptImmutableChunksSpansGroups(t *testing.T) {
+	prior := adoptGroupChunks
+	t.Cleanup(func() { adoptGroupChunks = prior })
+	adoptGroupChunks = 2
+
+	ctx := context.Background()
+	const chunks = 4
+	baseline := baselineCopy(t, chunks)
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	killed := errors.New("killed in the second group")
+	records := map[uint64]uint64{}
+	var committed []uint64
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.BeforeCommit = func(chunk uint64) error {
+			rec, pending, err := db.ImmutableAdoptPending()
+			require.NoError(t, err)
+			require.True(t, pending, "chunk %d is under a record", chunk)
+			records[chunk] = rec
+			if chunk == 2 {
+				for _, ext := range chunkFileExts {
+					_, err := os.Stat(filepath.Join(dir, "00001"+ext))
+					require.ErrorIs(t, err, os.ErrNotExist,
+						"the first group finished before the second")
+					_, err = os.Stat(
+						filepath.Join(db.ImmutableDir(), "00003"+ext),
+					)
+					require.NoError(t, err,
+						"chunk 3 moved in with its group")
+				}
+				return killed
+			}
+			return nil
+		}
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.ErrorIs(t, err, killed)
+	require.Equal(t, map[uint64]uint64{0: 0, 1: 0, 2: 2}, records)
+	require.Equal(t, []uint64{2}, committed,
+		"the first group reports once, past its last chunk")
+	first := blocksBelow(blocks, 2*4320)
+	requireTipAt(t, db, first[len(first)-1], len(first))
+
+	committed = nil
+	res, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.NoError(t, err)
+	require.Equal(t, len(blocks)-len(first), res.BlocksCopied)
+	require.Equal(t, []uint64{4}, committed)
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
+	requireBlocksMatch(t, baseline, db, blocks)
+	requireOffsetsMatch(t, baseline, db, blocks)
+}
