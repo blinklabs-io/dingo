@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -780,11 +781,13 @@ func (w *Writer) requireOrigin(
 // finishAnchor builds the dropped indexes, checks the rows against the
 // imported ledger state and applies that state's accounts.
 func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
+	start := time.Now()
 	if w.buildIndexes != nil {
 		if err := w.buildIndexes(ctx); err != nil {
 			return fmt.Errorf("build deferred indexes at the anchor: %w", err)
 		}
 	}
+	indexesBuilt := time.Now()
 	facts, hasFacts := w.facts.(AnchorFacts)
 	if hasFacts {
 		replayed, err := w.store.ReplayTransactions(nil)
@@ -805,6 +808,7 @@ func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
 			return err
 		}
 	}
+	verified := time.Now()
 	restorer, hasRestorer := w.idx.(AnchorRestorer)
 	txn := w.store.Database().Transaction(ctx, true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -829,6 +833,9 @@ func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
 	w.logger.Info(
 		"indexer reached the Mithril anchor",
 		"slot", anchor.Slot, "block", anchor.BlockNumber,
+		"build_indexes", indexesBuilt.Sub(start),
+		"verify", verified.Sub(indexesBuilt),
+		"copy_and_restore", time.Since(verified),
 	)
 	return nil
 }

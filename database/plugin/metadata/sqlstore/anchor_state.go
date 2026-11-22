@@ -19,6 +19,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -26,7 +28,8 @@ import (
 
 var _ metadata.AnchorStateStore = (*Store)(nil)
 
-// utxoDigestPage bounds the outputs read per statement while digesting.
+// utxoDigestPage bounds the outputs resolved and hashed per chunk while
+// digesting.
 const utxoDigestPage = 20_000
 
 // ReadImportedAccounts implements metadata.AnchorStateStore.
@@ -296,40 +299,66 @@ func (s *Store) liveUtxoDigest(
 	if txn == nil {
 		txCtx = ctx
 	}
-	query := s.dialect.Rebind(`-- name: LiveUtxoPage :many
+	rs, err := db.QueryContext(
+		txCtx,
+		s.dialect.Rebind(liveUtxoSetSQL(
+			s.dialect.Name(), s.dialect.QuoteIdentifier("transaction"),
+		)),
+		slot, slot,
+	)
+	if err != nil {
+		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
+	}
+	defer rs.Close()
+	d := metadata.NewUtxoDigester()
+	outputs := make([]liveOutput, 0, page)
+	for rs.Next() {
+		var o liveOutput
+		if err := rs.Scan(
+			&o.txHash, &o.idx, &o.amount, &o.payment, &o.staking, &o.datum,
+		); err != nil {
+			return metadata.UtxoSetDigest{}, fmt.Errorf(
+				"digest utxo set: %w", err,
+			)
+		}
+		outputs = append(outputs, o)
+		if len(outputs) == page {
+			if err := digestOutputs(txCtx, d, resolve, outputs); err != nil {
+				return metadata.UtxoSetDigest{}, fmt.Errorf(
+					"digest utxo set: %w", err,
+				)
+			}
+			outputs = outputs[:0]
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
+	}
+	if err := digestOutputs(txCtx, d, resolve, outputs); err != nil {
+		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
+	}
+	return d.Sum(), nil
+}
+
+// liveUtxoSetSQL selects the outputs live at a slot in digest order. Walking
+// the transaction hash index in order to satisfy the ORDER BY fetches every
+// output ever created by row id to keep the live ones; scanning utxo for the
+// live rows and sorting them reads the table once. On SQLite the unary plus
+// stops the planner choosing the index walk to avoid the sort. PostgreSQL
+// rejects unary plus on bytea, so the hint is confined to SQLite.
+func liveUtxoSetSQL(dialect, transactionTable string) string {
+	orderKey := "t.hash"
+	if dialect == "sqlite" {
+		orderKey = "+t.hash"
+	}
+	return `-- name: LiveUtxoSet :many
 SELECT t.hash, u.output_idx, u.amount, u.payment_key, u.staking_key,
     u.datum_hash
 FROM utxo u
-JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` t ON t.id = u.tx_id
-WHERE (t.hash > ? OR (t.hash = ? AND u.output_idx > ?))
-  AND u.added_slot <= ?
+JOIN ` + transactionTable + ` t ON t.id = u.tx_id
+WHERE u.added_slot <= ?
   AND (u.deleted_slot = 0 OR u.deleted_slot > ?)
-ORDER BY t.hash, u.output_idx
-LIMIT ?`)
-	d := metadata.NewUtxoDigester()
-	var (
-		afterTx        = []byte{}
-		afterIdx int64 = -1
-	)
-	for {
-		if err := txCtx.Err(); err != nil {
-			return metadata.UtxoSetDigest{}, err
-		}
-		n, lastTx, lastIdx, err := digestUtxoPage(
-			txCtx, db, query, d, resolve, afterTx, afterIdx, slot, page,
-		)
-		if err != nil {
-			return metadata.UtxoSetDigest{}, fmt.Errorf(
-				"digest utxo set: %w",
-				err,
-			)
-		}
-		if n < page {
-			break
-		}
-		afterTx, afterIdx = lastTx, lastIdx
-	}
-	return d.Sum(), nil
+ORDER BY ` + orderKey + `, u.output_idx`
 }
 
 // AppliedTransactionCount implements metadata.AnchorStateStore.
@@ -402,62 +431,68 @@ WHERE slot = ? ORDER BY pool_key_hash`),
 	return out, rs.Err()
 }
 
-// digestUtxoPage hashes the page of live outputs after (afterTx, afterIdx)
-// into h and returns how many it read and the last key. The page is read in
-// full before resolve runs, so the cursor is not held open across blob reads.
-func digestUtxoPage(
+type liveOutput struct {
+	txHash, payment, staking, datum []byte
+	idx                             int64
+	amount                          sql.NullString
+}
+
+// digestOutputs folds outputs, in order, into d. Resolving an output reads
+// its block bytes and is independent per output, so it runs on several
+// goroutines; only the hash needs the outputs in order.
+func digestOutputs(
 	ctx context.Context,
-	db queryer,
-	query string,
 	d *metadata.UtxoDigester,
 	resolve metadata.UtxoOutputResolver,
-	afterTx []byte,
-	afterIdx int64,
-	slot int64,
-	page int,
-) (n int, lastTx []byte, lastIdx int64, err error) {
-	type liveOutput struct {
-		txHash, payment, staking, datum []byte
-		idx                             int64
-		amount                          sql.NullString
-	}
-	rs, err := db.QueryContext(
-		ctx, query, afterTx, afterTx, afterIdx, slot, slot, page,
-	)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	defer rs.Close()
-	outputs := make([]liveOutput, 0, page)
-	for rs.Next() {
-		var o liveOutput
-		if err := rs.Scan(
-			&o.txHash, &o.idx, &o.amount, &o.payment, &o.staking, &o.datum,
-		); err != nil {
-			return 0, nil, 0, err
+	outputs []liveOutput,
+) error {
+	if resolve == nil {
+		for _, o := range outputs {
+			d.Add(
+				o.txHash, uint32(o.idx), o.amount.String, //nolint:gosec
+				o.payment, o.staking, o.datum, false, nil,
+			)
 		}
-		outputs = append(outputs, o)
+		return nil
 	}
-	if err := rs.Err(); err != nil {
-		return 0, nil, 0, err
-	}
-	for _, o := range outputs {
-		var cbor []byte
-		if resolve != nil {
-			var err error
-			cbor, err = resolve(o.txHash, uint32(o.idx)) //nolint:gosec
-			if err != nil {
-				return 0, nil, 0, fmt.Errorf(
-					"resolve output %x#%d: %w", o.txHash, o.idx, err,
-				)
+	cbors := make([][]byte, len(outputs))
+	errs := make([]error, len(outputs))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(digestResolveWorkers, len(outputs)) {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(outputs) || ctx.Err() != nil {
+					return
+				}
+				o := outputs[i]
+				cbor, err := resolve(o.txHash, uint32(o.idx)) //nolint:gosec
+				if err != nil {
+					errs[i] = fmt.Errorf(
+						"resolve output %x#%d: %w", o.txHash, o.idx, err,
+					)
+					continue
+				}
+				cbors[i] = cbor
 			}
+		})
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for i, o := range outputs {
+		if errs[i] != nil {
+			return errs[i]
 		}
 		d.Add(
 			o.txHash, uint32(o.idx), o.amount.String, //nolint:gosec
-			o.payment, o.staking, o.datum, resolve != nil, cbor,
+			o.payment, o.staking, o.datum, true, cbors[i],
 		)
-		lastTx, lastIdx = o.txHash, o.idx
-		n++
 	}
-	return n, lastTx, lastIdx, nil
+	return nil
 }
+
+// digestResolveWorkers bounds the goroutines resolving one digest chunk.
+const digestResolveWorkers = 8
