@@ -71,15 +71,20 @@ type backfillBatchLimitSetter interface {
 	)
 }
 
-func backfillBatchLimitReached(
-	flushedBytes int64,
-	acc database.BatchAccumulator,
-) bool {
+// backfillRowBufferFull reports whether the queued metadata rows should be
+// written into the open SQL transaction now. Only the queue counts: rows
+// already written are in the transaction whether they went in one statement
+// or many, so once a transaction is over its byte estimate, flushing after
+// every transaction bounds nothing and only splits the multi-row inserts
+// into per-transaction statements. Committing at the estimate is the
+// caller's decision (backfillTransactionByteLimitReached).
+func backfillRowBufferFull(acc database.BatchAccumulator) bool {
 	if sizer, ok := acc.(backfillBatchSizer); ok &&
 		sizer.Len() >= DefaultBackfillBatchRows {
 		return true
 	}
-	return backfillTransactionByteLimitReached(flushedBytes, acc)
+	sizer, ok := acc.(backfillBatchByteSizer)
+	return ok && sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes
 }
 
 func backfillTransactionByteLimitReached(
@@ -132,7 +137,11 @@ type Backfill struct {
 	// writeCheckpoint persists a checkpoint; tests replace it to inject
 	// failures. Nil uses the metadata store.
 	writeCheckpoint func(*models.BackfillCheckpoint) error
-	computeOffsets  func(
+	// decodeWorkers overrides the number of goroutines IndexBlocks decodes
+	// blocks on. Zero sizes it from GOMAXPROCS; tests set it to observe the
+	// workers independently of the host.
+	decodeWorkers  int
+	computeOffsets func(
 		uint64,
 		[]byte,
 		[]byte,
@@ -1685,7 +1694,7 @@ func (b *Backfill) processBlockTxsBatched(
 					err,
 				)
 			}
-			if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
+			if backfillRowBufferFull(acc) {
 				flushStart := time.Now()
 				if sizer, ok := acc.(backfillBatchByteSizer); ok {
 					b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()
