@@ -685,7 +685,7 @@ func mappedValue(
 // eventSourcesValue renders a []BarkEventSource with each URL's credentials
 // removed. Any other shape is redacted.
 func eventSourcesValue(v reflect.Value) slog.Value {
-	sources, ok := v.Interface().([]BarkEventSource)
+	sources, ok := reflect.TypeAssert[[]BarkEventSource](v)
 	if !ok {
 		return redactedValue(v)
 	}
