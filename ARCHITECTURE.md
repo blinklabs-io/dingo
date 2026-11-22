@@ -16853,8 +16853,10 @@ before any hard-fork translation, as the live rollover does.
 
 API-mode backfill commits a SQL transaction after the configured block window
 (200 blocks by default) or when its estimated payload reaches 32 MiB. The
-estimate combines encoded block bytes and queued metadata-row bytes. The
-cumulative threshold also controls row flushes. Rows are drained while they
+estimate combines encoded block bytes and queued metadata-row bytes. Between
+transactions, queued rows are written into the open SQL transaction only when
+the queue itself reaches 5,000 rows or 32 MiB; the transaction estimate decides
+only the commit. Rows are drained while they
 are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
@@ -24143,11 +24145,19 @@ read-only transaction. Pass 2 runs a bounded batch of pools at a time
 (`rewardPrecomputeChunkPools`, default 100), cut short at the pool that brings
 the batch to `rewardPrecomputeChunkDelegators` (5000) delegators and never
 fewer than one pool, so a run of large pools cannot hold the single write
-connection for tens of seconds. Each batch runs in its own write
+connection for tens of seconds. Each batch runs in its own read-write
 transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
 still matches, no rollback generation changed since Pass 1 ran, and no epoch
 boundary has claimed the round (`rewardPrecomputeFence`, bumped under
-`rewardPrecomputeWriteMu` before the boundary transaction opens). Each chunk
+`rewardPrecomputeWriteMu` before the boundary transaction opens). Once
+`reward-inputs` and `reward-outputs` are both drained, a batch writes only
+changes staged for the live UTxO set, so it runs in `LedgerDB.BeginStaged`: a
+transaction whose metadata view is a read-pool transaction, which takes no
+write connection and does not queue block commits behind it. Otherwise the
+batch writes metadata rows and holds the write connection until it commits.
+Rollback and boundary ordering does not depend on the write connection in
+either case: both take `rewardPrecomputeWriteMu`, which the batch holds from
+its guard through commit. Each chunk
 also sets the CIP-0163 `Guarded` flag from witness history at the snapshot's
 captured slot, and records each output's `Spendable` flag from account
 registration when it runs.

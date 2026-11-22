@@ -581,7 +581,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 
 	done := false
-	writeTxn := ls.ledgerDB().Begin(context.Background(), true)
+	writeTxn := ls.beginPrecomputeChunkTxn(context.Background())
 	err := ls.ledgerDB().Run(writeTxn, func(txn ledgerdb.Txn) error {
 		if ls.rewardInputRollbackActive.Load() != 0 ||
 			ls.rewardInputGeneration.Load() != round.generation ||
@@ -620,6 +620,15 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 		return err
 	})
 	return done, err
+}
+
+// beginPrecomputeChunkTxn opens the transaction a chunk runs in. A chunk's
+// writes only stage changes for the LedgerDB, so the transaction takes no
+// metadata write connection and block commits are not queued behind it.
+func (ls *LedgerState) beginPrecomputeChunkTxn(
+	ctx context.Context,
+) ledgerdb.Txn {
+	return ls.ledgerDB().BeginStaged(ctx)
 }
 
 // stakeRewardPrecomputeChunksInTxn runs up to maxChunks chunks of Pass 2 for

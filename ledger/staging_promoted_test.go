@@ -46,6 +46,7 @@ var stagingPromoted = map[string]string{
 	"Begin":                                  chainStore,
 	"BeginDestructiveTransitionContext":      chainStore,
 	"BeginLedgerOnly":                        chainStore,
+	"BeginStaged":                            chainStore,
 	"BlockAtOrAfterIndex":                    chainStore,
 	"BlockBatchTransactionContext":           chainStore,
 	"BlockBatchTxnContext":                   chainStore,

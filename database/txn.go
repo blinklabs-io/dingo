@@ -611,6 +611,35 @@ func NewMetadataOnlyTxn(
 	return t
 }
 
+// NewStagedTxn creates a transaction that commits only what its callers stage
+// on it for another store, such as the ledger's live UTxO set, through
+// AfterCommit and OnFinish hooks. Its metadata view is a read-pool
+// transaction, so it holds no write connection and a block commit does not
+// wait for it. It holds the commit barrier like a read-write transaction, so
+// a destructive transition still waits for it. A metadata write through it
+// fails, because the underlying transaction is read-only.
+func NewStagedTxn(ctx context.Context, db *Database) *Txn {
+	ctx = nonNilContext(ctx)
+	t := &Txn{db: db, readWrite: true}
+	if err := acquireCommitBarrier(
+		context.WithoutCancel(ctx),
+		t,
+		db.Metadata() != nil,
+	); err != nil {
+		panic("uncancelled commit-barrier context returned an error")
+	}
+	pinBlobStoreForTxn(t, db)
+	if ms := db.Metadata(); ms != nil {
+		t.metadataTxn = ms.ReadTransaction(ctx)
+		if t.metadataTxn == nil {
+			db.logger.Warn(
+				"metadata transaction is nil; callers must nil-check txn.Metadata()",
+			)
+		}
+	}
+	return t
+}
+
 // pinBlobStoreForTxn pins db's currently installed blob store for t's
 // lifetime and records which store that was. Every constructor calls it
 // before opening anything, so a transaction's blob work and the store that
