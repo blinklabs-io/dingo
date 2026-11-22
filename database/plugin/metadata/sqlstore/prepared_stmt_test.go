@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -574,14 +575,21 @@ func TestCacheableConsumeUtxosForDialect(t *testing.T) {
 func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 	t.Parallel()
 	sqliteStore := newMigratedSQLiteStore(t)
+	var logs bytes.Buffer
 
 	mysqlStore := &Store{
 		writeDB: sqliteStore.writeDB,
 		dialect: MySQLDialect(),
-		logger:  slog.Default(),
+		// The SQLite backing database intentionally exercises only MySQL cache
+		// membership, so its expected parser mismatches are not test output.
+		logger: slog.New(slog.NewTextHandler(
+			&logs,
+			&slog.HandlerOptions{Level: slog.LevelError},
+		)),
 	}
 	t.Cleanup(mysqlStore.closePreparedStatements)
 	mysqlStore.prepareHotStatements(context.Background())
+	require.Empty(t, logs.String())
 
 	_, ok := mysqlStore.lookupCachedStmt(insertUtxoQuery)
 	require.False(t, ok, "expected insertUtxoQuery to be uncached on MySQL")

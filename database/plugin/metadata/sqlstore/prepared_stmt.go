@@ -289,9 +289,10 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 // against the caller's connection. Pool statements enter the shared cache;
 // transaction statements stay in that transaction's cache. Neither needs a
 // second connection while a transaction holds the first.
-// A failed pool prepare is not returned: like the eager pass it is logged and
-// remembered, so the query takes the uncached path, which reports any real SQL
-// error to the caller, and the statement is not re-prepared on every call.
+// A failed pool prepare is remembered, so the query takes the uncached path,
+// which reports the SQL error to the caller, and the statement is not
+// re-prepared on every call. Lazy preparation is for deliberately incomplete
+// test schemas, so it does not duplicate that caller-visible error in logs.
 // Reset, RestoreFrom and Close forget the failures and stop further lazy
 // preparation, matching the eager cache, which they empty without refilling.
 
@@ -445,13 +446,6 @@ func (s *Store) prepareLazily(
 			s.stmtFailed[query] = struct{}{}
 		}
 		s.stmtMu.Unlock()
-		if ctx.Err() == nil {
-			s.logger.Warn(
-				"sqlstore: skipping prepared-statement cache entry",
-				"dialect", s.dialect.Name(),
-				"error", err,
-			)
-		}
 		return false
 	}
 	if s.stmtsInvalidated || s.closed.Load() {
