@@ -183,6 +183,10 @@ func (s *Store) applyChunked(
 	)
 	accounts, records = []AccountPut{}, []RewardRecord{}
 	mark := failSlot(tip, batch)
+	// A batch without a tip, changes or slotted rows writes no failure mark:
+	// no journaled commit lies before slot 0, so startup could never rewind
+	// a mark there.
+	unmarked := mark == 0 && tip == nil && len(batch.Changes) == 0
 	var rowsTotal cost
 	for _, r := range batch.Rows {
 		rowsTotal = rowsTotal.add(rowCost(r))
@@ -357,7 +361,11 @@ func (s *Store) applyChunked(
 		err := s.update(func(txn *badger.Txn) error {
 			var err error
 			if first {
-				prior, hadPrior, err = markInFlight(txn, mark)
+				if unmarked {
+					prior, hadPrior, err = readFailed(txn)
+				} else {
+					prior, hadPrior, err = markInFlight(txn, mark)
+				}
 				if err != nil {
 					return err
 				}
@@ -493,8 +501,8 @@ func takeRows(rows []RowPut, entries, bytes int64) int {
 
 // failSlot is the slot a chunked batch's failure mark records: the first
 // change's, else the tip's, else the lowest slot a row carries. A row with no
-// slot, such as a prefix wipe, says nothing: a mark at slot 0 would rewind
-// the whole journal.
+// slot, such as a prefix wipe, says nothing, and a batch where nothing
+// carries one writes no mark.
 func failSlot(tip *ocommon.Point, batch LedgerBatch) uint64 {
 	switch {
 	case len(batch.Changes) > 0:

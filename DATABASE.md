@@ -2943,11 +2943,19 @@ A batch whose `Rows`, `Accounts` and `RewardRecords` together are too many for
 one transaction writes them in transactions of their own (accounts, then rows,
 then records) ahead of the transaction that carries the other writes and the
 tip, under the failure mark, which takes the slot of the first
-UTxO change, else the tip's, else the first row's. A rollback the batch carries
+UTxO change, else the tip's, else the lowest slot a row or reward block op
+carries. A batch with none of those writes no mark. A rollback the batch carries
 is applied in the first of them. A set that stopped between those transactions
 starts with the mark, and a batch that writes the epoch again wipes the
 epoch's prefix first, so rows the stopped attempt wrote and the new one does
 not are gone.
+
+Snapshot and reward block ops that do not fit beside the batch's other rows
+follow, in order, in transactions of their own before the last. Each is
+weighed by its writes; a snapshot delete or reward block prune by the rows it
+finds, and it deletes them in as many transactions as they need. Neither
+delete is journaled, so a stopped attempt leaves it part done and the next
+application finishes it.
 
 The live set computes account transitions rather than copying `account` rows.
 The store keeps

@@ -96,7 +96,9 @@ func (s *Store) opsCost(
 		}
 		prefix, keep := snapshotMatcher(op)
 		scans = append(scans, func(txn *badger.Txn) error {
-			c = c.add(bulkCost(countKeys(txn, prefix, keep), snapshotDeleteEntries))
+			c = c.add(
+				bulkCost(countKeys(txn, prefix, keep), snapshotDeleteEntries),
+			)
 			return nil
 		})
 	}
