@@ -109,9 +109,14 @@ INSERT INTO utxo (id, tx_id, output_idx, payment_key, staking_key,
 VALUES (?, ?, 0, ?, ?, 0, ?, 0, '1')`,
 			id, txID, []byte{byte(id % 7)}, []byte{byte(id % 11)}, id)
 		require.NoError(t, err)
+		address := []byte(fmt.Sprintf("addr%d", id%97))
 		_, err = tx.Exec(
-			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			id, []byte(fmt.Sprintf("addr%d", id%97)))
+			`INSERT INTO address (address) VALUES (?)
+ON CONFLICT (address) DO NOTHING`, address)
+		require.NoError(t, err)
+		_, err = tx.Exec(
+			`INSERT INTO utxo_address (utxo_id, address_id)
+SELECT ?, id FROM address WHERE address = ?`, id, address)
 		require.NoError(t, err)
 	}
 	for asset := 1; asset <= assets; asset++ {
@@ -179,8 +184,8 @@ func TestAssetReadsNeverScanAssetTables(t *testing.T) {
 		`SELECT COUNT(*) FROM (SELECT 1`+assetHolderGroups+`) AS holders`,
 		policy, name)
 	plan("asset holders page",
-		`SELECT ua.address, dingo_uint64_sum(a.amount) AS quantity`+
-			assetHolderGroups+` ORDER BY quantity DESC, ua.address DESC LIMIT ? OFFSET ?`,
+		`SELECT ad.address, dingo_uint64_sum(a.amount) AS quantity`+
+			assetHolderGroups+` ORDER BY quantity DESC, ad.address DESC LIMIT ? OFFSET ?`,
 		policy, name, 10, 0)
 	source, args, err := assetTransactionsQuery(hash, name, nil, nil)
 	require.NoError(t, err)

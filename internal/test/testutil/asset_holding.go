@@ -93,3 +93,29 @@ WHERE t.hash = ? AND i.policy_id = ? AND i.name = ?`,
 		tb.Fatalf("insert asset mint burn: %v", err)
 	}
 }
+
+// InsertUtxoAddress writes one utxo_address row, creating the address's
+// dictionary row when it does not exist. It writes through plain SQL so a test
+// can seed a metadata schema without the store's write path.
+func InsertUtxoAddress(
+	tb testing.TB,
+	db SQLExecer,
+	utxoID int64,
+	address []byte,
+) {
+	tb.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO address (address) VALUES (?)
+ON CONFLICT (address) DO NOTHING`,
+		address,
+	); err != nil {
+		tb.Fatalf("insert address: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO utxo_address (utxo_id, address_id)
+SELECT ?, id FROM address WHERE address = ?`,
+		utxoID, address,
+	); err != nil {
+		tb.Fatalf("insert utxo address: %v", err)
+	}
+}

@@ -487,18 +487,24 @@ CREATE TABLE asset_holding (
 
 CREATE INDEX idx_asset_holding_asset_id ON asset_holding(asset_id);
 
+CREATE TABLE address (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address BLOB NOT NULL,
+    UNIQUE (address)
+);
+
 CREATE TABLE utxo_address (
     utxo_id INTEGER PRIMARY KEY,
-    address BLOB NOT NULL,
+    address_id INTEGER NOT NULL,
     tx_id INTEGER,
     output_idx INTEGER,
     slot INTEGER,
     block_index INTEGER,
-    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE,
+    FOREIGN KEY (address_id) REFERENCES address(id)
 );
 
-CREATE INDEX idx_utxo_address_address ON utxo_address(address);
-CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
+CREATE INDEX idx_utxo_address_order ON utxo_address(address_id, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (
     transaction_id INTEGER NOT NULL,

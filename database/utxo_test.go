@@ -180,7 +180,7 @@ func TestBackfillUtxoAddressesBatchesAndResumes(t *testing.T) {
 	require.Equal(t, 129, count)
 	var distinct int
 	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(DISTINCT address) FROM utxo_address`,
+		`SELECT COUNT(DISTINCT address_id) FROM utxo_address`,
 	).Scan(&distinct))
 	require.Equal(t, 1, distinct)
 
@@ -630,11 +630,7 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, testutil.TransactionID(t, txn, txID))
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
-		_, err = txn.Exec(
-			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			utxoID, []byte(addr.String()),
-		)
-		require.NoError(t, err)
+		testutil.InsertUtxoAddress(t, txn, utxoID, []byte(addr.String()))
 		if i == 1 {
 			testutil.InsertAssetHolding(
 				t, txn, utxoID, bytes.Repeat([]byte{0x48}, 28),
@@ -677,12 +673,7 @@ VALUES (?, 1, 0, '1', 0, FALSE)`,
 	require.NoError(t, err)
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
-	_, err = raw.Exec(
-		`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-		utxoID,
-		address,
-	)
-	require.NoError(t, err)
+	testutil.InsertUtxoAddress(t, raw, utxoID, address)
 	for assetName := range 3 {
 		testutil.InsertAssetHolding(
 			t, raw, utxoID, bytes.Repeat([]byte{0x4a}, 28),
@@ -2752,7 +2743,8 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = (SELECT id FROM "transaction
 			require.NoError(t, err)
 			var gotAddress []byte
 			require.NoError(t, raw.QueryRow(
-				`SELECT address FROM utxo_address`,
+				`SELECT a.address FROM utxo_address ua
+JOIN address a ON a.id = ua.address_id`,
 			).Scan(&gotAddress))
 			require.Equal(t, wantAddress, string(gotAddress))
 			var deletedSlot uint64

@@ -330,7 +330,7 @@ var Manifest = []Index{
 		Columns: []string{"payment_key"},
 		Notes:   "Payment-credential address history lookup", Critical: true,
 	},
-	// Keyed by an address or a script hash, which arrive in random order, so
+	// Keyed by an address id or a script hash, which arrive in random order, so
 	// each backfill insert would dirty an unrelated leaf page. None is a
 	// conflict target or read by backfill's write path: utxo_address and
 	// redeemer_script conflict on their primary keys and are cleared by
@@ -338,14 +338,9 @@ var Manifest = []Index{
 	// API reads, so they are rebuilt before the API reports ready. None is
 	// CatchUpDroppable, which is limited to utxo, transaction and asset.
 	{
-		Name: "idx_utxo_address_address", Table: "utxo_address",
-		Columns: []string{"address"},
-		Notes:   "Address UTxO query", Critical: true,
-	},
-	{
 		Name: "idx_utxo_address_order", Table: "utxo_address",
 		Columns: []string{
-			"address", "slot", "block_index", "output_idx", "tx_id",
+			"address_id", "slot", "block_index", "output_idx", "tx_id",
 		},
 		Notes: "Address UTxO page order", Critical: true,
 	},

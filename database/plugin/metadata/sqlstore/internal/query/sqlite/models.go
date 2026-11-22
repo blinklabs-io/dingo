@@ -23,6 +23,11 @@ type Account struct {
 	ExpirationEpoch sql.NullInt64
 }
 
+type Address struct {
+	ID      int64
+	Address []byte
+}
+
 type AddressTransaction struct {
 	ID            int64
 	PaymentKey    []byte
@@ -595,7 +600,7 @@ type Utxo struct {
 
 type UtxoAddress struct {
 	UtxoID     int64
-	Address    []byte
+	AddressID  int64
 	TxID       sql.NullInt64
 	OutputIdx  sql.NullInt64
 	Slot       sql.NullInt64

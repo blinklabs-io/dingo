@@ -572,10 +572,6 @@ INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_s
 VALUES (?, 1, 0, '1', 0, FALSE)`)
 	require.NoError(t, err)
 	defer utxoStmt.Close()
-	addressStmt, err := txn.Prepare(`
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
-	require.NoError(t, err)
-	defer addressStmt.Close()
 	for i := range addresses {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
@@ -583,8 +579,7 @@ INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
-		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
-		require.NoError(t, err)
+		testutil.InsertUtxoAddress(t, txn, utxoID, []byte(addresses[i]))
 		testutil.InsertAssetHolding(
 			t, txn, utxoID, policyID, assetName, amounts[i],
 		)
@@ -1015,12 +1010,7 @@ INSERT INTO utxo (
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
 	if len(utxo.Address) > 0 {
-		_, err = raw.Exec(`
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			utxoID,
-			utxo.Address,
-		)
-		require.NoError(t, err)
+		testutil.InsertUtxoAddress(t, raw, utxoID, utxo.Address)
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]

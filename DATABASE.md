@@ -548,7 +548,7 @@ is exact only when the page reaches the end of the address. If that index is not
 available, address listing retains the CBOR candidate scan. Historical
 balance queries sum every matching row; they return `ErrTooManyUtxoResults`
 only when the caller passes a positive row bound and the address exceeds it. `utxo_address`
-keeps each UTxO's canonical rendered address as bytes so exact pointer and
+names each UTxO's canonical rendered address, held as bytes in `address`, so exact pointer and
 bootstrap identities are available to both queries. Migration v42 adds the
 table; API-mode startup backfills all retained
 UTxOs in cancellable batches before APIs become available, records completion
@@ -6004,6 +6004,8 @@ the stored blocks as they age past the window, as it does on any node.
 | `utxo_collateral_edge` | `tx_id`, `utxo_id` | Clustered PK `(tx_id, utxo_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_utxo_id` (`utxo_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `tx_id`, `utxo_id` | Clustered PK `(tx_id, utxo_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_utxo_id` (`utxo_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
+| `address` | `id`, `address` | PK `id` (`AUTOINCREMENT`); unique `address` | One row per distinct rendered output address, in API storage mode. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Rows are never deleted, by rollback or pruning; every read drives from `utxo_address`, so an address with no output is invisible. |
+| `utxo_address` | `utxo_id`, `address_id`, `tx_id`, `output_idx`, `slot`, `block_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `address_id -> address.id`; index `idx_utxo_address_order` (`address_id`, `slot`, `block_index`, `output_idx`, `tx_id`) | API-mode address index, one row per output. `address_id` names the rendered address in `address`. `tx_id`, `output_idx`, `slot` and `block_index` copy the output's page position so an address page reads `idx_utxo_address_order` in order; every writer and the migration `v71` backfill fill them. The page order index is deferred during bulk import and rebuilt before the API reports ready. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
 | `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index: it is dropped only by a node-managed Mithril stream catch-up and rebuilt before ingest resumes, never by ordinary sync. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows there. |
@@ -6026,11 +6028,12 @@ rebuilding the rest of the deferred manifest. The durable `sync_state` marker
 still covers the complete cycle and is cleared only after all rebuildable
 indexes are present.
 
-The address- and script-hash-keyed API indexes `idx_utxo_address_address`
-(`utxo_address(address)`), `idx_utxo_address_order`
-(`utxo_address(address, slot, block_index, output_idx, tx_id)`) and
+The address- and script-hash-keyed API indexes `idx_utxo_address_order`
+(`utxo_address(address_id, slot, block_index, output_idx, tx_id)`) and
 `idx_redeemer_script_position`
-(`redeemer_script(script_hash, ...)`) are deferred and critical. Their keys
+(`redeemer_script(script_hash, ...)`) are deferred and critical. The order
+index leads with `address_id`, so it serves every exact-address lookup and no
+separate address index is kept. Their keys
 arrive in random order, so maintaining them row by row dirties a random leaf per
 insert during a backfill. None is a conflict target or read by the backfill's
 write path, all rebuild before the API reports ready, and none is
@@ -7000,13 +7003,35 @@ nullable `tx_id`, `output_idx`, `slot` and `block_index` columns to
 position the output takes in an address page: the producing transaction's
 `applied_transaction.slot` and `block_index`, or the output's `added_slot` and
 `0` while its producer has no application row. A batched backfill (cursor: last
-`utxo_address.utxo_id`) fills existing rows before the index is built, and
-every writer of `utxo_address` (single-row upserts, the row batch, the overlay
-flush, `SetUtxoAddress`) fills them from the stored `utxo` and
+`utxo_address.utxo_id`) fills existing rows before the index is built. The row
+batch writes the position with the row when the output carries its producing
+transaction's row id and block index, as outputs produced by
+`setTransactionWithAccumulator` do: the transaction's application slot, which
+is the output's `added_slot`, and its block index, the values the fill would
+derive. Every other writer of `utxo_address` (single-row upserts, the row batch
+for outputs without those values, the overlay flush, `SetUtxoAddress`) inserts
+the row and then fills the position from the stored `utxo` and
 `applied_transaction` rows. Writing or replaying an application row refreshes
 the outputs of that transaction, so an output stored before its producer was
 applied moves to the applied position.
 `TestUtxoAddressOrderBackfillCopiesPagePosition` pins the backfill.
+
+Migration `v77` (`utxo-address-dictionary`, integer version 77) holds each
+address once. It creates `address` (`id`, `address`, unique on `address`) and
+rebuilds `utxo_address` as `(utxo_id, address_id, tx_id, output_idx, slot,
+block_index)`: the by-value `address` column and `idx_utxo_address_address`
+are gone, and `idx_utxo_address_order` is rebuilt as
+`(address_id, slot, block_index, output_idx, tx_id)`. A batched copy (cursor:
+last legacy `utxo_address.utxo_id`, 50,000 rows per step) adds each range's
+addresses to the dictionary, copies the rows with their stored position, and
+swaps the copy in under the original name with the last batch, after a row
+count reconciliation in the same transaction. `address.id` is a node-local
+surrogate. Dictionary rows are never deleted, by rollback, pruning or the
+cascade from `utxo`; an address with no output is invisible because every read
+drives from `utxo_address`. Writers resolve ids inside the writing transaction
+and keep no id cache, so a rolled back write leaves neither a row nor an id.
+`TestUtxoAddressDictionaryKeepsRowsAndPositions` pins the rebuild and
+`TestOrderedUtxoAddressRowIsWrittenOnce` pins the single write.
 
 #### Mithril API reward-live-stake finalization
 
@@ -9643,8 +9668,8 @@ like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
 groups live asset quantities by canonical address in metadata storage. The
-`utxo_address` index stores each UTxO's rendered address, including pointer
-payloads and bootstrap identities that cannot be reconstructed from credential
+`utxo_address` index references each UTxO's rendered address, held once in
+`address`, including pointer payloads and bootstrap identities that cannot be reconstructed from credential
 columns alone. API-mode startup backfills missing address rows before exposing
 the API; core-mode nodes do not maintain this API-only index. See the
 historical Mesh balance notes above for its separate bounded row scan.
@@ -9774,7 +9799,8 @@ so deep and descending pages decode no CBOR. It reads one row past the page and
 does not count the address: the total is exact only when that read shows the
 page reaches the end of the address, and otherwise is reported as unknown, so
 the route omits its `X-Pagination-*` headers on a page short of the end.
-The page query drives from `utxo_address` and reads `idx_utxo_address_order`
+The page query resolves the address id from `address` once, drives from
+`utxo_address` and reads `idx_utxo_address_order`
 in order (ascending or descending) while filtering to live outputs, so it stops
 at the page bound instead of sorting the address's live set;
 

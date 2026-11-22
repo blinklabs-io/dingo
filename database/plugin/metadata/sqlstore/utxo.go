@@ -687,7 +687,7 @@ func (s *Store) GetUtxoBalanceByAddressAtSlot(
 		)
 	}
 	return s.getUtxoBalanceByPredicate(
-		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
+		"utxo_address.address_id = "+addressIDSubquery+" AND utxo.added_slot <= ? AND "+
 			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
 		[]any{address, slot, slot}, maxResults, txn,
 	)
@@ -2218,7 +2218,7 @@ func utxoOrderingClauses(
 			join = "CROSS JOIN"
 		}
 		from = "utxo_address " + join + " utxo ON utxo.id = utxo_address.utxo_id"
-		predicate += " AND utxo_address.address = ?"
+		predicate += " AND utxo_address.address_id = " + addressIDSubquery
 		slotExpr = utxoAddressSlotExpr
 		blockIndexExpr = utxoAddressBlockIndexExpr
 		args = append(args, query.IndexedExactAddress)
@@ -2989,9 +2989,43 @@ func fillUtxoAddressOrderByTransactions(
 	return nil
 }
 
+// addressIDSubquery selects the dictionary id of the address bound to its
+// placeholder. It is uncorrelated, so the planner evaluates it once and reads
+// utxo_address through idx_utxo_address_order; an address the dictionary does
+// not hold yields NULL and matches no row.
+const addressIDSubquery = "(SELECT id FROM address WHERE address = ?)"
+
+// upsertUtxoAddress writes the utxo_address row of one output, adding the
+// address to the dictionary when it is new, then fills the row's page
+// position.
+func upsertUtxoAddress(
+	ctx context.Context,
+	db queryer,
+	parameterLimit int,
+	utxoID int64,
+	address []byte,
+) error {
+	ids, err := ensureAddresses(ctx, db, [][]byte{address}, parameterLimit)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		"-- name: UpsertUtxoAddress :exec\n"+
+			"INSERT INTO utxo_address (utxo_id, address_id) VALUES (?, ?) "+
+			"ON CONFLICT (utxo_id) DO UPDATE SET address_id = excluded.address_id",
+		utxoID,
+		ids[string(address)],
+	)
+	if err != nil {
+		return fmt.Errorf("persist UTxO address: %w", err)
+	}
+	return fillUtxoAddressOrderByIDs(ctx, db, []int64{utxoID})
+}
+
 func persistUtxoAddress(
 	ctx context.Context,
 	db queryer,
+	parameterLimit int,
 	utxoID int64,
 	utxo *models.Utxo,
 ) error {
@@ -3002,17 +3036,7 @@ func persistUtxoAddress(
 	if len(address) == 0 {
 		return nil
 	}
-	_, err = db.ExecContext(ctx,
-		"-- name: UpsertUtxoAddress :exec\n"+
-			"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
-			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
-		utxoID,
-		address,
-	)
-	if err != nil {
-		return fmt.Errorf("persist UTxO address: %w", err)
-	}
-	return fillUtxoAddressOrderByIDs(ctx, db, []int64{utxoID})
+	return upsertUtxoAddress(ctx, db, parameterLimit, utxoID, address)
 }
 
 func (s *Store) persistUtxoAddress(
@@ -3024,7 +3048,9 @@ func (s *Store) persistUtxoAddress(
 	if s.storageMode != types.StorageModeAPI {
 		return nil
 	}
-	return persistUtxoAddress(ctx, db, utxoID, utxo)
+	return persistUtxoAddress(
+		ctx, db, s.dialect.ParameterLimit(), utxoID, utxo,
+	)
 }
 
 func utxoAddress(utxo *models.Utxo) ([]byte, error) {
@@ -3090,13 +3116,9 @@ func (s *Store) SetUtxoAddress(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			_, err := db.ExecContext(ctx, `
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
-ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-			if err != nil {
-				return err
-			}
-			return fillUtxoAddressOrderByIDs(ctx, db, []int64{int64(utxoID)})
+			return upsertUtxoAddress(
+				ctx, db, s.dialect.ParameterLimit(), int64(utxoID), address,
+			)
 		},
 	)
 }

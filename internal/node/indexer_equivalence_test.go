@@ -206,6 +206,15 @@ func dumpTables(t *testing.T, raw *sql.DB) map[string][]string {
 	return dumpNamedTables(t, raw, names)
 }
 
+// dumpProjections replace a table's own columns where one holds a dictionary
+// id, which is a node-local surrogate that differs with write order, with the
+// value it names.
+var dumpProjections = map[string]string{
+	"utxo_address": "SELECT ua.utxo_id, a.address, ua.tx_id, ua.output_idx, " +
+		"ua.slot, ua.block_index FROM utxo_address ua " +
+		"JOIN address a ON a.id = ua.address_id",
+}
+
 // dumpNamedTables is dumpTables over the named tables.
 func dumpNamedTables(
 	t *testing.T,
@@ -215,7 +224,11 @@ func dumpNamedTables(
 	t.Helper()
 	out := make(map[string][]string, len(names))
 	for _, n := range names {
-		rows, err := raw.Query("SELECT * FROM `" + n + "`")
+		query := "SELECT * FROM `" + n + "`"
+		if projected, ok := dumpProjections[n]; ok {
+			query = projected
+		}
+		rows, err := raw.Query(query)
 		require.NoError(t, err)
 		cols, err := rows.Columns()
 		require.NoError(t, err)

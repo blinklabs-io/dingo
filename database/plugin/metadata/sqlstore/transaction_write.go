@@ -1313,6 +1313,8 @@ func (s *Store) setTransactionWithAccumulator(
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
+				blockIndex := index
+				model.BlockIndex = &blockIndex
 				producedModels = append(producedModels, model)
 			}
 			if overlay != nil {
@@ -2171,7 +2173,7 @@ func (s *Store) persistUtxoRelationsWithoutAssets(
 			return err
 		}
 		addressRows.dropUtxoAddress(int64(id))
-		addressRows.add(utxoAddressShape, int64(id), address)
+		queueUtxoAddress(addressRows, int64(id), address, utxo)
 	} else if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
@@ -2196,7 +2198,7 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		if err != nil {
 			return err
 		}
-		rows.add(utxoAddressShape, int64(id), address)
+		queueUtxoAddress(rows, int64(id), address, utxo)
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err

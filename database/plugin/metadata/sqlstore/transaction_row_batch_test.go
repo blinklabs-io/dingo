@@ -608,7 +608,8 @@ func TestSetTransactionPersistsAssetUtxoAddress(t *testing.T) {
 
 	var address string
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT ua.address FROM utxo_address ua "+
+		"SELECT a.address FROM utxo_address ua "+
+			"JOIN address a ON a.id = ua.address_id "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
 			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		tx.Hash().Bytes(),
@@ -636,7 +637,8 @@ func TestSetTransactionPersistsAdaOnlyUtxoAddress(t *testing.T) {
 
 	var address string
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT ua.address FROM utxo_address ua "+
+		"SELECT a.address FROM utxo_address ua "+
+			"JOIN address a ON a.id = ua.address_id "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
 			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		txID,
