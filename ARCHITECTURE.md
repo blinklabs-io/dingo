@@ -21689,11 +21689,15 @@ Package isolation is enforced by direction, ownership, and composition:
   payload holds a small decoded view, optionally the encoded bytes, and
   optionally the chain's own decoded value. Two built-in roles pass the decoded
   value through `chain.NativeOf` without encoding; an external role reads
-  `Bytes`, which encodes only then. Each role follows an existing seam: the
-  ledger handed to `ChainManager.SetLedger` and `mempool.TxValidator`, the
-  forger's `LeaderChecker`, `BlockValidator` and `BlockBroadcaster`, chain
-  selection's tip comparison, and the mempool `AddTransaction` and
-  `RemoveTransaction`.
+  `Bytes`, which encodes only then and fails with `ErrNoEncoding` rather than
+  return empty bytes. Each role follows an existing seam: the ledger handed to
+  `ChainManager.SetLedger` and its `ValidateTx`, the forger's `LeaderChecker`,
+  `BlockValidator` and `BlockBroadcaster`, chain selection's tip comparison,
+  and the mempool `AddTransaction` and `RemoveTransaction`. `Ledger.ValidateTx`
+  validates against the applied state alone; the overlay validation the
+  mempool and block builder call, which adds the effects of earlier
+  transactions in the same block, takes the node module's `utxoref` types and
+  is not part of the role.
 - `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
   `NetworkRole`, `MempoolRole`) over small source interfaces that the node's
   own types already satisfy: `LedgerSource` and `ForgedBlockValidator` by

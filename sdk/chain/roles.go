@@ -18,14 +18,17 @@ import "context"
 
 // Ledger is the role that owns chain state and validates against it. It
 // follows the ledger the chain manager is configured with (its security
-// parameter) and the validator the mempool and forger call.
+// parameter) and the ledger's own transaction validation.
 type Ledger interface {
 	// SecurityParam returns the number of blocks after which the chain is
 	// final. It is positive for a ready ledger.
 	SecurityParam() int
 	// Tip returns the tip the ledger has applied.
 	Tip() Tip
-	// ValidateTx checks a transaction against the current ledger state.
+	// ValidateTx checks a transaction against the applied ledger state alone.
+	// Validation against the pending effects of transactions ahead in the
+	// same block, which mempool admission and block assembly need, is not
+	// part of the contract.
 	ValidateTx(tx Tx) error
 }
 

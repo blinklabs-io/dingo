@@ -115,3 +115,22 @@ func TestPayloadWithoutEncodingFails(t *testing.T) {
 		t.Fatalf("Bytes error = %v; want ErrNoEncoding", err)
 	}
 }
+
+func TestPayloadEmptyEncodingFails(t *testing.T) {
+	t.Parallel()
+
+	for _, empty := range [][]byte{nil, {}} {
+		p := chain.NewNativePayload(
+			chain.TxView{},
+			&nativeValue{},
+			func() ([]byte, error) { return empty, nil },
+		)
+		if raw, err := p.Bytes(); !errors.Is(err, chain.ErrNoEncoding) {
+			t.Fatalf("Bytes = %x, %v; want ErrNoEncoding", raw, err)
+		}
+	}
+	p := chain.NewPayload(chain.TxView{}, []byte{})
+	if raw, err := p.Bytes(); !errors.Is(err, chain.ErrNoEncoding) {
+		t.Fatalf("empty raw Bytes = %x, %v; want ErrNoEncoding", raw, err)
+	}
+}

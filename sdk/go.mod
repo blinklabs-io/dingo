@@ -2,7 +2,10 @@ module github.com/blinklabs-io/dingo/sdk
 
 go 1.26.11
 
-require github.com/blinklabs-io/gouroboros v0.220.4
+require (
+	github.com/blinklabs-io/gouroboros v0.220.4
+	github.com/blinklabs-io/ouroboros-mock v0.21.2
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect

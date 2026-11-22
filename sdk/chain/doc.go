@@ -23,8 +23,8 @@
 // external one reads the bytes, and only then is the encoding paid for.
 //
 // The role interfaces follow seams the Cardano implementation already has
-// (the ledger handed to the chain manager, the forger's leader and block
-// validation interfaces, the mempool transaction validator, chain selection).
+// (the ledger handed to the chain manager and its transaction validation, the
+// forger's leader and block validation interfaces, chain selection).
 // The Cardano implementation of every role is in the sdk/cardano package.
 // Every contract is experimental, like the rest of the sdk module.
 package chain

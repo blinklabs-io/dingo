@@ -29,6 +29,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/sdk/chain"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -48,6 +49,17 @@ func hashBytes(h lcommon.Blake2b256) []byte {
 	return h.Bytes()
 }
 
+// encoder returns v's retained encoding, and otherwise encodes v. A value
+// assembled rather than decoded, such as a freshly built block, retains none.
+func encoder(v interface{ Cbor() []byte }) func() ([]byte, error) {
+	return func() ([]byte, error) {
+		if raw := v.Cbor(); len(raw) > 0 {
+			return raw, nil
+		}
+		return cbor.Encode(v)
+	}
+}
+
 func headerView(h lcommon.BlockHeader, typ uint) chain.HeaderView {
 	return chain.HeaderView{
 		Type:     typ,
@@ -58,14 +70,14 @@ func headerView(h lcommon.BlockHeader, typ uint) chain.HeaderView {
 	}
 }
 
-// NewHeader wraps a decoded header. The payload holds the header itself and
-// encodes only when its bytes are requested.
+// NewHeader wraps a decoded header of block type typ. The payload holds the
+// header itself and encodes only when its bytes are requested. A block, which
+// also satisfies lcommon.BlockHeader, is reduced to its header.
 func NewHeader(typ uint, h lcommon.BlockHeader) chain.Header {
-	return chain.NewNativePayload(
-		headerView(h, typ),
-		h,
-		func() ([]byte, error) { return h.Cbor(), nil },
-	)
+	if b, ok := h.(lcommon.Block); ok {
+		h = b.Header()
+	}
+	return chain.NewNativePayload(headerView(h, typ), h, encoder(h))
 }
 
 // HeaderOf returns the decoded header of p: the native value when p carries
@@ -93,7 +105,7 @@ func NewBlock(b lcommon.Block) chain.Block {
 			TxCount:    len(b.Transactions()),
 		},
 		b,
-		func() ([]byte, error) { return b.Cbor(), nil },
+		encoder(b),
 	)
 }
 
@@ -122,7 +134,7 @@ func NewTx(tx lcommon.Transaction) chain.Tx {
 			Hash: hashBytes(tx.Hash()),
 		},
 		tx,
-		func() ([]byte, error) { return tx.Cbor(), nil },
+		encoder(tx),
 	)
 }
 

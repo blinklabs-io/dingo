@@ -17,6 +17,7 @@ package cardano
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/sdk/chain"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -28,8 +29,11 @@ import (
 var ErrNilSource = errors.New("cardano: role source is nil")
 
 // LedgerSource is what the Cardano ledger role reads from the node's ledger
-// state. It is the security parameter the chain manager takes from the ledger,
-// the applied tip, and the transaction validator the mempool and forger call.
+// state: the security parameter the chain manager takes from the ledger, the
+// applied tip, and ValidateTx, which validates against the applied state
+// alone. The mempool and forger validators also carry an overlay form, holding
+// the UTxO and account changes of transactions ahead in the same block, and
+// call only that form; the role does not cover it.
 type LedgerSource interface {
 	SecurityParam() int
 	Tip() ochainsync.Tip
@@ -85,6 +89,21 @@ func toCardanoTip(t chain.Tip) ochainsync.Tip {
 	tip.Point.Slot = t.Point.Slot
 	tip.Point.Hash = t.Point.Hash
 	return tip
+}
+
+// blockAndBytes returns the decoded block of p and its encoding. The encoding
+// comes from the payload rather than the decoded block, whose retained CBOR is
+// empty when the block was assembled rather than decoded.
+func blockAndBytes(p chain.Block) (lcommon.Block, []byte, error) {
+	decoded, err := BlockOf(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := p.Bytes()
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrNotBlock, err)
+	}
+	return decoded, raw, nil
 }
 
 // LedgerRole implements chain.Ledger for Cardano.
@@ -165,11 +184,11 @@ func (r *ConsensusRole) ValidateForgedBlock(
 	ctx context.Context,
 	block chain.Block,
 ) error {
-	decoded, err := BlockOf(block)
+	decoded, raw, err := blockAndBytes(block)
 	if err != nil {
 		return err
 	}
-	return r.validator.ValidateForgedBlock(ctx, decoded, decoded.Cbor())
+	return r.validator.ValidateForgedBlock(ctx, decoded, raw)
 }
 
 // NetworkRole implements chain.Network for Cardano.
@@ -189,11 +208,11 @@ func NewNetworkRole(sink NetworkSink) (*NetworkRole, error) {
 
 // Broadcast implements chain.Network.
 func (r *NetworkRole) Broadcast(ctx context.Context, block chain.Block) error {
-	decoded, err := BlockOf(block)
+	decoded, raw, err := blockAndBytes(block)
 	if err != nil {
 		return err
 	}
-	return r.sink.AddBlock(ctx, decoded, decoded.Cbor())
+	return r.sink.AddBlock(ctx, decoded, raw)
 }
 
 // MempoolRole implements chain.Mempool for Cardano.

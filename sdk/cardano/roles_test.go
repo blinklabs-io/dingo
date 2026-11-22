@@ -44,23 +44,6 @@ func testTx(t *testing.T) (lcommon.Transaction, []byte) {
 	return tx, raw
 }
 
-// fakeBlock implements only what the payload view and the roles read; any
-// other method call panics on the nil embedded interface.
-type fakeBlock struct {
-	lcommon.Block
-	cbor []byte
-}
-
-func (b fakeBlock) Type() int                           { return 7 }
-func (b fakeBlock) Transactions() []lcommon.Transaction { return nil }
-
-func (b fakeBlock) Hash() lcommon.Blake2b256 { return lcommon.Blake2b256{1} }
-
-func (b fakeBlock) PrevHash() lcommon.Blake2b256 { return lcommon.Blake2b256{2} }
-func (b fakeBlock) SlotNumber() uint64           { return 42 }
-func (b fakeBlock) BlockNumber() uint64          { return 9 }
-func (b fakeBlock) Cbor() []byte                 { return b.cbor }
-
 type ledgerSource struct {
 	gotTx lcommon.Transaction
 	tip   ochainsync.Tip
@@ -197,27 +180,19 @@ func TestLedgerRoleReportsSourceState(t *testing.T) {
 	}
 }
 
-func TestBlockPayloadViewAndBuiltInPath(t *testing.T) {
+func TestBlockPayloadBuiltInPath(t *testing.T) {
 	t.Parallel()
 
-	block := fakeBlock{cbor: []byte{0x80}}
-	payload := cardano.NewBlock(block)
-	view := payload.View()
-	if view.Type != 7 || view.Slot != 42 || view.Number != 9 ||
-		view.TxCount != 0 ||
-		!bytes.Equal(view.Hash, lcommon.Blake2b256{1}.Bytes()) ||
-		!bytes.Equal(view.PrevHash, lcommon.Blake2b256{2}.Bytes()) {
-		t.Fatalf("view = %+v", view)
-	}
-	got, err := cardano.BlockOf(payload)
+	block, typ, _ := testBlock(t)
+	got, err := cardano.BlockOf(cardano.NewBlock(block))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Hash() != block.Hash() {
+	if got != block {
 		t.Fatal("BlockOf returned a different block")
 	}
 	_, err = cardano.BlockOf(chain.NewPayload(
-		chain.BlockView{HeaderView: chain.HeaderView{Type: 7}},
+		chain.BlockView{HeaderView: chain.HeaderView{Type: typ}},
 		[]byte{0xff},
 	))
 	if !errors.Is(err, cardano.ErrNotBlock) {
@@ -277,14 +252,14 @@ func TestConsensusRole(t *testing.T) {
 		t.Fatalf("comparer saw %+v and %+v", gotA, gotB)
 	}
 
-	block := fakeBlock{cbor: []byte{0x80}}
+	block, _, raw := testBlock(t)
 	if err := role.ValidateForgedBlock(
 		t.Context(), cardano.NewBlock(block),
 	); err != nil {
 		t.Fatal(err)
 	}
 	if src.gotBlock == nil || src.gotBlock.Hash() != block.Hash() ||
-		!bytes.Equal(src.gotCbor, []byte{0x80}) {
+		!bytes.Equal(src.gotCbor, raw) {
 		t.Fatal("source did not receive the forged block and its bytes")
 	}
 }
@@ -324,12 +299,12 @@ func TestNetworkRoleBroadcastsDecodedBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := fakeBlock{cbor: []byte{0x80}}
+	block, _, raw := testBlock(t)
 	if err := role.Broadcast(t.Context(), cardano.NewBlock(block)); err != nil {
 		t.Fatal(err)
 	}
 	if sink.gotBlock == nil || sink.gotBlock.Hash() != block.Hash() ||
-		!bytes.Equal(sink.gotCbor, []byte{0x80}) {
+		!bytes.Equal(sink.gotCbor, raw) {
 		t.Fatal("sink did not receive the block and its bytes")
 	}
 }
@@ -375,6 +350,31 @@ func TestMempoolRolePassesTypeAndBytes(t *testing.T) {
 	}
 }
 
+func TestMempoolRoleRejectsEmptyEncoding(t *testing.T) {
+	t.Parallel()
+
+	tx, _ := testTx(t)
+	src := &mempoolSource{}
+	role, err := cardano.NewMempoolRole(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := chain.NewNativePayload(
+		cardano.NewTx(tx).View(),
+		tx,
+		func() ([]byte, error) { return nil, nil },
+	)
+	if err := role.AddTx(t.Context(), payload); !errors.Is(
+		err,
+		chain.ErrNoEncoding,
+	) {
+		t.Fatalf("AddTx error = %v; want ErrNoEncoding", err)
+	}
+	if src.gotRaw != nil {
+		t.Fatal("pool was handed a transaction with no bytes")
+	}
+}
+
 func TestRoleConstructorsRejectNilSources(t *testing.T) {
 	t.Parallel()
 
@@ -411,5 +411,46 @@ func TestRoleConstructorsRejectNilSources(t *testing.T) {
 		cardano.ErrNilSource,
 	) {
 		t.Fatalf("mempool: %v", err)
+	}
+}
+
+func TestRolesPassBytesOfAssembledBlock(t *testing.T) {
+	t.Parallel()
+
+	block, conwayBlock := assembledBlock(t)
+	typ := uint(conway.BlockTypeConway)
+	payload := cardano.NewBlock(conwayBlock)
+
+	sink := &networkSink{}
+	network, err := cardano.NewNetworkRole(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := network.Broadcast(t.Context(), payload); err != nil {
+		t.Fatal(err)
+	}
+	src := &consensusSource{}
+	consensus, err := cardano.NewConsensusRole(
+		src,
+		src,
+		func(_, _ ochainsync.Tip) chain.Comparison {
+			return chain.ComparisonEqual
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consensus.ValidateForgedBlock(t.Context(), payload); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{
+		"broadcast": sink.gotCbor,
+		"validate":  src.gotCbor,
+	} {
+		decoded, err := gledger.NewBlockFromCbor(typ, raw)
+		if err != nil || decoded.Hash() != block.Hash() {
+			t.Fatalf("%s received %d bytes decoding to %v, %v",
+				name, len(raw), decoded, err)
+		}
 	}
 }

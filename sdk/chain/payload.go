@@ -16,8 +16,8 @@ package chain
 
 import "errors"
 
-// ErrNoEncoding is returned by Payload.Bytes when the payload holds neither
-// encoded bytes nor a way to produce them.
+// ErrNoEncoding is returned by Payload.Bytes when the payload holds no encoded
+// bytes and no encoder, or its encoder produced no bytes.
 var ErrNoEncoding = errors.New("chain: payload has no encoded form")
 
 // HeaderView is the decoded view of a header every role can read without
@@ -79,7 +79,7 @@ func NewPayload[V any](view V, raw []byte) Payload[V] {
 // NewNativePayload returns a Payload that holds the chain's decoded value.
 // encode produces the bytes on demand and is called once per Bytes call, so it
 // should return the value's own retained encoding when it has one. A nil
-// encode makes Bytes return ErrNoEncoding.
+// encode, or one that returns no bytes, makes Bytes return ErrNoEncoding.
 func NewNativePayload[V any](
 	view V,
 	native any,
@@ -100,15 +100,23 @@ func (p Payload[V]) Native() any {
 }
 
 // Bytes returns the encoded form. It returns the bytes the payload was built
-// with, and otherwise encodes the native value.
+// with, and otherwise encodes the native value. It never returns empty bytes
+// without an error: no value has an empty encoding.
 func (p Payload[V]) Bytes() ([]byte, error) {
-	if p.raw != nil {
+	if len(p.raw) > 0 {
 		return p.raw, nil
 	}
 	if p.encode == nil {
 		return nil, ErrNoEncoding
 	}
-	return p.encode()
+	raw, err := p.encode()
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, ErrNoEncoding
+	}
+	return raw, nil
 }
 
 // NativeOf returns the payload's decoded value as a T. ok is false when the
