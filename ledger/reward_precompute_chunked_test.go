@@ -595,6 +595,65 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 	require.Equal(t, reference, resumed)
 }
 
+// TestChunkedRewardPrecomputeRestartsOnCapturedSlotChange pins that every
+// derived row of an epoch carries one captured slot: a round interrupted at
+// one captured slot and resumed at another (the startup path captures at the
+// current tip) must restart rather than stamp the remaining pools with the
+// later slot. The fact copy skips an epoch by its first row's slot.
+func TestChunkedRewardPrecomputeRestartsOnCapturedSlotChange(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		boundarySlot        = uint64(1_200)
+		firstSlot           = uint64(200)
+		laterSlot           = uint64(300)
+	)
+	poolCount, delegatorsPerPool := 5, 2
+
+	ls, db := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, firstSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+
+	require.NoError(t, ls.runChunkedStakeRewardPrecompute(
+		newEpoch, laterSlot, boundarySlot,
+	))
+
+	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, poolCount)
+	accountOutputs, err := db.Metadata().GetRewardAccountOutputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, accountOutputs, poolCount*(delegatorsPerPool+1))
+	slots := map[uint64]int{}
+	for _, o := range poolOutputs {
+		slots[o.CapturedSlot]++
+	}
+	for _, o := range accountOutputs {
+		slots[o.CapturedSlot]++
+	}
+	require.Equal(
+		t, map[uint64]int{laterSlot: poolCount + len(accountOutputs)},
+		slots,
+		"every row of the epoch must share the resumed round's captured slot",
+	)
+}
+
 func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	t.Parallel()
 	const (

@@ -742,6 +742,14 @@ func (ls *LedgerState) resumableRewardPrecomputeCursor(
 	if cursor.InputFingerprint != round.inputFingerprint {
 		return nil, 0, nil
 	}
+	// Every output row of an epoch must carry one captured slot, which the
+	// fact copy relies on to skip an epoch by a single row. The captured slot
+	// is not part of the input fingerprint, so an unfinished round resumed at
+	// a different one restarts instead of stamping its remaining pools with
+	// the new slot. A finished round writes no more rows.
+	if !cursor.Done && cursor.CapturedSlot != round.capturedSlot {
+		return nil, 0, nil
+	}
 	poolOutputs, err := meta.GetRewardPoolOutputs(
 		round.epochs.snapshot, metaTxn,
 	)
