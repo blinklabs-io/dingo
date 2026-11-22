@@ -941,33 +941,36 @@ func (m fixedBackfillBatchMetrics) EstimatedSizeBytes() int64 {
 	return m.bytes
 }
 
-func TestBackfillBatchLimitReached(t *testing.T) {
+func TestBackfillRowBufferFull(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		flushedBytes int64
-		rows         int
-		bytes        int64
-		want         bool
+		name  string
+		rows  int
+		bytes int64
+		want  bool
 	}{
 		{
-			name:         "below both limits",
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			rows:         DefaultBackfillBatchRows - 1,
-			bytes:        DefaultBackfillBatchBytes/2 - 1,
+			name:  "below both limits",
+			rows:  DefaultBackfillBatchRows - 1,
+			bytes: DefaultBackfillBatchBytes - 1,
 		},
 		{
-			name:         "row limit",
-			rows:         DefaultBackfillBatchRows,
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			want:         true,
+			name: "row limit",
+			rows: DefaultBackfillBatchRows,
+			want: true,
 		},
 		{
-			name:         "cumulative byte limit",
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			bytes:        DefaultBackfillBatchBytes / 2,
-			want:         true,
+			name:  "queued byte limit",
+			bytes: DefaultBackfillBatchBytes,
+			want:  true,
+		},
+		{
+			// Bytes already written to the transaction do not force a
+			// flush: the queue would only be split into smaller statements.
+			name:  "small queue in a large transaction",
+			rows:  1,
+			bytes: 1,
 		},
 	}
 	for _, test := range tests {
@@ -976,11 +979,7 @@ func TestBackfillBatchLimitReached(t *testing.T) {
 			acc := fixedBackfillBatchMetrics{
 				rows: test.rows, bytes: test.bytes,
 			}
-			assert.Equal(
-				t,
-				test.want,
-				backfillBatchLimitReached(test.flushedBytes, acc),
-			)
+			assert.Equal(t, test.want, backfillRowBufferFull(acc))
 		})
 	}
 }
