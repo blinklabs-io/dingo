@@ -48,6 +48,7 @@ type externalIngestHarness struct {
 	ls       *LedgerState
 	db       *database.Database
 	cm       *chain.ChainManager
+	registry *prometheus.Registry
 	closeSet func() error
 	shutOnce sync.Once
 }
@@ -91,9 +92,11 @@ func newExternalIngestHarnessWith(
 	opts ...func(*LedgerStateConfig),
 ) *externalIngestHarness {
 	t.Helper()
+	registry := prometheus.NewRegistry()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     dataDir,
-		StorageMode: storageMode,
+		DataDir:      dataDir,
+		StorageMode:  storageMode,
+		PromRegistry: registry,
 	})
 	require.NoError(t, err)
 	cm, err := chain.NewManager(t.Context(), db, nil)
@@ -110,7 +113,7 @@ func newExternalIngestHarnessWith(
 		UtxoSet:               set,
 		CardanoNodeConfig:     cfg,
 		Logger:                testLogger(),
-		PromRegistry:          prometheus.NewRegistry(),
+		PromRegistry:          registry,
 		ManualBlockProcessing: manual,
 		TrustedReplay:         manual,
 	}
@@ -119,7 +122,13 @@ func newExternalIngestHarnessWith(
 	}
 	ls, err := NewLedgerState(lsCfg)
 	require.NoError(t, err)
-	h := &externalIngestHarness{ls: ls, db: db, cm: cm, closeSet: closeSet}
+	h := &externalIngestHarness{
+		ls:       ls,
+		db:       db,
+		cm:       cm,
+		registry: registry,
+		closeSet: closeSet,
+	}
 	t.Cleanup(func() { h.shutdown(t) })
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	ls.currentEra = eras.ConwayEraDesc
@@ -597,6 +606,83 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 		withoutPruneFloor(rowBatchingDigest(t, h.db)),
 		"external ingest diverged from the trusted replay path",
 	)
+}
+
+func externalIngestSQLOperations(
+	t *testing.T,
+	registry *prometheus.Registry,
+) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	var total float64
+	for _, family := range families {
+		if family.GetName() != "dingo_database_sql_operations_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			total += metric.GetCounter().GetValue()
+		}
+	}
+	return total
+}
+
+func trustedBatchSQLOperations(
+	t *testing.T,
+	disableOverlay bool,
+) (float64, string) {
+	t.Helper()
+	h := newExternalIngestHarness(t, false)
+	h.ls.trustedBatchOverlayOff = disableOverlay
+	var usedOverlay atomic.Bool
+	h.ls.afterTrustedBatchOverlay = func() { usedOverlay.Store(true) }
+	blocks, _ := externalIngestBlocks(t, 0)
+	payOther := rowBatchingBaseAddress(t, 0x44, 0x55)
+	txs := make([]rowBatchingTx, 100)
+	for i := range 100 {
+		input := make([]byte, 32)
+		input[0] = byte(i)
+		txs[i] = newRowBatchingTx(t, map[uint]any{
+			0: []any{[]any{input, uint64(0)}},
+			1: []any{map[uint]any{
+				0: payOther,
+				1: uint64(1_000_000),
+			}},
+			2: uint64(100_000),
+		})
+	}
+	previousBlock := blocks[len(blocks)-1]
+	blocks = append(blocks, rowBatchingBlock(
+		t,
+		previousBlock.SlotNumber()+2,
+		previousBlock.BlockNumber()+1,
+		previousBlock.Hash(),
+		txs...,
+	))
+	resume := h.ls.PauseChainIngest()
+	defer resume()
+	before := externalIngestSQLOperations(t, h.registry)
+	tip, err := h.ls.ApplyTrustedBatch(t.Context(), ocommon.Point{}, blocks)
+	require.NoError(t, err)
+	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
+	if !disableOverlay {
+		require.True(t, usedOverlay.Load())
+	}
+	state := withoutPruneFloor(rowBatchingDigest(t, h.db))
+	state += "\nlive=" + strings.Join(liveOutputs(t, h), ",")
+	return externalIngestSQLOperations(t, h.registry) - before, state
+}
+
+func TestApplyTrustedBatchBoundsSQLOperations(t *testing.T) {
+	t.Parallel()
+
+	batchedOps, batchedState := trustedBatchSQLOperations(t, false)
+	perRowOps, perRowState := trustedBatchSQLOperations(t, true)
+	t.Logf("trusted batch SQL operations: batched=%.0f per-row=%.0f",
+		batchedOps, perRowOps)
+	require.Equal(t, perRowState, batchedState)
+	require.Less(t, batchedOps, perRowOps,
+		"trusted batch did not reduce SQL operations below the per-row path")
 }
 
 func TestPauseChainIngest(t *testing.T) {

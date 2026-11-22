@@ -1314,7 +1314,7 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 				producedModels = append(producedModels, model)
 			}
-			if overlay != nil {
+			if overlay != nil && s.liveUtxo == nil {
 				var produced, consumed, skipped []stakeCredentialDelta
 				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
 					ctx, db, overlay, transaction, point, transactionID,
@@ -1363,24 +1363,21 @@ func (s *Store) setTransactionWithAccumulator(
 				if err != nil {
 					return err
 				}
-				deltas := mergeStakeCredentialDeltas(
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
 					refsToStakeCredentialDeltas(certificateRefs),
 					consumed,
 					produced,
 				)
-				// Applied now, never queued for a batch flush: the live set
-				// is staged only after this write, so a credential re-sum
-				// here sees the set before this transaction and must add
-				// the transaction's own change, which a flush after staging
-				// would count twice.
-				if err := s.refreshRewardLiveStakeDeltas(
-					context.WithValue(ctx, liveUtxoPreWriteKey{}, true),
-					db, deltas, point.Slot,
-				); err != nil {
-					return err
-				}
 				if batchedAccumulator != nil {
 					return nil
+				}
+				// The unbatched path runs before the live set stages this
+				// transaction, so a first-touch re-sum needs its delta.
+				if err := s.refreshRewardLiveStakeDeltas(
+					context.WithValue(ctx, liveUtxoPreWriteKey{}, true),
+					db, batchedStakeDeltas, point.Slot,
+				); err != nil {
+					return err
 				}
 				return staged.flush(ctx, db, s.dialect.ParameterLimit())
 			}

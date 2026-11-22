@@ -233,15 +233,15 @@ var errOverlaySavepoint = errors.New(
 	"batch UTxO overlay cannot roll back to a savepoint",
 )
 
-// EnableBatchUtxoOverlay attaches a UTxO overlay to accumulator for the rest
-// of txn's block-apply batch and reads the pre-batch rows of inputs, the
-// inputs the batch consumes that it does not itself produce. deleteOnSpend
-// names inputs an earlier transaction of the same trusted batch committed.
-// producers are the hashes of the transactions the batch applies; an
-// identity row stored for one of them is reused rather than reported as a
-// conflict. It reports false, and changes nothing, outside SQLite core storage
-// mode and when the live UTxO set holds the outputs, which leaves no rows to
-// overlay.
+// EnableBatchUtxoOverlay attaches a transaction overlay to accumulator for
+// the rest of txn's block-apply batch. When the metadata store owns UTxOs it
+// also reads and stages their changes; an external live set keeps those
+// changes while the overlay still batches transaction and live-stake rows.
+// deleteOnSpend names inputs an earlier transaction of the same trusted batch
+// committed. producers are the hashes of the transactions the batch applies;
+// an identity row an import stored for one of them is reused rather than
+// reported as a conflict. It reports false, and changes nothing, outside
+// SQLite core storage mode.
 func (s *Store) EnableBatchUtxoOverlay(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
@@ -251,7 +251,7 @@ func (s *Store) EnableBatchUtxoOverlay(
 ) (bool, error) {
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok || s.dialect.Name() != "sqlite" ||
-		s.storageMode == types.StorageModeAPI || s.liveUtxo != nil {
+		s.storageMode == types.StorageModeAPI {
 		return false, nil
 	}
 	transaction, ok := txn.(*sqlTxn)
@@ -304,6 +304,9 @@ func (s *Store) EnableBatchUtxoOverlay(
 				ctx, db, overlay, producers,
 			); err != nil {
 				return err
+			}
+			if s.liveUtxo != nil {
+				return nil
 			}
 			return prefetchOverlayInputs(ctx, db, overlay, inputs)
 		},

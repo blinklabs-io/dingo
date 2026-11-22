@@ -827,13 +827,13 @@ func (b *LedgerDeltaBatch) applyBatched(
 	return nil
 }
 
-// enableTrustedUtxoOverlay attaches a batch UTxO overlay to acc when b is
-// applied by ApplyTrustedBatch and every delta is a plain ranking-block
-// delta. It reads the batch's pre-batch inputs once, in bulk; the store
-// declines outside SQLite core storage mode. Dijkstra blocks stay on the
-// per-row path because endorser closures consume inputs their ranking
-// transactions do not name, and so do later eras until they are known not
-// to.
+// enableTrustedUtxoOverlay attaches the SQLite trusted-batch overlay to acc
+// when b is applied by ApplyTrustedBatch and every delta is a plain
+// ranking-block delta. The overlay stages transaction rows and live-stake
+// changes; when SQLite owns the UTxO set it also reads the batch's pre-batch
+// inputs once, in bulk. Dijkstra blocks stay on the per-row path because
+// endorser closures consume inputs their ranking transactions do not name,
+// and so do later eras until they are known not to.
 func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 	ls *LedgerState,
 	txn ledgerdb.Txn,
