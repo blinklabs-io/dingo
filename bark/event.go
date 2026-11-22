@@ -410,13 +410,10 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	s.hub.mu.Unlock()
 	cursor := start.GetLastAckedSequence()
 	previousRun := start.GetLastAckedRunId()
-	restarted := start.GetAcceptReady() && previousRun != "" &&
-		previousRun != runID
+	restarted := previousRun != "" && previousRun != runID
 	if restarted {
 		cursor = oldest - 1
-	} else if start.GetAcceptReady() && previousRun == "" {
-		cursor = head
-	} else if !start.GetAcceptReady() && cursor == 0 {
+	} else if previousRun == "" && cursor == 0 {
 		cursor = head
 	}
 	if !restarted &&

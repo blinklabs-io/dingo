@@ -439,9 +439,8 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 	require.NoError(t, first.Send(&eventv1alpha1.SubscribeWithAckRequest{
 		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
 			Start: &eventv1alpha1.SubscribeWithAckStart{
-				SubscriberId:      "initial",
-				LastAckedSequence: 99,
-				AcceptReady:       true,
+				SubscriberId: "initial",
+				AcceptReady:  true,
 			},
 		},
 	}))
