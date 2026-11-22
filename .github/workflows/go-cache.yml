@@ -13,11 +13,15 @@ name: go-cache
 # in the commit SHA, so a new entry is written for every main push, and the
 # entries it supersedes are deleted right after the save to stay inside the
 # repository's 10 GB cache limit. GOFLAGS matches ci so the cached objects are
-# the ones its jobs ask for.
+# the ones its jobs ask for, and test-ci-go-cache.py fails when a go build,
+# test or vet in a ci job has no compile here with the same flags.
 #
 # A push that arrives while a run is in progress waits for it rather than
 # cancelling it: a cancelled run saves nothing, and a burst of merges would
 # then never refresh the caches. GitHub keeps only the newest waiting run.
+#
+# Every job runs on main only: a dispatch from another branch would save where
+# ci cannot restore it and then prune main's current entries.
 
 on:
   push:
@@ -34,6 +38,7 @@ concurrency:
 jobs:
   check:
     name: check
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -72,7 +77,11 @@ jobs:
           go build ./cmd/dingo
           GOARCH=386 go vet -tags dingo_extra_plugins ./...
           go test -tags dingo_extra_plugins -ldflags="-s -w" -run '^$' ./...
-          go test -run '^$' ./...
+          go test -run '^$' ./internal/docsparity
+      # The root ./... stops at sdk/go.mod.
+      - name: compile (sdk)
+        working-directory: sdk
+        run: go test -run '^$' ./...
       - name: save-go-mod
         if: steps.mod.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
@@ -95,6 +104,7 @@ jobs:
 
   race:
     name: race
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -129,8 +139,10 @@ jobs:
       - name: compile
         run: |
           set -euo pipefail
-          go test -tags dingo_extra_plugins -ldflags="-s -w" -race -run '^$' ./...
-          go test -race -run '^$' ./...
+          go test -tags dingo_extra_plugins -ldflags="-s -w" -race -gcflags='modernc.org/...=-d=checkptr=0' -run '^$' ./...
+      - name: compile (sdk)
+        working-directory: sdk
+        run: go test -race -run '^$' ./...
       - name: save-go-build
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -143,6 +155,7 @@ jobs:
 
   services:
     name: services
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -178,6 +191,9 @@ jobs:
         run: |
           set -euo pipefail
           go test -tags 'dingo_extra_plugins dingo_db_integration' -ldflags="-s -w" -run '^$' ./...
+          go test -tags dingo_extra_plugins -ldflags="-s -w" -run '^$' ./...
+          # make test-live-lifecycle runs the root package under -race.
+          go test -tags 'dingo_extra_plugins dingo_db_integration' -race -run '^$' .
       - name: save-go-build
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -190,6 +206,7 @@ jobs:
 
   macos:
     name: macos
+    if: github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 60
     permissions:

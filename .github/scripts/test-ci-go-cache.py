@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -40,6 +41,89 @@ def build_cache_step(job, action):
         if "go-build" in s["with"]["path"] or "Caches" in s["with"]["path"]
     ]
     return steps[0] if steps else None
+
+
+# Flags that change no compile action ID: they select tests, set a time
+# limit, or only affect the link.
+IGNORED_VALUE_FLAGS = {"-run", "-timeout", "-count", "-ldflags", "-o", "-f"}
+IGNORED_FLAGS = {"-v"}
+VALUE_FLAGS = IGNORED_VALUE_FLAGS | {"-tags", "-gcflags", "-asmflags"}
+COMPILE_ENV = ("GOFLAGS", "CGO_ENABLED", "GOOS", "GOARCH")
+
+
+def compile_signatures(job, makefile_dir):
+    """What each go build, test or vet run by a job compiles.
+
+    A signature is (working directory, compile environment, subcommand,
+    compile-affecting flags). Package arguments are dropped: the warm jobs
+    compile ./... or a superset of what ci names. make targets are expanded
+    with make -n so a go command behind a Makefile recipe is counted too.
+    """
+    base_env = {
+        k: str(v) for k, v in job.get("env", {}).items() if k in COMPILE_ENV
+    }
+    sigs = set()
+    for step in job["steps"]:
+        if "run" not in step:
+            continue
+        workdir = step.get("working-directory", ".")
+        for line in command_lines(step["run"], makefile_dir):
+            sig = signature(line, workdir, base_env)
+            if sig:
+                sigs.add(sig)
+    return sigs
+
+
+def command_lines(run, makefile_dir):
+    for raw in run.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = line.split()
+        if tokens[0] == "make" and len(tokens) == 2:
+            expanded = subprocess.run(
+                ["make", "-n", tokens[1]],
+                cwd=makefile_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            yield from command_lines(expanded, makefile_dir)
+        else:
+            yield line
+
+
+def signature(line, workdir, base_env):
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return None
+    env = dict(base_env)
+    while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+        k, v = tokens.pop(0).split("=", 1)
+        if k in COMPILE_ENV:
+            env[k] = v
+    if len(tokens) < 2 or tokens[0] != "go" or tokens[1] not in ("build", "test", "vet"):
+        return None
+    flags = []
+    args = iter(tokens[2:])
+    for tok in args:
+        if not tok.startswith("-"):
+            continue
+        name, eq, value = tok.partition("=")
+        if name in VALUE_FLAGS and not eq:
+            value = next(args, "")
+        if name in IGNORED_FLAGS or name in IGNORED_VALUE_FLAGS:
+            continue
+        if name == "-tags":
+            value = " ".join(sorted(value.replace(",", " ").split()))
+        flags.append((name, value))
+    return (
+        os.path.normpath(workdir),
+        tuple(sorted(env.items())),
+        tokens[1],
+        tuple(sorted(flags)),
+    )
 
 
 def build_prefix(key):
@@ -114,6 +198,31 @@ class GoCacheWorkflowTest(unittest.TestCase):
                 self.assertIn("github.sha", saved_key)
                 prefix = build_prefix(restore["with"]["key"])
                 self.assertTrue(saved_key.startswith(prefix), (saved_key, prefix))
+
+    def test_jobs_run_only_on_main(self):
+        # A dispatch from another branch would save to that branch, where ci
+        # cannot restore it, and then prune main's current entries.
+        for name, job in self.jobs.items():
+            with self.subTest(job=name):
+                self.assertIn("github.ref == 'refs/heads/main'", str(job.get("if", "")))
+
+    def test_warm_jobs_use_the_ci_runner_image(self):
+        for ci_name, warm_name in WARM_JOBS.items():
+            with self.subTest(job=ci_name):
+                self.assertEqual(
+                    self.ci[ci_name]["runs-on"], self.jobs[warm_name]["runs-on"]
+                )
+
+    def test_warm_jobs_compile_what_ci_compiles(self):
+        # A ci compile that no warm command matches restores nothing for the
+        # packages its flags change, so the cache is only as good as this.
+        root = WORKFLOWS.parent.parent
+        for ci_name, warm_name in WARM_JOBS.items():
+            with self.subTest(job=ci_name):
+                ci = compile_signatures(self.ci[ci_name], root)
+                warm = compile_signatures(self.jobs[warm_name], root)
+                self.assertTrue(ci)
+                self.assertEqual(set(), ci - warm)
 
     def test_warm_jobs_prune_after_saving(self):
         for name, job in self.jobs.items():
