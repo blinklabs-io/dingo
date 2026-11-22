@@ -84,8 +84,15 @@ type RemoteEventsConfig struct {
 
 // RemoteEvents follows the Event Service of other nodes and republishes what
 // it receives on the local EventBus as RemoteEvent. Each source reconnects
-// on its own and resumes after the last event it handled, so a dropped
-// connection loses nothing and does not repeat an event locally.
+// on its own and resumes after the last event it handled, so once a source
+// has handled an event, a dropped connection loses nothing and does not
+// repeat an event locally while the remote node keeps running.
+//
+// Position zero means the remote node's current position, so a source that
+// drops before its first handled event resumes there and skips what was
+// published while it was disconnected. The position is also lost when this
+// node restarts, and the remote node's sequence restarts with its process, so
+// events across either restart can be skipped without an error.
 type RemoteEvents struct {
 	cfg RemoteEventsConfig
 

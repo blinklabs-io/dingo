@@ -21292,16 +21292,16 @@ subscription against that node's EventService, filtered by the source's
 EventBus as `bark.remote_event` with a `RemoteEvent{Source, Event}` payload.
 The Event Service does not subscribe to that type, so a remote event is never
 sent back out to this node's own subscribers. The bark client reconnects with
-backoff and resumes after the last handled sequence, so a dropped connection
-neither loses nor repeats an event locally. The position is in memory: after a
+backoff and resumes after the last handled sequence, so once a source has
+handled an event, a dropped connection neither loses nor repeats an event
+locally while the remote node keeps running. Before the first handled event
+the position is zero, which the remote node reads as its current position, so
+a drop then skips what was published while disconnected. The position is in memory: after a
 restart, or after the remote node answers `OUT_OF_RANGE`, a source continues
 from the remote node's current position and the events in between are not
 replayed. The remote node's sequence also restarts with its process, and a
 new run that has already passed the old position accepts it, so that run's
-earlier events are skipped without an error. Position zero means the remote
-node's current position, so a subscription that drops before its first event
-also resumes there and skips what was published while it was disconnected.
-The bark client retries
+earlier events are skipped without an error. The bark client retries
 silently, so each source logs a warning when its node stops answering and an
 info line when it answers or delivers an event again, once per outage.
 Sources are independent of `barkEventEnabled`, are set only in YAML
