@@ -125,6 +125,9 @@ func hotStatementsFor(u *utxoSQL) []string {
 			queries = append(queries, u.edgeInsertQuery(table, size))
 		}
 	}
+	for n := 1; n <= utxoSpendBatchSize; n++ {
+		queries = append(queries, consumeUtxosByIDQuery(n))
+	}
 	if !u.sqlite {
 		return append(queries, consumeUtxoSQL)
 	}

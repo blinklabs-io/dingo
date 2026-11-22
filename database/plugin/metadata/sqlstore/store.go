@@ -152,6 +152,10 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	// spendMu guards spends, the outputs this store inserted that a later
+	// spend can address by row id (see spendCache).
+	spendMu                 sync.Mutex
+	spends                  spendCache
 	sqlitePath              string
 	sqliteOverlayInsertRows int
 	writeDB                 *sql.DB
@@ -1302,6 +1306,9 @@ func (t *sqlTxn) Commit() error {
 	err := t.tx.Commit()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
+		if t.owner != nil {
+			t.owner.forgetSpendCache()
+		}
 	}
 	for accumulator := range t.batchBefore {
 		accumulator.resetStatement()
@@ -1324,6 +1331,9 @@ func (t *sqlTxn) Rollback() error {
 	t.finished = true
 	defer t.releaseConnection()
 	t.restoreBatches(t.batchBefore)
+	if t.owner != nil && !t.readOnly {
+		t.owner.forgetSpendCache()
+	}
 	t.batchBefore = nil
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
@@ -1394,6 +1404,7 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
+		t.owner.forgetSpendCache()
 		t.restoreBatches(t.batchSavepoints[name])
 		for i, savepointName := range slices.Backward(t.savepointOrder) {
 			if savepointName == name {
