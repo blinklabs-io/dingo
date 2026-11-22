@@ -432,8 +432,10 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	// read after Truncate returns.
 	var tipAfterTruncate ochainsync.Tip
 	var tipAfterTruncateErr error
+	var tipAfterTruncateRead bool
 	syncer.liveLifecycleMu.Lock()
 	syncer.afterTruncate = func(db *database.Database) {
+		tipAfterTruncateRead = true
 		tipAfterTruncate, tipAfterTruncateErr = db.GetTip(nil)
 	}
 	syncer.liveLifecycleMu.Unlock()
@@ -448,7 +450,9 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, blocksRemoved)
 	requireInboundListenerAcceptsConnections(t, syncerLn)
+	require.True(t, tipAfterTruncateRead, "afterTruncate did not run")
 	require.NoError(t, tipAfterTruncateErr)
+	require.NotZero(t, tipAfterTruncate.Point.Slot)
 	require.LessOrEqual(t, tipAfterTruncate.Point.Slot, targetSlot)
 
 	// The forger keeps producing blocks throughout; the syncer must pick
