@@ -817,6 +817,11 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
 	require.Empty(t, h.catalogCloudDestination)
+	// The startup failure must arm backoff for this destination; pin its
+	// deadline so slow setup under parallel load cannot outlast the window.
+	require.Equal(t, cloudDest, h.catalogRetry.destination)
+	require.Equal(t, initialCatalogRetry, h.catalogRetry.delay)
+	h.catalogRetry.nextAttempt = time.Now().Add(time.Hour)
 
 	dir := filepath.Join(snapshotDir, "after-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
@@ -956,6 +961,11 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
 	require.Empty(t, h.catalogCloudDestination)
+	// The startup failure must arm backoff for this destination; pin its
+	// deadline so slow setup under parallel load cannot outlast the window.
+	require.Equal(t, cloudDest, h.catalogRetry.destination)
+	require.Equal(t, initialCatalogRetry, h.catalogRetry.delay)
+	h.catalogRetry.nextAttempt = time.Now().Add(time.Hour)
 
 	dir := filepath.Join(snapshotDir, "after-constructor-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
