@@ -1,0 +1,107 @@
+name: benchmark-baseline
+
+# Records a baseline for the benchmarks the pull-request gate compares
+# (benchmark-gate.yml). Every push to main that touches node code appends one
+# result file to gate-runs/ on the benchmark-data branch, next to the weekly
+# runs/ directory the full suite writes. The gate itself does not read these
+# files; they are the history to consult when a slowdown has to be located.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/scripts/bench-gate.sh'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-baseline
+  cancel-in-progress: false # let a recording finish; the next push queues behind it
+
+env:
+  # A pipe falls back to the next proxy on any error, a comma only on 404/410.
+  GOPROXY: 'https://proxy.golang.org|direct'
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write # push results to the benchmark-data branch
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-bench-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-bench-
+            ${{ runner.os }}-go-build-
+
+      - name: run-gate-benchmarks
+        id: run
+        run: |
+          set -euo pipefail
+          run_file="$RUNNER_TEMP/$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(git rev-parse --short HEAD).txt"
+          make bench-gate BENCH_GATE_OUT="$run_file"
+          echo "run_file=${run_file}" >> "$GITHUB_OUTPUT"
+
+      - name: publish-benchmark-data
+        env:
+          RUN_FILE: ${{ steps.run.outputs.run_file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            git fetch origin benchmark-data:refs/remotes/origin/benchmark-data
+            git worktree add ../benchmark-data-branch origin/benchmark-data
+          else
+            git worktree add --detach ../benchmark-data-branch HEAD
+            git -C ../benchmark-data-branch checkout --orphan benchmark-data
+            git -C ../benchmark-data-branch rm -rf . >/dev/null 2>&1 || true
+            git -C ../benchmark-data-branch clean -fdx
+          fi
+          dest=../benchmark-data-branch/gate-runs
+          if [[ -L "$dest" ]]; then
+            echo "gate-runs is unexpectedly a symlink; refusing to continue" >&2
+            exit 1
+          fi
+          mkdir -p "$dest"
+          cp "$RUN_FILE" "$dest/"
+          basename "$RUN_FILE" > "$dest/latest.txt"
+          # Keep the most recent 200 recordings; the weekly job keeps its own
+          # 104-week window in runs/.
+          find "$dest" -maxdepth 1 -name '*.txt' ! -name latest.txt -print \
+            | sort | head -n -200 | xargs -r git -C ../benchmark-data-branch rm -q -f --ignore-unmatch --
+          cd ../benchmark-data-branch
+          git add gate-runs
+          git commit -m "chore(benchmark-data): add gate run $(basename "$RUN_FILE")"
+          # The weekly job pushes to the same branch; retry on a lost race.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:benchmark-data; then
+              exit 0
+            fi
+            git fetch origin benchmark-data
+            git rebase origin/benchmark-data
+          done
+          echo "could not push benchmark-data" >&2
+          exit 1

@@ -30,6 +30,7 @@ package benchci
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"os/exec"
@@ -65,10 +66,23 @@ const (
 	// curated benchmarks do not track for regression purposes).
 	secOpMetric = "sec/op"
 
+	// GateRegressionThresholdPercent is the minimum "sec/op" delta, in percent,
+	// that flags a GateBenchmarks row in the per-pull-request gate. It is wider
+	// than RegressionThresholdPercent because the gate compares two builds on
+	// one shared runner with a handful of samples, where a 5% shift is within
+	// the run-to-run spread of the end-to-end benchmarks.
+	GateRegressionThresholdPercent = 10.0
+
 	// nonSignificantMarker is the exact string benchstat prints in the
 	// delta column instead of a percentage when it did not consider the
 	// change statistically significant at its alpha level (default 0.05).
 	nonSignificantMarker = "~"
+)
+
+// ErrNoGateRows reports that none of GateBenchmarks appeared in both result
+// files, so the gate had nothing to compare.
+var ErrNoGateRows = errors.New(
+	"benchci: no gate benchmark appears in both result files",
 )
 
 // gomaxprocsSuffix matches the trailing "-<GOMAXPROCS>" go test appends to
@@ -117,17 +131,61 @@ func Compare(oldFile, newFile string, curated []string) (string, bool, error) {
 	return Report(csv, curated)
 }
 
+// CompareGate compares a base-revision result file against a head-revision
+// result file for the per-pull-request gate. See GateReport.
+func CompareGate(baseFile, headFile string) (string, bool, error) {
+	csv, err := runBenchstat(baseFile, headFile)
+	if err != nil {
+		return "", false, err
+	}
+	return GateReport(csv)
+}
+
 // Report parses raw `benchstat -format=csv` output and renders the curated
 // markdown regression report. It is split out from Compare so tests can
 // exercise the parsing/flagging logic against fixture CSV text without
 // shelling out to benchstat.
 func Report(csv string, curated []string) (string, bool, error) {
+	return reportWithThreshold(csv, curated, RegressionThresholdPercent)
+}
+
+// GateReport is Report for the per-pull-request gate: it restricts the
+// comparison to GateBenchmarks, flags a row only beyond
+// GateRegressionThresholdPercent, and returns an error when none of the gate
+// benchmarks appear in both inputs, because a comparison that matched nothing
+// would otherwise pass vacuously.
+func GateReport(csv string) (string, bool, error) {
 	rows, err := parseSecOpTable(csv)
 	if err != nil {
 		return "", false, err
 	}
-	results := evaluateCurated(rows, curated)
+	results := evaluateCurated(rows, GateBenchmarks, GateRegressionThresholdPercent)
+	if !anyFound(results) {
+		return "", false, ErrNoGateRows
+	}
 	return renderMarkdown(results), anyFlagged(results), nil
+}
+
+func reportWithThreshold(
+	csv string,
+	curated []string,
+	threshold float64,
+) (string, bool, error) {
+	rows, err := parseSecOpTable(csv)
+	if err != nil {
+		return "", false, err
+	}
+	results := evaluateCurated(rows, curated, threshold)
+	return renderMarkdown(results), anyFlagged(results), nil
+}
+
+func anyFound(results []Row) bool {
+	for _, r := range results {
+		if r.Found {
+			return true
+		}
+	}
+	return false
 }
 
 func anyFlagged(results []Row) bool {
@@ -284,7 +342,11 @@ func formatSeconds(seconds float64) string {
 // "Benchmark" prefix restored for readability. A curated name with no match
 // at all is reported as a single not-found Row so missing data is visible
 // rather than silently dropped.
-func evaluateCurated(rows map[string]benchstatRow, curated []string) []Row {
+func evaluateCurated(
+	rows map[string]benchstatRow,
+	curated []string,
+	threshold float64,
+) []Row {
 	names := make([]string, 0, len(rows))
 	for name := range rows {
 		names = append(names, name)
@@ -320,7 +382,7 @@ func evaluateCurated(rows map[string]benchstatRow, curated []string) []Row {
 				Significant:  row.significant,
 				Found:        true,
 				Flagged: row.significant &&
-					row.deltaPercent > RegressionThresholdPercent,
+					row.deltaPercent > threshold,
 			})
 		}
 		if !matched {

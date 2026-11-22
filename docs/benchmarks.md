@@ -79,6 +79,64 @@ transaction fixtures differ from the reference's synthetic ones.
 lock-contention sweep across several `GOMAXPROCS` values. It is intended for
 benchmark comparisons and can take much longer than the regular suite.
 
+## Pull-request benchmark gate
+
+`.github/workflows/benchmark-gate.yml` runs on every pull request that changes
+a Go file, `go.mod`, `go.sum`, the Makefile, or the gate's own workflow and
+script. It guards the default stack (Badger blob, SQLite metadata, built-in
+ledger) with five benchmarks, listed in `benchci.GateBenchmarks`:
+
+| Dimension | Benchmark | Package |
+|---|---|---|
+| Sync throughput over a fixed 100-block range | `BenchmarkChainSyncFromGenesis` | `ledger` |
+| Sync of real blocks | `BenchmarkRealBlockProcessing` | `ledger` |
+| Block-apply latency | `BenchmarkBlockProcessingThroughput`, `BenchmarkBlockProcessingThroughputPredecoded` | `ledger` |
+| utxorpc request latency (`ReadParams` over HTTP) | `BenchmarkReadParamsRequest` | `api/utxorpc` |
+
+Method:
+
+- The job builds the pull request's base commit and its merged result on one
+  `ubuntu-latest` runner and runs both for 8 rounds, alternating which goes
+  first in each round (`.github/scripts/bench-gate.sh`). Drift on the shared
+  machine lands on both sides, so the gate needs no stored baseline and a slow
+  runner slows base and head equally.
+- `benchstat` (the version pinned in `benchci.BenchstatVersion`) compares the
+  two result files. A benchmark fails the gate only when benchstat reports the
+  `sec/op` change as significant (p < 0.05) and the slowdown exceeds
+  `benchci.GateRegressionThresholdPercent` (10%). A large but non-significant
+  delta, a significant delta under 10%, and any improvement pass.
+- The threshold is 10% rather than the weekly run's 5% because 8 samples on a
+  shared runner cannot resolve a smaller shift in the end-to-end benchmarks
+  without producing false failures. Allocation metrics (`B/op`, `allocs/op`)
+  are recorded in the result artifact but are not gated.
+- The script and comparator are taken from the base commit, so a pull request
+  cannot edit them to pass its own gate; a base that predates the gate falls
+  back to the head's copies. A benchmark missing from the base (a newly added
+  one) is reported as not found and is not compared. The gate fails if no gate
+  benchmark appears on both sides.
+- The workflow is not a required check; it does not report on documentation-only
+  pull requests.
+
+The report and both result files are in the job summary and the
+`benchmark-gate` artifact. To reproduce locally, run
+`.github/scripts/bench-gate.sh <base-checkout> <head-checkout> <out-dir> 8`
+and `go run ./internal/benchci/cmd/benchgate <out-dir>/base.txt
+<out-dir>/head.txt report.md`.
+
+The same job ends with a report-only `external-storage-smoke` step for storage
+plugins that live outside this repository. It never gates and currently prints
+a placeholder.
+
+### Baseline
+
+`.github/workflows/benchmark-baseline.yml` runs on every push to `main` that
+changes node code, and on manual dispatch (Actions, "benchmark-baseline",
+"Run workflow"). It runs `make bench-gate` (10 rounds) and commits the result to
+`gate-runs/` on the `benchmark-data` branch, with `gate-runs/latest.txt` naming
+the newest file. The weekly `make bench-ci` run keeps its own history in
+`runs/` and also covers the gate benchmarks. Compare two baseline files with
+`benchstat` to locate when a slowdown entered `main`.
+
 ## CPU and memory profiles
 
 `make test-load-profile` builds Dingo, loads the checked-in immutable test data,
