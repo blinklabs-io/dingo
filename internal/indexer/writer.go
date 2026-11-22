@@ -586,7 +586,10 @@ func (w *Writer) step(
 				w.reach = max(1, w.reach/2)
 				w.logger.Warn(
 					"indexer sparse batch too big for one blob transaction, shortening",
-					"blocks", len(blocks), "reach", w.reach,
+					"blocks",
+					len(blocks),
+					"reach",
+					w.reach,
 				)
 				return false, errBatchShrunk
 			}
@@ -641,7 +644,14 @@ func (w *Writer) readBlocks(
 			Slot: last.Slot, BlockNumber: last.Number, Hash: last.Hash,
 		}, throughSlot, w.limit)
 		if err != nil {
-			return nil, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			// The block this read continues from can be rolled back and
+			// deleted after the previous read returned it. The prefix
+			// already read is a valid batch; the next step re-reads from
+			// the committed tip and meets any lasting error itself.
+			break
 		}
 		for _, b := range more {
 			size += len(b.Cbor)

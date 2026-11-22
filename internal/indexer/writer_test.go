@@ -788,3 +788,29 @@ func TestSparseBatchesStillHalveOnOversizedTransaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(199), tip.BlockNumber)
 }
+
+// vanishingChain fails its second BlocksAfter call, as when the block a
+// sparse batch continues from is rolled back between reads.
+type vanishingChain struct {
+	*fakeChain
+	calls atomic.Int32
+}
+
+func (c *vanishingChain) BlocksAfter(
+	ctx context.Context, after indexerdb.Tip, through uint64, limit int,
+) ([]models.Block, error) {
+	if c.calls.Add(1) == 2 {
+		return nil, errors.New("locate block to continue after: not found")
+	}
+	return c.fakeChain.BlocksAfter(ctx, after, through, limit)
+}
+
+func TestSparseBatchesKeepReadPrefixWhenContinuationFails(t *testing.T) {
+	t.Parallel()
+	chain := &vanishingChain{fakeChain: newFakeChain(64, "a").withContent(10)}
+	store := newTestStore(t)
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 4).WithSparseBatches()
+	w.sparseBytes = 1000
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain.fakeChain)
+}
