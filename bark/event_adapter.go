@@ -15,6 +15,7 @@
 package bark
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/blinklabs-io/bark/eventtype"
@@ -22,10 +23,12 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -51,6 +54,9 @@ func (a *eventAdapter) sourceTypes() []string {
 		string(mempool.RemoveTransactionEventType),
 		connmanager.InboundConnectionEventType,
 		connmanager.ConnectionClosedEventType,
+		string(ledger.SyncStateEventType),
+		string(ledger.ProtocolParamsEventType),
+		string(DatabaseOperationEventType),
 	}
 }
 
@@ -115,8 +121,70 @@ func (a *eventAdapter) convert(
 		})
 	case connmanager.ConnectionClosedEvent:
 		add(eventtype.ConnManagerConnClosed, a.connectionClosed(d))
+	case ledger.SyncStateEvent:
+		add(eventtype.LedgerSyncState, &eventv1alpha1.SyncStateEventData{
+			PreviousState: syncState(d.Previous),
+			CurrentState:  syncState(d.Current),
+			TipSlot:       d.TipSlot,
+			SlotsBehind:   d.SlotsBehind,
+		})
+	case ledger.ProtocolParamsEvent:
+		if data, err := a.protocolParams(d); err != nil {
+			logger.Warn("event service could not convert protocol parameters",
+				"epoch", d.Epoch, "error", err)
+		} else {
+			add(eventtype.LedgerProtocolParams, data)
+		}
+	case DatabaseOperationEvent:
+		add(eventtype.DatabaseOperation, &eventv1alpha1.DatabaseOperationEventData{
+			OperationId: d.OperationID,
+			Type:        d.Type,
+			Status:      d.Status,
+			Error:       d.Error,
+		})
 	}
 	return out
+}
+
+func syncState(s ledger.SyncState) eventv1alpha1.SyncState {
+	switch s {
+	case ledger.SyncStateSyncing:
+		return eventv1alpha1.SyncState_SYNC_STATE_SYNCING
+	case ledger.SyncStateCaughtUp:
+		return eventv1alpha1.SyncState_SYNC_STATE_CAUGHT_UP
+	}
+	return eventv1alpha1.SyncState_SYNC_STATE_UNSPECIFIED
+}
+
+// protocolParams reports the parameters in their utxorpc form, which has the
+// same shape in every era, so a subscriber decodes parameters_json without
+// knowing the era.
+func (a *eventAdapter) protocolParams(
+	d ledger.ProtocolParamsEvent,
+) (*eventv1alpha1.ProtocolParametersEventData, error) {
+	if d.Params == nil {
+		return nil, errors.New("no protocol parameters")
+	}
+	params, err := d.Params.Utxorpc()
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := protojson.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	data := &eventv1alpha1.ProtocolParametersEventData{
+		Epoch:          d.Epoch,
+		ProtocolMajor:  uint64(params.GetProtocolVersion().GetMajor()),
+		ProtocolMinor:  uint64(params.GetProtocolVersion().GetMinor()),
+		ParametersJson: string(encoded),
+	}
+	if a.eraNameForEpoch != nil {
+		if name, err := a.eraNameForEpoch(d.Epoch); err == nil {
+			data.Era = name
+		}
+	}
+	return data, nil
 }
 
 func (a *eventAdapter) chainUpdate(
@@ -140,7 +208,9 @@ func (a *eventAdapter) chainUpdate(
 	return data
 }
 
-func chainRollback(d chain.ChainRollbackEvent) *eventv1alpha1.ChainRollbackEventData {
+func chainRollback(
+	d chain.ChainRollbackEvent,
+) *eventv1alpha1.ChainRollbackEventData {
 	fromSlot := d.Point.Slot
 	if len(d.RolledBackBlocks) > 0 {
 		// RolledBackBlocks is newest first, so its head was the old tip.

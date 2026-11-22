@@ -2801,6 +2801,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chain.header` | ChainManager | Ordered header-lifecycle stream. Carries one event for every authenticated Leios-era ranking-block header admitted to the header queue: `ChainHeaderAnnouncementEvent` (slot, header hash, announced endorser-block hash, issuer pool key hash, admission time, `Seq`) for an announcement, or `ChainHeaderObservedEvent` (slot, header hash, issuer pool key hash, `Seq`) otherwise. A block added without the queue (a local forge, a bulk restore) publishes only its announcement, and headers from eras without announcements publish nothing. `ChainHeaderInvalidationEvent` (highest still-valid point, discarded ranking-block hashes, reason, `Seq`) records queued headers leaving the chain. Events are enqueued under the chain mutex, so the Leios VoteManager can arm announcements, detect RB equivocation and identify the latest RB in chain-mutation order. Only the primary chain publishes: fork chains built by `NewChain` and `NewChainFromIntersect` carry no event bus, so their headers and blocks reach neither this topic nor `chain.update`. |
 | `chain.fork_detected` | ChainManager | Fork detected |
 | `database.immutable_tip_advanced` | blockpromote.Promoter | A promotion step moved the immutable tip (`blockpromote.TipAdvancedEvent`: tip hash, slot, block index, blocks promoted) |
+| `database.operation` | Bark DatabaseService | A snapshot, restore, truncate or verify operation entered a new status (`bark.DatabaseOperationEvent`: operation id, type, status, and the error when it failed). Published only while the EventService is mounted |
 | `chainselection.peer_tip_update` | ChainSelector | Peer tip updated |
 | `chainselection.chain_switch` | ChainSelector | Active peer changed |
 | `chainselection.selection` | ChainSelector | Chain selection made |
@@ -2832,6 +2833,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
 | `ledger.pool_restored` | LedgerState | Pool state restored after rollback |
+| `ledger.sync_state` | Node | The node moved between catching up to the chain tip and following it (`ledger.SyncStateEvent`: previous and current state, ledger tip slot, slots behind the wall clock). Caught up comes from the ledger's `IsAtTip` latch, which is read once because it never resets, and from `chainselection.genesis_mode_exited`; falling behind comes only from `chainselection.genesis_mode_entered`, so a node without Genesis selection reports one transition per run. Published only on a change |
+| `ledger.protocol_params` | Node | The protocol parameters in force changed (`ledger.ProtocolParamsEvent`: epoch, parameters). Checked on each `epoch.transition` against the last parameters seen, compared in their utxorpc form; the parameters at startup are the baseline and are not published |
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block forged and adopted onto the chain |
@@ -21259,8 +21262,11 @@ only when `barkEventEnabled` is true. Bark holds no credentials, so the bind
 address is the access control: enabling it defaults the listener to loopback,
 as for the lifecycle services. `eventAdapter` subscribes to the internal
 EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
-`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`) and
-converts each to a registry event with a typed payload; a rollback travelling on
+`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`,
+`ledger.sync_state`, `ledger.protocol_params`, `database.operation`) and
+converts each to a registry event with a typed payload. Protocol parameters
+travel as their utxorpc form encoded as JSON, which has the same shape in
+every era, and are dropped with a warning when that conversion fails; a rollback travelling on
 `chain.update` stays on `chain.update` and is reported in the payload's
 `rollback` field. A subscription filter selects by registered event type or
 category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
