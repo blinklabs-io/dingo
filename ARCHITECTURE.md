@@ -17627,7 +17627,8 @@ cache when the LeiosDB lacks the manifest or bodies. It verifies the
 manifest and each body against the announced hash, ordered references,
 transaction hashes, and encoded sizes before exposing them. A missing or
 inconsistent certified body is an error rather than an empty transaction list.
-The root document is served only at the literal `/` path (`GET /{$}`).
+The root document is served only at the literal `/` and `/api/v0/` paths
+(`GET /{$}` and `GET /api/v0/{$}`); a bare `/api/v0` redirects to `/api/v0/`.
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
 `GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block

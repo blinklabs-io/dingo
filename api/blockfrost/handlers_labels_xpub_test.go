@@ -16,10 +16,12 @@ package blockfrost
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -136,4 +138,23 @@ func TestRootUnderPrefixRedirectsBarePrefix(t *testing.T) {
 	)
 	require.Equal(t, http.StatusTemporaryRedirect, recorder.Code)
 	require.Equal(t, "/api/v0/", recorder.Header().Get("Location"))
+}
+
+func TestHandleHealthClockReportsMilliseconds(t *testing.T) {
+	t.Parallel()
+	handler := newTestBlockfrost(&mockNode{}).handler()
+	for _, path := range []string{"/health/clock", "/api/v0/health/clock"} {
+		before := time.Now().UnixMilli()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(
+			recorder,
+			httptest.NewRequest(http.MethodGet, path, nil),
+		)
+		after := time.Now().UnixMilli()
+		require.Equal(t, http.StatusOK, recorder.Code, path)
+		var resp HealthClockResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp), path)
+		require.GreaterOrEqual(t, resp.ServerTime, before, path)
+		require.LessOrEqual(t, resp.ServerTime, after, path)
+	}
 }
