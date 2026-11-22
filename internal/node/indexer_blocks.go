@@ -138,15 +138,21 @@ func (b *Backfill) IndexBlocks(
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
 	}
-	decoded, stopDecode := b.decodeBlocks(ctx, blocks)
-	defer stopDecode()
+	dec := b.decodeBlocks(ctx, blocks)
+	defer dec.stop()
 	for i, blk := range blocks {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		<-decoded[i].ready
+		select {
+		case <-dec.out[i].ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
-		if err := b.indexBlock(ctx, txn, acc, blk, &decoded[i]); err != nil {
+		err := b.indexBlock(ctx, txn, acc, blk, &dec.out[i])
+		dec.release(i)
+		if err != nil {
 			return fmt.Errorf("indexing block at slot %d: %w", blk.Slot, err)
 		}
 	}
@@ -168,53 +174,104 @@ type decodedBlock struct {
 	ready      chan struct{}
 }
 
+// blockDecoder decodes a batch's blocks ahead of the writer.
+type blockDecoder struct {
+	out []decodedBlock
+	// slots holds one token per block claimed by a worker and not yet
+	// released by the writer, bounding the decoded blocks held at once.
+	slots chan struct{}
+	quit  chan struct{}
+	wg    sync.WaitGroup
+}
+
 // decodeBlocks decodes a batch's blocks and computes their transaction
 // offsets on several goroutines, in block order, and returns at once. Both
 // depend only on the block bytes, so they need not run on the write
 // goroutine. The writer waits on each block's ready channel as it reaches
 // it, and errors stay with their block, so failures are reported where the
-// serial loop would have met them. stop ends the workers early and waits for
-// them; the caller must call it once the writer is done.
+// serial loop would have met them. The workers stay within decodeWindow
+// blocks of the writer, which calls release for each block it is done with.
+// The caller must call stop once the writer is done.
 func (b *Backfill) decodeBlocks(
 	ctx context.Context,
 	blocks []models.Block,
-) (out []decodedBlock, stop func()) {
-	out = make([]decodedBlock, len(blocks))
-	for i := range out {
-		out[i].ready = make(chan struct{})
+) *blockDecoder {
+	workers := b.decodeWorkers
+	if workers <= 0 {
+		workers = max(runtime.GOMAXPROCS(0)/2, 1)
 	}
-	workers := min(max(runtime.GOMAXPROCS(0)/2, 1), 8, len(blocks))
+	workers = min(workers, 8, len(blocks))
+	d := &blockDecoder{
+		out:   make([]decodedBlock, len(blocks)),
+		slots: make(chan struct{}, decodeWindow(workers)),
+		quit:  make(chan struct{}),
+	}
+	for i := range d.out {
+		d.out[i].ready = make(chan struct{})
+	}
 	var next atomic.Int64
-	var stopped atomic.Bool
-	var wg sync.WaitGroup
 	for range workers {
-		wg.Go(func() {
+		d.wg.Go(func() {
 			for {
+				// Taking the token before claiming the index keeps the
+				// claimed blocks a contiguous run from the writer's
+				// position, so the block the writer waits on always holds a
+				// token and the window cannot deadlock.
+				select {
+				case d.slots <- struct{}{}:
+				case <-d.quit:
+					return
+				}
 				i := int(next.Add(1) - 1)
 				if i >= len(blocks) {
 					return
 				}
-				d := &out[i]
-				if !stopped.Load() && ctx.Err() == nil {
+				out := &d.out[i]
+				if !d.stopped() && ctx.Err() == nil {
 					blk := blocks[i]
-					d.parsed, d.err = models.DecodeBlockCbor(
+					out.parsed, out.err = models.DecodeBlockCbor(
 						blk.Type, blk.Cbor,
 						lcommon.VerifyConfig{SkipBodyHashValidation: true},
 					)
-					if d.err == nil && len(d.parsed.Transactions()) != 0 {
-						d.offsets, d.offsetsErr = b.computeBlockOffsets(
-							blk.Slot, blk.Hash, blk.Cbor, d.parsed,
+					if out.err == nil && len(out.parsed.Transactions()) != 0 {
+						out.offsets, out.offsetsErr = b.computeBlockOffsets(
+							blk.Slot, blk.Hash, blk.Cbor, out.parsed,
 						)
 					}
 				}
-				close(d.ready)
+				close(out.ready)
 			}
 		})
 	}
-	return out, func() {
-		stopped.Store(true)
-		wg.Wait()
+	return d
+}
+
+func (d *blockDecoder) stopped() bool {
+	select {
+	case <-d.quit:
+		return true
+	default:
+		return false
 	}
+}
+
+// release drops the writer's reference to block i, which it has received
+// from ready, and lets the workers claim one more block.
+func (d *blockDecoder) release(i int) {
+	d.out[i] = decodedBlock{}
+	<-d.slots
+}
+
+// stop ends the workers early and waits for them.
+func (d *blockDecoder) stop() {
+	close(d.quit)
+	d.wg.Wait()
+}
+
+// decodeWindow is how many blocks the decode workers may hold decoded or in
+// flight ahead of the writer.
+func decodeWindow(workers int) int {
+	return 2 * workers
 }
 
 func (b *Backfill) indexBlock(

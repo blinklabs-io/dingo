@@ -68,13 +68,11 @@ func indexDecodeTestBlocks(
 // never reaches the second call while the first is in flight.
 func TestIndexBlocksDecodesAheadOfWriter(t *testing.T) {
 	t.Parallel()
-	if runtime.GOMAXPROCS(0) < 4 {
-		t.Skip("needs at least two decode workers")
-	}
 	blocks := decodeTestBlocks(t, 4)
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 	bf.SetDelegatorInactivityEnabled(false)
+	bf.decodeWorkers = 2
 	secondEntered := make(chan struct{})
 	var once sync.Once
 	var firstTimedOut atomic.Bool
@@ -118,8 +116,12 @@ func TestIndexBlocksReportsDecodeErrorAtItsBlock(t *testing.T) {
 	bf.SetDelegatorInactivityEnabled(false)
 	err := indexDecodeTestBlocks(t.Context(), db, bf, blocks)
 	require.ErrorContains(
-		t, err,
-		fmt.Sprintf("indexing block at slot %d: parsing block", blocks[bad].Slot),
+		t,
+		err,
+		fmt.Sprintf(
+			"indexing block at slot %d: parsing block",
+			blocks[bad].Slot,
+		),
 	)
 }
 
@@ -151,4 +153,56 @@ func TestIndexBlocksCancellationStopsDecodeWorkers(t *testing.T) {
 	atReturn := calls.Load()
 	runtime.Gosched()
 	require.Equal(t, atReturn, calls.Load(), "worker ran after return")
+}
+
+// The decode workers stay within decodeWindow blocks of the writer, so a
+// batch never holds more than that many decoded blocks the writer has not
+// reached. Holding block 0's offsets holds the writer at block 0.
+func TestIndexBlocksBoundsDecodeLookahead(t *testing.T) {
+	t.Parallel()
+	const workers = 2
+	window := decodeWindow(workers)
+	blocks := decodeTestBlocks(t, 3*window)
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+	bf.SetDelegatorInactivityEnabled(false)
+	bf.decodeWorkers = workers
+	release := make(chan struct{})
+	// A failed assertion must not leave block 0's worker blocked.
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var calls atomic.Int64
+	bf.computeOffsets = func(
+		slot uint64,
+		hash, blockCbor []byte,
+		block gledger.Block,
+	) (*database.BlockIngestionResult, error) {
+		calls.Add(1)
+		if slot == blocks[0].Slot {
+			<-release
+		}
+		return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor, block,
+		)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- indexDecodeTestBlocks(t.Context(), db, bf, blocks)
+	}()
+	require.Eventually(
+		t, func() bool { return calls.Load() >= int64(window) },
+		10*time.Second, time.Millisecond,
+		"workers did not fill the decode window",
+	)
+	require.Never(
+		t, func() bool { return calls.Load() > int64(window) },
+		300*time.Millisecond, 5*time.Millisecond,
+		"workers decoded past the window while the writer was held",
+	)
+	unblock()
+	require.NoError(t, <-errCh)
+	require.Equal(
+		t, int64(len(blocks)), calls.Load(),
+		"the writer recomputed offsets the workers had computed",
+	)
 }
