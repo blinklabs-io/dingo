@@ -14,6 +14,11 @@
 
 package utxoset
 
+import (
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
+
 // SetAvailableDiskForTest replaces the free-space probe of checkpoint writes.
 func (s *Set) SetAvailableDiskForTest(fn func(path string) (uint64, error)) {
 	s.availableDisk = fn
@@ -38,4 +43,24 @@ func (s *Set) CheckpointWriteBusyForTest() bool {
 		return false
 	}
 	return true
+}
+
+// PutSnapshotRowForTest stores row under tip as the store keeps it, with the
+// row's value as given rather than as encodeSnapshot builds it.
+func (s *Set) PutSnapshotRowForTest(
+	tip ocommon.Point,
+	row badgerutxo.SnapshotRow,
+) error {
+	_, err := s.store.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+		SnapshotOps: []badgerutxo.SnapshotOp{{
+			Kind: badgerutxo.SnapshotPut, Row: row,
+		}},
+	})
+	return err
+}
+
+// IndexSnapshotSlotsForTest runs the capture index backfill of the epoch
+// state load on its own.
+func (s *Set) IndexSnapshotSlotsForTest() error {
+	return s.indexSnapshotSlots()
 }

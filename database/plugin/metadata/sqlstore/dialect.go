@@ -250,10 +250,7 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	"utxo": {
 		"payment_key": true, "staking_key": true, "amount": true,
 	},
-	"applied_transaction": {"block_hash": true},
-	"asset": {
-		"policy_id": true,
-	},
+	"applied_transaction":  {"block_hash": true},
 	"pool_opcert_sequence": {"pool_key_hash": true},
 	"asset_mint_burn": {
 		"policy_id": true, "name": true, "fingerprint": true,

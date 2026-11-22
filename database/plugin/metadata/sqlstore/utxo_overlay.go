@@ -38,8 +38,10 @@ import (
 //   - Row ids are assigned at creation from sqlite_sequence, in the order the
 //     per-row path would have inserted the rows, including outputs that are
 //     spent again inside the batch and never written. Surviving rows, their
-//     asset rows and both sqlite_sequence entries therefore end exactly as
-//     the per-row path leaves them.
+//     holdings and the utxo sqlite_sequence entry therefore end exactly as
+//     the per-row path leaves them. Asset identities are not reserved:
+//     they are resolved when the holdings flush, and an elided output
+//     writes neither a holding nor an identity.
 //   - Nothing in utxo, utxo_pointer or reward_live_stake is read while the
 //     overlay holds unwritten state: the read barrier (barrierQueryer) writes
 //     it first. Asset and utxo_address rows stay queued until FlushBatch, as
@@ -66,13 +68,6 @@ const (
 	overlayAppliedColumns  = 10
 )
 
-var assetWithIDShape = rowShape{
-	table: "asset",
-	columns: []string{
-		"id", "name", "policy_id", "fingerprint", "utxo_id", "amount",
-	},
-}
-
 type overlayKey struct {
 	txID string
 	idx  uint32
@@ -84,9 +79,8 @@ func newOverlayKey(txID []byte, idx uint32) overlayKey {
 
 // overlayOutput is an output created inside the batch.
 type overlayOutput struct {
-	model     models.Utxo
-	id        int64
-	assetBase int64
+	model models.Utxo
+	id    int64
 	// spentBy is the consuming transaction's hash, nil while live;
 	// spentByID is that transaction's row id.
 	spentBy   []byte
@@ -190,14 +184,10 @@ type utxoOverlay struct {
 	// txChildren names the tables with a foreign key to "transaction".
 	txChildren []string
 
-	utxoSeq      int64
-	utxoSeqRow   bool
-	utxoWritten  int64
-	assetSeq     int64
-	assetSeqRow  bool
-	assetWritten int64
-	// skipAssets leaves asset rows unwritten and their ids unreserved, so
-	// the asset sequence is not restored.
+	utxoSeq     int64
+	utxoSeqRow  bool
+	utxoWritten int64
+	// skipAssets leaves asset holding rows unwritten.
 	skipAssets bool
 
 	stats overlayStats
@@ -301,13 +291,6 @@ func (s *Store) EnableBatchUtxoOverlay(
 				return err
 			}
 			overlay.utxoWritten = overlay.utxoSeq
-			overlay.assetSeq, overlay.assetSeqRow, err = readSQLiteSequence(
-				ctx, db, "asset",
-			)
-			if err != nil {
-				return err
-			}
-			overlay.assetWritten = overlay.assetSeq
 			if err := db.QueryRowContext(
 				ctx, overlayTransactionMaxIDQuery,
 			).Scan(&overlay.txSeq); err != nil {
@@ -799,14 +782,10 @@ func (o *utxoOverlay) create(
 		}
 		o.utxoSeq++
 		out := &overlayOutput{
-			model:     model,
-			id:        o.utxoSeq,
-			assetBase: o.assetSeq + 1,
+			model: model,
+			id:    o.utxoSeq,
 		}
 		out.model.ID = uint(out.id)
-		if !o.skipAssets {
-			o.assetSeq += int64(len(model.Assets))
-		}
 		o.created[key] = out
 		o.order = append(o.order, out)
 		o.unwritten++
@@ -1031,7 +1010,7 @@ func (s *Store) writeOverlay(
 			}
 			addresses.add(utxoAddressShape, out.id, address)
 		}
-		if err := addresses.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+		if err := addresses.flush(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 			return err
 		}
 	}
@@ -1065,7 +1044,7 @@ func (s *Store) writeOverlay(
 			continue
 		}
 		if !o.skipAssets {
-			queueOverlayRelations(&accumulator.rows, out, &o.assetWritten)
+			queueOverlayRelations(&accumulator.rows, out)
 		}
 	}
 	return nil
@@ -1236,35 +1215,23 @@ DELETE FROM utxo WHERE id IN (` +
 	return nil
 }
 
-// queueOverlayRelations queues out's asset rows. Asset ids are the ones
-// reserved at creation, so an elided output's assets leave the same gap in
-// the id sequence that inserting and deleting them would. Retained API
-// overlays write address rows in writeOverlay; core overlays do not index
-// UTxO addresses.
+// queueOverlayRelations queues out's holdings. An output the batch created
+// and spent again is never queued, so it leaves neither a holding nor an
+// identity. Retained API overlays write address rows in writeOverlay; core
+// overlays do not index UTxO addresses.
 func queueOverlayRelations(
 	rows *rowBatch,
 	out *overlayOutput,
-	assetWritten *int64,
 ) {
 	for i := range out.model.Assets {
-		asset := &out.model.Assets[i]
-		id := out.assetBase + int64(i)
-		rows.add(
-			assetWithIDShape,
-			id,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			sql.NullInt64{Int64: out.id, Valid: true},
-			sql.NullString{String: decimalUint64(asset.Amount), Valid: true},
-		)
-		*assetWritten = max(*assetWritten, id)
+		queueAssetHolding(rows, out.id, &out.model.Assets[i])
 	}
 }
 
-// restoreOverlaySequences raises sqlite_sequence to the last id the batch
-// reserved when that id belongs to a row the batch never wrote. Inserting
-// with an explicit id raises it to the highest written id on its own.
+// restoreOverlaySequences raises the utxo sqlite_sequence entry to the last id
+// the batch reserved when that id belongs to a row the batch never wrote.
+// Inserting with an explicit id raises it to the highest written id on its
+// own.
 func restoreOverlaySequences(
 	ctx context.Context,
 	db queryer,
@@ -1277,16 +1244,8 @@ func restoreOverlaySequences(
 	}
 	// Only a reused identity reserves an id it does not write, and the
 	// import that stored that identity created the sequence row.
-	if err := restoreSQLiteSequence(
-		ctx, db, "transaction", o.txSeq, o.txWritten, true,
-	); err != nil {
-		return err
-	}
-	if o.skipAssets {
-		return nil
-	}
 	return restoreSQLiteSequence(
-		ctx, db, "asset", o.assetSeq, o.assetWritten, o.assetSeqRow,
+		ctx, db, "transaction", o.txSeq, o.txWritten, true,
 	)
 }
 
@@ -1338,7 +1297,7 @@ INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`,
 // so it is retried there too.
 var overlayConflictPattern = regexp.MustCompile(
 	`UNIQUE constraint failed: ` +
-		`(utxo|asset|utxo_pointer|reward_live_stake|transaction|applied_transaction)\.` +
+		`(utxo|utxo_pointer|reward_live_stake|transaction|applied_transaction)\.` +
 		`|FOREIGN KEY constraint failed`,
 )
 
@@ -1443,7 +1402,7 @@ func (s *Store) flushOverlay(
 		return err
 	}
 	if err := accumulator.rows.flush(
-		ctx, db, s.dialect.ParameterLimit(),
+		ctx, db, s, s.dialect.ParameterLimit(),
 	); err != nil {
 		return overlayWriteError("flush batch rows", err)
 	}

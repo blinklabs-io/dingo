@@ -168,12 +168,9 @@ func TestReviewAssetSupplyAndLiveRows(t *testing.T) {
 			deleted,
 		)
 		require.NoError(t, err)
-		_, err = db.Exec(
-			"INSERT INTO asset(utxo_id,policy_id,name,amount) VALUES (?,?,x'41','18446744073709551615')",
-			i+1,
-			policy,
+		testutil.InsertAssetHolding(
+			t, db, int64(i+1), policy, []byte("A"), "18446744073709551615",
 		)
-		require.NoError(t, err)
 	}
 	cs := newToolSession(t, db, 100)
 	for _, name := range []string{"", "A"} {
@@ -501,10 +498,12 @@ func TestReviewPolicyOnlyPagination(t *testing.T) {
 	db := newSchemaDB(t)
 	_, err := db.Exec(
 		`INSERT INTO "transaction"(id,hash) VALUES(1,zeroblob(32));
- INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);
- INSERT INTO asset(id,utxo_id,policy_id,name,fingerprint,amount) VALUES(1,1,zeroblob(28),x'41',x'aa','1'),(2,1,zeroblob(28),x'42',x'bb','2');`,
+ INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);`,
 	)
 	require.NoError(t, err)
+	policy := make([]byte, 28)
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("A"), "1")
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("B"), "2")
 	cs := newToolSession(t, db, 100)
 	page := func(offset int) string {
 		return callTool(
@@ -518,7 +517,13 @@ func TestReviewPolicyOnlyPagination(t *testing.T) {
 	first, second := page(0), page(1)
 	require.Contains(t, first, "| B |")
 	require.Contains(t, second, "| A |")
-	_, err = db.Exec(`CREATE INDEX reverse_asset_order ON asset(policy_id,id ASC)`)
+	_, err = db.Exec(
+		`CREATE INDEX reverse_asset_order ON asset_holding(utxo_id, asset_id DESC)`,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		`CREATE INDEX reverse_identity_order ON asset_identity(policy_id, id ASC)`,
+	)
 	require.NoError(t, err)
 	require.Equal(t, first, page(0))
 	require.Equal(t, second, page(1))

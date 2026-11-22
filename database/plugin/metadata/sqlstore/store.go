@@ -616,12 +616,14 @@ func (s *Store) ReadPoolStats() sql.DBStats {
 
 // Transaction begins a write transaction bound to ctx: every statement a
 // caller issues against the returned Txn (via a domain method's txn
-// parameter) runs with this ctx, and per database/sql's own BeginTx
+// parameter) carries this ctx's values, and per database/sql's own BeginTx
 // contract, canceling it rolls the transaction back rather than leaving it
-// to time out on its own. Begin failures are retained on the returned
-// transaction because the historical MetadataStore contract cannot return
-// an error from this method. A nil ctx is treated as context.Background(),
-// matching prior behavior for any caller that does not supply one.
+// to time out on its own. Cancellation does not interrupt a statement
+// already running; the store call that follows fails with ctx.Err(). Begin
+// failures are retained on the returned transaction because the historical
+// MetadataStore contract cannot return an error from this method. A nil ctx
+// is treated as context.Background(), matching prior behavior for any caller
+// that does not supply one.
 func (s *Store) Transaction(ctx context.Context) types.Txn {
 	return s.transaction(ctx, false)
 }
@@ -1020,7 +1022,9 @@ func (s *Store) closeCheckpointAdmission() {
 // ctx its owning Transaction/ReadTransaction call was given, so every
 // statement issued against it -- through whichever domain method's txn
 // parameter it arrived through -- is bound to that same caller-supplied
-// ctx without that method needing a ctx parameter of its own.
+// ctx without that method needing a ctx parameter of its own. A write
+// transaction's statements get that ctx without its cancellation (see below);
+// a call made after cancellation returns ctx.Err().
 func (s *Store) dbFromTxn(
 	txn types.Txn,
 ) (queryer, context.Context, error) {
@@ -1052,6 +1056,20 @@ func (s *Store) dbFromTxn(
 		db = barrierQueryer{queryer: db, store: s, accumulator: acc}
 	}
 	ctx := sqlTransaction.ctx
+	if !sqlTransaction.readOnly && ctx != nil {
+		// Statements cannot observe cancellation, so the store call checks it.
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		// A driver may watch a cancellable context for every statement:
+		// modernc.org/sqlite starts a goroutine and installs a progress
+		// handler per statement, which a write transaction issuing tens of
+		// thousands of short statements pays for each time. The transaction
+		// was begun with ctx, so cancelling it still rolls the transaction
+		// back; a running statement finishes instead of being interrupted,
+		// and the next one fails on the closed transaction.
+		ctx = context.WithoutCancel(ctx)
+	}
 	if s.liveUtxo != nil {
 		ctx = context.WithValue(ctx, liveUtxoTxnKey{}, txn)
 	}
@@ -1270,7 +1288,8 @@ type sqlTxn struct {
 	// ctx is the context.Context this transaction was begun with (via
 	// Transaction/ReadTransaction). dbFromTxn hands it back alongside the
 	// queryer so every statement issued against this txn -- through
-	// whichever domain method's txn parameter -- is bound to it.
+	// whichever domain method's txn parameter -- is bound to it, without
+	// its cancellation for a write transaction.
 	ctx      context.Context
 	release  func()
 	beginErr error

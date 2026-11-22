@@ -7,6 +7,39 @@ domain packages do not self-register during package initialization. The host
 erases types only at its registry boundary while typed factories retain their
 provider configuration, service, and dependency bundles.
 
+A capability is a namespaced, versioned contract string, `<name>/v<N>` (for
+example `storage.blob/v0`, `consensus/v0`). The name is dot-separated lowercase
+segments (the segments `provider` and `config` are reserved); `N` is a
+non-negative integer without leading zeros. `plugin.ParseCapability` is the
+single parser. A host speaks one contract version per name: `NewHost` speaks
+the built-in set (`plugin.AllCapabilities`) and `Host.Declare` adds others.
+`Register` and `ValidateSelection` reject a capability the host does not speak,
+and when the name is spoken at another version the error names both versions.
+`Declare` also rejects a name nested under or containing a spoken name
+(`example` and `example.widget`), because the two would share a `plugins`
+subtree and an environment prefix.
+No capability list is closed in code, so a new plugin kind needs a `Declare`
+call and a provider registration, not a host edit.
+
+Configuration and environment key on the capability name, never the version.
+`plugin.EnvironmentPrefix` is `DINGO_PLUGINS_` plus the upper-cased name with
+dots as underscores, so contract version changes do not rename variables. In
+YAML the name's segments nest under `plugins`, as `storage.blob` already does:
+`example.widget` is `plugins.example.widget.{provider,config}`. The built-in
+selections keep their fixed fields; every other selection is collected into
+`PluginsConfig.Extra` by name. A mapping with a `provider` or `config` key is a
+selection, any other mapping is a namespace, and decoding stays strict: an
+unknown key, a duplicate key, a malformed name, a name nested with a built-in
+one (`consensus.foo`, `api`), or `storage.immutable` (which has no selection)
+is a load error reported at its source line. Aliases and merge keys resolve
+against the whole document. `LoadConfig` applies the `DINGO_PLUGINS_<NAME>_*` overlay to
+each extra selection present in the loaded YAML, and CLI flags still win. The
+precedence is CLI > environment > YAML > defaults. `Config.WithPluginSelection`
+stores a selection for a non-built-in capability by name. `Node.New` fails when
+a configured selection names a capability its host does not declare, or one
+passed to `WithPluginSelection` is malformed, rather than ignoring it. Out-of-tree providers must still be registered explicitly;
+there is no `init()` registration.
+
 `Node.New` validates plugin selections and node configuration before registering
 metrics or starting EventBus workers. Configuration failure leaves the caller
 metrics registry unchanged, so corrected construction can reuse it.
@@ -231,7 +264,14 @@ connection; canceling it mid-transaction triggers `database/sql`'s documented
 auto-rollback of the underlying `*sql.Tx`, which is asynchronous to the
 `cancel()` call and (for `database/sql`'s pooling) discards rather than idles
 the aborted connection. `database/plugin/metadata/sqlstore/live_stake_test.go`
-covers both.
+covers both. A write transaction's statements receive `ctx` through
+`context.WithoutCancel`: a driver that watches a cancellable context per
+statement (`modernc.org/sqlite` starts a goroutine and installs a progress
+handler for each one) would otherwise pay that on every statement of a
+transaction issuing thousands. Cancellation then does not interrupt a running
+write statement; `dbFromTxn` returns `ctx.Err()` to the next store call, and the
+rollback above ends the transaction. Read transactions keep the cancellable
+`ctx`, so cancellation interrupts their statements.
 
 Two gaps in that propagation are deliberate:
 - The nil-`txn` "autocommit" path (`dbFromTxn(nil)`/`readDBFromTxn(nil)`, used
@@ -2010,7 +2050,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
-├── sdk/                 # Plugin SDK, a separate Go module
+├── sdk/                 # Plugin SDK, a separate Go module (chain role contracts, Cardano roles)
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -3243,7 +3283,11 @@ wait for the certifying block, so a rollback that discards the pending
 closure removes outputs every consumer saw added. A failed update stops
 further updates. The node reconciles the set after database recovery and
 before the ledger starts, both at startup and after a live restore or
-truncate: a set behind the ledger is resumed by
+truncate. That reconcile also removes the zero-coin Byron genesis outputs a
+database seeded by an earlier release holds, from the metadata store before any
+row moves into the set and from the set itself after it is reconciled (see
+DATABASE.md, "Zero-coin Byron genesis outputs"). A set behind the ledger is
+resumed by
 `LedgerState.ResumeUtxoSetFrom`, which rolls the ledger back to the set's
 tip so the blocks after it are applied again, or rebuilt from the metadata
 store when that rollback is not possible. With the set as the only copy, the
@@ -3879,7 +3923,11 @@ while the abandoned blocks are stored and otherwise to the newest tip
 checkpoint on the chain. A checkpoint left by the former history backfill
 seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
 from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
-the ledger resolve and check a closure through one loader.
+the ledger resolve and check a closure through one loader. `IndexBlocks`
+decodes a batch's blocks and computes their transaction offsets on worker
+goroutines, which stay a bounded number of blocks ahead of the writer; the
+writer takes each block in order, so a decode error fails the batch at its
+block.
 
 The IndexerDB keeps the network's script-locked lovelace as a running aggregate
 (`script_locked_supply`, one cumulative-total row per slot whose commit changed
@@ -16810,8 +16858,10 @@ before any hard-fork translation, as the live rollover does.
 
 API-mode backfill commits a SQL transaction after the configured block window
 (200 blocks by default) or when its estimated payload reaches 32 MiB. The
-estimate combines encoded block bytes and queued metadata-row bytes. The
-cumulative threshold also controls row flushes. Rows are drained while they
+estimate combines encoded block bytes and queued metadata-row bytes. Between
+transactions, queued rows are written into the open SQL transaction only when
+the queue itself reaches 5,000 rows or 32 MiB; the transaction estimate decides
+only the commit. Rows are drained while they
 are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
@@ -17902,7 +17952,10 @@ the `pool_retirement` epoch index and rank certificates only for those pools, th
 full history of each candidate, so a page does not read every registration and retirement ever recorded
 when few pools qualify.
 
-`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
+retained holding (live, or spent and not yet pruned) of the asset; neither an
+`asset_identity` row with no holdings nor a mint/burn record alone counts. The response's CIP-14 fingerprint is computed from the policy id and
+name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
 `SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
@@ -18982,6 +19035,20 @@ for this: it reflects only a pool's *current* (possibly re-registered)
 parameters, which can be well after its true first-active epoch and would
 unsafely skip epochs where the pool genuinely had history.
 
+The skip map and a single empty `/pool_history` answer are not proof that Koios
+lacks a pool. Before the in-process observer compares an epoch, it re-requests
+`/pool_history` for each pool Dingo has in the epoch's stake basis that the
+cached reference lacks, bypassing the skip, and caches any row Koios returns. A
+pool still empty is checked against its own `/pool_updates` certificates
+(`GetPoolRegisteredAtEpoch`): unregistered, not yet effective, or retired more
+than one epoch before the epoch stays `pool_only_dingo`, since the
+`/pool_history` row for an epoch is the stake snapshot taken one epoch earlier
+and a pool retiring at e still has rows at e and e+1; registered with
+persistently empty history
+leaves the reference incomplete, so the epoch is recorded `ERROR` and retried
+without calling `FatalFunc`. The standalone `check` command reads only the cache
+and does not do this reconciliation.
+
 `check` and the default `run` command return a non-nil error (surfaced as a
 non-zero process exit) whenever any epoch comes back `FAIL` or `ERROR`. This
 is based on the *persisted* `check_epoch_status` for the run's scope
@@ -19121,23 +19188,52 @@ second sync:
   - **Strict mode** (`ObserverConfig.Strict`, the default via
     `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
-    and stops processing the rest of the current batch. Every Koios/tool
-    error (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`), with two
-    exceptions. A result whose significant mismatches are all
+    and stops processing the rest of the current batch. Every tool error
+    (`reportError`) and every non-pass parity result is fatal-eligible,
+    from either queue (`processEpoch` and `processAccountEpoch`), except
+    for the cases below. A result whose significant mismatches are all
     `reference_lag` (`referenceLagOnly`) means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
-    never stops either queue. A fetch that fails on Koios's daily tier quota
+    never stops either queue. A failure on Koios's daily tier quota
     (`ErrKoiosQuotaExceeded`, which wraps `ErrKoiosPermanent`) says nothing
-    about the chain and clears on Koios's daily reset, so `reportError`
-    records the epoch as ERROR without calling `FatalFunc`, and the queue
-    retries it every `ErrorRetryDelay` until the quota resets. If that ERROR
-    row cannot be persisted, the failure stays fatal. That covers the
+    about the chain and clears on Koios's daily reset, so the epoch is
+    recorded as ERROR without calling `FatalFunc` and the queue retries it
+    every `ErrorRetryDelay` until the quota resets. That covers the
     `/tx_info` sample too: `fetchTransactionsIfNeeded` returns a quota error
     rather than swallowing it, since an uncached sampled transaction would
-    otherwise be checked as a fatal `dingo_db_missing`. The other ERROR-severity
-    categories stay fatal: `dingo_db_missing` past the grace window,
+    otherwise be checked as a fatal `dingo_db_missing`. Any other failed
+    reference fetch (`reportFetchError`) is classified by provenance, since
+    the fetch both requests Koios and reads and writes the local cache. `get`
+    and `post` mark every error they return with `errKoiosRequest`, and an
+    exhausted 408 budget also with `errKoiosUnavailable`. A Koios request
+    that failed because Koios is unavailable (`koiosUnavailable`: a
+    transport error, timeout or 5xx that outlasted the client's own retries,
+    or an exhausted 408 budget) is not fatal-eligible at first: an
+    unreachable reference says nothing about whether Dingo's state agrees
+    with it, so the error is persisted and the epoch is retried, but only
+    until the outage outlasts `UnavailableRetryLimit`
+    (`koiosParity.unavailableRetryLimit`). Each check (one epoch on one queue)
+    counts its consecutive unavailable attempts in memory, and any attempt
+    that gets an answer from Koios, reference lag and quota exhaustion
+    included, resets the count. The attempt that reaches the limit is
+    fatal-eligible, with an error naming the attempt count and the elapsed
+    time, so a lasting outage cannot leave strict mode checking nothing while
+    blocks apply. In non-strict mode it is logged at ERROR and the check stays
+    queued for retry, like every other non-strict failure. `runQueue` re-runs
+    a failed check on the first `ErrorRetryDelay` tick at or after its due
+    time, which is one `ErrorRetryDelay` after the attempt ended, so
+    consecutive attempts start at least two ticks (ten minutes by default)
+    apart and the default limit of 144 spans at least about 24 hours; an
+    attempt that waits out the client's own retries (up to an hour for an
+    exhausted 408 budget) stretches it. The count is not persisted, so a
+    restart starts it again. A local cache or database error during the
+    fetch, any other `ErrKoiosPermanent` failure (a 401, 403, 400, 404 or 422
+    status, an oversized response) and a response that fails to decode stay
+    fatal-eligible. A failure to persist the retry (`RecordObserverError`)
+    makes any reported error fatal-eligible, quota and unavailability
+    included, because a non-fatal failure relies on that retry surviving a
+    restart. The remaining ERROR-severity categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
     the reference set is unusable, and `reward_type_unmodeled` means a Koios
     reward type was never validated, which strict mode exists to surface.
@@ -19180,7 +19276,10 @@ second sync:
     per pool, so it is spaced per epoch by
     `ObserverConfig.PoolHistoryRefetchDelay` (one hour by default). The spacing
     is held in memory, so a restart allows one immediate refetch. A refetch
-    failure goes through `reportError` like any other fetch failure.
+    failure goes through `reportFetchError` like any other fetch failure, so
+    it is classified by provenance: an unavailable Koios is retried without
+    firing `FatalFunc` until `UnavailableRetryLimit` consecutive attempts
+    fail, and a local cache error stays fatal in strict mode.
   - **Decoupled aggregate/account queues.** Two independent background
     goroutines, each with their own pending set and wake channel, drain
     `Observer.pending`/`wake` (`run`, always started) and
@@ -19253,8 +19352,8 @@ second sync:
     names the phases its `Status` is a verdict on, so an aggregate-only `PASS`
     — returned for the same epoch the account queue may still be checking, or
     may already have failed — cannot be read as the epoch's own answer. The
-    observer's `epoch validated` log line and `reportError`'s synthesized
-    `ERROR` carry that set too.
+    observer's `epoch validated` log line and the `ERROR` that `reportError`
+    and `reportFetchError` synthesize carry that set too.
   - **Transaction sample** (`internal/koiosparity/tx_parity.go`). Epoch-level
     totals cannot see a stored transaction whose inputs or outputs are wrong
     unless the error moves a total. A source that implements
@@ -19289,8 +19388,8 @@ second sync:
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
     the single choke point every `OnResult` call already goes through
-    (`processEpoch`'s and `processAccountEpoch`'s success paths, and
-    `reportError`'s synthesized `ERROR` path) — also calls
+    (`processEpoch`'s and `processAccountEpoch`'s success paths, and the
+    `ERROR` path `reportError` and `reportFetchError` synthesize) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
     `dingo_koiosparity_epoch_result_total` (by queue/status),
     `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring
@@ -21177,6 +21276,38 @@ consumer prints `location` without feeding it back into an operation.
 `GetDatabaseInfo` reads the persisted block inventory rather than scanning
 retained block contents.
 
+**EventService** (`bark/event.go`, `bark/event_adapter.go`) mounts bark's
+`EventService` when `BarkConfig.EventBus` is set, which `node.go`'s `Run()` does
+only when `barkEventEnabled` is true. Bark holds no credentials, so the bind
+address is the access control: enabling it defaults the listener to loopback,
+as for the lifecycle services. `eventAdapter` subscribes to the internal
+EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
+`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`) and
+converts each to a registry event with a typed payload; a rollback travelling on
+`chain.update` stays on `chain.update` and is reported in the payload's
+`rollback` field. A subscription filter selects by registered event type or
+category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
+node's `origin_node_id` is `barkEventNodeId`; unset, it is a random identifier
+drawn once per run, never the host name, because every subscriber sees it. The bus
+handlers only enqueue onto a bounded
+channel; one goroutine converts and appends to a ring buffer of
+`barkEventBufferSize` events that carries the delivery sequence. Subscribers
+read the ring at their own pace, so a slow remote client cannot delay any
+internal subscriber: `Subscribe` detaches a client that falls more than the ring
+behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
+stops acknowledging a half-ring window of delivered events is closed after a
+timeout; events a filter rejects do not count toward that window. Resuming with
+`last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
+refused unless `barkEventPublishEnabled` is set, and an event with no
+`origin_node_id` or this node's own is rejected; an accepted event goes to the
+node's remote subscribers and is not injected into the internal EventBus, which
+only accepts its own typed structs. Concurrent-stream limits
+(`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
+operator opt-ins; zero or unset means unlimited, and `PublishBatch` has no
+fixed batch cap.
+Sync state, protocol parameter and database operation events are not in the
+registry because no internal event carries that data.
+
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
 `Run()` does only when `barkLifecycleEnabled` is true. Bark owns transport and request validation (a negative `graceful_timeout` is
@@ -21580,6 +21711,30 @@ Package isolation is enforced by direction, ownership, and composition:
   gouroboros, so every other contract stays chain-neutral. The module is
   released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
   contract versioned `v0` and experimental, until a 1.0 is declared.
+- `sdk/chain/` holds the chain-neutral role contracts: `Ledger`, `Consensus`,
+  `Network` and the optional `Mempool`, plus `ChainID`, `Point`, `Tip` and the
+  `Payload` that carries a block, header or transaction between roles. A
+  payload holds a small decoded view, optionally the encoded bytes, and
+  optionally the chain's own decoded value. Two built-in roles pass the decoded
+  value through `chain.NativeOf` without encoding; an external role reads
+  `Bytes`, which encodes only then and fails with `ErrNoEncoding` rather than
+  return empty bytes. Each role follows an existing seam: the ledger handed to
+  `ChainManager.SetLedger` and its `ValidateTx`, the forger's `LeaderChecker`,
+  `BlockValidator` and `BlockBroadcaster`, chain selection's tip comparison,
+  and the mempool `AddTransaction` and `RemoveTransaction`. `Ledger.ValidateTx`
+  validates against the applied state alone; the overlay validation the
+  mempool and block builder call, which adds the effects of earlier
+  transactions in the same block, takes the node module's `utxoref` types and
+  is not part of the role.
+- `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
+  `NetworkRole`, `MempoolRole`) over small source interfaces that the node's
+  own types already satisfy: `LedgerSource` and `ForgedBlockValidator` by
+  `ledger.LedgerState`, `LeaderSource` by the leader schedule and the forger's
+  `LeaderChecker`, `NetworkSink` by the forger's `BlockBroadcaster`, and
+  `MempoolSource` by `mempool.Mempool`. The node module does not import the
+  sdk, so `internal/architecture` compiles those pairings in a temporary
+  workspace holding both modules. Nothing in the node calls through these roles
+  yet, so no existing path changes.
 
 ### Import Boundary Check
 
@@ -24046,11 +24201,19 @@ read-only transaction. Pass 2 runs a bounded batch of pools at a time
 (`rewardPrecomputeChunkPools`, default 100), cut short at the pool that brings
 the batch to `rewardPrecomputeChunkDelegators` (5000) delegators and never
 fewer than one pool, so a run of large pools cannot hold the single write
-connection for tens of seconds. Each batch runs in its own write
+connection for tens of seconds. Each batch runs in its own read-write
 transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
 still matches, no rollback generation changed since Pass 1 ran, and no epoch
 boundary has claimed the round (`rewardPrecomputeFence`, bumped under
-`rewardPrecomputeWriteMu` before the boundary transaction opens). Each chunk
+`rewardPrecomputeWriteMu` before the boundary transaction opens). Once
+`reward-inputs` and `reward-outputs` are both drained, a batch writes only
+changes staged for the live UTxO set, so it runs in `LedgerDB.BeginStaged`: a
+transaction whose metadata view is a read-pool transaction, which takes no
+write connection and does not queue block commits behind it. Otherwise the
+batch writes metadata rows and holds the write connection until it commits.
+Rollback and boundary ordering does not depend on the write connection in
+either case: both take `rewardPrecomputeWriteMu`, which the batch holds from
+its guard through commit. Each chunk
 also sets the CIP-0163 `Guarded` flag from witness history at the snapshot's
 captured slot, and records each output's `Spendable` flag from account
 registration when it runs.
@@ -24865,9 +25028,8 @@ not incremented in place from dingo's side.
 `--ledger-apply-row-batching-enabled`; default off; honoured by serve mode and
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
-batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset rows to multi-row inserts, reuses one prepared transaction-row
-upsert, and coalesces each block's live-stake deltas, which
+batches whether or not it is set. In core mode the accumulator reuses one
+prepared transaction-row upsert and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next
 validated block runs, so stored state is identical to the per-row path. A reward

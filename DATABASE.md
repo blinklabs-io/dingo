@@ -371,7 +371,7 @@ row by primary key. A MySQL upgrade while a deferred rebuild is pending still
 builds the index, because MySQL has no conditional index statement.
 
 `idx_utxo_deleted_payment_script` was a full index that also led with
-`deleted_slot`; until migration 74 drops it, the SQLite planner may choose it
+`deleted_slot`; until migration 75 drops it, the SQLite planner may choose it
 instead of the partial index for a spent-row range.
 
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
@@ -500,7 +500,8 @@ anchor, as the pool detail endpoint does. Account address totals sum lovelace
 without a width bound. Epoch stakes, pool history and delegators, and account
 stake history read the reward snapshot tables; the snapshot labelled E is the
 distribution active in epoch E+1. Account MIRs, asset balances and address
-totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`. The
+totals read `move_instantaneous_rewards_reward`, `asset_holding`,
+`asset_identity` and `utxo`. The
 single-DRep detail read uses one context-bound read transaction after its
 epoch-boundary wait, so cancellation covers every metadata query and all fields
 come from one database view. The vote endpoints list every cast, not only each
@@ -926,6 +927,80 @@ blockfrost/mesh API adapters, only their indexes back no predicate.
 `DROP INDEX IF EXISTS` is natively idempotent on SQLite and PostgreSQL replay,
 so only MySQL's translated `DROP INDEX <name> ON <table>` form reaches the
 runner's existing, already-generic "already applied" guard.
+
+Migration `v74` (`asset-identity-holdings`, integer version 74) replaces the
+per-output `asset` table with `asset_identity` (one row per distinct
+`(policy_id, name)`) and `asset_holding` (one row per output and asset,
+`WITHOUT ROWID` on SQLite; the clause is SQLite-only and is stripped for
+PostgreSQL and MySQL). The expand phase creates both tables and
+`idx_asset_holding_asset_id`. A resumable backfill copies the legacy rows in
+`asset.id` ranges of 50,000: it inserts the range's distinct identities, then
+the holdings joined to `utxo` and `asset_identity`, and commits both with its
+cursor (`last_id`, `scanned`, `copied`, `orphans`, `merged`, `coalesced`, which
+the migration log prints after each batch). `amount` is copied verbatim as
+text, including `NULL` and text that is not a canonical decimal. The final
+batch fails the migration unless the cursor accounts for every legacy row and
+`asset_holding` holds exactly the rows copied, so the contract phase, which
+runs `DROP TABLE asset` and with it `idx_asset_unique`, `idx_asset_policy_id`
+and `idx_asset_utxo_id`, never drops a source that was not fully copied.
+
+- A legacy row with a `NULL` `policy_id` or `name` is stored with the empty
+  value and counted in `coalesced`. The API renders a `NULL` and an empty name
+  identically, so responses do not change, but a MemPack-imported output whose
+  asset name was stored as `NULL` now matches an empty-name lookup.
+- A legacy row whose `utxo_id` is `NULL` or names no `utxo` row is dropped and
+  counted in `orphans`: the new table's `NOT NULL` constraint would refuse a
+  `NULL` `utxo_id`, and its foreign key a dangling one.
+- Rows that land on one `(utxo, policy, name)` (a `NULL` name and an empty name
+  of one asset on one output) merge when their amount text is identical, and
+  fail the migration when it differs.
+- The migration builds `idx_asset_holding_asset_id` itself and never drops it.
+  A pending `metadata_indexes_pending` marker left by an interrupted bulk load
+  does not change that; `idx_asset_policy_id` leaves the manifest because its
+  table is dropped.
+
+Measured on a Preview SQLite database bootstrapped from Mithril (epoch 1476,
+1,472,619 legacy asset rows):
+
+| Measure | `asset` | identities + holdings |
+| --- | ---: | ---: |
+| Asset tables and indexes | 77,415 pages (317 MB) | 24,984 pages (102 MB) |
+| Database pages in use | 387,299 | 334,867 |
+| WAL frames per block, 3 runs of about 2,000 blocks | 17.59, 17.11, 18.48 | 15.66, 16.74, 17.79 |
+
+The migration copied every row into 487,298 identities with no orphans or
+merges in about 10 seconds, with a peak WAL of 62 MB. The dropped table's pages
+stay on the freelist until `VACUUM`, so the file does not shrink. Preview
+outputs carry few assets per block, so the WAL difference there is within
+run-to-run spread; the reduction grows with assets per output. Query plans for
+the asset reads show no full scan of either table.
+
+Writers create identities on demand: a per-row insert writes the holding when
+the identity exists and otherwise inserts the identity (`ON CONFLICT DO
+NOTHING`) and retries once; a batched flush selects the distinct assets,
+inserts the missing identities in `(policy_id, name)` order, selects them again
+(locking, on PostgreSQL and MySQL, so a concurrent writer's committed row is
+seen), then inserts the holdings in `(utxo_id, asset_id)` order. No identity id
+is cached between statements, since a rolled-back transaction would leave a
+cached id naming a row that was never committed. Concurrent writers that create
+the same identity converge on PostgreSQL; on MySQL InnoDB aborts one of them
+with a deadlock that only a retry of the whole transaction recovers from. The
+node runs one metadata writer.
+
+Every hot asset read resolves the asset through the `asset_identity` unique
+key and reads its holdings through `idx_asset_holding_asset_id` or the
+`(utxo_id, asset_id)` primary key; `TestAssetReadsNeverScanAssetTables` fails
+on a plan step that scans either table. Trusted-batch apply, the consumed-UTxO
+prune and rollback never use `idx_asset_holding_asset_id`, which is what lets a
+Mithril stream catch-up drop it (`TestAssetWritePathsNeverUseTheAssetIdIndex`).
+`TestAssetHoldingInsertsDirtyFewPages` compares WAL frames per commit against
+a table shaped like the legacy `asset` table over the same rows.
+
+The change is forward-only and breaks external SQL that reads `asset`: the
+`asset` table, its `fingerprint` and `id` columns and its indexes no longer
+exist. Join `asset_holding` to `asset_identity` instead, and compute a
+fingerprint with CIP-14 (bech32 of the blake2b-160 hash of the policy id and
+name).
 
 Migration `v22` (`governance-vote-history`, integer version 22) creates
 `governance_vote_history`, the same rollback-journal pattern `v6`
@@ -2772,7 +2847,9 @@ UTxO changes. Their tags and markers are declared in
 |---|---|
 | `n` + slot (8 bytes, big-endian) + block hash | a `block_nonce` row: checkpoint flag (1 byte), then the nonce |
 | `e` + epoch (8 bytes, big-endian) | an `epoch` row: start slot and era (8 bytes each, big-endian), then the row's CBOR |
-| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row's CBOR |
+| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row: a `0x00` mark, its captured slot (8 bytes, big-endian), then the row's CBOR. A row written before the slot was kept holds the CBOR alone, which never starts with `0x00` |
+| `$` + captured slot (8 bytes, big-endian) + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | the capture index of a `pool_stake_snapshot` row; empty value. It reads the rows captured in a slot range without reading the others |
+| `msnapslot` | set once every `s` row carries its captured slot and has its `$` entry. Without it a read of a slot range reads every snapshot row, and the ledger state load at the next start gives each row its slot and entry, in chunks that a restart resumes, then sets it |
 | `f` + epoch (8 bytes, big-endian) | an `epoch_summary` row's CBOR, without its `id` |
 | `mera` | the last mid-epoch era switch: epoch, slot, source era and target era (8 bytes each, big-endian) |
 | `t` + slot (8 bytes, big-endian) | a `network_state` row: treasury and reserves (8 bytes each, big-endian) |
@@ -2848,6 +2925,10 @@ UTxO changes. Their tags and markers are declared in
 | `mrbpend` | the point a rollback in more than one transaction is restoring, set before its first transaction that leaves the set between two states it held and cleared by its last. A store that starts with it finishes the rollback (`Store.ResumeRollback`, which `Set.Reconcile` calls before it rewinds a failure mark), and `ApplyLedgerBatch` refuses with `ErrRollbackPending` until then |
 | `mexportfloor` | the lowest slot, as a big-endian `uint64`, from which the state journal names every account and DRep row at the slot of its `AddedSlot`, so an export of a slot range reads the journal rather than the table. It is written when a store opens without it, as the tip slot plus one, raised to the tip plus one by a catch-up merge, and reset by a full bootstrap; the effective floor is the larger of it and `mjfloor` |
 | `mloadfloor` | the tip slot plus one at the last load that dropped a row family a rollback undoes through the state journal and whose load writes no entries or tombstones for the rows before the tip. It applies only while one of those families (delegations, genesis delegations, MIR certificates, witnesses, import baselines, stake and pool history, op-certs, accounts, DReps and their links, pools, committee, governance, protocol parameter updates, closure outputs) holds a row; the DRep dormancy counter, the reward block counts and the reward output rows are not among them. A rollback, `HasJournalPoint`, `PointBefore` and `JournalFloor` treat a point below it, other than the tip, as beyond the journal, so an undrained set is rebuilt from the metadata store; `mjfloor` is separate and still bounds only as-of reads |
+
+Snapshot prefix wipes and range-tombstone rollbacks delete each snapshot row
+and its capture-index entry in one transaction. Large prefixes use multiple
+transactions while keeping each row and entry together.
 
 A state journal entry whose first value byte is `2` is a range tombstone
 (`RowPut.TombstonePrefix`): its key is a prefix that held no row before the
@@ -3427,6 +3508,80 @@ released database below its tip"):
 Until step 4 the metadata store stays whole and authoritative, so a stop at
 any earlier point loses nothing. Blob output offsets written for the old rows
 are left in the blob store.
+
+#### Zero-coin Byron genesis outputs
+
+The reference Byron to Shelley UTxO translation (`translateUTxOByronToShelley`)
+drops every Byron genesis output whose coin is zero, so neither the Shelley
+ledger state nor a Mithril-imported state holds one. Preview and Preprod each
+have seven such outputs in their Byron genesis; mainnet has none. A zero-coin
+Shelley `initialFunds` output is kept by the reference, and so by Dingo.
+
+`buildGenesisUtxoSet` drops them, so a database created now never holds them,
+in the ledger's stores or in an IndexerDB seeded by `SeedIndexerGenesis`. A
+database seeded by an earlier release holds them in whichever stores it has, and
+is repaired at startup from the genesis configuration. No schema migration does
+this: a core-mode store never wrote `utxo_address`, no `utxo` column tells a
+Byron genesis output from a Shelley one, and a store that keeps its UTxO set
+only in the live set has no `utxo` rows to select from. The repair instead
+names the outputs exactly: `ledger.ZeroValueByronGenesisOutputs` lists the
+zero-coin outputs of `ByronGenesis().GenesisUtxos()`, the source
+`buildGenesisUtxoSet` reads, and the genesis transactions no retained genesis
+output shares (a genesis transaction's id is the hash of its address). A
+zero-coin Byron output at the address of a Shelley `initialFunds` entry has
+the same reference as that retained output, so it is not listed. A network
+with none of them does nothing.
+
+- Metadata store. `nodestorage.Reconcile.Run` starts with
+  `ledger.RepairZeroValueByronGenesis`, so it runs before anything copies
+  `utxo` rows into the live set. `Database.RemoveGenesisUtxos`
+  (`Store.DeleteUnspentGenesisUtxos`) deletes, per listed output, the `utxo` row
+  that is unspent (`spent_at_tx_id` null, `deleted_slot` zero, not a collateral
+  return), has amount `0`, and no `asset_holding`, `utxo_reference_edge` or
+  `utxo_collateral_edge` row. Its `utxo_address`, `utxo_pointer` and
+  `utxo_reference_script` rows go with it, and so does its blob output offset
+  on a store that still keeps offsets. A listed genesis transaction then loses
+  its `address_transaction`, `applied_transaction` (slot 0) and `transaction`
+  rows when no `utxo` row, spend or edge refers to it; a store without `utxo`
+  rows has only these. The deletes and the `sync_state` key
+  `ledger.byron_genesis_zero_repair` commit in one transaction, so a stop
+  leaves the store as it was and the next start repeats the repair. With the key
+  set the repair does nothing. A spent output stays, as does a funded Byron or
+  zero-coin Shelley output.
+- IndexerDB. `NewIndexerService` runs the same repair on the IndexerDB, which
+  has its own `sync_state` key, before the writer reads it. That covers an
+  IndexerDB seeded from genesis by a release and an API store copied by the
+  move to the split layout; both would otherwise disagree with a Mithril-imported
+  state when the replay reaches its anchor. The seed of a replay toward a
+  Mithril anchor counted the genesis transactions it wrote into
+  `indexer_replay_txs`, which the anchor check compares with the
+  `applied_transaction` rows, so the same transaction takes the removed
+  application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
+- Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
+  `Set.RemoveZeroCoinOutputs` (`badgerutxo.Store.RemoveOutputs`) on every
+  start. It deletes the listed outputs the set holds whose coin is zero, as the
+  metadata repair checks the amount, and adjusts the output count and the
+  stake sums in the same transaction. It writes no journal record and leaves the
+  tip alone: a record would sit newest in the journal and the next rollback, of
+  any depth, would undo it first and make the outputs live again. No journal
+  record covers these outputs otherwise, since no block spent them. The set has
+  no mark because it can be rebuilt or restored from a checkpoint that predates
+  the removal; looking up the few listed keys each start is cheaper than a mark
+  that could outlive them. An output the set does not hold is not touched.
+
+Removing them changes no live stake: a Byron address has no stake credential and
+the amount is zero, so no `reward_live_stake` row or stake sum includes them.
+`TestRepairZeroValueByronGenesisCoreStore`,
+`TestRepairZeroValueByronGenesisAPIStore` and
+`TestReconcileRemovesGenesisFromLiveSetOnlyStore` pin the store shapes,
+`TestReconcileRemovesLegacyZeroValueByronGenesis` and
+`TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
+`TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
+repaired IndexerDB, `TestReconcileKeepsOutputAtSharedZeroByronReference` and
+`TestIndexerServiceKeepsOutputAtSharedZeroByronReference` a shared reference,
+and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
+statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
+run on SQLite.
 
 #### Reverting a released database below its tip
 
@@ -4641,8 +4796,11 @@ between any two leaves a node that starts and continues:
       cursor and is copied in one transaction, read and written 500 rows at
       a time. The copy carries every table of the schema except the API-only
       tables (`address_transaction`, `address_transaction_rebuild_source`,
-      `redeemer_script`, `transaction_metadata_label`) and any table whose
-      foreign keys reference one of those. That includes the `utxo` rows and
+      `asset_holding`, `asset_identity`, `redeemer_script`,
+      `transaction_metadata_label`) and any table whose foreign keys
+      reference one of those. Core mode writes no asset holdings, so the
+      namespace holds none, as the store of a node that ran in core mode from
+      its first block holds none. That includes the `utxo` rows and
       the tables and `sync_state` keys of the ledger-state families: the
       namespace is left as a released SQLite consensus store is, so steps 2
       to 4 below revert it and move its state into the LedgerDB. On
@@ -5138,7 +5296,14 @@ journal before it kept them). Then:
    anchor, streamed in pages in (transaction hash, output index) order, equals
    the digest of the ledger database's set (outputs added at or before the
    anchor and not spent at or before it). Each output's stored CBOR (assets,
-   inline datum, reference script) is part of the digest. The ledger's digest
+   inline datum, reference script) is part of the digest, hashed as a snapshot
+   import stores it so that block bytes and imported bytes of one output agree:
+   a legacy array output (including a Byron output's inline address) in map
+   form, the value in the MemPack form (zero quantities and then empty
+   policies dropped, a bare coin when no assets remain, policies and asset
+   names in bytewise order, shortest integer heads), and the address, datum
+   and reference script with shortest length heads around an inline datum's
+   and a native script's own bytes. The ledger's digest
    is taken when the anchor is recorded and kept as `indexer_anchor_digest`,
    because the ledger's core-mode sweep deletes spent rows and the set at the
    anchor cannot be digested once its `consumed_utxo_prune_floor` is past it.
@@ -5366,7 +5531,8 @@ erDiagram
     TRANSACTION ||--o{ PLUTUS_DATA : "transaction_id"
     TRANSACTION ||--o{ REDEEMER : "transaction_id"
     TRANSACTION ||--o{ TRANSACTION_METADATA_LABEL : "transaction_id"
-    UTXO ||--o{ ASSET : "utxo_id"
+    UTXO ||--o{ ASSET_HOLDING : "utxo_id"
+    ASSET_IDENTITY ||--o{ ASSET_HOLDING : "asset_id"
     DATUM ||..o{ UTXO : "hash = datum_hash"
     SCRIPT ||..o{ WITNESS_SCRIPTS : "hash = script_hash"
     TRANSACTION ||--o{ UTXO : "spent_at_tx_id"
@@ -5644,7 +5810,8 @@ found" halt as above.
 (the same primitive the removal of stale volatile blocks uses) called once, after the UTxO import phase and before both the
 reconcile pass and the post-import reward-live-stake rebuild: every UTxO
 whose `added_slot` is strictly after the import's anchor is deleted outright,
-cascading to its `asset` and `utxo_pointer` rows, so the ordinary block
+cascading to its `asset_holding` and `utxo_pointer` rows (the
+`asset_identity` rows stay), so the ordinary block
 replay that follows the import re-creates it fresh at its real slot --
 `insertUtxoModelChecked` sees no existing row, inserts with `inserted=true`,
 and its live-stake delta lands at the slot replay actually reaches it.
@@ -5832,13 +5999,14 @@ the stored blocks as they age past the window, as it does on any node.
 | `applied_transaction` | `tx_id`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_hash` (`block_hash`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order, and a certifying ranking block's own transactions follow the index range reserved for its endorser-block closure (the closure's transaction count plus its child bodies). `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
 | `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone) and `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the network script-locked supply (blockfrost `/network` `supply.locked`) is the running aggregate `script_locked_supply`, not a scan of this column. A NULL `payment_script` reads as key-locked. It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
-| `script_locked_supply` | `slot`, `amount` | PK `slot` | Running total of live script-locked lovelace: one row per slot whose commit changed the total, holding the total after that slot (`amount` is a signed 64-bit integer; an update that would leave the range `[0, 2^63-1]` fails the write instead of wrapping). No FK to `utxo`. Written in the transaction that changes the `utxo` rows by the insert and spend primitives (block apply on every path including the batch UTxO overlay, gap blocks, genesis, `CreateUtxo`, `ImportUtxos` of recovered inputs, `SetUtxoDeletedAtSlot`, `MarkUtxosDeletedAtSlot`, and `DeleteUtxos` of a live row), crediting an output only when its insert created the row and debiting a spend only when its update moved a live row, using the row's stored `payment_script`. A re-import that clears a local spend credits the output back at the slot of that spend. A write at a slot below the newest row also shifts every later row; one below the oldest row adds no row of its own, since it has no base to sum from. Rollback keeps rows at or below the rollback slot, so created outputs removed by `ON DELETE CASCADE` need no accounting; deleting the outputs created above a slot (`DeleteUtxosAfterSlot`) first subtracts each script-locked one from the rows in its `[added_slot, deleted_slot)` range, so ledger-state import's cleanup of post-anchor outputs, which runs without the rest of the rollback, leaves a total that matches the remaining rows and a replay that re-creates the output counts it once; when that leaves no row (the only row was a seed at a later slot) the base is rebuilt by a scan of the restored `utxo` rows. The IndexerDB writer, in the transaction of each batch that adds a checkpoint, deletes rows older than the newest row at or below the oldest retained checkpoint's slot (`indexerdb.Store.PruneScriptLockedSupply`); writer rollbacks land at or above that checkpoint, so they never need a trimmed row, and a rollback to the chain's origin, which no checkpoint covers, finds no row at or below its slot and rebuilds by scan. The consensus store keeps its live set in the LedgerDB, and nothing reads or trims its table; rows written while it still held `utxo` rows stay after the ledger-state drain deletes those rows, since the drain does not touch the aggregate. Migration 74 seeds one row from a full scan, at the newest of the store's tip slot and the slots its `utxo` rows record, and drops `idx_utxo_deleted_payment_script`; a store that keeps no `utxo` rows gets no row. An IndexerDB filled by the writer from genesis starts empty and is credited by the same primitives as its blocks replay, so no rebuild step exists. A fresh sync from genesis starts empty, which reads as zero. |
+| `script_locked_supply` | `slot`, `amount` | PK `slot` | Running total of live script-locked lovelace: one row per slot whose commit changed the total, holding the total after that slot (`amount` is a signed 64-bit integer; an update that would leave the range `[0, 2^63-1]` fails the write instead of wrapping). No FK to `utxo`. Written in the transaction that changes the `utxo` rows by the insert and spend primitives (block apply on every path including the batch UTxO overlay, gap blocks, genesis, `CreateUtxo`, `ImportUtxos` of recovered inputs, `SetUtxoDeletedAtSlot`, `MarkUtxosDeletedAtSlot`, and `DeleteUtxos` of a live row), crediting an output only when its insert created the row and debiting a spend only when its update moved a live row, using the row's stored `payment_script`. A re-import that clears a local spend credits the output back at the slot of that spend. A write at a slot below the newest row also shifts every later row; one below the oldest row adds no row of its own, since it has no base to sum from. Rollback keeps rows at or below the rollback slot, so created outputs removed by `ON DELETE CASCADE` need no accounting; deleting the outputs created above a slot (`DeleteUtxosAfterSlot`) first subtracts each script-locked one from the rows in its `[added_slot, deleted_slot)` range, so ledger-state import's cleanup of post-anchor outputs, which runs without the rest of the rollback, leaves a total that matches the remaining rows and a replay that re-creates the output counts it once; when that leaves no row (the only row was a seed at a later slot) the base is rebuilt by a scan of the restored `utxo` rows. The IndexerDB writer, in the transaction of each batch that adds a checkpoint, deletes rows older than the newest row at or below the oldest retained checkpoint's slot (`indexerdb.Store.PruneScriptLockedSupply`); writer rollbacks land at or above that checkpoint, so they never need a trimmed row, and a rollback to the chain's origin, which no checkpoint covers, finds no row at or below its slot and rebuilds by scan. The consensus store keeps its live set in the LedgerDB, and nothing reads or trims its table; rows written while it still held `utxo` rows stay after the ledger-state drain deletes those rows, since the drain does not touch the aggregate. Migration 75 seeds one row from a full scan, at the newest of the store's tip slot and the slots its `utxo` rows record, and drops `idx_utxo_deleted_payment_script`; a store that keeps no `utxo` rows gets no row. An IndexerDB filled by the writer from genesis starts empty and is credited by the same primitives as its blocks replay, so no rebuild step exists. A fresh sync from genesis starts empty, which reads as zero. |
 | `utxo_collateral_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx_id` (`tx_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_tx_id` (`tx_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
-| `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id` | Multi-asset quantities attached to `utxo.id`. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows and UTxO lookups do not read the table. A core database written by an earlier build keeps its existing rows, which are no longer read and are deleted with their UTxO. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand. Migration `v21` drops `idx_asset_fingerprint` and `idx_asset_amount`: a real WAL-frame-churn measurement during genesis sync found `idx_asset_amount` alone responsible for 23.4% of all frame writes to the metadata database -- the single largest contributor of any index or table -- and `idx_asset_fingerprint` for 3.4%, and neither backs a `WHERE`/`JOIN`/`ORDER BY` predicate anywhere in the tree. Unlike `name_hex`, the `fingerprint` and `amount` columns themselves are genuinely read and returned via the blockfrost/mesh API adapters, so only the indexes are dropped. A UTxO's rows are written in canonical order, ascending `policy_id` bytes then `name` bytes, and `loadUtxoAssets` sorts each UTxO's assets into that order on read, because a database written before canonical ordering holds one output's rows in arbitrary insertion order. API listings of a value (Blockfrost `amount`, Mesh operations, UTxO RPC multiassets) follow the same order. |
-| `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
+| `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
+| `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index: it is dropped only by a node-managed Mithril stream catch-up and rebuilt before ingest resumes, never by ordinary sync. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows there. |
+| `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset_holding` (holdings of retained outputs), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot`, `idx_transaction_metadata_label_label_slot` `(label, slot, transaction_id)` (schema version 58) | API-mode per-label metadata index. Join to `transaction.id`. `GetTransactionsByMetadataLabel` drives from the label rows through the `(label, slot, transaction_id)` index and joins `transaction` and `applied_transaction`, so a page reads its first rows in slot order and sorts only ties within a slot (by `block_index`, `id`) instead of every transaction carrying the label. A label row's `slot` equals its transaction's `slot`. The label, slot and label-slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
@@ -5885,18 +6053,18 @@ entries marked `CatchUpDroppable` (`deferred.CatchUpDroppableManifest`, both
 sets through `DropCatchUpIndexesContext`): `idx_utxo_payment_key`,
 `idx_utxo_staking_key`, `idx_utxo_spent_at_tx_id`,
 `idx_utxo_added_slot`, `idx_applied_transaction_block_hash`
-and `idx_asset_policy_id`. They are critical, but only rollback
+and `idx_asset_holding_asset_id`. They are critical, but only rollback
 (`DeleteUtxosAfterSlot`, `DeleteTransactionsAfterSlot` and its deletes of
 `utxo`), the API and LocalStateQuery read them, and none of those writes while
 the run holds network and chain ingest. Address, stake-key-only,
-block-transaction and policy queries become full scans of their table for the
-run, and long SQLite reads there hold back the WAL checkpoint. The run keeps
+block-transaction and asset-holder queries become full scans of their table for
+the run, and long SQLite reads there hold back the WAL checkpoint. The run keeps
 every index its own statements read: the `(tx_id, output_idx)` key, the retained
 `idx_utxo_staking_deleted_amount`, the deleted_slot-leading
 `idx_utxo_deleted_staking_amount` the
 consumed-UTxO prune filters on, `idx_applied_transaction_slot` for the epoch fee total
-(`SumTransactionFeesInSlotRange`), the opcert lookup index, and the `asset`
-`utxo_id` index the prune's cascade uses. `BuildCatchUpIndexesContext` rebuilds
+(`SumTransactionFeesInSlotRange`), the opcert lookup index, and the
+`asset_holding` primary key whose `utxo_id` prefix the prune's cascade uses. `BuildCatchUpIndexesContext` rebuilds
 the droppable set before the run releases the ledger and leaves the marker set,
 since the lazy entries are still missing.
 
@@ -8776,9 +8944,10 @@ WHERE hash = decode($1, 'hex');
 
 ```sql
 -- Produced outputs plus assets
-SELECT u.*, a.*
+SELECT u.*, i.policy_id, i.name, h.amount
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
+LEFT JOIN asset_holding h ON h.utxo_id = u.id
+LEFT JOIN asset_identity i ON i.id = h.asset_id
 WHERE u.transaction_id = (
   SELECT id FROM "transaction" WHERE hash = decode($1, 'hex')
 )
@@ -8895,9 +9064,10 @@ use the existing hydrated transaction read. No schema or retention changes.
 
 ```sql
 -- Live UTxO only, matching GetUtxo
-SELECT u.*, a.*
+SELECT u.*, i.policy_id, i.name, h.amount
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
+LEFT JOIN asset_holding h ON h.utxo_id = u.id
+LEFT JOIN asset_identity i ON i.id = h.asset_id
 WHERE u.deleted_slot = 0
   AND u.tx_id = decode($1, 'hex')
   AND u.output_idx = $2;
@@ -8905,9 +9075,10 @@ WHERE u.deleted_slot = 0
 
 ```sql
 -- Including spent rows, matching GetUtxoIncludingSpent
-SELECT u.*, a.*
+SELECT u.*, i.policy_id, i.name, h.amount
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
+LEFT JOIN asset_holding h ON h.utxo_id = u.id
+LEFT JOIN asset_identity i ON i.id = h.asset_id
 WHERE u.tx_id = decode($1, 'hex')
   AND u.output_idx = $2;
 ```
@@ -9244,12 +9415,13 @@ LIMIT $3;
 Per-asset balances, merged by `(policy_id, name)` as they arrive:
 
 ```sql
-SELECT asset.policy_id, asset.name, asset.amount
+SELECT i.policy_id, i.name, h.amount
 FROM utxo
-JOIN asset ON asset.utxo_id = utxo.id
+JOIN asset_holding h ON h.utxo_id = utxo.id
+JOIN asset_identity i ON i.id = h.asset_id
 WHERE utxo.deleted_slot = 0
   AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
-ORDER BY asset.policy_id, asset.name;
+ORDER BY i.policy_id, i.name;
 ```
 
 The address condition follows the same payment/staking branch rules as the
@@ -9336,11 +9508,12 @@ SELECT
   encode(u.tx_id, 'hex') AS tx_id,
   u.output_idx,
   u.amount,
-  encode(a.policy_id, 'hex') AS policy_id,
-  encode(a.name, 'hex') AS asset_name,
-  a.amount AS asset_amount
+  encode(i.policy_id, 'hex') AS policy_id,
+  encode(i.name, 'hex') AS asset_name,
+  h.amount AS asset_amount
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
+LEFT JOIN asset_holding h ON h.utxo_id = u.id
+LEFT JOIN asset_identity i ON i.id = h.asset_id
 WHERE u.deleted_slot = 0
   AND u.payment_key = decode($1, 'hex')
   AND u.payment_script = $2
@@ -9417,21 +9590,23 @@ SELECT u.*
 FROM utxo u
 WHERE u.deleted_slot = 0
   AND u.id IN (
-    SELECT utxo_id
-    FROM asset
-    WHERE policy_id = decode($1, 'hex')
-      AND name = decode($2, 'hex')
+    SELECT h.utxo_id
+    FROM asset_identity i
+    JOIN asset_holding h ON h.asset_id = i.id
+    WHERE i.policy_id = decode($1, 'hex')
+      AND i.name = decode($2, 'hex')
   );
 ```
 
 ```sql
 -- Total live quantity for a policy/name pair
-SELECT COALESCE(SUM(a.amount), 0) AS quantity
-FROM asset a
-JOIN utxo u ON u.id = a.utxo_id
-WHERE a.policy_id = decode($1, 'hex')
-  AND a.name = decode($2, 'hex')
-  AND a.amount IS NOT NULL
+SELECT COALESCE(SUM(CAST(h.amount AS DECIMAL(20, 0))), 0) AS quantity
+FROM asset_identity i
+JOIN asset_holding h ON h.asset_id = i.id
+JOIN utxo u ON u.id = h.utxo_id
+WHERE i.policy_id = decode($1, 'hex')
+  AND i.name = decode($2, 'hex')
+  AND h.amount IS NOT NULL
   AND u.deleted_slot = 0;
 ```
 
@@ -9500,7 +9675,7 @@ asset order. The quantity of each listed asset is its live holdings, as in
 negative `quantity` is a burn. `GetAssetTransactions` lists the transactions
 that mint or burn an asset (`asset_mint_burn.tx_hash`), produce an output
 holding it (`utxo.tx_id`, a collateral return included, through
-`asset.utxo_id`), or spend one (`utxo.spent_at_tx_id`). The branches are UNIONed
+`asset_holding.utxo_id`), or spend one (`utxo.spent_at_tx_id`). The branches are UNIONed
 so each starts from an indexed asset or mint/burn lookup and a transaction
 matching several appears once; the inclusive `from`/`to` range filters on the
 transaction's `(slot, block_index)`. The `/assets/{asset}/utxos` listing reuses
@@ -9587,12 +9762,14 @@ and this count for a stake credential's UTxOs, since a credential-only
 pattern never needs exact-address filtering.
 
 `UtxoWithOrderingQuery.FilterByAsset` combined with `MatchAllAddresses` has no
-address to narrow the live set, so both queries start from the policy's `asset`
-rows (`idx_asset_policy_id`), deduplicate their `utxo_id`s, and look the live
-UTxOs up by primary key. Probing `asset` once per live UTxO instead costs the
+address to narrow the live set, so both queries resolve the asset through
+`asset_identity` (`(policy_id, name)` unique key), read its holdings through
+`idx_asset_holding_asset_id`, and look the live UTxOs up by primary key; on SQLite
+the statement hides `idx_utxo_deleted_payment_script` from the planner so the
+holdings drive. Probing the holdings once per live UTxO instead costs the
 same however few UTxOs hold the policy. The cost of the asset-first form scales
-with the currently retained `asset` rows under the policy; spent UTxO rows are
-removed during pruning. A policy with many retained asset rows relative to its
+with the currently retained holdings under the policy; spent UTxO rows are
+removed during pruning. A policy with many retained holdings relative to its
 live UTxOs can still read more than a live scan would. With an address filter
 the asset filter remains a per-row `EXISTS` over
 the already narrowed set.
@@ -9701,7 +9878,7 @@ same statement as `GetStakeByPools` without the `GROUP BY`, restricted to the
 active pool set `GetActivePoolKeyHashes` resolves (the tip slot and the
 registration/retirement CTE). Completeness and the fallback are the same as for
 `GetStakeByPools`, evaluated across the whole active set. It runs on the
-caller's transaction, so its context cancels the statement.
+caller's transaction; a read transaction's context cancels the statement.
 
 ### `GetStakeByPoolsAtSlot`
 
@@ -10457,8 +10634,8 @@ NUMERIC)`, MySQL `CAST(amount AS DECIMAL(65, 0))`, and SQLite the
 arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
 (`database/plugin/metadata/sqlite/bigintsum`; SQLite's own `SUM` raises an
 integer-overflow error and `TOTAL` is a float). The result is read back as a
-decimal string. The sums run on the caller's transaction, so cancelling its
-context cancels the statements.
+decimal string. The sums run on the caller's transaction; cancelling a read
+transaction's context cancels the statements.
 The SQLite callbacks consume transient driver arguments before returning and
 retain only parsed numeric limbs. The driver can omit its text and blob
 argument copies; the aggregate still converts blob bytes to Go strings when
@@ -11386,18 +11563,17 @@ PostgreSQL and MySQL keep the per-row writes described above.
   double spend fails with `types.ErrUtxoConflict` and a missing input is a
   no-op, as on the per-row path.
 - **Outputs.** An output gets its `utxo.id` when it is created, from
-  `sqlite_sequence`, in the order the per-row path inserts rows; its asset
-  rows reserve their `asset.id` values the same way. An output the batch
-  spends again is never written, but its ids stay reserved, so surviving rows,
-  the foreign keys that point at them and both `sqlite_sequence` entries end
-  as the per-row path leaves them. `FlushBatch` raises a sequence that ends on
-  an unwritten id.
+  `sqlite_sequence`, in the order the per-row path inserts rows. An output the
+  batch spends again is never written, but its id stays reserved, so surviving
+  rows, the foreign keys that point at them and the `utxo` `sqlite_sequence`
+  entry end as the per-row path leaves them. `FlushBatch` raises the sequence
+  when it ends on an unwritten id.
 - **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
   multi-row `BatchOverlayInsertUtxos` statements and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
-  deletes before commit. It writes no `utxo_address` or `asset` rows and
-  reserves no asset ids, since the overlay runs only in core storage mode. None of these statements
+  deletes before commit. It writes no `utxo_address` or `asset_holding`
+  rows, since the overlay runs only in core storage mode. None of these statements
   carries a conflict clause; a `UNIQUE` failure is returned as
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
@@ -11482,12 +11658,12 @@ PostgreSQL and MySQL keep the per-row writes described above.
   spends go back to being inserted, marked and deleted; on withdrawal-heavy
   ranges the `barrier_flushes` count in the Debug line shows how often.
 
-Ids are exact only while the overlay is the only writer of `utxo` and
-`asset` rows inside the batch, which holds for every trusted block apply. The
+Ids are exact only while the overlay is the only writer of `utxo` rows inside
+the batch, which holds for every trusted block apply. The
 overlay keeps no undo log: a savepoint rollback across any overlay change,
 including a barrier write, fails the batch, and none occurs inside a trusted
 block-apply transaction. A UNIQUE failure counts as an overlay conflict only
-on the tables the overlay writes under its own ids (`utxo`, `asset`,
+on the tables the overlay writes under its own ids (`utxo`,
 `utxo_pointer`, `reward_live_stake`, `transaction`); any other would fail the
 per-row path too. A `FOREIGN KEY` failure in an overlay write is an overlay
 conflict as well. A barrier failure inside a statement that cannot return it

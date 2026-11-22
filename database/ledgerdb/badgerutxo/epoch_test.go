@@ -286,3 +286,20 @@ func TestLoadSummariesAndBootstrapMarker(t *testing.T) {
 	require.False(t, loaded)
 	require.Empty(t, summaryEpochs(t, s, 3))
 }
+
+// EachSnapshot visits the rows of every epoch and type in key order.
+func TestEachSnapshotVisitsEveryEpochAndType(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	applyEpochState(t, s, point(10, 0x10), nil,
+		snap(2, "mark", 'a'), snap(1, "set", 'b'), snap(1, "mark", 'a'),
+	)
+	var got []string
+	require.NoError(t, s.EachSnapshot(func(r badgerutxo.SnapshotRow) error {
+		got = append(got, string(rune('0'+r.Epoch))+r.Type+string(r.Pool))
+		return nil
+	}))
+	require.Equal(t, []string{"1setb", "1marka", "2marka"}, got)
+}

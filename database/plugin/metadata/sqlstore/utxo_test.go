@@ -1666,7 +1666,7 @@ func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
 		"SELECT COUNT(*) FROM utxo",
 	).Scan(&utxoCount))
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
+		"SELECT COUNT(*) FROM asset_holding",
 	).Scan(&assetCount))
 	require.Equal(t, 0, utxoCount)
 	require.Equal(t, 0, assetCount)
@@ -2036,10 +2036,9 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 		utxos[i].Address = fmt.Appendf(nil, "test-address-%d", i)
 	}
 	utxos[1].Assets = []models.Asset{{
-		Name:        []byte("token"),
-		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
-		Fingerprint: []byte("asset1"),
-		Amount:      types.Uint64(9),
+		Name:     []byte("token"),
+		PolicyId: bytes.Repeat([]byte{0xab}, 28),
+		Amount:   types.Uint64(9),
 	}}
 
 	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
@@ -2054,7 +2053,7 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 
 	var assetCount, addressCount int
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
+		"SELECT COUNT(*) FROM asset_holding",
 	).Scan(&assetCount))
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address",
@@ -2074,10 +2073,9 @@ func TestImportUtxosDeferredSQLiteSkipsAddressAndAssetInCoreMode(t *testing.T) {
 	utxo := *utxoForInsertCacheTest(0x91, 0, 1_000_000)
 	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{{
-		Name:        []byte("token"),
-		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
-		Fingerprint: []byte("asset1"),
-		Amount:      types.Uint64(9),
+		Name:     []byte("token"),
+		PolicyId: bytes.Repeat([]byte{0xab}, 28),
+		Amount:   types.Uint64(9),
 	}}
 	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
 		[]models.Utxo{utxo},
@@ -2086,7 +2084,7 @@ func TestImportUtxosDeferredSQLiteSkipsAddressAndAssetInCoreMode(t *testing.T) {
 
 	var assetCount, addressCount int
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
+		"SELECT COUNT(*) FROM asset_holding",
 	).Scan(&assetCount))
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address",
@@ -2107,17 +2105,16 @@ func TestInsertUtxoModelCoreModeWritesNoAssetRows(t *testing.T) {
 	utxo := utxoForInsertCacheTest(0x92, 0, 1_000_000)
 	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{{
-		Name:        []byte("token"),
-		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
-		Fingerprint: []byte("asset1"),
-		Amount:      types.Uint64(9),
+		Name:     []byte("token"),
+		PolicyId: bytes.Repeat([]byte{0xab}, 28),
+		Amount:   types.Uint64(9),
 	}}
 	insertUtxoInTxn(t, store, utxo, true)
 	require.NotZero(t, utxo.ID)
 
 	var assetCount int
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
+		"SELECT COUNT(*) FROM asset_holding",
 	).Scan(&assetCount))
 	require.Zero(t, assetCount)
 }
@@ -2131,10 +2128,9 @@ func TestGetUtxoLoadsAssetRowsOnlyInAPIMode(t *testing.T) {
 	utxo := utxoForInsertCacheTest(0x93, 0, 1_000_000)
 	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{{
-		Name:        []byte("token"),
-		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
-		Fingerprint: []byte("asset1"),
-		Amount:      types.Uint64(9),
+		Name:     []byte("token"),
+		PolicyId: bytes.Repeat([]byte{0xab}, 28),
+		Amount:   types.Uint64(9),
 	}}
 	insertUtxoInTxn(t, store, utxo, true)
 
@@ -2162,18 +2158,20 @@ func TestImportUtxosDeferredSQLiteDoesNotMutateInput(t *testing.T) {
 	}
 	utxos[0].Address = []byte("test-address")
 	utxos[0].Assets = []models.Asset{{
-		Name:        []byte("token"),
-		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
-		Fingerprint: []byte("asset1"),
-		Amount:      types.Uint64(9),
+		Name:     []byte("token"),
+		PolicyId: bytes.Repeat([]byte{0xab}, 28),
+		Amount:   types.Uint64(9),
 	}}
 
 	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
 	for i := range utxos {
 		require.Zero(t, utxos[i].ID)
 	}
-	require.Zero(t, utxos[0].Assets[0].ID)
-	require.Zero(t, utxos[0].Assets[0].UtxoID)
+	require.Len(t, utxos[0].Assets, 1)
+	require.Equal(t, []byte("token"), utxos[0].Assets[0].Name)
+	require.Equal(t, bytes.Repeat([]byte{0xab}, 28), utxos[0].Assets[0].PolicyId)
+	require.Equal(t, types.Uint64(9), utxos[0].Assets[0].Amount)
+	require.Empty(t, utxos[1].Assets)
 }
 
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises

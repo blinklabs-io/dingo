@@ -43,7 +43,7 @@ backfill all historical transaction metadata. Pruning also limits history.
 | Outputs | tx_out, tx_in | utxo: tx_id (producer row id), output_idx, amount, deleted_slot, spent_at_tx_id |
 | Stake accounts | stake_address and delegation/reward tables | account: staking_key, credential_tag, pool, drep, reward, active |
 | Datums | datum | datum: hash, raw_datum (CBOR bytes) |
-| Native assets | multi_asset and output/mint relations | asset: policy_id, name, amount, utxo_id (output holdings) |
+| Native assets | multi_asset and output/mint relations | asset_identity: id, policy_id, name; asset_holding: utxo_id, asset_id, amount (output holdings) |
 | Governance | gov_action_proposal, voting_procedure | governance_proposal, governance_vote, drep, committee_member |
 
 ## 2. Executable Dingo SQLite examples
@@ -165,7 +165,8 @@ ORDER BY m.name, p.cid`)
 		"transaction":         "Retained transaction metadata",
 		"utxo":                "Retained outputs; deleted_slot = 0 selects unspent outputs",
 		"account":             "Stake accounts identified by credential_tag and staking_key",
-		"asset":               "Native asset holdings linked by utxo_id",
+		"asset_identity":      "Distinct native assets by policy_id and name",
+		"asset_holding":       "Native asset quantity per utxo_id and asset_id",
 		"datum":               "Datum hashes and serialized CBOR",
 		"block_nonce":         "Block hashes and nonces by slot",
 		"drep":                "DRep registration state",

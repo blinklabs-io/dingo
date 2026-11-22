@@ -40,7 +40,7 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)
 		return 0, 0, false
 	}
 	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT COUNT(*) FROM asset WHERE utxo_id = ?`, id,
+		`SELECT COUNT(*) FROM asset_holding WHERE utxo_id = ?`, id,
 	).Scan(&assets))
 	return addedSlot, assets, true
 }
@@ -131,7 +131,7 @@ func TestCoreModeImportAndRollbackLeaveAssetTableEmpty(t *testing.T) {
 
 	var assetRows int
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM asset",
+		"SELECT COUNT(*) FROM asset_holding",
 	).Scan(&assetRows))
 	require.Zero(t, assetRows)
 }
