@@ -244,7 +244,8 @@ UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE ` + refEq + `
   AND deleted_slot = 0 AND spent_at_tx_id IS NULL
-RETURNING ` + utxoConsumedHash + `, output_idx, credential_tag, staking_key, amount`
+RETURNING ` + utxoConsumedHash + `, output_idx, credential_tag, ` +
+	utxoStakingKeyExpr + `, amount`
 
 // insertUtxoBatchQuery is the SQLite batched insert of rowCount outputs, one
 // of the sizes in sqliteRefs.
@@ -360,11 +361,18 @@ func (s *Store) insertUtxoModelsChecked(
 		end := min(start+utxoInsertBatchSize, len(utxos))
 		chunk := utxos[start:end]
 		args := make([]any, 0, len(chunk)*12)
-		for _, utxo := range chunk {
+		chunkParams := make([]*utxoInsertParams, len(chunk))
+		for i, utxo := range chunk {
 			params, err := createUtxoParams(utxo)
 			if err != nil {
 				return nil, err
 			}
+			chunkParams[i] = &params
+		}
+		if err := s.resolveUtxoParams(ctx, db, chunkParams); err != nil {
+			return nil, err
+		}
+		for _, params := range chunkParams {
 			args = append(args, params.args()...)
 		}
 		rows, err := s.queryRowsCached(
@@ -2048,7 +2056,7 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	); err != nil {
 		return false, err
 	}
-	params, err := createUtxoParams(&resolved)
+	params, err := s.utxoParams(ctx, db, &resolved)
 	if err != nil {
 		return false, err
 	}
@@ -2544,7 +2552,7 @@ func (s *Store) rollbackSpentStakeRefsQuery(
 		}
 	}
 	return "-- name: GetRollbackSpentStakeRefs\n" +
-		"SELECT credential_tag, staking_key " + from + "\n" +
+		"SELECT credential_tag, " + utxoStakingKeyExpr + " " + from + "\n" +
 		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
 }
 

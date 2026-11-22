@@ -22984,7 +22984,7 @@ total stake, registration, current pool delegation, and delegation certificate
 order; rollback therefore restores the aggregate from the same historical
 metadata used by normal account and UTxO repair. Malformed non-empty stake
 credentials are rejected before they enter the aggregate. The aggregate itself
-attributes only base-address stake, because it keys on `utxo.staking_key` and a
+attributes only base-address stake, because it keys on `utxo.staking_key_id` and a
 pointer address leaves that column empty; the pointer position is retained in
 `utxo_pointer` instead. Resolving it is inherently slot-evaluated -- a
 registration or de-registration anywhere can change which credential an existing

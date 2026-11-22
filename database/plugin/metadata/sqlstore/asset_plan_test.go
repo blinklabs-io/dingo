@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"strings"
 	"testing"
@@ -104,10 +105,11 @@ func seedAssetPlanStore(t *testing.T) *Store {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(id))
 		_, err := tx.Exec(`
-INSERT INTO utxo (id, tx_id, output_idx, payment_key, staking_key,
+INSERT INTO utxo (id, tx_id, output_idx, payment_key_id, staking_key_id,
                   credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, ?, 0, ?, ?, 0, ?, 0, '1')`,
-			id, txID, []byte{byte(id % 7)}, []byte{byte(id % 11)}, id)
+			id, txID, testutil.CredentialID(t, tx, []byte{byte(id % 7)}),
+			testutil.CredentialID(t, tx, []byte{byte(id % 11)}), id)
 		require.NoError(t, err)
 		address := []byte(fmt.Sprintf("addr%d", id%97))
 		_, err = tx.Exec(

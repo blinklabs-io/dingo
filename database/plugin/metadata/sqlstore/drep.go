@@ -1519,7 +1519,9 @@ account_power AS (
                     ELSE (SELECT COALESCE(SUM(CAST(fallback_utxo.amount AS ` + cast + `)), 0)
                           FROM utxo fallback_utxo
                           WHERE fallback_utxo.credential_tag = account_power_source.credential_tag
-                            AND fallback_utxo.staking_key = account_power_source.staking_key
+                            AND fallback_utxo.staking_key_id = (
+                                SELECT id FROM credential
+                                WHERE hash = account_power_source.staking_key)
                             AND fallback_utxo.deleted_slot = 0)
                END
                + COALESCE(CAST(account_power_source.reward AS ` + cast + `), 0)

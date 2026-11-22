@@ -213,6 +213,18 @@ var dumpProjections = map[string]string{
 	"utxo_address": "SELECT ua.utxo_id, a.address, ua.tx_id, ua.output_idx, " +
 		"ua.slot, ua.block_index FROM utxo_address ua " +
 		"JOIN address a ON a.id = ua.address_id",
+	"utxo": "SELECT u.tx_id, u.output_idx, u.collateral_return_for_tx_id, " +
+		"u.spent_at_tx_id, pc.hash AS payment_key, sc.hash AS staking_key, " +
+		"u.credential_tag, d.hash AS datum_hash, u.amount, u.payment_script, " +
+		"u.added_slot, u.deleted_slot FROM utxo u " +
+		"LEFT JOIN credential pc ON pc.id = u.payment_key_id " +
+		"LEFT JOIN credential sc ON sc.id = u.staking_key_id " +
+		"LEFT JOIN datum d ON d.id = u.datum_id",
+	"address_transaction": "SELECT pc.hash AS payment_key, a.payment_script, " +
+		"sc.hash AS staking_key, a.credential_tag, a.transaction_id, a.slot, " +
+		"a.tx_index FROM address_transaction a " +
+		"LEFT JOIN credential pc ON pc.id = a.payment_key_id " +
+		"LEFT JOIN credential sc ON sc.id = a.staking_key_id",
 }
 
 // dumpNamedTables is dumpTables over the named tables.

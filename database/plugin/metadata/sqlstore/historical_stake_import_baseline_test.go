@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -77,10 +78,15 @@ func TestEpochBoundaryStakeKeepsGenesisDelegationAcrossPoolReap(
 		nil,
 	))
 	txID := fixtureIdentityRow(t, store, 0, bytes.Repeat([]byte{0xd6}, 32))
-	_, err := store.writeDB.ExecContext(t.Context(), `
-INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+	_, err := store.writeDB.ExecContext(
+		t.Context(),
+		`
+INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, 0, 10, 0, ?)`,
-		txID, credential.Credential.Bytes(), fmt.Sprint(importBaselineStake))
+		txID,
+		testutil.CredentialID(t, store.writeDB, credential.Credential.Bytes()),
+		fmt.Sprint(importBaselineStake),
+	)
 	require.NoError(t, err)
 	writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 2), 0)
 	require.NoError(t, store.ClearDelegationsToRetiredPool(

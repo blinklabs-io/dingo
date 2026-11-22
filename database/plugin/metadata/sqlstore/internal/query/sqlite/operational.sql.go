@@ -107,16 +107,17 @@ func (q *Queries) CountTransactionsByMetadataLabel(ctx context.Context, label sq
 const countTransactionsByPaymentCred = `-- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ? AND payment_script = ?
+WHERE payment_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND payment_script = ?
 `
 
 type CountTransactionsByPaymentCredParams struct {
-	PaymentKey    []byte
+	Hash          []byte
 	PaymentScript sql.NullBool
 }
 
 func (q *Queries) CountTransactionsByPaymentCred(ctx context.Context, arg CountTransactionsByPaymentCredParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, arg.PaymentKey, arg.PaymentScript)
+	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, arg.Hash, arg.PaymentScript)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -1645,16 +1646,18 @@ func (q *Queries) GetConstitution(ctx context.Context) (Constitution, error) {
 const getControlledAmountByCredential = `-- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0
+WHERE credential_tag = ?
+  AND staking_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND deleted_slot = 0
 `
 
 type GetControlledAmountByCredentialParams struct {
 	CredentialTag int64
-	StakingKey    []byte
+	Hash          []byte
 }
 
 func (q *Queries) GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.StakingKey)
+	rows, err := q.db.QueryContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -1719,7 +1722,7 @@ func (q *Queries) GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsPa
 const getDatum = `-- name: GetDatum :one
 SELECT hash, raw_datum, id, added_slot
 FROM datum
-WHERE hash = ?
+WHERE hash = ? AND LENGTH(raw_datum) > 0
 `
 
 func (q *Queries) GetDatum(ctx context.Context, hash []byte) (Datum, error) {
@@ -4689,7 +4692,10 @@ func (q *Queries) SetConstitution(ctx context.Context, arg SetConstitutionParams
 const setDatum = `-- name: SetDatum :exec
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET raw_datum = excluded.raw_datum
+ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = excluded.raw_datum
 `
 
 type SetDatumParams struct {

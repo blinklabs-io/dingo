@@ -530,7 +530,8 @@ func overlayPrefetchQuery(keys int) string {
 	values := strings.TrimSuffix(strings.Repeat("(?, ?), ", keys), ", ")
 	return `-- name: BatchOverlayPrefetchInputs :many
 SELECT u.id, t.hash, u.output_idx, u.credential_tag,
-       u.staking_key, u.amount, u.deleted_slot, u.spent_at_tx_id
+       ` + uCredentialHash("staking_key_id") + `, u.amount,
+       u.deleted_slot, u.spent_at_tx_id
 FROM (VALUES ` + values + `) AS k
 CROSS JOIN "transaction" AS t ON t.hash = k.column1
 CROSS JOIN utxo AS u ON u.tx_id = t.id AND u.output_idx = k.column2`
@@ -1043,11 +1044,19 @@ func (s *Store) insertOverlayUtxos(
 	for start := 0; start < len(outputs); start += perStatement {
 		end := min(start+perStatement, len(outputs))
 		args := make([]any, 0, (end-start)*overlayUtxoInsertColumns)
+		chunkParams := make([]*utxoInsertParams, 0, end-start)
 		for _, out := range outputs[start:end] {
 			params, err := createUtxoParams(&out.model)
 			if err != nil {
 				return err
 			}
+			chunkParams = append(chunkParams, &params)
+		}
+		if err := s.resolveUtxoParams(ctx, db, chunkParams); err != nil {
+			return err
+		}
+		for i, out := range outputs[start:end] {
+			params := chunkParams[i]
 			params.SpentAtTxID = sql.NullInt64{}
 			if spender := overlaySpentByArg(out); spender != nil {
 				params.SpentAtTxID = sql.NullInt64{

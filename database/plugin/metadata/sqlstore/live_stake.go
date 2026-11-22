@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -568,7 +569,8 @@ func rewardLiveStakeRowValues(
 const sumCredentialUtxoStakeQuery = `-- name: SumCredentialUtxoStake :one
 SELECT SUM(CAST(amount AS BIGINT))
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`
+WHERE credential_tag = ? AND staking_key_id = ` + credentialIDSubquery + `
+  AND deleted_slot = 0`
 
 func (s *Store) sumCredentialUtxoStake(
 	ctx context.Context,
@@ -667,18 +669,17 @@ func (s *Store) verifyRewardLiveStakeRunningTotals(
 	db queryer,
 ) error {
 	row := db.QueryRowContext(ctx, `
-SELECT live.credential_tag, live.staking_key
+SELECT live.credential_tag, live.hash
 FROM (
-    SELECT DISTINCT credential_tag, staking_key
-    FROM utxo
-    WHERE deleted_slot = 0
-      AND staking_key IS NOT NULL
-      AND LENGTH(staking_key) > 0
+    SELECT DISTINCT u.credential_tag, c.hash
+    FROM utxo u
+    JOIN credential c ON c.id = u.staking_key_id
+    WHERE u.deleted_slot = 0
 ) live
 WHERE NOT EXISTS (
     SELECT 1 FROM reward_live_stake
     WHERE reward_live_stake.credential_tag = live.credential_tag
-      AND reward_live_stake.staking_key = live.staking_key
+      AND reward_live_stake.staking_key = live.hash
       AND reward_live_stake.utxo_stake IS NOT NULL
 )
 LIMIT 1`)
@@ -747,10 +748,10 @@ WHERE NOT EXISTS (
 AND NOT EXISTS (
     SELECT 1 FROM utxo
     WHERE utxo.deleted_slot = 0
-      AND utxo.staking_key IS NOT NULL
-      AND LENGTH(utxo.staking_key) > 0
       AND utxo.credential_tag = reward_live_stake.credential_tag
-      AND utxo.staking_key = reward_live_stake.staking_key
+      AND utxo.staking_key_id = (
+          SELECT id FROM credential
+          WHERE hash = reward_live_stake.staking_key)
 )`
 
 type stakeKeyBound struct {
@@ -787,22 +788,99 @@ func (r stakeKeyRange) predicate(tagColumn, keyColumn string) (string, []any) {
 	return strings.Join(clauses, " AND "), args
 }
 
-const liveUtxoStakeKeyFilter = `deleted_slot = 0
-      AND staking_key IS NOT NULL
-      AND LENGTH(staking_key) > 0`
+// credentialTags are the stake credential kinds, in key order.
+var credentialTags = [...]uint8{0, 1}
+
+// hashBounds returns the condition on a credential hash column that keeps the
+// keys of the range that carry tag, and the arguments of its placeholders. ok
+// is false when the range holds no key of that tag. The range is over
+// (credential_tag, hash) in that order, so the tag decides whether each bound
+// applies to the hash at all.
+func (r stakeKeyRange) hashBounds(
+	tag uint8,
+	column string,
+) (condition string, args []any, ok bool) {
+	var clauses []string
+	if r.lo != nil {
+		switch {
+		case r.lo.tag > tag:
+			return "", nil, false
+		case r.lo.tag == tag:
+			clauses = append(clauses, column+" > ?")
+			args = append(args, r.lo.key)
+		}
+	}
+	if r.hi != nil {
+		switch {
+		case r.hi.tag < tag:
+			return "", nil, false
+		case r.hi.tag == tag:
+			clauses = append(clauses, column+" <= ?")
+			args = append(args, r.hi.key)
+		}
+	}
+	if len(clauses) == 0 {
+		return "1 = 1", nil, true
+	}
+	return strings.Join(clauses, " AND "), args, true
+}
+
+// liveUtxoArms returns one SELECT per credential tag over the credentials that
+// hold a live output, driven from the credential dictionary so that each
+// range is a range of its unique hash index, and the arguments of its
+// placeholders. utxo names its credentials by id, which is not hash order, so
+// a (tag, hash) range cannot be read from utxo directly. selectList is the
+// column list over credential c and, when perOutput is set, the output u: a
+// perOutput arm returns one row per live output, the other one row per
+// credential.
+func (r stakeKeyRange) liveUtxoArms(
+	selectList string,
+	perOutput bool,
+) (arms []string, args []any) {
+	for _, tag := range credentialTags {
+		bounds, boundArgs, ok := r.hashBounds(tag, "c.hash")
+		if !ok {
+			continue
+		}
+		match := "EXISTS (SELECT 1 FROM utxo u WHERE u.staking_key_id = c.id" +
+			" AND u.credential_tag = " + strconv.Itoa(int(tag)) +
+			" AND u.deleted_slot = 0)"
+		from := "FROM credential c WHERE " + bounds + " AND " + match
+		if perOutput {
+			from = "FROM credential c JOIN utxo u ON u.staking_key_id = c.id" +
+				" WHERE u.credential_tag = " + strconv.Itoa(int(tag)) +
+				" AND u.deleted_slot = 0 AND " + bounds
+		}
+		arms = append(arms, "SELECT "+strings.ReplaceAll(
+			selectList, "{tag}", strconv.Itoa(int(tag)),
+		)+" "+from)
+		args = append(args, boundArgs...)
+	}
+	return arms, args
+}
+
+// liveUtxoKeySource is the distinct (credential_tag, hash) pairs of the range
+// that hold a live output, as a UNION of liveUtxoArms.
+func (r stakeKeyRange) liveUtxoKeySource() (string, []any) {
+	arms, args := r.liveUtxoArms("{tag} AS credential_tag, c.hash", false)
+	if len(arms) == 0 {
+		return "SELECT 0 AS credential_tag, c.hash FROM credential c WHERE 1 = 0", nil
+	}
+	return strings.Join(arms, "\n    UNION ALL\n    "), args
+}
 
 // rewardLiveStakeKeySource is every stake key the aggregate carries a row
 // for: registered accounts and keys that hold a live UTxO without one.
-func rewardLiveStakeKeySource(accountRange, utxoRange string) string {
+func rewardLiveStakeKeySource(accountRange, utxoSource string) string {
 	return `
     SELECT credential_tag, staking_key FROM account
     WHERE staking_key IS NOT NULL
       AND LENGTH(staking_key) > 0
       AND ` + accountRange + `
     UNION
-    SELECT credential_tag, staking_key FROM utxo
-    WHERE ` + liveUtxoStakeKeyFilter + `
-      AND ` + utxoRange
+    SELECT credential_tag, hash FROM (
+    ` + utxoSource + `
+    ) live_utxo_keys`
 }
 
 // countRewardLiveStakeKeys sizes the rebuild so its progress log can report
@@ -817,11 +895,11 @@ func countRewardLiveStakeKeysInRange(
 	keys stakeKeyRange,
 ) (int64, error) {
 	accountRange, accountArgs := keys.predicate("credential_tag", "staking_key")
-	utxoRange, utxoArgs := keys.predicate("credential_tag", "staking_key")
+	utxoSource, utxoArgs := keys.liveUtxoKeySource()
 	args := append(accountArgs, utxoArgs...)
 	var count int64
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+
-		rewardLiveStakeKeySource(accountRange, utxoRange)+`
+		rewardLiveStakeKeySource(accountRange, utxoSource)+`
 ) stake_keys`, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count reward live stake keys: %w", err)
@@ -843,12 +921,12 @@ func nextRewardLiveStakeBatchEnd(
 		"credential_tag",
 		"staking_key",
 	)
-	utxoRange, utxoArgs := after.predicate("credential_tag", "staking_key")
+	utxoSource, utxoArgs := after.liveUtxoKeySource()
 	args := append(append(accountArgs, utxoArgs...), batchSize-1)
 	var end stakeKeyBound
 	err := db.QueryRowContext(ctx, `
 SELECT credential_tag, staking_key FROM (`+
-		rewardLiveStakeKeySource(accountRange, utxoRange)+`
+		rewardLiveStakeKeySource(accountRange, utxoSource)+`
 ) stake_keys
 ORDER BY credential_tag, staking_key
 LIMIT 1 OFFSET ?`, args...).Scan(&end.tag, &end.key)
@@ -905,10 +983,10 @@ func rewardLiveStakeCredentialQuery(
             UNION ALL` + assignments("stake_registration_delegation", "srd") + `
             UNION ALL` + assignments("stake_vote_delegation", "svd") + `
             UNION ALL` + assignments("stake_vote_registration_delegation", "svrd")
-	creds := rewardLiveStakeKeySource(
-		inRange("credential_tag", "staking_key"),
-		inRange("credential_tag", "staking_key"),
-	)
+	accountRange := inRange("credential_tag", "staking_key")
+	utxoSource, utxoArgs := keys.liveUtxoKeySource()
+	args = append(args, utxoArgs...)
+	creds := rewardLiveStakeKeySource(accountRange, utxoSource)
 	utxoStakeSelect := "NULL"
 	runningTotalJoin := ""
 	if fromRunningTotals {
@@ -1507,11 +1585,14 @@ func sumRewardLiveStakeUtxos(
 	db queryer,
 	keys stakeKeyRange,
 ) (map[string]uint64, error) {
-	inRange, args := keys.predicate("credential_tag", "staking_key")
+	arms, args := keys.liveUtxoArms(
+		"{tag} AS credential_tag, c.hash, u.amount", true,
+	)
+	if len(arms) == 0 {
+		return map[string]uint64{}, nil
+	}
 	utxoRows, err := db.QueryContext(ctx,
-		`SELECT credential_tag, staking_key, amount FROM utxo
-WHERE `+liveUtxoStakeKeyFilter+`
-  AND `+inRange, args...)
+		strings.Join(arms, "\nUNION ALL\n"), args...)
 	if err != nil {
 		return nil, fmt.Errorf("load reward live stake UTxOs: %w", err)
 	}
@@ -1700,7 +1781,8 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 	utxoStakes := make(map[credentialKey]uint64)
 	utxoRows, err := db.QueryContext(
 		ctx,
-		`SELECT credential_tag, staking_key, amount FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`,
+		`SELECT u.credential_tag, c.hash, u.amount FROM utxo u
+JOIN credential c ON c.id = u.staking_key_id WHERE u.deleted_slot = 0`,
 	)
 	if err != nil {
 		return false, fmt.Errorf("load reward live stake UTxOs: %w", err)
@@ -1744,8 +1826,9 @@ SELECT canonical.credential_tag, canonical.staking_key,
        reward_live_stake.pool_key_hash
 FROM (
   SELECT credential_tag, staking_key FROM account WHERE LENGTH(staking_key) > 0
-  UNION SELECT credential_tag, staking_key FROM utxo
-    WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0
+  UNION SELECT u.credential_tag, c.hash FROM utxo u
+    JOIN credential c ON c.id = u.staking_key_id
+    WHERE u.deleted_slot = 0
 ) canonical
 LEFT JOIN account ON account.credential_tag = canonical.credential_tag
  AND account.staking_key = canonical.staking_key
@@ -1828,7 +1911,7 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 		return false, err
 	}
 	var orphan bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM reward_live_stake r WHERE NOT EXISTS (SELECT 1 FROM account a WHERE a.credential_tag = r.credential_tag AND a.staking_key = r.staking_key) AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.credential_tag = r.credential_tag AND u.staking_key = r.staking_key AND u.deleted_slot = 0))`).Scan(&orphan); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM reward_live_stake r WHERE NOT EXISTS (SELECT 1 FROM account a WHERE a.credential_tag = r.credential_tag AND a.staking_key = r.staking_key) AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.credential_tag = r.credential_tag AND u.staking_key_id = (SELECT id FROM credential WHERE hash = r.staking_key) AND u.deleted_slot = 0))`).Scan(&orphan); err != nil {
 		return false, err
 	}
 	return orphan, nil

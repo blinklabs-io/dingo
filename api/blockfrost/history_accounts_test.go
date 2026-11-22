@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"net/http"
 	"testing"
@@ -244,8 +245,9 @@ func (fx *epochFixture) addAccountOutput(
 	}
 	insertAdapterTransaction(t, fx.raw, tx)
 	_, err := fx.raw.Exec(
-		`INSERT INTO address_transaction (payment_key, staking_key, credential_tag, transaction_id, slot, tx_index) VALUES (?, ?, 0, ?, 50, 0)`,
-		bytes32of(28, 0x10), bytes32of(28, key), tx.ID,
+		`INSERT INTO address_transaction (payment_key_id, staking_key_id, credential_tag, transaction_id, slot, tx_index) VALUES (?, ?, 0, ?, 50, 0)`,
+		testutil.CredentialID(t, fx.raw, bytes32of(28, 0x10)),
+		testutil.CredentialID(t, fx.raw, bytes32of(28, key)), tx.ID,
 	)
 	require.NoError(t, err)
 }

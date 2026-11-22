@@ -991,14 +991,14 @@ func insertAdapterUtxo(
 	}
 	result, err := raw.Exec(`
 INSERT INTO utxo (
-    tx_id, collateral_return_for_tx_id, payment_key,
-    staking_key, credential_tag, added_slot, deleted_slot, amount, output_idx,
+    tx_id, collateral_return_for_tx_id, payment_key_id,
+    staking_key_id, credential_tag, added_slot, deleted_slot, amount, output_idx,
     payment_script
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		producer,
 		utxo.CollateralReturnForTxID,
-		utxo.PaymentKey,
-		utxo.StakingKey,
+		testutil.CredentialID(t, raw, utxo.PaymentKey),
+		testutil.CredentialID(t, raw, utxo.StakingKey),
 		utxo.CredentialTag,
 		utxo.AddedSlot,
 		utxo.DeletedSlot,
@@ -1570,9 +1570,10 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
 		_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, credential_tag,
+    payment_key_id, payment_script, staking_key_id, credential_tag,
     transaction_id, slot, tx_index
-) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`,
+			testutil.CredentialID(t, raw, payment), tx.ID, block.slot)
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			setIndexerTip(t, adapter, ochainsync.Tip{

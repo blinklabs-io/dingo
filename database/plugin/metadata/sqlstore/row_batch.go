@@ -51,6 +51,14 @@ type rowShape struct {
 	// resolveAddress marks queued address rows, which carry the encoded
 	// address in column 1 and are written with its dictionary id.
 	resolveAddress bool
+	// resolveCredentials marks queued address-transaction rows, which carry
+	// the payment credential hash in column 0 and the stake credential hash in
+	// column 2 and are written with their dictionary ids.
+	resolveCredentials bool
+	// distinctFirstColumn keeps the first queued row of each value of column
+	// 0 at flush. An upsert that updates a conflicting row cannot take one key
+	// twice in one statement on PostgreSQL.
+	distinctFirstColumn bool
 }
 
 var (
@@ -97,9 +105,10 @@ var (
 		name:  "InsertAddressTransactionBatch",
 		table: "address_transaction",
 		columns: []string{
-			"payment_key", "payment_script", "staking_key", "credential_tag",
-			"transaction_id", "slot", "tx_index",
+			"payment_key_id", "payment_script", "staking_key_id",
+			"credential_tag", "transaction_id", "slot", "tx_index",
 		},
+		resolveCredentials: true,
 	}
 	metadataLabelShape = rowShape{
 		name:  "UpsertTransactionMetadataLabelBatch",
@@ -113,12 +122,21 @@ var (
     json_value = excluded.json_value`,
 	}
 	// datum rows are content-addressed and shared between transactions, so
-	// they carry no transaction_id and are never replaced.
+	// they carry no transaction_id and a revealed datum is never replaced. A
+	// row with an empty raw_datum stands for a datum hash an output names
+	// before any transaction reveals it, and the reveal fills it in. The
+	// added_slot assignment comes first because MySQL reads the updated
+	// raw_datum in the assignments that follow it.
 	datumShape = rowShape{
 		name:    "InsertDatumBatch",
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
-		suffix:  "ON CONFLICT (hash) DO NOTHING",
+		suffix: `ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.raw_datum ELSE datum.raw_datum END`,
+		distinctFirstColumn: true,
 	}
 	utxoAddressShape = rowShape{
 		name:           "UpsertUtxoAddressBatch",
@@ -412,6 +430,21 @@ func (b *rowBatch) flush(
 			}
 			rows = resolved
 		}
+		if entry.shape.distinctFirstColumn {
+			rows = distinctByFirstColumn(rows)
+		}
+		if entry.shape.resolveCredentials {
+			resolved, err := resolveCredentialRows(
+				ctx,
+				db,
+				rows,
+				parameterLimit,
+			)
+			if err != nil {
+				return err
+			}
+			rows = resolved
+		}
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
 		placeholder := "(" + strings.TrimSuffix(
@@ -516,4 +549,20 @@ func queueUtxoAddress(
 		int64(utxo.AddedSlot), //nolint:gosec // SQL INTEGER slot
 		int64(*utxo.BlockIndex),
 	)
+}
+
+// distinctByFirstColumn returns rows without later rows that repeat the byte
+// value of column 0, in their original order.
+func distinctByFirstColumn(rows [][]any) [][]any {
+	seen := make(map[string]struct{}, len(rows))
+	out := make([][]any, 0, len(rows))
+	for _, row := range rows {
+		key, _ := row[0].([]byte)
+		if _, ok := seen[string(key)]; ok {
+			continue
+		}
+		seen[string(key)] = struct{}{}
+		out = append(out, row)
+	}
+	return out
 }

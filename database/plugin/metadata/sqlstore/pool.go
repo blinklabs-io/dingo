@@ -2978,7 +2978,8 @@ GROUP BY pool`,
 		FROM account
 JOIN utxo
   ON utxo.credential_tag = account.credential_tag
- AND utxo.staking_key = account.staking_key
+ AND utxo.staking_key_id = (
+     SELECT id FROM credential WHERE hash = account.staking_key)
 WHERE account.active = TRUE AND utxo.deleted_slot = 0
   AND account.pool IN (`+bindPlaceholders(len(chunk))+`)`,
 			args...,

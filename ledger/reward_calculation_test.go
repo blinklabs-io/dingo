@@ -8201,8 +8201,8 @@ INSERT INTO reward_live_stake (pool_key_hash, staking_key, credential_tag,
 VALUES (?, ?, 0, ?, ?, ?, 1, 1, 1, ?)`)
 	txStmt := prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
 	utxoStmt := prepare(`
-INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
-    added_slot, deleted_slot, amount, payment_script)
+INSERT INTO utxo (tx_id, output_idx, payment_key_id, staking_key_id,
+    credential_tag, added_slot, deleted_slot, amount, payment_script)
 VALUES (?, ?, ?, ?, 0, 1, 0, ?, 0)`)
 	stakeInputStmt := prepare(`
 INSERT INTO reward_stake_input (pool_key_hash, staking_key, epoch,
@@ -8305,7 +8305,11 @@ VALUES (?, ?, ?)`)
 			txRowID, err := txRes.LastInsertId()
 			require.NoError(tb, err)
 			_, err = utxoStmt.Exec(
-				txRowID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
+				txRowID, 0,
+				testutil.CredentialID(
+					tb, tx, epochBoundaryBenchHash(0x50, nextUtxo),
+				),
+				testutil.CredentialID(tb, tx, key),
 				strconv.FormatUint(amount, 10),
 			)
 			require.NoError(tb, err)

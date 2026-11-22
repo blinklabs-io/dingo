@@ -65,8 +65,11 @@ func drepPowerOracle(
 ) (map[string]uint64, map[uint64]uint64) {
 	t.Helper()
 	utxo := make(map[string]uint64)
-	rows, err := raw.Query(`SELECT credential_tag, staking_key, amount FROM utxo
-WHERE deleted_slot = 0 AND staking_key IS NOT NULL`)
+	rows, err := raw.Query(
+		`SELECT u.credential_tag, c.hash, u.amount FROM utxo u
+JOIN credential c ON c.id = u.staking_key_id
+WHERE u.deleted_slot = 0`,
+	)
 	require.NoError(t, err)
 	for rows.Next() {
 		var tag int64
@@ -159,11 +162,16 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 						deleted = 99
 					}
 					_, err := raw.Exec(backendRebind(backend.name, `
-INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
-    added_slot, deleted_slot, amount, payment_script)
+INSERT INTO utxo (tx_id, output_idx, payment_key_id, staking_key_id,
+    credential_tag, added_slot, deleted_slot, amount, payment_script)
 VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 						backendTransactionID(t, raw, backend.name, txID),
-						rewardBatchKey(0x51, i*3+u), account.StakingKey,
+						backendCredentialID(
+							t, raw, backend.name, rewardBatchKey(0x51, i*3+u),
+						),
+						backendCredentialID(
+							t, raw, backend.name, account.StakingKey,
+						),
 						deleted, strconv.Itoa(10_000_000+i*17+u),
 					)
 					require.NoError(t, err)
@@ -295,6 +303,33 @@ func backendTransactionID(
 	require.NoError(t, raw.QueryRow(
 		backendRebind(name, "SELECT id FROM "+table+" WHERE hash = ?"), hash,
 	).Scan(&id))
+	return id
+}
+
+// backendCredentialID returns the dictionary id of a credential hash, adding
+// the hash when it is not held yet.
+func backendCredentialID(
+	t *testing.T,
+	raw *sql.DB,
+	name string,
+	hash []byte,
+) any {
+	t.Helper()
+	if len(hash) == 0 {
+		return nil
+	}
+	lookup := backendRebind(name, "SELECT id FROM credential WHERE hash = ?")
+	var id int64
+	err := raw.QueryRow(lookup, hash).Scan(&id)
+	if err == nil {
+		return id
+	}
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	_, err = raw.Exec(
+		backendRebind(name, "INSERT INTO credential (hash) VALUES (?)"), hash,
+	)
+	require.NoError(t, err)
+	require.NoError(t, raw.QueryRow(lookup, hash).Scan(&id))
 	return id
 }
 

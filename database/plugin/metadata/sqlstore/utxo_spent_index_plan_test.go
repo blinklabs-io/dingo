@@ -413,7 +413,7 @@ func TestSpentStakingIndexDeferredCreateSQLPerDialect(t *testing.T) {
 	for _, dialect := range []Dialect{SQLiteDialect(), PostgresDialect()} {
 		statement := deferredIndexCreateSQL(dialect, entry)
 		require.Contains(t, statement,
-			`("deleted_slot", "credential_tag", "staking_key", "amount")`,
+			`("deleted_slot", "credential_tag", "staking_key_id", "amount")`,
 			dialect.Name())
 		require.True(t, strings.HasSuffix(statement, " WHERE deleted_slot > 0"),
 			"%s: %s", dialect.Name(), statement)
@@ -432,7 +432,7 @@ func useFullSpentStakingIndex(tb testing.TB, store *Store) {
 	for _, statement := range []string{
 		"DROP INDEX " + spentStakingIndex,
 		"CREATE INDEX " + spentStakingIndex + " ON utxo " +
-			"(deleted_slot, credential_tag, staking_key, amount)",
+			"(deleted_slot, credential_tag, staking_key_id, amount)",
 	} {
 		_, err := store.writeDB.Exec(statement)
 		require.NoError(tb, err, statement)

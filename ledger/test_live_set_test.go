@@ -139,9 +139,11 @@ func mirrorSeededUtxoRowsForTest(t *testing.T, ls *LedgerState) {
 	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
 	require.NoError(t, err)
 	rows, err := raw.Query(
-		`SELECT tx_id, output_idx, staking_key, CAST(amount AS INTEGER), added_slot
-		 FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL
-		 ORDER BY added_slot, id`,
+		`SELECT u.tx_id, u.output_idx, c.hash, CAST(u.amount AS INTEGER),
+		        u.added_slot
+		 FROM utxo u JOIN credential c ON c.id = u.staking_key_id
+		 WHERE u.deleted_slot = 0
+		 ORDER BY u.added_slot, u.id`,
 	)
 	require.NoError(t, err)
 	defer rows.Close()

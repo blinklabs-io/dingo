@@ -34,7 +34,7 @@ func legacyConsumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 	), ",")
 	returning := utxoConsumedHash + ", output_idx"
 	if returnStake {
-		returning += ", credential_tag, staking_key, amount"
+		returning += ", credential_tag, " + utxoStakingKeyExpr + ", amount"
 	}
 	return `UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
@@ -63,7 +63,7 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	require.NoError(tb, err)
 	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, spent_at_tx_id, amount, " +
 			"payment_script) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	)
@@ -76,8 +76,17 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 			spentBy = int64(i + 1)
 		}
 		_, err := stmt.Exec(
-			ids.ID(skewedUtxoTxID(i)), i%4, make([]byte, 28), int64(i%2),
-			int64(i), deletedSlot, spentBy, "1000000", i%2,
+			ids.ID(
+				skewedUtxoTxID(i),
+			),
+			i%4,
+			testutil.CredentialID(tb, tx, make([]byte, 28)),
+			int64(i%2),
+			int64(i),
+			deletedSlot,
+			spentBy,
+			"1000000",
+			i%2,
 		)
 		require.NoError(tb, err)
 	}

@@ -385,10 +385,19 @@ INSERT INTO "transaction" (hash) VALUES (?) ON CONFLICT (hash) DO NOTHING`,
 	); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `
-INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+	ids, err := credentialDictionary.ensure(ctx, db, [][]byte{ref.Key}, 100)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(
+		ctx,
+		`
+INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot, amount)
 VALUES ((SELECT id FROM "transaction" WHERE hash = ?), 0, ?, ?, 1, 0, ?)`,
-		txID, ref.Key, int64(ref.Tag), decimalUint64(types.Uint64(amount)),
+		txID,
+		ids[string(ref.Key)],
+		int64(ref.Tag),
+		decimalUint64(types.Uint64(amount)),
 	)
 	return err
 }
@@ -408,7 +417,9 @@ func markUtxoDeletedTx(
 		ctx,
 		`
 UPDATE utxo SET deleted_slot = ?
-WHERE credential_tag = ? AND staking_key = ? AND amount = ? AND deleted_slot = 0`,
+WHERE credential_tag = ? AND staking_key_id = (
+    SELECT id FROM credential WHERE hash = ?)
+  AND amount = ? AND deleted_slot = 0`,
 		deletedSlot,
 		int64(ref.Tag),
 		ref.Key,
@@ -870,7 +881,9 @@ func legacySumCredentialUtxoStake(
 	return sumUint64Rows(ctx, db, `
 SELECT amount
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+WHERE credential_tag = ? AND staking_key_id = (
+    SELECT id FROM credential WHERE hash = ?)
+  AND deleted_slot = 0`,
 		ref.Tag, ref.Key)
 }
 
@@ -891,7 +904,7 @@ func seedCredentialUtxos(
 	ids := testutil.NewTransactionIDs(tb, tx)
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
@@ -912,7 +925,7 @@ func seedCredentialUtxos(
 		_, err := stmt.Exec(
 			ids.ID(txID),
 			0,
-			ref.Key,
+			testutil.CredentialID(tb, tx, ref.Key),
 			int64(ref.Tag),
 			int64(1),
 			deletedSlot,

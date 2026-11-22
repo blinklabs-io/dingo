@@ -279,7 +279,8 @@ func addressTransactionInputQuery(size int) string {
 			query.WriteString(" UNION ALL ")
 		}
 		query.WriteString(`
-SELECT payment_key, payment_script, credential_tag, staking_key
+SELECT ` + utxoPaymentKeyExpr + `, payment_script, credential_tag,
+       ` + utxoStakingKeyExpr + `
 FROM utxo WHERE ` + refEq)
 	}
 	return query.String()

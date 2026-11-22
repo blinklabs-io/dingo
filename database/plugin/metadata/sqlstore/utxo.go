@@ -43,8 +43,10 @@ const utxoRowColumns = "utxo.tx_id, " +
 	"AS tx_hash, utxo.collateral_return_for_tx_id, utxo.spent_at_tx_id, " +
 	`(SELECT spender.hash FROM "transaction" AS spender ` +
 	`WHERE spender.id = utxo.spent_at_tx_id) AS spent_at_tx_hash, ` +
-	"utxo.payment_key, utxo.staking_key, utxo.credential_tag, " +
-	"utxo.datum_hash, utxo.id, utxo.added_slot, utxo.deleted_slot, " +
+	utxoPaymentKeyExpr + " AS payment_key, " + utxoStakingKeyExpr +
+	" AS staking_key, utxo.credential_tag, " +
+	utxoDatumHashExpr + " AS datum_hash, utxo.id, utxo.added_slot, " +
+	"utxo.deleted_slot, " +
 	"utxo.amount, utxo.output_idx, utxo.payment_script"
 
 // storesUtxoAssets reports whether output asset rows are maintained. Core
@@ -68,7 +70,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			); err != nil {
 				return err
 			}
-			params, err := createUtxoParams(&resolved)
+			params, err := s.utxoParams(ctx, db, &resolved)
 			if err != nil {
 				return err
 			}
@@ -228,10 +230,10 @@ const (
 UPDATE utxo
 SET deleted_slot = 0, spent_at_tx_id = NULL
 WHERE deleted_slot > ? AND deleted_slot > 0`
-	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
-		"FROM utxo WHERE added_slot > ?"
-	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
-		"FROM utxo WHERE deleted_slot > ? AND deleted_slot > 0"
+	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, " + utxoStakingKeyExpr +
+		" FROM utxo WHERE added_slot > ?"
+	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, " + utxoStakingKeyExpr +
+		" FROM utxo WHERE deleted_slot > ? AND deleted_slot > 0"
 )
 
 func (s *Store) DeleteUtxosAfterSlot(
@@ -247,7 +249,7 @@ func (s *Store) DeleteUtxosAfterSlot(
 		func(db queryer, ctx context.Context) error {
 			// No SQL DISTINCT here: it makes SQLite prefer
 			// idx_utxo_staking_deleted_amount (which already yields
-			// (credential_tag, staking_key) order, so the temp B-tree can
+			// (credential_tag, staking_key_id) order, so the temp B-tree can
 			// be skipped) over the purpose-built idx_utxo_added_slot. That
 			// index has no added_slot column, so the scan is not covering
 			// and every entry costs a row lookup just to test the
@@ -854,7 +856,7 @@ func (s *Store) importUtxos(
 					}
 				}
 				item := owned[i]
-				params, err := createUtxoParams(&item)
+				params, err := s.utxoParams(ctx, db, &item)
 				if err != nil {
 					return err
 				}
@@ -1448,7 +1450,7 @@ func queryStakeRefs(
 // queryStakeRefsDeduped runs query and returns its stake credential
 // references with duplicates removed, preserving the order of first
 // occurrence. It exists so range-scan queries over utxo can be written
-// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key)
+// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key_id)
 // pushes SQLite onto an index that supplies that ordering rather than onto
 // the index that satisfies the WHERE clause, turning a bounded range search
 // into a full table pass. queryStakeRefs already materialises every row, so
@@ -2761,7 +2763,8 @@ func (s *Store) GetControlledAmountByCredential(
 	return s.sumWideUint64(ctx, db, `
 SELECT `+s.wideSumExpr("amount")+`
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+WHERE credential_tag = ? AND staking_key_id = `+credentialIDSubquery+`
+  AND deleted_slot = 0`,
 		credentialTag,
 		stakingKey,
 	)
@@ -2809,10 +2812,12 @@ func (s *Store) GetUtxoPaymentScriptByCredential(
 			rows, err := db.QueryContext(
 				ctx,
 				s.dialect.Rebind(`
-SELECT DISTINCT payment_key, payment_script
+SELECT DISTINCT pc.hash, utxo.payment_script
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ?
-  AND payment_key IN (`+bindPlaceholders(len(chunk))+`)`),
+JOIN credential AS pc ON pc.id = utxo.payment_key_id
+WHERE utxo.credential_tag = ?
+  AND utxo.staking_key_id = `+credentialIDSubquery+`
+  AND pc.hash IN (`+bindPlaceholders(len(chunk))+`)`),
 				args...,
 			)
 			if err != nil {
@@ -3673,6 +3678,13 @@ type utxoInsertParams struct {
 	PaymentScript           sql.NullBool
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
+	// PaymentKeyID, StakingKeyID and DatumID are the dictionary ids of
+	// PaymentKey, StakingKey and DatumHash. They are NULL until
+	// resolveUtxoParams fills them, and stay NULL for a value the output
+	// does not carry.
+	PaymentKeyID sql.NullInt64
+	StakingKeyID sql.NullInt64
+	DatumID      sql.NullInt64
 }
 
 // args returns the values in insertUtxoQuery's placeholder order.
@@ -3682,10 +3694,10 @@ func (p utxoInsertParams) args() []any {
 		p.OutputIdx,
 		p.CollateralReturnForTxID,
 		p.SpentAtTxID,
-		p.PaymentKey,
-		p.StakingKey,
+		p.PaymentKeyID,
+		p.StakingKeyID,
 		p.CredentialTag,
-		p.DatumHash,
+		p.DatumID,
 		p.Amount,
 		p.PaymentScript,
 		p.AddedSlot,
@@ -3748,6 +3760,64 @@ func createUtxoParams(
 			Valid: true,
 		},
 	}, nil
+}
+
+// resolveUtxoParams fills the dictionary ids of params, adding the
+// credentials and datum hashes that are missing. Ids are resolved inside the
+// caller's transaction, so a rollback leaves none behind.
+func (s *Store) resolveUtxoParams(
+	ctx context.Context,
+	db queryer,
+	params []*utxoInsertParams,
+) error {
+	limit := s.dialect.ParameterLimit()
+	credentials := make([][]byte, 0, 2*len(params))
+	datums := make([][]byte, 0, len(params))
+	for _, p := range params {
+		credentials = append(credentials, p.PaymentKey, p.StakingKey)
+		datums = append(datums, p.DatumHash)
+	}
+	credentialIDs, err := credentialDictionary.ensure(
+		ctx, db, credentials, limit,
+	)
+	if err != nil {
+		return err
+	}
+	datumIDs, err := datumDictionary.ensure(ctx, db, datums, limit)
+	if err != nil {
+		return err
+	}
+	lookup := func(ids map[string]int64, key []byte) sql.NullInt64 {
+		if id, ok := ids[string(key)]; ok && len(key) > 0 {
+			return sql.NullInt64{Int64: id, Valid: true}
+		}
+		return sql.NullInt64{}
+	}
+	for _, p := range params {
+		p.PaymentKeyID = lookup(credentialIDs, p.PaymentKey)
+		p.StakingKeyID = lookup(credentialIDs, p.StakingKey)
+		p.DatumID = lookup(datumIDs, p.DatumHash)
+	}
+	return nil
+}
+
+// utxoParams converts a model whose producer is resolved to its insert
+// values, with the dictionary ids resolved.
+func (s *Store) utxoParams(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) (utxoInsertParams, error) {
+	params, err := createUtxoParams(utxo)
+	if err != nil {
+		return utxoInsertParams{}, err
+	}
+	if err := s.resolveUtxoParams(
+		ctx, db, []*utxoInsertParams{&params},
+	); err != nil {
+		return utxoInsertParams{}, err
+	}
+	return params, nil
 }
 
 func nullableUint(value *uint) sql.NullInt64 {

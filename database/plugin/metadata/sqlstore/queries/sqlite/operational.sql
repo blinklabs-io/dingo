@@ -143,12 +143,15 @@ WHERE slot > ? OR (slot = ? AND hash <> ?);
 -- name: GetDatum :one
 SELECT hash, raw_datum, id, added_slot
 FROM datum
-WHERE hash = ?;
+WHERE hash = ? AND LENGTH(raw_datum) > 0;
 
 -- name: SetDatum :exec
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET raw_datum = excluded.raw_datum;
+ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = excluded.raw_datum;
 
 -- name: GetScript :one
 SELECT hash, content, id, created_slot, type
@@ -1065,7 +1068,9 @@ ORDER BY u.id;
 -- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
+WHERE credential_tag = ?
+  AND staking_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND deleted_slot = 0;
 
 -- name: GetScriptLockedSupply :many
 SELECT amount
@@ -1317,7 +1322,8 @@ DELETE FROM transaction_metadata_label WHERE slot > ?;
 -- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ? AND payment_script = ?;
+WHERE payment_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND payment_script = ?;
 
 -- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?;

@@ -59,8 +59,8 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 	_, err = probe.Exec(
 		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
 			"WHERE i < 300) INSERT INTO utxo (tx_id, output_idx, " +
-			"staking_key, credential_tag, added_slot, deleted_slot, amount) " +
-			"SELECT randomblob(32), i % 4, randomblob(28), 0, i, 0, '1' FROM c",
+			"staking_key_id, credential_tag, added_slot, deleted_slot, amount) " +
+			"SELECT randomblob(32), i % 4, i, 0, i, 0, '1' FROM c",
 	)
 	require.NoError(t, err)
 	stat1 := func() int {
@@ -122,8 +122,8 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 		_, err := probe.Exec(
 			"WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c "+
 				"WHERE i < ?) INSERT INTO utxo (tx_id, output_idx, "+
-				"staking_key, credential_tag, added_slot, deleted_slot, "+
-				"amount) SELECT randomblob(32), i % 4, randomblob(28), 0, "+
+				"staking_key_id, credential_tag, added_slot, deleted_slot, "+
+				"amount) SELECT randomblob(32), i % 4, i, 0, "+
 				"i, 0, '1' FROM c",
 			from, to,
 		)

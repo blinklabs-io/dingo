@@ -75,18 +75,23 @@ filter on utxo.tx_id; the unique (tx_id, output_idx) index leads with it.
 
 ~~~sql
 SELECT hex(t.hash) AS tx_hash, u.output_idx, u.amount AS lovelace,
-       hex(u.payment_key) AS payment_credential, u.payment_script,
-       hex(u.staking_key) AS stake_credential, u.credential_tag,
-       hex(u.datum_hash) AS datum_hash
+       hex(pc.hash) AS payment_credential, u.payment_script,
+       hex(sc.hash) AS stake_credential, u.credential_tag,
+       hex(d.hash) AS datum_hash
 FROM utxo u
 JOIN "transaction" t ON t.id = u.tx_id
+LEFT JOIN credential pc ON pc.id = u.payment_key_id
+LEFT JOIN credential sc ON sc.id = u.staking_key_id
+LEFT JOIN datum d ON d.id = u.datum_id
 WHERE u.deleted_slot = 0
 LIMIT 20;
 ~~~
 
 Retained spent rows also exist: deleted_slot = 0 selects unspent outputs.
-There is no utxo.address text column. A payment_key filter deliberately searches
-across address forms sharing a credential; payment_script distinguishes key
+There is no utxo.address text column. utxo names its payment and stake
+credentials by id in credential (payment_key_id, staking_key_id; the hash is
+credential.hash) and its datum by id in datum (datum_id). A payment credential
+filter deliberately searches across address forms sharing a credential; payment_script distinguishes key
 from script payment credentials. For a complete Bech32 address, use get_utxos
 with address_or_credential so Dingo verifies exact address bytes from output
 CBOR. Matching payment/stake hashes alone does not establish full address identity.
@@ -119,11 +124,13 @@ type from the hash bytes.
 ~~~sql
 SELECT hex(hash) AS datum_hash, hex(raw_datum) AS datum_cbor_hex
 FROM datum
+WHERE LENGTH(raw_datum) > 0
 ORDER BY id DESC
 LIMIT 5;
 ~~~
 
-raw_datum contains serialized CBOR, not JSON. Use resolve_datum_or_script with
+raw_datum contains serialized CBOR, not JSON. An empty raw_datum marks a hash
+that an output names and no transaction has revealed yet. Use resolve_datum_or_script with
 the datum hash for decoded content. Core storage mode does not populate the
 API-mode datum, script, or redeemer detail indexes. Empty results from those
 tables in core mode do not mean the chain has no such data. API mode indexes

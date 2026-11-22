@@ -254,11 +254,11 @@ func testAccountAggregateContract(t *testing.T, store *Store) {
 	} {
 		exec(`
 INSERT INTO utxo (
-    tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot,
+    tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot,
     amount
 ) VALUES (?, 0, ?, 0, 1, ?, ?)`,
 			fixtureIdentityRow(t, store, 0, bytes.Repeat([]byte{byte(i + 1)}, 32)),
-			row.key,
+			fixtureCredentialID(t, store, row.key),
 			row.deleted,
 			row.amount,
 		)

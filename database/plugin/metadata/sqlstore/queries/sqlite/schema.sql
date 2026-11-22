@@ -452,16 +452,22 @@ CREATE TABLE token_registry_entry (
     UNIQUE (subject)
 );
 
+CREATE TABLE credential (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash BLOB NOT NULL,
+    UNIQUE (hash)
+);
+
 CREATE TABLE utxo (
     id INTEGER PRIMARY KEY,
     tx_id INTEGER NOT NULL,
     output_idx INTEGER NOT NULL,
     collateral_return_for_tx_id INTEGER,
     spent_at_tx_id INTEGER,
-    payment_key BLOB,
-    staking_key BLOB,
+    payment_key_id INTEGER,
+    staking_key_id INTEGER,
     credential_tag INTEGER NOT NULL DEFAULT 0,
-    datum_hash BLOB,
+    datum_id INTEGER,
     amount TEXT,
     payment_script BOOLEAN,
     added_slot INTEGER,
@@ -586,9 +592,9 @@ CREATE TABLE applied_transaction (
 
 CREATE TABLE address_transaction (
     id INTEGER PRIMARY KEY,
-    payment_key BLOB,
+    payment_key_id INTEGER,
     payment_script BOOLEAN,
-    staking_key BLOB,
+    staking_key_id INTEGER,
     credential_tag INTEGER NOT NULL DEFAULT 0,
     transaction_id INTEGER,
     slot INTEGER,

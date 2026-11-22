@@ -474,12 +474,12 @@ INSERT INTO "transaction" (
 	}
 	_, err = raw.Exec(`
 INSERT INTO utxo (
-    tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
 ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, FALSE)`,
 		txID,
-		paymentKey,
-		row.StakingKey,
+		testutil.CredentialID(t, raw, paymentKey),
+		testutil.CredentialID(t, raw, row.StakingKey),
 		row.CredentialTag,
 		row.AddedSlot,
 		strconv.FormatUint(uint64(row.Amount), 10),
@@ -488,12 +488,12 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, credential_tag,
+    payment_key_id, payment_script, staking_key_id, credential_tag,
     transaction_id, slot, tx_index
 ) VALUES (?, ?, ?, ?, ?, ?, 0)`,
-		row.PaymentKey,
+		testutil.CredentialID(t, raw, row.PaymentKey),
 		row.PaymentScript,
-		row.StakingKey,
+		testutil.CredentialID(t, raw, row.StakingKey),
 		row.CredentialTag,
 		txID,
 		slot,
@@ -1091,11 +1091,11 @@ func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 			}
 			if _, err := metadataTxn.Exec(`
 INSERT INTO utxo (
-    tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
 ) VALUES (?, ?, NULL, 0, ?, 0, '1000000', 0, FALSE)`,
 				testutil.TransactionID(t, metadataTxn, txHash),
-				payment,
+				testutil.CredentialID(t, metadataTxn, payment),
 				slot,
 			); err != nil {
 				return err
@@ -1582,12 +1582,12 @@ func seedExactAddressImportedUtxo(
 	}
 	_, err := raw.Exec(`
 INSERT INTO utxo (
-    tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
 ) VALUES (?, ?, ?, 0, ?, 0, ?, ?, FALSE)`,
 		testutil.TransactionID(t, raw, txHash),
-		paymentKey,
-		stakingKey,
+		testutil.CredentialID(t, raw, paymentKey),
+		testutil.CredentialID(t, raw, stakingKey),
 		slot,
 		strconv.FormatUint(slot*1_000_000, 10),
 		outputIdx,
@@ -1878,10 +1878,12 @@ INSERT INTO "transaction" (
 			}
 			if _, err := raw.Exec(`
 INSERT INTO utxo (
-    tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
 ) VALUES (?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
-				txID, paymentKey, stakingKey, uint64(i+1),
+				txID,
+				testutil.CredentialID(t, raw, paymentKey),
+				testutil.CredentialID(t, raw, stakingKey), uint64(i+1),
 				strconv.FormatUint(amount, 10),
 			); err != nil {
 				return err

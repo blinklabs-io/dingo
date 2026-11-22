@@ -125,6 +125,12 @@ func MatchesUtxoAddressPatterns(
 	return false, nil
 }
 
+// CredentialIDSubquery selects the dictionary id of the credential hash bound
+// to its placeholder. utxo and address_transaction name their credentials by
+// id; the subquery is uncorrelated, so the planner evaluates it once, and a
+// hash the dictionary does not hold yields NULL and matches no row.
+const CredentialIDSubquery = "(SELECT id FROM credential WHERE hash = ?)" //nolint:gosec // SQL text, not a credential
+
 // AppendUtxoAddressPatternOrBranch appends one coarse SQL branch. Exact
 // addresses are narrowed by their stored credentials and later compared by
 // complete serialized bytes after CBOR resolution.
@@ -153,7 +159,7 @@ func AppendUtxoAddressPatternOrBranch(
 		if len(exactOrs) == 0 {
 			ands = append(
 				ands,
-				"((utxo.payment_key IS NULL OR LENGTH(utxo.payment_key) = 0) AND (utxo.staking_key IS NULL OR LENGTH(utxo.staking_key) = 0))",
+				"(utxo.payment_key_id IS NULL AND utxo.staking_key_id IS NULL)",
 			)
 		} else {
 			ands = append(ands, exactOrs[0])
@@ -168,7 +174,7 @@ func AppendUtxoAddressPatternOrBranch(
 				lcommon.AddressHashSize,
 			)
 		}
-		ands = append(ands, "utxo.payment_key = ?")
+		ands = append(ands, "utxo.payment_key_id = "+CredentialIDSubquery)
 		branchArgs = append(branchArgs, pattern.PaymentPart)
 		if pattern.PaymentScript != nil {
 			ands = append(ands, "utxo.payment_script = ?")
@@ -183,7 +189,7 @@ func AppendUtxoAddressPatternOrBranch(
 				lcommon.AddressHashSize,
 			)
 		}
-		ands = append(ands, "utxo.staking_key = ?")
+		ands = append(ands, "utxo.staking_key_id = "+CredentialIDSubquery)
 		branchArgs = append(branchArgs, pattern.DelegationPart)
 	}
 	if len(ands) == 0 {
@@ -248,7 +254,9 @@ func AppendUtxoAddressOrBranchMode(
 		}
 		*ors = append(
 			*ors,
-			"(utxo.payment_script = ? AND utxo.payment_key = ? AND utxo.credential_tag = ? AND utxo.staking_key = ?)",
+			"(utxo.payment_script = ? AND utxo.payment_key_id = "+
+				CredentialIDSubquery+" AND utxo.credential_tag = ? AND "+
+				"utxo.staking_key_id = "+CredentialIDSubquery+")",
 		)
 		*args = append(
 			*args,
@@ -260,7 +268,8 @@ func AppendUtxoAddressOrBranchMode(
 	case hasPayment:
 		*ors = append(
 			*ors,
-			"(utxo.payment_script = ? AND utxo.payment_key = ?)",
+			"(utxo.payment_script = ? AND utxo.payment_key_id = "+
+				CredentialIDSubquery+")",
 		)
 		*args = append(*args, paymentScript, pk.Bytes())
 	case hasStake:
@@ -270,7 +279,8 @@ func AppendUtxoAddressOrBranchMode(
 		}
 		*ors = append(
 			*ors,
-			"(utxo.credential_tag = ? AND utxo.staking_key = ?)",
+			"(utxo.credential_tag = ? AND utxo.staking_key_id = "+
+				CredentialIDSubquery+")",
 		)
 		*args = append(*args, credentialTag, sk.Bytes())
 	}

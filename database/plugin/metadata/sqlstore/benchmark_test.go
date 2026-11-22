@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 
@@ -348,7 +349,7 @@ INSERT INTO account
 VALUES (?, 0, ?, ?, ?, ?, ?)`)
 	utxoStmt := prepare(`
 INSERT INTO utxo
-    (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot,
+    (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot,
      amount)
 VALUES (?, 0, ?, 0, ?, 0, ?)`)
 	totalStmt := prepare(`
@@ -404,7 +405,9 @@ VALUES (?, 0, ?, ?, ?)`)
 		require.NoError(tb, err)
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID, uint64(index))
-		_, err = utxoStmt.Exec(txID, key, slot, "1000000")
+		_, err = utxoStmt.Exec(
+			txID, testutil.CredentialID(tb, tx, key), slot, "1000000",
+		)
 		require.NoError(tb, err)
 		_, err = totalStmt.Exec(key, "1000000", "1000000")
 		require.NoError(tb, err)

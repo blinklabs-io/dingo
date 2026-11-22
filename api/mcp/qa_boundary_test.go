@@ -171,7 +171,7 @@ func TestQAAssetNameCollision(t *testing.T) {
 	db := newSchemaDB(t)
 	_, err := db.Exec(
 		`INSERT INTO "transaction"(id,hash) VALUES(1,zeroblob(32));
- INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);`,
+ INSERT INTO utxo(id,tx_id,output_idx,payment_key_id,amount,deleted_slot) VALUES(1,1,0,NULL,'1',0);`,
 	)
 	require.NoError(t, err)
 	policy := make([]byte, 28)

@@ -118,11 +118,12 @@ func linkAddressTransaction(
 	t.Helper()
 	_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, credential_tag,
+    payment_key_id, payment_script, staking_key_id, credential_tag,
     transaction_id, slot, tx_index
 ) VALUES (?, ?, ?, 0, ?, ?, 0)`,
-		addr.PaymentKeyHash().Bytes(), models.PaymentScriptFromAddress(addr),
-		stakingKeyOf(addr), transactionID, slot,
+		testutil.CredentialID(t, raw, addr.PaymentKeyHash().Bytes()),
+		models.PaymentScriptFromAddress(addr),
+		testutil.CredentialID(t, raw, stakingKeyOf(addr)), transactionID, slot,
 	)
 	require.NoError(t, err)
 }
@@ -600,7 +601,7 @@ func seedSiblingOutputs(
 	require.NoError(t, err)
 	txIDs := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(`
-INSERT INTO utxo (tx_id, payment_key, staking_key, credential_tag,
+INSERT INTO utxo (tx_id, payment_key_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script)
 VALUES (?, ?, ?, 0, ?, 0, '1000000', 0, ?)`)
 	require.NoError(t, err)
@@ -612,8 +613,8 @@ VALUES (?, ?, ?, 0, ?, 0, '1000000', 0, ?)`)
 		ids[i] = id
 		_, err = stmt.Exec(
 			txIDs.ID(id),
-			sibling.PaymentKeyHash().Bytes(),
-			stakingKeyOf(sibling),
+			testutil.CredentialID(t, tx, sibling.PaymentKeyHash().Bytes()),
+			testutil.CredentialID(t, tx, stakingKeyOf(sibling)),
 			uint64(i)+1,
 			models.PaymentScriptFromAddress(sibling),
 		)

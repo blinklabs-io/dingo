@@ -22,7 +22,7 @@ distinct from missing snapshots, checksum corruption, or cloud transport errors.
 
 The UTxO-HD MemPack tag-3 output stores its `DataHash32` as four
 little-endian `Word64` values. `ledgerstate` converts each word to the
-big-endian hash bytes before writing `utxo.datum_hash` and reconstructing
+big-endian hash bytes before writing the datum hash `utxo.datum_id` names and reconstructing
 the output CBOR. Tag-1 `SafeHash` and the datum-hash variant inside tag-5
 outputs already contain raw digest bytes and must not undergo that conversion.
 
@@ -158,7 +158,7 @@ table. Live operation then holds only about a security window of spent rows
 in a table that never grows anywhere near 25-fold, so those statistics are
 never revisited. Under them, the rollback sweep's stake-credential lookup for
 the UTxOs spent by rolled-back transactions
-(`SELECT credential_tag, staking_key FROM utxo WHERE spent_at_tx_id IN (...)`
+(`SELECT credential_tag, <staking key by id> FROM utxo WHERE spent_at_tx_id IN (...)`
 in `DeleteTransactionsAfterSlot`) planned a chunk holding a single
 transaction id as a pass over every `utxo` row, through
 `idx_utxo_staking_deleted_amount`, while the ledger held its write lock. On
@@ -237,8 +237,10 @@ user-visible change for anyone reading the metadata database with SQL:
   transaction, block, address-history, certificate-position and fee
   readers) join it, so an identity-only row never surfaces as a transaction.
 - `utxo` is `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`,
-  `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`,
-  `datum_hash`, `amount`, `payment_script`, `added_slot` and `deleted_slot`.
+  `spent_at_tx_id`, `payment_key_id`, `staking_key_id`, `credential_tag`,
+  `datum_id`, `amount`, `payment_script`, `added_slot` and `deleted_slot`. The
+  credential columns are ids in `credential` and `datum_id` an id in `datum`
+  (migration `v79`).
   `tx_id` is `NOT NULL` and is the row id of the producing transaction for
   every output, a collateral return included; `collateral_return_for_tx_id`
   (equal to `tx_id`) marks the return, so a reader that means regular outputs
@@ -344,7 +346,7 @@ upgrade path and is resynced.
 
 The stake-key lookup indexes `idx_utxo_staking_key` and
 `idx_utxo_staking_deleted_amount` include only outputs with a non-NULL
-`staking_key` on SQLite and PostgreSQL (schema version 53). Enterprise
+`staking_key_id` on SQLite and PostgreSQL (schema version 53). Enterprise
 outputs cannot contribute to credential stake totals and need no entries in
 these indexes. The deleted-slot-leading indexes are covered separately below.
 Upgrade builds the retained live-stake index immediately;
@@ -352,7 +354,7 @@ the simple stake-key index waits if a deferred rebuild is pending. A deferred
 rebuild preserves both partial predicates. MySQL keeps full indexes.
 
 `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`,
-`staking_key`, `amount`) holds spent outputs only on SQLite and PostgreSQL:
+`staking_key_id`, `amount`) holds spent outputs only on SQLite and PostgreSQL:
 `WHERE deleted_slot > 0` (schema version 60). A full index holds every live
 output at `deleted_slot = 0` ordered by credential and `amount`, so creating an
 output inserts at a random leaf, and spending it deletes from another and
@@ -6009,7 +6011,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `transaction` | `id`, `hash` | PK `id` (`AUTOINCREMENT`); unique `hash` (`idx_transaction_hash`, `NOT NULL`) | Identity table: one row per transaction hash the store knows, either applied (it has an `applied_transaction` row) or named only by an imported or recovered output (it has none). Everything else about a transaction lives in `applied_transaction`; child tables (`certs`, `key_witness`, `plutus_data`, `redeemer`, `redeemer_script`, `witness_scripts`, `leios_transaction_context`, `address_transaction`, `transaction_metadata_label`) keep their `transaction_id` column, which still names `transaction.id`. A Dijkstra batch has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash. |
 | `applied_transaction` | `tx_id`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_hash` (`block_hash`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order, and a certifying ranking block's own transactions follow the index range reserved for its endorser-block closure (the closure's transaction count plus its child bodies). `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
-| `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key_id`, `staking_key_id`, `credential_tag`, `datum_id`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key_id`, `staking_key_id` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key_id`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key_id`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `payment_key_id` and `staking_key_id` are ids in `credential` and `datum_id` an id in `datum` (migration `v79`); readers resolve a hash with `(SELECT id FROM credential WHERE hash = ?)` and project it back from the dictionary. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key_id, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `tx_id`, `utxo_id` | Clustered PK `(tx_id, utxo_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_utxo_id` (`utxo_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `tx_id`, `utxo_id` | Clustered PK `(tx_id, utxo_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_utxo_id` (`utxo_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
@@ -6019,7 +6021,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
 | `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index: it is dropped only by a node-managed Mithril stream catch-up and rebuilt before ingest resumes, never by ordinary sync. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows there. |
 | `asset_mint_burn` | `transaction_id`, `asset_id`, `slot`, `tx_index`, `quantity` | Clustered PK `(transaction_id, asset_id)`; FK `transaction_id -> transaction.id`, `asset_id -> asset_identity.id`; indexes `idx_asset_mint_burn_asset_id` (`asset_id`, `slot`, `tx_index`), `idx_asset_mint_burn_slot` (`slot`) | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. The transaction hash comes from `transaction` and the policy and name from `asset_identity`; the fingerprint is derived from them on read. Populated from `tx.AssetMint()` during indexing, resolving the asset identity per flush like `asset_holding`; `quantity` is a signed decimal string (negative for burns). Unlike `asset_holding` (holdings of retained outputs), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, transaction_id)`) and `mint_or_burn_count` (row count). The primary key makes re-applying a transaction after a rollback idempotent. Both indexes are deferred during bulk import and restored before API or rollback traffic. Rows with `slot > rollback_slot` are deleted before the rolled-back `transaction` identity rows. |
-| `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
+| `address_transaction` | `id`, `payment_key_id`, `payment_script`, `credential_tag`, `staking_key_id`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key_id`, `transaction_id`, `slot`; composite `(credential_tag, staking_key_id, slot, tx_index, payment_key_id)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_key_id` and `staking_key_id` are ids in `credential` (migration `v79`); NULL means the address has no such credential. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot`, `idx_transaction_metadata_label_label_slot` `(label, slot, transaction_id)` (schema version 58) | API-mode per-label metadata index. Join to `transaction.id`. `GetTransactionsByMetadataLabel` drives from the label rows through the `(label, slot, transaction_id)` index and joins `transaction` and `applied_transaction`, so a page reads its first rows in slot order and sorts only ties within a slot (by `block_index`, `id`) instead of every transaction carrying the label. A label row's `slot` equals its transaction's `slot`. The label, slot and label-slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
@@ -6027,7 +6029,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique `hash` (`uni_script_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. The tag and index filters are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears redeemers on replays. |
-| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
+| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. `utxo.datum_id` names a row of it. A row with an empty `raw_datum` is a hash an output names that no transaction has revealed yet; datum readers skip it and a reveal fills it in place. The `added_slot` index is deferred and rebuilt by background maintenance. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. Normal and Mithril gap-closure transaction writes use the same idempotent certificate upsert, preserving `slot`, `block_hash`, `block_index` (through the transaction), and `cert_index` for position-ordered readers. The transaction-id index remains resident for import cleanup. The slot index is rebuilt before rollback; block-hash, certificate-id, and certificate-type indexes are rebuilt by background maintenance. |
 
 Deferred-index bulk mode is shared by SQLite, PostgreSQL, and MySQL. InnoDB
@@ -6278,7 +6280,7 @@ the latest stored value; a later change in the same epoch replaces that
 epoch's row. Candidate snapshots encode entries ordered by transaction hash
 and output index so identical sets produce identical CBOR.
 On startup, committee-candidate restoration reads live `utxo` rows and joins
-`utxo.datum_hash` to `datum.raw_datum`; it does not require block CBOR blobs
+`utxo.datum_id` to `datum.id` and reads `datum.raw_datum` of revealed rows; it does not require block CBOR blobs
 to still be available. This restoration path rebuilds only the in-memory
 `(tx_hash, output_index) -> datum` membership set used to write the next
 epoch snapshot — it does not touch `midnight_committee_candidate_registrations`,
@@ -7041,6 +7043,69 @@ drives from `utxo_address`. Writers resolve ids inside the writing transaction
 and keep no id cache, so a rolled back write leaves neither a row nor an id.
 `TestUtxoAddressDictionaryKeepsRowsAndPositions` pins the rebuild and
 `TestOrderedUtxoAddressRowIsWrittenOnce` pins the single write.
+
+Migration `v79` (`utxo-credential-dictionary`, integer version 79) holds each
+payment credential, stake credential and datum hash once. It creates
+`credential` (`id`, `hash`, unique on `hash`) and rebuilds `utxo` and
+`address_transaction` with `payment_key_id` and `staking_key_id` in place of
+the by-value `payment_key` and `staking_key`; `utxo` also names its datum by
+`datum_id` in place of `datum_hash`. `credential_tag` and `payment_script`
+stay on the row, so one hash is one dictionary row whichever kind uses it, as
+payment key, stake key or either kind. An empty value is no credential and
+holds NULL. The row ids of both tables are kept, and their `AUTOINCREMENT`
+counters are carried over, so no id that was issued is issued again. A batched
+copy (cursor: phase and last legacy id, 50,000 rows per step) adds each range's
+credentials to the dictionary, adds an unrevealed `datum` row for each datum
+hash that has none, copies `utxo` rows, then `address_transaction` rows, and
+the swap compares row counts before it replaces either legacy table. On
+PostgreSQL and MySQL the swap drops the foreign keys that reference `utxo`,
+renames the copy and restores them with their names and `ON DELETE` rules;
+SQLite relies on the migration runner turning foreign keys off. The indexes
+are built after the swap, one per step: `idx_utxo_payment_key`
+(`payment_key_id`), `idx_utxo_staking_key` (`staking_key_id`, non-NULL only),
+`idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key_id`,
+`deleted_slot`, `amount`), `idx_utxo_deleted_staking_amount` (`deleted_slot`,
+`credential_tag`, `staking_key_id`, `amount`, spent rows only),
+`idx_addr_tx_payment` (`payment_key_id`) and `idx_addr_tx_stake_position`
+(`credential_tag`, `staking_key_id`, `slot`, `tx_index`, `payment_key_id`).
+The ids are not foreign keys: nothing deletes a dictionary row, and a foreign
+key would add a lookup to every output written and an implicit index on MySQL.
+
+`credential.id` and `datum.id` are node-local surrogates. Dictionary rows are
+never deleted, by rollback, pruning or the cascade from `utxo`; a credential
+with no output is invisible because every read drives from `utxo` or
+`address_transaction`. Writers resolve ids inside the writing transaction and
+keep no id cache, so a rolled back write leaves neither a row nor an id.
+`resolveUtxoParams` resolves the ids of every output a statement writes, and
+the address-transaction rows resolve theirs when the row batch flushes.
+
+An output that names a datum hash adds a `datum` row for it when no transaction
+has revealed the datum: a row with an empty `raw_datum` and `added_slot` 0. No
+revealed datum is empty, so an empty `raw_datum` marks the unrevealed state.
+`GetDatum`, the MCP datum tools and the Midnight governance reader see only
+revealed rows. A reveal (`datumShape`, `SetDatum`) fills the unrevealed row in
+place, so the output keeps its `datum_id`, and a later write of an already
+revealed hash leaves it alone. Datum rows are never deleted, so a rollback
+leaves an unrevealed row for an output it removed.
+
+A reader that has a hash resolves it with
+`(SELECT id FROM credential WHERE hash = ?)`, an uncorrelated subquery the
+planner evaluates once through the unique hash index, and a reader that
+reports a hash projects it from the dictionary by id. `utxo` is not in hash
+order by id, so the live stake key source
+(`rewardLiveStakeKeySource`, `nextRewardLiveStakeBatchEnd`) reads each
+credential tag as a range of `credential.hash` and probes `utxo` by credential
+id with `EXISTS`: a batch is a range of (`credential_tag`, hash), however the
+ids were issued. The address-history readers order rows with the same slot and
+transaction index by `payment_key_id` where they ordered by the payment key
+bytes. `GetAddressesByCredential` still orders by the payment key bytes, by
+joining the dictionary. `account`, the `reward_*` tables, `stake_delegation`
+and the certificate tables keep their credentials by value.
+`TestUtxoCredentialDictionaryKeepsRowsAndHoldsEachHashOnce` pins the rebuild,
+`TestUtxoWritesHoldEachCredentialAndDatumOnce` and
+`TestUnrevealedDatumRowIsHiddenUntilRevealed` pin the writers, and
+`TestLiveStakeKeysAreReadInHashOrderNotDictionaryOrder` and
+`TestCredentialQueriesUseDictionaryIndexes` pin the readers.
 
 #### Mithril API reward-live-stake finalization
 
@@ -9443,7 +9508,8 @@ bounds. Lovelace and count:
 SELECT amount
 FROM utxo
 WHERE deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
+  AND (utxo.payment_script = $1 AND utxo.payment_key_id =
+       (SELECT id FROM credential WHERE hash = decode($2, 'hex')))
 LIMIT $3;
 ```
 
@@ -9455,7 +9521,8 @@ FROM utxo
 JOIN asset_holding h ON h.utxo_id = utxo.id
 JOIN asset_identity i ON i.id = h.asset_id
 WHERE utxo.deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
+  AND (utxo.payment_script = $1 AND utxo.payment_key_id =
+       (SELECT id FROM credential WHERE hash = decode($2, 'hex')))
 ORDER BY i.policy_id, i.name;
 ```
 
@@ -10111,7 +10178,8 @@ WITH active_delegator_stake AS (
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
-   AND utxo.staking_key = active_delegation.staking_key
+   AND utxo.staking_key_id = (SELECT id FROM credential
+                              WHERE hash = active_delegation.staking_key)
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
   -- Gate predicate, emitted only when expiryEpoch > 0.
@@ -10459,7 +10527,8 @@ LEFT JOIN (
          COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0) AS utxo_sum
   FROM account ax
   JOIN utxo ON utxo.credential_tag = ax.credential_tag
-           AND utxo.staking_key = ax.staking_key
+           AND utxo.staking_key_id = (SELECT id FROM credential
+                                      WHERE hash = ax.staking_key)
            AND utxo.deleted_slot = 0
   -- CIP-0163 gate (emitted only when expiryEpoch > 0), ahead of the IN chunk:
   WHERE ax.active = 1 AND (ax.expiration_epoch = 0 OR ax.expiration_epoch >= ?)

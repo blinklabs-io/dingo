@@ -1091,7 +1091,8 @@ active_delegator_stake AS (
  FROM ` + delegationSource + `
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
-  AND utxo.staking_key = active_delegation.staking_key
+  AND utxo.staking_key_id = (
+      SELECT id FROM credential WHERE hash = active_delegation.staking_key)
   AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
@@ -1696,19 +1697,19 @@ func (s *Store) IterateLeiosClosureUtxoEffects(
 	}{
 		{false, `
 SELECT t.hash, utxo.output_idx, utxo.added_slot, lc.slot,
-       utxo.credential_tag, utxo.staking_key, utxo.amount
+       utxo.credential_tag, ` + utxoStakingKeyExpr + `, utxo.amount
 FROM utxo
 JOIN "transaction" t ON t.id = utxo.tx_id
 JOIN leios_transaction_context lc ON lc.transaction_id = utxo.tx_id
-WHERE utxo.staking_key IS NOT NULL AND length(utxo.staking_key) > 0
+WHERE utxo.staking_key_id IS NOT NULL
   AND lc.slot <> utxo.added_slot`},
 		{true, `
 SELECT t.hash, utxo.output_idx, utxo.deleted_slot, lc.slot,
-       utxo.credential_tag, utxo.staking_key, utxo.amount
+       utxo.credential_tag, ` + utxoStakingKeyExpr + `, utxo.amount
 FROM utxo
 JOIN "transaction" t ON t.id = utxo.tx_id
 JOIN leios_transaction_context lc ON lc.transaction_id = utxo.spent_at_tx_id
-WHERE utxo.staking_key IS NOT NULL AND length(utxo.staking_key) > 0
+WHERE utxo.staking_key_id IS NOT NULL
   AND utxo.deleted_slot <> 0 AND lc.slot <> utxo.deleted_slot`},
 	} {
 		if err := func() error {

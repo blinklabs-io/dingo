@@ -300,7 +300,7 @@ func TestGetUtxosByRefsAsOfReturnsSameRows(t *testing.T) {
 	require.NoError(t, err)
 	ids := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(t, err)
@@ -308,7 +308,7 @@ func TestGetUtxosByRefsAsOfReturnsSameRows(t *testing.T) {
 		id := utxoIDAt(r.i)
 		key := make([]byte, 28)
 		key[0] = byte(r.i)
-		_, err := stmt.Exec(ids.ID(id.Hash), id.Idx, key, 0, r.addedSlot, r.deletedSlot, "1000000")
+		_, err := stmt.Exec(ids.ID(id.Hash), id.Idx, testutil.CredentialID(t, tx, key), 0, r.addedSlot, r.deletedSlot, "1000000")
 		require.NoError(t, err)
 	}
 	require.NoError(t, stmt.Close())
@@ -353,9 +353,10 @@ func TestGetUtxosByRefsAsOfRejectsOutOfDomainSlot(t *testing.T) {
 
 	id := utxoIDAt(0)
 	_, err := store.writeDB.Exec(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, "+
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, "+
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		testutil.TransactionID(t, store.writeDB, id.Hash), id.Idx, make([]byte, 28), 0, 100, 0, "1000000",
+		testutil.TransactionID(t, store.writeDB, id.Hash), id.Idx,
+		testutil.CredentialID(t, store.writeDB, make([]byte, 28)), 0, 100, 0, "1000000",
 	)
 	require.NoError(t, err)
 	refs := []models.UtxoId{id}
@@ -547,11 +548,11 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 	}
 	for i, row := range rows {
 		_, err := store.writeDB.Exec(
-			"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, "+
+			"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, "+
 				"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			testutil.TransactionID(t, store.writeDB, row.txID),
 			row.outputIdx,
-			[]byte{byte(i + 1)},
+			testutil.CredentialID(t, store.writeDB, []byte{byte(i + 1)}),
 			0,
 			1,
 			row.deletedSlot,
@@ -630,7 +631,10 @@ func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
 				),
 				guardedArgs...,
 			)
-			if nRows >= 2 {
+			// Without statistics the default estimates decide this plan.
+			// For two terms they favor the primary key; the fallback to a
+			// deleted-slot index shows from four terms.
+			if nRows >= 4 {
 				require.Contains(
 					t, guardedPlan, "idx_utxo_deleted",
 					"expected the guarded update to fall back to a "+
@@ -658,9 +662,9 @@ func TestMarkUtxosDeletedQueryRetainsLivenessGuardForConcurrentWriters(t *testin
 // slot index.
 const (
 	legacyDistinctAddedAfterSlotQuery = "SELECT DISTINCT credential_tag, " +
-		"staking_key FROM utxo WHERE added_slot > ?"
+		utxoStakingKeyExpr + " FROM utxo WHERE added_slot > ?"
 	legacyDistinctDeletedAfterSlotQuery = "SELECT DISTINCT credential_tag, " +
-		"staking_key FROM utxo WHERE deleted_slot > ?"
+		utxoStakingKeyExpr + " FROM utxo WHERE deleted_slot > ?"
 )
 
 // newMigratedSQLiteStore opens a SQLite store carrying the real migrated
@@ -717,7 +721,7 @@ func seedRollbackUtxos(
 	require.NoError(tb, err)
 	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
@@ -749,7 +753,7 @@ func seedRollbackUtxos(
 		_, err := stmt.Exec(
 			ids.ID(txID),
 			i%4,
-			key,
+			testutil.CredentialID(tb, tx, key),
 			int64(cred%2),
 			addedSlot,
 			deletedSlot,
@@ -938,7 +942,7 @@ func TestRollbackStakeRefsDedupeMatchesSQLDistinct(t *testing.T) {
 	require.NoError(t, err)
 	ids := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(t, err)
@@ -946,7 +950,7 @@ func TestRollbackStakeRefsDedupeMatchesSQLDistinct(t *testing.T) {
 		_, err := stmt.Exec(
 			ids.ID([]byte{byte(i)}),
 			0,
-			row.stakingKey,
+			testutil.CredentialID(t, tx, row.stakingKey),
 			row.credentialTag,
 			row.addedSlot,
 			row.deletedSlot,
@@ -1312,7 +1316,8 @@ func legacyUtxoStakeRefsQuery(
 	liveOnly bool,
 ) (string, []any) {
 	predicate, args := sqliteOrOfRefs(ids)
-	query := "SELECT DISTINCT credential_tag, staking_key FROM utxo WHERE (" +
+	query := "SELECT DISTINCT credential_tag, " + utxoStakingKeyExpr +
+		" FROM utxo WHERE (" +
 		predicate + ")"
 	if liveOnly {
 		query += " AND deleted_slot = 0"
@@ -1348,7 +1353,7 @@ func seedStakeRefLookupUtxos(
 	require.NoError(tb, err)
 	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
+		"INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
@@ -1372,7 +1377,7 @@ func seedStakeRefLookupUtxos(
 		_, err := stmt.Exec(
 			ids.ID(txID),
 			i%4,
-			key,
+			testutil.CredentialID(tb, tx, key),
 			int64(cred%2),
 			int64(i),
 			deletedSlot,

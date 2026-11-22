@@ -30,9 +30,9 @@ type Address struct {
 
 type AddressTransaction struct {
 	ID            int64
-	PaymentKey    []byte
+	PaymentKeyID  sql.NullInt64
 	PaymentScript sql.NullBool
-	StakingKey    []byte
+	StakingKeyID  sql.NullInt64
 	CredentialTag int64
 	TransactionID sql.NullInt64
 	Slot          sql.NullInt64
@@ -125,6 +125,11 @@ type Constitution struct {
 	PolicyHash  []byte
 	AddedSlot   int64
 	DeletedSlot sql.NullInt64
+}
+
+type Credential struct {
+	ID   int64
+	Hash []byte
 }
 
 type Datum struct {
@@ -588,10 +593,10 @@ type Utxo struct {
 	OutputIdx               int64
 	CollateralReturnForTxID sql.NullInt64
 	SpentAtTxID             sql.NullInt64
-	PaymentKey              []byte
-	StakingKey              []byte
+	PaymentKeyID            sql.NullInt64
+	StakingKeyID            sql.NullInt64
 	CredentialTag           int64
-	DatumHash               []byte
+	DatumID                 sql.NullInt64
 	Amount                  sql.NullString
 	PaymentScript           sql.NullBool
 	AddedSlot               sql.NullInt64

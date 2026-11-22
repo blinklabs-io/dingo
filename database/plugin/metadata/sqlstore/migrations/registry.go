@@ -119,6 +119,7 @@ const (
 	assetMintBurnIDsSchemaRelease                       = "asset-mint-burn-ids"
 	utxoAddressDictionarySchemaRelease                  = "utxo-address-dictionary"
 	blockNonceClusteredSchemaRelease                    = "block-nonce-clustered"
+	utxoCredentialDictionarySchemaRelease               = "utxo-credential-dictionary" //nolint:gosec // a migration name, not a credential
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -317,6 +318,7 @@ var schemaVersions = []struct {
 	{Version: 76, Name: assetMintBurnIDsSchemaRelease, Dir: "v76"},
 	{Version: 77, Name: utxoAddressDictionarySchemaRelease, Dir: "v77"},
 	{Version: 78, Name: blockNonceClusteredSchemaRelease, Dir: "v78"},
+	{Version: 79, Name: utxoCredentialDictionarySchemaRelease, Dir: "v79"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -521,6 +523,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = blockNonceClusteredBackfill(dialect)
 			migration.BatchSize = blockNonceClusteredBatchSize
+		}
+		if version.Name == utxoCredentialDictionarySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoCredentialDictionaryBackfill(dialect)
+			migration.BatchSize = utxoCredentialDictionaryBatchSize
 		}
 		ret = append(ret, migration)
 	}

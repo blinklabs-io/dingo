@@ -127,12 +127,13 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	dialect := MySQLDialect()
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_addr_tx_stake_position` ON `address_transaction` (`credential_tag`, `staking_key`(255), `slot`, `tx_index`, `payment_key`(255))",
+		"CREATE INDEX `idx_addr_tx_stake_position` ON `address_transaction` (`credential_tag`, `staking_key_id`, `slot`, `tx_index`, `payment_key_id`)",
 		dialect.CreateIndexSQL(
 			"idx_addr_tx_stake_position",
 			"address_transaction",
 			[]string{
-				"credential_tag", "staking_key", "slot", "tx_index", "payment_key",
+				"credential_tag", "staking_key_id", "slot", "tx_index",
+				"payment_key_id",
 			},
 		),
 	)

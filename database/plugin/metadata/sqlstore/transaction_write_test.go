@@ -144,11 +144,11 @@ func seedConsumedUtxo(
 ) {
 	t.Helper()
 	_, err := store.writeDB.ExecContext(context.Background(), `
-INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, ?, ?, ?, ?, 0, ?)`,
 		testutil.TransactionID(t, store.writeDB, fx.consumedTxID),
 		0,
-		fx.ref.Key,
+		testutil.CredentialID(t, store.writeDB, fx.ref.Key),
 		int64(fx.ref.Tag),
 		int64(1),
 		decimalUint64(types.Uint64(fx.consumedAmount)),
@@ -599,10 +599,10 @@ func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
 	require.NoError(t, err)
 	seedConsumedUtxo(t, store, fx)
 	_, err = store.writeDB.ExecContext(ctx, `
-INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, 1, 0, ?)`,
 		testutil.TransactionID(t, store.writeDB, secondTxID),
-		fx.ref.Key,
+		testutil.CredentialID(t, store.writeDB, fx.ref.Key),
 		int64(fx.ref.Tag),
 		decimalUint64(types.Uint64(7_000_000)),
 	)

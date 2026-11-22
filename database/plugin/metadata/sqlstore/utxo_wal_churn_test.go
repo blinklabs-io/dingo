@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -90,8 +91,8 @@ func seedChurnUtxos(
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(
-		"INSERT INTO utxo (tx_id, output_idx, payment_key, credential_tag, " +
-			"staking_key, added_slot, deleted_slot, amount, payment_script) " +
+		"INSERT INTO utxo (tx_id, output_idx, payment_key_id, credential_tag, " +
+			"staking_key_id, added_slot, deleted_slot, amount, payment_script) " +
 			"VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
@@ -101,9 +102,9 @@ func seedChurnUtxos(
 	for i := range uint64(n) {
 		kind := churnKindFor(mix, i)
 		txID := churnHash('t', i, 0, 32)
-		var stakingKey any
+		var stakingKeyBytes []byte
 		if kind != churnEnterprise {
-			stakingKey = churnHash('s', i%20_000, 0, 28)
+			stakingKeyBytes = churnHash('s', i%20_000, 0, 28)
 		}
 		var deleted int64
 		if i%2 == 0 {
@@ -116,7 +117,9 @@ func seedChurnUtxos(
 		producer, err := res.LastInsertId()
 		require.NoError(tb, err)
 		_, err = stmt.Exec(
-			producer, churnHash('p', i, 0, 28), int64(0), stakingKey,
+			producer,
+			testutil.CredentialID(tb, tx, churnHash('p', i, 0, 28)),
+			int64(0), testutil.CredentialID(tb, tx, stakingKeyBytes),
 			int64(i), deleted, churnAmount(i), kind == churnScript,
 		)
 		require.NoError(tb, err)

@@ -297,8 +297,10 @@ func (s *Store) liveUtxoDigest(
 		txCtx = ctx
 	}
 	query := s.dialect.Rebind(`-- name: LiveUtxoPage :many
-SELECT t.hash, u.output_idx, u.amount, u.payment_key, u.staking_key,
-    u.datum_hash
+SELECT t.hash, u.output_idx, u.amount,
+    ` + uCredentialHash("payment_key_id") + `,
+    ` + uCredentialHash("staking_key_id") + `,
+    (SELECT d.hash FROM datum AS d WHERE d.id = u.datum_id)
 FROM utxo u
 JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` t ON t.id = u.tx_id
 WHERE (t.hash > ? OR (t.hash = ? AND u.output_idx > ?))
