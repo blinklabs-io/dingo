@@ -350,3 +350,35 @@ func TestExportSCLSFailsOnAPayloadTheCodecRejects(t *testing.T) {
 	require.ErrorIs(t, err, sclscardano.ErrPayload)
 	requireNoSCLSFiles(t, dir)
 }
+
+// TestExportSCLSNeverReplacesAnOutputCreatedDuringTheExport requires the
+// publish to refuse, not replace, a file that appears at the output after the
+// export started.
+func TestExportSCLSNeverReplacesAnOutputCreatedDuringTheExport(t *testing.T) {
+	t.Parallel()
+	f := newSCLSFixture(t, EraConway, sclsRefs()...)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "state.scls")
+	_, err := ExportSCLS(t.Context(), SCLSExportConfig{
+		Source: f.source(t),
+		Output: out,
+		Tool:   "dingo test",
+		verify: func(r io.Reader) (scls.Hash, error) {
+			vr, err := scls.Verify(r, scls.VerifyFull)
+			if err != nil {
+				return scls.Hash{}, err
+			}
+			if err := os.WriteFile(out, []byte("keep"), 0o600); err != nil {
+				return scls.Hash{}, err
+			}
+			return vr.RootHash, nil
+		},
+	})
+	require.ErrorIs(t, err, os.ErrExist)
+	got, err := os.ReadFile(out)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), got)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}

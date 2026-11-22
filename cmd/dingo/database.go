@@ -246,8 +246,10 @@ open in a running node.
 
 The export reads one snapshot of the live UTxO set at its tip and persists
 no checkpoint, so nothing is retained once the command ends. The file is
-staged as <output>.partial, verified in full, and renamed into place; a
-failure or an interrupt removes the staged file.
+staged as <output>.partial, verified in full, and hard-linked into place,
+which never replaces a file created at --output meanwhile; a failure or an
+interrupt removes the staged file. The output directory must be on a file
+system that supports hard links.
 
 Only a Conway state is exported, and only the utxo/v0 namespace. The file
 declares itself a parity export in its manifest (profile=parity,

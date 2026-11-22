@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -137,8 +138,9 @@ type SCLSExportResult struct {
 // ExportSCLS writes the UTxO set of cfg.Source as an SCLS file (CIP-0165) at
 // cfg.Output. Outputs stream in key order, one at a time, so memory does not
 // grow with the set. The file is staged beside the destination, finalized,
-// verified in full against the root the writer computed, and only then renamed
-// into place; a failure or a cancelled ctx removes the staged file. Only a
+// verified in full against the root the writer computed, and only then
+// hard-linked to cfg.Output, which never replaces a file that appeared there
+// meanwhile; a failure or a cancelled ctx removes the staged file. Only a
 // Conway state is exported.
 func ExportSCLS(
 	ctx context.Context,
@@ -227,13 +229,21 @@ func ExportSCLS(
 	if err := ctx.Err(); err != nil {
 		return res, err
 	}
-	if _, err := os.Lstat(cfg.Output); err == nil {
-		return res, fmt.Errorf("scls export: %w: %s", os.ErrExist, cfg.Output)
-	}
-	if err := os.Rename(partial, cfg.Output); err != nil {
+	// A hard link publishes without replacing a file created at the output
+	// while the export ran, which a rename would silently clobber.
+	if err := os.Link(partial, cfg.Output); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return res, fmt.Errorf("scls export: %w: %s", os.ErrExist, cfg.Output)
+		}
 		return res, fmt.Errorf("scls export: publish: %w", err)
 	}
 	staged = false
+	if err := os.Remove(partial); err != nil {
+		return res, fmt.Errorf(
+			"scls export: %s is published, but removing the staged file failed: %w",
+			cfg.Output, err,
+		)
+	}
 	if d, err := os.Open(filepath.Dir(cfg.Output)); err == nil { // #nosec G304 -- the output directory
 		// Directories cannot be synced on every platform; a failure only
 		// narrows the crash window.

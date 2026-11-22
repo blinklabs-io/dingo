@@ -4719,8 +4719,11 @@ fails the export. Each output's ledger CBOR goes through the go-scls typed
 
 The file is staged as `<output>.partial` (created exclusively; an existing
 output or staged file is refused), finalized, fsynced, verified in full
-(`scls.VerifyFull`) with its root compared to the writer's, then renamed to the
-output and the directory synced. A failure or an interrupt removes the staged
+(`scls.VerifyFull`) with its root compared to the writer's, then published by
+a hard link to the output, the staged name removed and the directory synced.
+The link fails rather than replace a file created at the output while the
+export ran, which a rename would clobber, so the output directory must be on a
+file system with hard links. A failure or an interrupt removes the staged
 file. Only a Conway tip is exported.
 
 The manifest summary carries the tool (`dingo <version>`), the creation time

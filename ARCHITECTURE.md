@@ -4832,7 +4832,7 @@ the set with `dblifecycle.OpenUtxoSet`, takes `ledgerstate.NewSCLSSource` (one
 `ledgerstate.ExportSCLS`, releasing both on every exit path. The conversion
 lives in `ledgerstate` behind the narrow `SCLSSource` interface (tip, era,
 outputs in key order); the container and `utxo/v0` codecs stay in go-scls.
-The export is offline, persists no checkpoint, and stages, verifies and renames
+The export is offline, persists no checkpoint, and stages, verifies and hard-links
 its output as described in `DATABASE.md`. It declares itself a parity export of
 the `utxo/v0` namespace in the manifest, not a bootstrap artifact.
 
