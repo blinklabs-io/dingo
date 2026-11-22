@@ -19,12 +19,15 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,11 +125,20 @@ type anchorRig struct {
 
 func newAnchorRig(t *testing.T, blocks int, anchorNumber uint64) *anchorRig {
 	t.Helper()
+	return newAnchorRigWithStore(t, blocks, anchorNumber, newTestStore(t))
+}
+
+func newAnchorRigWithStore(
+	t *testing.T,
+	blocks int,
+	anchorNumber uint64,
+	store *indexerdb.Store,
+) *anchorRig {
+	t.Helper()
 	log := &[]string{}
 	chain := &anchoredChain{
 		fakeChain: newFakeChain(blocks, "c"), anchorNumber: anchorNumber,
 	}
-	store := newTestStore(t)
 	facts := &anchorFacts{recordingFacts: &recordingFacts{log: log}}
 	idx := &countingIndexer{
 		loggingIndexer: &loggingIndexer{
@@ -353,4 +365,55 @@ func TestWriterDebitsWithdrawalsOnlyPastTheAnchor(t *testing.T) {
 	for number, debited := range idx.modes {
 		require.Equal(t, number > 12, debited, "block %d", number)
 	}
+}
+
+// plannerStatsProbe records the incremental planner-statistics runs the
+// metadata store is asked for. Embedding only the interface keeps the
+// store's other optional statistics interfaces out of the wrapper's method
+// set, so the Writer can reach the incremental form alone.
+type plannerStatsProbe struct {
+	metadata.MetadataStore
+	mu       sync.Mutex
+	triggers []string
+}
+
+func (p *plannerStatsProbe) OptimizePlannerStatsContext(
+	ctx context.Context, trigger string,
+) (types.PlannerStatsResult, error) {
+	p.mu.Lock()
+	p.triggers = append(p.triggers, trigger)
+	p.mu.Unlock()
+	return p.MetadataStore.(metadata.IncrementalPlannerStatsUpdater).
+		OptimizePlannerStatsContext(ctx, trigger)
+}
+
+func (p *plannerStatsProbe) runs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.triggers)
+}
+
+// The statistics the API plans with after the backfill must not be the last
+// periodic ones: reaching the anchor takes exactly one more, bounded pass.
+func TestWriterTakesOneFinalPlannerStatsPassAtTheAnchor(t *testing.T) {
+	t.Parallel()
+	probe := &plannerStatsProbe{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{}},
+		func(m metadata.MetadataStore) metadata.MetadataStore {
+			probe.MetadataStore = m
+			return probe
+		},
+	)
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(db, db, 10)
+	require.NoError(t, err)
+	r := newAnchorRigWithStore(t, 30, 12, store)
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, []string{"anchor"}, probe.runs())
+
+	// Following the ledger past the anchor takes no further pass.
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, []string{"anchor"}, probe.runs())
 }

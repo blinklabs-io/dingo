@@ -114,9 +114,13 @@ SQLite keeps planner statistics current while the node runs. A node synced from
 genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
 plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
-a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
-optimize(0x10012)` on the write connection, outside any transaction, at startup,
-after each epoch rollover commits, and once a minute in between. The consensus
+a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
+bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
+limit restored afterwards) on the write connection, outside any transaction, at startup,
+after each epoch rollover commits, and once a minute in between. `PRAGMA
+optimize` is not used because it re-analyzes a table only after a large change
+in its row count, leaving a steadily growing table with stale statistics. The
+IndexerDB takes one more pass when it reaches the Mithril anchor. The consensus
 store runs the startup pass before block processing begins. An API node's
 IndexerDB, which holds the API history, has its own manager: the node starts
 its listeners first and runs that pass on the manager worker, so planner

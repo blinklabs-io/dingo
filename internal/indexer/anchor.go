@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -830,5 +831,40 @@ func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
 		"indexer reached the Mithril anchor",
 		"slot", anchor.Slot, "block", anchor.BlockNumber,
 	)
+	w.finalizePlannerStats(ctx)
 	return nil
+}
+
+// finalizePlannerStats refreshes the IndexerDB's planner statistics once the
+// anchor is reached. Statistics gathered while the backfill was still loading
+// describe a fraction of the final rows, so API queries would plan against
+// them until the next periodic refresh. A failure is logged, not returned:
+// statistics only steer the planner, and the anchor is already durable.
+func (w *Writer) finalizePlannerStats(ctx context.Context) {
+	db := w.store.Database()
+	if db == nil {
+		return
+	}
+	start := time.Now()
+	var err error
+	switch updater := db.Metadata().(type) {
+	case metadata.IncrementalPlannerStatsUpdater:
+		// The bounded form samples every index; a full pass would read the
+		// whole IndexerDB.
+		_, err = updater.OptimizePlannerStatsContext(ctx, "anchor")
+	case metadata.ContextPlannerStatsUpdater:
+		err = updater.UpdatePlannerStatsContext(ctx)
+	case metadata.PlannerStatsUpdater:
+		err = updater.UpdatePlannerStats()
+	default:
+		return
+	}
+	if err != nil {
+		w.logger.Warn("indexer final planner statistics failed", "error", err)
+		return
+	}
+	w.logger.Info(
+		"indexer final planner statistics complete",
+		"duration", time.Since(start),
+	)
 }

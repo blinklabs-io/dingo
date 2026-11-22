@@ -113,3 +113,47 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 		})
 	}
 }
+
+// A table that keeps growing between periodic passes must have its statistics
+// retaken each pass, however small the growth since the last one.
+func TestOptimizePlannerStatsRefreshesStatsOfAGrowingTable(t *testing.T) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	ctx := t.Context()
+	_, err := store.writeDB.ExecContext(ctx, `
+CREATE TABLE planner_growth_probe (id INTEGER PRIMARY KEY, value INTEGER);
+CREATE INDEX planner_growth_value ON planner_growth_probe(value);`)
+	require.NoError(t, err)
+	grow := func(from, to int) {
+		_, err := store.writeDB.ExecContext(ctx, `
+WITH RECURSIVE seq(id) AS (
+ SELECT ? UNION ALL SELECT id + 1 FROM seq WHERE id < ?
+)
+INSERT INTO planner_growth_probe SELECT id, id % 7 FROM seq`, from, to)
+		require.NoError(t, err)
+	}
+	statRows := func() int {
+		var stat string
+		require.NoError(t, store.writeDB.QueryRowContext(ctx,
+			"SELECT stat FROM sqlite_stat1 WHERE idx = 'planner_growth_value'",
+		).Scan(&stat))
+		var n int
+		_, err := fmt.Sscanf(stat, "%d", &n)
+		require.NoError(t, err)
+		return n
+	}
+
+	grow(1, 100)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	require.NoError(t, err)
+	require.Equal(t, 100, statRows())
+
+	grow(101, 400)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	require.NoError(t, err)
+	require.Equal(
+		t, 400, statRows(),
+		"statistics must describe the table as it is now, not as it was when "+
+			"it was a quarter of its size",
+	)
+}

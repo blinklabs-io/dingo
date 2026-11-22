@@ -2383,7 +2383,7 @@ When `Node.Run()` is called, components are initialized in this order:
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
     Planner statistics managers (`internal/plannerstats.Manager`): for the
-    consensus store, the startup `PRAGMA optimize` pass runs after any
+    consensus store, the startup incremental planner-statistics pass runs after any
     commit-timestamp recovery and before the ledger starts processing blocks,
     to populate statistics before the first block batch. An API node runs a
     second manager over the IndexerDB: it starts after the API listeners and
@@ -8545,7 +8545,7 @@ exists. With the `AND active = TRUE` conjunct `GetAccountsByCredential` adds for
 chain per row, so each chunk costs `O(active rows × refs)` and the "batched"
 read becomes slower than the per-item loop it replaced as the account table
 grows. Outside Mithril sync and metadata backfill, SQLite statistics come from
-`internal/plannerstats.Manager`'s incremental `PRAGMA optimize` at startup,
+`internal/plannerstats.Manager`'s bounded `ANALYZE` at startup,
 after each epoch rollover and every minute (see DATABASE.md), so a
 genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper.

@@ -128,7 +128,7 @@ func (m sqlitePlannerStatsMetrics) observe(
 }
 
 // OptimizePlannerStatsContext runs the backend's incremental planner
-// statistics maintenance (PRAGMA optimize on SQLite). When the stored
+// statistics maintenance (a bounded ANALYZE on SQLite). When the stored
 // statistics changed it then refreshes the read pool and the cached hot
 // statements so no connection keeps planning with the old numbers. Backends
 // without an incremental form report Supported=false and are left alone.

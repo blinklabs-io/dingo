@@ -488,8 +488,11 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 	supported, err := SQLiteDialect().OptimizePlannerStats(context.Background(), sqliteExec)
 	require.NoError(t, err)
 	require.True(t, supported)
-	require.Len(t, sqliteExec.statements, 1)
-	require.Contains(t, sqliteExec.statements[0], "PRAGMA optimize")
+	require.Equal(t, []string{
+		"PRAGMA analysis_limit = 1000",
+		"ANALYZE",
+		"PRAGMA analysis_limit = 0",
+	}, sqliteExec.statements)
 
 	// Explicit full ANALYZE remains available; fresh Mithril bootstraps prefer
 	// incremental planner-stat maintenance on supported backends.
