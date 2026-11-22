@@ -397,7 +397,13 @@ func (s *Store) execBatch(
 					s.sqlOperations.WithLabelValues(op).Inc()
 				}
 				start := time.Now()
-				_, err := stmt.ExecContext(ctx, args...)
+				_, err := inStatementRegion(
+					ctx,
+					query,
+					func() (sql.Result, error) {
+						return stmt.ExecContext(ctx, args...)
+					},
+				)
 				if s.sqlQueryDuration != nil {
 					s.sqlQueryDuration.WithLabelValues(op, name).
 						Observe(time.Since(start).Seconds())

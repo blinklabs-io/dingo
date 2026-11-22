@@ -1290,15 +1290,7 @@ func (t *Txn) Commit() error {
 	// above and as rollback's own identical guard: committing a borrowed
 	// blobTxn here would commit its owner's transaction out from under it.
 	if t.blobTxn != nil && !t.sharedBlob {
-		var err error
-		if t.traceCtx != nil {
-			rtrace.WithRegion(t.traceCtx, tracing.RegionBlobCommit, func() {
-				err = t.blobTxn.Commit()
-			})
-		} else {
-			err = t.blobTxn.Commit()
-		}
-		if err != nil {
+		if err := t.commitBlob(); err != nil {
 			// Blob commit failed - rollback metadata only. Skipped when
 			// sharedMetadata: that handle is borrowed (see
 			// withBlobForRecovery), so a failure in this Txn's own blob
@@ -1464,4 +1456,14 @@ func (t *Txn) Release() {
 			"read_write", t.readWrite,
 		)
 	}
+}
+
+// commitBlob commits the blob transaction inside its trace region. The region
+// is ended by defer so a panicking commit cannot leave it open; StartRegion,
+// unlike WithRegion, costs one atomic load when no trace is running.
+func (t *Txn) commitBlob() error {
+	if t.traceCtx != nil {
+		defer rtrace.StartRegion(t.traceCtx, tracing.RegionBlobCommit).End()
+	}
+	return t.blobTxn.Commit()
 }

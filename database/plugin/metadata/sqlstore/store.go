@@ -1320,14 +1320,7 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	var err error
-	if t.ctx != nil {
-		rtrace.WithRegion(t.ctx, tracing.RegionSQLCommit, func() {
-			err = t.tx.Commit()
-		})
-	} else {
-		err = t.tx.Commit()
-	}
+	err := t.commitTx()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
 	}
@@ -1338,6 +1331,15 @@ func (t *sqlTxn) Commit() error {
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
 	return err
+}
+
+// commitTx commits the SQL transaction inside its trace region, ended by
+// defer so a panicking commit cannot leave it open.
+func (t *sqlTxn) commitTx() error {
+	if t.ctx != nil {
+		defer rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit).End()
+	}
+	return t.tx.Commit()
 }
 
 func (t *sqlTxn) Rollback() error {
