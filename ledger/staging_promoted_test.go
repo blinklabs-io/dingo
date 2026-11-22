@@ -41,7 +41,7 @@ const (
 // must be placed here deliberately.
 var stagingPromoted = map[string]string{
 	// The transaction and lifecycle methods of the interface itself.
-	"Begin": noFamilyRows, "BeginLedgerOnly": noFamilyRows, "Run": noFamilyRows,
+	"Begin": noFamilyRows, "BeginLedgerOnly": noFamilyRows, "BeginStaged": noFamilyRows, "Run": noFamilyRows,
 	"StorageMode": noFamilyRows, "Logger": noFamilyRows,
 	"BeginDestructiveTransitionContext":       noFamilyRows,
 	"BlockAtOrAfterIndex":                     noFamilyRows,

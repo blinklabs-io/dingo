@@ -454,7 +454,7 @@ VALUES (?, ?, ?, 0, 0, TRUE)`, hash, bytes.Repeat([]byte{0xaa}, 32), slot)
 		))
 		require.NoError(t, rows.flush(
 			ctx, newDialectQueryer(store.writeDB, store.dialect.Name()),
-			store.dialect.ParameterLimit(),
+			nil, store.dialect.ParameterLimit(),
 		))
 	}
 	keyInput, err := mockledger.NewSimpleTransactionInput(keyProducer, 0)
@@ -1036,7 +1036,7 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 		)
 	}
 	insertsBefore := counterValue(t, reg, "insert")
-	require.NoError(t, rows.flush(ctx, db, parameterLimit))
+	require.NoError(t, rows.flush(ctx, db, nil, parameterLimit))
 	require.Equal(t, float64(2), counterValue(t, reg, "insert")-insertsBefore)
 	require.Equal(t, rowCount, keyWitnessCount(t, store, txn))
 	require.True(t, rows.empty())
@@ -1075,7 +1075,7 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	rows.add(assetMintBurnShape, txHash, policyID, []byte("second"), []byte("fp2"), uint64(100), "-2", uint32(0))
 	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
 
-	require.NoError(t, rows.flush(ctx, db, store.dialect.ParameterLimit()))
+	require.NoError(t, rows.flush(ctx, db, nil, store.dialect.ParameterLimit()))
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM asset_mint_burn`,
@@ -1189,7 +1189,7 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 		require.NoError(t, batch.flush(
 			context.Background(),
 			newDialectQueryer(recorder, dialect),
-			1000,
+			nil, 1000,
 		))
 		// Each flushed statement leads with its shape's fixed
 		// "-- name:" comment; the translated text below it is unchanged.
