@@ -229,6 +229,63 @@ func TestBulkModeRunsBulkCheckpoint(t *testing.T) {
 	require.Equal(t, uint32(1), checkpointCalls.Load())
 }
 
+// TestStartRunsBulkCheckpointDuringMigrations pins that the writer-free
+// checkpoint runs while Start applies migrations, before the scheduled
+// checkpoint ticker exists, so a backfill's committed batches can leave the
+// WAL during an upgrade.
+func TestStartRunsBulkCheckpointDuringMigrations(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	checkpointed := make(chan struct{}, 1)
+	registry := []migrations.Migration{{
+		Version:          1,
+		Name:             "checkpoint-probe",
+		BackfillRevision: "1",
+		SQL:              map[string]migrations.SQL{"sqlite": {}},
+		Backfill: func(
+			ctx context.Context,
+			_ migrations.Batch,
+		) (migrations.BatchResult, error) {
+			select {
+			case <-checkpointed:
+				return migrations.BatchResult{Done: true}, nil
+			case <-ctx.Done():
+				return migrations.BatchResult{}, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return migrations.BatchResult{}, errors.New(
+					"no WAL checkpoint ran during the migration",
+				)
+			}
+		},
+	}}
+	store, err := New(Config{
+		WriteDB:         db,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+		BulkCheckpoint: func(context.Context) error {
+			select {
+			case checkpointed <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+		CheckpointInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	require.NoError(t, store.Start(t.Context()))
+}
+
 func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

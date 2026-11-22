@@ -7608,6 +7608,12 @@ keeps backfilling committed import frames so the WAL does not hold the whole
 import. If the caller's final pragma restore fails, the next scheduled
 checkpoint retries it and runs TRUNCATE only after recovery succeeds.
 
+Startup migrations commit on the write connection before `Store.Start` marks
+the store ready and starts the scheduled ticker. `Store.Start` therefore runs
+`BulkCheckpoint` on the checkpoint cadence for the duration of the upgrade, so
+each committed backfill batch and index build can be backfilled while the next
+one runs, and stops it before the scheduled ticker takes over.
+
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
 earlier version issued it against `writeDB` on the theory that

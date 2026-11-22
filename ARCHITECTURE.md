@@ -175,7 +175,9 @@ at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active reader
 can prevent either operation from reclaiming space. Bulk metadata imports drain
 and pause the scheduled callback until normal pragmas are restored; the write
 connection's automatic checkpoint stays disabled, and the ticker runs a
-PASSIVE-only `BulkCheckpoint` instead so the WAL is still backfilled. If the
+PASSIVE-only `BulkCheckpoint` instead so the WAL is still backfilled. Startup
+migrations run before the scheduled ticker starts, so `Store.Start` runs
+`BulkCheckpoint` on the same cadence until the upgrade returns. If the
 final restore fails, the next scheduled callback retries it before
 checkpointing. The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory

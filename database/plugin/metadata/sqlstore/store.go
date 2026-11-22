@@ -96,11 +96,12 @@ type Config struct {
 	Checkpoint func(context.Context) error
 	// BulkCheckpoint, when set, runs on the Checkpoint ticker in place of
 	// Checkpoint while bulk-load pragmas are active, which suppress
-	// Checkpoint. It must not take the writer lock: the import keeps
-	// committing on the write connection throughout. SQLite uses it for a
-	// PASSIVE checkpoint, because its write connection never checkpoints at
-	// commit and an import would otherwise leave its whole write set in the
-	// WAL.
+	// Checkpoint, and on the same cadence while Start runs migrations, before
+	// the Checkpoint ticker starts. It must not take the writer lock: the
+	// import or migration keeps committing on the write connection
+	// throughout. SQLite uses it for a PASSIVE checkpoint, because its write
+	// connection never checkpoints at commit and an import or upgrade would
+	// otherwise leave its whole write set in the WAL.
 	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
 	// SyncCommits is an optional provider-owned hook that makes every commit
@@ -582,7 +583,10 @@ func (s *Store) Start(ctx context.Context) error {
 			Logger:        s.logger,
 			Rebind:        s.dialect.Rebind,
 		}
-		if err := runner.Run(ctx); err != nil {
+		stopCheckpoint := s.startMigrationCheckpoint(ctx)
+		err := runner.Run(ctx)
+		stopCheckpoint()
+		if err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
 		}
 	}
@@ -986,6 +990,45 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+// startMigrationCheckpoint runs s.bulkCheckpoint on the checkpoint cadence
+// while startup migrations commit on the write connection, and returns the
+// function that stops it. The scheduled checkpoint ticker starts only once the
+// store is ready, so without this a provider whose writer never checkpoints at
+// commit would keep every migration batch in the WAL until the upgrade ends.
+// bulkCheckpoint is used rather than s.checkpoint because it never takes the
+// writer lock the migration holds between batches.
+func (s *Store) startMigrationCheckpoint(ctx context.Context) func() {
+	if s.bulkCheckpoint == nil || s.checkpointEvery <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := s.bulkCheckpoint(ctx)
+				if err != nil && ctx.Err() == nil {
+					s.logger.Warn(
+						"metadata database WAL checkpoint during upgrade failed",
+						"dialect", s.dialect.Name(),
+						"error", err,
+					)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
