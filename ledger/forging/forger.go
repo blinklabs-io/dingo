@@ -166,7 +166,15 @@ const (
 	forgeTimingOutcomeEmpty = "empty"
 	// forgeTimingOutcomeLost: no block was produced for the slot.
 	forgeTimingOutcomeLost = "lost"
+	// forgeTimingOutcomeSharedKESYielded: another producer sharing this
+	// pool's signer already produced its header for the slot.
+	forgeTimingOutcomeSharedKESYielded = "shared_kes_yielded"
 )
+
+func isSharedKESSlotAlreadySigned(err error) bool {
+	var refusal interface{ SharedKESSlotAlreadySigned() }
+	return errors.As(err, &refusal)
+}
 
 // The "forge timing" line also carries an "adopted" field. outcome describes
 // what block production produced; adopted describes whether it reached the
@@ -2163,6 +2171,15 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	buildStats = stats
 	buildDuration = time.Since(producingAt)
 	if err != nil {
+		if f.sharedKESSigner && isSharedKESSlotAlreadySigned(err) {
+			leaderSlotMissed = false
+			forgeOutcome = forgeTimingOutcomeSharedKESYielded
+			f.logger.Info(
+				"forge skip: shared KES signer already signed this slot",
+				"slot", currentSlot,
+			)
+			return nil
+		}
 		f.incCouldNotForge()
 		if isTipGateRefusal(err) {
 			// The chain moved under this slot while the forge was
@@ -3431,6 +3448,10 @@ func (f *BlockForger) buildBlockForSlot(
 			*blockCtx,
 		)
 		if emptyErr != nil {
+			if f.sharedKESSigner &&
+				isSharedKESSlotAlreadySigned(emptyErr) {
+				return nil, nil, stats, emptyErr
+			}
 			f.observeSelectionFallback(forgeSelectionResultLost)
 			f.logger.Error(
 				"leader slot lost: selection was aborted and no empty block could be built",

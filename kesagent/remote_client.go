@@ -109,6 +109,10 @@ type RemoteConfig struct {
 	// every signature is verified against it.
 	KESVKey           []byte
 	OpCertStartPeriod uint64
+	// SharedSigner says another producer for this pool uses the same agent.
+	// Its already-signed refusal is an expected slot outcome, not a failed
+	// signing request.
+	SharedSigner bool
 	// OpCert is the local operational certificate's CBOR. The agent must
 	// report this exact certificate at admission; the node has already
 	// validated its cold-key signature.
@@ -833,7 +837,8 @@ func (c *RemoteClient) Sign(
 		)
 	}
 	defer func() {
-		if err != nil {
+		if err != nil &&
+			!(c.cfg.SharedSigner && isSharedKESSlotAlreadySigned(err)) {
 			c.cfg.Metrics.incSignFailure()
 		}
 	}()

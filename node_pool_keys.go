@@ -504,6 +504,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 			SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 			KESVKey:           opCertKey.VKey,
 			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+			SharedSigner:      ks.keys.agentShared,
 			Logger:            ks.n.config.logger,
 			Metrics:           ks.metrics(),
 		})
@@ -517,6 +518,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		Profile:           ks.keys.agentProfile,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		SharedSigner:      ks.keys.agentShared,
 		OpCert:            opCertKey.RawCBOR,
 		SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 		Logger:            ks.n.config.logger,

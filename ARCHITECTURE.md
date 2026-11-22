@@ -14434,6 +14434,11 @@ therefore cannot consume the agent's first signature before a connected,
 synced producer. The setting is explicit because the signing protocol cannot
 tell a client whether another producer uses the same key. It defaults off, so
 an unshared producer retains the intentional ability to forge without a peer.
+When the agent reports that another header was already signed for the slot, a
+configured shared producer records a normal shared-signing yield rather than a
+failed forge or signing request. Every other refusal and signing error remains
+a failure. An unshared producer also retains the failure behavior for that
+refusal, because it indicates an unexpected competing header.
 
 - TLS 1.3 (the default). With `--shelley-kes-agent-server-spki-sha256`, the
   hex SHA-256 of the agent's server SubjectPublicKeyInfo, the agent is

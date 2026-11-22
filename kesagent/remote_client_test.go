@@ -617,6 +617,68 @@ func TestRemoteClientDoesNotResendAFinalRefusal(t *testing.T) {
 	}
 }
 
+func TestRemoteClientSharedSignerAlreadySignedIsNotASignFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		shared           bool
+		refusal          string
+		wantSharedMarker bool
+		wantFailures     float64
+	}{
+		{
+			name:             "shared signer already signed",
+			shared:           true,
+			refusal:          "kesagent: a different header was already signed for this slot",
+			wantSharedMarker: true,
+		},
+		{
+			name:             "unshared signer already signed",
+			refusal:          "kesagent: a different header was already signed for this slot",
+			wantSharedMarker: true,
+			wantFailures:     1,
+		},
+		{
+			name:         "shared signer other refusal",
+			shared:       true,
+			refusal:      "kesagent: header slot below the last signed slot refused",
+			wantFailures: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			skeyData, vkey, opCert := testKESMaterial(t)
+			cert := newTestCert(t, "node")
+			agent := startFakeRemoteAgent(t, cert, skeyData, vkey, opCert)
+			certFile, keyFile := cert.writePEM(t)
+			metrics := NewMetrics(prometheus.NewRegistry())
+			client, err := NewRemoteClient(RemoteConfig{
+				Address:          agent.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: agent.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				SignTimeout:      2 * time.Second,
+				SharedSigner:     tc.shared,
+				Metrics:          metrics,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
+			agent.refusal = tc.refusal
+			agent.refuseRequests.Store(1)
+
+			_, err = client.Sign(0, []byte("header"))
+			require.ErrorIs(t, err, ErrAgentRefused)
+			require.Equal(t, tc.wantSharedMarker,
+				isSharedKESSlotAlreadySigned(err))
+			require.Equal(t, tc.wantFailures,
+				promtestutil.ToFloat64(metrics.signFailures))
+		})
+	}
+}
+
 // Any other agent error, such as a slot store that is briefly unavailable,
 // is answered by resending the identical body on the same session.
 func TestRemoteClientResendsAfterANonRefusalError(t *testing.T) {
