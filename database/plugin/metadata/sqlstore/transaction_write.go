@@ -1160,6 +1160,7 @@ func (s *Store) setTransactionWithAccumulator(
 		transactionIsNew   bool
 		batchedStakeDeltas []stakeCredentialDelta
 		repairedUtxoIDs    []int64
+		insertedSpends     map[string]spendCacheEntry
 	)
 	err := s.withWriteTransaction(
 		txn,
@@ -1407,7 +1408,9 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return fmt.Errorf("create transaction outputs: %w", err)
 			}
-			s.rememberInsertedOutputs(producedModelPtrs, producedInserted)
+			insertedSpends = s.insertedSpendEntries(
+				producedModelPtrs, producedInserted,
+			)
 			if batchedAccumulator != nil && s.storageMode == types.StorageModeAPI {
 				for i, created := range producedInserted {
 					if !created {
@@ -1488,7 +1491,7 @@ func (s *Store) setTransactionWithAccumulator(
 				// and any cached row the update did not find live, go by
 				// reference below.
 				var cachedUpdated map[string]struct{}
-				if cached := s.takeCachedSpends(batch); len(cached) > 0 {
+				if cached := s.takeCachedSpends(txn, batch); len(cached) > 0 {
 					var deltas []stakeCredentialDelta
 					cachedUpdated, deltas, err = s.spendCachedRows(
 						ctx, db, cached, point.Slot, transactionID,
@@ -1700,6 +1703,9 @@ func (s *Store) setTransactionWithAccumulator(
 		err = fmt.Errorf(
 			"flushing bounded metadata rows: %w", staged.flushErr,
 		)
+	}
+	if err == nil {
+		s.rememberInsertedOutputs(txn, insertedSpends)
 	}
 	if err != nil || batchedAccumulator == nil {
 		return err

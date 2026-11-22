@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -309,8 +310,7 @@ func TestSpendCacheClearedByRollback(t *testing.T) {
 				spendCacheProducer(t, rolledID, []byte{1}),
 				spendCachePoint(10, rolledID), 0, nil, false, txn, 0,
 			))
-			rolledRowID := store.spends.entries[utxoIdentityKey(rolledID, 0)].id
-			require.NotZero(t, rolledRowID)
+			rolledRowID := spendCacheTxnRowID(t, txn)
 			if useSavepoint {
 				require.NoError(t, savepointer.RollbackTo("sp"))
 				require.NoError(t, store.SetTransaction(
@@ -435,4 +435,115 @@ func TestSpendCacheClearedByStoreReplacement(t *testing.T) {
 			)
 		})
 	}
+}
+
+// spendCacheTxnRowID reads the one utxo row id visible inside txn.
+func spendCacheTxnRowID(t *testing.T, txn types.Txn) int64 {
+	t.Helper()
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	var id int64
+	require.NoError(t, sqlTransaction.tx.QueryRowContext(
+		context.Background(), `SELECT id FROM utxo`,
+	).Scan(&id))
+	return id
+}
+
+// TestSpendCacheIgnoresUncommittedOutputs proves an output whose transaction
+// never committed leaves no cached row id. Cancelling the context rolls the
+// transaction back inside database/sql without calling the wrapper's Rollback,
+// and a Commit after that fails; in both cases the next insert reuses the
+// freed id, and a spend of the uncommitted output must not reach that row.
+func TestSpendCacheIgnoresUncommittedOutputs(t *testing.T) {
+	t.Parallel()
+	for name, commit := range map[string]bool{
+		"cancelled context": false,
+		"failed commit":     true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			rolledID := bytes.Repeat([]byte{0xe1}, 32)
+			keptID := bytes.Repeat([]byte{0xe2}, 32)
+			spenderID := bytes.Repeat([]byte{0xe3}, 32)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			txn := store.Transaction(ctx)
+			t.Cleanup(func() { _ = txn.Rollback() })
+			require.NoError(t, store.SetTransaction(
+				spendCacheProducer(t, rolledID, []byte{1}),
+				spendCachePoint(10, rolledID), 0, nil, false, txn, 0,
+			))
+			rolledRowID := spendCacheTxnRowID(t, txn)
+			cancel()
+			if commit {
+				require.Error(t, txn.Commit())
+			}
+			require.NoError(t, store.SetTransaction(
+				spendCacheProducer(t, keptID, []byte{2}),
+				spendCachePoint(11, keptID), 0, nil, false, nil, 0,
+			))
+			var keptRowID int64
+			require.NoError(t, store.writeDB.QueryRow(
+				`SELECT id FROM utxo`,
+			).Scan(&keptRowID))
+			require.Equal(
+				t, rolledRowID, keptRowID,
+				"the rollback must free the id for the next insert",
+			)
+
+			require.NoError(t, store.SetTransaction(
+				spendCacheSpender(t, spenderID,
+					models.UtxoId{Hash: rolledID, Idx: 0},
+				),
+				spendCachePoint(20, spenderID), 0, nil, false, nil, 0,
+			))
+			rows := spendCacheRows(t, store, spenderID)
+			require.Len(t, rows, 1)
+			require.Zero(
+				t, rows[0].deletedSlot,
+				"an output inserted after the rollback must stay live",
+			)
+		})
+	}
+}
+
+// TestSpendCachedOutputsResolveByRowIDInTransaction is
+// TestSpendCachedOutputsResolveByRowID with the producer and spender in one
+// transaction: the spender finds the producer's outputs among the entries the
+// transaction has not yet committed.
+func TestSpendCachedOutputsResolveByRowIDInTransaction(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	producerID := bytes.Repeat([]byte{0xf1}, 32)
+	spenderID := bytes.Repeat([]byte{0xf2}, 32)
+	renamedID := bytes.Repeat([]byte{0xef}, 32)
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, store.SetTransaction(
+		spendCacheProducer(t, producerID, []byte{1, 2}),
+		spendCachePoint(10, producerID), 0, nil, false, txn, 0,
+	))
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	_, err := sqlTransaction.tx.ExecContext(
+		context.Background(),
+		`UPDATE "transaction" SET hash = ? WHERE hash = ?`,
+		renamedID, producerID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetTransaction(
+		spendCacheSpender(t, spenderID,
+			models.UtxoId{Hash: producerID, Idx: 0},
+			models.UtxoId{Hash: producerID, Idx: 1},
+		),
+		spendCachePoint(20, spenderID), 0, nil, false, txn, 0,
+	))
+	require.NoError(t, txn.Commit())
+	var live int
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM utxo u JOIN "transaction" p ON p.id = u.tx_id
+WHERE u.deleted_slot = 0 AND p.hash = ?`, renamedID,
+	).Scan(&live))
+	require.Zero(t, live, "uncommitted outputs must be spent by row id")
 }

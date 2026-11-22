@@ -1310,6 +1310,9 @@ type sqlTxn struct {
 	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
 	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
 	overlayAccumulator *transactionBatchAccumulator
+	// spends holds the spend-cache entries of outputs this transaction
+	// inserted; Commit publishes them once the commit succeeds.
+	spends map[string]spendCacheEntry
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1329,10 +1332,10 @@ func (t *sqlTxn) Commit() error {
 	err := t.tx.Commit()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
-		if t.owner != nil {
-			t.owner.forgetSpendCache()
-		}
+	} else if t.owner != nil {
+		t.owner.publishSpendEntries(t.spends)
 	}
+	t.spends = nil
 	for accumulator := range t.batchBefore {
 		accumulator.resetStatement()
 	}
@@ -1354,9 +1357,7 @@ func (t *sqlTxn) Rollback() error {
 	t.finished = true
 	defer t.releaseConnection()
 	t.restoreBatches(t.batchBefore)
-	if t.owner != nil && !t.readOnly {
-		t.owner.forgetSpendCache()
-	}
+	t.spends = nil
 	t.batchBefore = nil
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
@@ -1427,7 +1428,8 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
-		t.owner.forgetSpendCache()
+		// Ids inserted after the savepoint are freed for reuse.
+		t.spends = nil
 		t.restoreBatches(t.batchSavepoints[name])
 		for i, savepointName := range slices.Backward(t.savepointOrder) {
 			if savepointName == name {
