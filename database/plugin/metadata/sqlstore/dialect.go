@@ -329,11 +329,16 @@ func SQLiteDialect() Dialect {
 			"PRAGMA wal_autocheckpoint = 0",
 		),
 		analyze: execStatements("ANALYZE"),
-		// An explicit mask replaces SQLite's defaults, so retain the
-		// temporary analysis-limit bit alongside the all-table check.
-		// Unrestricted index analysis holds the sole write connection and
-		// pauses block application for the duration of the scan.
-		optimize:       execStatements("PRAGMA optimize(0x10012)"),
+		// A bounded ANALYZE of every table rather than PRAGMA optimize:
+		// optimize re-analyzes a table only once its row count has moved by
+		// a large factor, so on tables growing steadily through a sync the
+		// statistics lagged far behind and steered queries to indexes that
+		// were selective only when the table was small. analysis_limit
+		// samples each index instead of reading it whole, which keeps the
+		// sole write connection's pause short, and the connection's own
+		// limit is restored afterwards so an explicit full ANALYZE stays
+		// exact.
+		optimize:       sqliteBoundedAnalyze,
 		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }
@@ -477,4 +482,38 @@ func rebindPostgres(query string) string {
 		}
 	}
 	return result.String()
+}
+
+// sqliteAnalysisLimit is the rows per index a periodic ANALYZE samples.
+const sqliteAnalysisLimit = 1000
+
+// sqliteBoundedAnalyze runs ANALYZE under analysis_limit, then restores the
+// connection's previous limit, which it can read only from an executor that
+// also queries.
+func sqliteBoundedAnalyze(ctx context.Context, exec Execer) error {
+	previous := 0
+	if q, ok := exec.(interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}); ok {
+		if err := q.QueryRowContext(ctx, "PRAGMA analysis_limit").Scan(&previous); err != nil {
+			return err
+		}
+	}
+	limit := sqliteAnalysisLimit
+	if previous > 0 && previous < limit {
+		limit = previous
+	}
+	if _, err := exec.ExecContext(ctx, fmt.Sprintf("PRAGMA analysis_limit = %d", limit)); err != nil {
+		return err
+	}
+	_, err := exec.ExecContext(ctx, "ANALYZE")
+	// Restore even when ctx was canceled mid-pass: a limit left behind would
+	// sample every later explicit ANALYZE on this connection.
+	if _, rerr := exec.ExecContext(
+		context.WithoutCancel(ctx),
+		fmt.Sprintf("PRAGMA analysis_limit = %d", previous),
+	); err == nil {
+		err = rerr
+	}
+	return err
 }
