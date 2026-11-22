@@ -284,3 +284,42 @@ func TestGateReport_LiveRunPackageMissingFromHeadFails(t *testing.T) {
 		)
 	}
 }
+
+// subVariantRemovedCSV is benchstat output for a real gate run whose head
+// dropped one sub-benchmark of BlockProcessingThroughputPredecoded and kept
+// the other.
+const subVariantRemovedCSV = `pkg: github.com/blinklabs-io/dingo/ledger
+,base,,head,,,
+,sec/op,CI,sec/op,CI,vs base,P
+RealBlockProcessing-4,4.40965e-05,6%,4.40965e-05,6%,~,p=1.000 n=8
+ChainSyncFromGenesis-4,0.0081762415,7%,0.0081762415,7%,~,p=1.000 n=8
+BlockProcessingThroughput-4,4.80805e-05,6%,4.80805e-05,6%,~,p=1.000 n=8
+BlockProcessingThroughputPredecoded/tracing=off-4,2.4505500000000004e-05,2%,2.4505500000000004e-05,2%,~,p=1.000 n=8
+BlockProcessingThroughputPredecoded/tracing=unsampled-4,2.4959000000000003e-05,3%
+geomean,0.00010117739909709834,,0.0001435646754823904,,+0.00%,
+`
+
+// A gated benchmark's surviving sub-benchmark must not hide a removed one.
+func TestGateReport_RemovedSubBenchmarkFails(t *testing.T) {
+	t.Parallel()
+	report, regressed, err := GateReport(subVariantRemovedCSV)
+	if err != nil {
+		t.Fatalf("GateReport: %v", err)
+	}
+	got := flaggedNames(report)
+	want := []string{
+		"BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4",
+	}
+	if !regressed || !slices.Equal(got, want) {
+		t.Fatalf(
+			"regressed=%t flagged %v, want %v; report:\n%s",
+			regressed, got, want, report,
+		)
+	}
+	if !strings.Contains(
+		report,
+		"| BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4 |",
+	) {
+		t.Fatalf("surviving sub-benchmark missing from report:\n%s", report)
+	}
+}

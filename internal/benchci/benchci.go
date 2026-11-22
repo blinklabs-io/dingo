@@ -174,51 +174,54 @@ func GateReport(csv string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	results := evaluateCurated(
-		rows,
-		GateBenchmarks,
-		GateRegressionThresholdPercent,
-	)
+	names := sortedRowNames(rows)
+	var results []Row
+	for _, bench := range GateBenchmarks {
+		found := evaluateCurated(
+			rows,
+			[]string{bench},
+			GateRegressionThresholdPercent,
+		)
+		missing := missingFromNew(rows, names, bench)
+		if len(missing) > 0 && !found[0].Found {
+			// Drop the not-found placeholder; the old rows replace it.
+			found = nil
+		}
+		results = append(results, found...)
+		results = append(results, missing...)
+	}
 	if !anyFound(results) {
 		return "", false, ErrNoGateRows
 	}
-	results = flagMissingFromNew(results, rows)
 	return renderMarkdown(results), anyFlagged(results), nil
 }
 
-// flagMissingFromNew replaces each not-found row whose benchmark the old file
-// still reports with a flagged MissingFromNew row. Without it, deleting,
-// renaming, or skipping a gated benchmark would remove it from the
-// comparison and pass the gate.
-func flagMissingFromNew(results []Row, rows map[string]benchstatRow) []Row {
-	names := sortedRowNames(rows)
-	out := make([]Row, 0, len(results))
-	for _, r := range results {
-		if r.Found {
-			out = append(out, r)
+// missingFromNew returns a flagged MissingFromNew row for every row of the
+// curated benchmark, sub-benchmarks included, that the old file reports and
+// the new one does not. Without it, deleting, renaming, or skipping a gated
+// benchmark or one of its sub-benchmarks would drop it from the comparison
+// and pass the gate.
+func missingFromNew(
+	rows map[string]benchstatRow,
+	names []string,
+	curated string,
+) []Row {
+	var out []Row
+	for _, name := range names {
+		row := rows[name]
+		if !row.onlyOld {
 			continue
 		}
-		replaced := false
-		for _, name := range names {
-			row := rows[name]
-			if !row.onlyOld {
-				continue
-			}
-			rest, ok := matchCurated(name, r.Name)
-			if !ok {
-				continue
-			}
-			replaced = true
-			out = append(out, Row{
-				Name:           r.Name + rest,
-				Old:            row.old,
-				MissingFromNew: true,
-				Flagged:        true,
-			})
+		rest, ok := matchCurated(name, curated)
+		if !ok {
+			continue
 		}
-		if !replaced {
-			out = append(out, r)
-		}
+		out = append(out, Row{
+			Name:           curated + rest,
+			Old:            row.old,
+			MissingFromNew: true,
+			Flagged:        true,
+		})
 	}
 	return out
 }
