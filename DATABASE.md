@@ -2335,7 +2335,12 @@ parameters, block counts and prefilter slot), the hex `last_pool_key_hash` and
 chunk reads it and resumes from the next pool (ascending `pool_key_hash`,
 `GetRewardPoolInputs`'s order) only while the input fingerprint matches and the
 epoch holds one pool output per completed pool; otherwise it clears the epoch's
-outputs (`DeleteRewardOutputsForEpoch`) and starts over. A finished cursor whose
+outputs (`DeleteRewardOutputsForEpoch`) and starts over. A resumed round keeps
+the captured slot the cursor records, whichever slot the background run, the
+epoch boundary or start-up resolved it at, so every output row of an epoch
+carries one captured slot. The fact copy relies on this: it reads one output
+row of an epoch and skips the epoch when that slot is outside the copied
+range. A finished cursor whose
 output fingerprint matches the stored pool outputs is the precompute's
 completion record.
 
