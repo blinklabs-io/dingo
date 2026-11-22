@@ -186,6 +186,7 @@ func explainPlan(
 // requires its table access to name an index rather than scan the table.
 func TestStakeBookkeepingReadersUseAnIndex(t *testing.T) {
 	t.Parallel()
+	skipPlanTestUnderRace(t)
 	store := newMigratedSQLiteStore(t)
 	w := newStakeWorkload(t, store, 300, 10)
 	w.register(50)
