@@ -206,3 +206,47 @@ func TestDerivedRewardRowsAreChunkedRolledBackWipedAndPruned(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, r7, rows)
 }
+
+// The captured slot of an epoch is read from its first pool row, from its
+// first account row when it has no pool row, and is absent for an epoch with
+// neither.
+func TestRewardDerivedEpochSlotReadsOneRow(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+
+	tip := ocommon.NewPoint(30, bytes.Repeat([]byte{30}, 32))
+	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
+		RewardDerived: []ledger.RewardDerivedChange{
+			{
+				Kind: ledger.RewardDerivedPools, Epoch: 4,
+				Pools: []*models.RewardPoolOutput{derivedPool(4, 11)},
+			},
+			{
+				Kind: ledger.RewardDerivedAccounts, Epoch: 5,
+				Accounts: derivedAccounts(5, 3, 22),
+			},
+			{
+				Kind: ledger.RewardDerivedPools, Epoch: 6,
+				Pools: []*models.RewardPoolOutput{derivedPool(6, 30)},
+			},
+			{
+				Kind: ledger.RewardDerivedAccounts, Epoch: 6,
+				Accounts: derivedAccounts(6, 3, 30),
+			},
+		},
+	}))
+	for epoch, want := range map[uint64]uint64{4: 11, 5: 22, 6: 30} {
+		slot, ok, err := set.RewardDerivedEpochSlot(epoch)
+		require.NoError(t, err)
+		require.True(t, ok, "epoch %d", epoch)
+		require.Equal(t, want, slot, "epoch %d", epoch)
+	}
+	_, ok, err := set.RewardDerivedEpochSlot(7)
+	require.NoError(t, err)
+	require.False(t, ok)
+	epochs, err := set.RewardDerivedEpochs()
+	require.NoError(t, err)
+	require.Equal(t, []uint64{4, 5, 6}, epochs)
+}

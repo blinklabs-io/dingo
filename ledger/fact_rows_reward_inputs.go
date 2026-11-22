@@ -327,6 +327,14 @@ func (ls *LedgerState) rewardPoolOutputFactRows(
 	if err != nil {
 		return metadata.FactRows{}, err
 	}
+	return poolOutputRowsOver(r, epochs, from, through)
+}
+
+func poolOutputRowsOver(
+	r RewardDerivedReader,
+	epochs []uint64,
+	from, through uint64,
+) (metadata.FactRows, error) {
 	out := metadata.FactRows{Columns: []string{
 		"apparent_performance", "pool_key_hash", "epoch", "optimal_reward",
 		"total_reward", "leader_reward", "leader_reward_deficit",
@@ -334,6 +342,13 @@ func (ls *LedgerState) rewardPoolOutputFactRows(
 		"captured_slot", "boundary_slot",
 	}}
 	for _, epoch := range epochs {
+		skip, err := rewardEpochOutsideRange(r, epoch, from, through)
+		if err != nil {
+			return metadata.FactRows{}, err
+		}
+		if skip {
+			continue
+		}
 		rows, err := r.RewardPoolOutputRows(epoch, nil)
 		if err != nil {
 			return metadata.FactRows{}, err
@@ -389,6 +404,13 @@ func accountOutputPageOver(
 	for i := start; i < len(epochs); i++ {
 		if len(out.Rows) >= limit {
 			return out, int64(epochs[i]), nil //nolint:gosec // an epoch number
+		}
+		skip, err := rewardEpochOutsideRange(r, epochs[i], from, through)
+		if err != nil {
+			return metadata.FactRows{}, 0, err
+		}
+		if skip {
+			continue
 		}
 		rows, err := r.RewardAccountOutputRows(epochs[i], nil)
 		if err != nil {
@@ -474,4 +496,30 @@ func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// RewardDerivedEpochSlotter is an optional RewardDerivedReader capability:
+// the slot an epoch's derived rows were captured at, read from one row.
+type RewardDerivedEpochSlotter interface {
+	RewardDerivedEpochSlot(epoch uint64) (uint64, bool, error)
+}
+
+// rewardEpochOutsideRange reports whether none of epoch's derived rows can
+// fall in [from, through]. Every derived row of an epoch carries the slot its
+// precompute captured them at, so one row decides for all of them, and a fact
+// copy over a slot range need not decode an epoch's whole delegator set to
+// find that none of it belongs to the range.
+func rewardEpochOutsideRange(
+	r RewardDerivedReader,
+	epoch, from, through uint64,
+) (bool, error) {
+	slotter, ok := r.(RewardDerivedEpochSlotter)
+	if !ok {
+		return false, nil
+	}
+	slot, found, err := slotter.RewardDerivedEpochSlot(epoch)
+	if err != nil || !found {
+		return false, err
+	}
+	return !inSlotRange(slot, from, through), nil
 }

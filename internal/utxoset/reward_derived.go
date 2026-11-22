@@ -427,6 +427,41 @@ func (s *Set) RewardCredentialOutputRows(
 	)
 }
 
+// RewardDerivedEpochSlot returns the slot epoch's derived rows were captured
+// at, from its first pool or account output row, and false when it has none.
+func (s *Set) RewardDerivedEpochSlot(epoch uint64) (uint64, bool, error) {
+	k, v, found, err := s.firstRow(badgerutxo.RewardPoolOutputPrefix(epoch))
+	if err != nil {
+		return 0, false, err
+	}
+	if found {
+		p, err := decodePoolOutput(k, v)
+		if err != nil {
+			return 0, false, err
+		}
+		return p.CapturedSlot, true, nil
+	}
+	k, v, found, err = s.firstRow(badgerutxo.RewardAccountOutputPrefix(epoch))
+	if err != nil || !found {
+		return 0, false, err
+	}
+	a, err := decodeAccountOutput(k, v)
+	if err != nil {
+		return 0, false, err
+	}
+	return a.CapturedSlot, true, nil
+}
+
+// firstRow returns a copy of the first row under prefix, in key order.
+func (s *Set) firstRow(prefix []byte) (k, v []byte, found bool, err error) {
+	err = s.store.EachRowAfter(prefix, nil, nil,
+		func(rk, rv []byte) error {
+			k, v, found = bytes.Clone(rk), bytes.Clone(rv), true
+			return badgerutxo.ErrStopRows
+		})
+	return k, v, found, err
+}
+
 // RewardCursorRow returns the epoch's precompute cursor.
 func (s *Set) RewardCursorRow(
 	epoch uint64, asOf *uint64,
@@ -437,21 +472,10 @@ func (s *Set) RewardCursorRow(
 // RewardDerivedEpochs lists the epochs holding a pool or account output
 // row, oldest first.
 func (s *Set) RewardDerivedEpochs() ([]uint64, error) {
-	var out []uint64
-	var last uint64
-	first := true
-	err := s.store.Rows(
-		[]byte{badgerutxo.RewardDerivedTag},
-		func(k, _ []byte) error {
-			e := binary.BigEndian.Uint64(k[1:9])
-			if first || e != last {
-				out = append(out, e)
-				last, first = e, false
-			}
-			return nil
-		},
-	)
-	return out, err
+	return s.store.DistinctUint64Keys([]byte{badgerutxo.RewardDerivedTag})
 }
 
-var _ ledger.RewardDerivedReader = (*Set)(nil)
+var (
+	_ ledger.RewardDerivedReader       = (*Set)(nil)
+	_ ledger.RewardDerivedEpochSlotter = (*Set)(nil)
+)
