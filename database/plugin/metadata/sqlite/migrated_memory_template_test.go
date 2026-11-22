@@ -95,7 +95,8 @@ func buildMigratedMemoryTemplate(
 
 // restoreInto copies the database named src into db. A backup restore goes
 // through SQLite's page cache, so every connection of a shared-cache db sees
-// the copy. It reports whether db's driver connection supports restoring.
+// the copy. It returns errNoRestore when db's driver connection cannot
+// restore.
 func restoreInto(db *sql.DB, src string) error {
 	conn, err := db.Conn(context.Background())
 	if err != nil {
@@ -125,7 +126,9 @@ func seedMigratedMemory(db *sql.DB, storageMode string) error {
 		storageMode, &migratedMemoryTemplate{},
 	)
 	tpl := value.(*migratedMemoryTemplate)
-	tpl.once.Do(func() { tpl.err = buildMigratedMemoryTemplate(tpl, storageMode) })
+	tpl.once.Do(
+		func() { tpl.err = buildMigratedMemoryTemplate(tpl, storageMode) },
+	)
 	if tpl.err != nil {
 		return tpl.err
 	}
