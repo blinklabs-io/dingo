@@ -399,6 +399,7 @@ func (b *rowBatch) EstimatedSizeBytes() int64 {
 func (b *rowBatch) flush(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	parameterLimit int,
 ) error {
 	if b.empty() {
@@ -408,7 +409,7 @@ func (b *rowBatch) flush(
 	for _, entry := range b.entries {
 		if entry.shape.resolveAssets {
 			if err := flushAssetHoldings(
-				ctx, db, entry.rows, parameterLimit,
+				ctx, db, s, entry.rows, parameterLimit,
 			); err != nil {
 				return err
 			}
@@ -416,7 +417,7 @@ func (b *rowBatch) flush(
 		}
 		if entry.shape.resolveMintBurn {
 			if err := flushAssetMintBurn(
-				ctx, db, entry.rows, parameterLimit,
+				ctx, db, s, entry.rows, parameterLimit,
 			); err != nil {
 				return err
 			}
@@ -465,7 +466,7 @@ func (b *rowBatch) flush(
 			if entry.shape.suffix != "" {
 				query += "\n" + entry.shape.suffix
 			}
-			if _, err := db.ExecContext(ctx, query, args...); err != nil {
+			if err := s.execBatch(ctx, db, query, args...); err != nil {
 				return fmt.Errorf(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
@@ -502,7 +503,7 @@ func (b *rowBatch) clone() rowBatch {
 
 // flushExceptClosureAPIRows keeps only API lookup/history rows queued. Assets,
 // datums and script-related rows remain visible before the next tx validates.
-func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, parameterLimit int) error {
+func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, s *Store, parameterLimit int) error {
 	var immediate, deferred rowBatch
 	immediate.trackSize = b.trackSize
 	deferred.trackSize = b.trackSize
@@ -516,7 +517,7 @@ func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, pa
 			target.add(entry.shape, row...)
 		}
 	}
-	if err := immediate.flush(ctx, db, parameterLimit); err != nil {
+	if err := immediate.flush(ctx, db, s, parameterLimit); err != nil {
 		return err
 	}
 	*b = deferred

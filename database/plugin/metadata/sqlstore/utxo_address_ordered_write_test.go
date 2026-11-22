@@ -58,7 +58,7 @@ func TestQueueUtxoAddressWritesFillPosition(t *testing.T) {
 		queuedShapeNames(&rows),
 		"both rows carry their position and share the ordered shape",
 	)
-	require.NoError(t, rows.flush(ctx, store.writeDB, 500))
+	require.NoError(t, rows.flush(ctx, store.writeDB, store, 500))
 
 	written := map[int64]utxoAddressPosition{
 		producing:  readUtxoAddressPosition(t, store, producing),
@@ -113,7 +113,7 @@ func TestFlushFillsOnlyPlainUtxoAddressRows(t *testing.T) {
 	queueUtxoAddress(&rows, id, []byte("addr_test1nofill"), &models.Utxo{
 		TransactionID: &txID, AddedSlot: 400, BlockIndex: &blockIndex,
 	})
-	require.NoError(t, rows.flush(ctx, store.writeDB, 500))
+	require.NoError(t, rows.flush(ctx, store.writeDB, store, 500))
 	require.Equal(
 		t, utxoAddressPosition{TxID: 21, Slot: 400, BlockIndex: 9},
 		readUtxoAddressPosition(t, store, id),
@@ -122,7 +122,7 @@ func TestFlushFillsOnlyPlainUtxoAddressRows(t *testing.T) {
 	plain := seedProducedOutput(t, store, 22, 410, 3, 0, true)
 	rows = rowBatch{}
 	rows.add(utxoAddressShape, plain, []byte("addr_test1fill"))
-	require.NoError(t, rows.flush(ctx, store.writeDB, 500))
+	require.NoError(t, rows.flush(ctx, store.writeDB, store, 500))
 	require.Equal(
 		t, utxoAddressPosition{TxID: 22, Slot: 410, BlockIndex: 3},
 		readUtxoAddressPosition(t, store, plain),

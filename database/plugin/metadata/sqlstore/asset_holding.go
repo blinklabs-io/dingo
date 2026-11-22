@@ -136,6 +136,7 @@ type assetIdentityKey struct {
 func ensureAssetIdentities(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	all []assetIdentityKey,
 	parameterLimit int,
 ) (map[assetIdentityKey]int64, error) {
@@ -169,7 +170,7 @@ func ensureAssetIdentities(
 			)
 		})
 		if err := insertAssetIdentities(
-			ctx, db, missing, parameterLimit,
+			ctx, db, s, missing, parameterLimit,
 		); err != nil {
 			return nil, err
 		}
@@ -193,6 +194,7 @@ func ensureAssetIdentities(
 func flushAssetMintBurn(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	rows [][]any,
 	parameterLimit int,
 ) error {
@@ -210,7 +212,7 @@ func flushAssetMintBurn(
 			), //nolint:forcetypeassert
 		})
 	}
-	ids, err := ensureAssetIdentities(ctx, db, keys, parameterLimit)
+	ids, err := ensureAssetIdentities(ctx, db, s, keys, parameterLimit)
 	if err != nil {
 		return err
 	}
@@ -257,7 +259,7 @@ func flushAssetMintBurn(
 				strings.Repeat("(?, ?, ?, ?, ?), ", end-start), ", ",
 			) +
 			"\nON CONFLICT (transaction_id, asset_id) DO NOTHING"
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		if err := s.execBatch(ctx, db, query, args...); err != nil {
 			return fmt.Errorf("insert asset_mint_burn rows: %w", err)
 		}
 	}
@@ -271,6 +273,7 @@ func flushAssetMintBurn(
 func flushAssetHoldings(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	rows [][]any,
 	parameterLimit int,
 ) error {
@@ -288,7 +291,7 @@ func flushAssetHoldings(
 			), //nolint:forcetypeassert
 		})
 	}
-	ids, err := ensureAssetIdentities(ctx, db, keys, parameterLimit)
+	ids, err := ensureAssetIdentities(ctx, db, s, keys, parameterLimit)
 	if err != nil {
 		return err
 	}
@@ -352,7 +355,7 @@ func flushAssetHoldings(
 				strings.Repeat("(?, ?, ?), ", end-start), ", ",
 			) +
 			"\nON CONFLICT (utxo_id, asset_id) DO NOTHING"
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		if err := s.execBatch(ctx, db, query, args...); err != nil {
 			return fmt.Errorf("insert asset_holding rows: %w", err)
 		}
 	}
@@ -415,6 +418,7 @@ func resolveAssetIdentities(
 func insertAssetIdentities(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	keys []assetIdentityKey,
 	parameterLimit int,
 ) error {
@@ -429,7 +433,7 @@ func insertAssetIdentities(
 			"INSERT INTO asset_identity (policy_id, name) VALUES " +
 			strings.TrimSuffix(strings.Repeat("(?, ?), ", end-start), ", ") +
 			"\nON CONFLICT (policy_id, name) DO NOTHING"
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		if err := s.execBatch(ctx, db, query, args...); err != nil {
 			return fmt.Errorf("insert asset_identity rows: %w", err)
 		}
 	}

@@ -2050,7 +2050,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
-├── sdk/                 # Plugin SDK, a separate Go module
+├── sdk/                 # Plugin SDK, a separate Go module (chain role contracts, Cardano roles)
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -3923,7 +3923,11 @@ while the abandoned blocks are stored and otherwise to the newest tip
 checkpoint on the chain. A checkpoint left by the former history backfill
 seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
 from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
-the ledger resolve and check a closure through one loader.
+the ledger resolve and check a closure through one loader. `IndexBlocks`
+decodes a batch's blocks and computes their transaction offsets on worker
+goroutines, which stay a bounded number of blocks ahead of the writer; the
+writer takes each block in order, so a decode error fails the batch at its
+block.
 
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the
@@ -21695,6 +21699,30 @@ Package isolation is enforced by direction, ownership, and composition:
   gouroboros, so every other contract stays chain-neutral. The module is
   released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
   contract versioned `v0` and experimental, until a 1.0 is declared.
+- `sdk/chain/` holds the chain-neutral role contracts: `Ledger`, `Consensus`,
+  `Network` and the optional `Mempool`, plus `ChainID`, `Point`, `Tip` and the
+  `Payload` that carries a block, header or transaction between roles. A
+  payload holds a small decoded view, optionally the encoded bytes, and
+  optionally the chain's own decoded value. Two built-in roles pass the decoded
+  value through `chain.NativeOf` without encoding; an external role reads
+  `Bytes`, which encodes only then and fails with `ErrNoEncoding` rather than
+  return empty bytes. Each role follows an existing seam: the ledger handed to
+  `ChainManager.SetLedger` and its `ValidateTx`, the forger's `LeaderChecker`,
+  `BlockValidator` and `BlockBroadcaster`, chain selection's tip comparison,
+  and the mempool `AddTransaction` and `RemoveTransaction`. `Ledger.ValidateTx`
+  validates against the applied state alone; the overlay validation the
+  mempool and block builder call, which adds the effects of earlier
+  transactions in the same block, takes the node module's `utxoref` types and
+  is not part of the role.
+- `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
+  `NetworkRole`, `MempoolRole`) over small source interfaces that the node's
+  own types already satisfy: `LedgerSource` and `ForgedBlockValidator` by
+  `ledger.LedgerState`, `LeaderSource` by the leader schedule and the forger's
+  `LeaderChecker`, `NetworkSink` by the forger's `BlockBroadcaster`, and
+  `MempoolSource` by `mempool.Mempool`. The node module does not import the
+  sdk, so `internal/architecture` compiles those pairings in a temporary
+  workspace holding both modules. Nothing in the node calls through these roles
+  yet, so no existing path changes.
 
 ### Import Boundary Check
 

@@ -268,7 +268,7 @@ BEGIN INSERT INTO utxo_address_updates VALUES (NEW.utxo_id); END;`)
 		TransactionID: &txID, OutputIdx: 1, AddedSlot: 500,
 		BlockIndex: &blockIndex,
 	})
-	require.NoError(t, rows.flush(ctx, store.writeDB, 500))
+	require.NoError(t, rows.flush(ctx, store.writeDB, store, 500))
 
 	var updates int
 	require.NoError(t, store.writeDB.QueryRowContext(ctx,

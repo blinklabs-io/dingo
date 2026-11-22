@@ -80,13 +80,13 @@ func TestCredentialDictionariesOnEngines(t *testing.T) {
 			rows.add(datumShape, hash, raw, int64(50))
 			rows.add(datumShape, hash, []byte{0x01}, int64(51))
 			require.NoError(t, rows.flush(
-				ctx, newDialectQueryer(store.writeDB, engine),
+				ctx, newDialectQueryer(store.writeDB, engine), store,
 				store.dialect.ParameterLimit(),
 			))
 			var again rowBatch
 			again.add(datumShape, hash, []byte{0xff}, int64(99))
 			require.NoError(t, again.flush(
-				ctx, newDialectQueryer(store.writeDB, engine),
+				ctx, newDialectQueryer(store.writeDB, engine), store,
 				store.dialect.ParameterLimit(),
 			))
 			revealed, err := store.GetDatum(datumHash, nil)

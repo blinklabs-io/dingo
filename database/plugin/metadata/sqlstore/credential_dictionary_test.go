@@ -225,7 +225,8 @@ func TestUnrevealedDatumRowIsHiddenUntilRevealed(t *testing.T) {
 	other := bytes.Repeat([]byte{0xd2}, 32)
 	rows.add(datumShape, other, []byte{0x03}, int64(52))
 	require.NoError(t, rows.flush(
-		context.Background(), store.writeDB, store.dialect.ParameterLimit(),
+		context.Background(), store.writeDB, store,
+		store.dialect.ParameterLimit(),
 	))
 
 	var gotRaw []byte
@@ -247,7 +248,8 @@ func TestUnrevealedDatumRowIsHiddenUntilRevealed(t *testing.T) {
 	var again rowBatch
 	again.add(datumShape, hash, []byte{0xff}, int64(99))
 	require.NoError(t, again.flush(
-		context.Background(), store.writeDB, store.dialect.ParameterLimit(),
+		context.Background(), store.writeDB, store,
+		store.dialect.ParameterLimit(),
 	))
 	require.NoError(t, store.writeDB.QueryRow(
 		`SELECT raw_datum, added_slot FROM datum WHERE hash = ?`, hash,
