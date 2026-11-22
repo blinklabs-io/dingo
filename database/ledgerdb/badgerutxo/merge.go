@@ -63,7 +63,7 @@ var utxoMarkers = [][]byte{
 // numbering, so they restart with it; the consumer's registration is not
 // listed and stays.
 var valueMarkers = [][]byte{
-	eraSwitchKey, pparamsSeqKey, syntheticV2Key, syntheticV2ClearedKey,
+	eraSwitchKey, snapshotSlotsKey, pparamsSeqKey, syntheticV2Key, syntheticV2ClearedKey,
 	governanceSeqKey, rewardSeqKey, rewardConsumedKey, rewardConsumedSlotKey,
 	exportFloorKey,
 }
@@ -83,6 +83,7 @@ var (
 		{NonceTag},
 		{EpochTag},
 		{SnapshotTag},
+		{SnapshotSlotTag},
 		{SummaryTag},
 		{NetworkStateTag},
 		{DonationTag},

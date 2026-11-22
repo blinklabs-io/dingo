@@ -988,6 +988,28 @@ func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresBarkEventNodeID pins that the configured event
+// origin reaches the node; without it every event carries a random origin.
+func TestBuildDingoConfigWiresBarkEventNodeID(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{BarkEventNodeID: "relay-eu-1"}
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+	if got := built.BarkEventNodeID(); got != "relay-eu-1" {
+		t.Fatalf("expected Bark event node ID to flow through, got %q", got)
+	}
+}
+
 // TestBuildDingoConfigWiresMidnightServerPolicy pins the composition boundary
 // between YAML/env/CLI configuration and the root node configuration used by
 // both initial startup and live API reinitialization.

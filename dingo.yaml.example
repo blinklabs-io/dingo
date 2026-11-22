@@ -421,6 +421,42 @@
 # CLI: --bark-archive-caller-lookups-per-second
 # barkArchiveCallerLookupsPerSecond: 0
 
+# Explicitly enable Bark's EventService, which streams this node's internal
+# events (peer churn, chain updates and rollbacks, epoch transitions, mempool
+# and connection events) to subscribers. Disabled by default. Requires a
+# non-zero barkPort. Bark does not authenticate callers, so Bark binds to
+# loopback unless barkHost says otherwise.
+# Can be overridden with DINGO_BARK_EVENT_ENABLED
+# CLI: --bark-event-enabled
+# barkEventEnabled: false
+
+# Also let the EventService accept Publish and PublishBatch from callers.
+# Disabled by default. Requires barkEventEnabled.
+# Can be overridden with DINGO_BARK_EVENT_PUBLISH_ENABLED
+# CLI: --bark-event-publish-enabled
+# barkEventPublishEnabled: false
+
+# Optional: the origin_node_id the EventService puts on this node's events,
+# which every subscriber sees. Empty (the default) selects a random identifier
+# for each run, so no host name is published; set it for an origin that stays
+# the same across restarts.
+# Can be overridden with DINGO_BARK_EVENT_NODE_ID
+# CLI: --bark-event-node-id
+# barkEventNodeId: ""
+
+# Optional: events the EventService keeps so a subscriber can resume after a
+# disconnect (0 selects the built-in size). A subscriber that falls further
+# behind than the buffer is detached. The two limits cap concurrent streams
+# overall and per caller address; they are opt-in, and 0 (the default) means
+# unlimited.
+# Can be overridden with DINGO_BARK_EVENT_BUFFER_SIZE,
+# DINGO_BARK_EVENT_MAX_SUBSCRIBERS, DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT
+# CLI: --bark-event-buffer-size, --bark-event-max-subscribers,
+#      --bark-event-max-subscribers-per-client
+# barkEventBufferSize: 0
+# barkEventMaxSubscribers: 0
+# barkEventMaxSubscribersPerClient: 0
+
 # Explicitly enable Bark's remote LifecycleService (Stop, Restart, GetStatus).
 # Disabled by default. Requires a non-zero barkPort.
 # Can be overridden with DINGO_BARK_LIFECYCLE_ENABLED

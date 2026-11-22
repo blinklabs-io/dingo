@@ -217,8 +217,8 @@ func (ls *LedgerState) governanceProposalDropFactRows(
 	return out, nil
 }
 
-// poolStakeSnapshotFactRows exports every pool stake snapshot of every epoch
-// the set holds, in key order.
+// poolStakeSnapshotFactRows exports the pool stake snapshots of the epochs the
+// set holds that were captured in [from, through], by epoch, type and pool.
 func (ls *LedgerState) poolStakeSnapshotFactRows(
 	_ metadata.FactTable,
 	from, through uint64,
@@ -238,29 +238,30 @@ func (ls *LedgerState) poolStakeSnapshotFactRows(
 		"leios_key_registration_epoch", "calculation_version",
 		"reward_account_auto_vote", "reward_account_auto_vote_resolved",
 	}}
-	for _, e := range sortedEpochs(view, nil) {
-		for _, typ := range rewardSnapshotTypes {
-			rows, err := ls.snapshotView(r, nil, e.EpochId, typ, 0)
-			if err != nil {
-				return metadata.FactRows{}, err
-			}
-			for _, s := range rows {
-				if !inSlotRange(s.CapturedSlot, from, through) {
-					continue
-				}
-				out.Rows = append(out.Rows, []any{
-					sqlInt(s.Epoch), s.SnapshotType, nilBytes(s.PoolKeyHash),
-					uint64Text(s.TotalStake), uint64Text(s.StakeDenominator),
-					sqlInt(s.DelegatorCount), sqlInt(s.CapturedSlot),
-					nilBytes(s.VrfKeyHash), nilBytes(s.LeiosKeyPublic),
-					nilBytes(s.LeiosKeyPossessionProof),
-					optSQLInt(s.LeiosKeyRegistrationEpoch),
-					sqlInt(s.CalculationVersion),
-					sqlInt(uint64(s.RewardAccountAutoVote)),
-					boolInt(s.RewardAccountAutoVoteResolved),
-				})
-			}
+	held := make(map[uint64]struct{}, len(view))
+	for id := range view {
+		held[id] = struct{}{}
+	}
+	snapshots, err := ls.snapshotsCapturedInView(r, nil, from, through)
+	if err != nil {
+		return metadata.FactRows{}, err
+	}
+	for _, s := range snapshots {
+		if _, ok := held[s.Epoch]; !ok ||
+			!slices.Contains(rewardSnapshotTypes, s.SnapshotType) {
+			continue
 		}
+		out.Rows = append(out.Rows, []any{
+			sqlInt(s.Epoch), s.SnapshotType, nilBytes(s.PoolKeyHash),
+			uint64Text(s.TotalStake), uint64Text(s.StakeDenominator),
+			sqlInt(s.DelegatorCount), sqlInt(s.CapturedSlot),
+			nilBytes(s.VrfKeyHash), nilBytes(s.LeiosKeyPublic),
+			nilBytes(s.LeiosKeyPossessionProof),
+			optSQLInt(s.LeiosKeyRegistrationEpoch),
+			sqlInt(s.CalculationVersion),
+			sqlInt(uint64(s.RewardAccountAutoVote)),
+			boolInt(s.RewardAccountAutoVoteResolved),
+		})
 	}
 	return out, nil
 }

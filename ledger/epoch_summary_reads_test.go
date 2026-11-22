@@ -46,6 +46,13 @@ func (*memSummarySet) PoolStakeSnapshots(
 	return nil, nil
 }
 
+func (*memSummarySet) PoolStakeSnapshotsCapturedIn(
+	uint64,
+	uint64,
+) ([]*models.PoolStakeSnapshot, error) {
+	return nil, nil
+}
+
 func (s *memSummarySet) EpochSummary(epoch uint64) (*models.EpochSummary, error) {
 	sm, ok := s.summaries[epoch]
 	if !ok {

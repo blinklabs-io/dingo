@@ -23,6 +23,7 @@ var tagFamilies = map[byte]nodesettings.Family{
 	NonceTag:             nodesettings.FamilyNonces,
 	EpochTag:             nodesettings.FamilyEpochs,
 	SnapshotTag:          nodesettings.FamilyEpochs,
+	SnapshotSlotTag:      nodesettings.FamilyEpochs,
 	SummaryTag:           nodesettings.FamilySummaries,
 	NetworkStateTag:      nodesettings.FamilyNetworkDonations,
 	DonationTag:          nodesettings.FamilyNetworkDonations,

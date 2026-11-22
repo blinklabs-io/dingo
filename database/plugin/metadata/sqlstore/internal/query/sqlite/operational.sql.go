@@ -29,6 +29,29 @@ func (q *Queries) AddNetworkDonation(ctx context.Context, arg AddNetworkDonation
 	return err
 }
 
+const assetHeld = `-- name: AssetHeld :one
+SELECT EXISTS (
+    SELECT 1
+    FROM asset_identity i
+    JOIN asset_holding h ON h.asset_id = i.id
+    WHERE i.policy_id = ? AND i.name = ?
+) AS held
+`
+
+type AssetHeldParams struct {
+	PolicyID []byte
+	Name     []byte
+}
+
+// AssetHeld reports whether any retained holding, live or spent and not yet
+// pruned, exists for the asset. An identity with no holding does not count.
+func (q *Queries) AssetHeld(ctx context.Context, arg AssetHeldParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, assetHeld, arg.PolicyID, arg.Name)
+	var held bool
+	err := row.Scan(&held)
+	return held, err
+}
+
 const claimOffchainMetadataFetch = `-- name: ClaimOffchainMetadataFetch :execrows
 UPDATE offchain_metadata
 SET next_fetch_after = ?, updated_at = ?
@@ -152,34 +175,6 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (i
 		arg.DrepType,
 		arg.Active,
 		arg.ExpirationEpoch,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const createAsset = `-- name: CreateAsset :one
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-RETURNING id
-`
-
-type CreateAssetParams struct {
-	Name        []byte
-	PolicyID    []byte
-	Fingerprint []byte
-	UtxoID      sql.NullInt64
-	Amount      sql.NullString
-}
-
-func (q *Queries) CreateAsset(ctx context.Context, arg CreateAssetParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, createAsset,
-		arg.Name,
-		arg.PolicyID,
-		arg.Fingerprint,
-		arg.UtxoID,
-		arg.Amount,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -1344,33 +1339,6 @@ func (q *Queries) GetActiveDreps(ctx context.Context) ([]Drep, error) {
 	return items, nil
 }
 
-const getAssetByPolicyAndName = `-- name: GetAssetByPolicyAndName :one
-SELECT name, policy_id, fingerprint, id, utxo_id, amount
-FROM asset
-WHERE policy_id = ? AND name = ?
-ORDER BY id
-LIMIT 1
-`
-
-type GetAssetByPolicyAndNameParams struct {
-	PolicyID []byte
-	Name     []byte
-}
-
-func (q *Queries) GetAssetByPolicyAndName(ctx context.Context, arg GetAssetByPolicyAndNameParams) (Asset, error) {
-	row := q.db.QueryRowContext(ctx, getAssetByPolicyAndName, arg.PolicyID, arg.Name)
-	var i Asset
-	err := row.Scan(
-		&i.Name,
-		&i.PolicyID,
-		&i.Fingerprint,
-		&i.ID,
-		&i.UtxoID,
-		&i.Amount,
-	)
-	return i, err
-}
-
 const getAssetMintBurnInfo = `-- name: GetAssetMintBurnInfo :one
 SELECT
     (SELECT first_event.tx_hash
@@ -1406,78 +1374,6 @@ func (q *Queries) GetAssetMintBurnInfo(ctx context.Context, arg GetAssetMintBurn
 	var i GetAssetMintBurnInfoRow
 	err := row.Scan(&i.InitialTxHash, &i.EventCount)
 	return i, err
-}
-
-const getAssetQuantityByPolicyAndName = `-- name: GetAssetQuantityByPolicyAndName :many
-SELECT asset.amount
-FROM asset
-INNER JOIN utxo ON asset.utxo_id = utxo.id
-WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0
-`
-
-type GetAssetQuantityByPolicyAndNameParams struct {
-	PolicyID []byte
-	Name     []byte
-}
-
-func (q *Queries) GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, getAssetQuantityByPolicyAndName, arg.PolicyID, arg.Name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []sql.NullString{}
-	for rows.Next() {
-		var amount sql.NullString
-		if err := rows.Scan(&amount); err != nil {
-			return nil, err
-		}
-		items = append(items, amount)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getAssetsByUtxoID = `-- name: GetAssetsByUtxoID :many
-SELECT name, policy_id, fingerprint, id, utxo_id, amount
-FROM asset
-WHERE utxo_id = ?
-ORDER BY id
-`
-
-func (q *Queries) GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) ([]Asset, error) {
-	rows, err := q.db.QueryContext(ctx, getAssetsByUtxoID, utxoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Asset{}
-	for rows.Next() {
-		var i Asset
-		if err := rows.Scan(
-			&i.Name,
-			&i.PolicyID,
-			&i.Fingerprint,
-			&i.ID,
-			&i.UtxoID,
-			&i.Amount,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const getBackfillCheckpoint = `-- name: GetBackfillCheckpoint :one
@@ -3623,32 +3519,6 @@ func (q *Queries) ImportAccount(ctx context.Context, arg ImportAccountParams) (i
 	var id int64
 	err := row.Scan(&id)
 	return id, err
-}
-
-const importAsset = `-- name: ImportAsset :exec
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
-`
-
-type ImportAssetParams struct {
-	Name        []byte
-	PolicyID    []byte
-	Fingerprint []byte
-	UtxoID      sql.NullInt64
-	Amount      sql.NullString
-}
-
-func (q *Queries) ImportAsset(ctx context.Context, arg ImportAssetParams) error {
-	_, err := q.db.ExecContext(ctx, importAsset,
-		arg.Name,
-		arg.PolicyID,
-		arg.Fingerprint,
-		arg.UtxoID,
-		arg.Amount,
-	)
-	return err
 }
 
 const importDrep = `-- name: ImportDrep :one

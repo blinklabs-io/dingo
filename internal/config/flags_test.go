@@ -134,6 +134,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.API.Kupo.Config":              {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
+		"Plugins.Extra":                        {},
 		"TokenRegistry.HeaderSecrets":          {},
 		"Plugins.API.Mcp.Config":               {},
 		"Midnight.CNightPolicyID":              {},

@@ -7,6 +7,39 @@ domain packages do not self-register during package initialization. The host
 erases types only at its registry boundary while typed factories retain their
 provider configuration, service, and dependency bundles.
 
+A capability is a namespaced, versioned contract string, `<name>/v<N>` (for
+example `storage.blob/v0`, `consensus/v0`). The name is dot-separated lowercase
+segments (the segments `provider` and `config` are reserved); `N` is a
+non-negative integer without leading zeros. `plugin.ParseCapability` is the
+single parser. A host speaks one contract version per name: `NewHost` speaks
+the built-in set (`plugin.AllCapabilities`) and `Host.Declare` adds others.
+`Register` and `ValidateSelection` reject a capability the host does not speak,
+and when the name is spoken at another version the error names both versions.
+`Declare` also rejects a name nested under or containing a spoken name
+(`example` and `example.widget`), because the two would share a `plugins`
+subtree and an environment prefix.
+No capability list is closed in code, so a new plugin kind needs a `Declare`
+call and a provider registration, not a host edit.
+
+Configuration and environment key on the capability name, never the version.
+`plugin.EnvironmentPrefix` is `DINGO_PLUGINS_` plus the upper-cased name with
+dots as underscores, so contract version changes do not rename variables. In
+YAML the name's segments nest under `plugins`, as `storage.blob` already does:
+`example.widget` is `plugins.example.widget.{provider,config}`. The built-in
+selections keep their fixed fields; every other selection is collected into
+`PluginsConfig.Extra` by name. A mapping with a `provider` or `config` key is a
+selection, any other mapping is a namespace, and decoding stays strict: an
+unknown key, a duplicate key, a malformed name, a name nested with a built-in
+one (`consensus.foo`, `api`), or `storage.immutable` (which has no selection)
+is a load error reported at its source line. Aliases and merge keys resolve
+against the whole document. `LoadConfig` applies the `DINGO_PLUGINS_<NAME>_*` overlay to
+each extra selection present in the loaded YAML, and CLI flags still win. The
+precedence is CLI > environment > YAML > defaults. `Config.WithPluginSelection`
+stores a selection for a non-built-in capability by name. `Node.New` fails when
+a configured selection names a capability its host does not declare, or one
+passed to `WithPluginSelection` is malformed, rather than ignoring it. Out-of-tree providers must still be registered explicitly;
+there is no `init()` registration.
+
 `Node.New` validates plugin selections and node configuration before registering
 metrics or starting EventBus workers. Configuration failure leaves the caller
 metrics registry unchanged, so corrected construction can reuse it.
@@ -17912,7 +17945,10 @@ the `pool_retirement` epoch index and rank certificates only for those pools, th
 full history of each candidate, so a page does not read every registration and retirement ever recorded
 when few pools qualify.
 
-`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
+retained holding (live, or spent and not yet pruned) of the asset; neither an
+`asset_identity` row with no holdings nor a mint/burn record alone counts. The response's CIP-14 fingerprint is computed from the policy id and
+name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
 `SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
@@ -21235,6 +21271,38 @@ verify, and delete consumers use `snapshot_id`, and the only workspace CLI
 consumer prints `location` without feeding it back into an operation.
 `GetDatabaseInfo` reads the persisted block inventory rather than scanning
 retained block contents.
+
+**EventService** (`bark/event.go`, `bark/event_adapter.go`) mounts bark's
+`EventService` when `BarkConfig.EventBus` is set, which `node.go`'s `Run()` does
+only when `barkEventEnabled` is true. Bark holds no credentials, so the bind
+address is the access control: enabling it defaults the listener to loopback,
+as for the lifecycle services. `eventAdapter` subscribes to the internal
+EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
+`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`) and
+converts each to a registry event with a typed payload; a rollback travelling on
+`chain.update` stays on `chain.update` and is reported in the payload's
+`rollback` field. A subscription filter selects by registered event type or
+category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
+node's `origin_node_id` is `barkEventNodeId`; unset, it is a random identifier
+drawn once per run, never the host name, because every subscriber sees it. The bus
+handlers only enqueue onto a bounded
+channel; one goroutine converts and appends to a ring buffer of
+`barkEventBufferSize` events that carries the delivery sequence. Subscribers
+read the ring at their own pace, so a slow remote client cannot delay any
+internal subscriber: `Subscribe` detaches a client that falls more than the ring
+behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
+stops acknowledging a half-ring window of delivered events is closed after a
+timeout; events a filter rejects do not count toward that window. Resuming with
+`last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
+refused unless `barkEventPublishEnabled` is set, and an event with no
+`origin_node_id` or this node's own is rejected; an accepted event goes to the
+node's remote subscribers and is not injected into the internal EventBus, which
+only accepts its own typed structs. Concurrent-stream limits
+(`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
+operator opt-ins; zero or unset means unlimited, and `PublishBatch` has no
+fixed batch cap.
+Sync state, protocol parameter and database operation events are not in the
+registry because no internal event carries that data.
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
@@ -24895,9 +24963,8 @@ not incremented in place from dingo's side.
 `--ledger-apply-row-batching-enabled`; default off; honoured by serve mode and
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
-batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset rows to multi-row inserts, reuses one prepared transaction-row
-upsert, and coalesces each block's live-stake deltas, which
+batches whether or not it is set. In core mode the accumulator reuses one
+prepared transaction-row upsert and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next
 validated block runs, so stored state is identical to the per-row path. A reward

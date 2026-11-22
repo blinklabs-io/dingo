@@ -51,13 +51,16 @@ type AppliedTransaction struct {
 	Valid         sql.NullBool
 }
 
-type Asset struct {
-	Name        []byte
-	PolicyID    []byte
-	Fingerprint []byte
-	ID          int64
-	UtxoID      sql.NullInt64
-	Amount      sql.NullString
+type AssetHolding struct {
+	UtxoID  int64
+	AssetID int64
+	Amount  sql.NullString
+}
+
+type AssetIdentity struct {
+	ID       int64
+	PolicyID []byte
+	Name     []byte
 }
 
 type AssetMintBurn struct {

@@ -958,6 +958,34 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	for name, v := range map[string]int{
+		"barkEventBufferSize":              c.BarkEventBufferSize,
+		"barkEventMaxSubscribers":          c.BarkEventMaxSubscribers,
+		"barkEventMaxSubscribersPerClient": c.BarkEventMaxSubscribersPerClient,
+	} {
+		if v < 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid %s %d: must not be negative", name, v,
+			))
+		}
+	}
+	if serving && c.BarkEventEnabled && c.BarkPort == 0 {
+		errs = append(
+			errs,
+			errors.New(
+				"barkPort must be non-zero when barkEventEnabled is true",
+			),
+		)
+	}
+	if c.BarkEventPublishEnabled && !c.BarkEventEnabled {
+		errs = append(
+			errs,
+			errors.New(
+				"barkEventEnabled must be true when barkEventPublishEnabled is true",
+			),
+		)
+	}
+
 	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
 		errs = append(
 			errs,

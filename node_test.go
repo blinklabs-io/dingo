@@ -466,6 +466,11 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 		{"era", WithStartEra("invalid"), "invalid start era"},
 		{"margin", WithMinPoolMargin(10001), "min pool margin"},
 		{"leverage", WithPledgeLeverage(true, 0), "pledge leverage"},
+		{
+			"bark event limit",
+			WithBarkEventService(true, false, 0, -1, 0),
+			"barkEventMaxSubscribers",
+		},
 		{"listeners", func(c *Config) { c.listeners = nil }, "no listeners defined"},
 		{"listener address", WithListeners(ListenerConfig{}), "listener must provide"},
 	} {
