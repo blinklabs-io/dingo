@@ -138,12 +138,23 @@ func Compare(oldFile, newFile string, curated []string) (string, bool, error) {
 // CompareGate compares a base-revision result file against a head-revision
 // result file for the per-pull-request gate. See GateReport.
 func CompareGate(baseFile, headFile string) (string, bool, error) {
-	csv, err := runBenchstat(baseFile, headFile)
+	csv, err := runBenchstat(
+		gateBaseLabel+"="+baseFile,
+		gateHeadLabel+"="+headFile,
+	)
 	if err != nil {
 		return "", false, err
 	}
 	return GateReport(csv)
 }
+
+// CompareGate labels its benchstat inputs so a table holding one input's
+// column names which input it is. A package only one side ran gets such a
+// table, and its rows look the same whichever side that was.
+const (
+	gateBaseLabel = "base"
+	gateHeadLabel = "head"
+)
 
 // Report parses raw `benchstat -format=csv` output and renders the curated
 // markdown regression report. It is split out from Compare so tests can
@@ -159,7 +170,7 @@ func Report(csv string, curated []string) (string, bool, error) {
 // benchmarks appear in both inputs, because a comparison that matched nothing
 // would otherwise pass vacuously.
 func GateReport(csv string) (string, bool, error) {
-	rows, err := parseSecOpTable(csv)
+	rows, err := parseSecOpTable(csv, gateBaseLabel)
 	if err != nil {
 		return "", false, err
 	}
@@ -217,7 +228,7 @@ func reportWithThreshold(
 	curated []string,
 	threshold float64,
 ) (string, bool, error) {
-	rows, err := parseSecOpTable(csv)
+	rows, err := parseSecOpTable(csv, "")
 	if err != nil {
 		return "", false, err
 	}
@@ -284,7 +295,19 @@ type benchstatRow struct {
 // and a ",<metric>,CI,<metric>,CI,vs base,P" row identifying the table's
 // metric ("sec/op", "B/op", or "allocs/op"), then one data row per
 // benchmark, then a trailing "geomean" row. Only "sec/op" blocks are kept.
-func parseSecOpTable(csv string) (map[string]benchstatRow, error) {
+//
+// A benchmark in only one input is a row with that input's columns alone.
+// In a two-input table benchstat drops the trailing empty cells of an
+// old-only row (3 fields) and keeps the leading ones of a new-only row (5
+// fields). A table for a package only one input ran has a single input
+// column, named in the header row, so its rows are old-only exactly when
+// that name is oldLabel. An empty oldLabel treats every such table as
+// new-only. Old-only rows are kept with onlyOld set; new-only rows are
+// dropped.
+func parseSecOpTable(
+	csv string,
+	oldLabel string,
+) (map[string]benchstatRow, error) {
 	csv = strings.ReplaceAll(csv, "\r\n", "\n")
 	blocks := strings.Split(strings.TrimRight(csv, "\n"), "\n\n")
 
@@ -303,6 +326,15 @@ func parseSecOpTable(csv string) (map[string]benchstatRow, error) {
 			continue
 		}
 		foundSecOpTable = true
+		var inputs []string
+		for _, label := range strings.Split(lines[0], ",")[1:] {
+			if label != "" {
+				inputs = append(inputs, label)
+			}
+		}
+		if len(inputs) == 1 && (oldLabel == "" || inputs[0] != oldLabel) {
+			continue
+		}
 		for _, line := range lines[2:] {
 			if strings.TrimSpace(line) == "" {
 				continue
@@ -312,9 +344,7 @@ func parseSecOpTable(csv string) (map[string]benchstatRow, error) {
 			if name == "geomean" {
 				continue
 			}
-			if len(fields) == 3 {
-				// benchstat ends a row after the old columns when the new
-				// file lacks the benchmark.
+			if len(inputs) == 1 || len(fields) == 3 {
 				if oldSeconds, err := strconv.ParseFloat(fields[1], 64); err == nil {
 					rows[name] = benchstatRow{
 						old:     formatSeconds(oldSeconds),
