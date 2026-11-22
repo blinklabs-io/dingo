@@ -225,6 +225,9 @@ var dumpProjections = map[string]string{
 		"a.tx_index FROM address_transaction a " +
 		"LEFT JOIN credential pc ON pc.id = a.payment_key_id " +
 		"LEFT JOIN credential sc ON sc.id = a.staking_key_id",
+	"pool_opcert_sequence": "SELECT c.hash AS pool_key_hash, o.slot, " +
+		"o.sequence FROM pool_opcert_sequence o " +
+		"JOIN credential c ON c.id = o.pool_key_id",
 }
 
 // dumpNamedTables is dumpTables over the named tables.

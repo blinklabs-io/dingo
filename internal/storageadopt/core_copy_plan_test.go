@@ -56,6 +56,7 @@ func TestCoreCopyPlanCarriesCoreModeTables(t *testing.T) {
 		"account_drep_clear", "account_import_baseline",
 		"account_inactivity_activation", "block_nonce",
 		"imported_pool_block_count", "pool_current_event",
-		"reward_seed_failure", "utxo_collateral_edge", "utxo_reference_edge",
+		"pool_opcert_sequence", "reward_seed_failure",
+		"utxo_collateral_edge", "utxo_reference_edge",
 	}, plan.CopiedWhole)
 }

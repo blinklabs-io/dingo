@@ -211,7 +211,7 @@ func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
 	).Scan(&latest))
 	require.NoError(t, store.writeDB.QueryRowContext(
 		t.Context(),
-		"SELECT sequence FROM pool_opcert_sequence WHERE pool_key_hash = ? AND slot = ?",
+		"SELECT sequence FROM pool_opcert_sequence WHERE pool_key_id = (SELECT id FROM credential WHERE hash = ?) AND slot = ?",
 		poolKeyHash.Bytes(),
 		10,
 	).Scan(&recorded))

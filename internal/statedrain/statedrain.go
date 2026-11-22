@@ -199,7 +199,11 @@ var graduated = []struct {
 		},
 		[]string{RewardStakeInputsPendingSyncKey},
 	},
-	{nodesettings.FamilyOpCerts, []Table{{"pool_opcert_sequence", "id"}}, nil},
+	{
+		nodesettings.FamilyOpCerts,
+		[]Table{{"pool_opcert_sequence", "pool_key_id"}},
+		nil,
+	},
 	// The two drain as a pair, DReps first: a certificate that changes a
 	// DRep delegation reads the account's prior delegation, and the store
 	// refuses to write while exactly one of them is drained, so no write runs

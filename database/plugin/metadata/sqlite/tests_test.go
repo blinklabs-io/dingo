@@ -948,7 +948,7 @@ func TestLatestPoolOpCertSequencesAtOrBefore(t *testing.T) {
 		{
 			sqlstore.PoolOpCertSequenceAtOrBeforeSQL,
 			[]any{key(both), 20},
-			"idx_pool_opcert_sequence_pool_slot",
+			"USING PRIMARY KEY (pool_key_id=? AND slot<?)",
 		},
 	} {
 		rows, err := db.Query("EXPLAIN QUERY PLAN "+tc.statement, tc.args...)

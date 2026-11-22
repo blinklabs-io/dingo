@@ -8218,7 +8218,7 @@ INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash,
     total_stake, delegator_count, captured_slot, calculation_version)
 VALUES (?, 'mark', ?, ?, ?, ?, ?)`)
 	blockStmt := prepare(`
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+INSERT INTO pool_opcert_sequence (pool_key_id, slot, sequence)
 VALUES (?, ?, ?)`)
 
 	shape := f.shape
@@ -8429,8 +8429,9 @@ VALUES (?, ?, ?, ?, ?, ?, 1)`,
 			float64(epochBoundaryBenchBlocks) *
 				float64(pools[p].stake) / float64(totalStake),
 		)
+		poolKeyID := testutil.CredentialID(tb, tx, pools[p].key)
 		for range share {
-			_, err := blockStmt.Exec(pools[p].key, slot, int64(math.MinInt64))
+			_, err := blockStmt.Exec(poolKeyID, slot, int64(math.MinInt64))
 			require.NoError(tb, err)
 			slot += 20
 		}

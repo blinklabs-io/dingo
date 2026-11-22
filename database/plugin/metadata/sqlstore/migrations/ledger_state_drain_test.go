@@ -38,7 +38,7 @@ func TestLedgerStateDrainSchemaStopsAnOlderBinary(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 79)
+	require.Len(t, registry, 80)
 	runner := func(reg []migrations.Migration) migrations.Runner {
 		return migrations.Runner{
 			DB:       db,

@@ -279,7 +279,7 @@ var Manifest = []Index{
 	},
 	{
 		Name: "idx_pool_opcert_sequence_pool_sequence", Table: "pool_opcert_sequence",
-		Columns: []string{"pool_key_hash", "sequence"},
+		Columns: []string{"pool_key_id", "sequence"},
 		Notes:   "Latest operational-certificate counter lookup", Critical: true,
 	},
 	{

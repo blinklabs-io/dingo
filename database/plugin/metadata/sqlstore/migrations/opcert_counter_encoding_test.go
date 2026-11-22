@@ -37,7 +37,7 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 79)
+	require.Len(t, registry, 80)
 	run := func(selected []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -72,8 +72,9 @@ SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?`,
 	require.Equal(t, int64(-1), latest)
 
 	rows, err := db.QueryContext(ctx, `
-SELECT sequence FROM pool_opcert_sequence
-WHERE pool_key_hash = ? ORDER BY sequence`, poolKeyHash)
+SELECT o.sequence FROM pool_opcert_sequence o
+JOIN credential c ON c.id = o.pool_key_id
+WHERE c.hash = ? ORDER BY o.sequence`, poolKeyHash)
 	require.NoError(t, err)
 	defer rows.Close()
 	want := []int64{math.MinInt64, -1}
@@ -100,8 +101,9 @@ SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?`,
 	).Scan(&latest))
 	require.Equal(t, int64(-1), latest)
 	rows, err = db.QueryContext(ctx, `
-SELECT sequence FROM pool_opcert_sequence
-WHERE pool_key_hash = ? ORDER BY sequence`, poolKeyHash)
+SELECT o.sequence FROM pool_opcert_sequence o
+JOIN credential c ON c.id = o.pool_key_id
+WHERE c.hash = ? ORDER BY o.sequence`, poolKeyHash)
 	require.NoError(t, err)
 	var replayed []int64
 	for rows.Next() {

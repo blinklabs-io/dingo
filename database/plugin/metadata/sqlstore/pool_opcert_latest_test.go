@@ -103,13 +103,13 @@ func TestLatestPoolOpCertSequenceNoCountMatchesLegacy(t *testing.T) {
 		for _, a := range []uint64{0, 99, 100, 105, 120, 160, 1000} {
 			got, found, err := store.LatestPoolOpCertSequenceAtOrBefore(p, a, nil)
 			require.NoError(t, err)
-			want, wantFound := legacy("pool_key_hash = ? AND slot <= ?", p.Bytes(), int64(a))
+			want, wantFound := legacy("pool_key_id = "+credentialIDSubquery+" AND slot <= ?", p.Bytes(), int64(a))
 			require.Equal(t, wantFound, found, "atOrBefore %d", a)
 			require.Equal(t, want, got, "atOrBefore %d", a)
 
 			got, found, err = store.LatestPoolOpCertSequenceAfter(p, a, nil)
 			require.NoError(t, err)
-			want, wantFound = legacy("pool_key_hash = ? AND slot > ?", p.Bytes(), a)
+			want, wantFound = legacy("pool_key_id = "+credentialIDSubquery+" AND slot > ?", p.Bytes(), a)
 			require.Equal(t, wantFound, found, "after %d", a)
 			require.Equal(t, want, got, "after %d", a)
 
@@ -121,7 +121,8 @@ func TestLatestPoolOpCertSequenceNoCountMatchesLegacy(t *testing.T) {
 					continue
 				}
 				want, wantFound = legacy(
-					"pool_key_hash = ? AND slot >= ? AND slot <= ?",
+					"pool_key_id = "+credentialIDSubquery+
+						" AND slot >= ? AND slot <= ?",
 					p.Bytes(), int64(a), int64(b),
 				)
 				require.Equal(t, wantFound, found, "range %d-%d", a, b)

@@ -146,7 +146,7 @@ func (s *Store) GetPoolBlockHashesInSlotRange(
 		return nil, 0, errTableDrained("pool_opcert_sequence")
 	}
 	return s.blockHashesInSlotRange(
-		"JOIN pool_opcert_sequence pos ON pos.slot = bn.slot AND pos.pool_key_hash = ?",
+		"JOIN pool_opcert_sequence pos ON pos.slot = bn.slot AND pos.pool_key_id = "+credentialIDSubquery,
 		[]any{poolKeyHash},
 		startSlot,
 		endSlot,

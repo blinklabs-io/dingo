@@ -378,8 +378,9 @@ func (s *Store) ReadOpCertCountersAt(
 	rs, err := db.QueryContext(
 		txCtx,
 		s.dialect.Rebind(`-- name: ReadOpCertCountersAt :many
-SELECT pool_key_hash, sequence FROM pool_opcert_sequence
-WHERE slot = ? ORDER BY pool_key_hash`),
+SELECT pool.hash, pool_opcert_sequence.sequence FROM pool_opcert_sequence
+JOIN credential AS pool ON pool.id = pool_opcert_sequence.pool_key_id
+WHERE pool_opcert_sequence.slot = ? ORDER BY pool.hash`),
 		slotValue,
 	)
 	if err != nil {

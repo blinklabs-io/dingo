@@ -34,6 +34,11 @@ const (
 		"WHERE d.id = utxo.datum_id)"
 )
 
+// poolOpCertKeyExpr projects the pool key hash of a pool_opcert_sequence row
+// from the credential dictionary by id.
+const poolOpCertKeyExpr = "(SELECT c.hash FROM credential AS c " +
+	"WHERE c.id = pool_opcert_sequence.pool_key_id)"
+
 // uCredentialHash projects the hash of the credential that column of an
 // output aliased u names.
 func uCredentialHash(column string) string {

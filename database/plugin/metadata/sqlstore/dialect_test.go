@@ -170,11 +170,11 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence` (`pool_key_hash`(255), `sequence`)",
+		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence` (`pool_key_id`, `sequence`)",
 		dialect.CreateIndexSQL(
 			"idx_pool_opcert_sequence_pool_sequence",
 			"pool_opcert_sequence",
-			[]string{"pool_key_hash", "sequence"},
+			[]string{"pool_key_id", "sequence"},
 		),
 	)
 	require.False(t, dialect.CanDropIndex("idx_utxo_spent_at_tx_id", "utxo"))

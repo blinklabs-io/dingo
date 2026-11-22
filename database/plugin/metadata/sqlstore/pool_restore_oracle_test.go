@@ -275,8 +275,9 @@ ORDER BY p.pool_key_hash, r.added_slot, l.port`)
 SELECT pool_key_hash, epoch, added_slot FROM pool_retirement
 ORDER BY pool_key_hash, added_slot`)
 	collect("opcert", `
-SELECT pool_key_hash, slot, sequence FROM pool_opcert_sequence
-ORDER BY pool_key_hash, slot`)
+SELECT c.hash, o.slot, o.sequence FROM pool_opcert_sequence o
+JOIN credential c ON c.id = o.pool_key_id
+ORDER BY c.hash, o.slot`)
 	var orphanOwners, orphanRelays, ownerCount, relayCount int
 	require.NoError(t, store.writeDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pool_registration_owner`).Scan(&ownerCount))
