@@ -656,6 +656,53 @@ func TestChunkedRewardPrecomputeAdoptsCursorCapturedSlot(t *testing.T) {
 	)
 }
 
+// TestChunkedRewardPrecomputeRestartKeepsRoundSlot pins that a cursor whose
+// committed rows are gone is not adopted: Pass 2 starts over, so the restarted
+// rows carry the resuming round's own captured slot, not the stale cursor's.
+func TestChunkedRewardPrecomputeRestartKeepsRoundSlot(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		boundarySlot        = uint64(1_200)
+		firstSlot           = uint64(200)
+		laterSlot           = uint64(300)
+	)
+	poolCount, delegatorsPerPool := 5, 2
+
+	ls, db := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, firstSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+	require.NoError(t, deleteUncreditedRewardOutputs(
+		dbadapter.New(db), nil, rewardSnapshotEpoch,
+	))
+
+	resumed, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, laterSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
+		dbadapter.New(db), nil, resumed,
+	)
+	require.NoError(t, err)
+	require.Nil(t, cursor, "a cursor without its rows must not be resumed")
+	require.Zero(t, startIndex)
+	require.Equal(t, laterSlot, resumed.capturedSlot,
+		"a discarded cursor must not replace the round's captured slot")
+}
+
 // TestEpochBoundaryReusesBackgroundChunkAtOneSlot pins that the boundary
 // finishes an unfinished background round from its cursor, keeping the
 // committed chunk and its captured slot, instead of redoing Pass 2.
