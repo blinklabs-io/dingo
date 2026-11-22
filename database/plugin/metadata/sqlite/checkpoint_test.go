@@ -354,6 +354,61 @@ func TestBulkModeCheckpointsWAL(t *testing.T) {
 	)
 }
 
+// TestNormalModeCheckpointsWAL pins that the scheduled checkpoint backfills
+// committed frames outside bulk mode: the write connection never checkpoints
+// at commit, so this ticker is the only thing that moves the WAL into
+// metadata.sqlite during normal operation.
+func TestNormalModeCheckpointsWAL(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE normal_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, err)
+	mainSize := func() int64 {
+		info, statErr := os.Stat(filepath.Join(dataDir, "metadata.sqlite"))
+		require.NoError(t, statErr)
+		return info.Size()
+	}
+	before := mainSize()
+
+	const rows = 400
+	payload := make([]byte, 4096)
+	tx, err := writeDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range rows {
+		_, err = tx.ExecContext(
+			t.Context(),
+			"INSERT INTO normal_probe (n, payload) VALUES (?, ?)",
+			i,
+			payload,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return mainSize()-before >= rows*int64(len(payload))
+		},
+		3*checkpointInterval,
+		"committed WAL frames were not checkpointed into the database file",
+	)
+}
+
 func TestCheckpointWALSchedulesTruncateEveryNthTick(t *testing.T) {
 	t.Parallel()
 	var modes []string
