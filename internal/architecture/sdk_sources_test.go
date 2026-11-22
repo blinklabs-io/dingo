@@ -59,7 +59,13 @@ func TestSDKCardanoSourcesMatchNode(t *testing.T) {
 
 	root := findRepoRoot(t)
 	goVersion := goDirective(t, filepath.Join(root, "go.mod"))
-	dir := t.TempDir()
+	// The go command matches the module of its resolved working directory
+	// against go.work's use paths, so a symlinked temporary directory (macOS
+	// /var -> /private/var) would leave ./check outside the workspace.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	checkDir := filepath.Join(dir, "check")
 	if err := os.Mkdir(checkDir, 0o755); err != nil {
 		t.Fatal(err)
