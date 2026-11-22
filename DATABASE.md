@@ -6037,11 +6037,11 @@ write path, all rebuild before the API reports ready, and none is
 tables key by integer transaction id, which grows with the chain, so their
 inserts append.
 
-SQLite commits each missing index in its own transaction so the WAL
-checkpointer can backfill completed builds while later ones run. An interrupted rebuild leaves
-completed indexes in place for the next run to skip; the marker is cleared only
-after a final transaction confirms the requested set is present. PostgreSQL and
-MySQL retain the single-transaction rebuild path.
+SQLite commits each missing index in its own transaction so the WAL checkpointer
+can backfill completed builds while later ones run. An interrupted rebuild
+leaves completed indexes in place for the next run to skip; the marker is
+cleared only after a final transaction confirms the requested set is present.
+PostgreSQL and MySQL retain the single-transaction rebuild path.
 
 A node-managed Mithril stream catch-up across at least 100 immutable files, on a
 SQLite metadata store only, drops the non-critical entries
@@ -7513,29 +7513,30 @@ the rollback-to-WAL transition's exclusive lock without consulting the busy
 handler, so running it on every connection makes a concurrent open fail outright
 with `SQLITE_BUSY` instead of waiting, and journal mode is persistent in the
 database header so once is enough; `busy_timeout` leads the remaining pragma
-list, because the driver applies `_pragma` directives in DSN order and anything
-ahead of it would run with no busy handler installed), so committed metadata
-reaches disk at WAL checkpoints. The write connection never checkpoints at
-commit (`sqliteWritePragmas` sets `wal_autocheckpoint(0)`, and the bulk and
-restore pragmas keep 0), because the copy and fsync inside `COMMIT` stalled the
-single writer; `checkpointWAL` runs a PASSIVE checkpoint every two seconds on
-its own connection instead, so several commits' worth of touches to a hot
-B-tree page coalesce into one checkpoint write. The read pool keeps
+list, because the driver applies `busy_timeout` before every other `_pragma`
+directive and anything ahead of it would run with no busy handler installed), so
+committed metadata reaches disk at WAL checkpoints. The write connection never
+checkpoints at commit (`sqliteWritePragmas` sets `wal_autocheckpoint(0)`, and
+the bulk and restore pragmas keep 0), because the copy and fsync inside `COMMIT`
+stalled the single writer; `checkpointWAL` runs a PASSIVE checkpoint every two
+seconds on its own connection instead, so several commits' worth of touches to a
+hot B-tree page coalesce into one checkpoint write. The read pool keeps
 `wal_autocheckpoint(10000)` via `sqliteReadPragmas`. `modernc.org/sqlite`
-applies a DSN's `_pragma` values in sorted order, so each DSN carries the
-pragma exactly once. Badger is opened with its default `SyncWrites=false` and a 128MiB memtable, so committed blob
-writes can sit unflushed far longer — at chain tip dingo writes only a few MiB
-of blocks per hour, so the memtable may not rotate for hours. Without the sync
-barrier an unclean host shutdown leaves a durable metadata tip pointing at
-blocks the blob store discarded, which is the inverse of the invariant the rest
-of the system is built on: startup reconciliation can trim a blob store that is
-*ahead* of the metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks
-missing *beneath* it. Recovery walks applied-block nonce history back to the
-newest point still indexed on the selected primary chain, then rolls both stores
-back to that common ancestor. A raw blob tip is not an authoritative target
-because it may belong to another fork. That rollback can be arbitrarily deep
-and, on a Mithril-bootstrapped node, can reach the `mithril_ledger_slot` trust
-boundary, past which no rollback is possible at all.
+applies the remaining `_pragma` values in sorted order, not DSN order, so each
+DSN carries the pragma exactly once. Badger is opened with its default
+`SyncWrites=false` and a 128MiB memtable, so committed blob writes can sit
+unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
+hour, so the memtable may not rotate for hours. Without the sync barrier an
+unclean host shutdown leaves a durable metadata tip pointing at blocks the blob
+store discarded, which is the inverse of the invariant the rest of the system is
+built on: startup reconciliation can trim a blob store that is *ahead* of the
+metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks missing
+*beneath* it. Recovery walks applied-block nonce history back to the newest
+point still indexed on the selected primary chain, then rolls both stores back
+to that common ancestor. A raw blob tip is not an authoritative target because
+it may belong to another fork. That rollback can be arbitrarily deep and, on a
+Mithril-bootstrapped node, can reach the `mithril_ledger_slot` trust boundary,
+past which no rollback is possible at all.
 
 Each SQLite connection in the read and write pools also sets
 `journal_size_limit=67108864` (64 MiB).
@@ -7557,35 +7558,35 @@ index-build temporaries on that connection also stay in RAM. `synchronous` and
 `temp_store=MEMORY` rather than the SQLite default.
 
 **Periodic forced WAL checkpoint (`checkpointWAL`,
-`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Moving the
-checkpoint off the commit path (above) fixed the write-amplification problem
-but surfaced a second one: `dingo_database_sql_wal_bytes` (below) never showed a
-single decrease, on any of four live instances, one of which had no other
-change applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE
-checkpoint, and PASSIVE — like FULL and RESTART — backfills WAL frames into
-`metadata.sqlite` and lets future commits reuse that reclaimed space, but
-does not shrink the `-wal` file itself. The `journal_size_limit` above can
-shrink it when SQLite resets the WAL, while `SQLITE_CHECKPOINT_TRUNCATE` can
-reduce it to zero. Verified directly against a copy of a
-live, actively-growing `metadata.sqlite`: with zero readers blocking it
-(every attempt reported `busy=0` with `checkpointed==log`, i.e. a fully
-successful checkpoint), PASSIVE, FULL, and RESTART each left a
-68062432-byte `-wal` file at exactly 68062432 bytes, while TRUNCATE alone
-dropped it to 0. So the gauge — a plain `os.Stat` of that file — could never
-show reclaim under PASSIVE checkpoints alone, no matter how well passive
-checkpointing was working underneath; the file's on-disk footprint is a
+`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Moving the checkpoint
+off the commit path (above) fixed the write-amplification problem but surfaced a
+second one: `dingo_database_sql_wal_bytes` (below) never showed a single
+decrease, on any of four live instances, one of which had no other change
+applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE checkpoint, and
+PASSIVE — like FULL and RESTART — backfills WAL frames into `metadata.sqlite`
+and lets future commits reuse that reclaimed space, but does not shrink the
+`-wal` file itself. The `journal_size_limit` above can shrink it when SQLite
+resets the WAL, while `SQLITE_CHECKPOINT_TRUNCATE` can reduce it to zero.
+Verified directly against a copy of a live, actively-growing `metadata.sqlite`:
+with zero readers blocking it (every attempt reported `busy=0` with
+`checkpointed==log`, i.e. a fully successful checkpoint), PASSIVE, FULL, and
+RESTART each left a 68062432-byte `-wal` file at exactly 68062432 bytes, while
+TRUNCATE alone dropped it to 0. So the gauge — a plain `os.Stat` of that file —
+could never show reclaim under PASSIVE checkpoints alone, no matter how well
+passive checkpointing was working underneath; the file's on-disk footprint is a
 high-water mark under PASSIVE checkpoints alone. With `journal_size_limit`
 configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
 operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
-hook alongside `Store.Maintenance`, on its own two-second ticker independent
-of the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`)
-runs `PRAGMA wal_checkpoint(PASSIVE)` every two seconds and attempts
-`PRAGMA wal_checkpoint(TRUNCATE)` on every 60th tick (two minutes). Before
-truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
-PASSIVE reports every WAL frame checkpointed. If a reader or writer prevents PASSIVE from draining the WAL, the truncation attempt is
-skipped. A reader at the WAL tip can still make TRUNCATE return `busy` even
-after PASSIVE drains the frames. In either case the file stays at its current
-size until a WAL reset or later TRUNCATE succeeds.
+hook alongside `Store.Maintenance`, on its own two-second ticker independent of
+the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`) runs
+`PRAGMA wal_checkpoint(PASSIVE)` every two seconds and attempts
+`PRAGMA wal_checkpoint(TRUNCATE)` on every 60th tick (two minutes). Before truncating,
+`checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when PASSIVE reports
+every WAL frame checkpointed. If a reader or writer prevents PASSIVE from
+draining the WAL, the truncation attempt is skipped. A reader at the WAL tip can
+still make TRUNCATE return `busy` even after PASSIVE drains the frames. In
+either case the file stays at its current size until a WAL reset or later
+TRUNCATE succeeds.
 
 Mithril bootstrap completes its final ImmutableDB copy before ledger-state
 import. The copy writes block and transaction metadata in addition to blob
