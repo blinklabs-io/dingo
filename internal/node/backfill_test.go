@@ -941,33 +941,36 @@ func (m fixedBackfillBatchMetrics) EstimatedSizeBytes() int64 {
 	return m.bytes
 }
 
-func TestBackfillBatchLimitReached(t *testing.T) {
+func TestBackfillRowBufferFull(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		flushedBytes int64
-		rows         int
-		bytes        int64
-		want         bool
+		name  string
+		rows  int
+		bytes int64
+		want  bool
 	}{
 		{
-			name:         "below both limits",
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			rows:         DefaultBackfillBatchRows - 1,
-			bytes:        DefaultBackfillBatchBytes/2 - 1,
+			name:  "below both limits",
+			rows:  DefaultBackfillBatchRows - 1,
+			bytes: DefaultBackfillBatchBytes - 1,
 		},
 		{
-			name:         "row limit",
-			rows:         DefaultBackfillBatchRows,
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			want:         true,
+			name: "row limit",
+			rows: DefaultBackfillBatchRows,
+			want: true,
 		},
 		{
-			name:         "cumulative byte limit",
-			flushedBytes: DefaultBackfillBatchBytes / 2,
-			bytes:        DefaultBackfillBatchBytes / 2,
-			want:         true,
+			name:  "queued byte limit",
+			bytes: DefaultBackfillBatchBytes,
+			want:  true,
+		},
+		{
+			// Bytes already written to the transaction do not force a
+			// flush: the queue would only be split into smaller statements.
+			name:  "small queue in a large transaction",
+			rows:  1,
+			bytes: 1,
 		},
 	}
 	for _, test := range tests {
@@ -976,11 +979,7 @@ func TestBackfillBatchLimitReached(t *testing.T) {
 			acc := fixedBackfillBatchMetrics{
 				rows: test.rows, bytes: test.bytes,
 			}
-			assert.Equal(
-				t,
-				test.want,
-				backfillBatchLimitReached(test.flushedBytes, acc),
-			)
+			assert.Equal(t, test.want, backfillRowBufferFull(acc))
 		})
 	}
 }
@@ -1261,6 +1260,101 @@ func TestBackfillFlushesByteBatchWithinTransactionLevel(t *testing.T) {
 	stored, err = db.GetTransactionByHash(ctx, tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	assert.Nil(t, stored, "the row flush must remain inside the caller transaction")
+}
+
+func TestBackfillKeepsSmallQueueInTransactionPastByteEstimate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		StorageMode: types.StorageModeAPI,
+		Logger:      slog.Default(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	backfill.batchTxnEstimatedBytes = DefaultBackfillBatchBytes
+	acc := db.NewBatchAccumulator()
+	tracker, ok := acc.(interface{ EnableSizeTracking() })
+	require.True(t, ok)
+	tracker.EnableSizeTracking()
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	defer acc.Reset()
+
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0xC3}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xD4}, lcommon.AddressHashSize),
+		bytes.Repeat([]byte{0xE5}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	tx, err := mockledger.NewTransactionBuilder().
+		WithId(bytes.Repeat([]byte{0xA1}, 32)).
+		WithInputs(input).
+		WithOutputs(output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0xB2}, 32),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offset := database.CborOffset{
+		BlockSlot:  point.Slot,
+		BlockHash:  blockHash,
+		ByteLength: 1,
+	}
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxHash [32]byte
+		copy(producedTxHash[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxHash,
+			OutputIdx: produced.Id.Index(),
+		}] = offset
+	}
+	offsets := &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHash: offset},
+		UtxoOffsets: utxoOffsets,
+	}
+
+	require.NoError(t, backfill.processBlockTxsBatched(
+		ctx,
+		[]lcommon.Transaction{tx},
+		point,
+		0,
+		eras.ConwayEraDesc.Id,
+		nil,
+		offsets,
+		acc,
+		txn,
+		nil,
+		true,
+	))
+	// The transaction is already past its byte estimate, but the queue is
+	// small, so its rows stay queued for one multi-row flush later.
+	sizer, ok := acc.(backfillBatchSizer)
+	require.True(t, ok)
+	assert.Positive(t, sizer.Len())
+	assert.Equal(t, DefaultBackfillBatchBytes, backfill.batchTxnEstimatedBytes)
 }
 
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {

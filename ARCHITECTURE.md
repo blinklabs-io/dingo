@@ -16835,8 +16835,10 @@ before any hard-fork translation, as the live rollover does.
 
 API-mode backfill commits a SQL transaction after the configured block window
 (200 blocks by default) or when its estimated payload reaches 32 MiB. The
-estimate combines encoded block bytes and queued metadata-row bytes. The
-cumulative threshold also controls row flushes. Rows are drained while they
+estimate combines encoded block bytes and queued metadata-row bytes. Between
+transactions, queued rows are written into the open SQL transaction only when
+the queue itself reaches 5,000 rows or 32 MiB; the transaction estimate decides
+only the commit. Rows are drained while they
 are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
