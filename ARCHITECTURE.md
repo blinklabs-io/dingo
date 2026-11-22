@@ -5468,6 +5468,13 @@ through the optional `metadata.BlockNonceBatchStore` capability in the same
 transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
 backends retain the per-row fallback.
 
+Indexer replay (`Backfill.computeBlockNonce`) queues each block's nonce row in
+its batch accumulator through the optional `metadata.BlockNonceBatchQueuer`
+capability, and `FlushBatch` writes the queued rows in queue order before the
+batch commits. The running nonce is held in memory, so nothing reads
+`block_nonce` inside the batch window. A backend without the capability, or a
+call without an accumulator, writes each row immediately.
+
 
 Key models in `database/models/`:
 

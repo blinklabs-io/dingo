@@ -24,3 +24,17 @@ type BlockNonceBatchStore interface {
 	// SetBlockNonces persists block nonces within the supplied metadata transaction.
 	SetBlockNonces([]models.BlockNonce, types.Txn) error
 }
+
+// BlockNonceBatchQueuer queues block nonces in a batch accumulator so that
+// FlushBatch writes them as multi-row inserts. Rows are written in queue
+// order. A backend that does not implement it takes the immediate
+// SetBlockNonce path.
+type BlockNonceBatchQueuer interface {
+	// QueueBlockNonce adds nonce to acc, which must have been created by the
+	// same backend. Nothing reaches the database until FlushBatch.
+	QueueBlockNonce(
+		nonce models.BlockNonce,
+		acc types.MetadataBatchAccumulator,
+		txn types.Txn,
+	) error
+}

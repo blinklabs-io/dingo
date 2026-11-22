@@ -346,7 +346,7 @@ func (b *Backfill) indexBlock(
 		b.processEpochBoundary(epochId, eraId)
 	}
 	if err := b.computeBlockNonce(
-		parsed, point, eraId, isNewEpoch || b.indexChainStart, txn,
+		parsed, point, eraId, isNewEpoch || b.indexChainStart, acc, txn,
 	); err != nil {
 		return err
 	}

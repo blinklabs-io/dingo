@@ -6110,7 +6110,11 @@ transaction rollback automatically restores the accumulator queue to its
 pre-transaction checkpoint; rollback to a savepoint restores that savepoint's
 queue. Rows queued by earlier committed transactions remain available. A failed
 SQL commit also restores the initial queue. `SetTransaction` builds the same
-rows and writes them before it returns. UTxO spends and certificate rows stay
+rows and writes them before it returns. Indexer replay queues its `block_nonce`
+rows the same way (`SetBlockNonceBatched`); `FlushBatch` writes them first, in
+queue order, with the `SetBlockNonce` upsert semantics, so ids follow
+application order. SQLite uses the multi-row `UpsertBlockNonceBatch`; other
+dialects write one row per statement. UTxO spends and certificate rows stay
 per statement: a later transaction in the same window reads them for
 double-spend detection, live-stake deltas, and certificate state.
 
