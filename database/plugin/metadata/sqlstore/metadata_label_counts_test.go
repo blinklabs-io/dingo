@@ -57,6 +57,10 @@ INSERT INTO transaction_metadata_label (transaction_id, label, slot) VALUES
 	require.NoError(t, err)
 	require.Equal(t, ascending[1:3], got)
 
+	got, err = store.ListMetadataLabelCounts(0, 3, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, ascending[3:], got)
+
 	count, err := store.CountMetadataLabels(nil)
 	require.NoError(t, err)
 	require.Equal(t, len(ascending), count)

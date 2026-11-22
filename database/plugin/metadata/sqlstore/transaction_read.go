@@ -421,11 +421,7 @@ func (s *Store) ListMetadataLabelCounts(
 	if descending {
 		query = listMetadataLabelCountsDescSQL
 	}
-	var args []any
-	if limit > 0 {
-		query += "\nLIMIT ? OFFSET ?"
-		args = append(args, limit, max(offset, 0))
-	}
+	query, args := addLimitOffset(query, nil, limit, offset)
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list metadata label counts: %w", err)
