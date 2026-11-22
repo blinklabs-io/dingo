@@ -315,12 +315,35 @@ class PruneGoCacheTest(unittest.TestCase):
 
     def test_ignores_keys_outside_the_prefix(self):
         proc, _, deletes = self.run_prune(
-            "7\\tLinux-go-build-race-aaa\\n8\\tLinux-go-build-check-old\\n",
+            "7\\tLinux-go-build-race-aaa\\n8\\tLinux-go-build-check-old\\n9\\tLinux-go-build-check-new\\n",
             "Linux-go-build-check-",
             "Linux-go-build-check-new",
         )
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertEqual(["cache delete 8 --repo o/r"], deletes)
+
+    def test_keeps_everything_when_the_keep_key_is_not_listed(self):
+        # actions/cache/save exits 0 when its upload fails, so a missing keep
+        # key must not leave the flavor with no entry at all.
+        proc, _, deletes = self.run_prune(
+            "1\\tLinux-go-build-check-aaa\\n2\\tLinux-go-build-check-bbb\\n",
+            "Linux-go-build-check-",
+            "Linux-go-build-check-new",
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual([], deletes)
+        self.assertIn("::warning::", proc.stdout)
+        self.assertIn("Linux-go-build-check-new", proc.stdout)
+
+    def test_keep_key_must_match_exactly(self):
+        # A listed key that only extends the keep key is a different entry.
+        proc, _, deletes = self.run_prune(
+            "1\\tLinux-go-mod-abc1\\n",
+            "Linux-go-mod-",
+            "Linux-go-mod-abc",
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual([], deletes)
 
     def test_refuses_missing_arguments(self):
         proc, _, deletes = self.run_prune("", "Linux-go-build-check-")

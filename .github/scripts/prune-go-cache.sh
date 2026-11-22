@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Delete every Actions cache entry on main whose key starts with a prefix,
-# except the one just saved.
+# except the one just saved. Deletes nothing when that entry is not listed.
 #
 # Each main push saves a new build cache under a key that ends in the commit
 # SHA, so the entries it supersedes are dead weight against the repository's
@@ -33,6 +33,14 @@ esac
 listing="$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main \
   --key "$prefix" --limit 100 --json id,key \
   --jq '.[] | [.id, .key] | @tsv')"
+
+# actions/cache/save exits 0 when its upload fails. Without the new entry the
+# loop below would delete every entry for this prefix, so prune only once the
+# keep key is listed.
+if ! cut -f2 <<< "$listing" | grep -qxF -- "$keep"; then
+  echo "::warning::cache key ${keep} not found on refs/heads/main; skipping prune"
+  exit 0
+fi
 
 while IFS=$'\t' read -r id key; do
   [ -n "$id" ] || continue
