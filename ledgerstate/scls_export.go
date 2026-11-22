@@ -281,8 +281,9 @@ func ExportSCLS(
 	}, nil
 }
 
-// addSCLSUtxo adds one output through the typed utxo/v0 payload codec: the
-// ledger tx_out is wrapped as the namespace's byte-string payload, decoded and
+// addSCLSUtxo adds one output through the typed utxo/v0 payload codec. The
+// stored tx_out is decoded, re-encoded in the ledger's own form (ledgerTxOut),
+// and that form is wrapped as the namespace's byte-string payload, decoded and
 // encoded back, so the codec rejects what it cannot represent.
 func addSCLSUtxo(w *scls.Writer, txID []byte, index uint32, c []byte) error {
 	if index > math.MaxUint16 {
@@ -291,13 +292,13 @@ func addSCLSUtxo(w *scls.Writer, txID []byte, index uint32, c []byte) error {
 			index, txID, sclscardano.UTxOV0Name,
 		)
 	}
-	wrapped, err := cbor.Encode(c)
-	if err != nil {
-		return fmt.Errorf("wrap output %x#%d: %w", txID, index, err)
-	}
-	txOut, err := sclscardano.DecodeTxOut(wrapped)
+	stored, err := decodeSCLSTxOut(c)
 	if err != nil {
 		return fmt.Errorf("output %x#%d: %w", txID, index, err)
+	}
+	txOut, err := decodeSCLSTxOut(ledgerTxOut(stored))
+	if err != nil {
+		return fmt.Errorf("output %x#%d: ledger form: %w", txID, index, err)
 	}
 	payload, err := sclscardano.EncodeTxOut(txOut)
 	if err != nil {
@@ -360,4 +361,13 @@ func (c ctxReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return c.r.Read(p)
+}
+
+// decodeSCLSTxOut decodes a tx_out with the utxo/v0 payload codec.
+func decodeSCLSTxOut(c []byte) (sclscardano.TxOut, error) {
+	wrapped, err := cbor.Encode(c)
+	if err != nil {
+		return sclscardano.TxOut{}, fmt.Errorf("wrap tx_out: %w", err)
+	}
+	return sclscardano.DecodeTxOut(wrapped)
 }

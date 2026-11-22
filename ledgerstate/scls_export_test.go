@@ -177,7 +177,15 @@ func TestExportSCLSWritesTheUTxOSetInKeyOrder(t *testing.T) {
 		reEncoded, err := sclscardano.EncodeTxOut(txOut)
 		require.NoError(t, err)
 		require.Equal(t, e.Value, reEncoded)
-		wrapped, err := cbor.Encode(want)
+		// The fixture outputs carry no datum or script, so the ledger
+		// serializes each as [address, coin], including the map-form ones.
+		stored, err := decodeSCLSTxOut(want)
+		require.NoError(t, err)
+		ledgerForm, err := cbor.Encode(
+			[]any{stored.Address, stored.Value.Coin},
+		)
+		require.NoError(t, err)
+		wrapped, err := cbor.Encode(ledgerForm)
 		require.NoError(t, err)
 		require.Equal(t, wrapped, e.Value)
 	}
