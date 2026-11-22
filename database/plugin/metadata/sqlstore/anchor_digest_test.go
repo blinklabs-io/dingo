@@ -370,7 +370,7 @@ func exerciseLiveUtxoDigestCarriesEveryOutputField(t *testing.T, store *Store) {
 				hash:    hash,
 				idx:     idx,
 				payment: bytes.Repeat([]byte{byte(i), byte(idx), 1}, 10)[:28],
-				amount:  fmt.Sprint(45_000_000_000_000_000 + i*10 + int(idx)),
+				amount:  fmt.Sprint(uint64(45_000_000_000_000_000) + uint64(i)*10 + uint64(idx)), //nolint:gosec // i is in [1, 6]
 				spent:   (i+int(idx))%5 == 0,
 			}
 			if (i+int(idx))%2 == 0 {
