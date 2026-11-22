@@ -20,8 +20,8 @@
 //
 //	benchgate <base-file> <head-file> <report-output-path>
 //
-// Exit status is 0 when no gate benchmark regressed, 1 when at least one did,
-// and 2 on a usage, I/O, or comparison error. The report is written before
+// Exit status is 0 when no gate benchmark regressed, 1 when at least one did
+// or is missing from the head file, and 2 on a usage, I/O, or comparison error. The report is written before
 // exiting 1 so the workflow can publish it.
 package main
 
@@ -68,7 +68,7 @@ func run(args []string) int {
 	}
 	if regressed {
 		fmt.Printf(
-			"regression: a gate benchmark is slower by more than %.0f%% (significant)\n",
+			"regression: a gate benchmark is significantly slower by more than %.0f%%, or missing from head\n",
 			benchci.GateRegressionThresholdPercent,
 		)
 		return exitRegression

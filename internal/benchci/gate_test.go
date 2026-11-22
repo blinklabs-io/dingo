@@ -56,7 +56,9 @@ func flaggedNames(report string) []string {
 	return out
 }
 
-func TestGateReport_FlagsOnlySignificantRegressionBeyondThreshold(t *testing.T) {
+func TestGateReport_FlagsOnlySignificantRegressionBeyondThreshold(
+	t *testing.T,
+) {
 	t.Parallel()
 	report, regressed, err := GateReport(gateCSV)
 	if err != nil {
@@ -159,5 +161,58 @@ func TestGateScriptRegexMatchesGateBenchmarks(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("script regex has %v, GateBenchmarks has %v", got, want)
+	}
+}
+
+// benchstat prints a benchmark that only the base file holds as a row with
+// the base columns alone. A gate benchmark the head no longer reports was
+// deleted, renamed, or skipped, so the gate has no head measurement for it
+// and must fail rather than pass it as not found.
+func TestGateReport_MissingFromHeadFails(t *testing.T) {
+	t.Parallel()
+	csv := strings.Replace(
+		gateCSV,
+		"geomean,",
+		"ReadParamsRequest-4,1e-04,1%\ngeomean,",
+		1,
+	)
+	report, regressed, err := GateReport(csv)
+	if err != nil {
+		t.Fatalf("GateReport: %v", err)
+	}
+	if !regressed {
+		t.Fatalf("a gate benchmark missing from head must fail:\n%s", report)
+	}
+	got := flaggedNames(report)
+	want := []string{
+		"BenchmarkBlockProcessingThroughput-4",
+		"BenchmarkReadParamsRequest-4",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("flagged %v, want %v; report:\n%s", got, want, report)
+	}
+}
+
+// A benchmark only the head reports is new, and has nothing to regress from.
+func TestGateReport_NewInHeadPasses(t *testing.T) {
+	t.Parallel()
+	csv := strings.Replace(
+		gateCSV,
+		"BlockProcessingThroughput-4,1e-04,1%,1.125e-04,1%,+12.50%",
+		"BlockProcessingThroughput-4,1e-04,1%,1.07e-04,1%,+7.00%",
+		1,
+	)
+	csv = strings.Replace(
+		csv,
+		"geomean,",
+		"ReadParamsRequest-4,,,1e-04,1%\ngeomean,",
+		1,
+	)
+	report, regressed, err := GateReport(csv)
+	if err != nil {
+		t.Fatalf("GateReport: %v", err)
+	}
+	if regressed {
+		t.Fatalf("a benchmark new in head must not fail the gate:\n%s", report)
 	}
 }

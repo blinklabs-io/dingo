@@ -108,8 +108,12 @@ type Row struct {
 	// "sec/op" table at all. False means it was skipped, renamed, removed,
 	// or otherwise absent from one or both input files.
 	Found bool
+	// MissingFromNew reports that the benchmark appears in the old file
+	// but not the new one. Only GateReport sets it, and always flags it.
+	MissingFromNew bool
 	// Flagged reports whether this row counts as a regression: Found,
-	// Significant, and DeltaPercent > RegressionThresholdPercent.
+	// Significant, and DeltaPercent above the report's threshold, or
+	// MissingFromNew.
 	Flagged bool
 }
 
@@ -159,11 +163,53 @@ func GateReport(csv string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	results := evaluateCurated(rows, GateBenchmarks, GateRegressionThresholdPercent)
+	results := evaluateCurated(
+		rows,
+		GateBenchmarks,
+		GateRegressionThresholdPercent,
+	)
 	if !anyFound(results) {
 		return "", false, ErrNoGateRows
 	}
+	results = flagMissingFromNew(results, rows)
 	return renderMarkdown(results), anyFlagged(results), nil
+}
+
+// flagMissingFromNew replaces each not-found row whose benchmark the old file
+// still reports with a flagged MissingFromNew row. Without it, deleting,
+// renaming, or skipping a gated benchmark would remove it from the
+// comparison and pass the gate.
+func flagMissingFromNew(results []Row, rows map[string]benchstatRow) []Row {
+	names := sortedRowNames(rows)
+	out := make([]Row, 0, len(results))
+	for _, r := range results {
+		if r.Found {
+			out = append(out, r)
+			continue
+		}
+		replaced := false
+		for _, name := range names {
+			row := rows[name]
+			if !row.onlyOld {
+				continue
+			}
+			rest, ok := matchCurated(name, r.Name)
+			if !ok {
+				continue
+			}
+			replaced = true
+			out = append(out, Row{
+				Name:           r.Name + rest,
+				Old:            row.old,
+				MissingFromNew: true,
+				Flagged:        true,
+			})
+		}
+		if !replaced {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func reportWithThreshold(
@@ -221,6 +267,9 @@ type benchstatRow struct {
 	old, new     string
 	deltaPercent float64
 	significant  bool
+	// onlyOld marks a row benchstat printed with the old columns alone: the
+	// benchmark is in the old file and not in the new one. Only old is set.
+	onlyOld bool
 }
 
 // parseSecOpTable extracts every data row from benchstat's "sec/op" CSV
@@ -259,11 +308,22 @@ func parseSecOpTable(csv string) (map[string]benchstatRow, error) {
 				continue
 			}
 			fields := strings.Split(line, ",")
-			if len(fields) < 6 {
-				continue
-			}
 			name := fields[0]
 			if name == "geomean" {
+				continue
+			}
+			if len(fields) == 3 {
+				// benchstat ends a row after the old columns when the new
+				// file lacks the benchmark.
+				if oldSeconds, err := strconv.ParseFloat(fields[1], 64); err == nil {
+					rows[name] = benchstatRow{
+						old:     formatSeconds(oldSeconds),
+						onlyOld: true,
+					}
+				}
+				continue
+			}
+			if len(fields) < 6 {
 				continue
 			}
 			oldSeconds, oldErr := strconv.ParseFloat(fields[1], 64)
@@ -347,33 +407,21 @@ func evaluateCurated(
 	curated []string,
 	threshold float64,
 ) []Row {
-	names := make([]string, 0, len(rows))
-	for name := range rows {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := sortedRowNames(rows)
 
 	results := make([]Row, 0, len(curated))
 	for _, base := range curated {
-		shortBase := strings.TrimPrefix(base, "Benchmark")
 		matched := false
 		for _, name := range names {
-			// nameNoPrefix strips a "Benchmark" prefix if present (real
-			// benchstat output never has one, but tolerate it for
-			// robustness) without touching the "-<GOMAXPROCS>" suffix or
-			// any "/<subname>" path, so it can be compared directly
-			// against shortBase.
-			nameNoPrefix := strings.TrimPrefix(name, "Benchmark")
-			shortName := gomaxprocsSuffix.ReplaceAllString(nameNoPrefix, "")
-			if shortName != shortBase &&
-				!strings.HasPrefix(shortName, shortBase+"/") {
+			row := rows[name]
+			if row.onlyOld {
+				continue
+			}
+			rest, ok := matchCurated(name, base)
+			if !ok {
 				continue
 			}
 			matched = true
-			// rest is whatever follows shortBase in the actual row name:
-			// "", "-<GOMAXPROCS>", "/<subname>", or "/<subname>-<GOMAXPROCS>".
-			rest := strings.TrimPrefix(nameNoPrefix, shortBase)
-			row := rows[name]
 			results = append(results, Row{
 				Name:         base + rest,
 				Old:          row.old,
@@ -392,11 +440,45 @@ func evaluateCurated(
 	return results
 }
 
+func sortedRowNames(rows map[string]benchstatRow) []string {
+	names := make([]string, 0, len(rows))
+	for name := range rows {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// matchCurated reports whether the benchstat row name belongs to the curated
+// benchmark, and returns whatever follows the curated name in the row: "",
+// "-<GOMAXPROCS>", "/<subname>", or "/<subname>-<GOMAXPROCS>". A "Benchmark"
+// prefix on the row name is tolerated though real benchstat output never
+// has one.
+func matchCurated(name, curated string) (string, bool) {
+	shortBase := strings.TrimPrefix(curated, "Benchmark")
+	nameNoPrefix := strings.TrimPrefix(name, "Benchmark")
+	shortName := gomaxprocsSuffix.ReplaceAllString(nameNoPrefix, "")
+	if shortName != shortBase &&
+		!strings.HasPrefix(shortName, shortBase+"/") {
+		return "", false
+	}
+	return strings.TrimPrefix(nameNoPrefix, shortBase), true
+}
+
 func renderMarkdown(results []Row) string {
 	var b strings.Builder
 	b.WriteString("| Benchmark | Old | New | Delta | Significant | Flagged |\n")
 	b.WriteString("|---|---|---|---|---|---|\n")
 	for _, r := range results {
+		if r.MissingFromNew {
+			fmt.Fprintf(
+				&b,
+				"| %s | %s | missing | - | - | **yes** |\n",
+				r.Name,
+				r.Old,
+			)
+			continue
+		}
 		if !r.Found {
 			fmt.Fprintf(&b, "| %s | - | - | - | - | not found |\n", r.Name)
 			continue

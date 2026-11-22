@@ -67,7 +67,10 @@ func BenchmarkReadParamsRequest(b *testing.B) {
 			b.Fatalf("ReadParams: %v", err)
 		}
 		if resp.Msg.GetLedgerTip().GetSlot() != 42 {
-			b.Fatalf("unexpected tip slot %d", resp.Msg.GetLedgerTip().GetSlot())
+			b.Fatalf(
+				"unexpected tip slot %d",
+				resp.Msg.GetLedgerTip().GetSlot(),
+			)
 		}
 	}
 }
