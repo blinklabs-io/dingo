@@ -88,14 +88,15 @@ const (
 
 	// Reasons for a forge skipped by the primary-chain-tip gate, used as the
 	// "reason" label on dingo_forge_stale_tip_skip_total and in the log line.
-	forgeStaleTipReasonHashDiverged       = "primary_tip_hash_diverged"
-	forgeStaleTipReasonPrimaryTipBehind   = "primary_tip_behind_applied"
-	forgeStaleTipReasonPrimaryNotAncestor = "applied_tip_not_primary_ancestor"
-	forgeStaleTipReasonBlockGap           = "unapplied_block_gap"
-	forgeStaleTipReasonHeaderFrontier     = "admitted_header_ahead"
-	forgeStaleTipReasonPeerHeightGap      = "peer_height_gap"
-	forgeStaleTipReasonAppliedStale       = "applied_tip_stale"
-	forgeStaleTipReasonEbManifestAhead    = "eb_manifest_ahead"
+	forgeStaleTipReasonHashDiverged        = "primary_tip_hash_diverged"
+	forgeStaleTipReasonPrimaryTipBehind    = "primary_tip_behind_applied"
+	forgeStaleTipReasonPrimaryNotAncestor  = "applied_tip_not_primary_ancestor"
+	forgeStaleTipReasonBlockGap            = "unapplied_block_gap"
+	forgeStaleTipReasonHeaderFrontier      = "admitted_header_ahead"
+	forgeStaleTipReasonPeerHeightGap       = "peer_height_gap"
+	forgeStaleTipReasonAppliedStale        = "applied_tip_stale"
+	forgeStaleTipReasonEbManifestAhead     = "eb_manifest_ahead"
+	forgeStaleTipReasonSharedKESNoUpstream = "shared_kes_no_upstream"
 	// This reason is recorded from a PRE-leader-check refusal: the primary
 	// chain tip already holds a block at the current slot that the ledger has
 	// not applied, so forging would parent a block for slot S on a tip already
@@ -195,6 +196,8 @@ func forgeStaleTipMessage(reason string) string {
 		return "forge skip: newest known block is stale"
 	case forgeStaleTipReasonEbManifestAhead:
 		return "forge skip: corroborated endorser block is ahead of the applied tip"
+	case forgeStaleTipReasonSharedKESNoUpstream:
+		return "forge skip: shared KES signer has no live upstream"
 	default:
 		return "forge skip: " + reason
 	}
@@ -291,6 +294,7 @@ type BlockForger struct {
 	forgeUpstreamStalenessSlots uint64
 	forgeAppliedStalenessSlots  uint64
 	forgeEbStalenessSlots       uint64
+	sharedKESSigner             bool
 	leiosVerifiedEbSlot         func() uint64
 	forgeStaleGapThresholdSlots uint64
 
@@ -785,6 +789,11 @@ type ForgerConfig struct {
 	// healthy. Operators who enable it should set it well above the expected
 	// announcement-to-apply lag.
 	ForgeEndorserBlockStalenessSlots uint64
+	// SharedKESSigner requires a live upstream connection before forging. A
+	// shared sign-mode KES agent accepts only the first header for a slot, so a
+	// disconnected producer must not consume that signature on a stale parent.
+	// False preserves the intentional no-upstream behavior of a solo producer.
+	SharedKESSigner bool
 	// LeiosVerifiedEbSlot optionally reports the highest slot for which this
 	// node has corroborated a Leios endorser block, which is proof a ranking
 	// block exists at that slot even if its header has not arrived. Advisory
@@ -913,6 +922,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	f.forgeUpstreamStalenessSlots = cfg.ForgeUpstreamStalenessSlots
 	f.forgeAppliedStalenessSlots = cfg.ForgeAppliedTipStalenessSlots
 	f.forgeEbStalenessSlots = cfg.ForgeEndorserBlockStalenessSlots
+	f.sharedKESSigner = cfg.SharedKESSigner
 	f.leiosVerifiedEbSlot = cfg.LeiosVerifiedEbSlot
 	if cfg.ForgeEBSelectionReserve <= 0 {
 		cfg.ForgeEBSelectionReserve = defaultForgeEBSelectionReserve
@@ -2610,13 +2620,14 @@ type forgeTipGates struct {
 	primaryTipNotAncestor bool
 	// newestKnown is the most recent locally authenticated block position:
 	// selected block, admitted verified header, or corroborated endorser block.
-	newestKnown   uint64
-	effectiveGap  uint64
-	ebGap         uint64
-	peerHeightGap uint64
-	upstreamStale bool
-	appliedStale  bool
-	ebStale       bool
+	newestKnown         uint64
+	effectiveGap        uint64
+	ebGap               uint64
+	peerHeightGap       uint64
+	upstreamStale       bool
+	appliedStale        bool
+	ebStale             bool
+	sharedKESNoUpstream bool
 	// syncSkip is the upstream-sync gate's verdict: this node is too far
 	// behind the network to forge. It lives here, with the rest of the
 	// gates, because it is decided from the SAME upstream pair as
@@ -2843,6 +2854,7 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 		f.forgeAppliedStalenessSlots > 0 &&
 		r.currentSlot > g.newestKnown &&
 		r.currentSlot-g.newestKnown > f.forgeAppliedStalenessSlots
+	g.sharedKESNoUpstream = f.sharedKESSigner && !r.upstreamLive
 	if r.upstreamBlockNumber > r.appliedTipBlockNumber {
 		g.peerHeightGap = r.upstreamBlockNumber - r.appliedTipBlockNumber
 	}
@@ -2879,6 +2891,8 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 		)
 
 	switch {
+	case g.sharedKESNoUpstream:
+		g.staleReason = forgeStaleTipReasonSharedKESNoUpstream
 	case g.primaryTipBehind:
 		g.staleReason = forgeStaleTipReasonPrimaryTipBehind
 	case g.primaryTipDiverged:
@@ -2927,6 +2941,8 @@ func (f *BlockForger) countStaleTipSkip(reason string) {
 		f.metrics.forgeStaleTipSkipAppliedStale.Inc()
 	case forgeStaleTipReasonEbManifestAhead:
 		f.metrics.forgeStaleTipSkipEbAhead.Inc()
+	case forgeStaleTipReasonSharedKESNoUpstream:
+		f.metrics.forgeStaleTipSkipSharedKESNoUpstream.Inc()
 	}
 }
 

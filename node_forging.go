@@ -623,6 +623,7 @@ func (n *Node) initBlockForger(
 		creds,
 		n.poolMetricsRegistry(poolID),
 		n.slotArbiterFor(poolID),
+		n.primaryKeySource().keys.agentShared,
 	)
 	if err != nil {
 		return err
@@ -667,6 +668,7 @@ func (n *Node) newPoolForger(
 	creds *forging.PoolCredentials,
 	reg prometheus.Registerer,
 	arbiter forging.SlotArbiter,
+	sharedKESSigner bool,
 ) (poolForging, error) {
 	if creds == nil {
 		return poolForging{}, errors.New("nil pool credentials")
@@ -854,6 +856,7 @@ func (n *Node) newPoolForger(
 		ConfirmedTxs:     mempoolAdapter,
 		BlockForged:      blockForged,
 		SlotClock:        slotClock,
+		SharedKESSigner:  sharedKESSigner,
 		// Equal-slot alternative forging. When a rival block already
 		// occupies the slot this node leads, the forger builds an
 		// alternative on the rival's predecessor and offers it to chain

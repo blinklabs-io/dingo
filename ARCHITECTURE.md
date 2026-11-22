@@ -14424,6 +14424,17 @@ implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
 which one it uses at startup (`KES agent link: TLS, pinned server key`,
 `TLS, verified by CA`, or `plain TCP`):
 
+When several producers for the same pool use that first-header-per-slot
+guard, every producer sets `--shelley-kes-agent-shared` (or
+`shelleyKesAgentShared`). A shared-agent forger requires a live upstream in
+the cycle's single tip reading. After it wins leader selection but before it
+builds or signs a block, it refuses the slot with
+`shared_kes_no_upstream` when no upstream is live. A disconnected producer
+therefore cannot consume the agent's first signature before a connected,
+synced producer. The setting is explicit because the signing protocol cannot
+tell a client whether another producer uses the same key. It defaults off, so
+an unshared producer retains the intentional ability to forge without a peer.
+
 - TLS 1.3 (the default). With `--shelley-kes-agent-server-spki-sha256`, the
   hex SHA-256 of the agent's server SubjectPublicKeyInfo, the agent is
   authenticated by that pin, compared in constant time during the handshake,
@@ -14620,8 +14631,10 @@ is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
 neither, since both need TLS. None of these four, nor
-`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
-than falling back to local-file or Unix-socket signing.
+`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a
+mistyped remote configuration is refused rather than falling back to
+local-file or Unix-socket signing. `shelleyKesAgentShared` is accepted only
+with a local or remote agent in sign mode.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.

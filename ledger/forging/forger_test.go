@@ -1772,6 +1772,69 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
 }
 
+func TestSharedKESSignerRequiresLiveUpstream(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		shared       bool
+		upstreamLive bool
+		wantForged   int
+	}{
+		{
+			name:       "solo producer without upstream",
+			wantForged: 1,
+		},
+		{
+			name:   "shared signer without upstream",
+			shared: true,
+		},
+		{
+			name:         "shared signer with upstream",
+			shared:       true,
+			upstreamLive: true,
+			wantForged:   1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			block := newForgerTestBlock(300, 2)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
+				Credentials:      setupTestCredentials(t),
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     builder,
+				BlockBroadcaster: &forgerTestBroadcaster{},
+				SlotClock: forgerTestSlotClock{
+					currentSlot:        300,
+					chainTipSlot:       100,
+					primaryTipExplicit: true,
+					primaryTipSlot:     100,
+					upstreamActive:     tc.upstreamLive,
+					slotsPerKESPeriod:  100,
+				},
+				SharedKESSigner: tc.shared,
+				PromRegistry:    prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(t, forger.checkAndForgeProduction(t.Context()))
+			require.Equal(t, tc.wantForged, builder.calls)
+			wantSkips := float64(1 - tc.wantForged)
+			require.Equal(t, wantSkips, testutil.ToFloat64(
+				forger.metrics.forgeStaleTipSkipSharedKESNoUpstream,
+			))
+			if wantSkips > 0 {
+				require.Contains(t, logs.String(),
+					`"reason":"shared_kes_no_upstream"`)
+			}
+		})
+	}
+}
+
 // TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins that a missing
 // corroborated target is not substituted with the wall clock or another
 // pipeline-stage value. A target-free peer-switch interval is not proof that

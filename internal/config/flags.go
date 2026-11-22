@@ -1064,6 +1064,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"remote KES agent profile to sign for, named when the agent admits a session",
 	),
+	boolFlag(
+		"ShelleyKESAgentShared",
+		"shelley-kes-agent-shared",
+		"require a live upstream before using this sign-mode KES agent because another producer shares it",
+	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
 		"shelley-key-watch-interval",

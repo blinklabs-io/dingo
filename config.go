@@ -340,6 +340,7 @@ type Config struct {
 	blockProducerPools                                                                  []BlockProducerPool
 	shelleyKESAgentPlaintext                                                            bool
 	shelleyKESAgentProfile                                                              string
+	shelleyKESAgentShared                                                               bool
 	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -682,7 +683,7 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
 				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
 				"WithShelleyKESAgentRemote, WithShelleyKESAgentPlaintext and " +
-				"WithShelleyKESAgentProfile; set them in each pool",
+				"WithShelleyKESAgentProfile and WithShelleyKESAgentShared; set them in each pool",
 		)
 	}
 	for name, v := range map[string]int{
@@ -1104,6 +1105,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.shelleyKESAgentProfile = c.cfg.ShelleyKESAgentProfile
+	c.shelleyKESAgentShared = c.cfg.ShelleyKESAgentShared
 	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -2013,7 +2015,8 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
 // WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
 // WithShelleyKESAgentMode, WithShelleyKESAgentRemote,
-// WithShelleyKESAgentPlaintext and WithShelleyKESAgentProfile options; New
+// WithShelleyKESAgentPlaintext, WithShelleyKESAgentProfile and
+// WithShelleyKESAgentShared options; New
 // refuses a config that sets any of them beside the pools.
 // WithShelleyKESAgentSignTimeout and WithShelleyKeyWatchInterval apply to
 // every pool.
@@ -2052,6 +2055,17 @@ func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
 func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentProfile = profile
+	}
+}
+
+// WithShelleyKESAgentShared marks a sign-mode KES agent as shared by another
+// producer for the same pool (CARDANO_SHELLEY_KES_AGENT_SHARED). Shared-agent
+// producers forge only while a live upstream connection is selected, so a
+// disconnected producer cannot consume the agent's first signature for a slot
+// on a stale parent. False preserves solo-producer behavior.
+func WithShelleyKESAgentShared(shared bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentShared = shared
 	}
 }
 
