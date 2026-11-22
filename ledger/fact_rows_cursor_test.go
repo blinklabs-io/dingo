@@ -93,10 +93,22 @@ func TestStakeInputPagesSurviveAPruneBetweenPages(t *testing.T) {
 	}
 }
 
-// prunableOutputs serves one account output row per epoch it still holds.
+// prunableOutputs serves one pool and one account output row per epoch it
+// still holds.
 type prunableOutputs struct {
 	RewardDerivedReader
 	epochs []uint64
+}
+
+func (p *prunableOutputs) RewardPoolOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolOutput, error) {
+	if !slices.Contains(p.epochs, epoch) {
+		return nil, nil
+	}
+	return []*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: []byte{byte(epoch)}, CapturedSlot: epoch,
+	}}, nil
 }
 
 func (p *prunableOutputs) RewardAccountOutputRows(
