@@ -17109,9 +17109,12 @@ step, the header-verification settle wait, and ledger batch apply/commit on
 the database worker goroutine that runs it) that let an execution trace
 attribute holder time; they record only while a trace is being captured.
 The IndexerDB writer marks its block read, fact copy, block indexing, fact
-patch and whole-batch stages there too, and `database.Txn` and the sqlstore
-transaction mark their blob and SQL commits. Within sqlstore, each statement
-runs in a `dingo.sql.<name>` region named by its `-- name:` comment, and
+patch and whole-batch stages there too, ending each region even when the
+stage panics and `Txn.Do` recovers it, and a context-bound `database.Txn`,
+blob-only ones included, and the sqlstore transaction mark their blob and SQL
+commits. Within sqlstore, a statement served by the hot-statement cache, and
+every statement when Prometheus metrics are configured, runs in one
+`dingo.sql.<name>` region named by its `-- name:` comment, and
 `setTransactionWithAccumulator` marks its phases as `dingo.sqlstore.tx.*`
 regions. With no trace running these cost one atomic load and allocate
 nothing.

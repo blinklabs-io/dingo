@@ -15,38 +15,73 @@
 package indexer
 
 import (
-	"bytes"
-	rtrace "runtime/trace"
+	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/tracetest"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/stretchr/testify/require"
 )
+
+// requireBalanced fails when a region was left open or ended out of order:
+// either makes go tool trace drop every region after it.
+func requireBalanced(t *testing.T, regions tracetest.Regions) {
+	t.Helper()
+	require.Empty(t, regions.Misuse)
+	require.Empty(t, regions.Open)
+	require.Equal(t, regions.Begins, regions.Ends)
+}
 
 // Not t.Parallel: only one execution trace can run per process.
 func TestWriterStepRecordsTraceRegions(t *testing.T) {
 	store := newTestStore(t)
 	chain := newFakeChain(4, "a")
-	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 3)
+	facts := &recordingFacts{log: &[]string{}}
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 3).WithFacts(facts)
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	err := w.CatchUp(t.Context())
-	rtrace.Stop()
+	var err error
+	regions := tracetest.Record(t, func() { err = w.CatchUp(t.Context()) })
 	require.NoError(t, err)
 
 	for _, name := range []string{
 		tracing.RegionIndexerReadBlocks,
 		tracing.RegionIndexerBatch,
+		tracing.RegionIndexerCopyFacts,
 		tracing.RegionIndexerIndexBlocks,
+		tracing.RegionIndexerPatchFacts,
 		tracing.RegionSQLCommit,
 		tracing.RegionBlobCommit,
 	} {
-		require.Truef(
+		require.Positivef(
 			t,
-			bytes.Contains(buf.Bytes(), []byte(name)),
+			regions.Begins[name],
 			"execution trace has no region %q",
 			name,
 		)
 	}
+	requireBalanced(t, regions)
+}
+
+type panickingIndexer struct{ syncRowIndexer }
+
+func (p *panickingIndexer) IndexBlocks(
+	context.Context, *database.Txn, []models.Block,
+) error {
+	panic("index blocks")
+}
+
+// Not t.Parallel: only one execution trace can run per process.
+func TestWriterRecoveredPanicEndsTraceRegions(t *testing.T) {
+	store := newTestStore(t)
+	chain := newFakeChain(4, "a")
+	w := NewWriter(store, chain, &panickingIndexer{}, nil, 3)
+
+	var err error
+	regions := tracetest.Record(t, func() { err = w.CatchUp(t.Context()) })
+	require.ErrorIs(t, err, database.ErrTxnPanic)
+
+	require.Positive(t, regions.Begins[tracing.RegionIndexerIndexBlocks])
+	requireBalanced(t, regions)
 }

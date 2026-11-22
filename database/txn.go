@@ -61,7 +61,7 @@ type Txn struct {
 	db *Database
 	// traceCtx joins the commit's runtime/trace region to the trace task the
 	// transaction began under; it is never used for cancellation. Nil on
-	// transactions built outside newDatabaseTxnContext.
+	// transactions built without a context, which record no commit region.
 	traceCtx     context.Context
 	blobTxn      types.Txn
 	metadataTxn  types.Txn
@@ -549,7 +549,7 @@ func newBlobOnlyTxnContext(
 	blockMutation blockMutationMode,
 ) (*Txn, error) {
 	ctx = nonNilContext(ctx)
-	t := &Txn{db: db, readWrite: readWrite}
+	t := &Txn{db: db, readWrite: readWrite, traceCtx: ctx}
 	if blockMutation == blockMutationSerialized {
 		if err := t.acquireBlockInventoryBeforeOpenContext(ctx); err != nil {
 			return nil, err
@@ -1292,9 +1292,9 @@ func (t *Txn) Commit() error {
 	if t.blobTxn != nil && !t.sharedBlob {
 		var err error
 		if t.traceCtx != nil {
-			region := rtrace.StartRegion(t.traceCtx, tracing.RegionBlobCommit)
-			err = t.blobTxn.Commit()
-			region.End()
+			rtrace.WithRegion(t.traceCtx, tracing.RegionBlobCommit, func() {
+				err = t.blobTxn.Commit()
+			})
 		} else {
 			err = t.blobTxn.Commit()
 		}

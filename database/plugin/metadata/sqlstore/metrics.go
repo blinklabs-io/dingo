@@ -413,10 +413,9 @@ func (q countingQueryer) QueryContext(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
-	end := statementRegion(ctx, query)
-	rows, err := q.queryContext(ctx, query, args...)
-	end()
-	return rows, err
+	defer statementRegion(ctx, query)()
+	// The caller owns and closes the returned rows.
+	return q.queryContext(ctx, query, args...) //nolint:sqlclosecheck
 }
 
 func (q countingQueryer) queryContext(

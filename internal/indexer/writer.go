@@ -466,9 +466,12 @@ func (w *Writer) step(
 		w.report(tip, ledgerTip)
 		return true, nil
 	}
-	region := rtrace.StartRegion(ctx, tracing.RegionIndexerReadBlocks)
-	blocks, err := w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.limit)
-	region.End()
+	var blocks []models.Block
+	err = withRegion(ctx, tracing.RegionIndexerReadBlocks, func() error {
+		var err error
+		blocks, err = w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.limit)
+		return err
+	})
 	if err != nil {
 		return false, fmt.Errorf("read canonical blocks: %w", err)
 	}
@@ -509,9 +512,7 @@ func (w *Writer) step(
 	if d, ok := w.idx.(WithdrawalDebiter); ok {
 		d.DebitWithdrawals(ceiling == nil)
 	}
-	batchRegion := rtrace.StartRegion(ctx, tracing.RegionIndexerBatch)
-	txn := w.store.Database().Transaction(ctx, true)
-	err = txn.Do(func(txn *database.Txn) error {
+	batch := func(txn *database.Txn) error {
 		if seed {
 			if err := w.genesis(ctx, txn); err != nil {
 				return fmt.Errorf("seed genesis state: %w", err)
@@ -524,24 +525,12 @@ func (w *Writer) step(
 		}
 		for _, seg := range segments {
 			if w.facts != nil {
-				region := rtrace.StartRegion(
-					ctx,
-					tracing.RegionIndexerCopyFacts,
-				)
-				err := w.facts.CopyFacts(ctx, txn, seg.from, seg.through)
-				region.End()
-				if err != nil {
+				if err := w.copyFacts(ctx, txn, seg); err != nil {
 					return fmt.Errorf("copy ledger facts: %w", err)
 				}
 			}
 			if len(seg.blocks) > 0 {
-				region := rtrace.StartRegion(
-					ctx,
-					tracing.RegionIndexerIndexBlocks,
-				)
-				err := w.idx.IndexBlocks(ctx, txn, seg.blocks)
-				region.End()
-				if err != nil {
+				if err := w.indexBlocks(ctx, txn, seg); err != nil {
 					return err
 				}
 				if ceiling != nil {
@@ -551,13 +540,7 @@ func (w *Writer) step(
 				}
 			}
 			if w.facts != nil {
-				region := rtrace.StartRegion(
-					ctx,
-					tracing.RegionIndexerPatchFacts,
-				)
-				err := w.facts.PatchFacts(ctx, txn, seg.from, seg.through)
-				region.End()
-				if err != nil {
+				if err := w.patchFacts(ctx, txn, seg); err != nil {
 					return fmt.Errorf("patch ledger facts: %w", err)
 				}
 			}
@@ -566,8 +549,11 @@ func (w *Writer) step(
 			return err
 		}
 		return w.store.SetTip(newTip, txn)
+	}
+	txn := w.store.Database().Transaction(ctx, true)
+	err = withRegion(ctx, tracing.RegionIndexerBatch, func() error {
+		return txn.Do(batch)
 	})
-	batchRegion.End()
 	if err != nil {
 		// Whatever step failed, the transaction rolled back every row the
 		// indexer wrote, so the state it carried between calls is stale.
@@ -908,4 +894,41 @@ func (w *Writer) adoptLegacyCheckpoint(ctx context.Context) error {
 	return txn.Do(func(txn *database.Txn) error {
 		return w.store.SetTip(seeded, txn)
 	})
+}
+
+// withRegion runs fn inside a runtime/trace region and ends the region on the
+// way out even when fn panics. Txn.Do recovers a panic from its function, so a
+// region ended only on the normal path would stay open while the enclosing
+// batch region ends; the trace parser rejects that end as a misuse and drops
+// every region after it.
+func withRegion(ctx context.Context, name string, fn func() error) error {
+	defer rtrace.StartRegion(ctx, name).End()
+	return fn()
+}
+
+func (w *Writer) copyFacts(
+	ctx context.Context,
+	txn *database.Txn,
+	seg segment,
+) error {
+	defer rtrace.StartRegion(ctx, tracing.RegionIndexerCopyFacts).End()
+	return w.facts.CopyFacts(ctx, txn, seg.from, seg.through)
+}
+
+func (w *Writer) indexBlocks(
+	ctx context.Context,
+	txn *database.Txn,
+	seg segment,
+) error {
+	defer rtrace.StartRegion(ctx, tracing.RegionIndexerIndexBlocks).End()
+	return w.idx.IndexBlocks(ctx, txn, seg.blocks)
+}
+
+func (w *Writer) patchFacts(
+	ctx context.Context,
+	txn *database.Txn,
+	seg segment,
+) error {
+	defer rtrace.StartRegion(ctx, tracing.RegionIndexerPatchFacts).End()
+	return w.facts.PatchFacts(ctx, txn, seg.from, seg.through)
 }

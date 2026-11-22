@@ -1303,9 +1303,9 @@ func (t *sqlTxn) Commit() error {
 	}
 	var err error
 	if t.ctx != nil {
-		region := rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit)
-		err = t.tx.Commit()
-		region.End()
+		rtrace.WithRegion(t.ctx, tracing.RegionSQLCommit, func() {
+			err = t.tx.Commit()
+		})
 	} else {
 		err = t.tx.Commit()
 	}

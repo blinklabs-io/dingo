@@ -64,3 +64,17 @@ func statementRegion(ctx context.Context, query string) func() {
 }
 
 func noopRegionEnd() {}
+
+// inStatementRegion runs a call on a cached statement inside its statement
+// region, ending the region even when the call panics. Only the cache hit is
+// wrapped: a miss falls back to the queryer, where countingQueryer (present
+// when metrics are configured) records the region, and wrapping the whole
+// helper would record that miss as two nested regions of the same name.
+func inStatementRegion[T any](
+	ctx context.Context,
+	query string,
+	run func() (T, error),
+) (T, error) {
+	defer statementRegion(ctx, query)()
+	return run()
+}
