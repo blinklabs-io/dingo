@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -121,7 +122,7 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		require.NoError(t, tx.Commit())
 	}
 	// Enough frames that a checkpoint has real work to do while it holds the
-	// writer lock; below wal_autocheckpoint's own 10000-page threshold.
+	// writer lock.
 	writeRows(0, 400)
 
 	// A reader opened after the initial writes is either at the WAL tip or,
@@ -241,9 +242,11 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 	)
 
 	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	checkpointErr := checkpointWAL(databaseURI, slog.New(
+	// Run the TRUNCATE tick directly: checkpointWAL's first ticks are
+	// PASSIVE-only and would never reach the TRUNCATE attempt.
+	checkpointErr := checkpointWALRunner(databaseURI, slog.New(
 		slog.NewTextHandler(&bytes.Buffer{}, nil),
-	))(t.Context())
+	))(t.Context(), true)
 	stopProbe()
 
 	blocked := testutil.RequireReceive(
@@ -255,5 +258,184 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		t, blocked, 50*time.Millisecond,
 		"checkpointWAL must not hold SQLite's writer lock for a sustained "+
 			"period while a reader snapshot prevents the WAL from draining",
+	)
+}
+
+// TestWriteConnectionDoesNotAutoCheckpoint pins the write connection's
+// automatic WAL checkpoint off: SQLite would otherwise run it inside COMMIT
+// on the writer. The store's own checkpointer keeps the WAL bounded.
+func TestWriteConnectionDoesNotAutoCheckpoint(t *testing.T) {
+	t.Parallel()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: t.TempDir()},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	autoCheckpointPages := func() int {
+		var pages int
+		require.NoError(
+			t,
+			writeDB.QueryRowContext(
+				t.Context(),
+				"PRAGMA wal_autocheckpoint",
+			).Scan(&pages),
+		)
+		return pages
+	}
+	require.Zero(t, autoCheckpointPages(), "fresh write connection")
+
+	dialect := sqlstore.SQLiteDialect()
+	require.NoError(t, dialect.SetBulkMode(t.Context(), writeDB))
+	require.Zero(t, autoCheckpointPages(), "in bulk mode")
+	require.NoError(t, dialect.RestoreNormalMode(t.Context(), writeDB))
+	require.Zero(t, autoCheckpointPages(), "after bulk mode")
+}
+
+// TestBulkModeCheckpointsWAL pins that the WAL is still backfilled while bulk
+// mode pauses the scheduled TRUNCATE: the write connection never checkpoints
+// at commit, so without it an import's whole write set stays in the WAL.
+func TestBulkModeCheckpointsWAL(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE bulk_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, err)
+	mainSize := func() int64 {
+		info, statErr := os.Stat(filepath.Join(dataDir, "metadata.sqlite"))
+		require.NoError(t, statErr)
+		return info.Size()
+	}
+	before := mainSize()
+
+	require.NoError(t, store.SetBulkLoadPragmas())
+	t.Cleanup(func() {
+		_ = store.RestoreNormalPragmas()
+	})
+	const rows = 400
+	payload := make([]byte, 4096)
+	tx, err := writeDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range rows {
+		_, err = tx.ExecContext(
+			t.Context(),
+			"INSERT INTO bulk_probe (n, payload) VALUES (?, ?)",
+			i,
+			payload,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return mainSize()-before >= rows*int64(len(payload))
+		},
+		3*checkpointInterval,
+		"bulk-mode WAL frames were not checkpointed into the database file",
+	)
+}
+
+// TestNormalModeCheckpointsWAL pins that the scheduled checkpoint backfills
+// committed frames outside bulk mode: the write connection never checkpoints
+// at commit, so this ticker is the only thing that moves the WAL into
+// metadata.sqlite during normal operation.
+func TestNormalModeCheckpointsWAL(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE normal_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	require.NoError(t, err)
+	mainSize := func() int64 {
+		info, statErr := os.Stat(filepath.Join(dataDir, "metadata.sqlite"))
+		require.NoError(t, statErr)
+		return info.Size()
+	}
+	before := mainSize()
+
+	const rows = 400
+	payload := make([]byte, 4096)
+	tx, err := writeDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	for i := range rows {
+		_, err = tx.ExecContext(
+			t.Context(),
+			"INSERT INTO normal_probe (n, payload) VALUES (?, ?)",
+			i,
+			payload,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return mainSize()-before >= rows*int64(len(payload))
+		},
+		3*checkpointInterval,
+		"committed WAL frames were not checkpointed into the database file",
+	)
+}
+
+func TestCheckpointWALSchedulesTruncateEveryNthTick(t *testing.T) {
+	t.Parallel()
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	checkpoint := checkpointWALEvery(
+		3,
+		func(ctx context.Context, truncate bool) error {
+			return checkpointTick(
+				ctx,
+				logger,
+				truncate,
+				func(_ context.Context, mode string) (int, int, int, error) {
+					modes = append(modes, mode)
+					return 0, 10, 10, nil
+				},
+			)
+		},
+	)
+	for range 6 {
+		require.NoError(t, checkpoint(t.Context()))
+	}
+	require.Equal(
+		t,
+		[]string{
+			"PASSIVE", "PASSIVE", "PASSIVE", "TRUNCATE",
+			"PASSIVE", "PASSIVE", "PASSIVE", "TRUNCATE",
+		},
+		modes,
 	)
 }

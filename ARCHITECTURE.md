@@ -165,17 +165,21 @@ with their existing components.
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and
-(on its own two-minute ticker, independent of the reclaim cadence) a best-effort
-`PRAGMA wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
-connection (never the write pool) — see `checkpointWAL` and `Store.Checkpoint`
-in DATABASE.md's write-amplification discussion for why the commit-triggered
-`wal_autocheckpoint` alone cannot shrink the WAL file's on-disk size even when
-it fully succeeds. `journal_size_limit` caps a reset WAL at 64 MiB, while the
-periodic TRUNCATE can reduce it to zero; an active reader can prevent either
-operation from reclaiming space. Bulk metadata imports drain and pause the
-scheduled TRUNCATE callback until normal pragmas are restored, while
-commit-triggered auto-checkpoints remain enabled. If the final restore fails,
-the next scheduled callback retries it before checkpointing. The tagged
+(on its own two-second ticker, independent of the reclaim cadence) a PASSIVE
+`wal_checkpoint`, with a best-effort TRUNCATE attempt on every 60th tick,
+against a dedicated short-timeout connection (never the write pool) — see
+`checkpointWAL` and `Store.Checkpoint` in DATABASE.md's write-amplification
+discussion for why PASSIVE checkpointing alone cannot shrink the WAL file's
+on-disk size even when it fully succeeds. `journal_size_limit` caps a reset WAL
+at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active reader
+can prevent either operation from reclaiming space. Bulk metadata imports drain
+and pause the scheduled callback until normal pragmas are restored; the write
+connection's automatic checkpoint stays disabled, and the ticker runs a
+PASSIVE-only `BulkCheckpoint` instead so the WAL is still backfilled. Startup
+migrations run before the scheduled ticker starts, so `Store.Start` runs
+`BulkCheckpoint` on the same cadence until the upgrade returns. If the
+final restore fails, the next scheduled callback retries it before
+checkpointing. The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in `sqlstore`
