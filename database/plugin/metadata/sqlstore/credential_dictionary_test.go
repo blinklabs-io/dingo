@@ -383,10 +383,7 @@ VALUES (?, 0, ?, 0, 1, 9, '5')`,
 	sums, err := sumRewardLiveStakeUtxos(
 		ctx, store.writeDB, stakeKeyRange{lo: &lo, hi: &hi})
 	require.NoError(t, err)
-	got := map[string]uint64{}
-	for k, v := range sums {
-		got[k] = v
-	}
+	got := sums
 	wantSums := map[string]uint64{}
 	for i, key := range keys {
 		if bytes.Compare(

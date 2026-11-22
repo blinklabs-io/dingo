@@ -91,7 +91,8 @@ func runUtxoAddressDictionary(
 	require.NoError(t, runner.Run(context.Background()))
 }
 
-func int64Ptr(v int64) *int64 { return &v }
+//go:fix inline
+func int64Ptr(v int64) *int64 { return new(v) }
 
 // TestUtxoAddressDictionaryKeepsRowsAndPositions upgrades databases with rows
 // spread over several batches and checks each row keeps its address and page
