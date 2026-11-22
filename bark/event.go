@@ -166,6 +166,7 @@ func (h *eventHub) append(ev *eventv1alpha1.Event) {
 	h.mu.Lock()
 	h.last++
 	ev.Sequence = h.last
+	ev.RunId = h.idPrefix
 	if ev.GetId() == "" {
 		ev.Id = h.idPrefix + "-" + strconv.FormatUint(h.last, 10)
 	}
@@ -179,13 +180,6 @@ func (h *eventHub) append(ev *eventv1alpha1.Event) {
 	close(h.wake)
 	h.wake = make(chan struct{})
 	h.mu.Unlock()
-}
-
-// position returns the sequence of the newest event.
-func (h *eventHub) position() uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.last
 }
 
 // oldestLocked returns the lowest sequence still in the ring.
@@ -409,15 +403,24 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	}
 	defer releaseID()
 
+	s.hub.mu.Lock()
+	head := s.hub.last
+	oldest := s.hub.oldestLocked()
+	runID := s.hub.idPrefix
+	s.hub.mu.Unlock()
 	cursor := start.GetLastAckedSequence()
-	head := s.hub.position()
-	if cursor == 0 {
+	previousRun := start.GetLastAckedRunId()
+	restarted := start.GetAcceptReady() && previousRun != "" &&
+		previousRun != runID
+	if restarted {
+		cursor = oldest - 1
+	} else if start.GetAcceptReady() && previousRun == "" {
+		cursor = head
+	} else if !start.GetAcceptReady() && cursor == 0 {
 		cursor = head
 	}
-	s.hub.mu.Lock()
-	oldest := s.hub.oldestLocked()
-	s.hub.mu.Unlock()
-	if cursor > head || (cursor < head && cursor+1 < oldest) {
+	if !restarted &&
+		(cursor > head || (cursor < head && cursor+1 < oldest)) {
 		return connect.NewError(
 			connect.CodeOutOfRange,
 			fmt.Errorf(
@@ -431,6 +434,16 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	)
 	log.Info("event subscription opened", "resume_from", cursor)
 	defer log.Info("event subscription closed")
+	if start.GetAcceptReady() {
+		if err := stream.Send(&eventv1alpha1.SubscribeWithAckResponse{
+			Ready: &eventv1alpha1.SubscribeWithAckReady{
+				RunId:              runID,
+				ResumeFromSequence: cursor,
+			},
+		}); err != nil {
+			return err
+		}
+	}
 
 	var win ackWindow
 	ackCh := make(chan struct{}, 1)

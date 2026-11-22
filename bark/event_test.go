@@ -353,6 +353,12 @@ func waitActive(t *testing.T, f *eventFixture, n int) {
 	}, 5*time.Second, 5*time.Millisecond)
 }
 
+func eventPosition(h *eventHub) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.last
+}
+
 // The acknowledged position survives a dropped stream: reconnecting with it
 // yields exactly the events that were not acknowledged, none lost.
 func TestEventAckResumesAfterDisconnect(t *testing.T) {
@@ -384,6 +390,99 @@ func TestEventAckResumesAfterDisconnect(t *testing.T) {
 	require.Equal(t, []string{"c:1", "d:1", "e:1"}, got)
 }
 
+func TestEventAckResumesFromOldestEventAfterServerRestart(t *testing.T) {
+	old := newEventFixture(t, nil, false)
+	old.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+	old.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+
+	current := newEventFixture(t, nil, false)
+	for _, address := range []string{"a:1", "b:1", "c:1"} {
+		current.publishChurn(address)
+	}
+	require.Eventually(t, func() bool {
+		return eventPosition(current.hub) == 3
+	}, 5*time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stream := current.client.SubscribeWithAck(ctx)
+	require.NoError(t, stream.Send(&eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId:      "restarted",
+				LastAckedRunId:    old.hub.idPrefix,
+				LastAckedSequence: eventPosition(old.hub),
+				AcceptReady:       true,
+			},
+		},
+	}))
+
+	resp, err := stream.Receive()
+	require.NoError(t, err)
+	require.Equal(t, current.hub.idPrefix, resp.GetReady().GetRunId())
+	require.Zero(t, resp.GetReady().GetResumeFromSequence())
+	var got []uint64
+	for range 3 {
+		resp, err = stream.Receive()
+		require.NoError(t, err)
+		require.Equal(t, current.hub.idPrefix, resp.GetEvent().GetRunId())
+		got = append(got, resp.GetEvent().GetSequence())
+	}
+	require.Equal(t, []uint64{1, 2, 3}, got)
+}
+
+func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
+	f := newEventFixture(t, nil, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	first := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, first.Send(&eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId:      "initial",
+				LastAckedSequence: 99,
+				AcceptReady:       true,
+			},
+		},
+	}))
+	resp, err := first.Receive()
+	require.NoError(t, err)
+	ready := resp.GetReady()
+	require.Equal(t, f.hub.idPrefix, ready.GetRunId())
+	require.Zero(t, ready.GetResumeFromSequence())
+	require.NoError(t, first.CloseRequest())
+	waitActive(t, f, 0)
+
+	f.publishChurn("a:1")
+	f.publishChurn("b:1")
+	require.Eventually(t, func() bool {
+		return eventPosition(f.hub) == 2
+	}, 5*time.Second, 5*time.Millisecond)
+
+	second := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, second.Send(&eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId:      "initial",
+				LastAckedRunId:    ready.GetRunId(),
+				LastAckedSequence: ready.GetResumeFromSequence(),
+				AcceptReady:       true,
+			},
+		},
+	}))
+	resp, err = second.Receive()
+	require.NoError(t, err)
+	require.Equal(t, ready.GetRunId(), resp.GetReady().GetRunId())
+	require.Zero(t, resp.GetReady().GetResumeFromSequence())
+	var got []uint64
+	for range 2 {
+		resp, err = second.Receive()
+		require.NoError(t, err)
+		got = append(got, resp.GetEvent().GetSequence())
+	}
+	require.Equal(t, []uint64{1, 2}, got)
+}
+
 // A filtered ack stream must not count events the filter rejected toward
 // its send window: the client has nothing to acknowledge for them.
 func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
@@ -411,7 +510,7 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 	for i := range 3 {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
-			return f.hub.position() == uint64(i+1)
+			return eventPosition(f.hub) == uint64(i+1)
 		}, 5*time.Second, 5*time.Millisecond)
 	}
 	f.bus.Publish(
@@ -472,7 +571,7 @@ func TestEventAckWindowCountsDeliveriesNotSequenceGap(t *testing.T) {
 	for i := range 5 {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
-			return f.hub.position() == uint64(i+1)
+			return eventPosition(f.hub) == uint64(i+1)
 		}, 5*time.Second, 5*time.Millisecond)
 	}
 	publishEpoch(1)
