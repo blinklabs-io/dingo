@@ -82,8 +82,7 @@ var (
 	)
 )
 
-const sharedKESSlotAlreadySignedReason =
-	"a different header was already signed for this slot"
+const sharedKESSlotAlreadySignedReason = "a different header was already signed for this slot"
 
 type sharedKESSlotAlreadySignedError struct {
 	err error
@@ -776,7 +775,7 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 	// configured shared signer. Each request authenticates its own connection.
 	defer func() {
 		if err != nil &&
-			!(c.cfg.SharedSigner && isSharedKESSlotAlreadySigned(err)) {
+			(!c.cfg.SharedSigner || !isSharedKESSlotAlreadySigned(err)) {
 			c.cfg.Metrics.incSignFailure()
 		}
 	}()
@@ -817,7 +816,7 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 		message,
 		resp,
 	); err != nil {
-		if !(c.cfg.SharedSigner && isSharedKESSlotAlreadySigned(err)) {
+		if !c.cfg.SharedSigner || !isSharedKESSlotAlreadySigned(err) {
 			c.recordDialFailureLocked()
 		}
 		return nil, err

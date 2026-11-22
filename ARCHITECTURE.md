@@ -13531,8 +13531,9 @@ a transaction the block could actually have carried can end the pass.
 Each leader slot that reaches block production emits one `forge timing` log
 line, whatever becomes of it. It carries the slot, the `leader_check` and
 `pre_build` intervals, the `build` duration and the number of build
-`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, or `lost`, and
-an `adopted` boolean. `outcome` describes what production produced and
+`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, `lost`, or
+`shared_kes_yielded`, and an `adopted` boolean. `outcome` describes what
+production produced and
 `adopted` whether it reached the chain, so a block dropped by self-validation
 or rejected by `AddBlock` reads as `outcome=forged, adopted=false` rather than
 as a success. Reconstructing those intervals from block timestamps after the
@@ -13690,7 +13691,7 @@ policy-approved upstream target:
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 
-`dingo_forge_stale_tip_skip_total` carries a `reason` label with nine values:
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with ten values:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
@@ -13703,8 +13704,9 @@ policy-approved upstream target:
 | `unapplied_rival_at_leader_slot` | The primary chain tip already holds a block at this slot that the ledger has not applied, so forging would parent a block for slot S on a tip already at slot S. | current slot, applied tip slot, primary chain tip slot |
 | `eb_manifest_ahead` | The local tips alone looked fine; a corroborated Leios endorser block leads the applied tip by more than `forgeEndorserBlockStalenessSlots`, proving a ranking block exists at a slot whose header this node has not admitted. **Opt-in and off by default (0 = disabled)**, governed by that bound alone -- so this series stays at 0 unless an operator sets it. | applied tip slot, highest corroborated endorser-block slot |
 | `applied_tip_stale` | Local evidence trails the corroborated upstream target beyond `forgeUpstreamStalenessSlots`, or with a usable target the optional `forgeAppliedTipStalenessSlots` wall-clock bound fires. | `newestKnown`, upstream sync target, current slot |
+| `shared_kes_no_upstream` | A producer configured to share its KES signer has no live selected upstream, so it cannot establish a current parent before competing for the signer's first signature in the slot. | shared-signer configuration, upstream liveness |
 
-The nine reasons do not share one diagnosis, and reading them as if they did
+The ten reasons do not share one diagnosis, and reading them as if they did
 sends an operator to the wrong component. The ancestry and block-gap reasons
 compare local ledger state with the primary chain; peer height and endorser
 block reasons use corroborated network evidence:
@@ -13738,9 +13740,11 @@ block reasons use corroborated network evidence:
   refused the slot rather than the shared "ledger tip stale vs primary chain
   tip", and `stale_source` distinguishes the two bounds behind
   `applied_tip_stale`.
+- `shared_kes_no_upstream` means this producer cannot compare its parent with
+  a selected upstream before asking a signer shared with another producer.
 
-All nine count lost blocks rather than leader checks, but they do not establish
-leadership the same way. Eight are counted after leader selection has proven
+All ten count lost blocks rather than leader checks, but they do not establish
+leadership the same way. Nine are counted after leader selection has proven
 this node elected. `unapplied_rival_at_leader_slot` is refused *before* the
 leader check -- it is the one gate that can drop a scheduled leader slot
 without moving `Forge_node_is_leader`, `Forge_node_not_leader` or

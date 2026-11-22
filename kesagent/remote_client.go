@@ -838,7 +838,7 @@ func (c *RemoteClient) Sign(
 	}
 	defer func() {
 		if err != nil &&
-			!(c.cfg.SharedSigner && isSharedKESSlotAlreadySigned(err)) {
+			(!c.cfg.SharedSigner || !isSharedKESSlotAlreadySigned(err)) {
 			c.cfg.Metrics.incSignFailure()
 		}
 	}()

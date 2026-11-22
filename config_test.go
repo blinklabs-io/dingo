@@ -1384,3 +1384,76 @@ func TestConfigValidateRejectsSinglePoolKeysWithBlockProducerPools(t *testing.T)
 		})
 	}
 }
+
+func TestConfigValidateRejectsSharedKESWithoutSignMode(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "top-level local key",
+			cfg: NewConfig(
+				WithShelleyKESAgentShared(true),
+			),
+		},
+		{
+			name: "top-level serve-key socket",
+			cfg: NewConfig(
+				WithShelleyKESAgentSocket("/tmp/kes-agent.sock"),
+				WithShelleyKESAgentShared(true),
+			),
+		},
+		{
+			name: "pool local key",
+			cfg: NewConfig(WithBlockProducerPools(BlockProducerPool{
+				ShelleyKESAgentShared: true,
+			})),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{config: tt.cfg}
+			require.ErrorContains(
+				t,
+				n.configValidate(),
+				"WithShelleyKESAgentShared",
+			)
+		})
+	}
+}
+
+func TestConfigValidateAcceptsSharedKESSignMode(t *testing.T) {
+	t.Parallel()
+
+	validConfig := func(opts ...ConfigOptionFunc) Config {
+		return NewConfig(append([]ConfigOptionFunc{
+			WithNetworkMagic(1),
+			WithListeners(ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: "127.0.0.1:0",
+			}),
+		}, opts...)...)
+	}
+	for _, cfg := range []Config{
+		validConfig(
+			WithShelleyKESAgentSocket("/tmp/kes-agent.sock"),
+			WithShelleyKESAgentMode("sign"),
+			WithShelleyKESAgentShared(true),
+		),
+		validConfig(
+			WithShelleyKESAgentRemote("agent.example:3105", "", "", ""),
+			WithShelleyKESAgentShared(true),
+		),
+		validConfig(
+			WithBlockProducerPools(BlockProducerPool{
+				ShelleyKESAgentSocket: "/tmp/kes-agent.sock",
+				ShelleyKESAgentMode:   "sign",
+				ShelleyKESAgentShared: true,
+			}),
+		),
+	} {
+		n := &Node{config: cfg}
+		require.NoError(t, n.configValidate())
+	}
+}

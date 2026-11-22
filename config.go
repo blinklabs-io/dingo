@@ -686,6 +686,29 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESAgentProfile and WithShelleyKESAgentShared; set them in each pool",
 		)
 	}
+	if n.config.cfg.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+		n.config.cfg.ShelleyKESAgentMode,
+		n.config.cfg.ShelleyKESAgentSocket,
+		n.config.cfg.ShelleyKESAgentAddress,
+		n.config.cfg.ShelleyKESAgentAddresses,
+	) {
+		return errors.New(
+			"WithShelleyKESAgentShared requires a KES agent in sign mode",
+		)
+	}
+	for i, pool := range n.config.cfg.BlockProducerPools {
+		if pool.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+			pool.ShelleyKESAgentMode,
+			pool.ShelleyKESAgentSocket,
+			pool.ShelleyKESAgentAddress,
+			pool.ShelleyKESAgentAddresses,
+		) {
+			return fmt.Errorf(
+				"WithShelleyKESAgentShared on blockProducerPools[%d] requires a KES agent in sign mode",
+				i,
+			)
+		}
+	}
 	for name, v := range map[string]int{
 		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
 		"barkEventMaxSubscribers":          n.config.cfg.BarkEventMaxSubscribers,
@@ -840,6 +863,22 @@ func (n *Node) configValidate() error {
 		}
 	}
 	return nil
+}
+
+func sharedKESAgentUsesSignMode(
+	mode, socket, address string,
+	addresses []string,
+) bool {
+	hasRemote := address != "" || len(addresses) > 0
+	if mode == "" {
+		switch {
+		case hasRemote:
+			mode = "sign"
+		case socket != "":
+			mode = "serve-key"
+		}
+	}
+	return mode == "sign" && (socket != "" || hasRemote)
 }
 
 // ConfigOptionFunc is a type that represents functions that modify the Connection config
