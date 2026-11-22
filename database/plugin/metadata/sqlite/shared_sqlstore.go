@@ -594,6 +594,14 @@ func NewSQLStore(
 // that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
+// BeforeOpenMemoryDB, when non-nil, is called with the freshly opened writer
+// of every in-memory store and that store's storage mode, before migrations
+// run. It exists so a test binary can restore an already-migrated schema into
+// the shared-cache database instead of running every migration. Production
+// code never sets it. Like BeforeOpenDataDir it must be assigned only from a
+// test package's init function.
+var BeforeOpenMemoryDB func(db *sql.DB, storageMode string) error
+
 // LazyHotStatements makes every store this package opens defer preparing its
 // hot statements to first use instead of preparing them in Start. It exists
 // for test binaries that open many short-lived stores; production code never
@@ -675,6 +683,17 @@ func openSQLStoreWithDialect(
 		readDB = writeDB
 		writeDB.SetMaxOpenConns(maxConnections)
 		writeDB.SetMaxIdleConns(maxConnections)
+		if BeforeOpenMemoryDB != nil {
+			if err := BeforeOpenMemoryDB(
+				writeDB, dependencies.StorageMode,
+			); err != nil {
+				_ = writeDB.Close()
+				return nil, nil, nil, fmt.Errorf(
+					"prepare in-memory SQLite database: %w",
+					err,
+				)
+			}
+		}
 		locker = migrations.NewProcessLocker()
 	} else {
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {
