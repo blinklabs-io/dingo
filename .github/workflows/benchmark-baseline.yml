@@ -107,11 +107,12 @@ jobs:
           mkdir -p "$dest"
           cp "$RUN_FILE" "$dest/"
           basename "$RUN_FILE" > "$dest/latest.txt"
-          # Keep the most recent 200 recordings; the weekly job keeps its own
-          # 104-week window in runs/.
-          find "$dest" -maxdepth 1 -name '*.txt' ! -name latest.txt -print \
-            | sort | head -n -200 | xargs -r git -C ../benchmark-data-branch rm -q -f --ignore-unmatch --
           cd ../benchmark-data-branch
+          # Keep the most recent 200 recordings; the weekly job keeps its own
+          # 104-week window in runs/. Paths are listed from inside the
+          # benchmark-data checkout because git rm rejects one outside it.
+          find gate-runs -maxdepth 1 -name '*.txt' ! -name latest.txt -print \
+            | sort | head -n -200 | xargs -r git rm -q -f --ignore-unmatch --
           git add gate-runs
           git commit -m "chore(benchmark-data): add gate run $(basename "$RUN_FILE")"
           # The weekly job pushes to the same branch; retry on a lost race.
@@ -119,7 +120,7 @@ jobs:
             if git push origin HEAD:benchmark-data; then
               exit 0
             fi
-            git fetch origin benchmark-data
+            git fetch origin +benchmark-data:refs/remotes/origin/benchmark-data
             git rebase origin/benchmark-data
           done
           echo "could not push benchmark-data" >&2
