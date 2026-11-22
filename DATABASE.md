@@ -4697,6 +4697,37 @@ ledger to stage the change. It calls `SyncConfig.InvalidateUtxoSetGovernance`
 afterwards, which removes the set's `mgov2` marker (`Store.InvalidateGovernance`)
 so the next startup reloads the proposals and votes from the store.
 
+#### Exporting the set as an SCLS file
+
+`dingo database export-scls --output <file>` writes the UTxO set as an SCLS
+(CIP-0165) file. It is offline: it opens the set under the data directory,
+which fails while a node holds it, and never reads a running node's state.
+
+The checkpoint is one Badger read transaction (`Store.CheckpointableSnapshot`),
+so the tip, the era and every output come from the same version of the set.
+That snapshot refuses what `Set.WriteCheckpoint` refuses (a failure mark, a
+pending merge or rollback, an unfinished bootstrap). The export persists no
+checkpoint, so none is retained or cleaned up: the transaction ends with the
+command, and the only file left is the output.
+
+Outputs stream from the set in key order (`u <txid:32> <index:4 BE>`, which is
+the `utxo/v0` key order) one at a time into the go-scls writer, which holds one
+chunk, and the Merkle state is logarithmic, so memory does not grow with the
+set. An output index above 65535 does not fit the 34-byte `utxo/v0` key and
+fails the export. Each output's ledger CBOR goes through the go-scls typed
+`utxo/v0` payload codec, and a payload the codec rejects fails the export.
+
+The file is staged as `<output>.partial` (created exclusively; an existing
+output or staged file is refused), finalized, fsynced, verified in full
+(`scls.VerifyFull`) with its root compared to the writer's, then renamed to the
+output and the directory synced. A failure or an interrupt removes the staged
+file. Only a Conway tip is exported.
+
+The manifest summary carries the tool (`dingo <version>`), the creation time
+and the comment `profile=parity era=conway namespaces=utxo/v0 bootstrap=false`:
+the file declares its era and namespace coverage and that it is a parity
+export. It is not a bootstrap artifact; no Dingo path restarts a node from it.
+
 ### Ledger state as of a slot
 
 The `k` journal and the rows it covers answer a read as of a past slot as a

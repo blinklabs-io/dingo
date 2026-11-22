@@ -2026,6 +2026,7 @@ dingo/
 │   ├── snapshot.go      # Snapshot parsing
 │   ├── import.go        # Ledger state import
 │   ├── utxo.go          # UTXO state handling
+│   ├── scls_export.go   # SCLS (CIP-0165) export of the UTxO set
 │   └── certstate.go     # Certificate state handling
 ├── mempool/             # Transaction pool
 │   ├── backend.go       # FIFO/DAG backend contract and constructors
@@ -4822,6 +4823,18 @@ automatic snapshots; its default is 30 seconds, and zero is unbounded.
 `dingo_snapshot_commit_pause_seconds{result}` and
 `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each
 backup wrote.
+
+#### SCLS export of the live UTxO set
+
+`dingo database export-scls` (`cmd/dingo/database.go`) is wiring only: it opens
+the set with `dblifecycle.OpenUtxoSet`, takes `ledgerstate.NewSCLSSource` (one
+`badgerutxo.Store.CheckpointableSnapshot` read transaction) and calls
+`ledgerstate.ExportSCLS`, releasing both on every exit path. The conversion
+lives in `ledgerstate` behind the narrow `SCLSSource` interface (tip, era,
+outputs in key order); the container and `utxo/v0` codecs stay in go-scls.
+The export is offline, persists no checkpoint, and stages, verifies and renames
+its output as described in `DATABASE.md`. It declares itself a parity export of
+the `utxo/v0` namespace in the manifest, not a bootstrap artifact.
 
 #### Recoverable remote live restore
 
