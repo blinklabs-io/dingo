@@ -15,10 +15,14 @@
 package sqlstore
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -299,43 +303,34 @@ func (s *Store) liveUtxoDigest(
 	if txn == nil {
 		txCtx = ctx
 	}
-	rs, err := db.QueryContext(
-		txCtx,
-		s.dialect.Rebind(liveUtxoSetSQL(
+	spool, err := spoolLiveOutputs(txCtx, db, s.dialect.Rebind(
+		liveUtxoSetSQL(
 			s.dialect.Name(), s.dialect.QuoteIdentifier("transaction"),
-		)),
-		slot, slot,
-	)
+		),
+	), slot)
 	if err != nil {
 		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
 	}
-	defer rs.Close()
+	defer spool.close()
 	d := metadata.NewUtxoDigester()
-	outputs := make([]liveOutput, 0, page)
-	for rs.Next() {
-		var o liveOutput
-		if err := rs.Scan(
-			&o.txHash, &o.idx, &o.amount, &o.payment, &o.staking, &o.datum,
-		); err != nil {
+	for {
+		if err := txCtx.Err(); err != nil {
+			return metadata.UtxoSetDigest{}, err
+		}
+		outputs, err := spool.next(page)
+		if err != nil {
 			return metadata.UtxoSetDigest{}, fmt.Errorf(
 				"digest utxo set: %w", err,
 			)
 		}
-		outputs = append(outputs, o)
-		if len(outputs) == page {
-			if err := digestOutputs(txCtx, d, resolve, outputs); err != nil {
-				return metadata.UtxoSetDigest{}, fmt.Errorf(
-					"digest utxo set: %w", err,
-				)
-			}
-			outputs = outputs[:0]
+		if len(outputs) == 0 {
+			break
 		}
-	}
-	if err := rs.Err(); err != nil {
-		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
-	}
-	if err := digestOutputs(txCtx, d, resolve, outputs); err != nil {
-		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
+		if err := digestOutputs(txCtx, d, resolve, outputs); err != nil {
+			return metadata.UtxoSetDigest{}, fmt.Errorf(
+				"digest utxo set: %w", err,
+			)
+		}
 	}
 	return d.Sum(), nil
 }
@@ -438,8 +433,9 @@ type liveOutput struct {
 }
 
 // digestOutputs folds outputs, in order, into d. Resolving an output reads
-// its block bytes and is independent per output, so it runs on several
-// goroutines; only the hash needs the outputs in order.
+// its block bytes and canonicalizing it re-encodes them; both are independent
+// per output, so they run on several goroutines and only the hash needs the
+// outputs in order.
 func digestOutputs(
 	ctx context.Context,
 	d *metadata.UtxoDigester,
@@ -474,7 +470,7 @@ func digestOutputs(
 					)
 					continue
 				}
-				cbors[i] = cbor
+				cbors[i] = metadata.CanonicalOutputCbor(cbor)
 			}
 		})
 	}
@@ -486,7 +482,7 @@ func digestOutputs(
 		if errs[i] != nil {
 			return errs[i]
 		}
-		d.Add(
+		d.AddCanonical(
 			o.txHash, uint32(o.idx), o.amount.String, //nolint:gosec
 			o.payment, o.staking, o.datum, true, cbors[i],
 		)
@@ -496,3 +492,116 @@ func digestOutputs(
 
 // digestResolveWorkers bounds the goroutines resolving one digest chunk.
 const digestResolveWorkers = 8
+
+// outputSpool holds the live outputs in digest order on disk. The sorted scan
+// is read to its end and its cursor closed before any output is resolved: a
+// resolver begins its own read transaction, so a cursor held open across
+// resolves would need a second read connection per resolving goroutine and
+// would stall a read pool of one. The scan also pins its read snapshot only
+// for the time it takes to read, not for the whole digest.
+type outputSpool struct {
+	file *os.File
+	r    *bufio.Reader
+}
+
+func spoolLiveOutputs(
+	ctx context.Context,
+	db queryer,
+	query string,
+	slot int64,
+) (*outputSpool, error) {
+	file, err := os.CreateTemp("", "dingo-utxo-digest-*")
+	if err != nil {
+		return nil, err
+	}
+	sp := &outputSpool{file: file}
+	if err := sp.fill(ctx, db, query, slot); err != nil {
+		sp.close()
+		return nil, err
+	}
+	return sp, nil
+}
+
+func (sp *outputSpool) fill(
+	ctx context.Context,
+	db queryer,
+	query string,
+	slot int64,
+) error {
+	rs, err := db.QueryContext(ctx, query, slot, slot)
+	if err != nil {
+		return err
+	}
+	defer rs.Close()
+	w := bufio.NewWriterSize(sp.file, spoolBufferSize)
+	var scratch []byte
+	for rs.Next() {
+		var o liveOutput
+		if err := rs.Scan(
+			&o.txHash, &o.idx, &o.amount, &o.payment, &o.staking, &o.datum,
+		); err != nil {
+			return err
+		}
+		scratch = scratch[:0]
+		for _, field := range [][]byte{
+			o.txHash, []byte(o.amount.String), o.payment, o.staking, o.datum,
+		} {
+			scratch = binary.AppendUvarint(scratch, uint64(len(field)))
+			scratch = append(scratch, field...)
+		}
+		scratch = binary.AppendUvarint(scratch, uint64(o.idx)) //nolint:gosec
+		if _, err := w.Write(scratch); err != nil {
+			return err
+		}
+	}
+	if err := rs.Err(); err != nil {
+		return err
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	sp.r = bufio.NewReaderSize(sp.file, spoolBufferSize)
+	return nil
+}
+
+// next returns up to n outputs, or none once the spool is exhausted.
+func (sp *outputSpool) next(n int) ([]liveOutput, error) {
+	outputs := make([]liveOutput, 0, n)
+	for len(outputs) < n {
+		var o liveOutput
+		var fields [5][]byte
+		for i := range fields {
+			size, err := binary.ReadUvarint(sp.r)
+			if err != nil {
+				if i == 0 && errors.Is(err, io.EOF) {
+					return outputs, nil
+				}
+				return nil, fmt.Errorf("read spooled output: %w", err)
+			}
+			fields[i] = make([]byte, size)
+			if _, err := io.ReadFull(sp.r, fields[i]); err != nil {
+				return nil, fmt.Errorf("read spooled output: %w", err)
+			}
+		}
+		idx, err := binary.ReadUvarint(sp.r)
+		if err != nil {
+			return nil, fmt.Errorf("read spooled output: %w", err)
+		}
+		o.txHash, o.payment, o.staking, o.datum = fields[0], fields[2], fields[3], fields[4]
+		o.amount = sql.NullString{String: string(fields[1]), Valid: true}
+		o.idx = int64(idx) //nolint:gosec
+		outputs = append(outputs, o)
+	}
+	return outputs, nil
+}
+
+func (sp *outputSpool) close() {
+	name := sp.file.Name()
+	_ = sp.file.Close()
+	_ = os.Remove(name)
+}
+
+const spoolBufferSize = 1 << 20

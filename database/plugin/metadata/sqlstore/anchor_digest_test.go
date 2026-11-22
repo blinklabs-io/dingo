@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -229,6 +230,74 @@ func TestLiveUtxoDigestReportsTheOutputThatFailedToResolve(t *testing.T) {
 	require.ErrorContains(
 		t, err, fmt.Sprintf("resolve output %x#%d", target.hash, target.idx),
 	)
+}
+
+// legacyOutputCbor is an output in the pre-Babbage array form, which the
+// digest canonicalizes to the map form a snapshot import stores.
+func legacyOutputCbor(t *testing.T, txHash []byte, idx uint32) []byte {
+	t.Helper()
+	addr := make([]byte, 29)
+	addr[0] = 0x60
+	addr[1] = txHash[0]
+	out, err := cbor.Encode([]any{addr, uint64(1_000_000) + uint64(idx)})
+	require.NoError(t, err)
+	return out
+}
+
+func TestLiveUtxoDigestCanonicalizesResolvedOutputs(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	all := seedDigestFixture(t, store, 12)
+	resolve := func(h []byte, idx uint32) ([]byte, error) {
+		return legacyOutputCbor(t, h, idx), nil
+	}
+	want, err := referenceDigest(all, 50, resolve)
+	require.NoError(t, err)
+	// The same outputs digested without canonicalizing must differ, or this
+	// test would not notice a skipped canonicalization.
+	raw := metadata.NewUtxoDigester()
+	for _, o := range all {
+		if o.live(50) {
+			raw.AddCanonical(
+				o.hash, uint32(o.idx), o.amount, nil, nil, nil, //nolint:gosec
+				true, legacyOutputCbor(t, o.hash, uint32(o.idx)), //nolint:gosec
+			)
+		}
+	}
+	require.NotEqual(t, want.Digest, raw.Sum().Digest)
+	for _, page := range []int{1, 5, 1000} {
+		got, err := store.liveUtxoDigest(
+			context.Background(), 50, resolve, nil, page,
+		)
+		require.NoError(t, err)
+		require.Equal(t, want, got, "page size %d", page)
+	}
+}
+
+func TestLiveUtxoDigestResolvesWithASingleReadConnection(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.readDB.SetMaxOpenConns(1)
+	all := seedDigestFixture(t, store, 12)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// A production resolver begins its own read transaction, so the digest
+	// must not hold a read connection while it resolves.
+	resolve := func(h []byte, idx uint32) ([]byte, error) {
+		txn := store.ReadTransaction(ctx)
+		defer func() { _ = txn.Rollback() }()
+		if st, ok := txn.(*sqlTxn); ok && st.beginErr != nil {
+			return nil, st.beginErr
+		}
+		return resolvedBytes(h, idx), nil
+	}
+	got, err := store.liveUtxoDigest(ctx, 50, resolve, nil, 4)
+	require.NoError(t, err)
+	want, err := referenceDigest(all, 50, func(h []byte, idx uint32) ([]byte, error) {
+		return resolvedBytes(h, idx), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func TestLiveUtxoSetQueryScansUtxoInsteadOfWalkingTheHashIndex(t *testing.T) {
