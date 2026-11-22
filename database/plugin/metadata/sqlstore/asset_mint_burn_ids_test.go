@@ -16,11 +16,15 @@ package sqlstore
 
 import (
 	"database/sql"
+	"math/big"
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,20 +108,46 @@ ORDER BY m.slot ASC, m.tx_index ASC, m.transaction_id ASC`,
 	require.NotContains(t, byTransaction, "SCAN", byTransaction)
 }
 
-// Queued events are written against the transaction's row id and the asset's
-// identity id, one row per (transaction, asset) pair.
-func TestAssetMintBurnFlushKeysByIdentityIDs(t *testing.T) {
+// A rollback deletes the mint events of the rolled-back transactions before
+// their identity rows; the foreign key from asset_mint_burn to the
+// transaction would otherwise refuse the identity delete. The asset identity
+// row, a dictionary entry, stays.
+func TestRollbackDeletesMintBurnEventsBeforeTransactionIdentity(t *testing.T) {
 	t.Parallel()
-	_, db := newManagementTestStoreWithRawDB(t)
-	policy := assetPolicy(0x09)
-	testutil.InsertAssetMintBurn(
-		t, db, credentialHash(0x51), policy, []byte("a"), 1, 0, "1",
+	store := newForeignKeySQLiteStore(t)
+	store.storageMode = types.StorageModeAPI
+	txID := bytes32(0x93)
+	mint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
+			lcommon.NewBlake2b224(assetPolicy(0x0a)): {
+				cbor.NewByteString([]byte("t")): big.NewInt(1),
+			},
+		},
 	)
-	var identities, events int
-	require.NoError(t, db.QueryRow(
-		"SELECT COUNT(*) FROM asset_identity").Scan(&identities))
-	require.NoError(t, db.QueryRow(
-		"SELECT COUNT(*) FROM asset_mint_burn").Scan(&events))
-	require.Equal(t, 1, identities)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(txID)
+	tx.WithOutputs(producerTestOutput(t, 1_500_000))
+	tx.WithMint(&mint)
+	tx.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		tx, ocommon.Point{Slot: 10, Hash: txID}, 0, nil, false, nil, 0,
+	))
+	var events int
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM asset_mint_burn`).Scan(&events))
 	require.Equal(t, 1, events)
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(5, nil))
+
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM asset_mint_burn`).Scan(&events))
+	require.Zero(t, events)
+	require.Zero(t, identityCount(t, store, txID))
+	var identities, violations int
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM asset_identity`).Scan(&identities))
+	require.Equal(t, 1, identities)
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations))
+	require.Zero(t, violations)
 }
