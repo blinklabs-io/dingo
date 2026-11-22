@@ -242,9 +242,11 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 	)
 
 	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	checkpointErr := checkpointWAL(databaseURI, slog.New(
+	// Run the TRUNCATE tick directly: checkpointWAL's first ticks are
+	// PASSIVE-only and would never reach the TRUNCATE attempt.
+	checkpointErr := checkpointWALRunner(databaseURI, slog.New(
 		slog.NewTextHandler(&bytes.Buffer{}, nil),
-	))(t.Context())
+	))(t.Context(), true)
 	stopProbe()
 
 	blocked := testutil.RequireReceive(
