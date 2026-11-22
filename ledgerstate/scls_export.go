@@ -89,9 +89,12 @@ func (s *SCLSSnapshotSource) Era() (int, error) {
 		return 0, err
 	}
 	if len(rows) == 0 {
-		return 0, errors.New("the UTxO set holds no epoch rows, so its era is unknown")
+		return 0, errors.New(
+			"the UTxO set holds no epoch rows, so its era is unknown",
+		)
 	}
-	return int(rows[len(rows)-1].Era), nil //nolint:gosec // era indexes are small
+	newest := rows[len(rows)-1]
+	return int(newest.Era), nil //nolint:gosec // era indexes are small
 }
 
 // EachUtxo implements SCLSSource.
@@ -147,7 +150,9 @@ func ExportSCLS(
 	cfg SCLSExportConfig,
 ) (res SCLSExportResult, err error) {
 	if cfg.Source == nil || cfg.Output == "" {
-		return res, errors.New("scls export: a source and an output are required")
+		return res, errors.New(
+			"scls export: a source and an output are required",
+		)
 	}
 	if _, err := os.Lstat(cfg.Output); err == nil {
 		return res, fmt.Errorf("scls export: %w: %s", os.ErrExist, cfg.Output)
@@ -176,7 +181,9 @@ func ExportSCLS(
 	// The file is public ledger state, so it takes the umask like other command
 	// output rather than the owner-only mode of a node's private checkpoints.
 	f, err := os.OpenFile( // #nosec G302,G304 -- public output at an operator-chosen path
-		partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666,
+		partial,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o666,
 	)
 	if errors.Is(err, fs.ErrExist) {
 		return res, fmt.Errorf(
@@ -242,7 +249,11 @@ func ExportSCLS(
 	// while the export ran, which a rename would silently clobber.
 	if err := os.Link(partial, cfg.Output); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return res, fmt.Errorf("scls export: %w: %s", os.ErrExist, cfg.Output)
+			return res, fmt.Errorf(
+				"scls export: %w: %s",
+				os.ErrExist,
+				cfg.Output,
+			)
 		}
 		return res, fmt.Errorf("scls export: publish: %w", err)
 	}
@@ -250,7 +261,8 @@ func ExportSCLS(
 	if err := os.Remove(partial); err != nil {
 		return res, fmt.Errorf(
 			"scls export: %s is published, but removing the staged file failed: %w",
-			cfg.Output, err,
+			cfg.Output,
+			err,
 		)
 	}
 	if d, err := os.Open(filepath.Dir(cfg.Output)); err == nil { // #nosec G304 -- the output directory
@@ -308,7 +320,7 @@ func verifySCLS(
 	want scls.Hash,
 	verify func(io.Reader) (scls.Hash, error),
 ) error {
-	f, err := os.Open(path) // #nosec G304 -- the staged file this export created
+	f, err := os.Open(path) // #nosec G304 -- staged by this export
 	if err != nil {
 		return fmt.Errorf("scls export: open staged file: %w", err)
 	}

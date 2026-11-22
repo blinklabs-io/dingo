@@ -166,7 +166,10 @@ func TestExportSCLSWritesTheUTxOSetInKeyOrder(t *testing.T) {
 		}
 		var ref badgerutxo.Ref
 		copy(ref[:32], e.Key[:32])
-		binary.BigEndian.PutUint32(ref[32:], uint32(binary.BigEndian.Uint16(e.Key[32:])))
+		binary.BigEndian.PutUint32(
+			ref[32:],
+			uint32(binary.BigEndian.Uint16(e.Key[32:])),
+		)
 		want, ok := f.outs[ref]
 		require.True(t, ok, "unexpected key %x", e.Key)
 		txOut, err := sclscardano.DecodeTxOut(e.Value)
