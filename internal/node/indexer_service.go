@@ -81,6 +81,7 @@ func NewIndexerService(
 	if err != nil {
 		return nil, err
 	}
+	w.WithSparseBatches()
 	// Recorded before the factory returns, so no reader finds the IndexerDB
 	// ready for a chain whose anchor it has not been told about. A single
 	// small write.
