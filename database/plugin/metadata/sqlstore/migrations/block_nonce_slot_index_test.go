@@ -55,7 +55,9 @@ func TestBlockNonceIndexUpgradeKeepsRowsAndUniqueness(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	run(registry)
+	// The unique (slot, hash) index is what version 56 leaves; a later
+	// version replaces the table, so the check runs at version 56.
+	run(registry[:56])
 	_, ok = indexSQL(t, db, "hash_slot")
 	require.False(t, ok)
 	definition, ok := indexSQL(t, db, "idx_block_nonce_slot_hash")
@@ -91,4 +93,6 @@ ON CONFLICT (hash, slot) DO UPDATE SET
 	require.Error(t, err)
 
 	run(registry)
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM block_nonce").Scan(&count))
+	require.Equal(t, 3, count, "the later rebuild keeps every row")
 }

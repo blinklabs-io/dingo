@@ -230,7 +230,7 @@ func (s *Store) blockHashesInSlotRange(
 	}
 	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
-		"SELECT bn.hash"+from+" ORDER BY bn.slot "+dir+", bn.id "+dir,
+		"SELECT bn.hash"+from+" ORDER BY bn.slot "+dir+", bn.ordinal "+dir,
 		args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)

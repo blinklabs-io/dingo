@@ -197,7 +197,7 @@ func TestStatementGuardAllowsTheDrainsChunkedDelete(t *testing.T) {
 	deleted, err := db.DeleteLedgerStateRows(
 		t.Context(),
 		"block_nonce",
-		"id",
+		"slot",
 		2,
 	)
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestStatementGuardAllowsTheDrainsChunkedDelete(t *testing.T) {
 	deleted, err = db.DeleteLedgerStateRows(
 		t.Context(),
 		"block_nonce",
-		"id",
+		"slot",
 		100,
 	)
 	require.NoError(t, err)

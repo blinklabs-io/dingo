@@ -96,9 +96,13 @@ ON CONFLICT (epoch_id) DO UPDATE SET
     length_in_slots = excluded.length_in_slots;
 
 -- name: SetBlockNonce :exec
-INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (hash, slot) DO UPDATE SET
+INSERT INTO block_nonce (slot, hash, ordinal, nonce, is_checkpoint)
+VALUES (
+    ?, ?,
+    COALESCE((SELECT MAX(b.ordinal) + 1 FROM block_nonce AS b WHERE b.slot = ?), 0),
+    ?, ?
+)
+ON CONFLICT (slot, hash) DO UPDATE SET
     nonce = excluded.nonce,
     is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint;
 
@@ -108,10 +112,10 @@ FROM block_nonce
 WHERE hash = ? AND slot = ?;
 
 -- name: GetBlockNoncesInSlotRange :many
-SELECT hash, nonce, id, slot, is_checkpoint
+SELECT hash, nonce, ordinal, slot, is_checkpoint
 FROM block_nonce
 WHERE slot >= ? AND slot < ?
-ORDER BY slot ASC;
+ORDER BY slot ASC, ordinal ASC;
 
 -- name: GetLastBlockNonceInRange :one
 SELECT nonce

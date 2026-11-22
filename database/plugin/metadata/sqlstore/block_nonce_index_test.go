@@ -87,8 +87,8 @@ func TestBlockNonceLookupsUseAnIndex(t *testing.T) {
 
 	queries := map[string]string{
 		"exact point": "SELECT nonce FROM block_nonce WHERE hash = x'00' AND slot = 40",
-		"slot range": "SELECT hash, nonce, id, slot, is_checkpoint FROM block_nonce " +
-			"WHERE slot >= 100 AND slot < 4000 ORDER BY slot ASC",
+		"slot range": "SELECT hash, nonce, ordinal, slot, is_checkpoint FROM block_nonce " +
+			"WHERE slot >= 100 AND slot < 4000 ORDER BY slot ASC, ordinal ASC",
 		"latest":          latestBlockNonceQuery,
 		"range stats":     "SELECT COUNT(*), MIN(slot), MAX(slot) FROM block_nonce WHERE slot >= 100 AND slot <= 4000",
 		"delete before":   "DELETE FROM block_nonce WHERE slot < 4000",
@@ -110,11 +110,11 @@ func TestBlockNonceLookupsUseAnIndex(t *testing.T) {
 		require.NoError(t, rows.Err(), name)
 		require.NoError(t, rows.Close(), name)
 		joined := strings.Join(plan, "; ")
-		require.Contains(t, joined, "INDEX", "%s must use an index: %s", name, joined)
+		require.Contains(t, joined, "PRIMARY KEY", "%s must use the key: %s", name, joined)
 		for _, step := range plan {
 			if strings.HasPrefix(step, "SCAN block_nonce") {
-				require.Contains(t, step, "INDEX",
-					"%s scans block_nonce without an index: %s", name, joined)
+				require.Contains(t, step, "PRIMARY KEY",
+					"%s scans block_nonce without the key: %s", name, joined)
 			}
 		}
 	}

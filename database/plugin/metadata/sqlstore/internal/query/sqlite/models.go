@@ -89,10 +89,10 @@ type BackfillCheckpoint struct {
 }
 
 type BlockNonce struct {
+	Slot         int64
 	Hash         []byte
+	Ordinal      int64
 	Nonce        []byte
-	ID           int64
-	Slot         sql.NullInt64
 	IsCheckpoint sql.NullBool
 }
 

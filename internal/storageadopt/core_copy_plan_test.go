@@ -54,8 +54,8 @@ func TestCoreCopyPlanCarriesCoreModeTables(t *testing.T) {
 	// is copied in one transaction; a new one is a deliberate addition.
 	require.Equal(t, []string{
 		"account_drep_clear", "account_import_baseline",
-		"account_inactivity_activation", "imported_pool_block_count",
-		"pool_current_event", "reward_seed_failure",
-		"utxo_collateral_edge", "utxo_reference_edge",
+		"account_inactivity_activation", "block_nonce",
+		"imported_pool_block_count", "pool_current_event",
+		"reward_seed_failure", "utxo_collateral_edge", "utxo_reference_edge",
 	}, plan.CopiedWhole)
 }

@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -646,9 +647,10 @@ func (s *Store) SetBlockNonce(
 	return queries.SetBlockNonce(
 		ctx,
 		sqlitequery.SetBlockNonceParams{
-			Hash:  blockHash,
-			Slot:  sql.NullInt64{Int64: slot, Valid: true},
-			Nonce: nonce,
+			Slot:   slot,
+			Hash:   blockHash,
+			Slot_2: slot,
+			Nonce:  nonce,
 			IsCheckpoint: sql.NullBool{
 				Bool:  isCheckpoint,
 				Valid: true,
@@ -658,6 +660,7 @@ func (s *Store) SetBlockNonce(
 }
 
 // SetBlockNonces writes a block-nonce batch with one multi-row SQLite upsert.
+// A block new to its slot takes the next ordinal of the slot, in batch order.
 func (s *Store) SetBlockNonces(
 	nonces []models.BlockNonce,
 	txn types.Txn,
@@ -683,29 +686,40 @@ func (s *Store) SetBlockNonces(
 	if err != nil {
 		return err
 	}
-	batchSize := max(s.dialect.ParameterLimit()/4, 1)
+	batchSize := max(s.dialect.ParameterLimit()/5, 1)
 	for start := 0; start < len(nonces); start += batchSize {
 		end := min(start+batchSize, len(nonces))
+		next, err := nextBlockNonceOrdinals(
+			ctx, db, nonces[start:end], s.dialect.ParameterLimit(),
+		)
+		if err != nil {
+			return err
+		}
 		values := make([]string, end-start)
-		args := make([]any, 0, (end-start)*4)
+		args := make([]any, 0, (end-start)*5)
 		for i, nonce := range nonces[start:end] {
 			slot, err := checkedInt64(nonce.Slot)
 			if err != nil {
 				return err
 			}
-			values[i] = "(?, ?, ?, ?)"
+			// A row that conflicts keeps the ordinal it already has; the
+			// one assigned here is used only by a block new to the slot.
+			ordinal := next[slot]
+			next[slot]++
+			values[i] = "(?, ?, ?, ?, ?)"
 			args = append(
 				args,
-				nonce.Hash,
 				slot,
+				nonce.Hash,
+				ordinal,
 				nonce.Nonce,
 				nonce.IsCheckpoint,
 			)
 		}
 		query := `-- name: UpsertBlockNonceBatch :exec
-INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
+INSERT INTO block_nonce (slot, hash, ordinal, nonce, is_checkpoint)
 VALUES ` + strings.Join(values, ",") + `
-ON CONFLICT (hash, slot) DO UPDATE SET
+ON CONFLICT (slot, hash) DO UPDATE SET
     nonce = excluded.nonce,
     is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint`
 		if _, err := s.execCached(ctx, db, query, args...); err != nil {
@@ -713,6 +727,63 @@ ON CONFLICT (hash, slot) DO UPDATE SET
 		}
 	}
 	return nil
+}
+
+// nextBlockNonceOrdinals returns, for each slot the rows name, the ordinal the
+// next block new to that slot takes: one past the highest stored, or zero. The
+// ordinal keeps blocks that share a slot in application order. A multi-row
+// insert cannot derive it per row, because rows of one statement do not see
+// each other.
+func nextBlockNonceOrdinals(
+	ctx context.Context,
+	db queryer,
+	nonces []models.BlockNonce,
+	parameterLimit int,
+) (map[int64]int64, error) {
+	next := make(map[int64]int64, len(nonces))
+	slots := make([]int64, 0, len(nonces))
+	for _, nonce := range nonces {
+		slot, err := checkedInt64(nonce.Slot)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := next[slot]; !ok {
+			next[slot] = 0
+			slots = append(slots, slot)
+		}
+	}
+	perStatement := max(1, parameterLimit)
+	for start := 0; start < len(slots); start += perStatement {
+		end := min(start+perStatement, len(slots))
+		args := make([]any, 0, end-start)
+		for _, slot := range slots[start:end] {
+			args = append(args, slot)
+		}
+		if err := func() error {
+			rows, err := db.QueryContext(ctx,
+				"-- name: GetBlockNonceOrdinals :many\n"+
+					"SELECT slot, MAX(ordinal) FROM block_nonce WHERE slot IN ("+
+					strings.TrimSuffix(strings.Repeat("?, ", end-start), ", ")+
+					") GROUP BY slot",
+				args...,
+			)
+			if err != nil {
+				return fmt.Errorf("read block nonce ordinals: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var slot, highest int64
+				if err := rows.Scan(&slot, &highest); err != nil {
+					return fmt.Errorf("scan block nonce ordinal: %w", err)
+				}
+				next[slot] = highest + 1
+			}
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+	}
+	return next, nil
 }
 
 func (s *Store) GetBlockNonce(
@@ -732,7 +803,7 @@ func (s *Store) GetBlockNonce(
 		ctx,
 		sqlitequery.GetBlockNonceParams{
 			Hash: point.Hash,
-			Slot: sql.NullInt64{Int64: slot, Valid: true},
+			Slot: slot,
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -762,8 +833,8 @@ func (s *Store) GetBlockNoncesInSlotRange(
 	rows, err := queries.GetBlockNoncesInSlotRange(
 		ctx,
 		sqlitequery.GetBlockNoncesInSlotRangeParams{
-			Slot:   sql.NullInt64{Int64: start, Valid: true},
-			Slot_2: sql.NullInt64{Int64: end, Valid: true},
+			Slot:   start,
+			Slot_2: end,
 		},
 	)
 	if err != nil {
@@ -771,14 +842,14 @@ func (s *Store) GetBlockNoncesInSlotRange(
 	}
 	ret := make([]models.BlockNonce, 0, len(rows))
 	for _, row := range rows {
-		slot, err := checkedUint64(row.Slot.Int64)
+		slot, err := checkedUint64(row.Slot)
 		if err != nil {
 			return nil, fmt.Errorf("get block nonces in slot range: %w", err)
 		}
 		ret = append(ret, models.BlockNonce{
 			Hash:         row.Hash,
 			Nonce:        row.Nonce,
-			ID:           uint(row.ID),
+			ID:           uint(row.Ordinal), //nolint:gosec // ordinal is never negative
 			Slot:         slot,
 			IsCheckpoint: row.IsCheckpoint.Bool,
 		})
@@ -807,8 +878,8 @@ func (s *Store) GetLastBlockNonceInRange(
 	nonce, err := queries.GetLastBlockNonceInRange(
 		ctx,
 		sqlitequery.GetLastBlockNonceInRangeParams{
-			Slot:   sql.NullInt64{Int64: start, Valid: true},
-			Slot_2: sql.NullInt64{Int64: end, Valid: true},
+			Slot:   start,
+			Slot_2: end,
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -817,17 +888,18 @@ func (s *Store) GetLastBlockNonceInRange(
 	return nonce, err
 }
 
-// latestBlockNonceQuery finds the highest slot through the slot-leading index
-// and orders only that slot's rows by id. A plain ORDER BY slot DESC, id DESC
-// cannot use the index for its id term and sorts the whole table.
-const latestBlockNonceQuery = `SELECT hash, nonce, id, slot, is_checkpoint
+// latestBlockNonceQuery finds the highest slot through the clustered key and
+// orders only that slot's rows by ordinal. A plain ORDER BY slot DESC, ordinal
+// DESC cannot use the key for its ordinal term and sorts the whole table.
+const latestBlockNonceQuery = `SELECT hash, nonce, ordinal, slot, is_checkpoint
 FROM block_nonce
 WHERE slot = (SELECT MAX(slot) FROM block_nonce)
-ORDER BY id DESC
+ORDER BY ordinal DESC
 LIMIT 1`
 
-// GetLatestBlockNonce returns the highest-slot nonce row, using its ID to
-// preserve application order when multiple blocks share a slot. The nonce is
+// GetLatestBlockNonce returns the highest-slot nonce row, using its ordinal
+// (returned as ID) to preserve application order when multiple blocks share a
+// slot. The nonce is
 // written in the same metadata transaction as the corresponding ledger
 // effects, so this row is the durable ledger-state high-water mark.
 func (s *Store) GetLatestBlockNonce(
@@ -879,7 +951,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlot(
 	}
 	return queries.DeleteBlockNoncesBeforeSlot(
 		ctx,
-		sql.NullInt64{Int64: slot, Valid: true},
+		slot,
 	)
 }
 
@@ -898,7 +970,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	}
 	return queries.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 		ctx,
-		sql.NullInt64{Int64: slot, Valid: true},
+		slot,
 	)
 }
 
@@ -918,14 +990,14 @@ func (s *Store) DeleteBlockNoncesAfterPoint(
 	if len(point.Hash) == 0 {
 		return queries.DeleteBlockNoncesAfterOrigin(
 			ctx,
-			sql.NullInt64{Int64: slot, Valid: true},
+			slot,
 		)
 	}
 	return queries.DeleteBlockNoncesAfterPoint(
 		ctx,
 		sqlitequery.DeleteBlockNoncesAfterPointParams{
-			Slot:   sql.NullInt64{Int64: slot, Valid: true},
-			Slot_2: sql.NullInt64{Int64: slot, Valid: true},
+			Slot:   slot,
+			Slot_2: slot,
 			Hash:   point.Hash,
 		},
 	)

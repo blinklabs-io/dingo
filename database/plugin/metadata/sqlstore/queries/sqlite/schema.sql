@@ -49,13 +49,13 @@ CREATE TABLE epoch (
 );
 
 CREATE TABLE block_nonce (
-    hash BLOB,
+    slot INTEGER NOT NULL,
+    hash BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
     nonce BLOB,
-    id INTEGER PRIMARY KEY,
-    slot INTEGER,
     is_checkpoint BOOLEAN,
-    UNIQUE (hash, slot)
-);
+    PRIMARY KEY (slot, hash)
+) WITHOUT ROWID;
 
 CREATE TABLE datum (
     hash BLOB NOT NULL UNIQUE,

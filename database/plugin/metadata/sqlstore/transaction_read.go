@@ -447,8 +447,8 @@ func (s *Store) GetBlockSlotRangeStats(
 	row, err := q.GetBlockSlotRangeStats(
 		ctx,
 		sqlitequery.GetBlockSlotRangeStatsParams{
-			Slot:   sql.NullInt64{Int64: start, Valid: true},
-			Slot_2: sql.NullInt64{Int64: end, Valid: true},
+			Slot:   start,
+			Slot_2: end,
 		},
 	)
 	if err != nil {
