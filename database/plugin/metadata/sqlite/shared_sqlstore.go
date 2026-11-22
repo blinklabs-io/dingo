@@ -260,20 +260,21 @@ func vacuumWith(
 // remains the path that can bring an idle WAL all the way to zero.
 //
 // Durability: per DATABASE.md's Cross-Store Durability Contract, synchronous
-// NORMAL under WAL mode means SQLite fsyncs the WAL at checkpoint boundaries,
-// not after every commit -- a committed transaction survives an application
-// crash (the bytes are already in the OS page cache) but an OS crash/power
-// loss can still roll back whatever was written since the last checkpoint's
-// fsync. That was already true at the old 1000-page threshold; the larger
-// threshold only widens the rolled-back window from ~4MB to ~40MB of recent
-// commits. It does not introduce a new failure class: SQLite's own WAL replay
-// guarantees the database is never corrupted, only reverted to an earlier
-// consistent point, and Dingo already resumes chain-sync from whatever tip the
-// metadata store reports after any restart (ledger.LedgerState.loadTip),
-// re-fetching and re-applying any blocks peers show as missing via the ordinary
-// FindIntersect/chain-sync path -- the same mechanism that already recovers
-// from an explicit rollback or from the pre-existing Badger-behind- metadata
-// race the Cross-Store Durability Contract section above documents.
+// NORMAL under WAL mode fsyncs the WAL when a checkpoint backfills it, not
+// after every commit. A committed transaction survives an application crash
+// (its frames are already in the OS page cache), but an OS crash or power loss
+// can roll back the commits made since the last checkpoint that synced the
+// WAL. The write connection never checkpoints at commit (sqliteWritePragmas),
+// so that window is bounded by time rather than by WAL size: checkpointWAL's
+// PASSIVE checkpoint every checkpointInterval, or longer while a reader's
+// snapshot leaves PASSIVE no frame it may backfill. A caller that needs its
+// commits on disk calls syncCommitsWAL. A rolled-back window is not
+// corruption: SQLite's WAL replay restores an earlier consistent point, and
+// Dingo resumes chain-sync from whatever tip the metadata store reports after
+// any restart (ledger.LedgerState.loadTip), re-fetching and re-applying any
+// blocks peers show as missing via the ordinary FindIntersect/chain-sync path
+// -- the same mechanism that recovers from an explicit rollback or from the
+// Badger-behind-metadata race the Cross-Store Durability Contract documents.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=journal_size_limit(67108864)" +
