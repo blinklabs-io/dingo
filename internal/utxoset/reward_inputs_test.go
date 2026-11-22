@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -54,6 +55,13 @@ func TestStakeInputsLargerThanAStoreTransactionAreChunkedAndRolledBack(
 	t *testing.T,
 ) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine write, read and rollback of 150k rows "+
+			"across store transactions; no other test covers the "+
+			"stake-input chunking, so it runs in the un-instrumented "+
+			"jobs",
+	)
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })

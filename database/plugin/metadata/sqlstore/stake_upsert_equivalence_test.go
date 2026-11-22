@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func accountRowText(t *testing.T, db *sql.DB, key []byte) string {
@@ -39,6 +41,12 @@ SELECT printf('%s|%s|%s|%s|%s|%s|%s|%s', hex(coalesce(pool, x'')), pool IS NULL,
 // same autoincrement reservation.
 func TestUpdateCertificateAccountRowMatchesFullUpsert(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine comparison of every certificate state "+
+			"pair against SQLite; the row equality is asserted in the "+
+			"un-instrumented run",
+	)
 	store := newMigratedSQLiteStore(t)
 	ctx := context.Background()
 	poolA, poolB := []byte{0xa1}, []byte{0xb1}
