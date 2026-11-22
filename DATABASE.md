@@ -9906,7 +9906,7 @@ same statement as `GetStakeByPools` without the `GROUP BY`, restricted to the
 active pool set `GetActivePoolKeyHashes` resolves (the tip slot and the
 registration/retirement CTE). Completeness and the fallback are the same as for
 `GetStakeByPools`, evaluated across the whole active set. It runs on the
-caller's transaction, so its context cancels the statement.
+caller's transaction; a read transaction's context cancels the statement.
 
 ### `GetStakeByPoolsAtSlot`
 
@@ -10662,8 +10662,8 @@ NUMERIC)`, MySQL `CAST(amount AS DECIMAL(65, 0))`, and SQLite the
 arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
 (`database/plugin/metadata/sqlite/bigintsum`; SQLite's own `SUM` raises an
 integer-overflow error and `TOTAL` is a float). The result is read back as a
-decimal string. The sums run on the caller's transaction, so cancelling its
-context cancels the statements.
+decimal string. The sums run on the caller's transaction; cancelling a read
+transaction's context cancels the statements.
 The SQLite callbacks consume transient driver arguments before returning and
 retain only parsed numeric limbs. The driver can omit its text and blob
 argument copies; the aggregate still converts blob bytes to Go strings when
