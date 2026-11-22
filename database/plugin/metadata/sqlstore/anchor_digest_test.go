@@ -190,7 +190,12 @@ func TestLiveUtxoDigestResolvesOutputsConcurrently(t *testing.T) {
 	}
 	got, err := store.liveUtxoDigest(ctx, 50, resolve, nil, 6)
 	require.NoError(t, err)
-	require.Greater(t, peak, 1, "outputs in a chunk resolve on several goroutines")
+	require.Greater(
+		t,
+		peak,
+		1,
+		"outputs in a chunk resolve on several goroutines",
+	)
 
 	serial := func(h []byte, idx uint32) ([]byte, error) {
 		return resolvedBytes(h, idx), nil
@@ -293,9 +298,13 @@ func TestLiveUtxoDigestResolvesWithASingleReadConnection(t *testing.T) {
 	}
 	got, err := store.liveUtxoDigest(ctx, 50, resolve, nil, 4)
 	require.NoError(t, err)
-	want, err := referenceDigest(all, 50, func(h []byte, idx uint32) ([]byte, error) {
-		return resolvedBytes(h, idx), nil
-	})
+	want, err := referenceDigest(
+		all,
+		50,
+		func(h []byte, idx uint32) ([]byte, error) {
+			return resolvedBytes(h, idx), nil
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
@@ -336,4 +345,96 @@ func TestLiveUtxoSetQueryKeepsNonSQLiteOrderKey(t *testing.T) {
 		require.Contains(t, q, "ORDER BY t.hash, u.output_idx", d)
 		require.NotContains(t, q, "+t.hash", d)
 	}
+}
+
+// exerciseLiveUtxoDigestCarriesEveryOutputField digests outputs whose
+// credentials, datum hash and amount are all set, some left NULL, so a field
+// lost or misplaced between the scan and the digest changes the result.
+func exerciseLiveUtxoDigestCarriesEveryOutputField(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	type output struct {
+		hash, payment, staking, datum []byte
+		idx                           uint32
+		amount                        string
+		spent                         bool
+	}
+	var live []output
+	for i := 6; i > 0; i-- {
+		hash := bytes.Repeat([]byte{byte(0xa0 + i)}, 32)
+		tx := fixtureIdentityRow(t, store, 0, hash)
+		for idx := range uint32(3) {
+			o := output{
+				hash:    hash,
+				idx:     idx,
+				payment: bytes.Repeat([]byte{byte(i), byte(idx), 1}, 10)[:28],
+				amount:  fmt.Sprint(45_000_000_000_000_000 + i*10 + int(idx)),
+				spent:   (i+int(idx))%5 == 0,
+			}
+			if (i+int(idx))%2 == 0 {
+				o.staking = bytes.Repeat([]byte{byte(i), byte(idx), 2}, 10)[:28]
+			}
+			if (i+int(idx))%3 != 0 {
+				o.datum = bytes.Repeat([]byte{byte(i), byte(idx), 3}, 11)[:32]
+			}
+			deleted := int64(0)
+			if o.spent {
+				deleted = 40
+			}
+			_, err := store.writeDB.ExecContext(
+				ctx,
+				store.dialect.Rebind(`
+INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, amount,
+    payment_key, staking_key, datum_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+				tx, o.idx, 10, deleted, o.amount, o.payment, o.staking, o.datum,
+			)
+			require.NoError(t, err)
+			if !o.spent {
+				live = append(live, o)
+			}
+		}
+	}
+	sort.Slice(live, func(a, b int) bool {
+		if c := bytes.Compare(live[a].hash, live[b].hash); c != 0 {
+			return c < 0
+		}
+		return live[a].idx < live[b].idx
+	})
+	resolve := func(h []byte, idx uint32) ([]byte, error) {
+		return legacyOutputCbor(t, h, idx), nil
+	}
+	for _, withOutputs := range []bool{false, true} {
+		var r metadata.UtxoOutputResolver
+		if withOutputs {
+			r = resolve
+		}
+		d := metadata.NewUtxoDigester()
+		for _, o := range live {
+			var out []byte
+			if withOutputs {
+				out = legacyOutputCbor(t, o.hash, o.idx)
+			}
+			d.Add(
+				o.hash, o.idx, o.amount, o.payment, o.staking, o.datum,
+				withOutputs, out,
+			)
+		}
+		want := d.Sum()
+		for _, page := range []int{1, 4, 1000} {
+			got, err := store.liveUtxoDigest(ctx, 50, r, nil, page)
+			require.NoError(t, err)
+			require.Equal(
+				t, want, got,
+				"page size %d with outputs %v", page, withOutputs,
+			)
+		}
+	}
+}
+
+func TestLiveUtxoDigestCarriesEveryOutputField(t *testing.T) {
+	t.Parallel()
+	exerciseLiveUtxoDigestCarriesEveryOutputField(
+		t, newMigratedSQLiteStore(t),
+	)
 }
