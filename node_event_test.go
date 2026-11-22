@@ -100,3 +100,28 @@ func TestStartRemoteEventsSubscribesToConfiguredSources(t *testing.T) {
 	require.Never(t, func() bool { return hits.Load() > stopped },
 		300*time.Millisecond, 20*time.Millisecond)
 }
+
+// The source filters are copied in and out of the configuration, so neither
+// the caller's slices nor a getter result can change this node's filters.
+func TestBarkEventSourcesAreCopiedAtTheConfigBoundary(t *testing.T) {
+	t.Parallel()
+
+	types := []string{"chain.update"}
+	origins := []string{"node-a"}
+	cfg := NewConfig(WithBarkEventSources(BarkEventSource{
+		Name: "a", URL: "http://a:9090",
+		EventTypes: types, OriginNodeIDs: origins,
+	}))
+	types[0] = "mempool.*"
+	origins[0] = "node-z"
+
+	got := cfg.BarkEventSources()
+	require.Equal(t, []string{"chain.update"}, got[0].EventTypes)
+	require.Equal(t, []string{"node-a"}, got[0].OriginNodeIDs)
+
+	got[0].EventTypes[0] = "mempool.*"
+	got[0].OriginNodeIDs[0] = "node-z"
+	again := cfg.BarkEventSources()
+	require.Equal(t, []string{"chain.update"}, again[0].EventTypes)
+	require.Equal(t, []string{"node-a"}, again[0].OriginNodeIDs)
+}

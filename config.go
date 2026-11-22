@@ -2018,7 +2018,7 @@ type BarkEventSource = internalconfig.BarkEventSource
 // serves its own EventService.
 func WithBarkEventSources(sources ...BarkEventSource) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BarkEventSources = slices.Clone(sources)
+		c.cfg.BarkEventSources = cloneBarkEventSources(sources)
 	}
 }
 
@@ -2923,7 +2923,22 @@ func (c *Config) BarkEventNodeID() string {
 
 // BarkEventSources returns the nodes whose EventService this node follows.
 func (c *Config) BarkEventSources() []BarkEventSource {
-	return slices.Clone(c.cfg.BarkEventSources)
+	return cloneBarkEventSources(c.cfg.BarkEventSources)
+}
+
+// cloneBarkEventSources copies the filter slices as well as the sources, so
+// a caller's slice cannot change this node's filters after the fact.
+func cloneBarkEventSources(sources []BarkEventSource) []BarkEventSource {
+	if sources == nil {
+		return nil
+	}
+	out := make([]BarkEventSource, len(sources))
+	for i, src := range sources {
+		src.EventTypes = slices.Clone(src.EventTypes)
+		src.OriginNodeIDs = slices.Clone(src.OriginNodeIDs)
+		out[i] = src
+	}
+	return out
 }
 
 // BarkLifecycleOperatorCertificateFingerprints retains the legacy input.

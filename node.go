@@ -1872,7 +1872,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	if n.remoteEvents != nil {
 		started = append(started, func() { //nolint:contextcheck
-			if err := n.remoteEvents.Stop(context.Background()); err != nil {
+			// Bounded: a source blocked publishing to a full subscriber
+			// would otherwise hold failed-startup cleanup forever.
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.remoteEvents.Stop(ctx); err != nil {
 				n.config.logger.Error(
 					"failed to stop remote event subscriber during cleanup",
 					"error",

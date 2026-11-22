@@ -21298,7 +21298,10 @@ restart, or after the remote node answers `OUT_OF_RANGE`, a source continues
 from the remote node's current position and the events in between are not
 replayed. The remote node's sequence also restarts with its process, and a
 new run that has already passed the old position accepts it, so that run's
-earlier events are skipped without an error. The bark client retries
+earlier events are skipped without an error. Position zero means the remote
+node's current position, so a subscription that drops before its first event
+also resumes there and skips what was published while it was disconnected.
+The bark client retries
 silently, so each source logs a warning when its node stops answering and an
 info line when it answers or delivers an event again, once per outage.
 Sources are independent of `barkEventEnabled`, are set only in YAML
