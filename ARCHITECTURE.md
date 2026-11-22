@@ -2833,8 +2833,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
 | `ledger.pool_restored` | LedgerState | Pool state restored after rollback |
-| `ledger.sync_state` | Node | The node moved between catching up to the chain tip and following it (`ledger.SyncStateEvent`: previous and current state, ledger tip slot, slots behind the wall clock). Caught up comes from the ledger's `IsAtTip` latch, which is read once because it never resets, and from `chainselection.genesis_mode_exited`; falling behind comes only from `chainselection.genesis_mode_entered`, so a node without Genesis selection reports one transition per run. Published only on a change |
-| `ledger.protocol_params` | Node | The protocol parameters in force changed (`ledger.ProtocolParamsEvent`: epoch, parameters). Checked on each `epoch.transition` against the last parameters seen, compared in their utxorpc form; the parameters at startup are the baseline and are not published |
+| `ledger.sync_state` | Node | The node moved between catching up to the chain tip and following it (`ledger.SyncStateEvent`: previous and current state, ledger tip slot, slots behind the wall clock). Caught up comes from the ledger's `IsAtTip` latch, which is read once because it never resets, and from `chainselection.genesis_mode_exited`; falling behind comes only from `chainselection.genesis_mode_entered`, so a node without Genesis selection reports one transition per run. Those two events arrive on separate subscriber goroutines, so each callback applies the selector's current mode (`GenesisSelectionState`) rather than the transition it announced. Published only on a change |
+| `ledger.protocol_params` | Node | The protocol parameters in force changed (`ledger.ProtocolParamsEvent`: epoch, parameters). Checked on each `epoch.transition` against the last parameters seen, compared as the era's complete parameter set (`ledger.ProtocolParamsJSON`), so a change to a parameter the utxorpc form omits still counts; the parameters at startup are the baseline and are not published |
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block forged and adopted onto the chain |
@@ -21265,8 +21265,9 @@ EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
 `mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`,
 `ledger.sync_state`, `ledger.protocol_params`, `database.operation`) and
 converts each to a registry event with a typed payload. Protocol parameters
-travel as their utxorpc form encoded as JSON, which has the same shape in
-every era, and are dropped with a warning when that conversion fails; a rollback travelling on
+travel as the complete parameter set in its era's own shape encoded as JSON
+(`ledger.ProtocolParamsJSON`), named by the payload's era, and are dropped
+with a warning when that conversion fails; a rollback travelling on
 `chain.update` stays on `chain.update` and is reported in the payload's
 `rollback` field. A subscription filter selects by registered event type or
 category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
@@ -21288,8 +21289,6 @@ only accepts its own typed structs. Concurrent-stream limits
 (`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
 operator opt-ins; zero or unset means unlimited, and `PublishBatch` has no
 fixed batch cap.
-Sync state, protocol parameter and database operation events are not in the
-registry because no internal event carries that data.
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s

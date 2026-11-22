@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -156,20 +155,21 @@ func syncState(s ledger.SyncState) eventv1alpha1.SyncState {
 	return eventv1alpha1.SyncState_SYNC_STATE_UNSPECIFIED
 }
 
-// protocolParams reports the parameters in their utxorpc form, which has the
-// same shape in every era, so a subscriber decodes parameters_json without
-// knowing the era.
+// protocolParams reports the complete parameter set in its era's own shape,
+// as Bark specifies for parameters_json; era names that shape. The protocol
+// version comes from the utxorpc form, which carries it the same way in every
+// era.
 func (a *eventAdapter) protocolParams(
 	d ledger.ProtocolParamsEvent,
 ) (*eventv1alpha1.ProtocolParametersEventData, error) {
 	if d.Params == nil {
 		return nil, errors.New("no protocol parameters")
 	}
-	params, err := d.Params.Utxorpc()
+	encoded, err := ledger.ProtocolParamsJSON(d.Params)
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := protojson.Marshal(params)
+	params, err := d.Params.Utxorpc()
 	if err != nil {
 		return nil, err
 	}

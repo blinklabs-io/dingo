@@ -15,6 +15,7 @@
 package bark
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -29,9 +30,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
-	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 )
 
 func discardLogger() *slog.Logger {
@@ -43,6 +41,7 @@ func testProtocolParams() *shelley.ShelleyProtocolParameters {
 		MaxTxSize:     16384,
 		ProtocolMajor: 10,
 		ProtocolMinor: 2,
+		MinUtxoValue:  1000000,
 		A0:            &cbor.Rat{Rat: big.NewRat(3, 10)},
 		Rho:           &cbor.Rat{Rat: big.NewRat(3, 1000)},
 		Tau:           &cbor.Rat{Rat: big.NewRat(2, 10)},
@@ -109,15 +108,13 @@ func TestEventAdapterConvertsProtocolParams(t *testing.T) {
 	require.Equal(t, uint64(10), d.GetProtocolMajor())
 	require.Equal(t, uint64(2), d.GetProtocolMinor())
 
-	want, err := params.Utxorpc()
+	want, err := ledger.ProtocolParamsJSON(params)
 	require.NoError(t, err)
-	var got cardano.PParams
-	require.NoError(t, protojson.Unmarshal([]byte(d.GetParametersJson()), &got))
-	require.True(
-		t,
-		proto.Equal(want, &got),
-		"parameters_json does not round-trip",
-	)
+	require.JSONEq(t, string(want), d.GetParametersJson())
+	// A parameter the utxorpc form omits is present.
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(d.GetParametersJson()), &fields))
+	require.InDelta(t, 1000000, fields["MinUtxoValue"], 0)
 }
 
 // TestEventAdapterDropsUnconvertibleProtocolParams checks parameters that

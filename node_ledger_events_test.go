@@ -278,7 +278,7 @@ func TestProtocolParamsTrackerSkipsUncomparableParams(t *testing.T) {
 	)
 
 	bad := testShelleyPParams(16384)
-	bad.A0 = nil
+	bad.A0 = &cbor.Rat{}
 	ls.set(11, bad)
 	tr.check(true)
 	testutil.RequireNoReceive(t, ch, 50*time.Millisecond, "uncomparable")
@@ -286,4 +286,73 @@ func TestProtocolParamsTrackerSkipsUncomparableParams(t *testing.T) {
 	ls.set(12, testShelleyPParams(16384))
 	tr.check(true)
 	testutil.RequireNoReceive(t, ch, 50*time.Millisecond, "baseline kept")
+}
+
+// TestProtocolParamsTrackerSeesParamsOutsideUtxorpc checks a change to a
+// parameter the utxorpc form omits, here Shelley's MinUtxoValue, is still
+// published.
+func TestProtocolParamsTrackerSeesParamsOutsideUtxorpc(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ch := bus.Subscribe(ledger.ProtocolParamsEventType)
+	ls := &fakeParamsLedger{}
+	before := testShelleyPParams(16384)
+	before.MinUtxoValue = 1000000
+	ls.set(10, before)
+	tr := newProtocolParamsTracker(
+		bus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		func() protocolParamsLedger { return ls },
+	)
+
+	after := testShelleyPParams(16384)
+	after.MinUtxoValue = 2000000
+	ls.set(11, after)
+	tr.check(true)
+	evt := testutil.RequireReceive(t, ch, 2*time.Second, "MinUtxoValue change")
+	require.Equal(
+		t,
+		ledger.ProtocolParamsEvent{Epoch: 11, Params: after},
+		evt.Data,
+	)
+}
+
+// TestSyncStateTrackerAppliesSelectorModeNotStaleCallback checks a Genesis
+// exit callback that runs after the selector has already re-entered Genesis
+// does not report the node caught up.
+func TestSyncStateTrackerAppliesSelectorModeNotStaleCallback(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	ch := syncStateEvents(t, bus)
+	var mu sync.Mutex
+	inGenesis := true
+	tr := newSyncStateTracker(bus, func() syncStateLedger { return nil })
+	tr.inGenesis = func() (bool, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return inGenesis, true
+	}
+	setGenesis := func(v bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		inGenesis = v
+	}
+
+	setGenesis(false)
+	tr.genesisModeChanged(true)
+	requireSyncState(t, ch, ledger.SyncStateEvent{
+		Previous: ledger.SyncStateSyncing, Current: ledger.SyncStateCaughtUp,
+	})
+
+	// The selector leaves and re-enters Genesis; the second exit's callback
+	// runs after the entry's, so the selector is back in Genesis by then.
+	setGenesis(true)
+	tr.genesisModeChanged(false)
+	requireSyncState(t, ch, ledger.SyncStateEvent{
+		Previous: ledger.SyncStateCaughtUp, Current: ledger.SyncStateSyncing,
+	})
+	tr.genesisModeChanged(true)
+	testutil.RequireNoReceive(t, ch, 50*time.Millisecond, "stale exit")
 }

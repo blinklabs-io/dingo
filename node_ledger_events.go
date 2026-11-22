@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"log/slog"
 	"sync"
 
@@ -22,8 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
-	"google.golang.org/protobuf/proto"
 )
 
 // syncStateLedger is the ledger state the sync state tracker reads.
@@ -42,9 +41,17 @@ type syncStateLedger interface {
 // signal that a caught-up node fell behind again. The ledger latch is
 // consulted once: it never resets, so after a Genesis re-entry it would
 // report caught up while the selector is still catching up.
+//
+// The selector's enter and exit events arrive on separate subscriber
+// goroutines, so a stale one can run after a newer one. Each callback
+// therefore applies the selector's current mode rather than the transition
+// its event announced.
 type syncStateTracker struct {
 	bus    *event.EventBus
 	ledger func() syncStateLedger
+	// inGenesis reports the selector's current mode, or ok false when there
+	// is no selector to ask.
+	inGenesis func() (active bool, ok bool)
 
 	mu          sync.Mutex
 	state       ledger.SyncState
@@ -79,6 +86,11 @@ func (t *syncStateTracker) ledgerTipCommitted() {
 func (t *syncStateTracker) genesisModeChanged(caughtUp bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.inGenesis != nil {
+		if active, ok := t.inGenesis(); ok {
+			caughtUp = !active
+		}
+	}
 	next := ledger.SyncStateSyncing
 	if caughtUp {
 		next = ledger.SyncStateCaughtUp
@@ -125,7 +137,7 @@ type protocolParamsTracker struct {
 	ledger func() protocolParamsLedger
 
 	mu   sync.Mutex
-	last *cardano.PParams
+	last []byte
 }
 
 func newProtocolParamsTracker(
@@ -148,9 +160,9 @@ func (t *protocolParamsTracker) check(publish bool) {
 	if params == nil {
 		return
 	}
-	// The utxorpc form is era-independent, so two parameter sets compare
-	// field by field whatever era they belong to.
-	compared, err := params.Utxorpc()
+	// The era's complete parameter set is compared, so a change to any
+	// parameter counts. An era change also changes the encoding's shape.
+	compared, err := ledger.ProtocolParamsJSON(params)
 	if err != nil {
 		t.logger.Warn("could not compare protocol parameters",
 			"epoch", epoch, "error", err)
@@ -158,7 +170,7 @@ func (t *protocolParamsTracker) check(publish bool) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.last != nil && proto.Equal(t.last, compared) {
+	if t.last != nil && bytes.Equal(t.last, compared) {
 		return
 	}
 	t.last = compared
@@ -187,6 +199,12 @@ func (n *Node) subscribeLedgerStateEvents() {
 		}
 		return nil
 	})
+	if cs := n.chainSelector; cs != nil {
+		syncTracker.inGenesis = func() (bool, bool) {
+			active, _ := cs.GenesisSelectionState()
+			return active, true
+		}
+	}
 	n.subscribeRequiredEvent(
 		ledger.TipEventType,
 		func(event.Event) { syncTracker.ledgerTipCommitted() },

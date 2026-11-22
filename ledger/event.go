@@ -15,6 +15,9 @@
 package ledger
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -267,4 +270,22 @@ const ProtocolParamsEventType event.EventType = "ledger.protocol_params"
 type ProtocolParamsEvent struct {
 	Epoch  uint64
 	Params lcommon.ProtocolParameters
+}
+
+// ProtocolParamsJSON renders params as JSON in their era's own shape, so every
+// parameter of that era is present. The utxorpc form is not used: it drops
+// parameters some eras have, such as Shelley's MinUtxoValue, Decentralization
+// and ExtraEntropy.
+func ProtocolParamsJSON(params lcommon.ProtocolParameters) (out []byte, err error) {
+	if params == nil {
+		return nil, errors.New("no protocol parameters")
+	}
+	// A rational whose value was never set makes encoding/json panic rather
+	// than return an error.
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("encode protocol parameters: %v", r)
+		}
+	}()
+	return json.Marshal(params)
 }
