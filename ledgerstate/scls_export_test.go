@@ -284,6 +284,29 @@ func TestExportSCLSCancellationLeavesNothing(t *testing.T) {
 	requireNoSCLSFiles(t, dir)
 }
 
+func TestExportSCLSCancellationStopsVerification(t *testing.T) {
+	t.Parallel()
+	f := newSCLSFixture(t, EraConway, sclsRefs()...)
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var read int64
+	_, err := ExportSCLS(ctx, SCLSExportConfig{
+		Source: f.source(t),
+		Output: filepath.Join(dir, "state.scls"),
+		Tool:   "dingo test",
+		verify: func(r io.Reader) (scls.Hash, error) {
+			cancel()
+			n, err := io.Copy(io.Discard, r)
+			read = n
+			return scls.Hash{}, err
+		},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, read, "verification kept reading after cancellation")
+	requireNoSCLSFiles(t, dir)
+}
+
 func TestExportSCLSLeavesNothingWhenVerificationFails(t *testing.T) {
 	t.Parallel()
 	f := newSCLSFixture(t, EraConway, sclsRefs()...)

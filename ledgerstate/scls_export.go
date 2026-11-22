@@ -239,7 +239,7 @@ func ExportSCLS(
 	if err := f.Close(); err != nil {
 		return res, fmt.Errorf("scls export: close staged file: %w", err)
 	}
-	if err := verifySCLS(partial, root, cfg.verify); err != nil {
+	if err := verifySCLS(ctx, partial, root, cfg.verify); err != nil {
 		return res, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -316,6 +316,7 @@ func addSCLSUtxo(w *scls.Writer, txID []byte, index uint32, c []byte) error {
 // verifySCLS verifies the staged file in full and requires its root to be the
 // one the writer reported.
 func verifySCLS(
+	ctx context.Context,
 	path string,
 	want scls.Hash,
 	verify func(io.Reader) (scls.Hash, error),
@@ -334,7 +335,9 @@ func verifySCLS(
 			return vr.RootHash, nil
 		}
 	}
-	got, err := verify(f)
+	// scls.Verify reads to EOF without a context, so a cancelled export would
+	// otherwise scan the whole staged file before its cleanup runs.
+	got, err := verify(ctxReader{ctx: ctx, r: f})
 	if err != nil {
 		return fmt.Errorf("scls export: verify staged file: %w", err)
 	}
@@ -345,4 +348,16 @@ func verifySCLS(
 		)
 	}
 	return nil
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
