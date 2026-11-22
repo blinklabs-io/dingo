@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -26,7 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func spendCacheAddress(t *testing.T, seed byte) (lcommon.Address, models.StakeCredentialRef) {
+func spendCacheAddress(
+	t *testing.T,
+	seed byte,
+) (lcommon.Address, models.StakeCredentialRef) {
 	t.Helper()
 	payment := bytes.Repeat([]byte{seed}, 28)
 	staking := bytes.Repeat([]byte{seed + 0x80}, 28)
@@ -118,8 +122,9 @@ func spendCacheRows(
 	spenderID []byte,
 ) []spendCacheRow {
 	t.Helper()
-	rows, err := store.writeDB.Query(`
-SELECT hex(p.hash), u.output_idx, u.deleted_slot, COALESCE(hex(s.hash), '')
+	rows, err := store.instrumentedQueryer(store.writeDB).QueryContext(
+		t.Context(), `
+SELECT p.hash, u.output_idx, u.deleted_slot, s.hash
 FROM utxo u
 JOIN "transaction" p ON p.id = u.tx_id
 LEFT JOIN "transaction" s ON s.id = u.spent_at_tx_id
@@ -129,14 +134,40 @@ ORDER BY p.hash, u.output_idx`, spenderID)
 	defer rows.Close()
 	var out []spendCacheRow
 	for rows.Next() {
-		var r spendCacheRow
+		var (
+			r              spendCacheRow
+			hash, spenders []byte
+		)
 		require.NoError(t, rows.Scan(
-			&r.hash, &r.idx, &r.deletedSlot, &r.spentByHash,
+			&hash, &r.idx, &r.deletedSlot, &spenders,
 		))
+		r.hash = hex.EncodeToString(hash)
+		r.spentByHash = hex.EncodeToString(spenders)
 		out = append(out, r)
 	}
 	require.NoError(t, rows.Err())
 	return out
+}
+
+// spendCacheStake reads a credential's running live-stake total.
+func spendCacheStake(
+	t *testing.T,
+	store *Store,
+	ref models.StakeCredentialRef,
+) uint64 {
+	t.Helper()
+	var raw string
+	require.NoError(t, store.instrumentedQueryer(store.writeDB).QueryRowContext(
+		t.Context(), `
+SELECT COALESCE((
+    SELECT utxo_stake FROM reward_live_stake
+    WHERE credential_tag = ? AND staking_key = ?
+), '0')`,
+		int64(ref.Tag), ref.Key,
+	).Scan(&raw))
+	value, err := parseUint64("test utxo stake", raw)
+	require.NoError(t, err)
+	return value
 }
 
 func spendCachePoint(slot uint64, txID []byte) ocommon.Point {
@@ -149,6 +180,16 @@ func spendCachePoint(slot uint64, txID []byte) ocommon.Point {
 // one extra input names an output the store never inserted.
 func TestSpendCachedOutputsMatchByReference(t *testing.T) {
 	t.Parallel()
+	testSpendCachedOutputsMatchByReference(
+		t, func(t *testing.T) *Store { return newMigratedSQLiteStore(t) },
+	)
+}
+
+func testSpendCachedOutputsMatchByReference(
+	t *testing.T,
+	newStore func(*testing.T) *Store,
+) {
+	t.Helper()
 	seeds := []byte{1, 2, 3, 1, 2, 3, 1, 2, 3, 4}
 	producerID := bytes.Repeat([]byte{0xa1}, 32)
 	spenderID := bytes.Repeat([]byte{0xa2}, 32)
@@ -161,7 +202,7 @@ func TestSpendCachedOutputsMatchByReference(t *testing.T) {
 
 	run := func(t *testing.T, cached bool) ([]spendCacheRow, map[uint8]uint64) {
 		t.Helper()
-		store := newMigratedSQLiteStore(t)
+		store := newStore(t)
 		for _, seed := range []byte{1, 2, 3, 4} {
 			_, ref := spendCacheAddress(t, seed)
 			establishRunningTotal(t, store, ref, 1)
@@ -184,7 +225,7 @@ func TestSpendCachedOutputsMatchByReference(t *testing.T) {
 		stake := make(map[uint8]uint64)
 		for _, seed := range []byte{1, 2, 3, 4} {
 			_, ref := spendCacheAddress(t, seed)
-			stake[seed] = readUtxoStake(t, store, ref)
+			stake[seed] = spendCacheStake(t, store, ref)
 			want, err := store.sumCredentialUtxoStake(
 				context.Background(), store.writeDB, ref,
 			)
@@ -320,4 +361,78 @@ func spendCacheSink(t *testing.T) string {
 	)
 	require.NoError(t, err)
 	return addr.String()
+}
+
+// TestSpendCacheClearedByStoreReplacement proves Reset and RestoreFrom, which
+// replace the rows a cached id was taken from, leave no id that can spend an
+// unrelated output inserted afterwards under the same id.
+func TestSpendCacheClearedByStoreReplacement(t *testing.T) {
+	t.Parallel()
+	// wipe stands in for a provider hook that empties utxo and rewinds its
+	// id sequence, as a schema drop and recreate does.
+	wipe := func(store *Store) func() error {
+		return func() error {
+			_, err := store.writeDB.Exec(`DELETE FROM utxo`)
+			if err != nil {
+				return err
+			}
+			_, err = store.writeDB.Exec(
+				`DELETE FROM sqlite_sequence WHERE name = 'utxo'`,
+			)
+			return err
+		}
+	}
+	for name, replace := range map[string]func(*Store) error{
+		"reset": func(store *Store) error {
+			store.reset = func(context.Context) error {
+				return wipe(store)()
+			}
+			return store.Reset(t.Context())
+		},
+		"restore": func(store *Store) error {
+			store.restoreFrom = func(context.Context, string) error {
+				return wipe(store)()
+			}
+			return store.RestoreFrom(t.Context(), "backup")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			replacedID := bytes.Repeat([]byte{0xd1}, 32)
+			keptID := bytes.Repeat([]byte{0xd2}, 32)
+			spenderID := bytes.Repeat([]byte{0xd3}, 32)
+			require.NoError(t, store.SetTransaction(
+				spendCacheProducer(t, replacedID, []byte{1}),
+				spendCachePoint(10, replacedID), 0, nil, false, nil, 0,
+			))
+			replacedRowID := store.spends.entries[utxoIdentityKey(replacedID, 0)].id
+			require.NotZero(t, replacedRowID)
+			require.NoError(t, replace(store))
+			require.NoError(t, store.SetTransaction(
+				spendCacheProducer(t, keptID, []byte{2}),
+				spendCachePoint(11, keptID), 0, nil, false, nil, 0,
+			))
+			var keptRowID int64
+			require.NoError(t, store.writeDB.QueryRow(
+				`SELECT id FROM utxo`,
+			).Scan(&keptRowID))
+			require.Equal(
+				t, replacedRowID, keptRowID,
+				"the replacement must free the id for the next insert",
+			)
+			require.NoError(t, store.SetTransaction(
+				spendCacheSpender(t, spenderID,
+					models.UtxoId{Hash: replacedID, Idx: 0},
+				),
+				spendCachePoint(20, spenderID), 0, nil, false, nil, 0,
+			))
+			rows := spendCacheRows(t, store, spenderID)
+			require.Len(t, rows, 1)
+			require.Zero(
+				t, rows[0].deletedSlot,
+				"an output inserted after the replacement must stay live",
+			)
+		})
+	}
 }

@@ -44,7 +44,8 @@ type spendCacheEntry struct {
 // SQLite's AUTOINCREMENT never reuses the id of a committed row, but a
 // rolled-back insert frees its id, and nothing rewinds sqlite_sequence on
 // other paths, so every rollback empties the cache: otherwise a stale id could
-// address a different row inserted after the rollback.
+// address a different row inserted after the rollback. Reset and RestoreFrom
+// replace the rows themselves, so they empty it too.
 type spendCache struct {
 	entries map[string]spendCacheEntry
 }
@@ -59,18 +60,23 @@ func (s *Store) rememberInsertedOutputs(utxos []*models.Utxo, inserted []bool) {
 	}
 	s.spendMu.Lock()
 	defer s.spendMu.Unlock()
-	if s.spends.entries == nil || len(s.spends.entries)+len(utxos) > spendCacheLimit {
+	if s.spends.entries == nil ||
+		len(s.spends.entries)+len(utxos) > spendCacheLimit {
 		s.spends.entries = make(map[string]spendCacheEntry, 1<<16)
 	}
 	for i, u := range utxos {
-		if i >= len(inserted) || !inserted[i] || u.ID == 0 || u.DeletedSlot != 0 {
+		if i >= len(inserted) || !inserted[i] || u.ID == 0 ||
+			u.DeletedSlot != 0 {
 			continue
 		}
 		s.spends.entries[utxoIdentityKey(u.TxId, u.OutputIdx)] = spendCacheEntry{
 			id:         int64(u.ID), //nolint:gosec // row ids are SQL integers
 			tag:        int64(u.CredentialTag),
 			stakingKey: u.StakingKey,
-			amount:     sql.NullString{String: decimalUint64(u.Amount), Valid: true},
+			amount: sql.NullString{
+				String: decimalUint64(u.Amount),
+				Valid:  true,
+			},
 		}
 	}
 }
@@ -83,7 +89,9 @@ func (s *Store) forgetSpendCache() {
 
 // takeCachedSpends removes and returns the cached rows of refs, keyed by
 // reference.
-func (s *Store) takeCachedSpends(refs []models.UtxoId) map[string]spendCacheEntry {
+func (s *Store) takeCachedSpends(
+	refs []models.UtxoId,
+) map[string]spendCacheEntry {
 	if !s.spendCacheEnabled() {
 		return nil
 	}
@@ -139,7 +147,10 @@ func (s *Store) spendCachedRows(
 		}
 		key, ok := byID[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("consume UTxO by id: unexpected row %d", id)
+			return nil, nil, fmt.Errorf(
+				"consume UTxO by id: unexpected row %d",
+				id,
+			)
 		}
 		e := cached[key]
 		updated[key] = struct{}{}

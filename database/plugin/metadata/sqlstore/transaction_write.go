@@ -1612,7 +1612,9 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					consumedStakeDeltas = append(consumedStakeDeltas, refDeltas...)
+					consumedStakeDeltas = append(
+						consumedStakeDeltas, refDeltas...,
+					)
 				}
 				// Historical replay defers account-derived fields to the final
 				// rebuild, but it still changes the live UTxO set. Keep its

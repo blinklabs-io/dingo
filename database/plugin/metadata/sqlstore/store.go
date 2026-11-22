@@ -462,8 +462,10 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	// Like Reset, a restore replaces the on-disk/remote schema and data out
 	// from under any statement prepared before it ran; invalidate the cache
 	// regardless of outcome so a later call always re-prepares against
-	// whatever RestoreFrom actually left behind.
+	// whatever RestoreFrom actually left behind. The restored rows carry
+	// their own ids, so no remembered spend id still names its output.
 	s.closePreparedStatements()
+	s.forgetSpendCache()
 	return err
 }
 
@@ -500,6 +502,8 @@ func (s *Store) Reset(ctx context.Context) error {
 	// whether reset succeeded or failed partway, rather than assume a
 	// partial failure left every cached statement's table intact.
 	s.closePreparedStatements()
+	// The recreated tables restart their id sequences.
+	s.forgetSpendCache()
 	return err
 }
 
