@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"testing"
@@ -465,4 +466,109 @@ func TestWriterFallsBackToAFullPlannerStatsPassAtTheAnchor(t *testing.T) {
 	r := newAnchorRigWithStore(t, 30, 12, store)
 	require.NoError(t, r.w.CatchUp(context.Background()))
 	require.Equal(t, 1, probe.fullRuns())
+}
+
+// failingStatsProbe fails the anchor's planner-statistics pass: the
+// incremental form with incrementalErr, or, when that is nil, reports the form
+// unsupported and fails the full refresh with fullErr.
+type failingStatsProbe struct {
+	metadata.MetadataStore
+	incrementalErr error
+	fullErr        error
+}
+
+func (p *failingStatsProbe) OptimizePlannerStatsContext(
+	context.Context, string,
+) (types.PlannerStatsResult, error) {
+	return types.PlannerStatsResult{Supported: p.incrementalErr != nil},
+		p.incrementalErr
+}
+
+func (p *failingStatsProbe) UpdatePlannerStatsContext(context.Context) error {
+	return p.fullErr
+}
+
+// warnRecorder keeps the warning records a logger emits.
+type warnRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *warnRecorder) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+
+func (h *warnRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *warnRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *warnRecorder) WithGroup(string) slog.Handler { return h }
+
+// errorFor returns the error attribute of the first record with message msg.
+func (h *warnRecorder) errorFor(msg string) (error, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != msg {
+			continue
+		}
+		var found error
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" {
+				found, _ = a.Value.Any().(error)
+				return false
+			}
+			return true
+		})
+		return found, true
+	}
+	return nil, false
+}
+
+// The anchor is durable once PhaseDone commits, so a failed statistics pass
+// at the anchor is logged and catch-up still reaches the ledger tip, whichever
+// form of the pass failed.
+func TestWriterLogsAFailedAnchorPlannerStatsPass(t *testing.T) {
+	t.Parallel()
+	injected := errors.New("injected planner statistics failure")
+	for name, probe := range map[string]*failingStatsProbe{
+		"incremental": {incrementalErr: injected},
+		"full":        {fullErr: injected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabaseWithMetadataWrapper(
+				t,
+				dbtest.Options{Config: &database.Config{}},
+				func(m metadata.MetadataStore) metadata.MetadataStore {
+					probe.MetadataStore = m
+					return probe
+				},
+			)
+			require.NoError(t, err)
+			store, err := indexerdb.NewStore(db, db, 10)
+			require.NoError(t, err)
+			r := newAnchorRigWithStore(t, 30, 12, store)
+			warnings := &warnRecorder{}
+			r.w.logger = slog.New(warnings)
+
+			require.NoError(t, r.w.CatchUp(context.Background()))
+			logged, ok := warnings.errorFor(
+				"indexer final planner statistics failed",
+			)
+			require.True(t, ok, "the failed pass is logged")
+			require.ErrorIs(t, logged, injected)
+			phase, err := r.store.Bootstrap(nil)
+			require.NoError(t, err)
+			require.Equal(t, indexerdb.PhaseDone, phase)
+			tip, err := r.store.Tip(nil)
+			require.NoError(t, err)
+			require.Equal(t, uint64(29), tip.BlockNumber)
+		})
+	}
 }
