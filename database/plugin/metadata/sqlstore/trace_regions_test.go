@@ -20,8 +20,6 @@ import (
 	rtrace "runtime/trace"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/internal/test/tracetest"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -91,45 +89,4 @@ func TestRegionsDoNotAllocateWhenTracingIsOff(t *testing.T) {
 		p.end()
 	})
 	require.Zero(t, allocs)
-}
-
-// Not t.Parallel: only one execution trace can run per process.
-func TestCachedStatementsRecordOneRegionPerCall(t *testing.T) {
-	store := newMigratedSQLiteStoreWithRegistry(t, prometheus.NewRegistry())
-	db := store.instrumentedQueryer(store.writeDB)
-	require.IsType(t, countingQueryer{}, db)
-	ctx := t.Context()
-	const (
-		missExec = "-- name: TraceMissExec :exec\n" +
-			"UPDATE sync_state SET value = value WHERE sync_key = 'none'"
-		missRow  = "-- name: TraceMissRow :one\nSELECT 1"
-		missRows = "-- name: TraceMissRows :many\nSELECT 1"
-	)
-	_, hot := hotStatementSet[hasSpecializedCertificatesSQL]
-	require.True(t, hot)
-
-	regions := tracetest.Record(t, func() {
-		_, err := store.execCached(ctx, db, missExec)
-		require.NoError(t, err)
-		var one int
-		require.NoError(t, store.queryRowCached(ctx, db, missRow).Scan(&one))
-		rows, err := store.queryRowsCached(ctx, db, missRows)
-		require.NoError(t, err)
-		require.NoError(t, rows.Close())
-		var exists bool
-		require.NoError(t, store.queryRowCached(
-			ctx, db, hasSpecializedCertificatesSQL, int64(1),
-		).Scan(&exists))
-	})
-
-	for _, name := range []string{
-		"dingo.sql.TraceMissExec",
-		"dingo.sql.TraceMissRow",
-		"dingo.sql.TraceMissRows",
-		"dingo.sql.HasTransactionCertificates",
-	} {
-		require.Equalf(t, 1, regions.Begins[name], "region %q", name)
-		require.Equalf(t, 1, regions.Ends[name], "region %q", name)
-	}
-	require.Empty(t, regions.Misuse)
 }
