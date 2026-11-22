@@ -127,7 +127,7 @@ func TestEventAdapterDropsUnconvertibleProtocolParams(t *testing.T) {
 		},
 	}
 	bad := testProtocolParams()
-	bad.A0 = nil
+	bad.A0 = &cbor.Rat{}
 	for _, params := range []*shelley.ShelleyProtocolParameters{bad, nil} {
 		evt := ledger.ProtocolParamsEvent{Epoch: 12}
 		if params != nil {
@@ -203,4 +203,28 @@ func TestEventSubscribeDeliversNodeStateEvents(t *testing.T) {
 		eventtype.LedgerProtocolParams: true,
 		eventtype.DatabaseOperation:    true,
 	}, got)
+}
+
+// TestEventAdapterKeepsParamsUtxorpcCannotRepresent checks parameters the
+// utxorpc form cannot carry, a rational with a denominator above 2^32, still
+// produce an event with the protocol version.
+func TestEventAdapterKeepsParamsUtxorpcCannotRepresent(t *testing.T) {
+	t.Parallel()
+	params := testProtocolParams()
+	params.A0 = &cbor.Rat{Rat: big.NewRat(1, 4294967296)}
+	_, err := params.Utxorpc()
+	require.Error(t, err)
+	out := (&eventAdapter{}).convert(
+		event.NewEvent(
+			ledger.ProtocolParamsEventType,
+			ledger.ProtocolParamsEvent{Epoch: 12, Params: params},
+		),
+		discardLogger(),
+	)
+	require.Len(t, out, 1)
+	var d eventv1alpha1.ProtocolParametersEventData
+	require.NoError(t, out[0].GetTypedData().UnmarshalTo(&d))
+	require.Equal(t, uint64(10), d.GetProtocolMajor())
+	require.Equal(t, uint64(2), d.GetProtocolMinor())
+	require.Contains(t, d.GetParametersJson(), `"A0":"1/4294967296"`)
 }

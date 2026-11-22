@@ -75,6 +75,14 @@ func (t *syncStateTracker) ledgerTipCommitted() {
 	if t.ledgerTipIn {
 		return
 	}
+	// While the selector is in Genesis mode the node is still catching up,
+	// whatever the ledger latch says; the Genesis exit reports caught up.
+	// The latch is not consumed, so a later tip outside Genesis can use it.
+	if t.inGenesis != nil {
+		if active, ok := t.inGenesis(); ok && active {
+			return
+		}
+	}
 	ls := t.ledger()
 	if ls == nil || !ls.IsAtTip() {
 		return
@@ -151,7 +159,12 @@ func newProtocolParamsTracker(
 	return t
 }
 
+// check reads the parameters while holding t.mu, so concurrent checks (an
+// epoch callback and the post-subscription reconcile) observe the ledger in
+// the order they publish and a stale read cannot follow a newer one.
 func (t *protocolParamsTracker) check(publish bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	ls := t.ledger()
 	if ls == nil {
 		return
@@ -168,8 +181,6 @@ func (t *protocolParamsTracker) check(publish bool) {
 			"epoch", epoch, "error", err)
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.last != nil && bytes.Equal(t.last, compared) {
 		return
 	}
@@ -231,4 +242,9 @@ func (n *Node) subscribeLedgerStateEvents() {
 		event.EpochTransitionEventType,
 		func(event.Event) { params.check(true) },
 	)
+	// The baseline was read before the subscription existed; an epoch that
+	// changed the parameters in between published no transition this tracker
+	// saw. Reconcile once now so that change is reported with the epoch it
+	// applies from rather than at the next boundary.
+	params.check(true)
 }

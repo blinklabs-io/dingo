@@ -356,3 +356,36 @@ func TestSyncStateTrackerAppliesSelectorModeNotStaleCallback(t *testing.T) {
 	tr.genesisModeChanged(true)
 	testutil.RequireNoReceive(t, ch, 50*time.Millisecond, "stale exit")
 }
+
+// TestSyncStateTrackerIgnoresLedgerTipInGenesis checks the ledger latch does
+// not report caught up while the selector is in Genesis mode, and that the
+// Genesis exit still does.
+func TestSyncStateTrackerIgnoresLedgerTipInGenesis(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	ch := syncStateEvents(t, bus)
+	ls := &fakeSyncLedger{}
+	ls.set(true, 900, 0)
+	var mu sync.Mutex
+	inGenesis := true
+	tr := newSyncStateTracker(bus, func() syncStateLedger { return ls })
+	tr.inGenesis = func() (bool, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return inGenesis, true
+	}
+
+	tr.ledgerTipCommitted()
+	testutil.RequireNoReceive(t, ch, 50*time.Millisecond, "tip in Genesis")
+
+	mu.Lock()
+	inGenesis = false
+	mu.Unlock()
+	tr.genesisModeChanged(true)
+	requireSyncState(t, ch, ledger.SyncStateEvent{
+		Previous: ledger.SyncStateSyncing,
+		Current:  ledger.SyncStateCaughtUp,
+		TipSlot:  900,
+	})
+}

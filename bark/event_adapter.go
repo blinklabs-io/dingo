@@ -28,6 +28,9 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -156,9 +159,7 @@ func syncState(s ledger.SyncState) eventv1alpha1.SyncState {
 }
 
 // protocolParams reports the complete parameter set in its era's own shape,
-// as Bark specifies for parameters_json; era names that shape. The protocol
-// version comes from the utxorpc form, which carries it the same way in every
-// era.
+// as Bark specifies for parameters_json; era names that shape.
 func (a *eventAdapter) protocolParams(
 	d ledger.ProtocolParamsEvent,
 ) (*eventv1alpha1.ProtocolParametersEventData, error) {
@@ -169,14 +170,11 @@ func (a *eventAdapter) protocolParams(
 	if err != nil {
 		return nil, err
 	}
-	params, err := d.Params.Utxorpc()
-	if err != nil {
-		return nil, err
-	}
+	version := protocolVersion(d.Params)
 	data := &eventv1alpha1.ProtocolParametersEventData{
 		Epoch:          d.Epoch,
-		ProtocolMajor:  uint64(params.GetProtocolVersion().GetMajor()),
-		ProtocolMinor:  uint64(params.GetProtocolVersion().GetMinor()),
+		ProtocolMajor:  uint64(version.Major),
+		ProtocolMinor:  uint64(version.Minor),
 		ParametersJson: string(encoded),
 	}
 	if a.eraNameForEpoch != nil {
@@ -280,4 +278,28 @@ func eraNameForBlockType(blockType uint) string {
 		return "dijkstra"
 	}
 	return ""
+}
+
+// protocolVersion reads the version from the era type directly. The utxorpc
+// form is not used: its conversion fails on parameters it cannot represent,
+// such as a rational with a denominator above 2^32, which would drop the
+// event for that epoch.
+func protocolVersion(
+	params lcommon.ProtocolParameters,
+) lcommon.ProtocolParametersProtocolVersion {
+	switch p := params.(type) {
+	case lcommon.ProtocolParametersProtocolVersionProvider:
+		return p.ProtocolParametersProtocolVersion()
+	case *dijkstra.DijkstraProtocolParameters:
+		return p.ProtocolVersion
+	case *conway.ConwayProtocolParameters:
+		return p.ProtocolVersion
+	}
+	if u, err := params.Utxorpc(); err == nil {
+		return lcommon.ProtocolParametersProtocolVersion{
+			Major: uint(u.GetProtocolVersion().GetMajor()),
+			Minor: uint(u.GetProtocolVersion().GetMinor()),
+		}
+	}
+	return lcommon.ProtocolParametersProtocolVersion{}
 }
