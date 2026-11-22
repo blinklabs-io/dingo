@@ -345,7 +345,6 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 	baseline := baselineCopy(t, chunks)
 	dir, digests := adoptSource(t, chunks)
 	blocks := fixtureBlocks(t, dir)
-	chunk0 := blocksBelow(blocks, 4320)
 	db := newAdoptDB(t, datatypes.StorageModeAPI)
 
 	killed := errors.New("killed mid-move")
@@ -360,9 +359,13 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 		}
 	})
 	require.ErrorIs(t, err, killed)
-	require.Equal(t, uint64(1), bound, "only chunk 0 was committed")
-	requireTipAt(t, db, chunk0[len(chunk0)-1], len(chunk0))
-	for _, name := range []string{"00001.chunk", "00001.primary"} {
+	// A group moves every chunk in before committing any of them, so the
+	// kill lands before chunk 0 commits.
+	require.Zero(t, bound, "no chunk was committed")
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	require.False(t, st.HasTip, "no tip covers the moved chunks")
+	for _, name := range []string{"00000.chunk", "00001.chunk", "00001.primary"} {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), name))
 		require.NoError(t, err, name)
 	}
@@ -373,7 +376,7 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
-	require.Equal(t, len(blocks)-len(chunk0), res.BlocksCopied)
+	require.Equal(t, len(blocks), res.BlocksCopied)
 	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
 	requireBlocksMatch(t, baseline, db, blocks)
 	requireOffsetsMatch(t, baseline, db, blocks)
@@ -673,7 +676,7 @@ func TestAdoptImmutableChunksPlacesChunkBeforeCommit(t *testing.T) {
 	pending, ok, err := db.ImmutableAdoptPending()
 	require.NoError(t, err)
 	require.True(t, ok, "the adoption is recorded as pending")
-	require.Equal(t, uint64(1), pending)
+	require.Equal(t, uint64(0), pending, "the record names its group's first chunk")
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
@@ -935,5 +938,41 @@ func TestAdoptImmutableChunksKeepsTipChunkFilesOnDigestMismatch(t *testing.T) {
 	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00001"+ext))
 		require.NoError(t, err, "committed markers name 00001%s", ext)
+	}
+}
+
+// A chunk that fails inside a group returns the chunks after it to the source
+// directory and finishes the chunks before it: their blobs are synced, their
+// source files removed and the committed callback reports them.
+func TestAdoptImmutableChunksMidGroupFailureReturnsLaterChunks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	killed := errors.New("killed before commit")
+	var committed []uint64
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.BeforeCommit = func(chunk uint64) error {
+			if chunk == 1 {
+				return killed
+			}
+			return nil
+		}
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.ErrorIs(t, err, killed)
+	require.Equal(t, []uint64{1}, committed, "chunk 0 was finished")
+	for _, ext := range chunkFileExts {
+		_, err := os.Stat(filepath.Join(dir, "00000"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist, "chunk 0 source removed")
+		_, err = os.Stat(filepath.Join(dir, "00002"+ext))
+		require.NoError(t, err, "chunk 2 returned to the source")
+		_, err = os.Stat(filepath.Join(db.ImmutableDir(), "00002"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist, "chunk 2 left the ImmutableDB")
 	}
 }
