@@ -7515,12 +7515,15 @@ with `SQLITE_BUSY` instead of waiting, and journal mode is persistent in the
 database header so once is enough; `busy_timeout` leads the remaining pragma
 list, because the driver applies `_pragma` directives in DSN order and anything
 ahead of it would run with no busy handler installed), so committed metadata
-reaches disk at WAL checkpoints (every 10000 pages, ~40MB at the default
-4096-byte page size, via `sqliteCommonPragmas`'s `wal_autocheckpoint`; raised
-from SQLite's 1000-page compiled-in default because a checkpoint firing on
-nearly every block-apply commit was rewriting the same hot B-tree pages to
-`metadata.sqlite` on almost every commit instead of letting several commits'
-worth of touches to a page coalesce into one checkpoint write). Badger is opened
+reaches disk at WAL checkpoints. The write connection never checkpoints at
+commit (`sqliteWritePragmas` sets `wal_autocheckpoint(0)`, and the bulk and
+restore pragmas keep 0), because the copy and fsync inside `COMMIT` stalled the
+single writer; `checkpointWAL` runs a PASSIVE checkpoint every two seconds on
+its own connection instead, so several commits' worth of touches to a hot
+B-tree page coalesce into one checkpoint write. The read pool keeps
+`wal_autocheckpoint(10000)` via `sqliteReadPragmas`. `modernc.org/sqlite`
+applies a DSN's `_pragma` values in sorted order, so each DSN carries the
+pragma exactly once. Badger is opened
 with its default `SyncWrites=false` and a 128MiB memtable, so committed blob
 writes can sit unflushed far longer — at chain tip dingo writes only a few MiB
 of blocks per hour, so the memtable may not rotate for hours. Without the sync
@@ -7555,9 +7558,9 @@ index-build temporaries on that connection also stay in RAM. `synchronous` and
 `temp_store=MEMORY` rather than the SQLite default.
 
 **Periodic forced WAL checkpoint (`checkpointWAL`,
-`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
-`wal_autocheckpoint` (above) fixed the write-amplification problem but
-surfaced a second one: `dingo_database_sql_wal_bytes` (below) never showed a
+`database/plugin/metadata/sqlite/shared_sqlstore.go`).** Moving the
+checkpoint off the commit path (above) fixed the write-amplification problem
+but surfaced a second one: `dingo_database_sql_wal_bytes` (below) never showed a
 single decrease, on any of four live instances, one of which had no other
 change applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE
 checkpoint, and PASSIVE — like FULL and RESTART — backfills WAL frames into
@@ -7577,7 +7580,8 @@ configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
 operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
 of the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`)
-attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes. Before
+runs `PRAGMA wal_checkpoint(PASSIVE)` every two seconds and attempts
+`PRAGMA wal_checkpoint(TRUNCATE)` on every 60th tick (two minutes). Before
 truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
 PASSIVE reports every WAL frame checkpointed. If a reader
 or writer prevents PASSIVE from draining the WAL, the truncation attempt is
@@ -7597,10 +7601,10 @@ checkpoint callback. Entering bulk mode first drains an in-flight callback, so
 the dedicated checkpoint connection cannot overlap the import's metadata
 writes; restoring normal pragmas re-enables the ticker. Bulk mode also caps
 SQLite auxiliary sorter threads at `min(4, GOMAXPROCS-1)` for index builds;
-normal-mode restore resets the setting to zero. Writer-owned
-`wal_autocheckpoint` remains active at 10000 pages throughout the import, so
-WAL frames are still backfilled while only the independent TRUNCATE attempts
-are postponed until the bulk phase completes. If the caller's final pragma
+normal-mode restore resets the setting to zero. The writer's
+`wal_autocheckpoint` stays 0 throughout the import and the scheduled
+checkpointer is paused, so the WAL is not backfilled until the bulk phase
+completes. If the caller's final pragma
 restore fails, the next scheduled checkpoint retries it and runs TRUNCATE only
 after recovery succeeds.
 

@@ -248,29 +248,11 @@ func vacuumWith(
 // journal_mode is deliberately absent: see ensureWALJournalMode. Everything
 // else here is per-connection state that has to be set on each one.
 //
-// wal_autocheckpoint(10000) raises the automatic-checkpoint threshold from
-// SQLite's compiled-in default of 1000 pages (~4MB at the default 4096-byte
-// page size) to 10000 pages (~40MB). Every top-level write transaction
-// (batches of up to 50 blocks; see ledger.batchSize) that pushes the WAL past
-// the threshold triggers a passive checkpoint that copies each dirty page
-// back into metadata.sqlite. Chain-state writes revisit a small set of hot
-// B-tree pages (UTXO/index pages near the tip, sequence counters) far more
-// often than they touch new ones, so a checkpoint firing on nearly every
-// commit rewrites those same pages to the main file over and over -- one
-// physical write per commit instead of one write per accumulated batch of
-// commits. Measured live against a from-genesis preview sync at the old
-// default: ~112MB/s sustained process write throughput (wchar) against a
-// combined ~2.9MB/s of net new data (SQLite file growth + Badger blob
-// growth), with the SQLite side alone accounting for the bulk of it while
-// the WAL file itself held a constant size -- i.e. checkpoint-driven
-// rewrites, not new data. Raising the threshold 10x lets up to 10x as many
-// commits' worth of hot-page churn coalesce into a single checkpoint pass,
-// since a checkpoint only ever needs to write the latest version of a given
-// page once. This value already runs in production via the bulk-load path
-// (see SQLiteDialect's setBulk, and its restore counterpart below, both of
-// which now agree on 10000) for genesis import and snapshot restore, so it
-// is not a new, unvalidated setting -- only its use outside of bulk mode is
-// new.
+// wal_autocheckpoint is deliberately absent: modernc.org/sqlite applies
+// the _pragma values of a DSN in sorted order, so a pragma that appears
+// twice takes the value that sorts last, not the one listed last. Each
+// DSN therefore carries it exactly once: sqliteWritePragmas sets it to 0 and
+// sqliteReadPragmas keeps the 10000-page threshold.
 //
 // journal_size_limit(67108864) lets SQLite shrink a reset WAL to at most
 // 64 MiB. It does not bound an active WAL or one that cannot reset because a
@@ -294,13 +276,18 @@ func vacuumWith(
 // race the Cross-Store Durability Contract section above documents.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
-	"&_pragma=wal_autocheckpoint(10000)" +
 	"&_pragma=journal_size_limit(67108864)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
 
 // sqliteWritePragmas is appended to the write pool's DSN only.
+//
+// wal_autocheckpoint(0) keeps SQLite from running an automatic checkpoint
+// inside COMMIT on the write connection, where the copy of WAL frames into the
+// database file and its fsync would stall the single writer. checkpointWAL
+// drains the WAL from its own connection instead. Bulk and restore pragmas in
+// sqlstore.SQLiteDialect keep this value.
 //
 // temp_store(MEMORY) keeps SQLite's statement journals off disk. A multi-row
 // INSERT ... RETURNING inside a write transaction saves every page it
@@ -314,13 +301,22 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // connection and not to the read pool, where many concurrent connections
 // could each hold large temporaries. synchronous and journal_mode are not
 // touched, so durability is unchanged.
-const sqliteWritePragmas = "&_pragma=temp_store(MEMORY)"
+const sqliteWritePragmas = "&_pragma=temp_store(MEMORY)" +
+	"&_pragma=wal_autocheckpoint(0)"
 
-// checkpointInterval is how often checkpointWAL forces a WAL checkpoint,
-// independent of the commit-triggered wal_autocheckpoint(10000) pragma above.
+// sqliteReadPragmas is appended to the read pool's DSN only. Read-only
+// connections never commit a write, so the threshold has no effect on them;
+// it is kept at the former shared value.
+const sqliteReadPragmas = "&_pragma=wal_autocheckpoint(10000)"
+
+// checkpointInterval is how often checkpointWAL runs a PASSIVE checkpoint.
+// The write connection's automatic checkpoint is disabled (see
+// sqliteWritePragmas), so this ticker is what bounds WAL growth. Every
+// checkpointTruncateEvery-th tick also attempts TRUNCATE once PASSIVE drains
+// the WAL, which keeps the TRUNCATE cadence at two minutes.
 //
-// wal_autocheckpoint only ever runs a PASSIVE checkpoint (that is what
-// SQLite's auto-checkpoint mechanism invokes internally), and PASSIVE -- like
+// A PASSIVE checkpoint (what SQLite's auto-checkpoint mechanism would run)
+// and PASSIVE -- like
 // FULL and RESTART -- backfills WAL frames into metadata.sqlite and lets
 // future writes reuse the reclaimed space, but does not shrink the -wal file
 // itself. journal_size_limit can shrink the file when SQLite resets the WAL;
@@ -340,7 +336,11 @@ const sqliteWritePragmas = "&_pragma=temp_store(MEMORY)"
 // reader holding an old snapshot can prevent WAL reset and make a given
 // TRUNCATE attempt busy (see checkpointBusyTimeout below), in which case the
 // file stays at its current size until a later reset or tick succeeds.
-const checkpointInterval = 2 * time.Minute
+const checkpointInterval = 2 * time.Second
+
+// checkpointTruncateEvery is the number of checkpointInterval ticks between
+// TRUNCATE attempts.
+const checkpointTruncateEvery = 60
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
 // any SQLite lock before giving up and retrying on the next tick.
@@ -385,31 +385,66 @@ func checkpointWAL(
 	databaseURI string,
 	logger *slog.Logger,
 ) func(context.Context) error {
-	return func(ctx context.Context) error {
-		db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
-		if err != nil {
-			return fmt.Errorf("open WAL checkpoint connection: %w", err)
-		}
-		defer func() {
-			_ = db.Close()
-		}()
+	return checkpointWALEvery(
+		checkpointTruncateEvery,
+		func(ctx context.Context, truncate bool) error {
+			db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
+			if err != nil {
+				return fmt.Errorf("open WAL checkpoint connection: %w", err)
+			}
+			defer func() {
+				_ = db.Close()
+			}()
 
-		return checkpointWALWith(
-			ctx,
-			logger,
-			func(ctx context.Context, mode string) (int, int, int, error) {
-				var busy, walLog, checkpointed int
-				row := db.QueryRowContext(
-					ctx,
-					fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
-				)
-				if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
-					return 0, 0, 0, err
-				}
-				return busy, walLog, checkpointed, nil
-			},
-		)
+			return checkpointTick(
+				ctx,
+				logger,
+				truncate,
+				func(ctx context.Context, mode string) (int, int, int, error) {
+					var busy, walLog, checkpointed int
+					row := db.QueryRowContext(
+						ctx,
+						fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
+					)
+					if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+						return 0, 0, 0, err
+					}
+					return busy, walLog, checkpointed, nil
+				},
+			)
+		},
+	)
+}
+
+// checkpointWALEvery returns a callback that calls run on every invocation,
+// with truncate set on every truncateEvery-th one.
+func checkpointWALEvery(
+	truncateEvery uint64,
+	run func(ctx context.Context, truncate bool) error,
+) func(context.Context) error {
+	var tick atomic.Uint64
+	return func(ctx context.Context) error {
+		return run(ctx, tick.Add(1)%truncateEvery == 0)
 	}
+}
+
+// checkpointTick runs a PASSIVE checkpoint, or the PASSIVE-gated TRUNCATE of
+// checkpointWALWith when truncate is set.
+func checkpointTick(
+	ctx context.Context,
+	logger *slog.Logger,
+	truncate bool,
+	checkpoint func(context.Context, string) (int, int, int, error),
+) error {
+	if truncate {
+		return checkpointWALWith(ctx, logger, checkpoint)
+	}
+	// A blocked PASSIVE attempt recurs every tick; the TRUNCATE tick reports
+	// persistent blockage at Warn.
+	if _, _, _, err := checkpoint(ctx, "PASSIVE"); err != nil {
+		return fmt.Errorf("WAL checkpoint: %w", err)
+	}
+	return nil
 }
 
 // syncCommitsBusyTimeout bounds how long a durability checkpoint waits for a
@@ -714,9 +749,10 @@ func openSQLStoreWithDialect(
 		readDB, err = sqlstore.OpenGuardedDB(
 			"sqlite",
 			fmt.Sprintf(
-				"%s?mode=ro%s",
+				"%s?mode=ro%s%s",
 				databaseURI,
 				sqliteCommonPragmas,
+				sqliteReadPragmas,
 			),
 			"sqlite",
 			dependencies.TracingEnabled,

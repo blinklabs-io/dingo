@@ -290,7 +290,7 @@ func SQLiteDialect() Dialect {
 				"PRAGMA synchronous = OFF",
 				"PRAGMA cache_size = -200000",
 				"PRAGMA temp_store = MEMORY",
-				"PRAGMA wal_autocheckpoint = 10000",
+				"PRAGMA wal_autocheckpoint = 0",
 			)(ctx, exec); err != nil {
 				return err
 			}
@@ -312,13 +312,10 @@ func SQLiteDialect() Dialect {
 			"PRAGMA cache_size = -200000",
 			"PRAGMA temp_store = MEMORY",
 		),
-		// wal_autocheckpoint is restored to 10000, not SQLite's compiled-in
-		// default of 1000: the per-connection DSN pragmas
-		// (sqliteCommonPragmas in database/plugin/metadata/sqlite/
-		// shared_sqlstore.go) already set every connection to 10000 for
-		// ordinary, non-bulk chain sync, and this restore path must agree
-		// with that value rather than quietly regressing a connection back
-		// to the smaller threshold once a bulk load finishes.
+		// wal_autocheckpoint stays 0, the value the write connection's DSN
+		// sets (sqliteWritePragmas in database/plugin/metadata/sqlite/
+		// shared_sqlstore.go): the store's own checkpointer drains the WAL,
+		// so a commit never runs the checkpoint itself.
 		//
 		// temp_store is restored to MEMORY for the same reason: the write
 		// connection runs with it from the DSN (sqliteWritePragmas) so
@@ -329,7 +326,7 @@ func SQLiteDialect() Dialect {
 			"PRAGMA cache_size = -50000",
 			"PRAGMA temp_store = MEMORY",
 			"PRAGMA threads = 0",
-			"PRAGMA wal_autocheckpoint = 10000",
+			"PRAGMA wal_autocheckpoint = 0",
 		),
 		analyze: execStatements("ANALYZE"),
 		// An explicit mask replaces SQLite's defaults, so retain the

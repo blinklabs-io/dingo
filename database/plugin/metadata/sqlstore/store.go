@@ -85,10 +85,10 @@ type Config struct {
 	VacuumInterval time.Duration
 	// Checkpoint is an optional provider-owned hook run on its own ticker,
 	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
-	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
-	// so the on-disk WAL file can be shrunk back down on a schedule, rather
-	// than relying solely on the commit-triggered wal_autocheckpoint passive
-	// checkpoint, which never truncates. This is best-effort: an active read
+	// run a periodic WAL checkpoint off the write path (see
+	// sqlite.checkpointWAL), PASSIVE on most ticks and TRUNCATE on some, so
+	// commits never checkpoint themselves and the on-disk WAL file can be
+	// shrunk back down on a schedule. This is best-effort: an active read
 	// snapshot can leave a given attempt busy, deferring the reduction to a
 	// later tick instead of guaranteeing an unconditional size ceiling. Left
 	// unset (or CheckpointInterval <= 0), this ticker never starts -- the

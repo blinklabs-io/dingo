@@ -257,3 +257,69 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 			"period while a reader snapshot prevents the WAL from draining",
 	)
 }
+
+// TestWriteConnectionDoesNotAutoCheckpoint pins the write connection's
+// automatic WAL checkpoint off: SQLite would otherwise run it inside COMMIT
+// on the writer. The store's own checkpointer keeps the WAL bounded.
+func TestWriteConnectionDoesNotAutoCheckpoint(t *testing.T) {
+	t.Parallel()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: t.TempDir()},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	autoCheckpointPages := func() int {
+		var pages int
+		require.NoError(
+			t,
+			writeDB.QueryRowContext(
+				t.Context(),
+				"PRAGMA wal_autocheckpoint",
+			).Scan(&pages),
+		)
+		return pages
+	}
+	require.Zero(t, autoCheckpointPages(), "fresh write connection")
+
+	dialect := sqlstore.SQLiteDialect()
+	require.NoError(t, dialect.SetBulkMode(t.Context(), writeDB))
+	require.Zero(t, autoCheckpointPages(), "in bulk mode")
+	require.NoError(t, dialect.RestoreNormalMode(t.Context(), writeDB))
+	require.Zero(t, autoCheckpointPages(), "after bulk mode")
+}
+
+func TestCheckpointWALSchedulesTruncateEveryNthTick(t *testing.T) {
+	t.Parallel()
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	checkpoint := checkpointWALEvery(
+		3,
+		func(ctx context.Context, truncate bool) error {
+			return checkpointTick(
+				ctx,
+				logger,
+				truncate,
+				func(_ context.Context, mode string) (int, int, int, error) {
+					modes = append(modes, mode)
+					return 0, 10, 10, nil
+				},
+			)
+		},
+	)
+	for range 6 {
+		require.NoError(t, checkpoint(t.Context()))
+	}
+	require.Equal(
+		t,
+		[]string{
+			"PASSIVE", "PASSIVE", "PASSIVE", "TRUNCATE",
+			"PASSIVE", "PASSIVE", "PASSIVE", "TRUNCATE",
+		},
+		modes,
+	)
+}

@@ -40,8 +40,7 @@ const sqliteFileMetricNamePrefix = "dingo_database_sql_"
 // The WAL gauge reports the -wal file's current size, not whether
 // checkpointing is keeping up: SQLite's PASSIVE, FULL, and RESTART
 // checkpoint modes (including the automatic checkpoint
-// wal_autocheckpoint(10000) triggers -- see sqliteCommonPragmas in
-// shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but
+// checkpointWAL's periodic PASSIVE run -- see shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but
 // do not shrink the -wal file themselves. journal_size_limit(67108864) can
 // shrink it to 64 MiB when SQLite resets the WAL, while checkpointWAL's
 // periodic TRUNCATE attempts (see shared_sqlstore.go) can bring it to zero.
@@ -55,11 +54,7 @@ const sqliteFileMetricNamePrefix = "dingo_database_sql_"
 // open across every attempt leaves it stalled at its current size instead,
 // so a healthy store and one whose checkpoints are persistently blocked can
 // read identically here for as long as that reader stays open -- use it to
-// see the on-disk WAL footprint, not checkpoint health on its own. Raising
-// wal_autocheckpoint to 10000 also raises this gauge's steady-state floor
-// from SQLite's old ~4MB (1000-page default) to ~40MB when checkpoints keep
-// up: that WAL size is now a normal part of the on-disk footprint, not
-// necessarily a transient backlog.
+// see the on-disk WAL footprint, not checkpoint health on its own.
 func registerSQLiteFileMetrics(
 	reg prometheus.Registerer,
 	databasePath string,
