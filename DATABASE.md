@@ -2847,7 +2847,9 @@ UTxO changes. Their tags and markers are declared in
 |---|---|
 | `n` + slot (8 bytes, big-endian) + block hash | a `block_nonce` row: checkpoint flag (1 byte), then the nonce |
 | `e` + epoch (8 bytes, big-endian) | an `epoch` row: start slot and era (8 bytes each, big-endian), then the row's CBOR |
-| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row's CBOR |
+| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row: a `0x00` mark, its captured slot (8 bytes, big-endian), then the row's CBOR. A row written before the slot was kept holds the CBOR alone, which never starts with `0x00` |
+| `$` + captured slot (8 bytes, big-endian) + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | the capture index of a `pool_stake_snapshot` row; empty value. It reads the rows captured in a slot range without reading the others |
+| `msnapslot` | set once every `s` row carries its captured slot and has its `$` entry. Without it a read of a slot range reads every snapshot row, and the ledger state load at the next start gives each row its slot and entry, in chunks that a restart resumes, then sets it |
 | `f` + epoch (8 bytes, big-endian) | an `epoch_summary` row's CBOR, without its `id` |
 | `mera` | the last mid-epoch era switch: epoch, slot, source era and target era (8 bytes each, big-endian) |
 | `t` + slot (8 bytes, big-endian) | a `network_state` row: treasury and reserves (8 bytes each, big-endian) |
@@ -2923,6 +2925,10 @@ UTxO changes. Their tags and markers are declared in
 | `mrbpend` | the point a rollback in more than one transaction is restoring, set before its first transaction that leaves the set between two states it held and cleared by its last. A store that starts with it finishes the rollback (`Store.ResumeRollback`, which `Set.Reconcile` calls before it rewinds a failure mark), and `ApplyLedgerBatch` refuses with `ErrRollbackPending` until then |
 | `mexportfloor` | the lowest slot, as a big-endian `uint64`, from which the state journal names every account and DRep row at the slot of its `AddedSlot`, so an export of a slot range reads the journal rather than the table. It is written when a store opens without it, as the tip slot plus one, raised to the tip plus one by a catch-up merge, and reset by a full bootstrap; the effective floor is the larger of it and `mjfloor` |
 | `mloadfloor` | the tip slot plus one at the last load that dropped a row family a rollback undoes through the state journal and whose load writes no entries or tombstones for the rows before the tip. It applies only while one of those families (delegations, genesis delegations, MIR certificates, witnesses, import baselines, stake and pool history, op-certs, accounts, DReps and their links, pools, committee, governance, protocol parameter updates, closure outputs) holds a row; the DRep dormancy counter, the reward block counts and the reward output rows are not among them. A rollback, `HasJournalPoint`, `PointBefore` and `JournalFloor` treat a point below it, other than the tip, as beyond the journal, so an undrained set is rebuilt from the metadata store; `mjfloor` is separate and still bounds only as-of reads |
+
+Snapshot prefix wipes and range-tombstone rollbacks delete each snapshot row
+and its capture-index entry in one transaction. Large prefixes use multiple
+transactions while keeping each row and entry together.
 
 A state journal entry whose first value byte is `2` is a range tombstone
 (`RowPut.TombstonePrefix`): its key is a prefix that held no row before the
