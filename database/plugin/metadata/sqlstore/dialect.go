@@ -510,7 +510,12 @@ func sqliteBoundedAnalyze(ctx context.Context, exec Execer) error {
 		return err
 	}
 	_, err := exec.ExecContext(ctx, "ANALYZE")
-	if _, rerr := exec.ExecContext(ctx, fmt.Sprintf("PRAGMA analysis_limit = %d", previous)); err == nil {
+	// Restore even when ctx was canceled mid-pass: a limit left behind would
+	// sample every later explicit ANALYZE on this connection.
+	if _, rerr := exec.ExecContext(
+		context.WithoutCancel(ctx),
+		fmt.Sprintf("PRAGMA analysis_limit = %d", previous),
+	); err == nil {
 		err = rerr
 	}
 	return err
