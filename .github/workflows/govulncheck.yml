@@ -37,9 +37,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          key: ${{ runner.os }}-go-build-govulncheck-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
+            ${{ runner.os }}-go-build-govulncheck-
       - name: govulncheck
         # govulncheck exits non-zero only for vulnerabilities this module
         # actually calls, so the unreachable findings it also prints (currently

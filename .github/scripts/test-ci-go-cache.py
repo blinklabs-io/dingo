@@ -224,6 +224,42 @@ class GoCacheWorkflowTest(unittest.TestCase):
                 self.assertTrue(ci)
                 self.assertEqual(set(), ci - warm)
 
+    def test_no_other_workflow_restores_a_warm_entry(self):
+        # actions/cache restores the newest entry whose key starts with a
+        # restore-keys line and whose path list is the same. A broader prefix
+        # elsewhere would pull a flavor compiled with other flags, then save
+        # it again as a second, larger entry that is never pruned.
+        warm = {}
+        for job in self.jobs.values():
+            step = build_cache_step(job, "actions/cache/save")
+            warm[build_prefix(step["with"]["key"])] = step["with"]["path"]
+        ci_restores = {
+            id(build_cache_step(self.ci[name], "actions/cache/restore"))
+            for name in WARM_JOBS
+        }
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            if path.name == "go-cache.yml":
+                continue
+            jobs = self.ci if path.name == "go-test.yml" else load(path.name)["jobs"]
+            for job_name, job in jobs.items():
+                for step in job.get("steps", []):
+                    if path.name == "go-test.yml" and id(step) in ci_restores:
+                        continue
+                    if not str(step.get("uses", "")).startswith("actions/cache"):
+                        continue
+                    restore_keys = str(step["with"].get("restore-keys", ""))
+                    lines = [step["with"]["key"]] + [
+                        k.strip() for k in restore_keys.splitlines() if k.strip()
+                    ]
+                    for line in lines:
+                        for prefix, warm_path in warm.items():
+                            with self.subTest(workflow=path.name, job=job_name, key=line):
+                                self.assertFalse(
+                                    prefix.startswith(line)
+                                    and step["with"]["path"] == warm_path,
+                                    prefix,
+                                )
+
     def test_warm_jobs_prune_after_saving(self):
         for name, job in self.jobs.items():
             with self.subTest(job=name):
@@ -288,6 +324,14 @@ class PruneGoCacheTest(unittest.TestCase):
 
     def test_refuses_missing_arguments(self):
         proc, _, deletes = self.run_prune("", "Linux-go-build-check-")
+        self.assertNotEqual(0, proc.returncode)
+        self.assertEqual([], deletes)
+
+    def test_refuses_an_empty_prefix(self):
+        # An empty prefix would match every entry on main.
+        proc, _, deletes = self.run_prune(
+            "1\\tLinux-go-mod-a\\n2\\tLinux-go-build-race-b\\n", "", "x"
+        )
         self.assertNotEqual(0, proc.returncode)
         self.assertEqual([], deletes)
 
