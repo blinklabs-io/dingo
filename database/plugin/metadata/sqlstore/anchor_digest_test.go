@@ -20,6 +20,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -437,4 +439,37 @@ func TestLiveUtxoDigestCarriesEveryOutputField(t *testing.T) {
 	exerciseLiveUtxoDigestCarriesEveryOutputField(
 		t, newMigratedSQLiteStore(t),
 	)
+}
+
+// TestLiveUtxoDigestLeavesNoSpoolFileWhileResolving checks that the spool is
+// unlinked as soon as it is created, so a process killed during a digest
+// leaves no file in the temporary directory.
+func TestLiveUtxoDigestLeavesNoSpoolFileWhileResolving(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an open file cannot be unlinked on Windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	store := newMigratedSQLiteStore(t)
+	seedDigestFixture(t, store, 4)
+	var listed []string
+	var mu sync.Mutex
+	_, err := store.liveUtxoDigest(
+		context.Background(), 50,
+		func(h []byte, idx uint32) ([]byte, error) {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range entries {
+				listed = append(listed, e.Name())
+			}
+			return resolvedBytes(h, idx), nil
+		},
+		nil, 4,
+	)
+	require.NoError(t, err)
+	require.Empty(t, listed)
 }

@@ -500,8 +500,9 @@ const digestResolveWorkers = 8
 // would stall a read pool of one. The scan also pins its read snapshot only
 // for the time it takes to read, not for the whole digest.
 type outputSpool struct {
-	file *os.File
-	r    *bufio.Reader
+	file     *os.File
+	r        *bufio.Reader
+	unlinked bool
 }
 
 func spoolLiveOutputs(
@@ -514,7 +515,9 @@ func spoolLiveOutputs(
 	if err != nil {
 		return nil, err
 	}
-	sp := &outputSpool{file: file}
+	// Unlinking the open file means a process killed mid-digest leaves no
+	// spool behind. Windows refuses, so close removes it there.
+	sp := &outputSpool{file: file, unlinked: os.Remove(file.Name()) == nil}
 	if err := sp.fill(ctx, db, query, slot); err != nil {
 		sp.close()
 		return nil, err
@@ -599,9 +602,10 @@ func (sp *outputSpool) next(n int) ([]liveOutput, error) {
 }
 
 func (sp *outputSpool) close() {
-	name := sp.file.Name()
 	_ = sp.file.Close()
-	_ = os.Remove(name)
+	if !sp.unlinked {
+		_ = os.Remove(sp.file.Name())
+	}
 }
 
 const spoolBufferSize = 1 << 20
