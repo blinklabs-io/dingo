@@ -98,7 +98,7 @@ func TestStoreTransactionWitnessesIncludesPlutusV4(t *testing.T) {
 		slot,
 		false,
 	))
-	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, nil, 999))
 	var witnessHash []byte
 	var witnessType int64
 	require.NoError(t, store.writeDB.QueryRowContext(
@@ -188,7 +188,7 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 		slot,
 		false,
 	))
-	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, nil, 999))
 	var witnessScriptCount int
 	require.NoError(t, store.writeDB.QueryRowContext(
 		t.Context(),
@@ -216,7 +216,7 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 		tx,
 		slot,
 	))
-	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, nil, 999))
 	gotDatum, err := store.GetDatum(
 		lcommon.Blake2b256Hash(nestedDatumRaw),
 		nil,
@@ -282,7 +282,7 @@ func TestStoreTransactionIndexesDijkstraSubTransactionOutputs(t *testing.T) {
 		tx,
 		slot,
 	))
-	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, nil, 999))
 	gotDatum, err := store.GetDatum(lcommon.Blake2b256Hash(datumRaw), nil)
 	require.NoError(t, err)
 	require.NotNil(t, gotDatum)
@@ -312,7 +312,7 @@ func TestStoreTransactionDatumIndexIncludesInvalidWitnesses(t *testing.T) {
 		tx,
 		slot,
 	))
-	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, nil, 999))
 	got, err := store.GetDatum(lcommon.Blake2b256Hash(raw), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)

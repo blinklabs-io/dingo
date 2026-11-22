@@ -58,6 +58,12 @@ type LedgerDB interface {
 	// need block bytes, such as an output's CBOR, must use Begin instead.
 	// A read-only one does not contend with writers.
 	BeginLedgerOnly(ctx context.Context, readWrite bool) Txn
+	// BeginStaged opens a read-write transaction that holds no metadata write
+	// connection: its reads see the metadata store, and its commit publishes
+	// only what callers staged on it for the live UTxO set. A write that
+	// reaches the metadata store through it fails, so it suits a caller whose
+	// writes all go to a drained family.
+	BeginStaged(ctx context.Context) Txn
 	// Run calls fn with txn, then commits if fn returns nil and rolls back
 	// otherwise. A panic in fn rolls back and is returned as an error. txn is
 	// finished either way. A nil txn runs fn in a new read-write transaction.
