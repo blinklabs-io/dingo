@@ -59,9 +59,9 @@ type AdoptChunksConfig struct {
 	// else in SourceDir, such as a partial chunk that was never certified, is
 	// left alone.
 	Digests map[string]string
-	// OnChunkCommitted, when set, is called after every block of a chunk has
-	// committed and the blob store is synced, with the number of the next
-	// chunk to adopt. Every chunk below it is in the ImmutableDB.
+	// OnChunkCommitted, when set, is called once every block of a group of
+	// chunks has committed and the blob store is synced, with the number of
+	// the next chunk to adopt. Every chunk below it is in the ImmutableDB.
 	OnChunkCommitted func(firstUnadopted uint64) error
 	// OnProgress receives progress after each flushed batch.
 	OnProgress func(LoadBlobsProgress)
@@ -77,12 +77,13 @@ type AdoptChunksConfig struct {
 }
 
 // AdoptImmutableChunks takes verified Mithril chunk files into the ImmutableDB
-// instead of copying their block bodies into the blob store. For each chunk, in
-// order, it moves the chunk, primary and secondary files into the database's
-// ImmutableDB directory, re-reads them there against the certified digests,
-// syncs them, and only then commits that chunk's index entries, markers and
-// UTxO offsets and advances the recorded tip. The chunk files are in place and
-// durable before any marker that names them exists.
+// instead of copying their block bodies into the blob store. It takes chunks
+// in order, in groups of up to adoptGroupChunks: it moves each chunk's chunk,
+// primary and secondary files into the database's ImmutableDB directory and
+// syncs the group's files and the directory, then for each chunk re-reads the
+// files against the certified digests, advances the recorded tip and commits
+// the chunk's index entries, markers and UTxO offsets. The chunk files are in
+// place and durable before any marker that names them exists.
 //
 // It resumes: a chunk that is already in the ImmutableDB directory is verified
 // rather than moved again, a chain that stops inside a chunk continues from
@@ -606,10 +607,12 @@ func adoptGroupChunk(
 }
 
 // discardAdoptedChunk undoes a chunk that failed before its markers could
-// commit. The recorded tip is read afresh: adoptChunk moves it over the chunk
-// before the first marker commits, and from then on, as for a chunk an
-// earlier run stopped inside, committed markers can name the chunk's local
-// and published files, so both stay.
+// commit, once the later chunks of its group are back in the source. The
+// recorded tip is read afresh: adoptChunk moves it over the chunk before the
+// first marker commits, and from then on, as for a chunk an earlier run
+// stopped inside, committed markers can name the chunk's local and published
+// files, so both stay. No file then sits past the tip, so the adopt record
+// is cleared, as a chunk adopted alone clears it once its tip is recorded.
 func discardAdoptedChunk(
 	db *database.Database,
 	destDir string,
@@ -619,6 +622,9 @@ func discardAdoptedChunk(
 ) error {
 	cur, _ := db.ImmutableState()
 	if cur.HasTip && num <= cur.TipSlot/geom.ChunkSlots {
+		if cerr := db.ClearImmutableAdopt(); cerr != nil {
+			return errors.Join(err, cerr)
+		}
 		return err
 	}
 	if uerr := db.UnpublishImmutableChunk(num); uerr != nil {
@@ -679,7 +685,10 @@ func moveChunksBack(
 	for _, num := range nums {
 		for _, ext := range chunkFileExts {
 			name := chunkFileName(num, ext)
-			err := move(filepath.Join(destDir, name), filepath.Join(srcDir, name))
+			err := move(
+				filepath.Join(destDir, name),
+				filepath.Join(srcDir, name),
+			)
 			if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("returning %s: %w", name, err)
 			}

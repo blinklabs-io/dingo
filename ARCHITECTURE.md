@@ -15190,11 +15190,13 @@ chunk is not, and its blocks reach the blob store through the normal copy.
 Chunks are adopted in groups of up to 64. The adopt record is written before
 the group's first rename; every file in the group is fsynced and the directory
 synced once before any tip covers them; the record is cleared once the group's
-last tip is recorded. Tip state and blocks share the blob store's write-ahead
-log, so tip-before-blocks ordering holds without a sync between them. After each
+last tip is recorded. `im_state` and the block records commit to the same blob
+store in order, so a crash that drops unsynced commits drops a suffix and the
+tip still precedes the blocks it covers without a sync between them. After each
 group the blob store is synced and `mithril_immutable_retired_below` advances
 past it. A failure inside a group moves the later chunks' files back to the
-source directory and finishes the chunks already committed. A resume takes a chunk already in the ImmutableDB
+source directory, finishes the chunks already committed, and clears the record
+when the tip covers the failed chunk. A resume takes a chunk already in the ImmutableDB
 directory as it is, verifies it again, and continues after the chain tip when
 that lies inside the chunk, including the first one (`im_state` already covers
 the chunk, so startup reconciliation leaves its files alone); a digest mismatch after a move removes that

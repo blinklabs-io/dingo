@@ -365,7 +365,9 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 	st, ok := db.ImmutableState()
 	require.True(t, ok)
 	require.False(t, st.HasTip, "no tip covers the moved chunks")
-	for _, name := range []string{"00000.chunk", "00001.chunk", "00001.primary"} {
+	for _, name := range []string{
+		"00000.chunk", "00001.chunk", "00001.primary",
+	} {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), name))
 		require.NoError(t, err, name)
 	}
@@ -676,7 +678,8 @@ func TestAdoptImmutableChunksPlacesChunkBeforeCommit(t *testing.T) {
 	pending, ok, err := db.ImmutableAdoptPending()
 	require.NoError(t, err)
 	require.True(t, ok, "the adoption is recorded as pending")
-	require.Equal(t, uint64(0), pending, "the record names its group's first chunk")
+	require.Equal(t, uint64(0), pending,
+		"the record names its group's first chunk")
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
@@ -939,6 +942,48 @@ func TestAdoptImmutableChunksKeepsTipChunkFilesOnDigestMismatch(t *testing.T) {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00001"+ext))
 		require.NoError(t, err, "committed markers name 00001%s", ext)
 	}
+}
+
+// A chunk that stops after its tip was recorded, with later chunks of its
+// group returned to the source, leaves no file past the recorded tip, so the
+// adopt record is cleared and the ImmutableDB writer can open.
+func TestAdoptImmutableChunksMidGroupStopAfterTipClearsRecord(t *testing.T) {
+	t.Parallel()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	chunk0 := blocksBelow(blocks, 4320)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnProgress = func(p LoadBlobsProgress) {
+			if p.BlocksCopied >= len(chunk0)+loadBlockBatchSize {
+				cancel()
+			}
+		}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	chunk1 := blocksBelow(blocks, 2*4320)
+	require.Equal(t, uint64(len(chunk1)), st.TipIndex,
+		"the tip covers chunk 1")
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending, "the recorded tip covers every adopted file")
+	for _, ext := range chunkFileExts {
+		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00002"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist,
+			"chunk 2 left the ImmutableDB")
+	}
+	require.NoError(t, db.ReconcileImmutable())
+
+	res, err := adopt(t, context.Background(), db, dir, digests, nil)
+	require.NoError(t, err)
+	require.Less(t, res.BlocksCopied, len(blocks)-len(chunk0))
+	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
 }
 
 // A chunk that fails inside a group returns the chunks after it to the source
