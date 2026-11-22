@@ -842,6 +842,20 @@ but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
 
+Chain selection does not make a competing suffix destructive on header
+evidence alone. Once a retained suffix wins selection, BlockFetch retrieves its
+exact body range into an isolated candidate buffer while the selected primary
+chain remains unchanged. The ledger then opens a rollback-only transaction,
+reconstructs state at the common ancestor, and runs the normal block envelope,
+transaction, certificate, governance, epoch-transition, and nonce processing
+over every candidate block. The transaction is always rolled back; validation
+does not persist candidate metadata or Leios endorser-block data. An incomplete,
+misordered, stale, or invalid candidate is discarded without changing the
+primary chain or ledger tip. A validated candidate may switch only while the
+primary tip and consensus generation still match the values used for selection
+and validation. That final check and the chain rollback share one mutation
+barrier, so a concurrent chain change cannot land between them.
+
 A deferred result other than the forecast horizon means local state was not
 ready (a block-apply commit or snapshot publication in progress, or published
 epoch data not yet covering the header's slot). For a header that does not

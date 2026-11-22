@@ -1220,7 +1220,23 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
 ) (bool, ouroboros.ConnectionId, error) {
-	source, required := ls.takeDeferredHeaderValidation(point)
+	return ls.deferredHeaderValidationRequiredWithMode(point, txn, true)
+}
+
+func (ls *LedgerState) deferredHeaderValidationRequiredWithMode(
+	point ocommon.Point,
+	txn ledgerdb.Txn,
+	consume bool,
+) (bool, ouroboros.ConnectionId, error) {
+	var source ouroboros.ConnectionId
+	var required bool
+	if consume {
+		source, required = ls.takeDeferredHeaderValidation(point)
+	} else {
+		ls.deferredHeaderValidationMu.Lock()
+		source, required = ls.deferredHeaderValidation[headerValidationPointKey(point)]
+		ls.deferredHeaderValidationMu.Unlock()
+	}
 	ls.deferredHeaderValidationMu.Lock()
 	belowFloor := point.Slot < ls.deferredHeaderValidationFloor
 	ls.deferredHeaderValidationMu.Unlock()
@@ -1338,7 +1354,16 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	point ocommon.Point,
 	block gledger.Block,
 ) error {
-	required, source, err := ls.deferredHeaderValidationRequired(point, txn)
+	var required bool
+	var source ouroboros.ConnectionId
+	var err error
+	if forkCandidateValidationFrom(ctx) {
+		required, source, err = ls.deferredHeaderValidationRequiredWithMode(
+			point, txn, false,
+		)
+	} else {
+		required, source, err = ls.deferredHeaderValidationRequired(point, txn)
+	}
 	if err != nil {
 		return err
 	}
@@ -1409,6 +1434,9 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 	// The hold discarded the batch these events belong to.
 	if ls.NetworkIngestHeld() {
+		return
+	}
+	if ls.handleForkCandidateBlockfetchEventLocked(e) {
 		return
 	}
 	if e.BatchDone {
@@ -1670,6 +1698,10 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	// A close is the terminal ordering barrier for every request on this
 	// connection, including one whose BatchDone was never delivered.
 	ls.releaseAllBlockfetchRequestsLocked(e.ConnectionId)
+	if ls.forkCandidate != nil &&
+		sameConnectionId(ls.forkCandidate.connection, e.ConnectionId) {
+		ls.discardForkCandidateLocked()
+	}
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	}
@@ -4303,6 +4335,7 @@ func (ls *LedgerState) resetChainsyncResyncState(
 	ls.bufferedHeaderEvents = nil
 	ls.bufferedHeaderMutex.Unlock()
 	ls.clearQueuedHeaders()
+	ls.discardForkCandidateLocked()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -6915,45 +6948,22 @@ func (ls *LedgerState) tryResolveForkPinned(
 		}
 		return true, nil
 	}
-	reverifyAfterRollback := incomingGenerationPinned
-	if reverifyAfterRollback {
-		// Rollback publishes a new producer-authorization generation and needs
-		// the generation write lock, so release the old generation before the
-		// destructive transition. The fork suffix is replayed after a fresh
-		// intersection and verified against the resulting ledger state.
+	if incomingGenerationPinned {
+		// Candidate fetching and validation outlive this admission call. Retain
+		// the stamped verdict on the copied path, but do not hold the generation
+		// lock across network or database work.
 		releaseIncomingGeneration()
 	}
-
-	ls.config.Logger.Info(
-		"fork detected: rolling back to common ancestor",
-		"component", "ledger",
-		"local_tip_slot", localTip.Point.Slot,
-		"peer_tip_slot", e.Tip.Point.Slot,
-		"ancestor_slot", ancestorBlock.Slot,
-		"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
-		"connection_id", e.ConnectionId.String(),
-	)
-
-	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), rollbackPoint, pending); err != nil {
+	if err := ls.chain.ValidateRollback(ls.lifecycleContext(), rollbackPoint); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			// The ancestor resolved but the chain no longer holds it at that
-			// index, so rolling back would splice a continuation onto a parent
-			// the chain does not have. Re-intersect instead of
-			// treating this as an internal failure.
 			ls.config.Logger.Warn(
 				"fork ancestor is no longer on the local chain, triggering chainsync re-sync",
-				"component",
-				"ledger",
-				"error",
-				err,
-				"ancestor_slot",
-				ancestorBlock.Slot,
-				"ancestor_hash",
-				hex.EncodeToString(ancestorBlock.Hash),
-				"local_tip_slot",
-				ls.chain.Tip().Point.Slot,
-				"connection_id",
-				e.ConnectionId.String(),
+				"component", "ledger",
+				"error", err,
+				"ancestor_slot", ancestorBlock.Slot,
+				"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+				"local_tip_slot", ls.chain.Tip().Point.Slot,
+				"connection_id", e.ConnectionId.String(),
 			)
 			ls.requestChainsyncResync(
 				e.ConnectionId,
@@ -6969,16 +6979,7 @@ func (ls *LedgerState) tryResolveForkPinned(
 			)
 			if reconcileErr != nil {
 				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
-					// Same reasoning as handleEventChainsyncRollback's
-					// matching branch: the common ancestor
-					// reconciliation found here sits at or below the
-					// Mithril boundary, so route it through the
-					// identical classified resync rather than a
-					// generic reconciliation error
-					return true, ls.handleMithrilBoundaryRollback(
-						e,
-						pending,
-					)
+					return true, ls.handleMithrilBoundaryRollback(e, pending)
 				}
 				return false, fmt.Errorf(
 					"reconcile primary chain and ledger after over-K fork resolution: %w",
@@ -6990,23 +6991,13 @@ func (ls *LedgerState) tryResolveForkPinned(
 				ls.setChainsyncState(SyncingChainsyncState)
 				return true, nil
 			}
-			// Fork exceeds security parameter K. We must not
-			// follow a chain that requires rolling back more
-			// than K blocks — this is a fundamental Ouroboros
-			// security guarantee. Trigger a chainsync re-sync
-			// immediately rather than waiting for
-			// headerMismatchResyncThreshold retries.
 			ls.config.Logger.Error(
-				"fork exceeds security parameter K, "+
-					"rejecting fork resolution",
+				"fork exceeds security parameter K, rejecting fork resolution",
 				"component", "ledger",
 				"ancestor_slot", ancestorBlock.Slot,
-				"local_tip_slot",
-				ls.chain.Tip().Point.Slot,
+				"local_tip_slot", ls.chain.Tip().Point.Slot,
 				"peer_tip_slot", e.Tip.Point.Slot,
 			)
-			// Only this connection is resynced, so only its count
-			// is reset.
 			ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 			ls.clearRollbackHistory()
 			pending.add(
@@ -7021,81 +7012,27 @@ func (ls *LedgerState) tryResolveForkPinned(
 				),
 			)
 			return true, nil
-		} else {
-			ls.config.Logger.Error(
-				"failed to roll back to common ancestor",
-				"component", "ledger",
-				"error", err,
-				"ancestor_slot", ancestorBlock.Slot,
-			)
-			return false, fmt.Errorf(
-				"failed to roll back to common ancestor: %w",
-				err,
-			)
 		}
+		return false, fmt.Errorf("validate candidate rollback point: %w", err)
 	}
-	// This fork rollback is genuine forward progress. Clear evidence from
-	// stale-ancestor / failed-rollback cycles so an unrelated later fork does
-	// not inherit the old divergence count.
-	ls.clearUnrecoverableRollbacks()
-
-	// Mark state as rollback so the next block header event logs
-	// "switched to fork" and increments the fork metric.
-	ls.setChainsyncState(RollbackChainsyncState)
-	if reverifyAfterRollback {
+	ls.config.Logger.Info(
+		"preferred fork detected: fetching candidate bodies before rollback",
+		"component", "ledger",
+		"local_tip_slot", localTip.Point.Slot,
+		"peer_tip_slot", e.Tip.Point.Slot,
+		"ancestor_slot", ancestorBlock.Slot,
+		"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+		"connection_id", e.ConnectionId.String(),
+	)
+	if err := ls.startForkCandidateValidation(
+		e.ConnectionId, rollbackPoint, localTip, forkPath,
+	); err != nil {
 		ls.requestChainsyncResync(
 			e.ConnectionId,
 			event.ChainsyncResyncReasonPersistentFork,
 			pending,
 		)
-		return true, nil
-	}
-
-	// Rollback succeeded — re-add the known peer fork segment from the
-	// common ancestor forward. Re-adding only the latest mismatching header
-	// works for one-block forks but fails once the winning fork is already
-	// several headers ahead.
-	for _, forkEvent := range forkPath {
-		if err := ls.addForkPathHeader(
-			forkEvent, e.Point, incomingCryptoVerificationGeneration,
-		); err != nil {
-			ls.config.Logger.Warn(
-				"failed to queue header after fork rollback",
-				"component", "ledger",
-				"error", err,
-				"slot", forkEvent.Point.Slot,
-				"connection_id", forkEvent.ConnectionId.String(),
-			)
-			// The failure (typically ErrHeaderQueueFull) leaves whatever
-			// was already queued -- from this loop's earlier iterations,
-			// or from the rollback above having preserved existing queued
-			// headers -- exactly where it was. If nothing is currently
-			// fetching it, kick a fetch so the backlog still drains
-			// instead of stalling forever; see
-			// ensureBlockfetchDrainingAfterForkQueueFailure.
-			ls.ensureBlockfetchDrainingAfterForkQueueFailure(
-				e.ConnectionId,
-				pending,
-			)
-			// Do not reset mismatch state — let the caller know the
-			// resolution failed so subsequent mismatch tracking proceeds.
-			return false, nil
-		}
-	}
-	ls.clearHeaderMismatches()
-	ls.clearRollbackHistory()
-	if ls.config.BlockfetchRequestRangeFunc != nil &&
-		ls.chain.HeaderCount() > 0 {
-		ls.chainsyncBlockfetchMutex.Lock()
-		if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, pending); err != nil {
-			ls.config.Logger.Warn(
-				"failed to start blockfetch after fork rollback",
-				"component", "ledger",
-				"error", err,
-				"connection_id", e.ConnectionId.String(),
-			)
-		}
-		ls.chainsyncBlockfetchMutex.Unlock()
+		return true, nil //nolint:nilerr // re-intersection is the recovery
 	}
 	return true, nil
 }

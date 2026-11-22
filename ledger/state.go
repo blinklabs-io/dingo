@@ -1995,6 +1995,7 @@ type LedgerState struct {
 	blockfetchContinuationPending bool
 	blockfetchContinuationMu      sync.Mutex
 	blockfetchContinuationWG      sync.WaitGroup
+	forkCandidate                 *forkCandidate
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
@@ -4101,6 +4102,9 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.closed.Store(true)
 	ls.closeMu.Unlock()
 	ls.stopQueuedBlockfetchFlush()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.discardForkCandidateLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
 	defer func() {
 		ls.closeMu.Lock()
 		ls.closeErr = retErr
@@ -6459,7 +6463,9 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
-	_, err := ls.rollbackChainAndStateDeferredDepth(ctx, point, pubs)
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, nil,
+	)
 	return err
 }
 
@@ -6472,6 +6478,27 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
+) (uint64, error) {
+	return ls.rollbackChainAndStateDeferredDepthIf(ctx, point, pubs, nil)
+}
+
+func (ls *LedgerState) rollbackChainAndStateDeferredIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
+) error {
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, preflight,
+	)
+	return err
+}
+
+func (ls *LedgerState) rollbackChainAndStateDeferredDepthIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
 ) (uint64, error) {
 	var removed uint64
 	ls.consumedUtxoPruneMutex.Lock()
@@ -6587,7 +6614,19 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		if err := ls.validateAndEmitRollbackUndo(ctx, point); err != nil {
+		events, rbErr := ls.chain.RollbackDeferredWithPreflight(
+			ctx,
+			point,
+			func() error {
+				if preflight != nil {
+					if err := preflight(); err != nil {
+						return err
+					}
+				}
+				return ls.validateAndEmitRollbackUndo(ctx, point)
+			},
+		)
+		if rbErr != nil {
 			// Validation refused the point before the chain was touched --
 			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
 			// all of which handleEventChainsyncRollback treats as
@@ -6601,10 +6640,6 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 			// blockfetchBatchStillCurrent reader also holds, so no reader can
 			// observe the intermediate value.
 			ls.chainRollbackGeneration.Store(priorGeneration)
-			return err
-		}
-		events, rbErr := ls.chain.RollbackDeferred(ctx, point)
-		if rbErr != nil {
 			return rbErr
 		}
 		for _, evt := range events {
@@ -11588,17 +11623,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// independently of the fetch-path write: a certified endorser
 				// block is part of the chain. A block that a later check
 				// rejects leaves a volatile record the collector removes.
-				if err := ls.persistCertifiedEndorserBlock(
-					ebHash.Bytes(),
-					ebSlot,
-					ebManifest,
-					ebTxs,
-				); err != nil {
-					return nil, &leiosEndorserBlockStorageError{
-						err: fmt.Errorf(
-							"persist certified endorser block: %w",
-							err,
-						),
+				if !forkCandidateValidationFrom(ctx) {
+					if err := ls.persistCertifiedEndorserBlock(
+						ebHash.Bytes(),
+						ebSlot,
+						ebManifest,
+						ebTxs,
+					); err != nil {
+						return nil, &leiosEndorserBlockStorageError{
+							err: fmt.Errorf(
+								"persist certified endorser block: %w",
+								err,
+							),
+						}
 					}
 				}
 				ls.logLeiosEndorserBlockApplyResult(
@@ -12996,6 +13033,19 @@ func (ls *LedgerState) computePParams(
 	lcommon.ProtocolParameters,
 	error,
 ) {
+	return ls.computePParamsIn(epoch, era, epochCache, nil)
+}
+
+func (ls *LedgerState) computePParamsIn(
+	epoch models.Epoch,
+	era eras.EraDesc,
+	epochCache []models.Epoch,
+	txn ledgerdb.Txn,
+) (
+	lcommon.ProtocolParameters,
+	lcommon.ProtocolParameters,
+	error,
+) {
 	// Only query stored pparams when the era has a decode function.
 	// Byron has nil DecodePParamsFunc and never stores pparams, so
 	// we skip straight to the genesis fallback for Byron.
@@ -13005,7 +13055,7 @@ func (ls *LedgerState) computePParams(
 		pparams, err = ls.loadPersistedProtocolParameters(
 			epoch.EpochId,
 			era,
-			nil,
+			txn,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
@@ -13042,7 +13092,7 @@ func (ls *LedgerState) computePParams(
 				prevPP, prevErr := ls.loadPersistedProtocolParameters(
 					ep.EpochId,
 					*prevEra,
-					nil,
+					txn,
 				)
 				if prevErr != nil {
 					// Historical block validation falls back to the

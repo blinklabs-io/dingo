@@ -305,6 +305,10 @@ type utxoSetBatch struct {
 	// changes, whose live reward aggregate the truncation must refresh.
 	rollbackRefs []models.StakeCredentialRef
 	changes      []UtxoEvent
+	// validationOnly keeps speculative fork validation from stopping the
+	// live set when its private overlay cannot be prepared.
+	validationOnly bool
+	validationErr  error
 	// nonces are the block nonces txn wrote, and pruneNoncesBefore the
 	// slot its nonce prune reached, for a set that keeps nonces.
 	nonces            []models.BlockNonce
@@ -437,6 +441,15 @@ func (ls *LedgerState) stageUtxoSet(
 	})
 	if r, readable := ls.config.UtxoSet.(UtxoSetReader); readable {
 		if err := ls.stageUtxoOverlay(r, txn, batch, changes); err != nil {
+			ls.utxoSetMu.Lock()
+			validationOnly := batch.validationOnly
+			if validationOnly && batch.validationErr == nil {
+				batch.validationErr = err
+			}
+			ls.utxoSetMu.Unlock()
+			if validationOnly {
+				return
+			}
 			slot := uint64(0)
 			if tip != nil {
 				slot = tip.Slot
@@ -1188,12 +1201,45 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
 	if err != nil {
+		ls.utxoSetMu.Lock()
+		validationOnly := b.validationOnly
+		if validationOnly && b.validationErr == nil {
+			b.validationErr = err
+		}
+		ls.utxoSetMu.Unlock()
+		if validationOnly {
+			return
+		}
 		ls.failUtxoSet(
 			point.Slot,
 			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
 			err,
 		)
 	}
+}
+
+// stageUtxoSetRollbackForValidation prepares a rollback overlay that is
+// discarded with txn. A preview failure rejects the candidate without
+// changing the live set's failure state.
+func (ls *LedgerState) stageUtxoSetRollbackForValidation(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.validationOnly = true
+	})
+	ls.stageUtxoSetRollback(txn, point)
+	return ls.utxoSetValidationError(txn)
+}
+
+func (ls *LedgerState) utxoSetValidationError(txn ledgerdb.Txn) error {
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil {
+		return nil
+	}
+	return batch.validationErr
 }
 
 // LiveUtxoStake implements types.LiveUtxoSource: the lovelace in live
