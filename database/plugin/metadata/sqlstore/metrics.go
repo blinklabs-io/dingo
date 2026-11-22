@@ -376,6 +376,7 @@ func (q countingQueryer) ExecContext(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
+	defer statementRegion(ctx, query)()
 	op, name := classifySQLStatement(query)
 	if q.counter != nil {
 		q.counter.WithLabelValues(op).Inc()
@@ -412,6 +413,17 @@ func (q countingQueryer) QueryContext(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
+	end := statementRegion(ctx, query)
+	rows, err := q.queryContext(ctx, query, args...)
+	end()
+	return rows, err
+}
+
+func (q countingQueryer) queryContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
 	op, name := classifySQLStatement(query)
 	if q.counter != nil {
 		q.counter.WithLabelValues(op).Inc()
@@ -430,6 +442,7 @@ func (q countingQueryer) QueryRowContext(
 	query string,
 	args ...any,
 ) *sql.Row {
+	defer statementRegion(ctx, query)()
 	op, name := classifySQLStatement(query)
 	if q.counter != nil {
 		q.counter.WithLabelValues(op).Inc()

@@ -1155,6 +1155,8 @@ func (s *Store) setTransactionWithAccumulator(
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			phase := startPhases(ctx, "dingo.sqlstore.tx.prepare")
+			defer phase.end()
 			if historicalBackfill && txn != nil &&
 				batchedAccumulator != nil &&
 				batchedAccumulator.backfillBatchLimits != nil {
@@ -1190,6 +1192,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.identity")
 			if overlay != nil && !overlay.retainHistory {
 				transactionID, err = overlay.stageTransaction(
 					hash,
@@ -1289,6 +1292,7 @@ func (s *Store) setTransactionWithAccumulator(
 					return err
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.produced")
 			collateralReturn := transaction.CollateralReturn()
 			producedModels := make(
 				[]models.Utxo,
@@ -1421,6 +1425,7 @@ func (s *Store) setTransactionWithAccumulator(
 					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.api_details")
 			if err := s.applyTransactionAPIDetails(
 				ctx,
 				db,
@@ -1456,6 +1461,7 @@ func (s *Store) setTransactionWithAccumulator(
 			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
+			phase.next(ctx, "dingo.sqlstore.tx.spend")
 			var spentRefs []models.UtxoId
 			if s.dialect.Name() != "sqlite" {
 				spentRefs = make(
@@ -1579,6 +1585,7 @@ func (s *Store) setTransactionWithAccumulator(
 					)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 			if historicalBackfill {
 				if s.dialect.Name() != "sqlite" {
 					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(

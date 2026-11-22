@@ -733,6 +733,7 @@ func (s *Store) queryRowCached(
 	query string,
 	args ...any,
 ) *sql.Row {
+	defer statementRegion(ctx, query)()
 	// A failed barrier is recorded on the overlay and fails the batch at
 	// FlushBatch; a *sql.Row cannot carry it.
 	_ = overlayReadBarrier(ctx, db, query)
@@ -776,6 +777,7 @@ func (s *Store) execCached(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
+	defer statementRegion(ctx, query)()
 	if err := overlayReadBarrier(ctx, db, query); err != nil {
 		return nil, err
 	}
@@ -857,6 +859,18 @@ func (s *Store) readCanUseWriteCache(txn types.Txn) bool {
 }
 
 func (s *Store) queryRowsCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	end := statementRegion(ctx, query)
+	rows, err := s.queryRowsCachedUntraced(ctx, db, query, args...)
+	end()
+	return rows, err
+}
+
+func (s *Store) queryRowsCachedUntraced(
 	ctx context.Context,
 	db queryer,
 	query string,

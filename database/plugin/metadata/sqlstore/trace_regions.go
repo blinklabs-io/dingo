@@ -1,0 +1,66 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlstore
+
+import (
+	"context"
+	rtrace "runtime/trace"
+)
+
+// phaseRegions marks consecutive phases of one function as runtime/trace
+// regions: next ends the running phase and starts the named one. With no
+// execution trace running every call returns after one atomic load.
+type phaseRegions struct {
+	region *rtrace.Region
+}
+
+func startPhases(ctx context.Context, name string) *phaseRegions {
+	p := &phaseRegions{}
+	p.next(ctx, name)
+	return p
+}
+
+func (p *phaseRegions) next(ctx context.Context, name string) {
+	if p.region != nil {
+		p.region.End()
+		p.region = nil
+	}
+	if rtrace.IsEnabled() {
+		p.region = rtrace.StartRegion(ctx, name)
+	}
+}
+
+func (p *phaseRegions) end() {
+	if p.region != nil {
+		p.region.End()
+		p.region = nil
+	}
+}
+
+// statementRegion starts a region named for one SQL statement, so a trace
+// attributes the writer's time per statement rather than by CPU sampling.
+// The statement is classified only while a trace runs.
+func statementRegion(ctx context.Context, query string) func() {
+	if !rtrace.IsEnabled() {
+		return noopRegionEnd
+	}
+	op, name := classifySQLStatement(query)
+	if name == "" || name == "unknown" {
+		name = op
+	}
+	return rtrace.StartRegion(ctx, "dingo.sql."+name).End
+}
+
+func noopRegionEnd() {}

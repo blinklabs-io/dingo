@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	rtrace "runtime/trace"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -464,7 +466,9 @@ func (w *Writer) step(
 		w.report(tip, ledgerTip)
 		return true, nil
 	}
+	region := rtrace.StartRegion(ctx, tracing.RegionIndexerReadBlocks)
 	blocks, err := w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.limit)
+	region.End()
 	if err != nil {
 		return false, fmt.Errorf("read canonical blocks: %w", err)
 	}
@@ -505,6 +509,7 @@ func (w *Writer) step(
 	if d, ok := w.idx.(WithdrawalDebiter); ok {
 		d.DebitWithdrawals(ceiling == nil)
 	}
+	batchRegion := rtrace.StartRegion(ctx, tracing.RegionIndexerBatch)
 	txn := w.store.Database().Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		if seed {
@@ -519,12 +524,24 @@ func (w *Writer) step(
 		}
 		for _, seg := range segments {
 			if w.facts != nil {
-				if err := w.facts.CopyFacts(ctx, txn, seg.from, seg.through); err != nil {
+				region := rtrace.StartRegion(
+					ctx,
+					tracing.RegionIndexerCopyFacts,
+				)
+				err := w.facts.CopyFacts(ctx, txn, seg.from, seg.through)
+				region.End()
+				if err != nil {
 					return fmt.Errorf("copy ledger facts: %w", err)
 				}
 			}
 			if len(seg.blocks) > 0 {
-				if err := w.idx.IndexBlocks(ctx, txn, seg.blocks); err != nil {
+				region := rtrace.StartRegion(
+					ctx,
+					tracing.RegionIndexerIndexBlocks,
+				)
+				err := w.idx.IndexBlocks(ctx, txn, seg.blocks)
+				region.End()
+				if err != nil {
 					return err
 				}
 				if ceiling != nil {
@@ -534,7 +551,13 @@ func (w *Writer) step(
 				}
 			}
 			if w.facts != nil {
-				if err := w.facts.PatchFacts(ctx, txn, seg.from, seg.through); err != nil {
+				region := rtrace.StartRegion(
+					ctx,
+					tracing.RegionIndexerPatchFacts,
+				)
+				err := w.facts.PatchFacts(ctx, txn, seg.from, seg.through)
+				region.End()
+				if err != nil {
 					return fmt.Errorf("patch ledger facts: %w", err)
 				}
 			}
@@ -544,6 +567,7 @@ func (w *Writer) step(
 		}
 		return w.store.SetTip(newTip, txn)
 	})
+	batchRegion.End()
 	if err != nil {
 		// Whatever step failed, the transaction rolled back every row the
 		// indexer wrote, so the state it carried between calls is stale.

@@ -20,12 +20,14 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	rtrace "runtime/trace"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
@@ -56,7 +58,11 @@ func (e PartialCommitError) Is(target error) bool {
 // Txn is a wrapper that coordinates both metadata and blob transactions.
 // Metadata and blob are first-class siblings, not nested.
 type Txn struct {
-	db           *Database
+	db *Database
+	// traceCtx joins the commit's runtime/trace region to the trace task the
+	// transaction began under; it is never used for cancellation. Nil on
+	// transactions built outside newDatabaseTxnContext.
+	traceCtx     context.Context
 	blobTxn      types.Txn
 	metadataTxn  types.Txn
 	writeContext *txnContext
@@ -357,7 +363,7 @@ func newDatabaseTxnContext(
 	readWrite bool,
 	blockMutation blockMutationMode,
 ) (*Txn, error) {
-	t := &Txn{db: db, readWrite: readWrite}
+	t := &Txn{db: db, readWrite: readWrite, traceCtx: ctx}
 	if err := acquireCommitBarrier(acquireCtx, t, db.Metadata() != nil); err != nil {
 		_ = t.Rollback()
 		return nil, err
@@ -1284,7 +1290,15 @@ func (t *Txn) Commit() error {
 	// above and as rollback's own identical guard: committing a borrowed
 	// blobTxn here would commit its owner's transaction out from under it.
 	if t.blobTxn != nil && !t.sharedBlob {
-		if err := t.blobTxn.Commit(); err != nil {
+		var err error
+		if t.traceCtx != nil {
+			region := rtrace.StartRegion(t.traceCtx, tracing.RegionBlobCommit)
+			err = t.blobTxn.Commit()
+			region.End()
+		} else {
+			err = t.blobTxn.Commit()
+		}
+		if err != nil {
 			// Blob commit failed - rollback metadata only. Skipped when
 			// sharedMetadata: that handle is borrowed (see
 			// withBlobForRecovery), so a failure in this Txn's own blob

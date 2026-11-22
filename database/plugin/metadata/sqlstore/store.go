@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"regexp"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -1299,7 +1301,14 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	err := t.tx.Commit()
+	var err error
+	if t.ctx != nil {
+		region := rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit)
+		err = t.tx.Commit()
+		region.End()
+	} else {
+		err = t.tx.Commit()
+	}
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
 	}
