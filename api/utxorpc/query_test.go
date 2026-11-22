@@ -95,6 +95,8 @@ func newByronQueryServer(
 // v1beta ReadParams is served by rewriting the path onto this same alpha
 // handler (see betaVersionedQueryHandler), so this covers both versions.
 func TestReadParams_ByronEraFailedPrecondition(t *testing.T) {
+	t.Parallel()
+
 	stub := &byronLedgerStub{
 		tip: ochainsync.Tip{
 			Point: ocommon.NewPoint(42, []byte{0xab, 0xcd}),
@@ -129,6 +131,8 @@ func TestReadParams_ByronEraFailedPrecondition(t *testing.T) {
 // handler, so a state that does hold protocol parameters must still take the
 // normal path and answer with them.
 func TestReadParams_ShelleyStateUnaffected(t *testing.T) {
+	t.Parallel()
+
 	stub := &shelleyLedgerStub{
 		byronLedgerStub: byronLedgerStub{
 			tip: ochainsync.Tip{
@@ -243,18 +247,24 @@ func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
 }
 
 func TestCaip2FromNetworkMagic_UnknownNetwork(t *testing.T) {
+	t.Parallel()
+
 	const devnetMagic uint32 = 42
 	got := caip2FromNetworkMagic(devnetMagic)
 	require.Equal(t, "cardano:devnet", got)
 }
 
 func TestCaip2FromNetworkMagic_CustomNetwork(t *testing.T) {
+	t.Parallel()
+
 	const customMagic uint32 = math.MaxUint32
 	got := caip2FromNetworkMagic(customMagic)
 	require.Equal(t, "cardano:4294967295", got)
 }
 
 func TestEffectiveSearchUtxosMaxItems(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, int32(100), effectiveSearchUtxosMaxItems(100, 10_000))
 	require.Equal(t, int32(10_000), effectiveSearchUtxosMaxItems(0, 10_000))
 }
@@ -328,6 +338,8 @@ func TestSearchUtxosMatchAllAddresses(t *testing.T) {
 }
 
 func TestSearchUtxoAddressPatternsPreservesMatchIntent(t *testing.T) {
+	t.Parallel()
+
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	stake := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -354,6 +366,8 @@ func TestSearchUtxoAddressPatternsPreservesMatchIntent(t *testing.T) {
 }
 
 func TestSearchUtxoAddressPatternsRejectsInvalidCredentialLength(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		pattern *utxorpcCardano.AddressPattern
@@ -391,12 +405,16 @@ func TestSearchUtxoAddressPatternsRejectsInvalidCredentialLength(t *testing.T) {
 }
 
 func TestExtractSearchPredicatePatterns_NilPredicate(t *testing.T) {
+	t.Parallel()
+
 	addressPattern, assetPattern := extractSearchPredicatePatterns(nil)
 	require.Nil(t, addressPattern)
 	require.Nil(t, assetPattern)
 }
 
 func TestExtractSearchPredicatePatterns_WithCardanoMatch(t *testing.T) {
+	t.Parallel()
+
 	address := &utxorpcCardano.AddressPattern{
 		ExactAddress: []byte{0x01, 0x02},
 	}
