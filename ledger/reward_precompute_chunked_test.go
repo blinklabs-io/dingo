@@ -600,8 +600,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 // derived row of an epoch carries one captured slot: a round interrupted at
 // one captured slot and resumed at another (the startup path captures at the
 // current tip) adopts the cursor's slot and keeps its committed chunk rather
-// than stamp the remaining pools with the later slot. The fact copy skips an
-// epoch by its first row's slot.
+// than stamp the remaining pools with the later slot.
 func TestChunkedRewardPrecomputeAdoptsCursorCapturedSlot(t *testing.T) {
 	t.Parallel()
 

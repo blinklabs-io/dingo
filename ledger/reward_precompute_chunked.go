@@ -789,9 +789,8 @@ func (ls *LedgerState) resumableRewardPrecomputeCursor(
 		len(poolOutputs) != cursor.CompletedPools {
 		return nil, 0, nil
 	}
-	// Every output row of an epoch must carry one captured slot, which the
-	// fact copy relies on to skip an epoch by a single row. The captured slot
-	// is not part of the input fingerprint, and the boundary and startup
+	// Every output row of a round carries one captured slot. The captured
+	// slot is not part of the input fingerprint, and the boundary and startup
 	// resume at a different one than the background run, so a resumed round
 	// adopts the slot its committed rows already carry. A finished round
 	// writes no more rows, and a discarded cursor has no rows to match.

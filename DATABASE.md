@@ -2337,12 +2337,14 @@ chunk reads it and resumes from the next pool (ascending `pool_key_hash`,
 epoch holds one pool output per completed pool; otherwise it clears the epoch's
 outputs (`DeleteRewardOutputsForEpoch`) and starts over. A resumed round keeps
 the captured slot the cursor records, whichever slot the background run, the
-epoch boundary or start-up resolved it at, so every output row of an epoch
-carries one captured slot. The fact copy relies on this: it reads one output
-row of an epoch and skips the epoch when that slot is outside the copied
-range. A finished cursor whose
-output fingerprint matches the stored pool outputs is the precompute's
-completion record.
+epoch boundary or start-up resolved it at, so a round's output rows carry one
+captured slot; a round resumed before rounds adopted the cursor's slot holds
+rows at several. A chunk saves its pool outputs and their account outputs in
+one transaction at one captured slot, so the `reward_account_output` fact copy
+reads an epoch's pool output rows and skips its account rows when every pool
+row's slot is outside the copied range; an epoch with no pool output row is
+always read. A finished cursor whose output fingerprint matches the stored pool
+outputs is the precompute's completion record.
 
 **Credited reward rounds.** Table `reward_credit_round` holds one
 `{snapshot_epoch, boundary_slot}` (`models.RewardCreditRound`) row for each

@@ -342,13 +342,6 @@ func poolOutputRowsOver(
 		"captured_slot", "boundary_slot",
 	}}
 	for _, epoch := range epochs {
-		skip, err := rewardEpochOutsideRange(r, epoch, from, through)
-		if err != nil {
-			return metadata.FactRows{}, err
-		}
-		if skip {
-			continue
-		}
 		rows, err := r.RewardPoolOutputRows(epoch, nil)
 		if err != nil {
 			return metadata.FactRows{}, err
@@ -405,7 +398,7 @@ func accountOutputPageOver(
 		if len(out.Rows) >= limit {
 			return out, int64(epochs[i]), nil //nolint:gosec // an epoch number
 		}
-		skip, err := rewardEpochOutsideRange(r, epochs[i], from, through)
+		skip, err := rewardAccountEpochOutsideRange(r, epochs[i], from, through)
 		if err != nil {
 			return metadata.FactRows{}, 0, err
 		}
@@ -498,28 +491,27 @@ func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
 	return out, nil
 }
 
-// RewardDerivedEpochSlotter is an optional RewardDerivedReader capability:
-// the slot an epoch's derived rows were captured at, read from one row.
-type RewardDerivedEpochSlotter interface {
-	RewardDerivedEpochSlot(epoch uint64) (uint64, bool, error)
-}
-
-// rewardEpochOutsideRange reports whether none of epoch's derived rows can
-// fall in [from, through]. Every derived row of an epoch carries the slot its
-// precompute captured them at, so one row decides for all of them, and a fact
-// copy over a slot range need not decode an epoch's whole delegator set to
-// find that none of it belongs to the range.
-func rewardEpochOutsideRange(
+// rewardAccountEpochOutsideRange reports whether none of epoch's account
+// output rows can fall in [from, through], judged from its pool output rows,
+// one per pool, so the copy need not decode the epoch's whole delegator set to
+// find that none of it belongs to the range. A precompute chunk saves its
+// pools' output rows and their account rows in one transaction at one captured
+// slot, and the credit-time recheck keeps that slot, so every account row's
+// slot lies within its epoch's lowest and highest pool row slot. An epoch can
+// hold several slots, one per resumed run of a round interrupted before rounds
+// adopted their cursor's slot, so every pool row is read rather than the
+// first. An epoch with no pool row is never skipped.
+func rewardAccountEpochOutsideRange(
 	r RewardDerivedReader,
 	epoch, from, through uint64,
 ) (bool, error) {
-	slotter, ok := r.(RewardDerivedEpochSlotter)
-	if !ok {
-		return false, nil
-	}
-	slot, found, err := slotter.RewardDerivedEpochSlot(epoch)
-	if err != nil || !found {
+	pools, err := r.RewardPoolOutputRows(epoch, nil)
+	if err != nil || len(pools) == 0 {
 		return false, err
 	}
-	return !inSlotRange(slot, from, through), nil
+	lo, hi := pools[0].CapturedSlot, pools[0].CapturedSlot
+	for _, p := range pools[1:] {
+		lo, hi = min(lo, p.CapturedSlot), max(hi, p.CapturedSlot)
+	}
+	return hi < from || lo > through, nil
 }
