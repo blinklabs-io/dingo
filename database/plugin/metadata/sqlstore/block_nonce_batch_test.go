@@ -78,7 +78,11 @@ func TestQueuedBlockNoncesMatchPerRowWrites(t *testing.T) {
 		require.Equal(t, want[i].Slot, got[i].Slot, "row %d slot", i)
 		require.Equal(t, want[i].Nonce, got[i].Nonce, "row %d nonce", i)
 		require.Equal(
-			t, want[i].IsCheckpoint, got[i].IsCheckpoint, "row %d checkpoint", i,
+			t,
+			want[i].IsCheckpoint,
+			got[i].IsCheckpoint,
+			"row %d checkpoint",
+			i,
 		)
 	}
 	latest, ok, err := batched.GetLatestBlockNonce(nil)
