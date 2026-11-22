@@ -95,7 +95,7 @@ ledger) with five benchmarks, listed in `benchci.GateBenchmarks`:
 
 Method:
 
-- The job builds the pull request's base commit and its merged result on one
+- The job builds the base commit and the pull request's merged result on one
   `ubuntu-latest` runner and runs both for 8 rounds, alternating which goes
   first in each round (`.github/scripts/bench-gate.sh`). Drift on the shared
   machine lands on both sides, so the gate needs no stored baseline and a slow
@@ -109,11 +109,14 @@ Method:
   shared runner cannot resolve a smaller shift in the end-to-end benchmarks
   without producing false failures. Allocation metrics (`B/op`, `allocs/op`)
   are recorded in the result artifact but are not gated.
-- The script and comparator are taken from the base commit, so a pull request
-  cannot edit them to pass its own gate; a base that predates the gate falls
-  back to the head's copies. A benchmark missing from the base (a newly added
-  one) is reported as not found and is not compared. The gate fails if no gate
-  benchmark appears on both sides.
+- The script and comparator are taken from the base commit, so a change to
+  them takes effect only after it merges; a base that predates the gate falls
+  back to the head's copies. This is a guard against accidental changes, not
+  a security boundary: the head's benchmarks run in the same job.
+- A benchmark missing from the base (a newly added one) is reported as not
+  found and is not compared. A gate benchmark the base reports and the head
+  does not (deleted, renamed, or skipped) fails the gate, as does a run in
+  which no gate benchmark appears on both sides.
 - The workflow is not a required check; it does not report on documentation-only
   pull requests.
 
@@ -129,11 +132,11 @@ a placeholder.
 
 ### Baseline
 
-`.github/workflows/benchmark-baseline.yml` runs on every push to `main` that
-changes node code, and on manual dispatch (Actions, "benchmark-baseline",
-"Run workflow"). It runs `make bench-gate` (10 rounds) and commits the result to
-`gate-runs/` on the `benchmark-data` branch, with `gate-runs/latest.txt` naming
-the newest file. The weekly `make bench-ci` run keeps its own history in
+`.github/workflows/benchmark-baseline.yml` runs daily at 02:30 UTC, skipping a
+`main` commit that already has a recording, and on manual dispatch (Actions,
+"benchmark-baseline", "Run workflow"), which always records. It runs
+`make bench-gate` (10 rounds) and commits the result to `gate-runs/` on the
+`benchmark-data` branch, with `gate-runs/latest.txt` naming the newest file. The weekly `make bench-ci` run keeps its own history in
 `runs/` and also covers the gate benchmarks. Compare two baseline files with
 `benchstat` to locate when a slowdown entered `main`.
 

@@ -39,6 +39,7 @@ if [[ ${1:-} == --record ]]; then
     head_dir=$base_dir
     record_file=$(realpath -m "$3")
     out_dir=$(mktemp -d)
+    trap 'rm -rf "$out_dir"' EXIT
     rounds=${4:-10}
 else
     [[ $# -ge 3 && $# -le 4 ]] || usage

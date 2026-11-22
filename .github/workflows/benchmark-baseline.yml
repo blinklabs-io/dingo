@@ -1,20 +1,17 @@
 name: benchmark-baseline
 
 # Records a baseline for the benchmarks the pull-request gate compares
-# (benchmark-gate.yml). Every push to main that touches node code appends one
-# result file to gate-runs/ on the benchmark-data branch, next to the weekly
-# runs/ directory the full suite writes. The gate itself does not read these
-# files; they are the history to consult when a slowdown has to be located.
+# (benchmark-gate.yml). Each run appends one result file for the main tip to
+# gate-runs/ on the benchmark-data branch, next to the weekly runs/ directory
+# the full suite writes. The gate itself does not read these files; they are
+# the history to consult when a slowdown has to be located.
+#
+# Daily rather than per push: every pull request is already gated, and a run
+# per merge would hold a runner for most of each merge. The schedule keeps
+# clear of the weekly benchmark.yml run, which writes the same branch.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Makefile'
-      - '.github/scripts/bench-gate.sh'
+  schedule:
+    - cron: '30 2 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -40,11 +37,31 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      # A scheduled run skips a main commit that already has a recording; a
+      # manual dispatch always records.
+      - name: check-recorded
+        id: recorded
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --short=12 HEAD)
+          if [[ $GITHUB_EVENT_NAME == schedule ]] \
+            && git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            git fetch origin benchmark-data:refs/remotes/origin/benchmark-data
+            recorded=$(git ls-tree --name-only origin/benchmark-data gate-runs/)
+            if grep -q -- "-${sha}\.txt$" <<< "$recorded"; then
+              echo "main ${sha} already has a gate recording" >&2
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        if: steps.recorded.outputs.skip != 'true'
         with:
           go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        if: steps.recorded.outputs.skip != 'true'
         with:
           path: |
             ~/go/pkg/mod
@@ -55,14 +72,16 @@ jobs:
             ${{ runner.os }}-go-build-
 
       - name: run-gate-benchmarks
+        if: steps.recorded.outputs.skip != 'true'
         id: run
         run: |
           set -euo pipefail
-          run_file="$RUNNER_TEMP/$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(git rev-parse --short HEAD).txt"
+          run_file="$RUNNER_TEMP/$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(git rev-parse --short=12 HEAD).txt"
           make bench-gate BENCH_GATE_OUT="$run_file"
           echo "run_file=${run_file}" >> "$GITHUB_OUTPUT"
 
       - name: publish-benchmark-data
+        if: steps.recorded.outputs.skip != 'true'
         env:
           RUN_FILE: ${{ steps.run.outputs.run_file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

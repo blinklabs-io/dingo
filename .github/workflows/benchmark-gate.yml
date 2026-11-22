@@ -43,15 +43,28 @@ jobs:
     # Backstop for a wedged runner; a normal run is well under half of this.
     timeout-minutes: 40
     steps:
+      # head is the pull request's test merge commit. Its first parent is the
+      # base it was merged onto; the event payload's base.sha can lag behind
+      # it, which would charge commits already on main to this pull request.
       - name: checkout-head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           path: head
+          fetch-depth: 2
           persist-credentials: false
+      - name: resolve-base
+        id: base
+        run: |
+          set -euo pipefail
+          if ! sha=$(git -C head rev-parse --verify HEAD^2 >/dev/null && git -C head rev-parse HEAD^1); then
+            echo "head is not a merge commit; cannot find the base it was merged onto" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
       - name: checkout-base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ steps.base.outputs.sha }}
           path: base
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
@@ -68,9 +81,11 @@ jobs:
             ${{ runner.os }}-go-bench-
             ${{ runner.os }}-go-build-
 
-      # The gate's own script and comparator come from the base revision, so a
-      # pull request cannot edit them to pass its own gate. A base that
+      # The gate's own script and comparator come from the base revision, so
+      # a change to them takes effect only after it merges. A base that
       # predates the gate (the pull request that adds it) falls back to head.
+      # This is not a security boundary: the head's benchmarks run in this
+      # job with the same access to the result files.
       - name: select-trusted-tooling
         id: tooling
         run: |
