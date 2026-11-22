@@ -2526,7 +2526,7 @@ func (n *Node) Truncate(
 				return 0, err
 			}
 		}
-		return lifecycle.Truncate(
+		removed, err := lifecycle.Truncate(
 			ctx,
 			tmpDB,
 			block,
@@ -2535,6 +2535,12 @@ func (n *Node) Truncate(
 			n.config.delegatorInactivity,
 			setOpts...,
 		)
+		// Test seam: the truncated state before sync resumes, which on a
+		// live network refetches the removed blocks within milliseconds.
+		if err == nil && n.afterTruncate != nil {
+			n.afterTruncate(tmpDB)
+		}
+		return removed, err
 	}()
 	// tmpDB's database.New registered its own Prometheus collectors under
 	// the same names reinitializeAndResume's database.New is about to use;

@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/topology"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -425,6 +427,17 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	syncer.liveLifecycleMu.Unlock()
 	require.NoError(t, err)
 
+	// The tip is read before sync resumes: the forger still serves the
+	// removed blocks, so the resumed syncer can fetch them back before a
+	// read after Truncate returns.
+	var tipAfterTruncate ochainsync.Tip
+	var tipAfterTruncateErr error
+	syncer.liveLifecycleMu.Lock()
+	syncer.afterTruncate = func(db *database.Database) {
+		tipAfterTruncate, tipAfterTruncateErr = db.GetTip(nil)
+	}
+	syncer.liveLifecycleMu.Unlock()
+
 	targetSlot := earlyTip.Point.Slot
 	blocksRemoved, err := syncer.Truncate(
 		context.Background(),
@@ -435,11 +448,7 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, blocksRemoved)
 	requireInboundListenerAcceptsConnections(t, syncerLn)
-
-	syncer.liveLifecycleMu.Lock()
-	tipAfterTruncate, err := syncer.db.GetTip(nil)
-	syncer.liveLifecycleMu.Unlock()
-	require.NoError(t, err)
+	require.NoError(t, tipAfterTruncateErr)
 	require.LessOrEqual(t, tipAfterTruncate.Point.Slot, targetSlot)
 
 	// The forger keeps producing blocks throughout; the syncer must pick
