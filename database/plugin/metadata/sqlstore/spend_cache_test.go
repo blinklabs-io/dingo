@@ -547,3 +547,40 @@ WHERE u.deleted_slot = 0 AND p.hash = ?`, renamedID,
 	).Scan(&live))
 	require.Zero(t, live, "uncommitted outputs must be spent by row id")
 }
+
+// TestSpendCachedOutputsResolveByRowIDAfterCommit is
+// TestSpendCachedOutputsResolveByRowID with the producer inserted inside a
+// committed transaction, as production writes it: the outputs reach the store
+// cache only when Commit publishes them.
+func TestSpendCachedOutputsResolveByRowIDAfterCommit(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	producerID := bytes.Repeat([]byte{0x91}, 32)
+	spenderID := bytes.Repeat([]byte{0x92}, 32)
+	renamedID := bytes.Repeat([]byte{0x9e}, 32)
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, store.SetTransaction(
+		spendCacheProducer(t, producerID, []byte{1, 2}),
+		spendCachePoint(10, producerID), 0, nil, false, txn, 0,
+	))
+	require.NoError(t, txn.Commit())
+	_, err := store.writeDB.Exec(
+		`UPDATE "transaction" SET hash = ? WHERE hash = ?`,
+		renamedID, producerID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetTransaction(
+		spendCacheSpender(t, spenderID,
+			models.UtxoId{Hash: producerID, Idx: 0},
+			models.UtxoId{Hash: producerID, Idx: 1},
+		),
+		spendCachePoint(20, spenderID), 0, nil, false, nil, 0,
+	))
+	var live int
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM utxo u JOIN "transaction" p ON p.id = u.tx_id
+WHERE u.deleted_slot = 0 AND p.hash = ?`, renamedID,
+	).Scan(&live))
+	require.Zero(t, live, "committed outputs must be spent by row id")
+}
