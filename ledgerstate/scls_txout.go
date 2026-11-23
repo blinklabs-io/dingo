@@ -17,9 +17,11 @@ package ledgerstate
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"slices"
 
 	sclscardano "github.com/blinklabs-io/go-scls/cardano"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // CBOR major types, shifted into the initial byte.
@@ -46,8 +48,13 @@ const (
 //     (variableMapLenEncoding in Encoder.hs).
 //   - Inline datums and native scripts keep their stored bytes, which the
 //     ledger memoizes; Plutus scripts are re-encoded as [language, bytes].
-func ledgerTxOut(out sclscardano.TxOut) []byte {
-	addr := appendBytes(nil, out.Address)
+//   - Addresses go through ledgerAddress.
+func ledgerTxOut(out sclscardano.TxOut) ([]byte, error) {
+	address, err := ledgerAddress(out.Address)
+	if err != nil {
+		return nil, err
+	}
+	addr := appendBytes(nil, address)
 	value := appendLedgerValue(nil, out.Value)
 	inlineOrScript := out.Script != nil ||
 		(out.Datum != nil && out.Datum.Inline != nil)
@@ -62,7 +69,7 @@ func ledgerTxOut(out sclscardano.TxOut) []byte {
 		if out.Datum != nil {
 			res = appendBytes(res, out.Datum.Hash[:])
 		}
-		return res
+		return res, nil
 	}
 	n := uint64(2)
 	if out.Datum != nil {
@@ -101,7 +108,26 @@ func ledgerTxOut(out sclscardano.TxOut) []byte {
 		res = appendHead(res, cborTag, 24)
 		res = appendBytes(res, script)
 	}
-	return res
+	return res, nil
+}
+
+// ledgerAddress returns the address bytes the ledger holds for an output.
+// Decoding a pre-Babbage output, fromCborBothAddr (Address.hs) keeps only the
+// consumed prefix of the address and rebuilds a pointer through
+// mkPtrNormalized, which zeroes every component when one is out of range; the
+// stored bytes are the transaction's and keep both. The lenient gouroboros
+// decoder reproduces that crop and normalization. A Byron address is kept
+// as stored: the ledger holds its original serialization, which re-encoding
+// the decoded attributes need not reproduce.
+func ledgerAddress(stored []byte) ([]byte, error) {
+	if len(stored) == 0 || stored[0]>>4 == lcommon.AddressTypeByron {
+		return stored, nil
+	}
+	addr, err := lcommon.NewAddressFromBytesLenient(stored)
+	if err != nil {
+		return nil, fmt.Errorf("address: %w", err)
+	}
+	return addr.Bytes()
 }
 
 func appendLedgerValue(b []byte, v sclscardano.TxValue) []byte {

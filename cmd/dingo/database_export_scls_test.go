@@ -42,7 +42,9 @@ func TestExportSCLSReleasesTheSetAndPublishesAVerifiedFile(t *testing.T) {
 	store, err := badgerutxo.Open(badgerutxo.DirFor(dataDir))
 	require.NoError(t, err)
 	tip := ocommon.Point{Slot: 77, Hash: bytes.Repeat([]byte{9}, 32)}
-	txOut, err := cbor.Encode([]any{bytes.Repeat([]byte{1}, 29), uint64(5)})
+	// An enterprise key-hash address on network 1.
+	addr := append([]byte{0x61}, bytes.Repeat([]byte{1}, 28)...)
+	txOut, err := cbor.Encode([]any{addr, uint64(5)})
 	require.NoError(t, err)
 	require.NoError(t, store.Bootstrap(
 		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{8}, 32)},

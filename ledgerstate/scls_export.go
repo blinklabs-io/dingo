@@ -296,7 +296,11 @@ func addSCLSUtxo(w *scls.Writer, txID []byte, index uint32, c []byte) error {
 	if err != nil {
 		return fmt.Errorf("output %x#%d: %w", txID, index, err)
 	}
-	txOut, err := decodeSCLSTxOut(ledgerTxOut(stored))
+	ledgerForm, err := ledgerTxOut(stored)
+	if err != nil {
+		return fmt.Errorf("output %x#%d: %w", txID, index, err)
+	}
+	txOut, err := decodeSCLSTxOut(ledgerForm)
 	if err != nil {
 		return fmt.Errorf("output %x#%d: ledger form: %w", txID, index, err)
 	}

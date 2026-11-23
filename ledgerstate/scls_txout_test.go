@@ -43,6 +43,7 @@ func TestLedgerTxOutMatchesTheLedgerSerialization(t *testing.T) {
 	p1 := "581c" + hex.EncodeToString(bytes.Repeat([]byte{0x01}, 28))
 	p2 := "581c" + hex.EncodeToString(bytes.Repeat([]byte{0x02}, 28))
 	keyHash := "581c" + hex.EncodeToString(bytes.Repeat([]byte{0x33}, 28))
+	payment := hex.EncodeToString(bytes.Repeat([]byte{0x44}, 28))
 
 	// 24 single-byte asset names, stored in descending order.
 	var manyIn, manyWant []string
@@ -110,15 +111,40 @@ func TestLedgerTxOutMatchesTheLedgerSerialization(t *testing.T) {
 			want: cborCat("a4", "00", addr, "01", "05", "02", "8200", dh,
 				"03", "d8185822", "8200", "8200", keyHash),
 		},
+		{
+			// Slot 2^32 does not fit the pointer's 32-bit slot, so
+			// mkPtrNormalized zeroes all three components.
+			name: "out-of-range pointer is normalized",
+			stored: cborCat("82", "582441", payment,
+				"9080808000", "01", "02", "05"),
+			want: cborCat("82", "582041", payment, "000000", "05"),
+		},
+		{
+			name:   "in-range pointer is kept",
+			stored: cborCat("82", "582041", payment, "050102", "05"),
+			want:   cborCat("82", "582041", payment, "050102", "05"),
+		},
+		{
+			name:   "bytes after the address payload are cropped",
+			stored: cborCat("82", "581f61", payment, "dead", "05"),
+			want:   cborCat("82", "581d61", payment, "05"),
+		},
+		{
+			name:   "byron address is kept as stored",
+			stored: cborCat("82", "4582d8184100", "05"),
+			want:   cborCat("82", "4582d8184100", "05"),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			out, err := decodeSCLSTxOut(tc.stored)
 			require.NoError(t, err)
+			got, err := ledgerTxOut(out)
+			require.NoError(t, err)
 			require.Equal(t,
 				hex.EncodeToString(tc.want),
-				hex.EncodeToString(ledgerTxOut(out)),
+				hex.EncodeToString(got),
 			)
 		})
 	}

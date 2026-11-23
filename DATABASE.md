@@ -4720,7 +4720,10 @@ serializes a Conway UTxO entry, which is what a reference export holds: the
 2-element array (3 with a datum hash) when there is no inline datum or script
 reference, otherwise a map with ascending keys; an asset-free value as a bare
 coin; multiasset maps in bytewise key order, indefinite-length above 23
-entries; inline datum and native script bytes unchanged. Both the stored and
+entries; inline datum and native script bytes unchanged; a Shelley-family
+address with bytes after its payload cropped and an out-of-range pointer
+zeroed, as the ledger's pre-Babbage decode does, and a Byron address
+unchanged. Both the stored and
 the re-encoded forms go through the go-scls typed `utxo/v0` payload codec, and
 a payload the codec rejects fails the export.
 
