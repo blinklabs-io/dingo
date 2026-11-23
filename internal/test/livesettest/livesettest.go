@@ -42,7 +42,12 @@ func Open(tb testing.TB) *utxoset.Set {
 		MemTableSize: 8 << 20,
 	})
 	require.NoError(tb, err)
-	tb.Cleanup(func() { require.NoError(tb, set.Close()) })
+	closing := set
+	tb.Cleanup(func() {
+		target := closing
+		closing = nil
+		require.NoError(tb, target.Close())
+	})
 	return set
 }
 
@@ -99,9 +104,11 @@ func adopt(
 	tb.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ledgerDBs.Store(db, set)
+	closingDB, closingSet := db, set
 	tb.Cleanup(func() {
-		ledgerDBs.Delete(db)
-		_ = set.Close()
+		ledgerDBs.Delete(closingDB)
+		_ = closingSet.Close()
+		closingDB, closingSet = nil, nil
 	})
 	var moved nodesettings.FamilyMask
 	require.NoError(tb, nodestorage.Reconcile{

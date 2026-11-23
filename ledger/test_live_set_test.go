@@ -185,7 +185,12 @@ func attachTestLiveSet(t testing.TB, ls *LedgerState) {
 	if ls.config.Logger == nil {
 		ls.config.Logger = testLogger()
 	}
-	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	closing := ls
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		require.NoError(t, target.Close())
+	})
 }
 
 func seedTestOutputCBOR(t *testing.T, db *database.Database, txID []byte, index uint32, amount uint64) []byte {
