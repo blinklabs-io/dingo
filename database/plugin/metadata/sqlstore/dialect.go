@@ -324,7 +324,7 @@ func SQLiteDialect() Dialect {
 			"PRAGMA synchronous = NORMAL",
 			"PRAGMA cache_size = -50000",
 			"PRAGMA temp_store = MEMORY",
-			"PRAGMA threads = 0",
+			"PRAGMA threads = 4",
 			"PRAGMA wal_autocheckpoint = 0",
 		),
 		analyze: execStatements("ANALYZE"),

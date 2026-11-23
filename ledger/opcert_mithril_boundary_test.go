@@ -30,10 +30,11 @@ func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	OpenLiveSetForTest(t, db)
 
 	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(make([]byte, 28)))
 	const boundarySlot = uint64(100)
-	require.NoError(t, db.UpdatePoolOpCertSequence(
+	require.NoError(t, seedDB(t, db).UpdatePoolOpCertSequence(
 		context.Background(),
 		poolKeyHash,
 		490,
@@ -41,6 +42,7 @@ func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
 		nil,
 	))
 	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
+	fxAttachLedgerDB(t, ledgerState)
 
 	stored, found, err := ledgerState.latestOpCertCounterForValidation(
 		context.Background(),

@@ -184,19 +184,6 @@ func (s *Set) ensureDrepState(ctx context.Context, ldb ledgerdb.LedgerDB) error 
 		if err := ldb.IterateDreps(txn, func(d *models.Drep) error {
 			dreps++
 			k := drepKey(d.CredentialTag, d.Credential)
-			s.merge.noteDrep(k)
-			if s.merge != nil && s.mergeOverDrained.Load() {
-				// The metadata store lost the rows a drain moved out; an
-				// import of a DRep the ledger already holds keeps the slot
-				// it was first written at.
-				held, err := s.Drep(d.CredentialTag, d.Credential)
-				if err != nil {
-					return err
-				}
-				if held != nil {
-					d.AddedSlot = held.AddedSlot
-				}
-			}
 			return put(k, encodeDrep(*d))
 		}); err != nil {
 			return err

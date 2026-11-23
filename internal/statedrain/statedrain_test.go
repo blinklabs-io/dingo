@@ -248,8 +248,15 @@ func TestGraduatedListNamesTheFamiliesAndTheirTables(t *testing.T) {
 	require.Equal(t, []string{
 		"account_reward_delta", "account_withdrawal_witness",
 		"account_import_baseline", "registration", "deregistration",
-		"stake_registration", "stake_deregistration", "account",
+		"stake_registration", "stake_deregistration",
+		"account_inactivity_activation", "account",
 	}, tables[nodesettings.FamilyAccounts])
+	require.Equal(t,
+		[]string{statedrain.DelegatorInactivitySyncKey},
+		entries[12].SyncKeys)
+	require.Equal(t,
+		[]string{statedrain.PendingRatificationSyncKey},
+		entries[5].SyncKeys)
 	require.Equal(t, []string{
 		"pool_registration_owner", "pool_registration_relay",
 		"pool_retirement", "pool_registration", "pool",

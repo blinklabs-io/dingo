@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const blockIdentityVersion = 75
+const blockIdentityVersion = 74
 
 func blockIdentityHash(b byte) []byte {
 	return bytes.Repeat([]byte{b}, 32)

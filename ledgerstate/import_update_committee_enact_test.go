@@ -21,8 +21,6 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -125,11 +123,11 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		govImportConfigForTest(t, db, govStateData),
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(t.Context(), nil)
+	members, err := ledgerDBFor(t, db).GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	imported := map[string]uint64{}
@@ -145,18 +143,18 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	}
 	require.Equal(t, wantImported, imported)
 
-	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, row)
 	require.NotNil(t, row.RatifiedEpoch, "UpdateCommittee must be ratified")
 	require.Equal(t, uint64(500), *row.RatifiedEpoch)
 
-	txn := db.MetadataTxn(t.Context(), true)
+	txn := ledgerDBFor(t, db).Begin(t.Context(), true)
 	defer txn.Release()
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
 	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
-		DB:           dbadapter.New(db),
+		DB:           ledgerDBFor(t, db),
 		Txn:          txn,
 		PrevEpoch:    500,
 		NewEpoch:     501,
@@ -172,7 +170,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.Equal(t, 1, out.EnactedCount)
 	require.NoError(t, txn.Commit())
 
-	members, err = db.GetCommitteeMembers(t.Context(), nil)
+	members, err = ledgerDBFor(t, db).GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, m := range members {
@@ -203,7 +201,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 	staleHash := bytes.Repeat([]byte{0x33}, 28)
-	require.NoError(t, db.SetCommitteeMembers(
+	require.NoError(t, ledgerDBFor(t, db).SetCommitteeMembers(
 		t.Context(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: 0,
@@ -255,14 +253,14 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 	})
 	require.NoError(t, err)
 
-	cfg := govImportConfigForTest(db, govStateData)
+	cfg := govImportConfigForTest(t, db, govStateData)
 	cfg.State.Epoch = 653
 	cfg.State.Tip = &SnapshotTip{Slot: 65_350}
 	require.NoError(t, importGovState(
 		context.Background(), cfg, func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(t.Context(), nil)
+	members, err := ledgerDBFor(t, db).GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	require.Equal(t, uint8(1), members[0].ColdCredentialTag)
@@ -309,7 +307,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 		tx, cfg.State.Tip.Slot+1, state, &conway.ConwayProtocolParameters{},
 	))
 
-	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, row.RatifiedEpoch)
 	require.Equal(t, uint64(653), *row.RatifiedEpoch)
@@ -317,7 +315,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 	require.Equal(t, uint64(653), *row.EnactedEpoch)
 	require.NotNil(t, row.EnactedSlot)
 	require.Equal(t, uint64(65_300), *row.EnactedSlot)
-	pending, err := db.GetRatifiedGovernanceProposals(t.Context(), nil)
+	pending, err := ledgerDBFor(t, db).GetRatifiedGovernanceProposals(t.Context(), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending, "the imported action must not enact again")
 }
@@ -382,14 +380,14 @@ func TestImportRatifiedNonCommitteeActionDoesNotWarn(t *testing.T) {
 	require.NoError(t, err)
 
 	var logs bytes.Buffer
-	importCfg := govImportConfigForTest(db, govStateData)
+	importCfg := govImportConfigForTest(t, db, govStateData)
 	importCfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	require.NoError(t, importGovState(
 		context.Background(),
 		importCfg,
 		func(ImportProgress) {},
 	))
-	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	row, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, row.RatifiedEpoch, "the action must be imported ratified")
 	require.NotContains(t, logs.String(), "level=WARN")

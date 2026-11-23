@@ -44,7 +44,7 @@ func TestLedgerViewRewardWithdrawalValidation(t *testing.T) {
 	require.NoError(t, err)
 
 	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: key,
 		Reward:     types.Uint64(balance),
 		Active:     true,
@@ -55,6 +55,7 @@ func TestLedgerViewRewardWithdrawalValidation(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}}
+	fxAttachLedgerDB(t, lv.ls)
 	rewardAddr, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xe1}, key...),
 	)

@@ -336,6 +336,14 @@ func (ls *LedgerState) rewardPoolOutputFactRows(
 	if err != nil {
 		return metadata.FactRows{}, err
 	}
+	return poolOutputRowsOver(r, epochs, from, through)
+}
+
+func poolOutputRowsOver(
+	r RewardDerivedReader,
+	epochs []uint64,
+	from, through uint64,
+) (metadata.FactRows, error) {
 	out := metadata.FactRows{Columns: []string{
 		"apparent_performance", "pool_key_hash", "epoch", "optimal_reward",
 		"total_reward", "leader_reward", "leader_reward_deficit",
@@ -399,6 +407,13 @@ func accountOutputPageOver(
 		if len(out.Rows) >= limit {
 			return out, int64(epochs[i]), nil //nolint:gosec // an epoch number
 		}
+		skip, err := rewardAccountEpochOutsideRange(r, epochs[i], from, through)
+		if err != nil {
+			return metadata.FactRows{}, 0, err
+		}
+		if skip {
+			continue
+		}
 		rows, err := r.RewardAccountOutputRows(epochs[i], nil)
 		if err != nil {
 			return metadata.FactRows{}, 0, err
@@ -447,28 +462,11 @@ func (ls *LedgerState) rewardCreditRoundFactRows(
 }
 
 // RewardPrecomputeCursors returns each retained reward precompute cursor as
-// stored, by snapshot epoch: from the live UTxO set once the reward outputs
-// are drained into it, from the metadata store's sync state otherwise.
+// the LedgerDB set stores it, by snapshot epoch.
 func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
-	var epochs []uint64
-	if ls.FactTableDrained("reward_pool_output") {
-		_, set, err := ls.rewardDerivedExport()
-		if err != nil {
-			return nil, err
-		}
-		epochs = set
-	} else {
-		keys, err := ls.ledgerDB().ListSyncStateKeysByPrefix(
-			models.RewardPrecomputeCursorPrefix, nil,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for _, k := range keys {
-			if epoch, ok := cursorEpochOfKey(k); ok {
-				epochs = append(epochs, epoch)
-			}
-		}
+	_, epochs, err := ls.rewardDerivedExport()
+	if err != nil {
+		return nil, err
 	}
 	out := make(map[uint64]string, len(epochs))
 	for _, epoch := range epochs {
@@ -483,4 +481,29 @@ func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// rewardAccountEpochOutsideRange reports whether none of epoch's account
+// output rows can fall in [from, through], judged from its pool output rows,
+// one per pool, so the copy need not decode the epoch's whole delegator set to
+// find that none of it belongs to the range. A precompute chunk saves its
+// pools' output rows and their account rows in one transaction at one captured
+// slot, and the credit-time recheck keeps that slot, so every account row's
+// slot lies within its epoch's lowest and highest pool row slot. An epoch can
+// hold several slots, one per resumed run of a round interrupted before rounds
+// adopted their cursor's slot, so every pool row is read rather than the
+// first. An epoch with no pool row is never skipped.
+func rewardAccountEpochOutsideRange(
+	r RewardDerivedReader,
+	epoch, from, through uint64,
+) (bool, error) {
+	pools, err := r.RewardPoolOutputRows(epoch, nil)
+	if err != nil || len(pools) == 0 {
+		return false, err
+	}
+	lo, hi := pools[0].CapturedSlot, pools[0].CapturedSlot
+	for _, p := range pools[1:] {
+		lo, hi = min(lo, p.CapturedSlot), max(hi, p.CapturedSlot)
+	}
+	return hi < from || lo > through, nil
 }

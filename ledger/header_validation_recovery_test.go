@@ -157,6 +157,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 	ls.metrics.init(prometheus.NewRegistry())
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
@@ -246,6 +247,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
@@ -336,6 +338,7 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 	chainTipBefore := cm.PrimaryChain().Tip().Point.Slot
@@ -427,6 +430,7 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
@@ -577,6 +581,7 @@ func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 	ls.metrics.init(prometheus.NewRegistry())
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
@@ -689,6 +694,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = ledgerTip
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
@@ -891,6 +897,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 					),
 				},
 			}
+			attachTestLedgerDB(t, ls)
 			ls.currentTip = ledgerTip
 			ls.metrics.init(prometheus.NewRegistry())
 			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))

@@ -17,8 +17,6 @@ package ledger_test
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -30,15 +28,7 @@ import (
 // enacted.
 func TestGovernanceRatifiesParentlessProposalFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	proposal := ledger.HardForkRatifyOverSetForTest(
-		t, set,
-		func(store ledgerdb.LedgerDB) {
-			require.NoError(t, set.LoadLedgerState(t.Context(), store))
-		},
-	)
+	proposal := ledger.HardForkRatifyOverSetForTest(t)
 	require.NotNil(
 		t,
 		proposal.RatifiedEpoch,

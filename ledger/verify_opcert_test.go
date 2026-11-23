@@ -376,16 +376,17 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 			CardanoNodeConfig: cfg,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	var issuer lcommon.IssuerVkey
 	issuer[0] = 0xA1
 	pkh := lcommon.PoolKeyHash(issuer.Hash())
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 3, 20, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 3, 20, nil),
 	)
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 40, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 5, 40, nil),
 	)
 
 	tests := []struct {
@@ -452,12 +453,13 @@ func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
 		currentEra: eras.DijkstraEraDesc,
 		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
 	}
+	fxAttachLedgerDB(t, ls)
 	var issuer lcommon.IssuerVkey
 	issuer[0] = 0xC3
 	pkh := lcommon.PoolKeyHash(issuer.Hash())
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 0, 10, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 0, 10, nil),
 	)
 
 	got, err := ls.leiosAnnouncementOCINStaleness(
@@ -487,7 +489,7 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 	ls.publishSnapshotsLocked()
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 0, 20, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 0, 20, nil),
 	)
 
 	staleness, err := ls.ValidateLeiosAnnouncementHeader(tb.block.Header())

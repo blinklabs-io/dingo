@@ -195,9 +195,6 @@ func (s *Store) PParamsForEra(era uint64) ([]PParamsRow, error) {
 // the order the metadata store wrote them, and marks them loaded, for a
 // store from before it kept them.
 func (s *Store) LoadPParams(rows []PParamsRow) error {
-	if s.merging.Load() {
-		return s.mergePParams(rows)
-	}
 	if err := s.dropPrefix(
 		[]byte{PParamsTag}, []byte{PParamsSlotTag},
 	); err != nil {
@@ -238,53 +235,4 @@ func (s *Store) PParamsLoaded() (bool, error) {
 		return err
 	})
 	return ok, err
-}
-
-// mergePParams appends the rows the store does not already hold after the ones
-// it does, in the order given, and marks them loaded. Every write is a new
-// row, so a row equal to one held is skipped: a merge that runs again then
-// writes nothing twice.
-func (s *Store) mergePParams(rows []PParamsRow) error {
-	return s.update(func(txn *badger.Txn) error {
-		seq, err := readPParamsSeq(txn)
-		if err != nil {
-			return err
-		}
-		held := map[string]struct{}{}
-		err = eachPrefix(txn, []byte{PParamsTag}, func(k, v []byte) error {
-			r, err := decodePParams(k, v)
-			if err != nil {
-				return err
-			}
-			held[pparamsIdentity(r)] = struct{}{}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		for _, r := range rows {
-			id := pparamsIdentity(r)
-			if _, ok := held[id]; ok {
-				continue
-			}
-			held[id] = struct{}{}
-			if err := setPParams(txn.Set, r, seq); err != nil {
-				return err
-			}
-			seq++
-		}
-		if err := txn.Set(
-			pparamsSeqKey, binary.BigEndian.AppendUint64(nil, seq),
-		); err != nil {
-			return err
-		}
-		return txn.Set(pparamsKey, []byte{1})
-	})
-}
-
-func pparamsIdentity(r PParamsRow) string {
-	k := binary.BigEndian.AppendUint64(nil, r.Era)
-	k = binary.BigEndian.AppendUint64(k, r.Epoch)
-	k = binary.BigEndian.AppendUint64(k, r.AddedSlot)
-	return string(append(k, r.Cbor...))
 }

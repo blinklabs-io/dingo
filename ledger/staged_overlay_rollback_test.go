@@ -265,14 +265,6 @@ func TestDrainedAccountWriteStopsSetWhenUnstageable(t *testing.T) {
 	)
 }
 
-func TestUndrainedAccountWriteLeavesSetRunningWhenUnstageable(t *testing.T) {
-	t.Parallel()
-	ls := &LedgerState{}
-	ls.config.Logger = slog.New(slog.DiscardHandler)
-	ls.stageRewardCredits(nil, []models.AccountRewardCredit{{StakingKey: []byte{1}, Amount: 5, Slot: 3}})
-	require.False(t, ls.utxoSetFailed.Load(), "the metadata store holds the credit")
-}
-
 // drainedBumpSet is a set that serves the DRep and account readers of a
 // drained ledger; its committed dormancy counter steps to 1 at bumpSlot.
 type drainedBumpSet struct {

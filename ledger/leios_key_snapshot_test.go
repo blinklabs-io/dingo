@@ -33,6 +33,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	t.Parallel()
 
 	db := newTestDB(t)
+	OpenLiveSetForTest(t, db)
 	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
 	oldPublic := bytes.Repeat([]byte{0x51}, 96)
 	oldProof := bytes.Repeat([]byte{0x61}, 48)
@@ -56,15 +57,15 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			LeiosKeyPublic:          append([]byte(nil), public...),
 			LeiosKeyPossessionProof: append([]byte(nil), proof...),
 		}
-		require.NoError(t, db.Metadata().ImportPool(record, registration, nil))
+		poolSeedRegistered(t, db, record.PoolKeyHash, registration)
 	}
 
 	importPool(50, oldPublic, oldProof)
-	require.NoError(t, db.SetEpoch(0, 6, nil, nil, nil, nil, 3, 1, 100, nil))
-	require.NoError(t, db.SetEpoch(100, 7, nil, nil, nil, nil, 3, 1, 100, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(0, 6, nil, nil, nil, nil, 3, 1, 100, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(100, 7, nil, nil, nil, nil, 3, 1, 100, nil))
 	keyRegistrationEpoch := uint64(7)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
 			Epoch:                         8,
 			SnapshotType:                  models.PoolStakeSnapshotTypeMark,
 			PoolKeyHash:                   append([]byte(nil), poolKeyHash...),
@@ -76,7 +77,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			CalculationVersion:            1,
 			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteNone,
 			RewardAccountAutoVoteResolved: true,
-		},
+		}},
 		nil,
 	))
 
@@ -84,14 +85,14 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	importPool(250, newPublic, newProof)
 	var poolHash lcommon.PoolKeyHash
 	copy(poolHash[:], poolKeyHash)
-	current, err := db.Metadata().GetPools([]lcommon.PoolKeyHash{poolHash}, nil)
+	current, err := seedDB(t, db).GetPools(t.Context(), []lcommon.PoolKeyHash{poolHash}, nil)
 	require.NoError(t, err)
 	require.Len(t, current, 1)
 	require.Equal(t, newPublic, current[0].LeiosKeyPublic)
 
 	for _, snapshotEpoch := range []uint64{26, 27, 28} {
-		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-			&models.PoolStakeSnapshot{
+		require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
+			[]*models.PoolStakeSnapshot{{
 				Epoch:                     snapshotEpoch,
 				SnapshotType:              models.PoolStakeSnapshotTypeMark,
 				PoolKeyHash:               append([]byte(nil), poolKeyHash...),
@@ -99,12 +100,12 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 				LeiosKeyPublic:            append([]byte(nil), oldPublic...),
 				LeiosKeyPossessionProof:   append([]byte(nil), oldProof...),
 				LeiosKeyRegistrationEpoch: &keyRegistrationEpoch,
-			},
+			}},
 			nil,
 		))
 	}
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
 			Epoch:                     9,
 			SnapshotType:              models.PoolStakeSnapshotTypeMark,
 			PoolKeyHash:               append([]byte(nil), poolKeyHash...),
@@ -112,7 +113,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			LeiosKeyPublic:            append([]byte(nil), oldPublic...),
 			LeiosKeyPossessionProof:   append([]byte(nil), oldProof...),
 			LeiosKeyRegistrationEpoch: nil,
-		},
+		}},
 		nil,
 	))
 	txn := db.Transaction(context.Background(), false)
@@ -123,6 +124,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.consensus.Store(&consensusSnapshot{currentEra: eras.ShelleyEraDesc})
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	view := ls.NewView(txn)

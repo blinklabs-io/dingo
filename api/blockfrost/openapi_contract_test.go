@@ -128,14 +128,17 @@ func (o openAPIOperation) validSamplePath(t *testing.T) string {
 		"gov_action_id":  string(govAction),
 		"hash":           strings.Repeat("ab", 32),
 		"hash_or_number": "1",
+		"index":          "0",
 		"label":          "1",
 		"number":         "1",
 		"policy_id":      policy,
 		"pool_id":        "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+		"role":           "0",
 		"script_hash":    policy,
 		"slot_number":    "1",
 		"stake_address":  "stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v",
 		"tx_hash":        strings.Repeat("ab", 32),
+		"xpub":           strings.Repeat("ab", 64),
 	}
 	return openAPIPathParameter.ReplaceAllStringFunc(
 		o.path,

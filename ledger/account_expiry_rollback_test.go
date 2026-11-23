@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
@@ -101,9 +102,10 @@ func newExpiryRollbackTestLedgerWithEpochs(
 		currentEra: eras.ShelleyEraDesc,
 		epochCache: epochCache,
 	}
+	attachTestLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	for _, e := range epochCache {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e.StartSlot,
 			e.EpochId,
 			nil, nil, nil, nil,
@@ -117,8 +119,8 @@ func newExpiryRollbackTestLedgerWithEpochs(
 }
 
 // seedRollbackCertificate records a certificate through the public database
-// ingestion boundary. This keeps the ledger test independent of a concrete
-// metadata provider and its schema implementation.
+// ingestion boundary, and in db's LedgerDB set once that is open, as the
+// certificate's own transaction does.
 func seedRollbackCertificate(
 	t *testing.T,
 	db *database.Database,
@@ -139,17 +141,11 @@ func seedRollbackCertificate(
 		map[int]uint64{0: 0},
 		nil, 0,
 	))
-}
-
-func rollbackStakeDelegationCertificate(
-	cred []byte,
-) lcommon.Certificate {
-	return &lcommon.StakeDelegationCertificate{
-		StakeCredential: &lcommon.Credential{
-			CredType:   0,
-			Credential: lcommon.NewBlake2b224(cred),
-		},
-		PoolKeyHash: lcommon.NewBlake2b224(renewTestCred(0x0A)),
+	if ls := seedLedgerOf(db); ls != nil {
+		require.NoError(t, ls.stageAccountTransaction(
+			nil, tx, slot, 0, txID,
+			database.BatchedTxIngestOpts{}, map[int]uint64{0: 0},
+		))
 	}
 }
 
@@ -164,20 +160,122 @@ func rollbackStakeRegistrationCertificate(
 	}
 }
 
-func rollbackStakeDeregistrationCertificate(
-	cred []byte,
-) lcommon.Certificate {
-	return &lcommon.StakeDeregistrationCertificate{
-		StakeCredential: lcommon.Credential{
-			CredType:   0,
-			Credential: lcommon.NewBlake2b224(cred),
-		},
-	}
+// expiryRollbackBlock commits what stage writes as the block at slot: the
+// set's journal records it under that point, so a rollback below slot undoes
+// it.
+func expiryRollbackBlock(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	slot uint64,
+	stage func(txn *database.Txn) error,
+) {
+	t.Helper()
+	hash := make([]byte, 32)
+	binary.BigEndian.PutUint64(hash[len(hash)-8:], slot)
+	point := ocommon.NewPoint(slot, hash)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := stage(txn); err != nil {
+			return err
+		}
+		ls.stageUtxoSet(txn, &point)
+		return db.SetTip(ochainsync.Tip{Point: point}, txn)
+	}))
+	require.False(t, ls.utxoSetFailed.Load())
 }
 
-// runRollbackRecompute mirrors the rollback path: it gathers the affected set
-// (witnessed after rollbackSlot) before any deletes, then recomputes
-// expirations, all inside one write transaction.
+// expiryRollbackEmptyBlock applies a block at slot that changes no account: a
+// rollback targets a block on the chain, so the scenarios put one at the slot
+// they roll back to.
+func expiryRollbackEmptyBlock(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	slot uint64,
+) {
+	t.Helper()
+	expiryRollbackBlock(t, ls, db, slot, func(*database.Txn) error {
+		return nil
+	})
+}
+
+// expiryRollbackAccount applies a block at slot that leaves account in the
+// given state.
+func expiryRollbackAccount(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	slot uint64,
+	account models.Account,
+) {
+	t.Helper()
+	account.AddedSlot = slot
+	expiryRollbackBlock(t, ls, db, slot, func(txn *database.Txn) error {
+		ls.stageLedgerChanges(txn, LedgerChanges{Accounts: []AccountChange{{
+			Slot: slot, Account: account,
+		}}})
+		return nil
+	})
+}
+
+// expiryRollbackRenew applies a block at slot that witnesses cred, renewing
+// its expiration to expiration.
+func expiryRollbackRenew(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	slot uint64,
+	cred []byte,
+	expiration uint64,
+) {
+	t.Helper()
+	expiryRollbackBlock(t, ls, db, slot, func(txn *database.Txn) error {
+		ls.stageAccountExpirations(
+			txn,
+			[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, cred)},
+			expiration,
+			slot,
+		)
+		return nil
+	})
+}
+
+// expiryRollbackActivate runs the one-time CIP-0163 activation at the epoch
+// boundary block at slot.
+func expiryRollbackActivate(
+	t *testing.T,
+	ls *LedgerState,
+	db *database.Database,
+	slot uint64,
+	epoch uint64,
+) {
+	t.Helper()
+	expiryRollbackBlock(t, ls, db, slot, func(txn *database.Txn) error {
+		return ls.activateDelegatorInactivityIfNeeded(
+			txn, epoch, slot,
+		)
+	})
+}
+
+// expiryRollbackAccountAt reads cred's account, inactive ones included.
+func expiryRollbackAccountAt(
+	t *testing.T,
+	ls *LedgerState,
+	cred []byte,
+) *models.Account {
+	t.Helper()
+	acct, err := ls.ledgerDB().GetAccountByCredential(
+		context.Background(), 0, cred, true, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	return acct
+}
+
+// runRollbackRecompute rolls the LedgerDB set back to rollbackSlot from its
+// journal inside one write transaction, as the rollback path does; the
+// journal restores each account's expiration and the activation record.
 func runRollbackRecompute(
 	t *testing.T,
 	ls *LedgerState,
@@ -185,23 +283,15 @@ func runRollbackRecompute(
 	rollbackSlot uint64,
 ) {
 	t.Helper()
+	hash := make([]byte, 32)
+	binary.BigEndian.PutUint64(hash[len(hash)-8:], rollbackSlot)
+	point := ocommon.NewPoint(rollbackSlot, hash)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		affected, err := db.AccountsWitnessedAfterSlot(
-			context.Background(),
-			rollbackSlot,
-			txn,
-		)
-		if err != nil {
-			return err
-		}
-		return ls.recomputeAccountExpirationsAfterRollback(
-			context.Background(),
-			txn,
-			rollbackSlot,
-			affected,
-		)
+		ls.stageUtxoSetRollback(txn, point)
+		return nil
 	}))
+	require.False(t, ls.utxoSetFailed.Load())
 }
 
 // TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal is the brief
@@ -220,40 +310,28 @@ func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(
 	)
 
 	cred := renewTestCred(0x01)
-	// Account currently reflects the E2 witness: expiration = 2 + 90 = 92.
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       150,
-			ExpirationEpoch: 2 + inactivity,
-		}),
-	)
-	// Witness in E1 (slot 150) and E2 (slot 250).
-	seedRollbackCertificate(
-		t, db, 150, rollbackStakeDelegationCertificate(cred),
-	)
-	seedRollbackCertificate(
-		t, db, 250, rollbackStakeDelegationCertificate(cred),
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:      cred,
+		Active:          true,
+		CreatedSlot:     150,
+		ExpirationEpoch: 1 + inactivity,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackRenew(t, ls, db, 250, cred, 2+inactivity)
+	require.Equal(
+		t, 2+inactivity, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
 	)
 
 	runRollbackRecompute(t, ls, db, 199)
 
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
+	require.Equal(
+		t, 1+inactivity, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
 	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1)+inactivity, acct.ExpirationEpoch)
 }
 
-// TestRecomputeAccountExpirationsAfterRollbackGateOff verifies the recomputation
-// is a no-op when the gate is off: the E2-derived expiration is left untouched.
+// TestRecomputeAccountExpirationsAfterRollbackGateOff verifies that with the
+// gate off neither a witness nor the rollback of its block gives an account an
+// expiration.
 func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
 	t.Parallel()
 
@@ -263,48 +341,33 @@ func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
 	)
 
 	cred := renewTestCred(0x02)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       150,
-			ExpirationEpoch: 2 + inactivity,
-		}),
-	)
-	seedRollbackCertificate(
-		t, db, 150, rollbackStakeDelegationCertificate(cred),
-	)
-	seedRollbackCertificate(
-		t, db, 250, rollbackStakeDelegationCertificate(cred),
-	)
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:  cred,
+		Active:      true,
+		CreatedSlot: 150,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackBlock(t, ls, db, 250, func(txn *database.Txn) error {
+		ls.renewWitnessedAccountExpirations(
+			txn, 2, 250, []lcommon.Transaction{stakeDelegationTx(cred)},
+		)
+		return nil
+	})
+	require.Zero(t, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch)
 
 	runRollbackRecompute(t, ls, db, 199)
 
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2)+inactivity, acct.ExpirationEpoch)
+	acct := expiryRollbackAccountAt(t, ls, cred)
+	require.True(t, acct.Active)
+	require.Zero(t, acct.ExpirationEpoch)
 }
 
-// TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor is the
-// review-fix scenario: the one-time CIP-0163 activation stamp gives every
-// pre-existing account expiration = A + W without leaving a witness, so a pure
-// witness-history recompute would mis-restore an account whose only
-// post-activation witness is orphaned. Here W=90, activation runs at epoch
-// A=500 for an account created in epoch 5 (registration cert at slot 550,
-// stamped to 590 by activation). A post-activation delegation at slot 50550
-// (epoch 505) renews expiration to 595, then a rollback to slot 50150 (epoch
-// 501) orphans it. The only surviving witness is the epoch-5 registration, so
-// an unclamped recompute would produce 5+90=95. The activation floor (A=500,
-// account was stamped at activation) must clamp it back up to 500+90=590 — NOT 95,
-// NOT 0.
+// TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor: the
+// one-time CIP-0163 activation stamp gives every pre-existing account
+// expiration = A + W without leaving a witness. An account stamped at
+// activation and then renewed by a later witness must fall back to the
+// activation floor A + W when the witness is rolled away, not to 0 and not to
+// its registration epoch + W.
 func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(
 	t *testing.T,
 ) {
@@ -317,68 +380,40 @@ func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 
 	cred := renewTestCred(0x04)
-	// Account created in epoch 5 (slot 550): pre-activation registration only.
-	require.NoError(
+	// Registered in epoch 5 (slot 550), before activation.
+	expiryRollbackAccount(t, ls, db, 550, models.Account{
+		StakingKey:  cred,
+		Active:      true,
+		CreatedSlot: 550,
+	})
+	expiryRollbackActivate(t, ls, db, 50000, activationEpoch)
+	expiryRollbackEmptyBlock(t, ls, db, 50150)
+	require.Equal(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       550,
-			CreatedSlot:     550,
-			ExpirationEpoch: 0,
-		}),
+		activationEpoch+inactivity,
+		expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
+		"activation must stamp A+W",
 	)
-	// Pre-activation registration witness at slot 550 (epoch 5).
-	seedRollbackCertificate(
-		t, db, 550, rollbackStakeRegistrationCertificate(cred),
-	)
+	// A witness in epoch 505 (slot 50550) renews past the floor.
+	expiryRollbackRenew(t, ls, db, 50550, cred, 505+inactivity)
 
-	// One-time activation at epoch A=500 stamps expiration = 500 + 90 = 590 and
-	// durably records the activation epoch in the marker.
-	require.NoError(t, runActivate(t, ls, db, activationEpoch))
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, activationEpoch+inactivity, acct.ExpirationEpoch,
-		"activation must stamp A+W")
-
-	// Post-activation delegation witness at slot 50550 (epoch 505) renews the
-	// expiration to 505 + 90 = 595 (as block application would).
-	seedRollbackCertificate(
-		t, db, 50550, rollbackStakeDelegationCertificate(cred),
-	)
-	require.NoError(t, db.RenewAccountExpirations(
-		context.Background(),
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, cred)},
-		505+inactivity,
-		nil,
-	))
-
-	// Roll back into epoch 501 (slot 50150): the epoch-505 delegation is
-	// orphaned, leaving only the epoch-5 registration surviving.
 	runRollbackRecompute(t, ls, db, 50150)
 
-	acct, err = db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
+	require.Equal(
+		t,
+		activationEpoch+inactivity,
+		expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
+		"must fall back to the activation floor A+W (590), not cert+W (95) or 0",
+	)
+	marker, err := ls.ledgerDB().GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, activationEpoch+inactivity, acct.ExpirationEpoch,
-		"must clamp to activation floor A+W (590), not cert+W (95) or 0")
+	require.Equal(t, "500", marker, "a surviving activation keeps its marker")
 }
 
 // TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly verifies that a
-// credential whose only witness was rolled away (no surviving witness <=
-// rollbackSlot) has its expiration reset to 0.
+// credential whose only witness is rolled away returns to no expiration.
 func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
 	t *testing.T,
 ) {
@@ -390,39 +425,24 @@ func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
 	)
 
 	cred := renewTestCred(0x03)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       150,
-			ExpirationEpoch: 2 + inactivity,
-		}),
-	)
-	// Only witness is at slot 250 (E2), which is rolled away by a rollback to
-	// slot 199.
-	seedRollbackCertificate(
-		t, db, 250, rollbackStakeDelegationCertificate(cred),
-	)
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:  cred,
+		Active:      true,
+		CreatedSlot: 150,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackRenew(t, ls, db, 250, cred, 2+inactivity)
 
 	runRollbackRecompute(t, ls, db, 199)
 
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(0), acct.ExpirationEpoch)
+	require.Zero(t, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch)
 }
 
 // TestRecomputeAccountExpirationsAfterRollbackActivationMembership verifies
-// that every account stamped at activation is reconstructed when rollback
-// crosses before A. The account with no surviving witness resets to 0, while
-// the account with an epoch-A witness restores its earlier epoch-1 witness.
+// that rolling back below the activation boundary undoes the stamp for every
+// account it touched: one with no earlier witness returns to 0, one with an
+// earlier witness returns to that witness's expiration, and the marker clears
+// so a re-sync activates again.
 func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
 	t *testing.T,
 ) {
@@ -436,79 +456,50 @@ func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
 		t, true, inactivity, expiryRollbackSmallEpochCount,
 	)
 
-	// Activation-stamped account: expiration = A+W = 92, created before
-	// activation, no witness rows.
 	stamped := renewTestCred(0x51)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      stamped,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       50,
-			CreatedSlot:     50,
-			ExpirationEpoch: activationEpoch + inactivity,
-		}),
-	)
-
-	// Coincidentally-92 account: value came from an epoch-2 witness (slot 250),
-	// with a surviving epoch-1 witness (slot 150).
+	expiryRollbackAccount(t, ls, db, 50, models.Account{
+		StakingKey:  stamped,
+		Active:      true,
+		CreatedSlot: 50,
+	})
 	witnessed := renewTestCred(0x52)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      witnessed,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       150,
-			CreatedSlot:     150,
-			ExpirationEpoch: activationEpoch + inactivity,
-		}),
-	)
-	seedRollbackCertificate(
-		t, db, 150, rollbackStakeDelegationCertificate(witnessed),
-	)
-	seedRollbackCertificate(
-		t, db, 250, rollbackStakeDelegationCertificate(witnessed),
-	)
-	require.NoError(t, runActivate(t, ls, db, activationEpoch))
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:      witnessed,
+		Active:          true,
+		CreatedSlot:     150,
+		ExpirationEpoch: 1 + inactivity,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackActivate(t, ls, db, 200, activationEpoch)
+	expiryRollbackRenew(t, ls, db, 250, witnessed, activationEpoch+inactivity)
+	for _, cred := range [][]byte{stamped, witnessed} {
+		require.Equal(
+			t,
+			activationEpoch+inactivity,
+			expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
+		)
+	}
 
-	// Roll back into epoch 1 (before activation epoch 2): the reset targets both
-	// 92-valued rows, then the affected-set recompute corrects the witnessed one.
 	runRollbackRecompute(t, ls, db, 199)
 
-	stampedAcct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		stamped,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Zero(t, stampedAcct.ExpirationEpoch,
+	require.Zero(t, expiryRollbackAccountAt(t, ls, stamped).ExpirationEpoch,
 		"activation-stamped account resets to 0 (its pre-activation value)")
-
-	witnessedAcct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		witnessed,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
 	require.Equal(
 		t,
-		uint64(1)+inactivity,
-		witnessedAcct.ExpirationEpoch,
-		"epoch-2-witnessed account is recomputed from its surviving epoch-1 witness, not left at 0",
+		1+inactivity,
+		expiryRollbackAccountAt(t, ls, witnessed).ExpirationEpoch,
+		"epoch-2-witnessed account returns to its surviving epoch-1 witness, not 0",
 	)
+	marker, err := ls.ledgerDB().GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, marker)
 }
 
 // TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness
-// verifies that crossing back before activation restores the expiration that
-// activation overwrote. The credential has only an epoch-(A-1) witness, so it
-// is absent from the ordinary post-rollback affected set; the activation-reset
-// credential set must bring it into the witness-history recomputation.
+// verifies that activation overwriting a shorter witness expiration is undone
+// by a rollback below the activation boundary.
 func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 	t *testing.T,
 ) {
@@ -522,51 +513,35 @@ func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 		t, true, inactivity, expiryRollbackSmallEpochCount,
 	)
 	cred := renewTestCred(0x53)
-	require.NoError(
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:      cred,
+		Active:          true,
+		CreatedSlot:     150,
+		ExpirationEpoch: 1 + inactivity,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackActivate(t, ls, db, 200, activationEpoch)
+	require.Equal(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       150,
-			CreatedSlot:     150,
-			ExpirationEpoch: uint64(1) + inactivity,
-		}),
+		activationEpoch+inactivity,
+		expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
+		"activation must replace the shorter pre-activation witness expiration",
 	)
-	seedRollbackCertificate(
-		t, db, 150, rollbackStakeDelegationCertificate(cred),
-	)
-
-	require.NoError(t, runActivate(t, ls, db, activationEpoch))
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, activationEpoch+inactivity, acct.ExpirationEpoch,
-		"activation must replace the shorter pre-activation witness expiration")
 
 	runRollbackRecompute(t, ls, db, 199)
 
-	acct, err = db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
 	require.Equal(
 		t,
-		uint64(1)+inactivity,
-		acct.ExpirationEpoch,
+		1+inactivity,
+		expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
 		"rollback before activation must restore the epoch-(A-1) witness expiration",
 	)
 }
 
+// TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtActivation
+// verifies that an account deregistered before activation is not stamped, so
+// rolling away its later re-registration leaves the expiration its last
+// surviving witness gave it rather than the activation floor.
 func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtActivation(
 	t *testing.T,
 ) {
@@ -580,52 +555,43 @@ func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtAc
 		t, true, inactivity, expiryRollbackSmallEpochCount,
 	)
 	cred := renewTestCred(0x54)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:    cred,
-			CredentialTag: 0,
-			Active:        false,
-			AddedSlot:     50,
-			CreatedSlot:   50,
-		}),
+	expiryRollbackAccount(t, ls, db, 50, models.Account{
+		StakingKey:      cred,
+		Active:          true,
+		CreatedSlot:     50,
+		ExpirationEpoch: inactivity,
+	})
+	// Deregistered in epoch 1: the witness renews, the account goes inactive.
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:      cred,
+		Active:          false,
+		CreatedSlot:     50,
+		ExpirationEpoch: 1 + inactivity,
+	})
+	expiryRollbackActivate(t, ls, db, 200, activationEpoch)
+	expiryRollbackEmptyBlock(t, ls, db, 225)
+	require.Equal(
+		t, 1+inactivity, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
+		"activation stamps active accounts only",
 	)
-	seedRollbackCertificate(
-		t, db, 50, rollbackStakeRegistrationCertificate(cred),
-	)
-	seedRollbackCertificate(
-		t, db, 150, rollbackStakeDeregistrationCertificate(cred),
-	)
-
-	// The account exists but is inactive at A, so activation must not record it
-	// in the durable stamped-membership set.
-	require.NoError(t, runActivate(t, ls, db, activationEpoch))
-
-	// A later registration is rolled away. The surviving deregistration is a
-	// witness in epoch 1, and must not be clamped to activation epoch 2.
-	seedRollbackCertificate(
-		t, db, 250, rollbackStakeRegistrationCertificate(cred),
-	)
-	require.NoError(t, db.RenewAccountExpirations(
-		context.Background(),
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, cred)},
-		2+inactivity,
-		nil,
-	))
+	// Re-registered in epoch 2.
+	expiryRollbackAccount(t, ls, db, 250, models.Account{
+		StakingKey:      cred,
+		Active:          true,
+		CreatedSlot:     250,
+		ExpirationEpoch: 2 + inactivity,
+	})
 
 	runRollbackRecompute(t, ls, db, 225)
 
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1)+inactivity, acct.ExpirationEpoch)
+	acct := expiryRollbackAccountAt(t, ls, cred)
+	require.False(t, acct.Active)
+	require.Equal(t, 1+inactivity, acct.ExpirationEpoch)
 }
 
+// TestRecomputeAccountExpirationsAfterRollbackBeforeActivation verifies that
+// rolling back below the activation boundary clears both the stamp and the
+// durable marker.
 func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
 	t *testing.T,
 ) {
@@ -636,26 +602,21 @@ func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
 		t, true, inactivity, expiryRollbackSmallEpochCount,
 	)
 	cred := renewTestCred(0x44)
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey: cred, Active: true, ExpirationEpoch: 2 + inactivity,
-		}),
+	expiryRollbackAccount(t, ls, db, 150, models.Account{
+		StakingKey:  cred,
+		Active:      true,
+		CreatedSlot: 150,
+	})
+	expiryRollbackEmptyBlock(t, ls, db, 199)
+	expiryRollbackActivate(t, ls, db, 200, 2)
+	require.Equal(
+		t, 2+inactivity, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch,
 	)
-	require.NoError(t, runActivate(t, ls, db, 2))
 
 	runRollbackRecompute(t, ls, db, 199) // epoch 1, before activation epoch 2
 
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Zero(t, acct.ExpirationEpoch)
-	marker, err := db.GetSyncState(
+	require.Zero(t, expiryRollbackAccountAt(t, ls, cred).ExpirationEpoch)
+	marker, err := ls.ledgerDB().GetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		nil,
 	)

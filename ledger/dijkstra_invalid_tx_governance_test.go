@@ -168,12 +168,12 @@ func addDijkstraFailingScriptSpend(
 	require.NoError(t, err)
 	fx.inputIds[0] = bytes.Repeat([]byte{0xa4}, lcommon.Blake2b256Size)
 	fx.tx.Body.TxInputs = conway.NewConwayTransactionInputSet([]shelley.ShelleyTransactionInput{{TxId: lcommon.NewBlake2b256(fx.inputIds[0])}})
-	require.NoError(t, fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		if err := fx.db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: fx.inputIds[0], OutputIdx: 0}); err != nil {
-			return err
-		}
-		return fx.db.Blob().SetUtxo(txn.Blob(), fx.inputIds[0], 0, outputCbor)
-	}))
+	require.NoError(t, fx.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: fx.inputIds[0]},
+			Cbor: outputCbor,
+		}},
+	}}))
 
 	datumBytes, err := data.Encode(data.NewInteger(big.NewInt(42)))
 	require.NoError(t, err)
@@ -268,7 +268,7 @@ func newDijkstraHardForkReplayFixture(
 	)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              fx.db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, fx.db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     fx.ls.config.CardanoNodeConfig,
 		Logger:                fx.ls.config.Logger,
@@ -329,7 +329,7 @@ func requireDijkstraCollateralOnlyEffect(
 	_, err = fx.ls.UtxoByRef(fx.tx.Hash().Bytes(), 0)
 	require.ErrorIs(t, err, database.ErrUtxoNotFound,
 		"regular outputs must not be created")
-	_, err = fx.db.GetGovernanceProposal(t.Context(), fx.tx.Hash().Bytes(), 0, nil)
+	_, err = seedDB(t, fx.db).GetGovernanceProposal(t.Context(), fx.tx.Hash().Bytes(), 0, nil)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 }
 
@@ -399,10 +399,22 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 			currentPParams: invalid.ls.currentPParams,
 			currentEpoch:   invalid.ls.currentEpoch,
 		}
+		set := invalid.ls.config.UtxoSet
+		regular, ok, err := set.(UtxoSetReader).Get(invalid.inputIds[0], 0)
+		require.NoError(t, err)
+		require.True(t, ok)
 		require.NoError(t, invalid.ls.chain.Rollback(t.Context(), ocommon.Point{}))
 		require.NoError(t, invalid.ls.rollback(t.Context(), ocommon.Point{}))
 		seedDijkstraHardForkLedger(invalid.ls, template)
-		_, err := invalid.ls.UtxoByRef(invalid.inputIds[1], 0)
+		// The fixture put the script-locked input in the set outside any
+		// block, so the rewind to origin dropped it with the block's outputs.
+		require.NoError(t, set.ApplyUtxoChanges(nil, []UtxoEvent{{
+			Added: []UtxoOutput{{
+				Ref:  models.UtxoId{Hash: invalid.inputIds[0]},
+				Cbor: regular,
+			}},
+		}}))
+		_, err = invalid.ls.UtxoByRef(invalid.inputIds[1], 0)
 		require.NoError(t, err, "rollback must restore the spent collateral")
 		require.NoError(
 			t,

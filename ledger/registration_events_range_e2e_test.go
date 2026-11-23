@@ -22,7 +22,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,65 +48,38 @@ func registrationEventCredentials(
 }
 
 // The set answers the credentials with a registration or deregistration in a
-// slot range, with the store's read failing, as the store's UNION over its
-// certificate tables does, before and after a rollback.
+// slot range, with the store's read failing, before and after a rollback.
 func TestRegistrationEventCredentialsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
 	h := newRegistrationHarnessWith(t, "set", nil)
 	ldb := h.scenario.LedgerDB()
 	s := h.slots
-	ranges := [][2]uint64{
-		{0, math.MaxInt64},
-		{s.S1, s.S1},
-		{s.S2, s.S2},
-		{s.S3, s.S5},
-		{s.S1 - 1, s.S1 - 1},
-		{s.S5 + 1, math.MaxInt64},
-		{s.DRegister, math.MaxInt64},
-		{s.S4, s.S3},
-	}
-	want := make([][]string, len(ranges))
-	for i, r := range ranges {
-		want[i] = registrationEventCredentials(t, h.store, r[0], r[1])
-	}
-	require.Len(t, want[1], 3, "K, L and M register at S1")
-	require.Len(t, want[2], 1, "K deregisters at S2")
-	require.Empty(t, want[6], "DRep certificates are not stake events")
-	require.Empty(t, want[7], "an empty range lists nothing")
 	reached, _ := h.scenario.HideStoreReads(registrationEventsRead)
-	for i, r := range ranges {
-		require.Equal(t, want[i], registrationEventCredentials(t, ldb, r[0], r[1]),
-			"range %v", r)
+	in := func(from, to uint64) []string {
+		t.Helper()
+		return registrationEventCredentials(t, ldb, from, to)
 	}
+	key := func(k []byte) string {
+		return models.NewStakeCredentialRef(0, k).MapKey()
+	}
+	atS1 := []string{key(s.K), key(s.L), key(s.M)}
+	slices.Sort(atS1)
+	require.Equal(t, atS1, in(s.S1, s.S1), "K, L and M register at S1")
+	require.Equal(t, []string{key(s.K)}, in(s.S2, s.S2), "K deregisters at S2")
+	require.Equal(t, atS1, in(0, math.MaxInt64))
+	require.NotEmpty(t, in(s.S3, s.S5))
+	require.Empty(t, in(s.S1-1, s.S1-1), "nothing registers before S1")
+	require.Empty(t, in(s.S5+1, math.MaxInt64), "nothing registers after S5")
+	require.Empty(t, in(s.DRegister, math.MaxInt64),
+		"DRep certificates are not stake events")
+	require.Empty(t, in(s.S4, s.S3), "an empty range lists nothing")
 	h.scenario.RollbackBeforeBoundary()
-	for _, r := range ranges {
-		require.Empty(t, registrationEventCredentials(t, ldb, r[0], r[1]),
-			"range %v after the rollback", r)
+	for _, r := range [][2]uint64{
+		{0, math.MaxInt64}, {s.S1, s.S1}, {s.S2, s.S2}, {s.S3, s.S5},
+	} {
+		require.Empty(t, in(r[0], r[1]), "range %v after the rollback", r)
 	}
 	require.Zero(t, reached(), "the read reached the metadata store")
-}
-
-// Verify mode answers from the store and counts a difference from the set.
-func TestRegistrationEventCredentialsMatchTheStoreInVerifyMode(t *testing.T) {
-	t.Parallel()
-	h := newRegistrationHarness(t)
-	got := registrationEventCredentials(
-		t, h.scenario.LedgerDB(), 0, math.MaxInt64,
-	)
-	require.Equal(
-		t, registrationEventCredentials(t, h.store, 0, math.MaxInt64), got,
-	)
-	// Written around the ledger, so the set never sees it.
-	cred := bytes.Repeat([]byte{0x7e}, 28)
-	raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO stake_registration (staking_key, credential_tag, added_slot)
-VALUES (?, 0, ?)`, cred, 5)
-	require.NoError(t, err)
-	_ = registrationEventCredentials(
-		t, h.scenario.LedgerDB(), 0, math.MaxInt64,
-	)
 }
 
 // A write transaction sees the registrations it staged and none the staged

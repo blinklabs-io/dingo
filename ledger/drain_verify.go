@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"net"
 	"slices"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -86,10 +87,15 @@ func FamilyLoaded(
 		return r.OpCertsLoaded()
 	case nodesettings.FamilyGovernance:
 		r, ok := set.(GovernanceReader)
-		if !ok {
+		m, ok2 := set.(StateMarkReader)
+		if !ok || !ok2 {
 			return false, nil
 		}
-		return r.GovernanceLoaded()
+		loaded, err := r.GovernanceLoaded()
+		if err != nil || !loaded {
+			return false, err
+		}
+		return m.RatifyPendingLoaded()
 	case nodesettings.FamilyPParamsUpdates:
 		pr, ok := set.(PParamsReader)
 		ur, ok2 := set.(PParamUpdateReader)
@@ -210,7 +216,10 @@ func VerifyFamily(
 	case nodesettings.FamilyOpCerts:
 		return verifyOpCertFamily(ctx, ldb, set, txn)
 	case nodesettings.FamilyGovernance:
-		return verifyGovernance(ctx, ldb, set, txn)
+		if err := verifyGovernance(ctx, ldb, set, txn); err != nil {
+			return err
+		}
+		return verifyRatifyPending(ldb, set, txn)
 	case nodesettings.FamilyPParamsUpdates:
 		return verifyPParams(ldb, set, txn)
 	case nodesettings.FamilyMIRGenesis:
@@ -926,7 +935,123 @@ func verifyAccounts(
 	if err := verifyWitnessSlots(ldb, set, txn); err != nil {
 		return err
 	}
+	if err := verifyInactivity(ctx, ldb, set, txn, stored); err != nil {
+		return err
+	}
 	return verifyRegistrationHistory(ctx, ldb, set, txn)
+}
+
+// verifyInactivity compares the epoch the set's delegator inactivity
+// activation ran at with the metadata store's, and requires every credential
+// the store records as stamped to be marked on its account in the set. The
+// set may mark more: its load also marks an account its journal shows active
+// just before the activation, which a store that never recorded the stamp
+// does not list. The store answers membership for named credentials only, so
+// it is asked about every account it holds, as the load of the set asks it.
+func verifyInactivity(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+	set UtxoSetWriter,
+	txn ledgerdb.Txn,
+	accounts map[string]models.Account,
+) error {
+	r, ok := set.(StateMarkReader)
+	lister, ok2 := set.(accountLister)
+	if !ok || !ok2 {
+		return missingReader("the delegator inactivity activation")
+	}
+	want, err := ldb.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey, txn,
+	)
+	if err != nil {
+		return err
+	}
+	epoch, ran, err := r.InactivityActivation(nil)
+	if err != nil {
+		return err
+	}
+	var got string
+	if ran {
+		got = strconv.FormatUint(epoch, 10)
+	}
+	if want != got {
+		return fmt.Errorf(
+			"the delegator inactivity activation differs between the "+
+				"metadata store and the set: %q against %q", want, got,
+		)
+	}
+	stamped := map[string]struct{}{}
+	if want != "" {
+		refs := make([]models.StakeCredentialRef, 0, len(accounts))
+		for _, a := range accounts {
+			refs = append(
+				refs,
+				models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey),
+			)
+		}
+		stamped, err = ldb.AccountInactivityActivationMembership(
+			ctx, refs, txn,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	marked := 0
+	err = lister.Accounts(func(a *models.Account) error {
+		ref := models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
+		if _, ok := stamped[ref.MapKey()]; ok && a.InactivityActivation {
+			marked++
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if marked != len(stamped) {
+		return fmt.Errorf(
+			"the credentials the delegator inactivity activation stamped "+
+				"differ between the metadata store and the set: the set "+
+				"marks %d of the store's %d", marked, len(stamped),
+		)
+	}
+	return nil
+}
+
+// verifyRatifyPending compares the set's pending ratification record with
+// the metadata store's, byte for byte.
+func verifyRatifyPending(
+	ldb ledgerdb.LedgerDB,
+	set UtxoSetWriter,
+	txn ledgerdb.Txn,
+) error {
+	r, ok := set.(StateMarkReader)
+	if !ok {
+		return missingReader("the pending ratification record")
+	}
+	want, err := ldb.GetSyncState(pendingRatificationSyncKey, txn)
+	if err != nil {
+		return err
+	}
+	tip, err := ldb.GetTip(txn)
+	if err != nil {
+		return err
+	}
+	// The record of a boundary above the store's tip is not loaded: the
+	// ledger applies that boundary again.
+	if ratifyPendingSlot([]byte(want)) > tip.Point.Slot {
+		want = ""
+	}
+	got, _, err := r.RatifyPending(nil)
+	if err != nil {
+		return err
+	}
+	if want != string(got) {
+		return fmt.Errorf(
+			"the pending ratification record differs between the metadata "+
+				"store and the set: %q against %q", want, got,
+		)
+	}
+	return nil
 }
 
 func verifyImportBaselines(
@@ -1097,9 +1222,13 @@ func accountsLoaded(set UtxoSetWriter) (bool, error) {
 	if !ok {
 		return false, nil
 	}
+	m, ok := set.(StateMarkReader)
+	if !ok {
+		return false, nil
+	}
 	for _, loaded := range []func() (bool, error){
 		a.AccountsLoaded, b.ImportBaselinesLoaded, w.WitnessSlotsLoaded,
-		h.RegistrationHistoryLoaded,
+		h.RegistrationHistoryLoaded, m.InactivityLoaded,
 	} {
 		ok, err := loaded()
 		if err != nil || !ok {

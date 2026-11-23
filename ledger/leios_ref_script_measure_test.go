@@ -38,7 +38,7 @@ import (
 func TestLeiosSelectionSessionMeasuresOverlayReferenceScripts(t *testing.T) {
 	t.Parallel()
 	const scriptSize = 123
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	db := newStorageFaultTestDB(t)
 	ls := newFakeEraLedgerState(db, func(
 		lcommon.Transaction,
 		uint64,
@@ -133,7 +133,7 @@ func TestLeiosSelectionSessionMeasuresTopLevelReferenceScriptsOnly(
 ) {
 	t.Parallel()
 	const topScriptSize, subScriptSize = 123, 77
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	db := newStorageFaultTestDB(t)
 	ls := newFakeEraLedgerState(db, func(
 		lcommon.Transaction,
 		uint64,
@@ -212,7 +212,7 @@ func TestLeiosSelectionSessionMeasuresTopLevelReferenceScriptsOnly(
 func TestLeiosSelectionSessionMeasuresStoredReferenceScripts(t *testing.T) {
 	t.Parallel()
 	const scriptSize = 321
-	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	db := newStorageFaultTestDB(t)
 	ls := newFakeEraLedgerState(db, func(
 		lcommon.Transaction,
 		uint64,

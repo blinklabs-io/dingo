@@ -27,12 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
-// governanceDrained reports whether the metadata store no longer holds the
-// governance family's rows.
-func (ls *LedgerState) governanceDrained() bool {
-	return ls.familyDrained(nodesettings.FamilyGovernance)
-}
-
 // drainedGovernanceReader returns the set's governance reader for a drained
 // family. The metadata store holds nothing to fall back to, so a set that is
 // not following the ledger or does not hold every row is an error.
@@ -219,7 +213,7 @@ func (s stagingLedgerDB) setDrainedVote(
 }
 
 // GetAllGovernanceProposals lists the set's proposals in row ID order, soft
-// deleted ones included, when the family is drained.
+// deleted ones included.
 func (s stagingLedgerDB) GetAllGovernanceProposals(
 	ctx context.Context,
 	txn ledgerdb.Txn,
@@ -275,7 +269,7 @@ func (s stagingLedgerDB) GetAllGovernanceVotes(
 }
 
 // GetGovernanceProposalsRefundedAt reads the set's proposals whose deposit
-// was returned when epoch began when the family is drained.
+// was returned when epoch began.
 func (s stagingLedgerDB) GetGovernanceProposalsRefundedAt(
 	epoch uint64,
 	txn ledgerdb.Txn,

@@ -1,9 +1,6 @@
--- Split the per-output asset table into one identity row per distinct
--- (policy_id, name) and one holding row per (UTxO, asset). Holdings are keyed
--- by (utxo_id, asset_id), so a UTxO's holdings are contiguous and the primary
--- key also serves the cascade from utxo. idx_asset_holding_asset_id is the
--- only secondary index; the identity table's unique key serves lookups by
--- policy and by (policy, name).
-CREATE TABLE IF NOT EXISTS `asset_identity` (`id` integer PRIMARY KEY AUTOINCREMENT,`policy_id` blob NOT NULL,`name` blob NOT NULL,UNIQUE (`policy_id`,`name`));
-CREATE TABLE IF NOT EXISTS `asset_holding` (`utxo_id` integer NOT NULL,`asset_id` integer NOT NULL,`amount` text,PRIMARY KEY (`utxo_id`,`asset_id`),CONSTRAINT `fk_asset_holding_utxo` FOREIGN KEY (`utxo_id`) REFERENCES `utxo`(`id`) ON DELETE CASCADE,CONSTRAINT `fk_asset_holding_asset` FOREIGN KEY (`asset_id`) REFERENCES `asset_identity`(`id`)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS `idx_asset_holding_asset_id` ON `asset_holding`(`asset_id`);
+-- applied_transaction names its block by an integer reference into a
+-- dictionary that holds each block hash once, instead of repeating the hash
+-- on every transaction row and again in an index entry. The backfill fills
+-- block_id from block_hash; the contract phase drops block_hash.
+CREATE TABLE IF NOT EXISTS `block_identity` (`id` integer PRIMARY KEY AUTOINCREMENT,`hash` blob NOT NULL,UNIQUE (`hash`));
+ALTER TABLE `applied_transaction` ADD COLUMN `block_id` integer;

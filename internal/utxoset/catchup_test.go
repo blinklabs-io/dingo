@@ -26,9 +26,15 @@ import (
 )
 
 // applySlotsWithNonces applies one output and one block nonce per slot in
-// [from, to], each its own commit.
+// [from, to], each its own commit, to a set that holds every family.
 func applySlotsWithNonces(t *testing.T, set *utxoset.Set, from, to uint64) {
 	t.Helper()
+	if _, ok, err := set.Tip(); err == nil && !ok {
+		require.NoError(t, set.LoadUtxoSet(
+			slotPoint(0), catchUpFeed(),
+		))
+		require.NoError(t, set.FinishImport())
+	}
 	for slot := from; slot <= to; slot++ {
 		tip := slotPoint(slot)
 		require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{

@@ -281,7 +281,7 @@ func (ls *LedgerState) firstShelleyStakeRewardApplication(
 			newEpoch,
 		)
 	}
-	pparams, params, _, err := ls.rewardParameters(
+	pparams, params, err := ls.rewardParameters(
 		txn, firstShelley, firstShelley, pots,
 	)
 	if err != nil {
@@ -435,7 +435,7 @@ func (ls *LedgerState) chunkedStakeRewardApplication(
 	if err != nil {
 		return nil, false, err
 	}
-	pparams, _, _, err := ls.rewardParameters(
+	pparams, _, err := ls.rewardParameters(
 		txn, round.epochs.performance, round.epochs.pots, round.pots,
 	)
 	if err != nil {
@@ -503,39 +503,36 @@ func (ls *LedgerState) recheckRoundEligibility(
 	if err != nil {
 		return 0, 0, err
 	}
-	restored, err := ldb.TakeRewardEligibilityRecheck(txn)
-	if err != nil {
+	if _, err := ldb.TakeRewardEligibilityRecheck(txn); err != nil {
 		return 0, 0, err
 	}
+	var restored []models.StakeCredentialRef
 	// With the outputs in the live set, the rollback counter says whether a
 	// rollback restored any registration since the round began, which the
 	// credentials a rollback restored no longer list.
 	var byCredential map[string][]*models.RewardAccountOutput
-	if ls.rewardRecheckBySeq(txn) {
-		seq, err := ls.rewardRollbackSeq(txn)
+	seq, err := ls.rewardRollbackSeq(txn)
+	if err != nil {
+		return 0, 0, err
+	}
+	if seq != cursorSeq {
+		all, err := ldb.GetRewardAccountOutputs(round.epochs.snapshot, txn)
 		if err != nil {
 			return 0, 0, err
 		}
-		restored = nil
-		if seq != cursorSeq {
-			all, err := ldb.GetRewardAccountOutputs(round.epochs.snapshot, txn)
-			if err != nil {
-				return 0, 0, err
+		byCredential = make(map[string][]*models.RewardAccountOutput)
+		for _, o := range all {
+			ref := models.NewStakeCredentialRef(
+				o.CredentialTag,
+				o.StakingKey,
+			)
+			if _, ok := byCredential[ref.MapKey()]; !ok {
+				restored = append(restored, ref)
 			}
-			byCredential = make(map[string][]*models.RewardAccountOutput)
-			for _, o := range all {
-				ref := models.NewStakeCredentialRef(
-					o.CredentialTag,
-					o.StakingKey,
-				)
-				if _, ok := byCredential[ref.MapKey()]; !ok {
-					restored = append(restored, ref)
-				}
-				byCredential[ref.MapKey()] = append(
-					byCredential[ref.MapKey()],
-					o,
-				)
-			}
+			byCredential[ref.MapKey()] = append(
+				byCredential[ref.MapKey()],
+				o,
+			)
 		}
 	}
 	refs := make([]models.StakeCredentialRef, 0, len(changed)+len(restored))
@@ -644,14 +641,6 @@ func (ls *LedgerState) recheckRoundEligibility(
 // rewardRecheckBatch bounds the credentials one registration read covers
 // when a boundary rechecks every credential with an output.
 const rewardRecheckBatch = 10_000
-
-// rewardRecheckBySeq reports whether the eligibility recheck follows the live
-// set's rollback counter: the set answers the reward output reads, or the
-// family is drained and holds the only copy.
-func (ls *LedgerState) rewardRecheckBySeq(txn ledgerdb.Txn) bool {
-	return ls.rewardDerivedServing(txn) != nil ||
-		ls.familyDrained(nodesettings.FamilyRewardOutputs)
-}
 
 // rewardRollbackSeq returns the live set's durable rollback counter, zero
 // when no set keeps the derived reward rows.
@@ -928,7 +917,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 
-	pparams, params, performanceDecentralization, err := ls.rewardParameters(
+	pparams, params, err := ls.rewardParameters(
 		txn,
 		performanceEpoch,
 		potsEpoch,
@@ -949,7 +938,6 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			txn,
 			performanceEpoch,
 			poolInputs,
-			performanceDecentralization,
 		)
 		if err != nil {
 			return nil, false, err
@@ -1403,35 +1391,28 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	activationApplies := activated && activationEpoch <= app.epochs.snapshot
 	activationFloors := make(map[string]uint64)
 	if activationApplies {
-		if r := ls.accountServing(txn); r != nil {
-			activationReader, ok := r.(AccountInactivityActivationReader)
-			if !ok {
-				return nil, errors.New("set account activation provenance is unavailable")
-			}
-			loaded, err := activationReader.AccountInactivityActivationLoaded()
+		r := ls.accountServing(txn)
+		if r == nil {
+			return nil, drainedUnserved(nodesettings.FamilyAccounts)
+		}
+		activationReader, ok := r.(AccountInactivityActivationReader)
+		if !ok {
+			return nil, errors.New("set account activation provenance is unavailable")
+		}
+		loaded, err := activationReader.AccountInactivityActivationLoaded()
+		if err != nil {
+			return nil, fmt.Errorf("load set account activation provenance: %w", err)
+		}
+		if !loaded {
+			return nil, errors.New("set account activation provenance is not loaded")
+		}
+		for _, ref := range refs {
+			a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
 			if err != nil {
-				return nil, fmt.Errorf("load set account activation provenance: %w", err)
+				return nil, fmt.Errorf("load set account activation membership: %w", err)
 			}
-			if !loaded {
-				return nil, errors.New("set account activation provenance is not loaded")
-			}
-			for _, ref := range refs {
-				a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
-				if err != nil {
-					return nil, fmt.Errorf("load set account activation membership: %w", err)
-				}
-				if a != nil && a.InactivityActivation {
-					activationFloors[ref.MapKey()] = a.InactivityActivationEpoch
-				}
-			}
-		} else {
-			activationMembership, err := ls.ledgerDB().
-				AccountInactivityActivationMembership(ctx, refs, txn)
-			if err != nil {
-				return nil, fmt.Errorf("load activation membership: %w", err)
-			}
-			for key := range activationMembership {
-				activationFloors[key] = activationEpoch
+			if a != nil && a.InactivityActivation {
+				activationFloors[ref.MapKey()] = a.InactivityActivationEpoch
 			}
 		}
 	}
@@ -1639,7 +1620,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
-	pparams, params, performanceDecentralization, err := ls.rewardParameters(
+	pparams, params, err := ls.rewardParameters(
 		txn,
 		epochs.performance,
 		epochs.pots,
@@ -1710,7 +1691,6 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		txn,
 		epochs.performance,
 		poolInputs,
-		performanceDecentralization,
 	)
 	if err != nil {
 		return nil, false, err
@@ -4161,7 +4141,7 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	boundarySlot uint64,
 ) error {
 	ldb := ls.ledgerDB()
-	fees, err := ls.rewardEpochFeesFor(ldb, txn, endedEpoch)
+	fees, err := ls.rewardEpochFeesFor(txn, endedEpoch)
 	if err != nil {
 		return fmt.Errorf(
 			"sum reward fees for epoch %d: %w",
@@ -4247,26 +4227,26 @@ func (ls *LedgerState) rewardParameters(
 	performanceEpoch uint64,
 	calculationEpoch uint64,
 	pots *models.RewardAdaPots,
-) (lcommon.ProtocolParameters, rewards.Parameters, *big.Rat, error) {
+) (lcommon.ProtocolParameters, rewards.Parameters, error) {
 	performanceEpochRow, err := ls.ledgerDB().GetEpoch(
 		performanceEpoch,
 		txn,
 	)
 	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"get performance epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
 	if performanceEpochRow == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"performance epoch %d not found",
 			performanceEpoch,
 		)
 	}
 	performanceEraDesc, ok := ls.eraById(performanceEpochRow.EraId)
 	if !ok || performanceEraDesc == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"unknown era ID %d for reward performance epoch %d",
 			performanceEpochRow.EraId, performanceEpoch,
 		)
@@ -4277,13 +4257,13 @@ func (ls *LedgerState) rewardParameters(
 		txn,
 	)
 	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"get pparams for reward performance epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
 	if performancePParams == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"missing pparams for reward performance epoch %d",
 			performanceEpoch,
 		)
@@ -4293,14 +4273,14 @@ func (ls *LedgerState) rewardParameters(
 		txn,
 	)
 	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"get reward calculation epoch %d: %w",
 			calculationEpoch,
 			err,
 		)
 	}
 	if calculationEpochRow == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"reward calculation epoch %d not found",
 			calculationEpoch,
 		)
@@ -4330,7 +4310,7 @@ func (ls *LedgerState) rewardParameters(
 		uint64(calculationEpochRow.LengthInSlots),
 	)
 	if err != nil {
-		return nil, rewards.Parameters{}, nil, err
+		return nil, rewards.Parameters{}, err
 	}
 	// Babbage and later have no d field: BabbagePParams defines
 	// `ppDG = to (const minBound)`, and translating the prior epoch's
@@ -4341,10 +4321,9 @@ func (ls *LedgerState) rewardParameters(
 	// inflates eta by the inverse: Prime Mainnet moves from d = 7/10 to
 	// Babbage at epoch 40, and the epoch-39 round overpaid 3.3x.
 	//
-	// Block counting keeps the performance epoch's d: BBODY accumulated that
-	// epoch's BlocksMade under its curPParams, so incrBlocks already skipped
-	// the Alonzo overlay slots.
-	blockCountDecentralization := params.Decentralization
+	// Block counting is unaffected: the set classified each block's slot
+	// against the overlay schedule when the block was applied, under the d
+	// then in force, as BBODY's incrBlocks does under curPParams.
 	if calculationEpochRow.EraId >= eras.BabbageEraDesc.Id {
 		params.Decentralization = new(big.Rat)
 	}
@@ -4358,7 +4337,7 @@ func (ls *LedgerState) rewardParameters(
 	pledgeLeveragePParams := performancePParams
 	calculationEraDesc, ok := ls.eraById(calculationEpochRow.EraId)
 	if !ok || calculationEraDesc == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"unknown era ID %d for reward calculation epoch %d",
 			calculationEpochRow.EraId, calculationEpoch,
 		)
@@ -4370,13 +4349,13 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch, *calculationEraDesc, txn,
 		)
 		if err != nil {
-			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+			return nil, rewards.Parameters{}, fmt.Errorf(
 				"get Dijkstra pparams for reward calculation epoch %d: %w",
 				calculationEpoch, err,
 			)
 		}
 		if pledgeLeveragePParams == nil {
-			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+			return nil, rewards.Parameters{}, fmt.Errorf(
 				"missing Dijkstra pparams for reward calculation epoch %d",
 				calculationEpoch,
 			)
@@ -4390,13 +4369,13 @@ func (ls *LedgerState) rewardParameters(
 	// the boundary apply and the async precompute path, so both agree.
 	applyFullPotConfig(&params, ls.config)
 	if params.MaxLovelaceSupply < uint64(pots.Reserves) {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+		return nil, rewards.Parameters{}, fmt.Errorf(
 			"invalid reward pots: reserves %d exceed max supply %d",
 			pots.Reserves,
 			params.MaxLovelaceSupply,
 		)
 	}
-	return performancePParams, params, blockCountDecentralization, nil
+	return performancePParams, params, nil
 }
 
 // applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger
@@ -4427,7 +4406,6 @@ func (ls *LedgerState) rewardBlockCounts(
 	metaTxn ledgerdb.Txn,
 	performanceEpoch uint64,
 	poolInputs []*models.RewardPoolInput,
-	decentralization *big.Rat,
 ) (map[string]uint64, uint64, bool, error) {
 	epoch, err := meta.GetEpoch(performanceEpoch, metaTxn)
 	if err != nil {
@@ -4439,8 +4417,6 @@ func (ls *LedgerState) rewardBlockCounts(
 	if epoch == nil || epoch.LengthInSlots == 0 {
 		return nil, 0, true, nil
 	}
-	startSlot := epoch.StartSlot
-	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
 	poolKeys := make([]lcommon.PoolKeyHash, 0, len(poolInputs))
 	for _, input := range poolInputs {
 		if input == nil {
@@ -4468,84 +4444,12 @@ func (ls *LedgerState) rewardBlockCounts(
 		if ok {
 			return counts, total, true, nil
 		}
-		if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
-			// A drained family has no rows to fall back to; the epoch is
-			// one whose counts the set never held, which the reward round
-			// declines rather than distributes.
-			return nil, 0, false, nil
-		}
-	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
-		return nil, 0, false, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		// The metadata store has no rows to fall back to; the epoch is
+		// one whose counts the set never held, which the reward round
+		// declines rather than distributes.
+		return nil, 0, false, nil
 	}
-	var counts map[string]uint64
-	var total uint64
-	if decentralization != nil && decentralization.Sign() > 0 {
-		counts, total, err = rewardBlockCountsExcludingOverlaySlots(
-			meta,
-			metaTxn,
-			poolKeys,
-			startSlot,
-			endSlot,
-			decentralization,
-		)
-	} else {
-		counts, total, err = meta.CountPoolBlocksInSlotRange(
-			poolKeys,
-			startSlot,
-			endSlot,
-			metaTxn,
-		)
-		if err != nil {
-			err = fmt.Errorf(
-				"count reward pool blocks in epoch %d: %w",
-				performanceEpoch, err,
-			)
-		}
-	}
-	if err != nil {
-		return nil, 0, false, err
-	}
-	return meta.MergeImportedPoolBlockCounts(
-		performanceEpoch,
-		startSlot,
-		counts,
-		total,
-		metaTxn,
-	)
-}
-
-func rewardBlockCountsExcludingOverlaySlots(
-	meta ledgerdb.LedgerDB,
-	metaTxn ledgerdb.Txn,
-	poolKeys []lcommon.PoolKeyHash,
-	startSlot uint64,
-	endSlot uint64,
-	decentralization *big.Rat,
-) (map[string]uint64, uint64, error) {
-	counts := make(map[string]uint64, len(poolKeys))
-	for _, poolKey := range poolKeys {
-		counts[string(poolKey[:])] = 0
-	}
-	rows, err := meta.GetPoolBlockIssuersInSlotRange(
-		startSlot,
-		endSlot,
-		metaTxn,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf("get reward pool block issuers: %w", err)
-	}
-	var total uint64
-	for _, row := range rows {
-		if rewardIsOverlaySlot(startSlot, decentralization, row.Slot) {
-			continue
-		}
-		total++
-		key := string(row.PoolKeyHash)
-		if _, ok := counts[key]; ok {
-			counts[key]++
-		}
-	}
-	return counts, total, nil
+	return nil, 0, false, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 func rewardIsOverlaySlot(

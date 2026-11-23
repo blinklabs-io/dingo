@@ -131,11 +131,11 @@ WHERE version = ?`), true, blockIdentityVersion)
 func TestAppliedTransactionBlockIdentityAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	exerciseBlockIdentity(
-		t, newPostgresAssetSplitEngine(t, "dingo_v75_block_identity"))
+		t, newPostgresAssetSplitEngine(t, "dingo_v74_block_identity"))
 }
 
 func TestAppliedTransactionBlockIdentityAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
 	exerciseBlockIdentity(
-		t, newMySQLAssetSplitEngine(t, "dingo_v75_block_identity"))
+		t, newMySQLAssetSplitEngine(t, "dingo_v74_block_identity"))
 }

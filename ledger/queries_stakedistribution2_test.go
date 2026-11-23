@@ -58,6 +58,8 @@ func seedStakeDistribution2Pools(
 	}
 	poolA = seedLiveStakeFixture(t, ls.db, idA, vrfA, 3_000_000, 1)
 	poolB = seedLiveStakeFixture(t, ls.db, idB, vrfB, 1_000_000, 1)
+	seedTestStakedOutput(t, ls, append(bytes.Clone(idA), 0, 0, 0, 0), 0, idA, 3_000_000)
+	seedTestStakedOutput(t, ls, append(bytes.Clone(idB), 0, 0, 0, 0), 0, idB, 1_000_000)
 	seedLiveTip(t, ls)
 	return poolA, poolB, vrfA, vrfB
 }
@@ -84,7 +86,7 @@ func TestQueryShelleyStakeDistribution2_ReportsTheLiveDistribution(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	poolA, poolB, vrfA, vrfB := seedStakeDistribution2Pools(t, ls)
 	// Circulation is pinned to the 4_000_000 the pools hold (nothing in
@@ -102,7 +104,7 @@ func TestQueryShelleyStakeDistribution2_ReportsTheLiveDistribution(
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 1, nil))
 	ls.config.CardanoNodeConfig = cfg
 
 	result, err := ls.Query(t.Context(), stakeDistribution2Query(), QueryPoint{})
@@ -134,7 +136,7 @@ func TestQueryShelleyStakeDistribution2_ReportsTheLiveDistribution(
 func TestQueryShelleyStakeDistribution2_ViaGetCBOR(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	poolA, _, _, _ := seedStakeDistribution2Pools(t, ls)
 
@@ -199,7 +201,7 @@ func newHalfDelegatedLedger(
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 4_000_000, 1, nil))
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
 	seedEpochs(t, ls, map[uint64]uint64{0: 0})
@@ -286,7 +288,7 @@ func newLiveVersusMarkLedger(
 	seedLiveStakeFixture(t, db, idB, vrfB, 1_000_000, 1)
 	pkhC = seedLiveStakeFixture(t, db, idC, vrfC, 2_000_000, 1)
 	pkhD = lcommon.PoolKeyHash(lcommon.NewBlake2b224(idD))
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		t.Context(),
 		nil,
 		&models.Pool{PoolKeyHash: pkhD.Bytes(), VrfKeyHash: vrfD},
@@ -309,7 +311,7 @@ func newLiveVersusMarkLedger(
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 4_000_000, 1, nil))
 	ls = newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
 	seedEpochs(t, ls, map[uint64]uint64{0: 0})

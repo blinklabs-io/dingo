@@ -327,17 +327,7 @@ func newByronShelleyBoundaryLedgerFrom(
 // and the boundary rejects an empty live UTxO set as an unpopulated table.
 func seedBoundaryFixtureLiveUtxo(t *testing.T, ls *LedgerState) {
 	t.Helper()
-	txn := ls.db.Transaction(context.Background(), true)
-	require.NoError(t, ls.db.CreateUtxo(
-		context.Background(), txn, &models.Utxo{
-			TxId:      bytes.Repeat([]byte{0x03}, 32),
-			AddedSlot: 0,
-			Amount:    types.Uint64(1_000_000_000),
-		},
-	))
-	require.NoError(t, txn.Commit())
-	set := ls.config.UtxoSet.(*memUtxoSet)
-	require.NoError(t, set.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
+	require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
 		Added: []UtxoOutput{{
 			Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{0x03}, 32)},
 			Cbor: boundaryOutputCbor(t, 1_000_000_000),
@@ -428,7 +418,8 @@ func newUnseededByronShelleyBoundaryLedgerFromBlocks(
 		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
 	)
 
-	require.NoError(t, db.SetEpoch(
+	set := OpenLiveSetForTest(t, db)
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		byronEpochStart,
 		byronEpoch,
 		nil,
@@ -449,7 +440,7 @@ func newUnseededByronShelleyBoundaryLedgerFromBlocks(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
 		ValidateHistorical: true,
-		UtxoSet:            &memUtxoSet{outputs: make(map[string][]byte)},
+		UtxoSet:            set,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
@@ -463,7 +454,7 @@ func newUnseededByronShelleyBoundaryLedgerFromBlocks(
 	}
 	require.NoError(t, db.SetTip(byronTip, nil))
 	byronNonce := bytes.Repeat([]byte{0x42}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		byronTip.Point.Hash,
 		byronTip.Point.Slot,
 		byronNonce,
@@ -972,7 +963,7 @@ func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
 	)
 
 	// Persisted epoch row.
-	epochs, err := ls.db.GetEpochs(nil)
+	epochs, err := ls.ledgerDB().GetEpochs(nil)
 	require.NoError(t, err)
 	var persisted *models.Epoch
 	for i := range epochs {
@@ -1010,7 +1001,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 	}
 	pparamsCbor, err := cbor.Encode(shelleyPParams)
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		firstShelley.SlotNumber(),
 		shelleyEpoch,
 		nil,
@@ -1022,7 +1013,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		432_000,
 		nil,
 	))
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		pparamsCbor,
 		firstShelley.SlotNumber(),
 		shelleyEpoch,
@@ -1223,7 +1214,7 @@ func TestByronShelleyBoundaryRejectsEmptyLiveUtxo(t *testing.T) {
 	require.ErrorContains(t, err, "no live UTxO at the Byron-to-Shelley boundary")
 	require.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
 
-	pots, err := ls.db.Metadata().GetRewardAdaPots(208, nil)
+	pots, err := ls.ledgerDB().GetRewardAdaPots(208, nil)
 	require.NoError(t, err)
 	require.Nil(t, pots, "the failed boundary must not commit Shelley pots")
 }
@@ -1236,7 +1227,7 @@ func seedByronBoundaryUtxos(
 	genesisReserves, liveUtxo, spentUtxo uint64,
 ) {
 	t.Helper()
-	require.NoError(t, ls.db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, ls.db).SetNetworkState(
 		0, genesisReserves, 0, nil,
 	))
 	txn := ls.db.Transaction(context.Background(), true)
@@ -1260,9 +1251,8 @@ func seedByronBoundaryUtxos(
 		))
 	}
 	require.NoError(t, txn.Commit())
-	set := ls.config.UtxoSet.(*memUtxoSet)
 	if liveUtxo > 0 {
-		require.NoError(t, set.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
+		require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
 			Added: []UtxoOutput{{
 				Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{0x01}, 32)},
 				Cbor: boundaryOutputCbor(t, liveUtxo),
@@ -1296,7 +1286,7 @@ func requireBoundaryReserves(
 	expectedReserve uint64,
 ) {
 	t.Helper()
-	meta := ls.db.Metadata()
+	meta := ls.ledgerDB()
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
@@ -1372,7 +1362,7 @@ func TestByronShelleyEraHistoryWhenFirstShelleyBlockFollowsTransitionEpoch(
 			LengthInSlots: uint(byronEpochLength),
 			EraId:         eras.ByronEraDesc.Id,
 		}
-		require.NoError(t, ls.db.SetEpoch(
+		require.NoError(t, seedDB(t, ls.db).SetEpoch(
 			row.StartSlot, row.EpochId, nil, nil, nil, nil,
 			row.EraId, row.SlotLength, row.LengthInSlots, nil,
 		))
