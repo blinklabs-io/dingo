@@ -75,7 +75,8 @@ named storage features. `Node.New` builds one registry from the enabled
 consumers and refuses startup when the operator-selected `storageMode` does not
 include a consumer's tier, naming every incompatible consumer and tier. The
 `api` tier enables the complete declared feature registry; the `core` tier can
-serve UTxO RPC from current-chain storage. Disabled ports resolve no provider.
+serve UTxO RPC's live-state reads from the ledger. Disabled ports resolve no
+provider.
 Failures unwind providers in reverse order. Normal shutdown orders APIs, mempool,
 ledger/database, then storage. Database receives provider-owned stores through
 `database.Stores`. Before API providers start, API-mode database startup runs
@@ -4003,10 +4004,14 @@ gated as current state. The Blockfrost mempool endpoints resolve a pooled
 transaction's confirmed inputs and deposit parameters from the ledger store at
 the ledger tip, because the IndexerDB may not have reached it.
 UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`. The node builds
-it over the IndexerDB in API mode and the consensus database in core mode. The
-API-mode service answers `Unavailable` while the IndexerDB is not ready and
-reports its tip; the core-mode service is immediately ready and reports the
-consensus tip. Sync, watch, submit and evaluation stay on the ledger.
+it over the IndexerDB in API mode and over the ledger in core mode
+(`utxorpc.NewLedgerQueryDatabase`). The API-mode service answers
+`Unavailable` while the IndexerDB is not ready and reports its tip. The
+core-mode service is immediately ready, reports the ledger tip and reads
+live outputs by reference from the ledger's UTxO set; the ledger store holds
+no UTxO, datum or transaction rows, so an address search, a datum read and a
+transaction read answer `FailedPrecondition` (`ErrQueryNeedsAPIStorage`).
+Sync, watch, submit and evaluation stay on the ledger.
 
 A reader never mixes the two stores in one transaction or takes an API row
 from the ledger store: a `sqlstore` transaction is valid only on the store

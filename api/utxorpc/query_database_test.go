@@ -18,36 +18,69 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
+	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 )
 
-func TestQueryDatabaseUsesConsensusStoreWithoutIndexer(t *testing.T) {
+// A core-tier node has no IndexerDB: the QueryService reads live outputs by
+// reference from the ledger's UTxO set and refuses what only history can
+// answer, rather than reading the ledger's database, which holds no UTxO,
+// datum or transaction rows.
+func TestCoreQueryServiceReadsTheLedgerAndRefusesHistory(t *testing.T) {
 	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	// The api harness finds a live output of the shared fixture chain.
+	api := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	apiCli := queryconnect.NewQueryServiceClient(
+		api.Client, api.Server.URL, connect.WithGRPC(),
+	)
+	search, err := apiCli.SearchUtxos(
+		ctx, connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
 	require.NoError(t, err)
-	want := ochainsync.Tip{
-		Point:       ocommon.NewPoint(42, []byte{0xaa}),
-		BlockNumber: 7,
-	}
-	require.NoError(t, db.SetTip(want, nil))
+	require.NotEmpty(t, search.Msg.GetItems())
+	ref := search.Msg.GetItems()[0].GetTxoRef()
 
-	queryDB := NewIndexerQueryDatabase(db, nil, nil)
-	got, err := queryDB.Tip()
+	core := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: 20,
+		tune: func(cfg *UtxorpcConfig) {
+			ledger, ok := cfg.LedgerState.(QueryLedger)
+			require.True(t, ok)
+			cfg.QueryDatabase = NewLedgerQueryDatabase(ledger)
+		},
+	})
+	cli := queryconnect.NewQueryServiceClient(
+		core.Client, core.Server.URL, connect.WithGRPC(),
+	)
+
+	read, err := cli.ReadUtxos(ctx, connect.NewRequest(
+		&query.ReadUtxosRequest{Keys: []*query.TxoRef{ref}},
+	))
 	require.NoError(t, err)
-	require.Equal(t, want, got)
-	ready, err := queryDB.Ready(indexerdb.KindCurrent)
-	require.NoError(t, err)
-	require.True(t, ready)
+	require.Len(t, read.Msg.GetItems(), 1)
+	require.Equal(t, ref.GetHash(), read.Msg.GetItems()[0].GetTxoRef().GetHash())
+	require.Equal(t, ref.GetIndex(), read.Msg.GetItems()[0].GetTxoRef().GetIndex())
+	tip := core.LS.Tip()
+	require.Equal(t, tip.Point.Slot, read.Msg.GetLedgerTip().GetSlot())
+
+	_, err = cli.SearchUtxos(
+		ctx, connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	_, err = cli.ReadTx(ctx, connect.NewRequest(
+		&query.ReadTxRequest{Hash: api.IndexedTxHashes[0]},
+	))
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
 }
 
 // recordingQueryDB answers queries itself; calls counts what reached it.
