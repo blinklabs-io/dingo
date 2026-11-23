@@ -280,6 +280,15 @@ func stakeInputPageOver(
 	}
 	for ; epochIdx < len(ex.epochs); epochIdx, poolIdx = epochIdx+1, 0 {
 		epoch := ex.epochs[epochIdx]
+		// An epoch captured outside the range has no row to serve, so its
+		// pools are not read either.
+		if skip, err := ex.view.stakesCapturedOutside(
+			epoch, from, through,
+		); err != nil {
+			return metadata.FactRows{}, 0, err
+		} else if skip {
+			continue
+		}
 		pools, err := ex.view.pools(epoch)
 		if err != nil {
 			return metadata.FactRows{}, 0, err
