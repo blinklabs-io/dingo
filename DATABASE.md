@@ -6917,6 +6917,8 @@ naming columns they do not change.
 | `idx_account_drep` | dropped | Prefix of `idx_account_drep_active_staking_key`. |
 | `idx_account_drep_active_staking_key`, `idx_account_drep_type_active_staking_key`, `idx_account_active_pool_staking_key` | kept | DRep power, delegator and pool-delegator readers. Written only when drep, drep type, active or pool change. |
 
+Account lookups by one DRep credential (`GetDRepDelegators`, `GetDRepDelegatorsAtSlot`, `GetDRepVotingPower`, and the protocol-version-10 delegator clear in `removeAllDrepDelegators`) match `drep_type` as `+drep_type = ?`. When the sampled planner statistics hold no account with the requested DRep type, as after an `ANALYZE` taken before any script-hash DRep delegation, SQLite rates `idx_account_drep_type_active_staking_key` as selective as `idx_account_drep_active_staking_key` and can choose it, although it matches every account delegated to a DRep of that type. The unary plus keeps `drep_type` out of index selection; PostgreSQL and MySQL accept it on an integer column, and dialect translation leaves it unchanged.
+
 `updateCertificateAccount` reads the stored `active`, `pool`, `drep` and
 `drep_type` and names only the changed ones in the conflict branch of the
 account upsert; `added_slot` and `created_slot` are restated as before. Its

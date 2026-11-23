@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 const (
@@ -122,6 +124,12 @@ const stakeWorkloadDigest = "7a52891a744ae243a0c70c7e992e23da3cec1a5fe9609e54c80
 // pins the stored state those writes produce.
 func TestStakeBookkeepingWALFrames(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine SQLite WAL frame counting over a "+
+			"Shelley-like workload; the frame bounds are asserted in "+
+			"the un-instrumented run",
+	)
 	res := runStakeWALWorkload(t)
 	t.Log("\n" + formatFrames("sync", res.syncFrames, stakeWALBlocks))
 	t.Log("\n" + formatFrames("boundary", res.boundaryFrames, 0))

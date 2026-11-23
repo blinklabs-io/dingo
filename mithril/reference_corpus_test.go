@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // referenceRecord is one answer recorded from the Rust Mithril crates; see
@@ -454,6 +456,12 @@ func readReferenceCorpus(t *testing.T) []referenceRecord {
 // except the deliberate divergences listed in referenceDivergences.
 func TestReferenceCorpus(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine replay of the recorded reference "+
+			"corpus; the verifier's agreement with it is asserted in "+
+			"the un-instrumented run",
+	)
 	recs := readReferenceCorpus(t)
 	compared := 0
 	for _, rec := range recs {

@@ -75,10 +75,13 @@ func VotingPowerSQL(
 	dialect := sqlDialect(dialectName)
 	positional := dialectName == "postgres"
 	innerExpiry, outerExpiry := expiryClauses(expiryEpoch, positional)
-	outerParams := "? AND a.drep_type = ?"
+	// The unary plus on drep_type keeps SQLite off
+	// idx_account_drep_type_active_staking_key; see the account index notes
+	// in DATABASE.md.
+	outerParams := "? AND +a.drep_type = ?"
 	args := []any{drepCredential, credentialTag}
 	if positional {
-		outerParams = "$1 AND a.drep_type = $2"
+		outerParams = "$1 AND +a.drep_type = $2"
 		if expiryEpoch > 0 {
 			args = append(args, expiryEpoch)
 		}
