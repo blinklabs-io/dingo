@@ -165,17 +165,21 @@ with their existing components.
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and
-(on its own two-minute ticker, independent of the reclaim cadence) a best-effort
-`PRAGMA wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
-connection (never the write pool) — see `checkpointWAL` and `Store.Checkpoint`
-in DATABASE.md's write-amplification discussion for why the commit-triggered
-`wal_autocheckpoint` alone cannot shrink the WAL file's on-disk size even when
-it fully succeeds. `journal_size_limit` caps a reset WAL at 64 MiB, while the
-periodic TRUNCATE can reduce it to zero; an active reader can prevent either
-operation from reclaiming space. Bulk metadata imports drain and pause the
-scheduled TRUNCATE callback until normal pragmas are restored, while
-commit-triggered auto-checkpoints remain enabled. If the final restore fails,
-the next scheduled callback retries it before checkpointing. The tagged
+(on its own two-second ticker, independent of the reclaim cadence) a PASSIVE
+`wal_checkpoint`, with a best-effort TRUNCATE attempt on every 60th tick,
+against a dedicated short-timeout connection (never the write pool) — see
+`checkpointWAL` and `Store.Checkpoint` in DATABASE.md's write-amplification
+discussion for why PASSIVE checkpointing alone cannot shrink the WAL file's
+on-disk size even when it fully succeeds. `journal_size_limit` caps a reset WAL
+at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active reader
+can prevent either operation from reclaiming space. Bulk metadata imports drain
+and pause the scheduled callback until normal pragmas are restored; the write
+connection's automatic checkpoint stays disabled, and the ticker runs a
+PASSIVE-only `BulkCheckpoint` instead so the WAL is still backfilled. Startup
+migrations run before the scheduled ticker starts, so `Store.Start` runs
+`BulkCheckpoint` on the same cadence until the upgrade returns. If the
+final restore fails, the next scheduled callback retries it before
+checkpointing. The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in `sqlstore`
@@ -2390,7 +2394,7 @@ When `Node.Run()` is called, components are initialized in this order:
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
     Planner statistics managers (`internal/plannerstats.Manager`): for the
-    consensus store, the startup `PRAGMA optimize` pass runs after any
+    consensus store, the startup incremental planner-statistics pass runs after any
     commit-timestamp recovery and before the ledger starts processing blocks,
     to populate statistics before the first block batch. An API node runs a
     second manager over the IndexerDB: it starts after the API listeners and
@@ -2403,11 +2407,10 @@ When `Node.Run()` is called, components are initialized in this order:
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
     block application after the startup pass can be re-analyzed before the
-    next rollover. The optimizer considers every table while retaining SQLite's
-    temporary sampling limit. An explicit optimizer mask must retain that bit;
-    omitting it permits unrestricted index analysis. The single write connection
-    is held during maintenance, so unrestricted analysis here would stop block
-    application for the duration of each scan. The tick shares the worker with
+    next rollover. Each pass analyzes every table under a temporary
+    `analysis_limit`, sampling each index rather than reading it whole. The
+    single write connection is held during maintenance, so unrestricted
+    analysis here would stop block application for the duration of each scan. The tick shares the worker with
     the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
@@ -3871,10 +3874,16 @@ below).
 `internal/indexer` holds the writer: one goroutine pulls
 canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
 `ChainSource` (`DatabaseSource` over the ledger database), and commits each
-batch's rows, ledger facts and new tip in one transaction. A batch whose
+batch's rows, ledger facts and new tip in one transaction. The node's writer
+sizes a batch by content as well as by blocks (`Writer.WithSparseBatches`):
+once it has read its block limit, it keeps reading while the blocks hold less
+than `indexer.SparseBatchBytes` of CBOR, up to `indexer.SparseBatchFactor`
+times the limit, so ranges of near-empty blocks commit less often. A batch whose
 blob writes exceed one Badger transaction (`badger.ErrTxnTooBig`) is retried
-at half as many blocks, down to a single block, which fails as an ordinary
-error; each commit doubles the batch back toward its configured size. A
+smaller: a batch that read past its limit first halves that reach, and one
+within its limit is retried at half as many blocks, down to a single block,
+which fails as an ordinary error; each commit doubles both back toward their
+configured sizes. A
 `FactsSource`
 (`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
 by natural key, and the writer splits a batch at each boundary so a boundary's
@@ -3951,7 +3960,11 @@ the ledger database (`MetadataFacts` as `AnchorFacts`: applied-transaction
 count and a streamed digest of the live UTxO set at the anchor, through the
 `metadata.AnchorStateStore` capability) and applies the imported account state
 in one transaction with the phase marker (`Backfill` as `AnchorRestorer`, the
-history backfill's restore at its anchor). Each phase commits its own marker
+history backfill's restore at its anchor). Once that transaction commits, the
+writer takes one planner-statistics pass over the IndexerDB
+(`Writer.finalizePlannerStats`): the bounded form where the backend has one
+and the full refresh otherwise. A failure is logged, not returned, because the
+anchor is already durable. Each phase commits its own marker
 under `indexer_bootstrap`, so a stop resumes in the phase that has work left;
 `indexerdb.Store.ReadyServing` is not ready until the phase is `done` and the
 tip has passed the recorded anchor. A ledger that drained its accounts into
@@ -5466,6 +5479,13 @@ Ledger apply collects block-nonce rows for its database batch and persists them
 through the optional `metadata.BlockNonceBatchStore` capability in the same
 transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
 backends retain the per-row fallback.
+
+Indexer replay (`Backfill.computeBlockNonce`) queues each block's nonce row in
+its batch accumulator through the optional `metadata.BlockNonceBatchQueuer`
+capability, and `FlushBatch` writes the queued rows in queue order before the
+batch commits. The running nonce is held in memory, so nothing reads
+`block_nonce` inside the batch window. A backend without the capability, or a
+call without an accumulator, writes each row immediately.
 
 
 Key models in `database/models/`:
@@ -8568,7 +8588,7 @@ exists. With the `AND active = TRUE` conjunct `GetAccountsByCredential` adds for
 chain per row, so each chunk costs `O(active rows × refs)` and the "batched"
 read becomes slower than the per-item loop it replaced as the account table
 grows. Outside Mithril sync and metadata backfill, SQLite statistics come from
-`internal/plannerstats.Manager`'s incremental `PRAGMA optimize` at startup,
+`internal/plannerstats.Manager`'s bounded `ANALYZE` at startup,
 after each epoch rollover and every minute (see DATABASE.md), so a
 genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper.
