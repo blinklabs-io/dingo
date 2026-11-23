@@ -320,14 +320,14 @@ func (ls *LedgerState) stageCommittee(
 	if r == nil {
 		// The set is the only copy, so a change it cannot stage would be
 		// lost.
-		ls.failAccountStaging(
+		ls.failAccountStaging(txn,
 			drainedUnserved(nodesettings.FamilyCommitteeConstitution),
 		)
 		return
 	}
 	st, err := ls.committeeView(r, txn)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	var out []CommitteeChange

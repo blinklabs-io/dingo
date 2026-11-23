@@ -308,10 +308,11 @@ type utxoSetBatch struct {
 	// validationOnly keeps speculative fork validation from stopping the
 	// live set when its private overlay cannot be prepared.
 	validationOnly bool
-	// epochCache is the epoch cache of the fork candidate a validation-only
-	// batch stages. The live cache does not hold an epoch the candidate
-	// opens, so the staging that resolves a slot to its epoch reads this one.
-	epochCache    []models.Epoch
+	// consensus is the consensus view of the fork candidate a validation-only
+	// batch stages. The live view does not hold an epoch the candidate opens
+	// or its parameters, so every rule that reads the epoch cache, epoch or
+	// parameters while txn validates reads this one.
+	consensus     *consensusSnapshot
 	validationErr error
 	// nonces are the block nonces txn wrote, and pruneNoncesBefore the
 	// slot its nonce prune reached, for a set that keeps nonces.
@@ -447,13 +448,7 @@ func (ls *LedgerState) stageUtxoSet(
 	})
 	if r, readable := ls.config.UtxoSet.(UtxoSetReader); readable {
 		if err := ls.stageUtxoOverlay(r, txn, batch, changes); err != nil {
-			ls.utxoSetMu.Lock()
-			validationOnly := batch.validationOnly
-			if validationOnly && batch.validationErr == nil {
-				batch.validationErr = err
-			}
-			ls.utxoSetMu.Unlock()
-			if validationOnly {
+			if ls.recordValidationFailure(txn, err) {
 				return
 			}
 			slot := uint64(0)
@@ -1200,13 +1195,7 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
 	if err != nil {
-		ls.utxoSetMu.Lock()
-		validationOnly := b.validationOnly
-		if validationOnly && b.validationErr == nil {
-			b.validationErr = err
-		}
-		ls.utxoSetMu.Unlock()
-		if validationOnly {
+		if ls.recordValidationFailure(txn, err) {
 			return
 		}
 		ls.failUtxoSet(
@@ -1231,29 +1220,64 @@ func (ls *LedgerState) stageUtxoSetRollbackForValidation(
 	return ls.utxoSetValidationError(txn)
 }
 
-// setForkValidationEpochs gives txn's validation-only batch the epoch cache
-// of the fork candidate it validates.
-func (ls *LedgerState) setForkValidationEpochs(
+// setForkValidationConsensus gives txn's validation-only batch the consensus
+// view of the fork candidate it validates.
+func (ls *LedgerState) setForkValidationConsensus(
 	txn ledgerdb.Txn,
-	epochs []models.Epoch,
+	snapshot *consensusSnapshot,
 ) {
 	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
-		b.epochCache = slices.Clone(epochs)
+		b.consensus = snapshot
 	})
 }
 
-// forkValidationEpochs returns the epoch cache of the fork candidate txn
-// validates, nil when txn is not a fork validation.
-func (ls *LedgerState) forkValidationEpochs(txn ledgerdb.Txn) []models.Epoch {
+// forkValidationConsensus returns the consensus view of the fork candidate
+// txn validates, nil when txn is not a fork validation.
+func (ls *LedgerState) forkValidationConsensus(
+	txn ledgerdb.Txn,
+) *consensusSnapshot {
 	if txn == nil {
 		return nil
 	}
 	ls.utxoSetMu.Lock()
 	defer ls.utxoSetMu.Unlock()
 	if batch := ls.utxoSetBatches[txn]; batch != nil && batch.validationOnly {
-		return batch.epochCache
+		return batch.consensus
 	}
 	return nil
+}
+
+// stagingEpoch is the epoch txn stages against: the candidate's while txn
+// validates a fork candidate, the live one otherwise.
+func (ls *LedgerState) stagingEpoch(txn ledgerdb.Txn) uint64 {
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		return snapshot.currentEpoch.EpochId
+	}
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentEpoch.EpochId
+}
+
+// recordValidationFailure keeps err on txn's batch and reports true when txn
+// only validates a fork candidate. Its staging is discarded with txn, so a
+// failure rejects the candidate and must not stop the live set.
+func (ls *LedgerState) recordValidationFailure(
+	txn ledgerdb.Txn,
+	err error,
+) bool {
+	if txn == nil {
+		return false
+	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil || !batch.validationOnly {
+		return false
+	}
+	if batch.validationErr == nil {
+		batch.validationErr = err
+	}
+	return true
 }
 
 func (ls *LedgerState) utxoSetValidationError(txn ledgerdb.Txn) error {

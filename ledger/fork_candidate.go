@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -43,11 +44,14 @@ type forkCandidate struct {
 	localTip   ochainsync.Tip
 	generation uint64
 	path       []ChainsyncEvent
-	blocks     []BlockfetchEvent
-	request    chan struct{}
-	requestID  uint64
-	timer      *time.Timer
-	err        error
+	// tail holds headers the peer sent after path while its bodies were in
+	// flight; they are queued once the validated path is installed.
+	tail      []ChainsyncEvent
+	blocks    []BlockfetchEvent
+	request   chan struct{}
+	requestID uint64
+	timer     *time.Timer
+	err       error
 }
 
 type forkCandidateValidationContextKey struct{}
@@ -55,6 +59,19 @@ type forkCandidateValidationContextKey struct{}
 func forkCandidateValidationFrom(ctx context.Context) bool {
 	validation, _ := ctx.Value(forkCandidateValidationContextKey{}).(bool)
 	return validation
+}
+
+// pathExtends reports whether path starts with every point of prefix.
+func pathExtends(path, prefix []ChainsyncEvent) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if !pointMatches(path[i].Point, prefix[i].Point) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *forkCandidate) matchesEvent(e BlockfetchEvent) bool {
@@ -115,9 +132,20 @@ func (ls *LedgerState) startForkCandidateValidation(
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.forkCandidate != nil {
-		if pointMatches(ls.forkCandidate.path[len(ls.forkCandidate.path)-1].Point,
+	if current := ls.forkCandidate; current != nil {
+		if pointMatches(current.path[len(current.path)-1].Point,
 			path[len(path)-1].Point) {
+			return nil
+		}
+		// A peer that keeps sending headers while its bodies are fetched
+		// would otherwise discard every in-flight candidate before it
+		// completes. A path that extends the in-flight one leaves it running;
+		// the extra headers queue behind it once it is installed.
+		if sameConnectionId(current.connection, connection) &&
+			pathExtends(path, current.path) {
+			current.tail = append(
+				[]ChainsyncEvent(nil), path[len(current.path):]...,
+			)
 			return nil
 		}
 		ls.discardForkCandidateLocked()
@@ -309,35 +337,23 @@ func (ls *LedgerState) finishForkCandidate(candidate *forkCandidate) {
 		)
 		return
 	}
-	for i, forkEvent := range candidate.path {
-		if err := ls.addForkPathHeader(
-			forkEvent,
-			candidate.path[len(candidate.path)-1].Point,
-			forkEvent.HeaderCryptoVerificationGeneration,
-		); err != nil {
-			ls.config.Logger.Warn(
-				"failed to queue validated fork header",
-				"component", "ledger",
-				"slot", forkEvent.Point.Slot,
-				"error", err,
-			)
-			return
-		}
-		candidate.blocks[i].ConnectionId = candidate.connection
-	}
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.blockfetchBatchRollbackGeneration = ls.blockfetchRollbackGeneration.Load()
-	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
-	ls.pendingBlockfetchEvents = append(
-		ls.pendingBlockfetchEvents,
-		candidate.blocks...,
-	)
-	if err := ls.flushPendingBlockfetchBlocksDeferred(&pending); err != nil {
+	tail, err := ls.installForkCandidate(candidate, &pending)
+	if err != nil {
+		// The chain now sits at the ancestor with the suffix dropped, and the
+		// peer will not resend it on its own: drop what was queued and
+		// re-intersect so the pipeline resumes from the ancestor.
 		ls.config.Logger.Error(
 			"failed to install validated fork candidate",
 			"component", "ledger",
 			"error", err,
+		)
+		ls.chainsyncBlockfetchMutex.Lock()
+		ls.clearQueuedHeaders()
+		ls.chainsyncBlockfetchMutex.Unlock()
+		ls.requestChainsyncResync(
+			candidate.connection,
+			event.ChainsyncResyncReasonPersistentFork,
+			&pending,
 		)
 		return
 	}
@@ -345,6 +361,81 @@ func (ls *LedgerState) finishForkCandidate(candidate *forkCandidate) {
 	ls.clearRollbackHistory()
 	ls.clearUnrecoverableRollbacks()
 	ls.setChainsyncState(RollbackChainsyncState)
+	if len(tail) == 0 {
+		return
+	}
+	tipPoint := tail[len(tail)-1].Point
+	for _, header := range tail {
+		if err := ls.addForkPathHeader(
+			header, tipPoint, header.HeaderCryptoVerificationGeneration,
+		); err != nil {
+			ls.config.Logger.Warn(
+				"failed to queue header received during fork candidate fetch",
+				"component", "ledger",
+				"slot", header.Point.Slot,
+				"error", err,
+			)
+			break
+		}
+	}
+	ls.ensureBlockfetchDrainingQueuedHeaders(
+		candidate.connection,
+		event.ChainsyncResyncReasonForkExtensionRestartFailed,
+		&pending,
+	)
+}
+
+// installForkCandidate queues the validated headers and blocks onto the chain
+// after the rollback to the candidate's ancestor. It returns the headers the
+// peer sent past the candidate while its bodies were fetched. The caller owns
+// chainsyncMutex and holds neither chainsyncBlockfetchMutex nor anything
+// else this function takes.
+func (ls *LedgerState) installForkCandidate(
+	candidate *forkCandidate,
+	pending *pendingPublishes,
+) ([]ChainsyncEvent, error) {
+	for i, forkEvent := range candidate.path {
+		if err := ls.addForkPathHeader(
+			forkEvent,
+			candidate.path[len(candidate.path)-1].Point,
+			forkEvent.HeaderCryptoVerificationGeneration,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"queue validated fork header at slot %d: %w",
+				forkEvent.Point.Slot, err,
+			)
+		}
+		candidate.blocks[i].ConnectionId = candidate.connection
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	// Blocks still pending from the batch the rollback superseded were
+	// fetched for the abandoned segment. Resetting the batch generations
+	// below would make them current, so they are discarded first, and the
+	// generations are restored afterwards so blocks that batch delivers
+	// later stay stale.
+	if stale := ls.pendingBlockfetchEvents; len(stale) > 0 {
+		ls.pendingBlockfetchEvents = nil
+		if err := ls.discardStaleBlockfetchBatch(stale); err != nil {
+			return nil, err
+		}
+	}
+	supersededRollback := ls.blockfetchBatchRollbackGeneration
+	supersededChain := ls.blockfetchBatchChainGeneration
+	defer func() {
+		ls.blockfetchBatchRollbackGeneration = supersededRollback
+		ls.blockfetchBatchChainGeneration = supersededChain
+	}()
+	ls.blockfetchBatchRollbackGeneration = ls.blockfetchRollbackGeneration.Load()
+	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
+	ls.pendingBlockfetchEvents = append(
+		ls.pendingBlockfetchEvents,
+		candidate.blocks...,
+	)
+	if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
+		return nil, fmt.Errorf("flush validated fork blocks: %w", err)
+	}
+	return candidate.tail, nil
 }
 
 var errForkCandidateValidationComplete = errors.New(
@@ -367,12 +458,14 @@ func (ls *LedgerState) validateForkCandidate(
 		return errors.New("selected chain changed during fork candidate fetch")
 	}
 	ctx = context.WithValue(ctx, forkCandidateValidationContextKey{}, true)
+	// The floor is read before the transaction opens: a writer holding the
+	// ledger lock may wait for a database connection this transaction holds.
+	ls.RLock()
+	mithrilFloor := ls.mithrilLedgerSlot
+	ls.RUnlock()
 	txn := ls.ledgerDB().Begin(ctx, true)
 	defer txn.Release()
 	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
-		ls.RLock()
-		mithrilFloor := ls.mithrilLedgerSlot
-		ls.RUnlock()
 		_, runningNonce, err := ls.ledgerDB().TruncateAfterSlot(
 			ctx,
 			ancestor,
@@ -438,7 +531,19 @@ func (ls *LedgerState) validateForkCandidate(
 			return errors.New("fork validation consensus snapshot unavailable")
 		}
 		epochCache := slices.Clone(epochs)
-		ls.setForkValidationEpochs(txn, epochCache) //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
+		// Every rule that reads the consensus view while this transaction
+		// validates reads the candidate's, never the selected chain's.
+		stageConsensus := func() { //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
+			candidate := *live
+			candidate.currentEpoch = currentEpoch
+			candidate.currentEra = currentEra
+			candidate.currentPParams = pparams
+			candidate.prevEraPParams = prevPParams
+			candidate.syntheticV2CostModelInEffect = synthetic
+			candidate.epochCache = slices.Clone(epochCache)
+			ls.setForkValidationConsensus(txn, &candidate)
+		}
+		stageConsensus()
 		for _, block := range blocks {
 			if block.SlotNumber() >= currentEpoch.StartSlot+
 				uint64(currentEpoch.LengthInSlots) {
@@ -452,7 +557,7 @@ func (ls *LedgerState) validateForkCandidate(
 					return transitionErr
 				}
 				epochCache = append(epochCache, currentEpoch)
-				ls.setForkValidationEpochs(txn, epochCache) //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
+				stageConsensus()
 			}
 			point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 			var offsets *database.BlockIngestionResult
@@ -473,13 +578,6 @@ func (ls *LedgerState) validateForkCandidate(
 				return fmt.Errorf("validate candidate block at slot %d: %w", point.Slot, err)
 			}
 			if delta != nil {
-				candidate := *live
-				candidate.currentEpoch = currentEpoch
-				candidate.currentEra = currentEra
-				candidate.currentPParams = pparams
-				candidate.prevEraPParams = prevPParams
-				candidate.epochCache = epochCache
-				delta.consensus = &candidate
 				if err := delta.apply(ctx, ls, txn); err != nil {
 					delta.Release()
 					return fmt.Errorf("stage candidate block at slot %d: %w", point.Slot, err)

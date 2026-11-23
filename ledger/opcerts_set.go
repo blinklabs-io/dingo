@@ -203,12 +203,12 @@ func (ls *LedgerState) stageOpCert(
 		// The set is the only copy, so a counter it cannot stage would be
 		// lost.
 		err := drainedUnserved(nodesettings.FamilyOpCerts)
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return err
 	}
 	prev, err := ls.opCertView(r, txn, pool.Bytes(), nil)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return err
 	}
 	next := OpCertState{

@@ -434,9 +434,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// validation, once per transaction while validating, where each tx is its
 	// own delta) yields the same final expiration as applying it once per block.
 	if ls.config.DelegatorInactivityEnabled {
-		ls.RLock()
-		currentEpoch := ls.currentEpoch.EpochId
-		ls.RUnlock()
+		currentEpoch := ls.stagingEpoch(txn)
 		witnessTxs := make([]lcommon.Transaction, 0, len(d.Transactions))
 		for i, tr := range d.Transactions {
 			if !appliedTxs[i] {
@@ -576,9 +574,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 		return nil
 	}
 
-	ls.RLock()
-	epoch := ls.currentEpoch.EpochId
-	ls.RUnlock()
+	epoch := ls.stagingEpoch(txn)
 	if err := ls.ledgerDB().AddNetworkDonation(
 		d.Point.Slot,
 		epoch,

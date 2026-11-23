@@ -11671,6 +11671,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
@@ -11977,6 +11978,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 		}
 		if err := delta.donate(blockDonation); err != nil {
 			delta.Release()

@@ -294,8 +294,8 @@ func (ls *LedgerState) rewardEpochOfSlot(
 	slot uint64,
 ) (epoch models.Epoch, ok bool, err error) {
 	// A fork candidate may open epochs the published cache does not hold yet.
-	if cache := ls.forkValidationEpochs(txn); cache != nil {
-		epoch, err = epochForSlotInCache(cache, slot)
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		epoch, err = epochForSlotInCache(snapshot.epochCache, slot)
 		return epoch, err == nil, err
 	}
 	if ls.loadConsensusSnapshot() == nil {
@@ -321,14 +321,18 @@ func (ls *LedgerState) stageBlockMinted(
 	}
 	epoch, ok, err := ls.rewardEpochOfSlot(txn, slot)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve block epoch: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve block epoch: %w", err))
 		return
 	}
 	if !ok {
 		return
 	}
 	overlay := false
-	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+	pparams := ls.ProtocolParamsForSlot(slot)
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		pparams = snapshot.currentPParams
+	}
+	if pparams != nil {
 		d := decentralizationParamRat(pparams)
 		overlay = d != nil && rewardIsOverlaySlot(epoch.StartSlot, d, slot)
 	}
@@ -386,7 +390,7 @@ func (ls *LedgerState) stageTransactionFee(
 	}
 	fee, err := ls.transactionFeePot(txn, tx)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve transaction fee: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve transaction fee: %w", err))
 		return
 	}
 	if fee == 0 {
@@ -398,7 +402,7 @@ func (ls *LedgerState) stageTransactionFee(
 	}
 	epoch, ok, err := ls.rewardEpochOfSlot(txn, execSlot)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve fee epoch: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve fee epoch: %w", err))
 		return
 	}
 	if !ok {

@@ -462,8 +462,8 @@ func (s stagingLedgerDB) drepsUnserved() error {
 // failDrepStaging stops the set following the ledger and, when the DReps
 // family is drained and the set alone holds the write, returns err so the
 // write is not lost.
-func (s stagingLedgerDB) failDrepStaging(err error) error {
-	s.ls.failAccountStaging(err)
+func (s stagingLedgerDB) failDrepStaging(txn ledgerdb.Txn, err error) error {
+	s.ls.failAccountStaging(txn, err)
 	return err
 }
 
@@ -482,7 +482,7 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, drepCredential)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d == nil {
 		// The metadata store's answer for a missing DRep, which vote
@@ -531,7 +531,7 @@ func (s stagingLedgerDB) InsertDrepIfAbsent(
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, cred)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d != nil {
 		return nil
@@ -558,7 +558,7 @@ func (s stagingLedgerDB) ResetDormantDRepEpochs(
 	}
 	n, err := s.ls.dormancyView(r, txn)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if n != 0 {
 		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
@@ -653,7 +653,7 @@ func (s stagingLedgerDB) ClearDanglingDRepDelegations(
 	}
 	n, err := s.ls.stageDanglingClear(ar, r, txn, atSlot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	if err != nil {
-		return 0, s.failDrepStaging(err)
+		return 0, s.failDrepStaging(txn, err)
 	}
 	return n, nil
 }
