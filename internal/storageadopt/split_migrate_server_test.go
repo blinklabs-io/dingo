@@ -307,9 +307,16 @@ func TestServerAdoptionCarriesCoreModeReads(t *testing.T) {
 			require.NoError(t, err)
 			txID, err := res.LastInsertId()
 			require.NoError(t, err)
+			res, err = raw.Exec(
+				`INSERT INTO block_identity(hash) VALUES(?)`,
+				bytes.Repeat([]byte{0x52}, 32),
+			)
+			require.NoError(t, err)
+			blockID, err := res.LastInsertId()
+			require.NoError(t, err)
 			_, err = raw.Exec(
-				`INSERT INTO applied_transaction(tx_id,block_hash,slot,type,fee,block_index,valid) VALUES(?,?,2,6,'170000',0,TRUE)`,
-				txID, bytes.Repeat([]byte{0x52}, 32),
+				`INSERT INTO applied_transaction(tx_id,block_id,slot,type,fee,block_index,valid) VALUES(?,?,2,6,'170000',0,TRUE)`,
+				txID, blockID,
 			)
 			require.NoError(t, err)
 			_, err = raw.Exec(

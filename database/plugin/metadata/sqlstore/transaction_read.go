@@ -35,7 +35,8 @@ import (
 // imported output's producer is until it is applied, is not a transaction
 // here.
 const (
-	sqliteTransactionColumns = `t.hash, a.block_hash, a.metadata, a.slot,
+	sqliteTransactionColumns = `t.hash, (SELECT bi.hash FROM block_identity AS bi
+WHERE bi.id = a.block_id), a.metadata, a.slot,
 a.type, t.id, a.fee, a.collateral_fee, a.ttl, a.block_index, a.valid`
 	appliedTransactionFrom = `"transaction" AS t
 JOIN applied_transaction AS a ON a.tx_id = t.id`
@@ -828,7 +829,8 @@ func addressTransactionRangeQuery(
 	to *models.AddressTransactionPosition,
 ) (string, []any) {
 	query := `
-SELECT at.payment_key, th.hash, at.slot, at.tx_index, tx.block_hash
+SELECT at.payment_key, th.hash, at.slot, at.tx_index, ` +
+		appliedBlockHashSQL("tx") + `
 FROM address_transaction at
 JOIN "transaction" th ON th.id = at.transaction_id
 JOIN applied_transaction tx ON tx.tx_id = th.id

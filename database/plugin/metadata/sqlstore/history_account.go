@@ -152,7 +152,8 @@ WHERE reward.credential_tag = ? AND reward.credential = ?`
 	}
 	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
-		"SELECT txh.hash, reward.amount, tx.slot, tx.block_index, tx.block_hash"+
+		"SELECT txh.hash, reward.amount, tx.slot, tx.block_index, "+
+			appliedBlockHashSQL("tx")+
 			from+" ORDER BY mir.added_slot "+dir+", tx.block_index "+dir+
 			", certs.cert_index "+dir+", reward.id "+dir,
 		args,

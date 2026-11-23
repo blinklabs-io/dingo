@@ -256,9 +256,9 @@ var Manifest = []Index{
 		Notes:   "Script-locked supply", Critical: true,
 	},
 	{
-		Name: "idx_applied_transaction_block_hash", Table: "applied_transaction",
-		Columns: []string{"block_hash"},
-		Notes:   "Block transaction grouping", Critical: true,
+		Name: "idx_applied_transaction_block_id", Table: "applied_transaction",
+		Columns: []string{"block_id", "block_index"},
+		Notes:   "Block transaction grouping in block order", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{

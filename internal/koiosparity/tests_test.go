@@ -3183,7 +3183,7 @@ func testSchema(includePools bool) []string {
 		`CREATE TABLE governance_proposal_drop (proposal_id INTEGER PRIMARY KEY, dropped_epoch INTEGER, dropped_slot INTEGER)`,
 		`CREATE TABLE account_reward_delta (id INTEGER PRIMARY KEY AUTOINCREMENT, staking_key BLOB NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, tx_hash BLOB NOT NULL, amount TEXT, previous_reward TEXT, added_slot INTEGER NOT NULL, withdrawal NUMERIC NOT NULL DEFAULT 0, post_snapshot NUMERIC NOT NULL DEFAULT 0)`,
 		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL UNIQUE)`,
-		`CREATE TABLE applied_transaction (tx_id INTEGER PRIMARY KEY, block_hash BLOB, metadata BLOB, slot INTEGER, type INTEGER, fee TEXT, collateral_fee TEXT, ttl TEXT, block_index INTEGER, valid NUMERIC NOT NULL DEFAULT 1)`,
+		`CREATE TABLE applied_transaction (tx_id INTEGER PRIMARY KEY, block_id INTEGER, metadata BLOB, slot INTEGER, type INTEGER, fee TEXT, collateral_fee TEXT, ttl TEXT, block_index INTEGER, valid NUMERIC NOT NULL DEFAULT 1)`,
 		`CREATE TABLE certs (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER, slot INTEGER, cert_index INTEGER)`,
 	}
 	if includePools {

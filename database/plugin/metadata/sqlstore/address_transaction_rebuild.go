@@ -147,8 +147,8 @@ func (s *Store) addressTransactionRebuildPage(
 	cursor int64,
 ) ([]models.Transaction, error) {
 	rows, err := s.readDB.QueryContext(ctx, s.dialect.Rebind(`
-SELECT source.transaction_id, txh.hash, tx.block_hash, tx.slot, tx.block_index,
-       tx.valid
+SELECT source.transaction_id, txh.hash, `+appliedBlockHashSQL("tx")+`, tx.slot,
+       tx.block_index, tx.valid
 FROM address_transaction_rebuild_source source
 LEFT JOIN "transaction" txh ON txh.id = source.transaction_id
 LEFT JOIN applied_transaction tx ON tx.tx_id = txh.id

@@ -250,8 +250,11 @@ func TestGetAssetInfo(t *testing.T) {
 			url TEXT,
 			decimals INTEGER
 		);
+		CREATE TABLE block_identity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL UNIQUE
+		);
 		CREATE TABLE applied_transaction (
-			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB
+			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_id INTEGER
 		);
 		CREATE TABLE utxo (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

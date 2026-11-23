@@ -34,8 +34,11 @@ func seedBlockAmountRows(tb testing.TB, store *Store, count int) []byte {
 	insertTx, err := txn.Prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
 	require.NoError(tb, err)
 	defer insertTx.Close()
+	_, err = txn.Exec(`INSERT INTO block_identity (hash) VALUES (?)`, hash)
+	require.NoError(tb, err)
 	insertApplied, err := txn.Prepare(`INSERT INTO applied_transaction
-(tx_id, block_hash, fee, block_index, valid) VALUES (?, ?, '7', ?, TRUE)`)
+(tx_id, block_id, fee, block_index, valid)
+VALUES (?, (SELECT id FROM block_identity WHERE hash = ?), '7', ?, TRUE)`)
 	require.NoError(tb, err)
 	defer insertApplied.Close()
 	insertOutput, err := txn.Prepare(`INSERT INTO utxo
@@ -91,7 +94,7 @@ func TestBlockTransactionTotalsQueryIsIndexBacked(t *testing.T) {
 		plan.WriteString(detail + "\n")
 	}
 	require.NoError(t, rows.Err())
-	require.Contains(t, plan.String(), "idx_applied_transaction_block_hash")
+	require.Contains(t, plan.String(), "idx_applied_transaction_block_id")
 	require.Contains(t, plan.String(), "idx_utxo_tx_id_output_idx")
 	require.Contains(t, plan.String(), "idx_utxo_collateral_return_for_tx_id")
 	require.NotContains(t, plan.String(), "SCAN utxo")

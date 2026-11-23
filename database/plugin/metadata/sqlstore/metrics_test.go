@@ -291,10 +291,10 @@ func TestBatchInsertTransactionIsCounted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		before+2,
+		before+3,
 		counterValue(t, reg, "insert"),
-		"expected the prepared identity insert and the application row "+
-			"insert to be counted",
+		"expected the prepared identity insert, the block dictionary "+
+			"insert and the application row insert to be counted",
 	)
 
 	require.NoError(t, txn.Rollback())

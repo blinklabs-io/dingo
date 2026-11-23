@@ -449,16 +449,28 @@ func writeOverlayTransactions(
 	o.mutations++
 	o.stats.TransactionWrites++
 	var identities, applied []any
+	hashes := make([]any, len(o.txPending))
+	for i, row := range o.txPending {
+		hashes[i] = row.values[1]
+	}
+	blockIDs, err := resolveBlockIDs(ctx, db, hashes)
+	if err != nil {
+		return overlayWriteError("resolve batch block identities", err)
+	}
 	for _, row := range o.txPending {
 		if !row.reused {
 			identities = append(identities, row.id, row.values[0])
 			o.txWritten = max(o.txWritten, row.id)
 		}
-		applied = append(applied, row.id)
-		applied = append(applied, row.values[1:]...)
+		blockID, err := blockIDs.id(row.values[1])
+		if err != nil {
+			return overlayWriteError("resolve batch block identity", err)
+		}
+		applied = append(applied, row.id, blockID)
+		applied = append(applied, row.values[2:]...)
 	}
 	// The identity rows go first: applied_transaction references them.
-	err := execChunked(ctx, db, identities, overlayIdentityColumns, func(rows int) string {
+	err = execChunked(ctx, db, identities, overlayIdentityColumns, func(rows int) string {
 		return `-- name: BatchOverlayInsertTransactionIdentities :exec
 INSERT INTO "transaction" (id, hash) VALUES ` + strings.TrimSuffix(
 			strings.Repeat("(?, ?), ", rows), ", ")
@@ -469,7 +481,7 @@ INSERT INTO "transaction" (id, hash) VALUES ` + strings.TrimSuffix(
 	err = execChunked(ctx, db, applied, overlayAppliedColumns, func(rows int) string {
 		return `-- name: BatchOverlayInsertAppliedTransactions :exec
 INSERT INTO applied_transaction (
-    tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    tx_id, block_id, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
 ) VALUES ` + strings.TrimSuffix(strings.Repeat(
 			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ")

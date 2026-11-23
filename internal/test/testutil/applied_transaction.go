@@ -74,19 +74,51 @@ func InsertAppliedTransaction(
 	if ttl == "" {
 		ttl = "0"
 	}
-	_, err := db.ExecContext(
+	blockID, err := blockIdentityID(db, tx.BlockHash)
+	if err != nil {
+		tb.Fatalf("insert block identity: %v", err)
+	}
+	_, err = db.ExecContext(
 		context.Background(),
 		`INSERT INTO applied_transaction (
-    tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    tx_id, block_id, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tx.BlockHash, tx.Metadata, tx.Slot, tx.Type, fee, collateralFee,
+		id, blockID, tx.Metadata, tx.Slot, tx.Type, fee, collateralFee,
 		ttl, tx.BlockIndex, !tx.Invalid,
 	)
 	if err != nil {
 		tb.Fatalf("insert applied transaction: %v", err)
 	}
 	return id
+}
+
+// blockIdentityID returns the block_identity id of hash, inserting the row
+// when the block is not in the dictionary yet. An empty hash has no block and
+// returns nil.
+func blockIdentityID(db Execer, hash []byte) (any, error) {
+	if len(hash) == 0 {
+		return nil, nil
+	}
+	queryer, ok := db.(Queryer)
+	if !ok {
+		return nil, errors.New("block identity lookup needs a Queryer")
+	}
+	if _, err := db.ExecContext(
+		context.Background(),
+		`INSERT INTO block_identity (hash) VALUES (?)
+ON CONFLICT (hash) DO NOTHING`, hash,
+	); err != nil {
+		return nil, err
+	}
+	var id int64
+	if err := queryer.QueryRowContext(
+		context.Background(),
+		`SELECT id FROM block_identity WHERE hash = ?`, hash,
+	).Scan(&id); err != nil {
+		return nil, err
+	}
+	return id, nil
 }
 
 // InsertTransactionIdentity writes the identity row of a transaction known
@@ -217,6 +249,21 @@ func ExecTransactionInsert(
 			identityArgs = append(identityArgs, tokenArgs...)
 		case "hash":
 			hashToken, hashArgs = token, tokenArgs
+		case "block_hash":
+			// The statement names a block by hash; the row holds its id.
+			if token != "?" || len(tokenArgs) != 1 {
+				appliedCols = append(appliedCols, "block_id")
+				appliedVals = append(appliedVals, token)
+				continue
+			}
+			hash, _ := tokenArgs[0].([]byte)
+			blockID, err := blockIdentityID(db, hash)
+			if err != nil {
+				return nil, err
+			}
+			appliedCols = append(appliedCols, "block_id")
+			appliedVals = append(appliedVals, "?")
+			appliedArgs = append(appliedArgs, blockID)
 		default:
 			appliedCols = append(appliedCols, column)
 			appliedVals = append(appliedVals, token)

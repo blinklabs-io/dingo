@@ -434,7 +434,8 @@ func withdrawalHistoryQuery(
 	stakingKey []byte,
 ) (string, []any) {
 	return `
-SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, tx.block_hash
+SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, ` +
+		appliedBlockHashSQL("tx") + `
 FROM account_reward_delta ard
 JOIN "transaction" th ON th.hash = ard.tx_hash
 JOIN applied_transaction tx ON tx.tx_id = th.id
@@ -900,13 +901,14 @@ SELECT %[1]s.added_slot AS added_slot,
        txh.hash AS tx_hash,
        %[1]s.pool_key_hash AS pool_key_hash,
        tx.slot AS tx_slot,
-       tx.block_hash AS block_hash
+       %[2]s AS block_hash
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
 JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
+			appliedBlockHashSQL("tx"),
 		))
 		args = append(args, source.certType, credentialTag, stakingKey)
 	}
@@ -944,7 +946,7 @@ SELECT %[1]s.added_slot AS added_slot,
        ? AS action,
        %[2]s AS deposit,
        tx.slot AS tx_slot,
-       tx.block_hash AS block_hash,
+       %[3]s AS block_hash,
        COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), %[1]s.added_slot) AS effective_slot
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
@@ -953,6 +955,7 @@ JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
 			deposit,
+			appliedBlockHashSQL("tx"),
 		))
 		args = append(
 			args,

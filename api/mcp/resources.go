@@ -39,7 +39,7 @@ backfill all historical transaction metadata. Pruning also limits history.
 
 | Concept | cardano-db-sync | Dingo SQLite |
 | :--- | :--- | :--- |
-| Transactions | tx | "transaction": id, hash (every known transaction); applied_transaction: tx_id, block_hash, slot, block_index, fee (applied transactions) |
+| Transactions | tx | "transaction": id, hash (every known transaction); applied_transaction: tx_id, block_id (block_identity.id; block_identity.hash is the block hash), slot, block_index, fee (applied transactions) |
 | Outputs | tx_out, tx_in | utxo: tx_id (producer row id), output_idx, amount, deleted_slot, spent_at_tx_id |
 | Stake accounts | stake_address and delegation/reward tables | account: staking_key, credential_tag, pool, drep, reward, active |
 | Datums | datum | datum: hash, raw_datum (CBOR bytes) |
@@ -54,10 +54,11 @@ relevant history was not indexed or has been pruned.
 ### Recent retained transactions
 
 ~~~sql
-SELECT hex(t.hash) AS tx_hash, hex(a.block_hash) AS block_hash,
+SELECT hex(t.hash) AS tx_hash, hex(b.hash) AS block_hash,
        a.slot, a.block_index, a.fee AS fee_lovelace
 FROM applied_transaction a
 JOIN "transaction" t ON t.id = a.tx_id
+LEFT JOIN block_identity b ON b.id = a.block_id
 ORDER BY a.tx_id DESC
 LIMIT 20;
 ~~~
@@ -489,7 +490,7 @@ func registerResources(
 			}
 		} else if db != nil {
 			var rawHash []byte
-			err := db.QueryRowContext(ctx, `SELECT slot, block_hash FROM applied_transaction ORDER BY slot DESC LIMIT 1`).Scan(&slot, &rawHash)
+			err := db.QueryRowContext(ctx, `SELECT a.slot, b.hash FROM applied_transaction a LEFT JOIN block_identity b ON b.id = a.block_id ORDER BY a.slot DESC LIMIT 1`).Scan(&slot, &rawHash)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, fmt.Errorf("read database tip: %w", err)
 			}

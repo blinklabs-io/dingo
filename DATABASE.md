@@ -222,9 +222,13 @@ user-visible change for anyone reading the metadata database with SQL:
   recovery's spender). `hash` is `NOT NULL` and unique.
 - `applied_transaction` holds everything specific to an application:
   `tx_id` (primary key, foreign key to `transaction.id` `ON DELETE CASCADE`),
-  `block_hash`, `metadata`, `slot`, `type`, `fee`, `collateral_fee`, `ttl`,
+  `block_id` (the `block_identity.id` of the block, `NULL` for a transaction
+  with no block), `metadata`, `slot`, `type`, `fee`, `collateral_fee`, `ttl`,
   `block_index` and `valid`, with `idx_applied_transaction_slot` and
-  `idx_applied_transaction_block_hash`. A row exists exactly when the
+  `idx_applied_transaction_block_id` on (`block_id`, `block_index`).
+  `block_identity` is `id` and `hash` (unique, `NOT NULL`): each block hash is
+  stored once there instead of once per transaction row and index entry. A row
+  exists exactly when the
   transaction was applied. Readers that mean an applied transaction (the
   transaction, block, address-history, certificate-position and fee
   readers) join it, so an identity-only row never surfaces as a transaction.
@@ -928,6 +932,21 @@ blockfrost/mesh API adapters, only their indexes back no predicate.
 `DROP INDEX IF EXISTS` is natively idempotent on SQLite and PostgreSQL replay,
 so only MySQL's translated `DROP INDEX <name> ON <table>` form reaches the
 runner's existing, already-generic "already applied" guard.
+
+Migration `v75` (`applied-transaction-block-identity`, integer version 75)
+stores each block hash once. The expand phase creates `block_identity` and adds
+`applied_transaction.block_id`. A resumable backfill reads `tx_id` ranges of
+50,000 rows; each batch inserts the range's distinct block hashes, in order of
+their first transaction, then sets `block_id` from the dictionary, and commits
+both with its cursor (the last `tx_id`). The last batch fails the migration
+while any row that has a `block_hash` has no `block_id`. The contract phase
+creates `idx_applied_transaction_block_id`, drops
+`idx_applied_transaction_block_hash` and then drops the `block_hash` column,
+which SQLite refuses to do while an index names it. A replay that finds the
+column gone treats the backfill as finished. The old index leaves the deferred
+manifest and the new one takes its place, still `CatchUpDroppable`. The index
+v61 builds on `block_hash` is left in that migration and dropped here, so an
+upgrade from before v61 builds it once and removes it.
 
 Migration `v74` (`asset-identity-holdings`, integer version 74) replaces the
 per-output `asset` table with `asset_identity` (one row per distinct
@@ -5997,7 +6016,8 @@ the stored blocks as they age past the window, as it does on any node.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash` | PK `id` (`AUTOINCREMENT`); unique `hash` (`idx_transaction_hash`, `NOT NULL`) | Identity table: one row per transaction hash the store knows, either applied (it has an `applied_transaction` row) or named only by an imported or recovered output (it has none). Everything else about a transaction lives in `applied_transaction`; child tables (`certs`, `key_witness`, `plutus_data`, `redeemer`, `redeemer_script`, `witness_scripts`, `leios_transaction_context`, `address_transaction`, `transaction_metadata_label`) keep their `transaction_id` column, which still names `transaction.id`. A Dijkstra batch has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash. |
-| `applied_transaction` | `tx_id`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_hash` (`block_hash`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order, and a certifying ranking block's own transactions follow the index range reserved for its endorser-block closure (the closure's transaction count plus its child bodies). `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
+| `block_identity` | `id`, `hash` | PK `id` (`AUTOINCREMENT`); unique `hash` | Dictionary of block hashes: one row per block that has an applied transaction. `applied_transaction.block_id` refers to `id`; there is no foreign key, because rows are never deleted. Rollback deletes the `applied_transaction` rows and leaves the block's row, which is invisible to every reader because reads start from `applied_transaction`, and which the block takes again if it is re-applied. A write resolves the id against the table on every insert and keeps no copy, so a rolled-back insert leaves no stale id behind. A batched UTxO-overlay write resolves all of its block hashes in one multi-row insert and one select. |
+| `applied_transaction` | `tx_id`, `block_id`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_id` (`block_id`, `block_index`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order, and a certifying ranking block's own transactions follow the index range reserved for its endorser-block closure (the closure's transaction count plus its child bodies). `block_id` names the block through `block_identity.hash`, and the hash and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
 | `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx_id` (`tx_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
@@ -6052,7 +6072,7 @@ blocks the ledger already holds (or the ledger is empty), it also drops the
 entries marked `CatchUpDroppable` (`deferred.CatchUpDroppableManifest`, both
 sets through `DropCatchUpIndexesContext`): `idx_utxo_payment_key`,
 `idx_utxo_staking_key`, `idx_utxo_spent_at_tx_id`,
-`idx_utxo_added_slot`, `idx_applied_transaction_block_hash`
+`idx_utxo_added_slot`, `idx_applied_transaction_block_id`
 and `idx_asset_holding_asset_id`. They are critical, but only rollback
 (`DeleteUtxosAfterSlot`, `DeleteTransactionsAfterSlot` and its deletes of
 `utxo`), the API and LocalStateQuery read them, and none of those writes while
@@ -9055,11 +9075,19 @@ and MySQL retain per-row unsigned validation in Go. No schema change.
 ### `GetTransactionsByBlockHash`
 
 ```sql
-SELECT *
-FROM "transaction"
-WHERE block_hash = decode($1, 'hex')
-ORDER BY block_index ASC;
+SELECT t.hash, b.hash AS block_hash, a.*
+FROM block_identity b
+JOIN applied_transaction a ON a.block_id = b.id
+JOIN "transaction" t ON t.id = a.tx_id
+WHERE b.hash = decode($1, 'hex')
+ORDER BY a.block_index ASC;
 ```
+
+The block hash resolves through the unique key of `block_identity`, and the
+rows of the block are read in `block_index` order straight from
+`idx_applied_transaction_block_id`, with no sort. An entry of that index holds
+two integers where the old index held a 32-byte hash. `GetBlockTransactionTotals`
+resolves the block the same way.
 
 ### `GetBlockTransactionTotals`
 
@@ -10472,7 +10500,8 @@ ORDER BY a.credential_tag, a.staking_key;
 
 Dingo unions all certificate tables that can carry pool delegation and orders
 with slot, transaction index, and certificate index. Each row also selects
-`tx.slot` (`tx_slot`) and `tx.block_hash` (`block_hash`); the Blockfrost adapter
+`tx.slot` (`tx_slot`) and the block hash (`block_hash`, read through
+`block_identity` from `tx.block_id`); the Blockfrost adapter
 resolves `block_height` from the block store by hash (block numbers are not in
 the metadata SQL schema) and derives `block_time` from the slot.
 
@@ -10480,7 +10509,8 @@ the metadata SQL schema) and derives `block_time` from the slot.
 SELECT *
 FROM (
   SELECT sd.added_slot, tx.block_index, c.cert_index, tx.hash AS tx_hash, sd.pool_key_hash,
-         tx.slot AS tx_slot, tx.block_hash AS block_hash
+         tx.slot AS tx_slot,
+         (SELECT bi.hash FROM block_identity bi WHERE bi.id = tx.block_id) AS block_hash
   FROM stake_delegation sd
   JOIN certs c ON c.id = sd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
@@ -10501,8 +10531,9 @@ Unions the stake (de)registration certificate tables, tagging each row with an
 `action` (`registered` / `deregistered`). Each row additionally selects the
 deposit (`deposit_amount` for registrations, the refund `amount` for the legacy
 `deregistration` table, a literal `0` for a certificate type that carries no
-deposit column at all), `tx.slot` (`tx_slot`), and `tx.block_hash`
-(`block_hash`, resolved to `block_height` by the adapter as above).
+deposit column at all), `tx.slot` (`tx_slot`), and the block hash
+(`block_hash`, read through `block_identity` and resolved to `block_height` by
+the adapter as above).
 
 The deposit column is selected raw, without `COALESCE`, so a NULL survives to
 the caller as a nil `AccountRegistrationHistoryRow.Deposit` meaning the recorded

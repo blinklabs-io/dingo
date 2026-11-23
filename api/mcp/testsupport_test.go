@@ -67,8 +67,11 @@ func newFixtureDB(t *testing.T) *sql.DB {
 		);
 		CREATE UNIQUE INDEX idx_utxo_tx_id_output_idx ON utxo (tx_id, output_idx);
 		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, hash BLOB);
+		CREATE TABLE block_identity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL UNIQUE
+		);
 		CREATE TABLE applied_transaction (
-			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB,
+			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_id INTEGER,
 			fee TEXT, block_index INTEGER
 		);
 		CREATE TABLE account (

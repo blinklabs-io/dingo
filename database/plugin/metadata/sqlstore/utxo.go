@@ -2656,8 +2656,8 @@ func (s *Store) GetUtxosWithHistory(
 SELECT ` + utxoRowColumns + `,
        ` + createdSlotExpr + `,
        ` + createdBlockIndexExpr + `,
-       created_transaction.block_hash,
-       spent_transaction.block_hash
+       ` + appliedBlockHashSQL("created_transaction") + `,
+       ` + appliedBlockHashSQL("spent_transaction") + `
 FROM utxo
 LEFT JOIN applied_transaction AS created_transaction
     ON created_transaction.tx_id = utxo.tx_id

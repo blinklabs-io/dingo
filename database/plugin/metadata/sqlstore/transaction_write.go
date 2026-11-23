@@ -231,14 +231,14 @@ SELECT id FROM "transaction" WHERE hash = ?`
 // write paths can skip replay cleanup after an insert that created it.
 const appliedTransactionInsertSQL = `-- name: InsertAppliedTransaction :execresult
 INSERT INTO applied_transaction (
-    tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    tx_id, block_id, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (tx_id) DO NOTHING`
 
 const appliedTransactionUpdateSQL = `-- name: UpdateAppliedTransactionOnConflict :exec
 UPDATE applied_transaction
-SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
+SET block_id = ?, block_index = ?, slot = ?, collateral_fee = ?
 WHERE tx_id = ?`
 
 // consumeUtxoSQL is the PostgreSQL and MySQL spend of one input. SQLite
@@ -560,7 +560,7 @@ func insertIdentityRow(
 
 // insertTransactionRows resolves the identity row of args[0], inserting it
 // if absent, then writes the application row. args are the ten values of
-// applied_transaction in column order after the hash: hash, block_hash,
+// applied_transaction in column order after the hash: hash, block hash,
 // metadata, slot, type, fee, collateral_fee, ttl, block_index, valid. It
 // returns the identity row id and whether the application row was created;
 // on a replay the application row's position fields are updated.
@@ -579,7 +579,11 @@ func insertTransactionRows(
 	if err != nil {
 		return 0, false, err
 	}
-	applied := append([]any{id}, args[1:]...)
+	blockID, err := resolveBlockID(ops.queryRow, ops.exec, args[1])
+	if err != nil {
+		return 0, false, err
+	}
+	applied := append([]any{id, blockID}, args[2:]...)
 	result, err := ops.exec(appliedTransactionInsertSQL, applied...)
 	if err != nil {
 		return 0, false, fmt.Errorf("insert applied transaction: %w", err)
@@ -592,7 +596,7 @@ func insertTransactionRows(
 	if !created {
 		if _, err := ops.exec(
 			appliedTransactionUpdateSQL,
-			args[1], args[8], args[3], args[6], id,
+			blockID, args[8], args[3], args[6], id,
 		); err != nil {
 			return 0, false, fmt.Errorf("update applied transaction: %w", err)
 		}
