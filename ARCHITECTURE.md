@@ -23302,23 +23302,28 @@ state as the account and witness history. Startup adds this provenance to
 account encodings from before they carried it, from the SQL membership or from
 the exact pre-boundary journal view; it does not continue with an
 unavailable, inexact floor.
-Rolling back before epoch `A` clears expiration for the exact membership set,
-returns its credentials, deletes the membership rows, and unions those
-credentials with credentials witnessed after the rollback point. The ledger then
-reconstructs every affected expiration from surviving witness history before
-deleting the marker. This restores a pre-activation witness renewal that the
-uniform activation stamp overwrote, while an account with no surviving witness
-returns to expiration 0. The marker deletion allows activation to run again
-when the surviving chain next enters an enabled boundary.
+A truncate of a store whose accounts are still in SQL
+(`database.RecomputeAccountExpirationsAfterTruncate`, called by
+`database/lifecycle.Truncate`) does the same in SQL: truncating before epoch
+`A` clears expiration for the exact membership set, returns its credentials,
+deletes the membership rows, and unions those credentials with credentials
+witnessed after the target. It then reconstructs every affected expiration
+from surviving witness history before deleting the marker. This restores a
+pre-activation witness renewal that the uniform activation stamp overwrote,
+while an account with no surviving witness returns to expiration 0. The marker
+deletion allows activation to run again when the surviving chain next enters
+an enabled boundary.
 
 Every valid reward-withdrawal map entry is also persisted in the rollback-aware
 `account_withdrawal_witness` history, independently of balance deltas. This
 includes zero-amount withdrawals: they move no rewards but still prove account
-activity under CIP-0163. Rollback affected-set and last-witness queries include
-this history, and rollback removes its orphaned rows.
+activity under CIP-0163. The truncate's affected-set and last-witness queries
+include this history, and the truncate removes its orphaned rows; a ledger
+rollback restores the set's witness slots from its journal.
 
 The insert is elided when the gate is off. `account_withdrawal_witness` is
-read only by the rollback/renewal queries above, so on a gate-off node — the
+read only by the truncate's witness queries above and the SQL expiry
+reconstruction below, so on a gate-off node — the
 default for any node not running CIP-0163 — the row would never be read;
 writing it anyway is pure write amplification on a table that grows without
 bound and is never pruned. `LedgerDelta.apply` sets
@@ -23378,10 +23383,12 @@ ledger's ordinary delta apply, renewal hook included, and imports no snapshot.
 rows from live `account.expiration_epoch`, which may reflect a later renewal;
 the current-epoch N row is still captured.)
 
-Besides the Mithril gap above, expiry reconstruction (the stake-aggregation
-chokepoint's `historicalExpirationSQL` and the reward-crediting guard's
-`guardedExpiredRewardCredentials`) also requires two from-genesis nodes to
-retain the same witness history for the same slot -- the ten
+Besides the Mithril gap above, expiry reconstruction also requires two
+from-genesis nodes to retain the same witness history for the same slot. The
+reward-crediting guard (`guardedExpiredRewardCredentials`) reads the LedgerDB
+set's journaled witness slots. The SQL stake-aggregation chokepoint
+(`historicalExpirationSQL`), which a store whose accounts are still in SQL
+answers from, reads the ten
 stake-witnessing certificate tables (`accountWitnessTables`:
 `stake_registration`, `stake_registration_delegation`,
 `stake_vote_registration_delegation`, `vote_registration_delegation`,
@@ -23403,8 +23410,8 @@ Retention itself is never configurable or age-based for any of these tables
 `DeleteCertificatesAfterSlot` and the `account_reward_delta`/
 `account_withdrawal_witness` deletes in
 `database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
-slot` for a rollback or lifecycle-truncate target slot (the same primitive
-both share, see "CIP-0163 Bookkeeping in Lifecycle Truncate" below). That target slot is derived from consensus chain
+slot` for a lifecycle-truncate target slot (see "CIP-0163 Bookkeeping in
+Lifecycle Truncate" below). That target slot is derived from consensus chain
 state, not wall-clock time or per-node configuration, so it produces
 byte-identical retained history on every node that rolls back or truncates to
 the same point; a node that has not rolled back or lifecycle-truncated past a
