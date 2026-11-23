@@ -19389,7 +19389,7 @@ second sync:
     collateral return. Core storage mode is not sampled: it keeps no utxo
     rows and does not retain the collateral and reference associations. On an API node the consensus
     database is itself core mode, so the node builds the source with
-    `WithTransactionHistory` over the IndexerDB: the epoch's slot range still
+    `WithIndexerDB`: the epoch's slot range still
     comes from the consensus database, and the blocks' transactions from the
     IndexerDB. The IndexerDB trails the ledger, so both sample reads return
     `ErrTransactionHistoryPending` until its tip reaches the epoch's last
@@ -19409,7 +19409,10 @@ second sync:
     (`processEpoch`'s and `processAccountEpoch`'s success paths, and the
     `ERROR` path `reportError` and `reportFetchError` synthesize) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
-    `dingo_koiosparity_epoch_result_total` (by queue/status),
+    `dingo_koiosparity_epoch_result_total` (by queue/status, including
+    `not_checked`), `dingo_koiosparity_epoch_not_checked_total` (by
+    queue/reason; a `NOT_CHECKED` result leaves the last-checked gauges
+    alone),
     `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring
     `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
     `dingo_koiosparity_epoch_mismatch_count` (mirroring
@@ -19477,25 +19480,36 @@ second sync:
   permanent Dingo subsystem — SQLite (or whichever metadata backend the node
   itself runs) remains the only backend involved, since `DatabaseSource` reads
   the live node's own store rather than opening a second connection.
-  - **Reward-state retention.** `Run()` and
-    `reinitializeBackgroundManagers` both call
-    `n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
-    n.config.koiosParity.Enabled)` immediately after configuring the
-    snapshot manager's other options, before `CaptureGenesisSnapshot`/`Start`.
-    This is necessary because the observer only validates a closed epoch
-    after fetching and comparing against Koios over the network — work that
-    can fall arbitrarily far behind chain progression during a from-genesis
-    or catch-up sync — while `ledger/snapshot.cleanupOldSnapshots` otherwise
-    prunes `reward_account_output` to a fixed 4-epoch window on every epoch
-    transition (see DATABASE.md, Snapshot and Reward-State Retention).
-    Without this, an epoch's reward rows are routinely gone by the time the
-    observer's backlog reaches that epoch, and every koios-parity account
-    check for it fails permanently with a row that genuinely no longer
-    exists rather than one Koios and Dingo actually disagree on. The setter
-    mirrors API storage mode's pre-existing unbounded retention and
-    is not consensus-affecting (it only widens local historical retention),
-    so unlike `SetDelegatorInactivity` it carries no `configurationLocked`
-    gate.
+  - **Reward-state retention.** The observer changes no LedgerDB
+    retention: `ledger/snapshot.cleanupOldSnapshots` prunes
+    `reward_pool_output`, `reward_account_output`, `reward_stake_input` and
+    the precompute cursors below `snapshot.RewardStateRetainedFrom` the same
+    whether or not it runs. Reward history older than that window is API data
+    and lives in the IndexerDB. `koiosParitySource` builds the source with
+    `WithIndexerDB` when the node has one: the reward tables
+    (`epoch_summary`, `reward_ada_pots`, `reward_pool_input`,
+    `reward_pool_output`, `reward_account_output`, `reward_snapshot`,
+    `pool_stake_snapshot`) and the tip that decides `RewardsPending` are read
+    from the IndexerDB, so any closed epoch can be compared, including the
+    previous stake epoch the account-lifecycle diff reads. Tip and epoch
+    lookups for the boundary gate, protocol parameters, pool certificates,
+    governance refunds and the Mithril boundary stay on the ledger. The
+    IndexerDB trails the ledger, so `checkEpoch` first waits (the same 5 s
+    poll, up to 10 min) for its tip to reach the boundary that closes the
+    epoch, and otherwise returns `ErrRewardHistoryPending`, which
+    `deferForHistory` handles like `ErrTransactionHistoryPending`. Without an
+    IndexerDB the source reads the LedgerDB and reports the window through
+    `RewardStateRetainedFrom`, derived from the ledger tip's epoch and never
+    lowered by a rollback. A Koios epoch whose stake epoch lies below it is
+    `NOT_CHECKED` with reason `reward_state_pruned`: the observer reports it
+    before any Koios request, and `checkEpoch` checks again after its reads,
+    since a floor that only rises and is still at or below the stake epoch
+    after them was there for every read. A `NOT_CHECKED` result is neither a
+    pass nor a mismatch: nothing is committed to the cache, the stored
+    verdict stays as it was, no retry is scheduled, `FatalFunc` is not
+    called, the observer logs `epoch not checked` with the reason, and
+    `dingo_koiosparity_epoch_not_checked_total` counts it by queue and
+    reason.
   - **Live database Restore/Truncate.** `node_lifecycle.go`'s
     `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
     background goroutine has exited, same as `shutdown()`) and unsubscribes
@@ -22674,10 +22688,12 @@ for historical rotation metadata, and `"actv"` for Mithril-imported active
 The Cleanup step of each epoch transition (`cleanupOldSnapshots`) prunes only
 what scales with delegator count — `RewardStakeInput` and (in `core` storage
 mode) `RewardAccountOutput`, plus `PoolStakeSnapshot` — to the four epochs the
-rotation and delayed reward model need (current through current-3).
-`EpochSummary`, `RewardAdaPots`, `RewardSnapshot`, `RewardPoolInput`, and
-`RewardPoolOutput` are exempt and retained for the life of the database, so
-full per-epoch and per-pool reward history stays queryable and a missing
+rotation and delayed reward model need (current through current-3). The
+LedgerDB prunes `RewardPoolOutput` and the precompute cursors with
+`RewardAccountOutput`; the IndexerDB keeps every epoch's.
+`EpochSummary`, `RewardAdaPots`, `RewardSnapshot` and `RewardPoolInput` are
+exempt and retained for the life of the database, so full per-epoch and
+per-pool reward history stays queryable and a missing
 summary row keeps its diagnostic meaning of a boundary that was never
 captured. Because a retained snapshot can outlive its per-credential rows,
 `applyStakeRewards` skips an epoch whose snapshot claims delegators over an
@@ -22952,8 +22968,8 @@ Blockfrost account reward-history endpoint (`NodeAdapter.AccountRewardHistory`,
 `GET /accounts/{stake_address}/rewards`) can answer for any epoch rather than
 only the trailing four; `core` mode is unchanged. `RewardStakeInput` is likewise
 retained without bound in `api` mode, for the Blockfrost epoch stake and account
-stake-history endpoints, and pruned to the four-epoch window in `core` mode (and
-by the Koios parity observer, which needs only `RewardAccountOutput`). Rollback
+stake-history endpoints, and pruned to the four-epoch window in `core` mode.
+The Koios parity observer does not change either. Rollback
 does not consult storage mode: the set rolls its reward rows back through its
 journal, the IndexerDB removes the reward fact rows dated after the rollback
 point (`RollbackFacts`), and the v0.94.2 revert

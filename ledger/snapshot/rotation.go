@@ -1155,6 +1155,17 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 // default currentEpoch-3 window regardless.
 const poolSnapshotRetentionMaxDepth uint64 = 24
 
+// RewardStateRetainedFrom returns the first epoch whose pool stake snapshots
+// and reward state cleanupOldSnapshots keeps once the boundary into
+// currentEpoch is processed. Rows of every epoch at or above it are still
+// held; rows below it may be gone.
+func RewardStateRetainedFrom(currentEpoch uint64) uint64 {
+	if currentEpoch < 3 {
+		return 0
+	}
+	return currentEpoch - 3
+}
+
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
 // delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
 // current, current-1, current-2 for Go, and current-3 so reward calculation can
@@ -1163,25 +1174,11 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 //
 // reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
 // and is not needed once the epoch it snapshots has finished replaying, so
-// outside API storage mode it is pruned to that 4-epoch window. In API storage
-// mode (types.StorageModeAPI) it is retained WITHOUT BOUND so the Blockfrost
-// epoch stake and account stake-history endpoints can answer for any epoch the
-// node has run in that mode. reward_account_output is pruned to the same
-// window in CORE storage mode (types.StorageModeCore), matching dingo's original pruning behavior exactly, but likewise retained
-// WITHOUT BOUND in API storage mode so the Blockfrost account
-// reward-history endpoint (GET /accounts/{stake_address}/rewards)
-// can serve an account's full reward history instead of only the trailing few
-// epochs — the same "silently look empty past the window" failure mode that
-// epoch_summary rows once showed. reward_account_output is likewise
-// retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
-// has been called (node.go wires this from the koios-parity observer's Enabled
-// config): that observer only validates a closed epoch after fetching and
-// comparing over the network, which can fall arbitrarily far behind chain
-// progression during a from-genesis or catch-up sync, so the fixed 4-epoch
-// window otherwise prunes an epoch's rows before the observer ever reads them.
-// See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (koios-parity, prunes only
-// reward_stake_input) for the implementation and full rationale.
+// outside API storage mode it is pruned to that 4-epoch window, together with
+// the pool and account reward outputs and the precompute cursors. In API
+// storage mode (types.StorageModeAPI) both reward tables are retained without
+// bound. The window is the same whatever reads the rows outside it: reward
+// history older than the window is API data, which the IndexerDB holds.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1200,7 +1197,7 @@ func (m *Manager) cleanupOldSnapshots(
 		return nil // Not enough history to clean
 	}
 
-	deleteBeforeEpoch := currentEpoch - 3
+	deleteBeforeEpoch := RewardStateRetainedFrom(currentEpoch)
 
 	// Pool-stake snapshots are retained without bound in API storage mode,
 	// the same way reward_account_output already is (types.StorageModeAPI,
@@ -1298,16 +1295,6 @@ func (m *Manager) cleanupOldSnapshots(
 		// Blockfrost epoch stake and account history endpoints read
 		// reward_stake_input for epochs far behind the tip. This costs about
 		// 1.3M rows per epoch on mainnet.
-	case m.RewardAccountOutputRetentionUnbounded():
-		// The in-process Koios parity observer needs reward_account_output
-		// only (see doc comment above).
-		if err := ldb.DeleteRewardStakeInputBeforeEpoch(
-			ctx,
-			deleteBeforeEpoch,
-			nil,
-		); err != nil {
-			return fmt.Errorf("cleanup reward state: %w", err)
-		}
 	default:
 		if err := ldb.DeleteRewardStateBeforeEpoch(
 			ctx,

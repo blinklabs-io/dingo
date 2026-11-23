@@ -182,7 +182,17 @@ const (
 	StatusPass  = "PASS"
 	StatusFail  = "FAIL"
 	StatusError = "ERROR"
+	// StatusNotChecked is a result that is neither a pass nor a mismatch:
+	// Dingo no longer holds the state the comparison reads. NotCheckedReason
+	// says why. It is reported through metrics and logs only and never
+	// replaces the epoch's stored verdict.
+	StatusNotChecked = "NOT_CHECKED"
 )
+
+// NotCheckedRewardStatePruned is the NotCheckedReason of an epoch whose stake
+// epoch's reward outputs the LedgerDB has pruned, on a node with no IndexerDB
+// to read them from.
+const NotCheckedRewardStatePruned = "reward_state_pruned"
 
 // EpochCompareResult holds the comparison outcome for one epoch.
 //
@@ -203,6 +213,9 @@ type EpochCompareResult struct {
 	// CheckedScopes names the check phases this result's Status is a verdict
 	// on, drawn from ScopeAggregate/ScopeAccount.
 	CheckedScopes []string
+	// NotCheckedReason says why Status is StatusNotChecked, and is empty
+	// otherwise.
+	NotCheckedReason string
 }
 
 // CoversScope reports whether Status is a verdict on the named check phase.
