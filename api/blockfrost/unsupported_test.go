@@ -30,12 +30,6 @@ func TestRouterUnsupportedOperationsReturnExplicitError(t *testing.T) {
 	// Requests enumerate the unimplemented operations from the pinned upstream
 	// specification independently of the production route table.
 	requests := []struct{ method, path string }{
-		{"GET", "/api/v0/"},
-		{"GET", "/api/v0/health"},
-		{"GET", "/api/v0/health/clock"},
-		{"GET", "/health/clock"},
-		{"GET", "/api/v0/metadata/txs/labels"},
-		{"GET", "/api/v0/utils/addresses/xpub/testvalue/testvalue/testvalue"},
 		{"POST", "/api/v0/ipfs/add"},
 		{"GET", "/api/v0/ipfs/gateway/testvalue"},
 		{"POST", "/api/v0/ipfs/pin/add/testvalue"},
@@ -71,7 +65,6 @@ func TestRouterUnsupportedMethodAndUnknownPath(t *testing.T) {
 		{http.MethodPost, "/api/v0/nutlink/hash/tickers", "GET, HEAD", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v0/ipfs/pin/add/hash", "POST", http.StatusMethodNotAllowed},
 		{http.MethodHead, "/api/v0/nutlink/hash", "", http.StatusNotImplemented},
-		{http.MethodGet, "/api/v0", "", http.StatusNotFound},
 		{http.MethodGet, "/api/v0/nutlink/hash/unknown", "", http.StatusNotFound},
 		{http.MethodPost, "/api/v0/ipfs/pin/add/hash/extra", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0/ipfs/gateway/hash/dir/file.png", "", http.StatusNotImplemented},
@@ -105,6 +98,8 @@ func TestRouterImplementedOperationsKeepPrecedence(t *testing.T) {
 		"/api/v0/epochs/latest", "/api/v0/epochs/latest/parameters",
 		"/api/v0/pools/extended", "/api/v0/pools/retiring",
 		"/api/v0/metadata/txs/labels/721", "/api/v0/governance/dreps",
+		"/api/v0/", "/api/v0/health", "/health/clock", "/api/v0/health/clock",
+		"/api/v0/metadata/txs/labels",
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()

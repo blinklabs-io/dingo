@@ -67,20 +67,12 @@ func TestValidateTxConwayPoolRetirementEpochBound(t *testing.T) {
 	pool := bytes.Repeat([]byte{0x3c}, lcommon.Blake2b224Size)
 	vrfKeyHash := bytes.Repeat([]byte{0x3d}, lcommon.Blake2b256Size)
 	rewardAccount := bytes.Repeat([]byte{0x3e}, lcommon.Blake2b224Size)
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrfKeyHash,
-			RewardAccount: rewardAccount,
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrfKeyHash,
-			RewardAccount: rewardAccount,
-			AddedSlot:     10,
-		},
-		nil,
-	))
+	poolSeedRegistered(t, db, pool, &models.PoolRegistration{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    vrfKeyHash,
+		RewardAccount: rewardAccount,
+		AddedSlot:     10,
+	})
 	pp := stakeRefundTestPparams()
 	pp.MaxEpoch = retirementTestMaxEpoch
 
@@ -256,7 +248,7 @@ func TestBlockValueConservationRefundsCurrentDepositAfterSameTxReregistration(
 			cred := stakeRefundTestCredential(0xd1)
 			cred.CredType = credType
 			deposit := recordedDeposit
-			seedStakeRegistration(t, db, cred, &deposit, 100, 0xd1)
+			stakeSeedRegistration(t, db, cred, &deposit, 100, 0xd1)
 			sequence := func(fee uint64) *conway.ConwayTransaction {
 				return conwayCertTx(
 					fee,
@@ -338,8 +330,8 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 	// parallel subtests must not rewrite one another's.
 	newSeededLedger := func(t *testing.T) *LedgerState {
 		ls, db := newBlockValidationLedger(t)
-		seedStakeRegistration(t, db, registered, &zero, 100, 0xe1)
-		seedImportedDrep(t, db, drep, 0, 100, true)
+		stakeSeedRegistration(t, db, registered, &zero, 100, 0xe1)
+		drepSeedRegistered(t, db, drep, new(uint64(0)), 100, true)
 		return ls
 	}
 	pool := lcommon.PoolKeyHash(
@@ -553,7 +545,7 @@ func TestBlockLegacyDeregistrationRefundsRecordedDeposit(t *testing.T) {
 					seed := byte(0x10*(i+1)) + byte(credType)
 					cred := stakeRefundTestCredential(seed)
 					cred.CredType = credType
-					seedStakeRegistration(t, db, cred, sc.refund, 100, seed)
+					stakeSeedRegistration(t, db, cred, sc.refund, 100, seed)
 					want := keyDeposit
 					if sc.refund != nil {
 						want = *sc.refund

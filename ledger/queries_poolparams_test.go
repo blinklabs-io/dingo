@@ -90,32 +90,28 @@ func seedStakePoolParamsRegistration(
 	vrf := repeatedBytes(32, 0xAA)
 	reward := repeatedBytes(28, 0x22)
 	margin := &dbtypes.Rat{Rat: big.NewRat(3, 10)}
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:                poolKeyHash,
-			VrfKeyHash:                 vrf,
-			RewardAccount:              reward,
-			RewardAccountCredentialTag: rewardTag,
-			Margin:                     margin,
-			Pledge:                     dbtypes.Uint64(pledge),
-			Cost:                       dbtypes.Uint64(340_000_000),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:                poolKeyHash,
-			VrfKeyHash:                 vrf,
-			RewardAccount:              reward,
-			RewardAccountCredentialTag: rewardTag,
-			Margin:                     margin,
-			Pledge:                     dbtypes.Uint64(pledge),
-			Cost:                       dbtypes.Uint64(340_000_000),
-			MetadataUrl:                "https://a.io/p",
-			MetadataHash:               repeatedBytes(32, 0x55),
-			Owners:                     owners,
-			Relays:                     relays,
-			AddedSlot:                  addedSlot,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:                poolKeyHash,
+		VrfKeyHash:                 vrf,
+		RewardAccount:              reward,
+		RewardAccountCredentialTag: rewardTag,
+		Margin:                     margin,
+		Pledge:                     dbtypes.Uint64(pledge),
+		Cost:                       dbtypes.Uint64(340_000_000),
+	}, &models.PoolRegistration{
+		PoolKeyHash:                poolKeyHash,
+		VrfKeyHash:                 vrf,
+		RewardAccount:              reward,
+		RewardAccountCredentialTag: rewardTag,
+		Margin:                     margin,
+		Pledge:                     dbtypes.Uint64(pledge),
+		Cost:                       dbtypes.Uint64(340_000_000),
+		MetadataUrl:                "https://a.io/p",
+		MetadataHash:               repeatedBytes(32, 0x55),
+		Owners:                     owners,
+		Relays:                     relays,
+		AddedSlot:                  addedSlot,
+	}))
 }
 
 // setStakePoolParamsLiveState places the live tip at tipSlot inside an epoch
@@ -265,23 +261,19 @@ func TestQueryStakePoolParams_PortlessHostnameIsMultiHost(t *testing.T) {
 	pool := repeatedBytes(28, 0x11)
 	vrf := repeatedBytes(32, 0xAA)
 	reward := repeatedBytes(28, 0x22)
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrf,
-			RewardAccount: reward,
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    vrf,
+		RewardAccount: reward,
+	}, &models.PoolRegistration{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    vrf,
+		RewardAccount: reward,
+		Relays: []models.PoolRegistrationRelay{
+			{Hostname: "relay.example"},
 		},
-		&models.PoolRegistration{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrf,
-			RewardAccount: reward,
-			Relays: []models.PoolRegistrationRelay{
-				{Hostname: "relay.example"},
-			},
-			AddedSlot: 1,
-		},
-		nil,
-	))
+		AddedSlot: 1,
+	}))
 
 	got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 	require.NoError(t, err)
@@ -305,19 +297,15 @@ func TestQueryStakePoolParams_PreservesPortlessSingleHostName(t *testing.T) {
 	vrf := repeatedBytes(32, 0xAA)
 	reward := repeatedBytes(28, 0x22)
 	relayType := lcommon.PoolRelayTypeSingleHostName
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
-			Relays: []models.PoolRegistrationRelay{{
-				Type: &relayType, Hostname: "relay.example",
-			}},
-			AddedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
+	}, &models.PoolRegistration{
+		PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
+		Relays: []models.PoolRegistrationRelay{{
+			Type: &relayType, Hostname: "relay.example",
+		}},
+		AddedSlot: 1,
+	}))
 
 	got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 	require.NoError(t, err)
@@ -517,10 +505,10 @@ func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -593,24 +581,20 @@ func TestQueryStakePoolParams_BlsKeyFromProtocolVersion12(t *testing.T) {
 		pp.ProtocolVersion.Major = tc.major
 		ls.currentPParams = pp
 		ls.publishSnapshotsLocked()
-		require.NoError(t, ls.db.Metadata().ImportPool(
-			&models.Pool{
-				PoolKeyHash:             pool,
-				VrfKeyHash:              repeatedBytes(32, 0xAA),
-				RewardAccount:           repeatedBytes(28, 0x22),
-				LeiosKeyPublic:          repeatedBytes(96, 0x66),
-				LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
-			},
-			&models.PoolRegistration{
-				PoolKeyHash:             pool,
-				VrfKeyHash:              repeatedBytes(32, 0xAA),
-				RewardAccount:           repeatedBytes(28, 0x22),
-				LeiosKeyPublic:          repeatedBytes(96, 0x66),
-				LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
-				AddedSlot:               1,
-			},
-			nil,
-		))
+		require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+			PoolKeyHash:             pool,
+			VrfKeyHash:              repeatedBytes(32, 0xAA),
+			RewardAccount:           repeatedBytes(28, 0x22),
+			LeiosKeyPublic:          repeatedBytes(96, 0x66),
+			LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
+		}, &models.PoolRegistration{
+			PoolKeyHash:             pool,
+			VrfKeyHash:              repeatedBytes(32, 0xAA),
+			RewardAccount:           repeatedBytes(28, 0x22),
+			LeiosKeyPublic:          repeatedBytes(96, 0x66),
+			LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
+			AddedSlot:               1,
+		}))
 
 		got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 		require.NoError(t, err)
@@ -631,7 +615,7 @@ func TestQueryStakePoolParams_BlsKeyFromProtocolVersion12(t *testing.T) {
 func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
 	setStakePoolParamsLiveState(ls, 0, 0, 10)
@@ -682,9 +666,10 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 		Ipv6: &ipv6,
 	}}
 	pools[poolID] = cert
-	require.NoError(t, ls.db.SetGenesisStaking(
+	require.NoError(t, seedDB(t, ls.db).SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
+		0,
 		0,
 		nil,
 		nil,
@@ -720,19 +705,15 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 	// encoding, IPv4 as is and IPv6 as little-endian 32-bit words.
 	ipv4 := net.IP{192, 168, 1, 1}
 	ipv6 := net.ParseIP("2001:db8::1")
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
+	}, &models.PoolRegistration{
+		PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
+		AddedSlot: 5,
+		Relays: []models.PoolRegistrationRelay{
+			{Ipv4: &ipv4, Ipv6: &ipv6, Port: 3001},
 		},
-		&models.PoolRegistration{
-			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
-			AddedSlot: 5,
-			Relays: []models.PoolRegistrationRelay{
-				{Ipv4: &ipv4, Ipv6: &ipv6, Port: 3001},
-			},
-		},
-		nil,
-	))
+	}))
 
 	got, err := ls.Query(t.Context(), stakePoolParamsQuery(poolID), QueryPoint{})
 	require.NoError(t, err)

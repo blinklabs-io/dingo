@@ -38,7 +38,7 @@ func TestPoolStakeDistribution_ReportsElectingVrfAfterMidEpochRotation(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	oldVrf := repeatedBytes(32, 0xAA)
 	newVrf := repeatedBytes(32, 0xBB)
@@ -46,40 +46,29 @@ func TestPoolStakeDistribution_ReportsElectingVrfAfterMidEpochRotation(
 	pkh := lcommon.PoolKeyHash(
 		lcommon.NewBlake2b224(repeatedBytes(28, 0x11)),
 	)
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: oldVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  oldVrf,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			VrfKeyHash:   oldVrf,
-			TotalStake:   dbtypes.Uint64(1_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: oldVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  oldVrf,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        snapshotEpoch,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		VrfKeyHash:   oldVrf,
+		TotalStake:   dbtypes.Uint64(1_000_000),
+		CapturedSlot: 1,
+	}))
 	// The re-registration lands after the capture.
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  newVrf,
-			AddedSlot:   5,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  newVrf,
+		AddedSlot:   5,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 	ls := newPoolDistr2Ledger(t, db)
 
 	electing, ok, err := ls.electingVrfKeyHashFromSnapshotWithContext(
@@ -108,7 +97,7 @@ func TestPoolStakeDistribution_SnapshotRowWithoutVrfFallsBackPerPool(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	oldVrf := repeatedBytes(32, 0xAA)
 	newVrf := repeatedBytes(32, 0xBB)
@@ -116,39 +105,28 @@ func TestPoolStakeDistribution_SnapshotRowWithoutVrfFallsBackPerPool(
 	pkh := lcommon.PoolKeyHash(
 		lcommon.NewBlake2b224(repeatedBytes(28, 0x11)),
 	)
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: oldVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  oldVrf,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(1_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: oldVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  oldVrf,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        snapshotEpoch,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(1_000_000),
+		CapturedSlot: 1,
+	}))
 	// The re-registration lands after the capture.
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  newVrf,
-			AddedSlot:   5,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  newVrf,
+		AddedSlot:   5,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 	ls := newPoolDistr2Ledger(t, db)
 
 	dist, err := ls.PoolStakeDistribution(t.Context(), nil, QueryPoint{}, nil)
@@ -165,35 +143,28 @@ func TestQueryShelleyStakeDistribution_ReportsElectingVrfAfterMidEpochRotation(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	oldVrf := repeatedBytes(32, 0xAA)
 	newVrf := repeatedBytes(32, 0xBB)
 	pkh := seedLiveStakeFixture(
 		t, db, repeatedBytes(28, 0x11), oldVrf, 1_000_000, 1,
 	)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        0,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			VrfKeyHash:   oldVrf,
-			TotalStake:   dbtypes.Uint64(1_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  newVrf,
-			AddedSlot:   5,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		VrfKeyHash:   oldVrf,
+		TotalStake:   dbtypes.Uint64(1_000_000),
+		CapturedSlot: 1,
+	}))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  newVrf,
+		AddedSlot:   5,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
@@ -206,7 +177,7 @@ func TestQueryShelleyStakeDistribution_ReportsElectingVrfAfterMidEpochRotation(
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 1, nil))
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
 	seedEpochs(t, ls, map[uint64]uint64{0: 0})

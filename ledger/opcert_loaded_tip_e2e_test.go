@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -33,8 +33,8 @@ type opCertObservation struct {
 	sequence, slot uint64
 }
 
-// opCertNode is a ledger over a live UTxO set whose op-cert rows are drained
-// from the metadata store, so the set is the only copy of the counters.
+// opCertNode is a ledger over a live UTxO set, the only copy of the op-cert
+// counters.
 type opCertNode struct {
 	scenario  ledger.BoundaryEpochStateScenario
 	loadedTip uint64
@@ -49,16 +49,6 @@ func (n opCertNode) observe(t *testing.T, o opCertObservation) {
 	))
 	require.NoError(t, txn.Commit())
 	txn.Release()
-}
-
-func (n opCertNode) drain(t *testing.T) {
-	t.Helper()
-	require.NoError(t, n.scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyOpCerts,
-	))
-	n.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyOpCerts),
-	)
 }
 
 // reads returns every op-cert read and counter verdict the node gives for
@@ -117,7 +107,6 @@ func TestOpCertReadsOfASetLoadedAtATipMatchASyncedSet(t *testing.T) {
 
 	synced := opCertNode{}
 	synced.scenario, _, _ = setModeScenario(t)
-	synced.drain(t)
 	for _, o := range []opCertObservation{
 		{rotated, 3, tip - 300},
 		{steady, 7, tip - 200},
@@ -127,23 +116,28 @@ func TestOpCertReadsOfASetLoadedAtATipMatchASyncedSet(t *testing.T) {
 		synced.observe(t, o)
 	}
 
-	// The loaded node's metadata store holds the tip's counter map the way
-	// a snapshot import writes it: every counter stamped at the tip.
+	// The loaded node opens over the tip's counter map the way a snapshot
+	// import writes it: every counter stamped at the tip.
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	loaded := opCertNode{
-		scenario:  ledger.NewBoundaryEpochStateScenarioForTest(t, set),
+		scenario: ledger.NewSeededBoundaryEpochStateScenarioForTest(
+			t, set, nil, func(db *database.Database) {
+				for _, o := range []opCertObservation{
+					{rotated, 4, tip}, {steady, 7, tip},
+				} {
+					require.NoError(
+						t,
+						dbadapter.New(db).UpdatePoolOpCertSequence(
+							t.Context(), o.pool, o.sequence, o.slot, nil,
+						),
+					)
+				}
+			},
+		),
 		loadedTip: tip,
 	}
-	store := dbadapter.New(loaded.scenario.DB)
-	for _, o := range []opCertObservation{{rotated, 4, tip}, {steady, 7, tip}} {
-		require.NoError(t, store.UpdatePoolOpCertSequence(
-			t.Context(), o.pool, o.sequence, o.slot, nil,
-		))
-	}
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	loaded.drain(t)
 
 	require.Equal(
 		t, synced.reads(t, pools, tip), loaded.reads(t, pools, tip),

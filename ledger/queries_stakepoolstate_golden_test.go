@@ -290,6 +290,7 @@ func seedGoldenStakePoolState(
 			// After the pending registration, which would cancel it.
 			seedStakePoolRetirement(t, ls, pool, *entry.Retiring, 155)
 		}
+		fxPoolDeposit(t, ls.db, pool, 156, entry.Deposit)
 		if entry.Delegators != nil {
 			for _, credential := range entry.Delegators.Items() {
 				seedActiveDelegator(
@@ -310,18 +311,14 @@ func importGoldenRegistration(
 	reg *models.PoolRegistration,
 ) {
 	t.Helper()
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   reg.PoolKeyHash,
-			VrfKeyHash:    reg.VrfKeyHash,
-			RewardAccount: reg.RewardAccount,
-			Margin:        reg.Margin,
-			Pledge:        reg.Pledge,
-			Cost:          reg.Cost,
-		},
-		reg,
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   reg.PoolKeyHash,
+		VrfKeyHash:    reg.VrfKeyHash,
+		RewardAccount: reg.RewardAccount,
+		Margin:        reg.Margin,
+		Pledge:        reg.Pledge,
+		Cost:          reg.Cost,
+	}, reg))
 }
 
 // TestQueryStakePoolState_MatchesLedgerGolden compares dingo's reply to the

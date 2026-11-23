@@ -30,8 +30,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/rewardlikelihood"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -442,6 +442,10 @@ type ImportConfig struct {
 	// when Reconcile is set. It is populated by the import phases and consumed
 	// by reconcileStaleLedgerState. Not caller-settable.
 	reconcileKeys *reconcileKeys
+	// afterPhase, when non-nil, is called after each import phase with its
+	// name; an error it returns stops the import there, as a crash would.
+	// Tests use it to stop between phases.
+	afterPhase func(phase string) error
 	// rewardCreditFoldBatchSize overrides how many covered reward credits one
 	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
 	rewardCreditFoldBatchSize int
@@ -449,29 +453,105 @@ type ImportConfig struct {
 	// receives the snapshot's UTxO set: the import marks the database
 	// (database.UtxoSetOnlySyncKey), writes no utxo rows or output CBOR to
 	// the metadata and blob stores, and reads UTxO stake from the set. A
-	// Reconcile import needs a set that is also a FamilyLoader.
+	// Reconcile import keeps the set's older ledger-state families when the
+	// set is also a CatchUpLoader.
 	UtxoSet UtxoSetLoader
+	// LedgerDB is the LedgerDB the import writes the snapshot's ledger state
+	// through, over UtxoSet. It is required.
+	LedgerDB ImportLedgerDB
+}
+
+// ImportLedgerDB is the LedgerDB an import writes a snapshot through: the
+// ledger's own reads and writes, plus the rows only a snapshot carries, which
+// no certificate wrote.
+type ImportLedgerDB interface {
+	ledgerdb.LedgerDB
+	ledgerdb.RewardLikelihoodStore
+	// ImportAccount writes an account as the snapshot holds it, with the
+	// baseline its later history is measured from.
+	ImportAccount(account *models.Account, txn ledgerdb.Txn) error
+	// ImportPool writes a pool's registration as the snapshot holds it.
+	// future marks a re-registration that takes effect at the next epoch
+	// boundary; it is written after the parameters in force.
+	ImportPool(
+		registration *models.PoolRegistration,
+		future bool,
+		txn ledgerdb.Txn,
+	) error
+	// RetirePools schedules pools to retire at epoch, as of slot.
+	RetirePools(pools [][]byte, epoch, slot uint64, txn ledgerdb.Txn) error
+	// ImportDrep writes a DRep as the snapshot holds it, with its deposit
+	// and the accounts that delegate to it.
+	ImportDrep(drep *models.Drep, deposit uint64, txn ledgerdb.Txn) error
+	// SetImportedDormantDRepEpochs sets the count of consecutive dormant
+	// epochs, as of slot.
+	SetImportedDormantDRepEpochs(epochs, slot uint64, txn ledgerdb.Txn) error
+	// ReplaceImportedBlockCounts replaces an epoch's per-pool block counts
+	// with the snapshot's, keyed by pool key hash, and records their total.
+	// The total is written for an epoch no pool minted in too: it tells a
+	// certified zero-block epoch from one the snapshot said nothing about.
+	ReplaceImportedBlockCounts(
+		epoch uint64,
+		pools map[string]uint64,
+		total, capturedSlot uint64,
+		txn ledgerdb.Txn,
+	) error
+	// DeleteNetworkDonationsForEpoch removes the donations recorded for
+	// epoch, which the snapshot's total for that epoch replaces.
+	DeleteNetworkDonationsForEpoch(epoch uint64, txn ledgerdb.Txn) error
+	// DeactivateAccounts marks accounts inactive as of slot, with no
+	// delegation.
+	DeactivateAccounts(
+		refs []models.StakeCredentialRef,
+		slot uint64,
+		txn ledgerdb.Txn,
+	) error
+	// ImportCertificates applies the certificates of tx, which the snapshot
+	// implies rather than a block carries, as of point.
+	ImportCertificates(
+		tx lcommon.Transaction,
+		point ocommon.Point,
+		txn ledgerdb.Txn,
+	) error
+	// ImportRewardBlocks writes the block counts and fees of the newest
+	// epochs as reward calculation reads them, the snapshot's counts standing
+	// in for the blocks at or below anchorSlot, its tip.
+	ImportRewardBlocks(ctx context.Context, anchorSlot uint64) error
+	// Err returns the first write the LedgerDB set refused after its
+	// transaction committed, or nil.
+	Err() error
+	// DeactivateDreps marks DReps inactive as of slot.
+	DeactivateDreps(
+		refs []models.StakeCredentialRef,
+		slot uint64,
+		txn ledgerdb.Txn,
+	) error
 }
 
 // UtxoSetLoader is a live UTxO set an import loads, which serves the metadata
 // store's UTxO reads during the import.
 type UtxoSetLoader interface {
 	types.LiveUtxoSource
-	// LoadUtxoSet replaces the set with the outputs feed puts, as of point.
+	// LoadUtxoSet starts an import of the ledger state at point: it marks
+	// the set as holding a partial import and replaces its outputs with the
+	// ones feed puts. A set a stopped import of the same point left with its
+	// outputs complete keeps them, and feed is not called.
 	LoadUtxoSet(
 		point ocommon.Point,
 		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
 	) error
+	// FinishImport removes the mark LoadUtxoSet left, once the import has
+	// written the whole ledger state.
+	FinishImport() error
 }
 
 // CatchUpLoader is a live UTxO set that keeps the ledger-state families it
-// holds when a catch-up replaces its outputs, so a catch-up into a set that is
-// the only copy of the ledger state keeps the history older than the snapshot,
-// as a catch-up into SQL rows does.
+// holds when a catch-up replaces its outputs, so a catch-up keeps the history
+// older than the snapshot.
 type CatchUpLoader interface {
 	UtxoSetLoader
-	// LoadUtxoSetCatchUp replaces the outputs with the ones feed puts, as of
-	// point, keeping the families.
+	// LoadUtxoSetCatchUp starts a catch-up import as LoadUtxoSet does,
+	// keeping the families.
 	LoadUtxoSetCatchUp(
 		point ocommon.Point,
 		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
@@ -606,10 +686,14 @@ func validateImportEraHistory(cfg ImportConfig) error {
 	return nil
 }
 
-// ImportLedgerState orchestrates the full import of parsed ledger
-// state data into Dingo's metadata store. If ImportKey is set,
-// completed phases are checkpointed so a failed import can resume
-// from the last successful phase.
+// ImportLedgerState writes the parsed ledger state into the LedgerDB set
+// through cfg.LedgerDB.
+//
+// The set is marked as holding a partial import from the moment the import
+// first changes it until the last write, so a node never opens a set an
+// import stopped part way through. Running the same import again resumes it:
+// a set whose outputs are complete for the snapshot keeps them, and every
+// other family is written again from the start.
 func ImportLedgerState(
 	ctx context.Context,
 	cfg ImportConfig,
@@ -620,40 +704,17 @@ func ImportLedgerState(
 	if cfg.Database == nil {
 		return errors.New("database is nil")
 	}
-	drainedImport, finishDrained, err := beginDrainedImport(ctx, cfg)
-	if err != nil {
+	if cfg.State == nil {
+		return errors.New("ledger state is nil")
+	}
+	if err := requireWholeLedgerState(cfg.State); err != nil {
 		return err
-	}
-	if !drainedImport {
-		if err := cfg.Database.RefuseLedgerStateRewrite(ctx); err != nil {
-			return err
-		}
-	}
-	importDone := false
-	if finishDrained {
-		defer func() {
-			if !importDone {
-				cfg.Database.EndDrainedImport(ctx)
-			}
-		}()
 	}
 	if cfg.UtxoSet == nil {
 		return errors.New("ledger-state import requires the LedgerDB UTxO set")
 	}
-	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	// A set that also holds the ledger-state families takes the catch-up: it
-	// replaces the whole set with the snapshot's outputs.
-	_, familyLoader := cfg.UtxoSet.(FamilyLoader)
-	if cfg.Reconcile && !familyLoader {
-		return errors.New(
-			"a catch-up import into a live-UTxO-set-only database is not supported",
-		)
-	}
-	if cfg.State == nil {
-		return errors.New("ledger state is nil")
+	if cfg.LedgerDB == nil {
+		return errors.New("ledger-state import requires the LedgerDB")
 	}
 	if cfg.State.Tip == nil {
 		return errors.New("snapshot tip is nil")
@@ -662,32 +723,18 @@ func ImportLedgerState(
 		return fmt.Errorf("validating imported era history: %w", err)
 	}
 	slot := cfg.State.Tip.Slot
-	if drainedImport {
-		if reset, err := cfg.Database.PinDrainedImportPoint(
-			ctx, ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
-		); err != nil {
-			return err
-		} else if reset {
-			cfg.Logger.Warn(
-				"a pending import of another snapshot left rows in the drained families; emptied them before importing",
-				"component", "ledgerstate", "slot", slot,
+	if cfg.Reconcile {
+		if _, ok := cfg.UtxoSet.(CatchUpLoader); !ok {
+			return errors.New(
+				"a catch-up import needs a LedgerDB set that keeps its families",
 			)
 		}
-	}
-	if cfg.Reconcile {
 		if err := validateReconcileImportConfig(cfg); err != nil {
 			return err
 		}
 		// Accumulate the snapshot's live keys as the import phases run, so the
 		// post-import reconcile can mark every absent live row inactive.
 		cfg.reconcileKeys = newReconcileKeys()
-		if drainedImport {
-			mask, _, err := cfg.Database.DrainedImportPending(ctx)
-			if err != nil {
-				return err
-			}
-			cfg.reconcileKeys.drained = mask
-		}
 	}
 
 	progress := func(p ImportProgress) {
@@ -696,31 +743,6 @@ func ImportLedgerState(
 		}
 	}
 
-	// Check for existing checkpoint to enable resume. Reconcile (catch-up)
-	// always runs the full import pass so the snapshot key set it collects is
-	// complete, so checkpoint resume is bypassed in that mode.
-	completedPhase := ""
-	if cfg.ImportKey != "" && !cfg.Reconcile {
-		cp, err := cfg.Database.Metadata().GetImportCheckpoint(
-			cfg.ImportKey, nil,
-		)
-		if err != nil {
-			cfg.Logger.Warn(
-				"failed to read import checkpoint, "+
-					"starting from scratch",
-				"component", "ledgerstate",
-				"error", err,
-			)
-		} else if cp != nil {
-			completedPhase = cp.Phase
-			cfg.Logger.Info(
-				"resuming import from checkpoint",
-				"component", "ledgerstate",
-				"completed_phase", completedPhase,
-				"import_key", cfg.ImportKey,
-			)
-		}
-	}
 	cfg.Logger.Info(
 		"starting ledger state import",
 		"component", "ledgerstate",
@@ -735,17 +757,14 @@ func ImportLedgerState(
 		return fmt.Errorf("validating ledger state: %w", err)
 	}
 
-	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" &&
-		!models.IsPhaseCompleted(completedPhase, models.ImportPhaseUTxO) {
+	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
 		return errors.New(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
 	}
 	// Marked only once the snapshot is known valid: the mark pins the
 	// database to the live UTxO set.
-	if err := markUtxoSetOnlyImport(
-		ctx, cfg, marked, completedPhase,
-	); err != nil {
+	if err := markUtxoSetOnlyImport(ctx, cfg); err != nil {
 		return err
 	}
 	if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
@@ -753,332 +772,86 @@ func ImportLedgerState(
 	}
 	defer func() { _ = cfg.Database.SetLiveUtxoSource(nil) }()
 
-	// Delete post-anchor rollover residue so replay can re-trigger every
-	// crossed epoch boundary. See DATABASE.md for the cleanup's scope and
-	// rationale.
-	//
-	// Run the full sweep atomically so a failed delete cannot leave only part
-	// of the post-anchor state removed.
-	sweepTxn := cfg.Database.MetadataTxn(ctx, true)
-	defer sweepTxn.Release()
-	if err := sweepTxn.Do(func(txn *database.Txn) error {
-		if err := cfg.Database.DeleteEpochsAfterSlot(slot, txn); err != nil {
-			return fmt.Errorf("deleting post-anchor epoch rows: %w", err)
-		}
-		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
-			return fmt.Errorf("deleting post-anchor reward state: %w", err)
-		}
-		if err := cfg.Database.RestorePoolStateAtSlot(ctx, slot, txn); err != nil {
-			return fmt.Errorf("restoring post-anchor pool state: %w", err)
-		}
-		if err := cfg.Database.RestoreAccountStateAtSlot(ctx, slot, txn); err != nil {
-			return fmt.Errorf("restoring post-anchor account state: %w", err)
-		}
-		if err := cfg.Database.DeletePParamsAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor protocol parameters: %w", err)
-		}
-		if err := cfg.Database.DeletePParamUpdatesAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor protocol parameter updates: %w", err)
-		}
-		if err := cfg.Database.RestoreDrepStateAtSlot(ctx, slot, txn); err != nil {
-			return fmt.Errorf("restoring post-anchor DRep state: %w", err)
-		}
-		if err := cfg.Database.DeleteGovernanceVotesAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor governance votes: %w", err)
-		}
-		if err := cfg.Database.DeleteGovernanceProposalsAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor governance proposals: %w", err)
-		}
-		if err := cfg.Database.DeleteCommitteeMembersAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor committee state: %w", err)
-		}
-		if err := cfg.Database.DeleteConstitutionsAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor constitutions: %w", err)
-		}
-		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
-			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
-			txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor block nonces: %w", err)
-		}
-		if err := cfg.Database.DeleteNetworkStateAfterSlot(ctx, slot, txn); err != nil {
-			return fmt.Errorf("deleting post-anchor network state: %w", err)
-		}
-		if err := cfg.Database.DeleteNetworkDonationsAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf("deleting post-anchor network donations: %w", err)
-		}
-		if err := seedImportedEpochDonations(cfg, slot, txn); err != nil {
-			return err
-		}
-		return nil
+	if err := importUTxOs(ctx, cfg, progress); err != nil {
+		return fmt.Errorf("importing UTxOs: %w", err)
+	}
+	if err := setCheckpoint(ctx, cfg, models.ImportPhaseUTxO); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhaseUTxO); err != nil {
+		return err
+	}
+	if err := cfg.LedgerDB.Run(nil, func(txn ledgerdb.Txn) error {
+		return seedImportedEpochDonations(cfg, slot, txn)
 	}); err != nil {
 		return err
 	}
 
-	// Import UTxOs (from UTxO table file or inline data)
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseUTxO,
-	) {
-		if cfg.State.UTxOTablePath != "" ||
-			cfg.State.UTxOData != nil {
-			if err := importUTxOs(ctx, cfg, progress); err != nil {
-				return fmt.Errorf("importing UTxOs: %w", err)
-			}
-		}
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhaseUTxO,
-		); err != nil {
-			return err
-		}
-	} else {
-		cfg.Logger.Info(
-			"skipping UTxO import (already completed)",
-			"component", "ledgerstate",
-		)
-	}
-
-	// A UTxO created strictly after this snapshot's anchor by local block
-	// replay never appears in the snapshot's live set at all -- the anchor
-	// predates it -- so it never reaches hydrateImportedUtxo's ON CONFLICT
-	// clear above, which only ever sees a row the snapshot's live set
-	// conflicts with. A reconcile pass (below) cannot repair it either: it is
-	// equally absent from the reconcile key set, so reconcile tombstones a
-	// still-live one and leaves an already-spent one untouched either way.
-	// Either shape leaves the row permanently wrong, and the next real
-	// replay of the block that spends it halts with "utxo not found".
-	//
-	// Roll the row back entirely instead of patching its deleted_slot:
-	// UtxosDeleteRolledback (the same primitive deleteBlobBlocksAboveSlot
-	// uses to discard a rejected gap-block range) deletes every UTxO with
-	// added_slot > slot outright, so the ordinary replay that follows this
-	// import re-creates it at its real slot with insertUtxoModelChecked's
-	// inserted=true, contributing its live-stake delta exactly when replay
-	// reaches it. Patching deleted_slot in place at import time instead would
-	// be wrong: ComputeEpochBoundarySnapshot's mark-snapshot read
-	// (GetLiveStakeInputsForPools) has no tip gate and no slot argument, so a
-	// row made live at import time would count toward every mark snapshot
-	// crossed between the anchor and the slot replay actually re-creates it
-	// at -- corrupting reward/leader-stake inputs instead of only failing the
-	// halt this exists to fix. Run before reconcile, so reconcile's live-row
-	// scan never has to reason about a post-anchor row it cannot correctly
-	// judge either way. The rollback is unconditional because it is
-	// idempotent and a no-op on a fresh database, which has no post-anchor
-	// rows.
-	if err := cfg.Database.UtxosDeleteRolledback(ctx, slot, nil); err != nil {
-		return fmt.Errorf(
-			"rolling back post-anchor-created UTxOs: %w",
-			err,
-		)
-	}
-
 	// Import cert state (accounts, pools, DReps)
-	certStatePoolsImported := false
-	certStatePhaseRan := false
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseCertState,
-	) {
-		certStatePhaseRan = true
-		if cfg.State.CertStateData != nil {
-			poolsImported, importedAccounts, err := importCertState(
-				ctx, cfg, slot, progress,
-			)
-			if err != nil {
-				return fmt.Errorf(
-					"importing cert state: %w",
-					err,
-				)
-			}
-			certStatePoolsImported = poolsImported > 0
+	poolsImported, err := importCertState(ctx, cfg, slot, progress)
+	if err != nil {
+		return fmt.Errorf("importing cert state: %w", err)
+	}
+	if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
+		return err
+	}
+	if err := setCheckpoint(
+		ctx, cfg, models.ImportPhaseCertState,
+	); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhaseCertState); err != nil {
+		return err
+	}
 
-			// The snapshot sets account.reward at its anchor. Clear later
-			// journal entries without reversing amounts applied against the
-			// pre-import balance. See DATABASE.md, "account_reward_delta".
-			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
-				ctx, slot, importedAccounts, nil,
-			); err != nil {
-				return fmt.Errorf(
-					"rolling back post-anchor account reward journal: %w",
-					err,
-				)
-			}
-		}
-		if cfg.State.CertStateData != nil {
-			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
-				return err
-			}
-		}
-
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhaseCertState,
+	// Import stake snapshots
+	if cfg.State.SnapShotsData != nil {
+		if err := importSnapShots(
+			ctx, cfg, slot, progress, poolsImported == 0,
 		); err != nil {
-			return err
-		}
-	} else {
-		cfg.Logger.Info(
-			"skipping cert state import (already completed)",
-			"component", "ledgerstate",
-		)
-		// A checkpoint at or past cert-state but short of tip belongs to an
-		// import that never finished, so the node has not served (and
-		// journaled nothing) since that cert-state phase ran. A checkpoint
-		// written by an importer without the journal cleanup above can
-		// therefore still leave stale post-anchor rows behind the account
-		// balances it overwrote; repeat the cleanup for the same
-		// credentials. It is idempotent when the cleanup already ran. A
-		// tip checkpoint marks a completed import whose journal may since
-		// hold legitimate post-anchor rows, so it is left alone.
-		if cfg.State.CertStateData != nil &&
-			!models.IsPhaseCompleted(
-				completedPhase,
-				models.ImportPhaseTip,
-			) {
-			if err := rollbackResumedAccountRewardJournal(
-				ctx, cfg, slot,
-			); err != nil {
-				return err
-			}
-			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
-				return err
-			}
+			return fmt.Errorf("importing stake snapshots: %w", err)
 		}
 	}
-	// Import stake snapshots
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseSnapshots,
-	) {
-		if cfg.State.SnapShotsData != nil {
-			allowSnapshotPoolFallback := certStatePhaseRan &&
-				!certStatePoolsImported
-			if !allowSnapshotPoolFallback && !certStatePhaseRan &&
-				!certStatePoolsImported {
-				// On resume, cert-state may have completed in a prior run.
-				// Allow snapshot fallback only when no active pools exist
-				// in the database.
-				hasActivePools, err := hasActivePoolsInDatabase(ctx, cfg)
-				if err != nil {
-					return fmt.Errorf(
-						"checking existing pools before snapshot fallback: %w",
-						err,
-					)
-				}
-				allowSnapshotPoolFallback = !hasActivePools
-			}
-			if err := importSnapShots(
-				ctx, cfg, slot, progress, allowSnapshotPoolFallback,
-			); err != nil {
-				return fmt.Errorf(
-					"importing stake snapshots: %w",
-					err,
-				)
-			}
-		}
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhaseSnapshots,
-		); err != nil {
-			return err
-		}
-	} else {
-		cfg.Logger.Info(
-			"skipping snapshot import (already completed)",
-			"component", "ledgerstate",
-		)
+	if err := setCheckpoint(
+		ctx, cfg, models.ImportPhaseSnapshots,
+	); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhaseSnapshots); err != nil {
+		return err
 	}
 
 	// Import protocol parameters
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhasePParams,
-	) {
-		if err := importPParams(ctx, cfg); err != nil {
-			return fmt.Errorf(
-				"importing protocol parameters: %w",
-				err,
-			)
-		}
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhasePParams,
-		); err != nil {
-			return err
-		}
-	} else {
-		cfg.Logger.Info(
-			"skipping pparams import (already completed)",
-			"component", "ledgerstate",
-		)
+	if err := importPParams(ctx, cfg); err != nil {
+		return fmt.Errorf("importing protocol parameters: %w", err)
+	}
+	if err := setCheckpoint(ctx, cfg, models.ImportPhasePParams); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhasePParams); err != nil {
+		return err
 	}
 
 	// Import governance state (constitution, committee, proposals)
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseGovState,
-	) {
-		if cfg.State.GovStateData != nil &&
-			cfg.State.EraIndex >= EraConway {
-			if err := importGovState(
-				ctx, cfg, progress,
-			); err != nil {
-				return fmt.Errorf(
-					"importing governance state: %w",
-					err,
-				)
-			}
-		}
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhaseGovState,
-		); err != nil {
-			return err
-		}
-	} else {
-		cfg.Logger.Info(
-			"skipping governance state import "+
-				"(already completed)",
-			"component", "ledgerstate",
-		)
-		// The checkpoint may predate the root verifier, so verify the
-		// seeded roots even though the phase is not re-run.
-		if cfg.State.GovStateData != nil &&
-			cfg.State.EraIndex >= EraConway {
-			if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
-				return fmt.Errorf(
-					"verifying per-purpose governance roots: %w",
-					err,
-				)
-			}
+	if cfg.State.GovStateData != nil && cfg.State.EraIndex >= EraConway {
+		if err := importGovState(ctx, cfg, progress); err != nil {
+			return fmt.Errorf("importing governance state: %w", err)
 		}
 	}
+	if err := setCheckpoint(ctx, cfg, models.ImportPhaseGovState); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhaseGovState); err != nil {
+		return err
+	}
 
-	// Mithril v2 catch-up: the snapshot is the complete, trusted ledger state
-	// at its tip, so any live row absent from it has been spent/deregistered/
-	// retired by that tip. Mark those stale rows inactive (never delete). On a
-	// fresh bootstrap Reconcile is false and this is skipped entirely. This
-	// must run before advancing/checkpointing the tip, so a reconcile failure
-	// cannot leave metadata claiming the snapshot tip with stale rows active.
+	// A catch-up snapshot is the complete ledger state at its tip, so any
+	// live row absent from it was spent, deregistered or retired by then.
+	// Those rows are marked inactive, never deleted, before the import ends.
 	if cfg.Reconcile {
 		if err := reconcileStaleLedgerState(
 			ctx,
-			cfg.Database,
+			cfg.LedgerDB,
 			cfg.reconcileKeys,
 			slot,
 			cfg.State.Epoch,
@@ -1088,51 +861,18 @@ func ImportLedgerState(
 		}
 	}
 
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseRewardLiveStake,
-	) {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf(
-				"cancelled before rebuilding reward live stake: %w",
-				err,
-			)
-		}
-		if err := cfg.Database.RebuildRewardLiveStake(
-			ctx,
-			slot,
-			nil,
-		); err != nil {
-			return fmt.Errorf("rebuilding reward live stake: %w", err)
-		}
-		progress(ImportProgress{
-			Stage:       "reward_live_stake",
-			Current:     1,
-			Total:       1,
-			Percent:     100,
-			Description: "reward live stake rebuilt",
-		})
-	} else {
-		cfg.Logger.Info(
-			"skipping reward live stake rebuild (already completed)",
-			"component", "ledgerstate",
-		)
+	if err := importTip(ctx, cfg); err != nil {
+		return fmt.Errorf("setting tip: %w", err)
 	}
-
-	// Set the chain tip
-	if !models.IsPhaseCompleted(
-		completedPhase,
-		models.ImportPhaseTip,
-	) {
-		if err := importTip(ctx, cfg); err != nil {
-			return fmt.Errorf("setting tip: %w", err)
-		}
-		if err := setCheckpoint(
-			ctx,
-			cfg, models.ImportPhaseTip,
-		); err != nil {
-			return err
-		}
+	if err := setCheckpoint(ctx, cfg, models.ImportPhaseTip); err != nil {
+		return err
+	}
+	if err := cfg.stopAfter(models.ImportPhaseTip); err != nil {
+		return err
+	}
+	// The last write: until it, the set refuses to be opened.
+	if err := cfg.UtxoSet.FinishImport(); err != nil {
+		return err
 	}
 
 	cfg.Logger.Info(
@@ -1141,10 +881,21 @@ func ImportLedgerState(
 		"epoch", cfg.State.Epoch,
 		"slot", slot,
 	)
+	return nil
+}
 
-	if finishDrained {
-		importDone = true
-		return FinishDrainedImport(ctx, cfg.Database, cfg.UtxoSet)
+// requireWholeLedgerState refuses a ledger state without a UTxO map or
+// certificate state. A snapshot carries both, empty or not. Loading the map
+// is what replaces the LedgerDB set with the snapshot, so an import without
+// one would finish over the set's earlier state and discard what it
+// imported; the certificate state is where the set takes its accounts,
+// pools, DReps and dormant epoch count from.
+func requireWholeLedgerState(state *RawLedgerState) error {
+	if state.UTxOTablePath == "" && state.UTxOData == nil {
+		return errors.New("ledger state has no UTxO map")
+	}
+	if state.CertStateData == nil {
+		return errors.New("ledger state has no certificate state")
 	}
 	return nil
 }
@@ -1227,7 +978,7 @@ func validateImportState(cfg ImportConfig) error {
 			// A valid stored row stands in for an incompatible payload,
 			// which importPParams relies on during catch-up.
 			stored, err := storedValidPParams(
-				cfg.Database.Metadata(), nil, state.Epoch, state.EraIndex,
+				heldLedgerState(cfg), nil, state.Epoch, state.EraIndex,
 			)
 			if err != nil {
 				return fmt.Errorf(
@@ -1264,7 +1015,7 @@ func validateImportState(cfg ImportConfig) error {
 			}
 			if err != nil {
 				stored, storedErr := storedValidPParams(
-					cfg.Database.Metadata(), nil, previousEpoch, previousEra,
+					heldLedgerState(cfg), nil, previousEpoch, previousEra,
 				)
 				if storedErr != nil {
 					return fmt.Errorf(
@@ -1291,33 +1042,55 @@ func validateImportState(cfg ImportConfig) error {
 	return nil
 }
 
+// heldLedgerState is the LedgerDB whose rows a check made before the import
+// writes may rely on: a catch-up into a set that holds a ledger state keeps
+// its families, and any other import replaces them, so it has none.
+func heldLedgerState(cfg ImportConfig) ImportLedgerDB {
+	if !cfg.Reconcile {
+		return nil
+	}
+	if h, ok := cfg.UtxoSet.(interface {
+		HoldsLedgerState() (bool, error)
+	}); ok {
+		if held, err := h.HoldsLedgerState(); err != nil || !held {
+			return nil
+		}
+	}
+	return cfg.LedgerDB
+}
+
 // validateImportedRewardBases runs, before any phase persists, the
 // protocol-parameter check seedImportedRewardInputs makes for each Mark/Set/Go
 // epoch it would seed. That check depends only on the imported state and the
 // rows already stored, unlike the basis reconciliation, which needs the pool
 // registrations the cert-state phase writes.
 func validateImportedRewardBases(cfg ImportConfig) error {
-	store := cfg.Database.Metadata()
+	cfg.LedgerDB = heldLedgerState(cfg)
+	store := cfg.LedgerDB
 	epoch := cfg.State.Epoch
 	for back := uint64(0); back <= 2 && back <= epoch; back++ {
 		rewardEpoch := epoch - back
-		existing, err := store.GetRewardSnapshot(rewardEpoch, "mark", nil)
-		if err != nil {
-			return fmt.Errorf(
-				"checking existing reward snapshot for epoch %d: %w",
-				rewardEpoch, err,
+		// Only a catch-up keeps a basis the set already holds; any other
+		// import replaces the whole set, so it has no basis to keep.
+		if store != nil {
+			existing, err := store.GetRewardSnapshot(rewardEpoch, "mark", nil)
+			if err != nil {
+				return fmt.Errorf(
+					"checking existing reward snapshot for epoch %d: %w",
+					rewardEpoch, err,
+				)
+			}
+			complete, err := importedAuthoritativeRewardBasisComplete(
+				store,
+				nil,
+				existing,
 			)
-		}
-		complete, err := importedAuthoritativeRewardBasisComplete(
-			store,
-			nil,
-			existing,
-		)
-		if err != nil {
-			return err
-		}
-		if complete {
-			continue
+			if err != nil {
+				return err
+			}
+			if complete {
+				continue
+			}
 		}
 		if err := validateImportedRewardPParams(
 			cfg, nil, rewardEpoch,
@@ -1353,50 +1126,29 @@ func validateReconcileImportConfig(cfg ImportConfig) error {
 	return nil
 }
 
-func hasActivePoolsInDatabase(
-	ctx context.Context,
-	cfg ImportConfig,
-) (bool, error) {
-	txn := cfg.Database.MetadataTxn(ctx, false)
-	defer txn.Release()
-	store := cfg.Database.Metadata()
-	pools, err := store.GetActivePoolKeyHashes(txn.Metadata())
-	if err != nil {
-		return false, err
+// stopAfter ends the import after phase when the LedgerDB set refused one of
+// its writes, or when afterPhase says to.
+func (cfg ImportConfig) stopAfter(phase string) error {
+	if err := cfg.LedgerDB.Err(); err != nil {
+		return fmt.Errorf("writing the %s phase into the LedgerDB set: %w", phase, err)
 	}
-	return len(pools) > 0, nil
+	if cfg.afterPhase == nil {
+		return nil
+	}
+	return cfg.afterPhase(phase)
 }
 
-// setCheckpoint persists the completed phase if resume tracking
-// is enabled (ImportKey is set).
-func setCheckpoint(ctx context.Context, cfg ImportConfig, phase string) error {
+// setCheckpoint records the phase the import has written when ImportKey is
+// set. It reports progress only: a resumed import runs every phase again.
+func setCheckpoint(_ context.Context, cfg ImportConfig, phase string) error {
 	if cfg.ImportKey == "" {
 		return nil
 	}
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
-	defer txn.Release()
-
-	err := store.SetImportCheckpoint(
-		&models.ImportCheckpoint{
-			ImportKey: cfg.ImportKey,
-			Phase:     phase,
-		},
-		txn.Metadata(),
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"saving checkpoint for phase %q: %w",
-			phase,
-			err,
-		)
-	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf(
-			"committing checkpoint for phase %q: %w",
-			phase,
-			err,
-		)
+	if err := cfg.Database.Metadata().SetImportCheckpoint(
+		&models.ImportCheckpoint{ImportKey: cfg.ImportKey, Phase: phase},
+		nil,
+	); err != nil {
+		return fmt.Errorf("saving checkpoint for phase %q: %w", phase, err)
 	}
 	cfg.Logger.Info(
 		"checkpoint saved",
@@ -1414,17 +1166,16 @@ func setCheckpoint(ctx context.Context, cfg ImportConfig, phase string) error {
 //
 // The snapshot total covers every block of the epoch up to the anchor, so it
 // replaces rather than adds to any rows local replay wrote for that epoch
-// before a catch-up import; the post-anchor sweep has already removed the
-// rest.
+// before a catch-up import.
 func seedImportedEpochDonations(
 	cfg ImportConfig,
 	slot uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
-	meta := cfg.Database.Metadata()
+	meta := cfg.LedgerDB
 	if err := meta.DeleteNetworkDonationsForEpoch(
 		cfg.State.Epoch,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("replacing imported epoch donations: %w", err)
 	}
@@ -1435,7 +1186,7 @@ func seedImportedEpochDonations(
 		slot,
 		cfg.State.Epoch,
 		cfg.State.Donation,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("seeding imported epoch donations: %w", err)
 	}
@@ -1588,26 +1339,24 @@ func loadUtxoSet(
 
 // markUtxoSetOnlyImport records that the database keeps its UTxO set only in
 // the live UTxO set, unless it already does. An unmarked database must hold
-// no live utxo rows and no earlier import's progress; a snapshot restore may
-// already have stored its blocks.
-func markUtxoSetOnlyImport(
-	ctx context.Context,
-	cfg ImportConfig,
-	marked string,
-	completedPhase string,
-) error {
+// no live utxo rows; a snapshot restore may already have stored its blocks.
+func markUtxoSetOnlyImport(ctx context.Context, cfg ImportConfig) error {
+	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set mode: %w", err)
+	}
 	if marked != "" {
 		return nil
 	}
 	errHasRows := errors.New("has utxo rows")
-	err := cfg.Database.IterateLiveUtxos(
+	err = cfg.Database.IterateLiveUtxos(
 		ctx, nil,
 		func(*models.Utxo) error { return errHasRows },
 	)
 	if err != nil && !errors.Is(err, errHasRows) {
 		return fmt.Errorf("look for utxo rows: %w", err)
 	}
-	if err != nil || completedPhase != "" {
+	if err != nil {
 		return errors.New(
 			"a live-UTxO-set-only import needs a database without a metadata UTxO set",
 		)
@@ -1627,7 +1376,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) (int, []models.StakeCredentialRef, error) {
+) (int, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -1636,7 +1385,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return 0, nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -1646,7 +1395,7 @@ func importCertState(
 		// reconcile forbids checkpoint resume, so a re-run fails here again —
 		// tell the operator how to get unstuck instead of looping.
 		if cfg.Reconcile {
-			return 0, nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"parsing cert state for reconcile: %w; catch-up cannot "+
 					"continue with a partial cert state and the database may "+
 					"contain a partial import — perform a full Mithril "+
@@ -1657,18 +1406,16 @@ func importCertState(
 		// A skipped or partially decoded entry would import an account,
 		// pool or DRep set that differs from the ledger state, and every
 		// stake distribution and reward derived from it would be wrong.
-		return 0, nil, fmt.Errorf(
+		return 0, fmt.Errorf(
 			"parsing cert state: %w; the ledger state cannot be "+
 				"imported with skipped or partially decoded entries",
 			err,
 		)
 	}
-	if err := cfg.Database.SetImportedDormantDRepEpochs(
-		ctx,
-		certState.DormantEpochs,
-		nil,
+	if err := cfg.LedgerDB.SetImportedDormantDRepEpochs(
+		certState.DormantEpochs, slot, nil,
 	); err != nil {
-		return 0, nil, fmt.Errorf("importing dormant DRep epochs: %w", err)
+		return 0, fmt.Errorf("importing dormant DRep epochs: %w", err)
 	}
 
 	// Catch-up reconcile: record the snapshot's live cert-state keys (the
@@ -1706,27 +1453,15 @@ func importCertState(
 	}
 
 	// Import accounts
-	var importedAccounts []models.StakeCredentialRef
 	if len(certState.Accounts) > 0 {
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return 0, nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"importing accounts: %w",
 				err,
 			)
 		}
-		// importAccounts has already validated every entry's credential type
-		// (it errors out above otherwise), so converting again here cannot
-		// fail in practice; still handled rather than ignored, since a
-		// dropped credential here would silently widen the "untouched"
-		// exemption DeleteAccountRewardJournalForCredentialsAfterSlot relies
-		// on for coverage it does not have.
-		refs, refsErr := accountCredentialRefs(certState.Accounts)
-		if refsErr != nil {
-			return 0, nil, refsErr
-		}
-		importedAccounts = refs
 		progress(ImportProgress{
 			Stage:   "accounts",
 			Current: len(certState.Accounts),
@@ -1746,7 +1481,7 @@ func importCertState(
 			ctx, cfg, certState.Pools, slot,
 			certState.PendingPoolRetirements,
 		); err != nil {
-			return 0, nil, fmt.Errorf("importing pools: %w", err)
+			return 0, fmt.Errorf("importing pools: %w", err)
 		}
 		importedPools = len(certState.Pools)
 		progress(ImportProgress{
@@ -1766,7 +1501,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return 0, nil, fmt.Errorf("importing DReps: %w", err)
+			return 0, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -1780,80 +1515,15 @@ func importCertState(
 		})
 	}
 	if err := persistImportedCommitteeCertificates(
-		ctx,
-		cfg.Database,
+		cfg.LedgerDB,
 		certState,
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
-		0,
 	); err != nil {
-		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
+		return 0, fmt.Errorf("importing committee authorizations: %w", err)
 	}
 
-	return importedPools, importedAccounts, nil
-}
-
-// accountCredentialRefs converts parsed accounts to the stake credential
-// refs cert-state import writes them under.
-func accountCredentialRefs(
-	accounts []ParsedAccount,
-) ([]models.StakeCredentialRef, error) {
-	refs := make([]models.StakeCredentialRef, 0, len(accounts))
-	for i := range accounts {
-		tag, err := models.CredentialTagFromUint(
-			uint(accounts[i].StakingKey.Type),
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"resolving imported account %x credential type %d: %w",
-				accounts[i].StakingKey.Hash,
-				accounts[i].StakingKey.Type,
-				err,
-			)
-		}
-		refs = append(
-			refs,
-			models.NewStakeCredentialRef(tag, accounts[i].StakingKey.Hash),
-		)
-	}
-	return refs, nil
-}
-
-// rollbackResumedAccountRewardJournal deletes post-anchor reward journal
-// rows for the snapshot's accounts when a resumed import skips the
-// cert-state phase. The accounts are re-derived from the snapshot's cert
-// state, since the phase that returned them ran in an earlier process.
-func rollbackResumedAccountRewardJournal(
-	ctx context.Context,
-	cfg ImportConfig,
-	slot uint64,
-) error {
-	certState, err := ParseCertState(cfg.State.CertStateData)
-	if err != nil {
-		if certState == nil {
-			return fmt.Errorf(
-				"parsing cert state for resumed journal rollback: %w", err,
-			)
-		}
-		cfg.Logger.Warn(
-			"cert state parse warnings",
-			"component", "ledgerstate",
-			"warning", err.Error(),
-		)
-	}
-	refs, err := accountCredentialRefs(certState.Accounts)
-	if err != nil {
-		return err
-	}
-	if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
-		ctx, slot, refs, nil,
-	); err != nil {
-		return fmt.Errorf(
-			"rolling back post-anchor account reward journal: %w",
-			err,
-		)
-	}
-	return nil
+	return importedPools, nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.
@@ -1871,24 +1541,13 @@ func importAccounts(
 
 	const accountBatchSize = 10000
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
 		}
 	}()
-
-	rounds, err := store.GetPendingRewardCreditRounds(txn.Metadata())
-	if err != nil {
-		return fmt.Errorf("reading applied reward rounds before account import: %w", err)
-	}
-	coveredRewardEpochs := make([]uint64, 0, len(rounds))
-	for _, round := range rounds {
-		if round.BoundarySlot <= slot {
-			coveredRewardEpochs = append(coveredRewardEpochs, round.SnapshotEpoch)
-		}
-	}
 
 	inBatch := 0
 	for _, acct := range accounts {
@@ -1912,14 +1571,8 @@ func importAccounts(
 			)
 		}
 
-		// CreatedSlot is deliberately left at 0. The account's real registration
-		// slot predates the snapshot and is not recoverable from it, and 0
-		// ("existed before any reachable rollback point") is the answer rollback
-		// needs: RestoreAccountStateAtSlot deletes an account only when
-		// created_slot is past the rollback slot, which is the only thing
-		// keeping these rows alive given the snapshot carries no certificate
-		// history to prove they were registered. Stamping the snapshot slot here
-		// would make every imported account deletable by a rollback to it.
+		// CreatedSlot is left at 0: the account's registration slot predates
+		// the snapshot and is not recoverable from it.
 		model := &models.Account{
 			StakingKey:    acct.StakingKey.Hash,
 			CredentialTag: credentialTag,
@@ -1936,21 +1589,13 @@ func importAccounts(
 		}
 
 		if err := store.ImportAccount(
-			model, txn.Metadata(),
+			model, txn,
 		); err != nil {
 			return fmt.Errorf(
 				"importing account %x: %w",
 				acct.StakingKey.Hash,
 				err,
 			)
-		}
-
-		// The imported balance already includes every covered round, including
-		// credits later withdrawn. Folding them must commit with that balance.
-		if len(coveredRewardEpochs) > 0 {
-			if err := store.FoldRewardAccountOutputs(coveredRewardEpochs, credentialTag, acct.StakingKey.Hash, txn.Metadata()); err != nil {
-				return fmt.Errorf("folding imported account reward credits: %w", err)
-			}
 		}
 
 		inBatch++
@@ -1963,7 +1608,7 @@ func importAccounts(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(ctx, true)
+			txn = cfg.LedgerDB.Begin(ctx, true)
 		}
 	}
 
@@ -2073,8 +1718,8 @@ func importPools(
 
 	const poolBatchSize = 5000
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -2115,11 +1760,9 @@ func importPools(
 			imports = append(imports, *pool.FutureParams)
 		}
 		for i, p := range imports {
-			model, reg := poolImportModels(p, slot)
+			_, reg := poolImportModels(p, slot)
 			reg.RegistrationIndex = uint(i)
-			if err := store.ImportPool(
-				model, reg, txn.Metadata(),
-			); err != nil {
+			if err := store.ImportPool(reg, i > 0, txn); err != nil {
 				return fmt.Errorf(
 					"importing pool %x: %w",
 					pool.PoolKeyHash,
@@ -2138,7 +1781,7 @@ func importPools(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(ctx, true)
+			txn = cfg.LedgerDB.Begin(ctx, true)
 		}
 	}
 
@@ -2186,10 +1829,10 @@ func importPendingPoolRetirements(
 	}
 	slices.Sort(epochs)
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
-	metaTxn := txn.Metadata()
+	metaTxn := txn
 
 	total := 0
 	for _, epoch := range epochs {
@@ -2208,7 +1851,7 @@ func importPendingPoolRetirements(
 				cfg.State.Epoch,
 			)
 		}
-		if err := assertPoolsImported(store, metaTxn, keyHashes); err != nil {
+		if err := assertPoolsImported(ctx, store, metaTxn, keyHashes); err != nil {
 			return fmt.Errorf(
 				"checking pools scheduled to retire at epoch %d: %w",
 				epoch,
@@ -2221,7 +1864,7 @@ func importPendingPoolRetirements(
 		// sorting with the rest of the import and behind any retirement
 		// certificate seen in a later live block.
 		if err := store.RetirePools(
-			metaTxn, keyHashes, epoch, slot,
+			keyHashes, epoch, slot, metaTxn,
 		); err != nil {
 			return fmt.Errorf(
 				"retiring pools scheduled for epoch %d: %w",
@@ -2251,8 +1894,9 @@ func importPendingPoolRetirements(
 // hash it cannot resolve, which would reproduce the very gap these rows
 // exist to close, so the mismatch is surfaced instead of logged.
 func assertPoolsImported(
-	store metadata.MetadataStore,
-	metaTxn types.Txn,
+	ctx context.Context,
+	store ImportLedgerDB,
+	metaTxn ledgerdb.Txn,
 	keyHashes [][]byte,
 ) error {
 	poolKeyHashSize := len(lcommon.PoolKeyHash{})
@@ -2270,7 +1914,7 @@ func assertPoolsImported(
 		copy(pkh[:], keyHash)
 		lookup = append(lookup, pkh)
 	}
-	existing, err := store.GetPools(lookup, metaTxn)
+	existing, err := store.GetPools(ctx, lookup, metaTxn)
 	if err != nil {
 		return fmt.Errorf("loading pools: %w", err)
 	}
@@ -2303,8 +1947,8 @@ func importDReps(
 
 	const drepBatchSize = 10000
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -2357,18 +2001,7 @@ func importDReps(
 			))
 		}
 
-		reg := &models.RegistrationDrep{
-			CredentialTag:  credentialTag,
-			DrepCredential: drep.Credential.Hash,
-			AnchorURL:      drep.AnchorURL,
-			AnchorHash:     drep.AnchorHash,
-			AddedSlot:      slot,
-			DepositAmount:  types.Uint64(drep.Deposit),
-		}
-
-		if err := store.ImportDrep(
-			model, reg, txn.Metadata(),
-		); err != nil {
+		if err := store.ImportDrep(model, drep.Deposit, txn); err != nil {
 			return fmt.Errorf(
 				"importing DRep %x: %w",
 				drep.Credential.Hash,
@@ -2386,7 +2019,7 @@ func importDReps(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(ctx, true)
+			txn = cfg.LedgerDB.Begin(ctx, true)
 		}
 	}
 
@@ -2640,7 +2273,7 @@ func seedImportedRewardBasis(
 	epoch uint64,
 	slot uint64,
 ) error {
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -2714,9 +2347,9 @@ func seedImportedRewardBasis(
 	}
 	preAnchorFees := types.Uint64(cfg.State.Fees - snapshots.Fee)
 	pots.ImportedEpochFees = &preAnchorFees
-	if err := cfg.Database.Metadata().SaveRewardAdaPots(
+	if err := cfg.LedgerDB.SaveRewardAdaPots(
 		pots,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
 	}
@@ -2746,13 +2379,13 @@ func seedImportedRewardBasis(
 				target,
 			)
 		}
-		registrations, err := cfg.Database.Metadata().
+		registrations, err := cfg.LedgerDB.
 			GetPoolRegistrationsEffectiveForEpoch(
 				keys,
 				epochStartSlot,
 				target,
 				slot,
-				txn.Metadata(),
+				txn,
 			)
 		if err != nil {
 			return nil, err
@@ -2760,13 +2393,13 @@ func seedImportedRewardBasis(
 		return rewardPoolParamsFromRegistrations(registrations), nil
 	}
 	if err := seedImportedRewardInputs(
-		cfg.Database.Metadata(),
-		txn.Metadata(),
+		cfg.LedgerDB,
+		txn,
 		snapshots,
 		resolveParams,
 		func(target uint64) error {
 			return validateImportedRewardPParams(
-				cfg, txn.Metadata(), target,
+				cfg, txn, target,
 			)
 		},
 		epoch,
@@ -2779,7 +2412,7 @@ func seedImportedRewardBasis(
 		cfg,
 		epoch,
 		slot,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return err
 	}
@@ -2792,7 +2425,7 @@ func seedImportedNonMyopicState(
 	cfg ImportConfig,
 	epoch uint64,
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	if len(cfg.State.NonMyopicData) == 0 {
 		return nil
@@ -2848,7 +2481,7 @@ func seedImportedNonMyopicState(
 			PerformanceEstimate: performance,
 		})
 	}
-	if err := cfg.Database.Metadata().SaveRewardLikelihoodState(
+	if err := cfg.LedgerDB.SaveRewardLikelihoodState(
 		&models.RewardLikelihoodState{
 			Epoch:        epoch,
 			RewardPot:    types.Uint64(rewardPot),
@@ -2871,10 +2504,10 @@ func persistImportedSnapshot(
 	st snapshotImportTarget,
 	poolSnapshots []*models.PoolStakeSnapshot,
 ) error {
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
-	metaTxn := txn.Metadata()
+	metaTxn := txn
 
 	if err := store.DeletePoolStakeSnapshotsForEpoch(
 		st.targetEpoch,
@@ -2910,7 +2543,7 @@ func persistImportedSnapshot(
 		// (implicit no), matching pre-CIP-1694 behaviour, until per-boundary
 		// DRep-delegation state is persisted.
 		if st.targetEpoch == cfg.State.Epoch {
-			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
+			if err := store.ResolvePoolRewardAccountAutoVotes(
 				ctx,
 				poolSnapshots, txn,
 			); err != nil {
@@ -2980,10 +2613,10 @@ func persistImportedActivePoolDistribution(
 	cfg ImportConfig,
 	poolSnapshots []*models.PoolStakeSnapshot,
 ) error {
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
-	metaTxn := txn.Metadata()
+	metaTxn := txn
 
 	if err := store.DeletePoolStakeSnapshotsForEpoch(
 		cfg.State.Epoch,
@@ -3080,12 +2713,12 @@ func synthesizeRetiredScheduledPools(
 		return nil
 	}
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
-	metaTxn := txn.Metadata()
+	metaTxn := txn
 
-	existing, err := store.GetPools(keyHashes, metaTxn)
+	existing, err := store.GetPools(ctx, keyHashes, metaTxn)
 	if err != nil {
 		return fmt.Errorf("loading existing pools: %w", err)
 	}
@@ -3112,16 +2745,12 @@ func synthesizeRetiredScheduledPools(
 		// ImportPool + RetirePools for the same key would be redundant.
 		present[string(pool.PoolKeyHash)] = struct{}{}
 
-		model := &models.Pool{
-			PoolKeyHash: slices.Clone(pool.PoolKeyHash),
-			VrfKeyHash:  slices.Clone(pool.VrfKeyHash),
-		}
 		reg := &models.PoolRegistration{
 			PoolKeyHash: slices.Clone(pool.PoolKeyHash),
 			VrfKeyHash:  slices.Clone(pool.VrfKeyHash),
 			AddedSlot:   slot,
 		}
-		if err := store.ImportPool(model, reg, metaTxn); err != nil {
+		if err := store.ImportPool(reg, false, metaTxn); err != nil {
 			return fmt.Errorf(
 				"importing retired scheduled pool %x: %w",
 				pool.PoolKeyHash,
@@ -3143,10 +2772,7 @@ func synthesizeRetiredScheduledPools(
 	// stake and reward query. RetirePools matches against the pool rows just
 	// inserted in this same transaction.
 	if err := store.RetirePools(
-		metaTxn,
-		retiredKeyHashes,
-		epoch,
-		slot,
+		retiredKeyHashes, epoch, slot, metaTxn,
 	); err != nil {
 		return fmt.Errorf("retiring scheduled pools: %w", err)
 	}
@@ -3336,8 +2962,8 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		"hash", hex.EncodeToString(tip.BlockHash),
 	)
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
 
 	oTip := ochainsync.Tip{
@@ -3348,7 +2974,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		BlockNumber: 0, // Not available from snapshot
 	}
 
-	if err := store.SetTip(oTip, txn.Metadata()); err != nil {
+	if err := store.SetTip(oTip, txn); err != nil {
 		return fmt.Errorf("setting tip: %w", err)
 	}
 
@@ -3357,7 +2983,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 	// the authoritative baseline and never treats an arbitrary first replayed
 	// certificate as one.
 	if err := importOpCertCounters(
-		store, cfg.State.OpCertCounters, tip.Slot, txn.Metadata(),
+		ctx, store, cfg.State.OpCertCounters, tip.Slot, txn,
 	); err != nil {
 		return err
 	}
@@ -3371,7 +2997,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		cfg.State.BlocksPrev,
 		cfg.State.BlocksCur,
 		tip.Slot,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return err
 	}
@@ -3399,7 +3025,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 			tip.Slot,
 			cfg.State.EvolvingNonce,
 			true, // checkpoint
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"setting tip block nonce: %w", err,
@@ -3420,28 +3046,30 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		cfg.State.Treasury,
 		cfg.State.Reserves,
 		tip.Slot,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("setting network state: %w", err)
 	}
 
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf(
+			"commit transaction in importTip: %w",
+			err,
+		)
+	}
+
 	// Generate epoch history from era bounds
-	epochCount, err := generateAndSaveEpochs(ctx, cfg, txn)
+	epochCount, err := generateAndSaveEpochs(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("generating epoch history: %w", err)
 	}
-
 	cfg.Logger.Info(
 		"generated epoch history",
 		"component", "ledgerstate",
 		"epoch_count", epochCount,
 	)
-
-	if err = txn.Commit(); err != nil {
-		return fmt.Errorf(
-			"commit transaction in importTip: %w",
-			err,
-		)
+	if err := store.ImportRewardBlocks(ctx, tip.Slot); err != nil {
+		return err
 	}
 	return nil
 }
@@ -3491,12 +3119,12 @@ func validateBlocksMadeKeys(blocks map[string]uint64) error {
 // later anchor, and merging a newer map into an older one would leave counts
 // from two different anchors in one epoch.
 func importBlocksMade(
-	store metadata.MetadataStore,
+	store ImportLedgerDB,
 	epoch uint64,
 	blocksPrev map[string]uint64,
 	blocksCur map[string]uint64,
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	type epochBlocks struct {
 		blocks map[string]uint64
@@ -3514,30 +3142,9 @@ func importBlocksMade(
 		if err := validateBlocksMadeKeys(imported.blocks); err != nil {
 			return err
 		}
-		if err := store.DeleteImportedPoolBlockCountsForEpoch(
-			imported.epoch, txn,
-		); err != nil {
-			return err
-		}
-		counts := make([]models.ImportedPoolBlockCount, 0, len(imported.blocks))
-		for poolKey, blocks := range imported.blocks {
-			counts = append(counts, models.ImportedPoolBlockCount{
-				Epoch:          imported.epoch,
-				PoolKeyHash:    []byte(poolKey),
-				BlocksProduced: blocks,
-				CapturedSlot:   slot,
-			})
-		}
-		if err := store.SaveImportedPoolBlockCounts(counts, txn); err != nil {
-			return err
-		}
-		// Written unconditionally, including for a map with no entries. An
-		// epoch in which no pool minted a block is a state the certified
-		// snapshot asserts, and without this row it would be
-		// indistinguishable from an epoch the import said nothing about --
-		// which the reward round declines rather than treats as zero.
-		if err := store.SaveImportedEpochBlockTotal(
+		if err := store.ReplaceImportedBlockCounts(
 			imported.epoch,
+			imported.blocks,
 			sumBlocksMade(imported.blocks),
 			slot,
 			txn,
@@ -3574,10 +3181,11 @@ func validateOpCertCounters(counters map[string]uint64) error {
 }
 
 func importOpCertCounters(
-	store metadata.MetadataStore,
+	ctx context.Context,
+	store ImportLedgerDB,
 	counters map[string]uint64,
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	if err := validateOpCertCounters(counters); err != nil {
 		return err
@@ -3585,9 +3193,7 @@ func importOpCertCounters(
 	for poolKey, sequence := range counters {
 		var poolKeyHash lcommon.PoolKeyHash
 		copy(poolKeyHash[:], poolKey)
-		if err := store.UpdatePoolOpCertSequence(
-			poolKeyHash, sequence, slot, txn,
-		); err != nil {
+		if err := store.UpdatePoolOpCertSequence(ctx, poolKeyHash, sequence, slot, txn); err != nil {
 			return fmt.Errorf("storing certified opcert counter: %w", err)
 		}
 	}
@@ -3676,13 +3282,30 @@ func importedSnapshotCaptureSlot(
 func generateAndSaveEpochs(
 	ctx context.Context,
 	cfg ImportConfig,
-	txn *database.Txn,
 ) (int, error) {
 	if err := validateImportEraHistory(cfg); err != nil {
 		return 0, fmt.Errorf("validating imported era history: %w", err)
 	}
-	store := cfg.Database.Metadata()
-	metaTxn := txn.Metadata()
+	store := cfg.LedgerDB
+	// The epochs commit in batches: one transaction holding a whole chain's
+	// epochs is larger than the LedgerDB set takes in one write.
+	const epochBatchSize = 200
+	metaTxn := store.Begin(ctx, true)
+	defer func() { metaTxn.Release() }()
+	inBatch := 0
+	next := func() error {
+		inBatch++
+		if inBatch < epochBatchSize {
+			return nil
+		}
+		if err := metaTxn.Commit(); err != nil {
+			return fmt.Errorf("committing epoch batch: %w", err)
+		}
+		metaTxn.Release()
+		metaTxn = store.Begin(ctx, true)
+		inBatch = 0
+		return nil
+	}
 	totalEpochs := 0
 
 	// SetEpoch uses OnConflict/upsert clauses in all backends,
@@ -3741,6 +3364,9 @@ func generateAndSaveEpochs(
 				)
 			}
 			totalEpochs++
+			if err := next(); err != nil {
+				return totalEpochs, err
+			}
 		}
 
 		// #nosec G115
@@ -3808,6 +3434,9 @@ func generateAndSaveEpochs(
 			)
 		}
 		totalEpochs++
+		if err := next(); err != nil {
+			return totalEpochs, err
+		}
 	}
 
 	// #nosec G115
@@ -3819,6 +3448,9 @@ func generateAndSaveEpochs(
 		"component", "ledgerstate",
 	)
 
+	if err := metaTxn.Commit(); err != nil {
+		return totalEpochs, fmt.Errorf("committing epoch batch: %w", err)
+	}
 	return totalEpochs, nil
 }
 
@@ -3829,7 +3461,7 @@ func generateAndSaveEpochs(
 // same lookup and makes catch-up/reconcile re-entry safe.
 func validateImportedRewardPParams(
 	cfg ImportConfig,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 	rewardEpoch uint64,
 ) error {
 	if cfg.State == nil {
@@ -3851,7 +3483,7 @@ func validateImportedRewardPParams(
 			currentEpoch,
 		)
 	}
-	store := cfg.Database.Metadata()
+	store := cfg.LedgerDB
 	currentAvailable, err := importedPParamsAvailable(
 		store,
 		txn,
@@ -3924,8 +3556,8 @@ func validateImportedRewardPParams(
 }
 
 func importedPParamsAvailable(
-	store metadata.MetadataStore,
-	txn types.Txn,
+	store ImportLedgerDB,
+	txn ledgerdb.Txn,
 	epoch uint64,
 	era int,
 	payload []byte,
@@ -3944,26 +3576,32 @@ func importedPParamsAvailable(
 }
 
 func storedValidPParams(
-	store metadata.MetadataStore,
-	txn types.Txn,
+	store ImportLedgerDB,
+	txn ledgerdb.Txn,
 	epoch uint64,
 	era int,
 ) (*models.PParams, error) {
-	if era < 0 {
+	if era < 0 || store == nil {
 		return nil, nil
 	}
 	// #nosec G115 -- era was checked non-negative above.
-	rows, err := store.GetPParams(epoch, uint(era), txn)
+	rows, err := store.ListPParamsForEra(uint(era), txn)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	// The latest row at or before epoch; of rows at one epoch, the last
+	// written.
+	var latest *models.PParams
+	for i := range rows {
+		if rows[i].Epoch <= epoch &&
+			(latest == nil || rows[i].Epoch >= latest.Epoch) {
+			latest = &rows[i]
+		}
+	}
+	if latest == nil || !pparamsDataIsValid(era, latest.Cbor) {
 		return nil, nil
 	}
-	if !pparamsDataIsValid(era, rows[0].Cbor) {
-		return nil, nil
-	}
-	return &rows[0], nil
+	return latest, nil
 }
 
 func pparamsDataIsValid(era int, payload []byte) bool {
@@ -3986,14 +3624,14 @@ func importPParams(
 		"component", "ledgerstate",
 	)
 
-	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	store := cfg.LedgerDB
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
 
 	pparamsCbor := []byte(cfg.State.PParamsData)
 	currentStored, err := storedValidPParams(
 		store,
-		txn.Metadata(),
+		txn,
 		cfg.State.Epoch,
 		cfg.State.EraIndex,
 	)
@@ -4071,7 +3709,7 @@ func importPParams(
 		} else {
 			previousStored, err := storedValidPParams(
 				store,
-				txn.Metadata(),
+				txn,
 				previousEpoch,
 				previousEra,
 			)
@@ -4098,7 +3736,7 @@ func importPParams(
 			previousSlot,
 			previousEpoch,
 			uint(previousEra),
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"storing historical protocol parameters for epoch %d: %w",
@@ -4116,7 +3754,7 @@ func importPParams(
 			pparamsSlot,
 			cfg.State.Epoch,
 			uint(cfg.State.EraIndex),
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf("storing protocol parameters: %w", err)
 		}
@@ -4257,7 +3895,7 @@ func importGovState(
 			"error", warning,
 		)
 	}
-	store := cfg.Database.Metadata()
+	store := cfg.LedgerDB
 	currentEpochSlot := snapshotEpochAnchorSlot(
 		cfg,
 		cfg.State.Epoch,
@@ -4289,7 +3927,7 @@ func importGovState(
 	// Import constitution
 	if govState.Constitution != nil {
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(ctx, true)
+			txn := cfg.LedgerDB.Begin(ctx, true)
 			defer txn.Release()
 			if err := store.SetConstitution(
 				&models.Constitution{
@@ -4298,7 +3936,7 @@ func importGovState(
 					PolicyHash: govState.Constitution.PolicyHash,
 					AddedSlot:  currentEpochSlot,
 				},
-				txn.Metadata(),
+				txn,
 			); err != nil {
 				return fmt.Errorf(
 					"importing constitution: %w", err,
@@ -4324,12 +3962,11 @@ func importGovState(
 	// Import committee members and quorum.
 	if len(committee) > 0 || committeeQuorum != nil {
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(ctx, true)
+			txn := cfg.LedgerDB.Begin(ctx, true)
 			defer txn.Release()
 			if len(enactedUpdateCommitteeIds) > 0 {
-				if err := store.SoftDeleteAllCommitteeMembers(
-					currentEpochSlot,
-					txn.Metadata(),
+				if err := store.SoftDeleteAllCommitteeMembers(ctx, currentEpochSlot,
+					txn,
 				); err != nil {
 					return fmt.Errorf(
 						"retiring superseded committee members: %w", err,
@@ -4365,9 +4002,7 @@ func importGovState(
 						AddedSlot:         currentEpochSlot,
 					}
 				}
-				if err := store.SetCommitteeMembers(
-					members, txn.Metadata(),
-				); err != nil {
+				if err := store.SetCommitteeMembers(ctx, members, txn); err != nil {
 					return fmt.Errorf(
 						"importing committee members: %w", err,
 					)
@@ -4377,12 +4012,8 @@ func importGovState(
 				if committeeQuorum.Rat == nil {
 					return errors.New("committee quorum present but missing Rat")
 				}
-				quorum := &types.Rat{
-					Rat: new(big.Rat).Set(committeeQuorum.Rat),
-				}
-				if err := store.SetCommitteeQuorum(
-					quorum, currentEpochSlot, txn.Metadata(),
-				); err != nil {
+				quorum := new(big.Rat).Set(committeeQuorum.Rat)
+				if err := store.SetCommitteeQuorum(ctx, quorum, currentEpochSlot, txn); err != nil {
 					return fmt.Errorf(
 						"importing committee quorum: %w", err,
 					)
@@ -4453,9 +4084,9 @@ func importGovState(
 		}
 		ratifiedCommitteeActions := 0
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(ctx, true)
+			txn := cfg.LedgerDB.Begin(ctx, true)
 			defer txn.Release()
-			metaTxn := txn.Metadata()
+			metaTxn := txn
 			for position, prop := range govState.Proposals {
 				select {
 				case <-ctx.Done():
@@ -4508,33 +4139,32 @@ func importGovState(
 					enactedEpoch = &ee
 					enactedSlot = &es
 				}
-				if err := store.SetGovernanceProposal(
-					&models.GovernanceProposal{
-						TxHash:          prop.TxHash,
-						ActionIndex:     prop.ActionIndex,
-						ActionType:      prop.ActionType,
-						ProposedEpoch:   prop.ProposedIn,
-						ExpiresEpoch:    prop.ExpiresAfter,
-						Deposit:         prop.Deposit,
-						ReturnAddress:   prop.ReturnAddr,
-						AnchorURL:       prop.AnchorURL,
-						AnchorHash:      prop.AnchorHash,
-						ParentTxHash:    prop.ParentTxHash,
-						ParentActionIdx: prop.ParentActionIdx,
-						GovActionCbor:   prop.GovActionCbor,
-						RatifiedEpoch:   ratifiedEpoch,
-						RatifiedSlot:    ratifiedSlot,
-						EnactedEpoch:    enactedEpoch,
-						EnactedSlot:     enactedSlot,
-						ExpiredEpoch:    expiredEpoch,
-						ExpiredSlot:     expiredSlot,
-						// The snapshot lists proposals in submission order,
-						// and every proposal of one epoch shares its anchor
-						// slot, so this position stands in for the block
-						// order RATIFY needs.
-						TxIndex:   &orderIndex,
-						AddedSlot: proposedSlot,
-					},
+				if err := store.SetGovernanceProposal(ctx, &models.GovernanceProposal{
+					TxHash:          prop.TxHash,
+					ActionIndex:     prop.ActionIndex,
+					ActionType:      prop.ActionType,
+					ProposedEpoch:   prop.ProposedIn,
+					ExpiresEpoch:    prop.ExpiresAfter,
+					Deposit:         prop.Deposit,
+					ReturnAddress:   prop.ReturnAddr,
+					AnchorURL:       prop.AnchorURL,
+					AnchorHash:      prop.AnchorHash,
+					ParentTxHash:    prop.ParentTxHash,
+					ParentActionIdx: prop.ParentActionIdx,
+					GovActionCbor:   prop.GovActionCbor,
+					RatifiedEpoch:   ratifiedEpoch,
+					RatifiedSlot:    ratifiedSlot,
+					EnactedEpoch:    enactedEpoch,
+					EnactedSlot:     enactedSlot,
+					ExpiredEpoch:    expiredEpoch,
+					ExpiredSlot:     expiredSlot,
+					// The snapshot lists proposals in submission order,
+					// and every proposal of one epoch shares its anchor
+					// slot, so this position stands in for the block
+					// order RATIFY needs.
+					TxIndex:   &orderIndex,
+					AddedSlot: proposedSlot,
+				},
 					metaTxn,
 				); err != nil {
 					return fmt.Errorf(
@@ -4679,12 +4309,10 @@ func committeeMemberKey(member ParsedCommitteeMember) string {
 }
 
 func persistImportedCommitteeCertificates(
-	ctx context.Context,
-	db *database.Database,
+	store ImportLedgerDB,
 	certState *ParsedCertState,
 	slot uint64,
-	txn *database.Txn,
-	protocolMajor uint64,
+	txn ledgerdb.Txn,
 ) error {
 	if certState == nil ||
 		(len(certState.CommitteeHotKeys) == 0 && len(certState.CommitteeResignations) == 0) {
@@ -4734,10 +4362,8 @@ func persistImportedCommitteeCertificates(
 	// would hand consumers a hash that cannot be a transaction id.
 	hash := lcommon.Blake2b256Hash(seed)
 	tx := importedCommitteeTransaction{hash: hash, certs: certs}
-	return db.SetTransactionMetadataOnly(
-		ctx,
-		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{},
-		txn, protocolMajor,
+	return store.ImportCertificates(
+		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, txn,
 	)
 }
 
@@ -4839,7 +4465,7 @@ func govActionIdKey(txHash []byte, actionIdx uint32) string {
 func seedPrevGovActionIds(
 	ctx context.Context,
 	cfg ImportConfig,
-	store metadata.MetadataStore,
+	store ImportLedgerDB,
 	govState *ParsedGovState,
 	currentEpochSlot uint64,
 ) (int, error) {
@@ -4880,9 +4506,9 @@ func seedPrevGovActionIds(
 		},
 	}
 
-	txn := cfg.Database.MetadataTxn(ctx, true)
+	txn := cfg.LedgerDB.Begin(ctx, true)
 	defer txn.Release()
-	metaTxn := txn.Metadata()
+	metaTxn := txn
 
 	count := 0
 	for _, s := range seeds {
@@ -4894,9 +4520,7 @@ func seedPrevGovActionIds(
 		// index. Active proposals are pre-enactment, so a row
 		// matching a root cannot exist; skip if it does to avoid
 		// clobbering the live row's anchor/deposit data.
-		existing, err := store.GetGovernanceProposal(
-			s.id.TxHash, s.id.ActionIndex, metaTxn,
-		)
+		existing, err := store.GetGovernanceProposal(ctx, s.id.TxHash, s.id.ActionIndex, metaTxn)
 		if err != nil && !errors.Is(
 			err, models.ErrGovernanceProposalNotFound,
 		) {
@@ -4934,7 +4558,7 @@ func seedPrevGovActionIds(
 			AnchorHash:    make([]byte, 32),
 			AddedSlot:     0,
 		}
-		if err := store.SetGovernanceProposal(row, metaTxn); err != nil {
+		if err := store.SetGovernanceProposal(ctx, row, metaTxn); err != nil {
 			return count, fmt.Errorf(
 				"seeding root %s#%d (action_type %d): %w",
 				hex.EncodeToString(s.id.TxHash),
@@ -4957,35 +4581,6 @@ func seedPrevGovActionIds(
 	return count, nil
 }
 
-// verifyImportedPurposeRoots parses the snapshot governance state and
-// verifies its per-purpose roots against the database.
-func verifyImportedPurposeRoots(ctx context.Context, cfg ImportConfig) error {
-	govState, err := ParseGovState(
-		cfg.State.GovStateData,
-		cfg.State.EraIndex,
-	)
-	if govState == nil {
-		if err != nil {
-			return fmt.Errorf("parsing governance state: %w", err)
-		}
-		return nil
-	}
-	// A GovRelation that fails to decode leaves PrevGovActionIds nil, which
-	// would otherwise read as a snapshot with no roots.
-	if govState.ImportParseError != nil {
-		return fmt.Errorf(
-			"parsing governance state: %w",
-			govState.ImportParseError,
-		)
-	}
-	if govState.PrevGovActionIds == nil {
-		return nil
-	}
-	return verifyPrevGovActionIdsSeeded(
-		ctx, cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
-	)
-}
-
 // verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
 // root in the snapshot is an enacted governance_proposal row that the tally
 // resolves as that purpose's current root. Without it a skipped seed, or an
@@ -4994,7 +4589,7 @@ func verifyImportedPurposeRoots(ctx context.Context, cfg ImportConfig) error {
 func verifyPrevGovActionIdsSeeded(
 	ctx context.Context,
 	cfg ImportConfig,
-	store metadata.MetadataStore,
+	store ImportLedgerDB,
 	prev *ParsedPrevGovActionIds,
 ) error {
 	roots := []struct {
@@ -5022,15 +4617,13 @@ func verifyPrevGovActionIdsSeeded(
 			[]uint8{govActionTypeNewConstitution},
 		},
 	}
-	txn := cfg.Database.MetadataTxn(ctx, false)
+	txn := cfg.LedgerDB.Begin(ctx, false)
 	defer txn.Release()
 	for _, r := range roots {
 		if r.id == nil {
 			continue
 		}
-		row, err := store.GetGovernanceProposal(
-			r.id.TxHash, r.id.ActionIndex, txn.Metadata(),
-		)
+		row, err := store.GetGovernanceProposal(ctx, r.id.TxHash, r.id.ActionIndex, txn)
 		if err != nil && !errors.Is(
 			err, models.ErrGovernanceProposalNotFound,
 		) {
@@ -5050,9 +4643,7 @@ func verifyPrevGovActionIdsSeeded(
 				r.id.ActionIndex,
 			)
 		}
-		current, err := store.GetLastEnactedGovernanceProposal(
-			r.actionTypes, txn.Metadata(),
-		)
+		current, err := store.GetLastEnactedGovernanceProposal(ctx, r.actionTypes, txn)
 		if err != nil {
 			return fmt.Errorf(
 				"resolving current %s root: %w", r.purpose, err,

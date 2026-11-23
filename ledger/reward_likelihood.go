@@ -83,7 +83,7 @@ func (ls *LedgerState) saveRewardLikelihoodForApplication(
 	if app == nil {
 		return errors.New("save reward likelihood: application is nil")
 	}
-	ldb := ls.ledgerDB()
+	ldb := ls.rewardLikelihoodDB()
 	epoch := app.epochs.pots + 1
 	previousState, err := ldb.GetRewardLikelihoodStateBeforeEpoch(epoch, txn)
 	if err != nil {

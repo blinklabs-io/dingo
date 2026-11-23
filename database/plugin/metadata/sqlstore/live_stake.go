@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -1832,114 +1831,6 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 		return false, err
 	}
 	return orphan, nil
-}
-
-func (s *Store) StaleConsensusStakeSnapshotsExist(
-	txn types.Txn,
-) (bool, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return false, fmt.Errorf(
-			"stale consensus stake snapshots: resolve db: %w",
-			err,
-		)
-	}
-	var stale bool
-	if s.familyDrained(nodesettings.FamilyRewardInputs) {
-		// The mark snapshots' versions are in the live UTxO set, which the
-		// node checks itself; the emptied table holds none.
-		err = db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM pool_stake_snapshot
-    WHERE snapshot_type IN ('mark', 'set', 'go')
-      AND calculation_version <> ?
-)`, models.RewardStakeCalculationVersion).Scan(&stale)
-		if err != nil {
-			return false, fmt.Errorf(
-				"checking stake snapshot provenance: %w", err,
-			)
-		}
-		return stale, nil
-	}
-	// The reward_snapshot clause deliberately does not restrict to
-	// authoritative rows: a non-authoritative fallback row (written by
-	// captureMarkSnapshot) is a real source for reward calculation whenever
-	// no authoritative row has been captured yet, so it must fail this gate
-	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
-	// separately rejecting a version mismatch when the fallback is consulted.
-	err = db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM pool_stake_snapshot
-    WHERE snapshot_type IN ('mark', 'set', 'go')
-      AND calculation_version <> ?
-) OR EXISTS (
-    SELECT 1 FROM reward_snapshot
-    WHERE snapshot_type = 'mark'
-      AND calculation_version <> ?
-)`,
-		models.RewardStakeCalculationVersion,
-		models.RewardStakeCalculationVersion,
-	).Scan(&stale)
-	if err != nil {
-		return false, fmt.Errorf(
-			"checking stake snapshot provenance: %w",
-			err,
-		)
-	}
-	return stale, nil
-}
-
-// StaleConsensusStakeSnapshotEpochs is diagnostics only, for the operator-
-// facing error StaleConsensusStakeSnapshotsExist gates on; it is not itself
-// part of the fail-closed check.
-func (s *Store) StaleConsensusStakeSnapshotEpochs(
-	txn types.Txn,
-) ([]uint64, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"stale consensus stake snapshot epochs: resolve db: %w",
-			err,
-		)
-	}
-	query := `
-SELECT epoch FROM pool_stake_snapshot
-WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
-UNION
-SELECT epoch FROM reward_snapshot
-WHERE snapshot_type = 'mark' AND calculation_version <> ?
-ORDER BY epoch`
-	args := []any{
-		models.RewardStakeCalculationVersion,
-		models.RewardStakeCalculationVersion,
-	}
-	if s.familyDrained(nodesettings.FamilyRewardInputs) {
-		query = `
-SELECT epoch FROM pool_stake_snapshot
-WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
-ORDER BY epoch`
-		args = args[:1]
-	}
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"listing stale stake snapshot epochs: %w",
-			err,
-		)
-	}
-	defer rows.Close()
-	var epochs []uint64
-	for rows.Next() {
-		var epoch uint64
-		if err := rows.Scan(&epoch); err != nil {
-			return nil, err
-		}
-		epochs = append(epochs, epoch)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return epochs, nil
 }
 
 func (s *Store) GetPostSnapshotRewardCredits(

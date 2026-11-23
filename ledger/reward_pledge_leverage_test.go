@@ -161,25 +161,24 @@ func TestRewardParametersPledgeLeverageSource(t *testing.T) {
 			)
 			ls.config.PledgeLeverageEnabled = true
 			ls.config.PledgeLeverage = 100
-			meta := db.Metadata()
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				100, 2, nil, nil, nil, nil, tc.performance.era.Id, 1, 100, nil,
 			))
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				200, 3, nil, nil, nil, nil, tc.calculation.era.Id, 1, 100, nil,
 			))
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pledgeLeverageTestPParams(t, tc.performance),
 				100, 2, tc.performance.era.Id, nil,
 			))
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pledgeLeverageTestPParams(t, tc.calculation),
 				200, 3, tc.calculation.era.Id, nil,
 			))
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			_, params, _, err := ls.rewardParameters(
+			_, params, err := ls.rewardParameters(
 				txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
 			)
 			require.NoError(t, err)

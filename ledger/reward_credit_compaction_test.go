@@ -17,12 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"math"
 	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,24 +31,39 @@ import (
 func agedCreditedRound(t *testing.T) *epochBoundaryBenchFixture {
 	t.Helper()
 	f := creditedRewardRound(t)
+	ageCreditedRound(t, f)
+	return f
+}
+
+// ageCreditedRound records rewardCreditRoundsKeptUnfolded rounds after the
+// one f's boundary credited.
+func ageCreditedRound(t *testing.T, f *epochBoundaryBenchFixture) {
+	t.Helper()
 	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
 	for i := range uint64(rewardCreditRoundsKeptUnfolded) {
-		require.NoError(t, f.db.Metadata().AddAppliedRewardCreditRound(
+		require.NoError(t, seedDB(t, f.db).AddAppliedRewardCreditRound(
 			models.RewardCreditRound{
 				SnapshotEpoch: 9 + i,
 				BoundarySlot:  boundary + (i+1)*epochBoundaryBenchEpochLength,
 			}, nil,
 		))
 	}
-	return f
 }
 
 func unfoldedCreditCount(t *testing.T, f *epochBoundaryBenchFixture) int {
 	t.Helper()
-	var n int
-	require.NoError(t, rewardCalcSQLDB(t, f.db).QueryRow(`
-SELECT COUNT(*) FROM reward_account_output
-WHERE spendable AND NOT guarded AND NOT folded`).Scan(&n))
+	// The set keeps an output only while it is spendable, unguarded and
+	// unfolded.
+	r := f.ls.rewardOutputReader(nil)
+	require.NotNil(t, r, "the fixture's set must keep reward outputs")
+	epochs, err := r.RewardOutputEpochs(nil)
+	require.NoError(t, err)
+	n := 0
+	for _, epoch := range epochs {
+		outputs, err := r.EpochRewardOutputs(epoch, math.MaxInt32, nil)
+		require.NoError(t, err)
+		n += len(outputs)
+	}
 	return n
 }
 
@@ -73,7 +88,7 @@ func TestRewardCreditCompactionIgnoresUnfoldedKeptRounds(t *testing.T) {
 	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
 	for i := range uint64(rewardCreditRoundsKeptUnfolded) {
-		require.NoError(t, f.db.Metadata().SaveRewardAccountOutputs(
+		require.NoError(t, seedDB(t, f.db).SaveRewardAccountOutputs(
 			[]*models.RewardAccountOutput{{
 				StakingKey:  bytes.Repeat([]byte{byte(0xa0 + i)}, 28),
 				PoolKeyHash: bytes.Repeat([]byte{0xb0}, 28),
@@ -132,14 +147,9 @@ func TestRewardCreditCompactionFoldsDueRoundsExactly(t *testing.T) {
 
 	want := creditedRewardRound(t)
 	settleRewardCredits(t, want.ls)
-	gotRaw, err := dbtest.RawSQLiteMetadata(t, f.db)
-	require.NoError(t, err)
-	defer gotRaw.Close()
-	wantRaw, err := dbtest.RawSQLiteMetadata(t, want.db)
-	require.NoError(t, err)
-	defer wantRaw.Close()
-	require.Equal(t, dumpEpochBoundaryState(t, wantRaw),
-		dumpEpochBoundaryState(t, gotRaw),
+	require.Zero(t, unfoldedCreditCount(t, want))
+	require.Equal(t, accountRewards(t, want, credits),
+		accountRewards(t, f, credits),
 		"compaction writes what folding every credit writes")
 }
 
@@ -158,23 +168,16 @@ func TestRewardCreditCompactionLeavesNewestRounds(t *testing.T) {
 // the round's outputs are unfolded credits again.
 func TestRewardCreditCompactionRollbackBelowBoundary(t *testing.T) {
 	t.Parallel()
-	f := agedCreditedRound(t)
+	f, lastOfEpoch := journaledRewardRound(t)
+	ageCreditedRound(t, f)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
+	unfolded := unfoldedCreditCount(t, f)
+	require.Positive(t, unfolded)
 	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
-	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
-	txn := f.db.Transaction(context.Background(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := f.db.DeleteAccountRewardsAfterSlot(context.Background(), boundary-1, txn); err != nil {
-			return err
-		}
-		return f.db.DeleteRewardStateAfterSlot(boundary-1, txn)
-	}))
+	fxRollback(t, f.ls, lastOfEpoch)
 	require.Equal(t, stored, accountRewards(t, f, credits))
-	var folded int
-	require.NoError(t, rewardCalcSQLDB(t, f.db).QueryRow(
-		`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
-	).Scan(&folded))
-	require.Zero(t, folded)
+	require.Equal(t, unfolded, unfoldedCreditCount(t, f),
+		"the round's outputs are unfolded credits again")
 }

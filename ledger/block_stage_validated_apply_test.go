@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -113,12 +112,6 @@ func processValidatedTestBlock(t *testing.T) *LedgerState {
 			{TxId: txHash, OutputIdx: 0}: {BlockSlot: 10, ByteLength: 1},
 		},
 	}
-	require.NoError(
-		t,
-		db.CreateUtxo(context.Background(), nil, &models.Utxo{
-			TxId: inputID, OutputIdx: 0, AddedSlot: 1,
-		}),
-	)
 
 	validated := 0
 	testEra := eras.DijkstraEraDesc
@@ -151,6 +144,8 @@ func processValidatedTestBlock(t *testing.T) *LedgerState {
 		},
 		currentEra: testEra,
 	}
+	attachTestLiveSet(t, ls)
+	seedTestLiveOutput(t, ls, inputID, 0, 5_000_000)
 	ls.metrics.init(prometheus.NewRegistry())
 	block := &validityOutcomeTestBlock{
 		header: &gdijkstra.DijkstraBlockHeader{

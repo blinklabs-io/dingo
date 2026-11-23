@@ -110,11 +110,10 @@ func SetSyntheticV2CostModelClearedEpoch(
 // onto a fork that never re-enacts the confirming write. Mirrors the
 // CIP-0163 delegator-inactivity-activation precedent
 // (RecomputeAccountExpirationsAfterTruncate,
-// DelegatorInactivityActivationEpoch): shared by
-// ledger.LedgerState.rollback (bounded rollback during normal sync) and
-// database/lifecycle.Truncate (offline/live disaster-recovery truncate, which
-// may go far deeper), so both apply the exact same bookkeeping regardless of
-// which path performs the truncation.
+// DelegatorInactivityActivationEpoch). database/lifecycle.Truncate calls it
+// for a store whose protocol parameters are still in SQL; once the LedgerDB
+// set holds them, the set keeps both markers and reverts them in its own
+// rollback.
 func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 	d *Database,
 	txn *Txn,

@@ -46,6 +46,7 @@ func (*scanCountingSet) EraSwitch() (*database.MidEpochEraSwitch, error) {
 func (s *scanCountingSet) PoolStakeSnapshots(
 	epoch uint64,
 	typ string,
+	_ int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	s.scans.Add(1)
 	var out []*models.PoolStakeSnapshot
@@ -176,7 +177,7 @@ func TestSnapshotsCapturedInViewMatchesPerEpochView(t *testing.T) {
 		var want []string
 		for e := uint64(0); e <= 7; e++ {
 			for _, typ := range types {
-				rows, err := ls.snapshotView(set, nil, e, typ)
+				rows, err := ls.snapshotView(set, nil, e, typ, 0)
 				require.NoError(t, err)
 				for _, s := range rows {
 					if inSlotRange(s.CapturedSlot, rng[0], rng[1]) {

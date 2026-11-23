@@ -46,3 +46,10 @@ type Transaction struct {
 	BlockIndex    uint32
 	Valid         bool
 }
+
+// MetadataLabelCount is a transaction metadata label in use and the number of
+// transactions whose metadata carries it.
+type MetadataLabelCount struct {
+	Label uint64
+	Count uint64
+}

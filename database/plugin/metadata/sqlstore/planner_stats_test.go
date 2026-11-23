@@ -106,7 +106,7 @@ SELECT tx_id, MIN(added_slot) FROM utxo GROUP BY tx_id`,
 }
 
 // addDeletedSlotTrapIndex recreates idx_utxo_deleted_payment_script, the full
-// deleted_slot-leading index migration 75 drops. Without statistics SQLite
+// deleted_slot-leading index migration 74 drops. Without statistics SQLite
 // drives a live-row lookup from it, which is the plan these fixtures need to
 // observe; the production schema no longer offers that fallback.
 func addDeletedSlotTrapIndex(tb testing.TB, store *Store) {

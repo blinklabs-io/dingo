@@ -711,8 +711,8 @@ func (b *poolBook) retiringAtEpoch(
 }
 
 // leiosCertifies reports whether the chain may hold a Leios certified pool
-// registration or retirement, which takes effect at a certifying slot the set
-// does not keep, so pool reads stay on the metadata store. Certificates exist
+// registration or retirement, which takes effect at a certifying slot the
+// pool states do not keep. Certificates exist
 // only from the Dijkstra era on: every node configures a certificate
 // validator, so the validator alone does not mean one was ever applied. A
 // ledger that has published no era yet is treated as certifying.

@@ -279,18 +279,6 @@ type AccountStore interface {
 		maxSlot uint64,
 		txn Txn,
 	) (map[string]uint64, error)
-	// AccountsWitnessedAfterSlot returns the distinct reward-account
-	// credentials witnessed (via a stake-witnessing certificate or a reward
-	// withdrawal) at a slot greater than the given slot — the CIP-0163 rollback
-	// affected set. It must be called before rolled-back certificate and
-	// reward-delta rows are deleted. When txn is nil a read transaction is
-	// opened for the query; pass an existing txn to read within a wider unit of
-	// work.
-	AccountsWitnessedAfterSlot(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) ([]models.StakeCredentialRef, error)
 	// GetAccountByCredential returns an account by staking credential tag and
 	// key.
 	GetAccountByCredential(
@@ -436,18 +424,6 @@ type AccountStore interface {
 		stakingKey []byte,
 		txn Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
-	// RenewAccountExpirations sets the CIP-0163 expirationEpoch for the given
-	// reward-account credentials. See the metadata store implementation for
-	// semantics (refs with no matching account row are ignored). When txn is
-	// nil a write transaction is opened, committed on success and rolled back
-	// on error via Txn.Do; pass an existing write txn to participate in a
-	// wider unit of work.
-	RenewAccountExpirations(
-		ctx context.Context,
-		refs []models.StakeCredentialRef,
-		expirationEpoch uint64,
-		txn Txn,
-	) error
 	// SetGenesisStakingWithDeposits stores genesis staking with the key and
 	// pool deposits that the reference ledger retains for later refunds.
 	SetGenesisStakingWithDeposits(
@@ -458,34 +434,10 @@ type AccountStore interface {
 		blockHash []byte,
 		txn Txn,
 	) error
-	// StampAllActiveAccountExpirations sets the CIP-0163 expirationEpoch for
-	// every active account row. Used once at activation to give every
-	// pre-existing account a full inactivity window from the activation epoch,
-	// including accounts witnessed before activation. Returns the number of
-	// rows stamped. When txn is nil a write transaction is opened, committed on
-	// success and rolled back on error via Txn.Do; pass an existing write txn
-	// to participate in a wider unit of work.
-	StampAllActiveAccountExpirations(
-		ctx context.Context,
-		expirationEpoch uint64,
-		txn Txn,
-	) (int64, error)
 }
 
 // RewardStore holds reward calculation inputs, outputs, pots and credit rounds.
 type RewardStore interface {
-	// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of
-	// each credential in refs, recording slot as its update. With a live
-	// UTxO source, a rollback calls it for the credentials of the outputs
-	// the rollback changes, which the metadata store cannot find itself.
-	RefreshRewardLiveStakeRefs(
-		refs []models.StakeCredentialRef,
-		slot uint64,
-		txn Txn,
-	) error
-	// RebuildRewardLiveStake recomputes the live reward aggregate of every
-	// credential as of slot.
-	RebuildRewardLiveStake(slot uint64, txn Txn) error
 	// MergeImportedPoolBlockCounts combines the per-pool block counts
 	// observed for epoch from epochStartSlot with those imported from a
 	// ledger-state snapshot, returning the merged counts and epoch total. The
@@ -562,25 +514,6 @@ type RewardStore interface {
 		sourceHash []byte,
 		txn Txn,
 	) error
-	// ClaimFallbackRewardSnapshot atomically reserves the (epoch,
-	// snapshot_type) reward snapshot marker for a fallback (non-authoritative)
-	// capture, returning false when an authoritative snapshot already occupies
-	// it so the caller abandons the fallback rather than overwriting the
-	// authoritative row. See rewardstate.ClaimFallbackSnapshot.
-	ClaimFallbackRewardSnapshot(
-		snapshot *models.RewardSnapshot,
-		txn Txn,
-	) (bool, error)
-	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that
-	// cannot persist reward inputs against the authoritative epoch-rollover
-	// capture. It returns proceed=false when an authoritative row already
-	// exists. A non-zero guard ID identifies a temporary row that the caller
-	// must delete in the same transaction before commit.
-	ClaimFallbackRewardSnapshotGuard(
-		epoch uint64,
-		snapshotType string,
-		txn Txn,
-	) (bool, uint, error)
 	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
 	// one stake credential in the credited rounds folded and returns them,
 	// for the caller to write to the account in the same transaction.
@@ -610,14 +543,6 @@ type RewardStore interface {
 	// can read reward_account_output behind the tip. API storage mode prunes
 	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) error
-	// DeleteRewardAccountOutputsBeforeEpoch is the reward account output half
-	// of DeleteRewardStateBeforeEpoch, for a database that drained the stake
-	// inputs.
-	DeleteRewardAccountOutputsBeforeEpoch(
 		ctx context.Context,
 		epoch uint64,
 		txn Txn,
@@ -702,28 +627,6 @@ type RewardStore interface {
 	) ([]*models.AccountRewardDelta, error)
 	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
 	GetRewardAdaPots(epoch uint64, txn Txn) (*models.RewardAdaPots, error)
-	// SaveRewardLikelihoodState installs the non-myopic state visible from a
-	// completed reward boundary.
-	SaveRewardLikelihoodState(
-		state *models.RewardLikelihoodState,
-		pools []*models.RewardPoolLikelihood,
-		txn Txn,
-	) error
-	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
-	GetRewardLikelihoodStateBeforeEpoch(
-		epoch uint64,
-		txn Txn,
-	) (*models.RewardLikelihoodState, error)
-	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
-	GetRewardLikelihoodStateAtSlot(
-		slot uint64,
-		txn Txn,
-	) (*models.RewardLikelihoodState, error)
-	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
-	GetRewardPoolLikelihoods(
-		epoch uint64,
-		txn Txn,
-	) ([]*models.RewardPoolLikelihood, error)
 	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
 	GetRewardPoolInputs(
 		epoch uint64,
@@ -776,10 +679,6 @@ type RewardStore interface {
 		snapshotEpoch uint64,
 		txn Txn,
 	) (bool, error)
-	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
-	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
-	// that claimed the guard.
-	ReleaseFallbackRewardSnapshotGuard(guardID uint, txn Txn) error
 	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
 	SaveRewardAccountOutputs(
 		outputs []*models.RewardAccountOutput,
@@ -801,6 +700,33 @@ type RewardStore interface {
 	// TakeRewardEligibilityRecheck returns and clears the credentials whose
 	// registration a rollback restored since the last call.
 	TakeRewardEligibilityRecheck(txn Txn) ([]models.StakeCredentialRef, error)
+}
+
+// RewardLikelihoodStore holds the non-myopic pool-ranking state the reward
+// updates install. Only the ledger's own LedgerDB keeps it.
+type RewardLikelihoodStore interface {
+	// SaveRewardLikelihoodState installs the non-myopic state visible from a
+	// completed reward boundary.
+	SaveRewardLikelihoodState(
+		state *models.RewardLikelihoodState,
+		pools []*models.RewardPoolLikelihood,
+		txn Txn,
+	) error
+	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
+	GetRewardLikelihoodStateBeforeEpoch(
+		epoch uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
+	GetRewardLikelihoodStateAtSlot(
+		slot uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
+	GetRewardPoolLikelihoods(
+		epoch uint64,
+		txn Txn,
+	) ([]*models.RewardPoolLikelihood, error)
 }
 
 // PoolStore holds stake pool registrations, retirements, VRF keys and
@@ -1528,13 +1454,6 @@ type GovernanceStore interface {
 		epoch uint64,
 		txn Txn,
 	) ([]*models.GovernanceProposal, error)
-	// GetExpiredDReps returns all active DReps whose expiry epoch is at
-	// or before the given epoch.
-	GetExpiredDReps(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) ([]*models.Drep, error)
 	// GetExpiredGovernanceProposalsAt returns proposals expired at the exact
 	// epoch-boundary slot. Used by epoch replay to restore deposit-return
 	// effects.
@@ -1895,17 +1814,6 @@ type EpochStore interface {
 	// proposals that target epoch or the epoch before it, newest row
 	// first.
 	GetPParamUpdates(epoch uint64, txn Txn) ([]models.PParamUpdate, error)
-	// ReconcileAlonzoPParamsUnitAfterRecovery repairs a conservative v20
-	// classification only when commit-timestamp recovery removed every
-	// persisted Alonzo protocol-parameter row. The migration must initially
-	// treat any such row as legacy because releases before gouroboros v0.205.7
-	// stored a lossy per-byte value. Once recovery has rolled all of those rows
-	// back, however, there is no incompatible value left to protect and a
-	// genesis replay can safely persist the corrected per-word representation.
-	//
-	// Missing and unknown markers are never inferred here. They remain hard
-	// failures in checkAlonzoPParamsUnit rather than being silently blessed.
-	ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) error
 	// SaveEpochSummary saves an epoch summary.
 	SaveEpochSummary(summary *models.EpochSummary, txn Txn) error
 	// SetBlockNonce records the nonce of the block blockHash at slotNumber.

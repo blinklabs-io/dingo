@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -146,7 +147,7 @@ type stateBatchHarness struct {
 func newStateBatchHarness(t *testing.T) *stateBatchHarness {
 	t.Helper()
 	db := newTestDB(t)
-	return &stateBatchHarness{
+	h := &stateBatchHarness{
 		db: db,
 		ls: &LedgerState{
 			db:             db,
@@ -158,19 +159,13 @@ func newStateBatchHarness(t *testing.T) *stateBatchHarness {
 		},
 		slot: 10,
 	}
+	attachTestLedgerDB(t, h.ls)
+	return h
 }
 
 func (h *stateBatchHarness) seedUtxo(t *testing.T, ref batchRef, amount uint64) {
 	t.Helper()
-	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		return h.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId:       ref.txID(),
-			OutputIdx:  uint32(ref.index), //nolint:gosec
-			PaymentKey: bytes.Repeat([]byte{0x42}, 28),
-			AddedSlot:  1,
-			Amount:     dbtypes.Uint64(amount),
-		})
-	}))
+	seedTestLiveOutput(t, h.ls, ref.txID(), uint32(ref.index), amount) //nolint:gosec
 }
 
 func (h *stateBatchHarness) seedAccount(
@@ -179,7 +174,7 @@ func (h *stateBatchHarness) seedAccount(
 	reward uint64,
 ) {
 	t.Helper()
-	require.NoError(t, h.db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, h.db, context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -255,7 +250,13 @@ func (h *stateBatchHarness) apply(
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
 	err := h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		return delta.applyWithoutRecordingDonations(context.Background(), h.ls, txn)
+		err := delta.applyWithoutRecordingDonations(context.Background(), h.ls, txn)
+		if err != nil {
+			return err
+		}
+		// The set journals the block under its point, as the block loop does.
+		h.ls.stageUtxoSet(dbadapter.Txn(txn), &point)
+		return nil
 	})
 	return delta, err
 }
@@ -298,14 +299,14 @@ func (h *stateBatchHarness) process(
 
 func (h *stateBatchHarness) utxoLive(t *testing.T, txID []byte, index uint32) bool {
 	t.Helper()
-	utxo, err := h.db.Metadata().GetUtxo(txID, index, nil)
+	_, ok, err := h.ls.config.UtxoSet.(UtxoSetReader).Get(txID, index)
 	require.NoError(t, err)
-	return utxo != nil
+	return ok
 }
 
 func (h *stateBatchHarness) reward(t *testing.T, stakeKey []byte) uint64 {
 	t.Helper()
-	account, err := h.db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
+	account, err := h.ls.ledgerDB().GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	return uint64(account.Reward)
 }
@@ -408,7 +409,7 @@ func TestDijkstraBatchRollbackAndReapplyRestoresEveryLevel(t *testing.T) {
 		Hash: bytes.Repeat([]byte{0x01}, 32),
 		Type: gledger.BlockTypeDijkstra,
 	}, nil))
-	require.NoError(t, h.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, h.db,
 		bytes.Repeat([]byte{0x01}, 32),
 		1,
 		bytes.Repeat([]byte{0x02}, 32),
@@ -434,6 +435,8 @@ func TestDijkstraBatchRollbackAndReapplyRestoresEveryLevel(t *testing.T) {
 		}
 	}
 	applied := []bool{false, false, true, true}
+	parent := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	h.ls.stageUtxoSet(nil, &parent)
 	before := snapshot()
 	require.Equal(t, []bool{true, true, false, false}, before)
 
@@ -442,13 +445,11 @@ func TestDijkstraBatchRollbackAndReapplyRestoresEveryLevel(t *testing.T) {
 	require.Equal(t, applied, snapshot())
 
 	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, _, err := h.db.TruncateAfterSlot(context.Background(),
-			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)},
-			0,
-			txn,
-		)
+		h.ls.stageUtxoSetRollback(dbadapter.Txn(txn), parent)
+		_, _, err := h.db.TruncateAfterSlot(context.Background(), parent, 0, txn)
 		return err
 	}))
+	require.False(t, h.ls.utxoSetFailed.Load())
 	require.Equal(t, before, snapshot(), "rollback restores inputs and drops every level's outputs")
 
 	_, err = h.apply(t, tx)

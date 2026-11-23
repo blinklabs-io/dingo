@@ -49,7 +49,7 @@ func seedParameterChangeGovernanceConstitution(
 	db *database.Database,
 ) {
 	t.Helper()
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorHash: bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size),
 	}, nil))
 }
@@ -157,6 +157,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		},
 		currentEra: currentEra,
 	}
+	fxAttachLedgerDB(t, ls)
 	block := &parameterChangeGovernanceTestBlock{
 		header: &conway.ConwayBlockHeader{},
 		tx:     tx,
@@ -193,7 +194,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
+	_, getErr := seedDB(t, db).GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,
@@ -256,6 +257,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		},
 		currentEra: currentEra,
 	}
+	fxAttachLedgerDB(t, ls)
 	block := &parameterChangeGovernanceTestBlock{
 		header: &gdijkstra.DijkstraBlockHeader{},
 		tx:     tx,
@@ -292,7 +294,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
+	_, getErr := seedDB(t, db).GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,

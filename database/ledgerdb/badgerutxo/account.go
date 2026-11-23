@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/dgraph-io/badger/v4"
@@ -66,25 +67,70 @@ func accountKey(tag uint8, key []byte) []byte {
 	return append([]byte{AccountTag}, credKey(tag, key)...)
 }
 
-func accountPoolKey(r AccountRow) []byte {
-	k := []byte{AccountPoolTag, byte(len(r.Pool))} //nolint:gosec // a pool key hash
-	k = append(k, r.Pool...)
-	return append(k, credKey(r.Tag, r.Key)...)
+// ErrKeyPartTooLong reports a hash too long for the one-byte length a key
+// stores it behind.
+var ErrKeyPartTooLong = errors.New("badgerutxo: key part longer than 255 bytes")
+
+// keyPartLen returns the length byte of v in a key. A longer part would wrap
+// to the length of a shorter one and be filed under that part's keys.
+func keyPartLen(v []byte) (byte, error) {
+	n := len(v)
+	if n > math.MaxUint8 {
+		return 0, fmt.Errorf("%w: %d bytes", ErrKeyPartTooLong, n)
+	}
+	return byte(n), nil
 }
 
-func accountPoolPrefix(pool []byte) []byte {
-	return append([]byte{AccountPoolTag, byte(len(pool))}, pool...) //nolint:gosec // a pool key hash
+func accountPoolKey(r AccountRow) ([]byte, error) {
+	k, err := accountPoolPrefix(r.Pool)
+	if err != nil {
+		return nil, err
+	}
+	return append(k, credKey(r.Tag, r.Key)...), nil
 }
 
-func accountDrepKey(r AccountRow) []byte {
-	k := accountDrepPrefix(r.DrepType, r.Drep)
-	return append(k, credKey(r.Tag, r.Key)...)
+func accountPoolPrefix(pool []byte) ([]byte, error) {
+	n, err := keyPartLen(pool)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{AccountPoolTag, n}, pool...), nil
 }
 
-func accountDrepPrefix(typ uint8, drep []byte) []byte {
-	k := make([]byte, 0, 3+len(drep))
-	k = append(k, AccountDRepTag, typ, byte(len(drep))) //nolint:gosec // a DRep credential
-	return append(k, drep...)
+func accountDrepKey(r AccountRow) ([]byte, error) {
+	k, err := accountDrepPrefix(r.DrepType, r.Drep)
+	if err != nil {
+		return nil, err
+	}
+	return append(k, credKey(r.Tag, r.Key)...), nil
+}
+
+func accountDrepPrefix(typ uint8, drep []byte) ([]byte, error) {
+	n, err := keyPartLen(drep)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{AccountDRepTag, typ, n}, drep...), nil
+}
+
+// accountSecondaryKeys returns the secondary keys r has.
+func accountSecondaryKeys(r AccountRow) ([][]byte, error) {
+	var keys [][]byte
+	if delegatesToPool(r) {
+		k, err := accountPoolKey(r)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	if delegatesToDrep(r) {
+		k, err := accountDrepKey(r)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
 }
 
 // delegatesToPool and delegatesToDrep say which secondary keys r has: an
@@ -205,13 +251,12 @@ func setAccount(txn *badger.Txn, tag uint8, key []byte, r *AccountRow) error {
 		return err
 	}
 	if had {
-		if delegatesToPool(old) {
-			if err := txn.Delete(accountPoolKey(old)); err != nil {
-				return err
-			}
+		stale, err := accountSecondaryKeys(old)
+		if err != nil {
+			return err
 		}
-		if delegatesToDrep(old) {
-			if err := txn.Delete(accountDrepKey(old)); err != nil {
+		for _, k := range stale {
+			if err := txn.Delete(k); err != nil {
 				return err
 			}
 		}
@@ -222,16 +267,15 @@ func setAccount(txn *badger.Txn, tag uint8, key []byte, r *AccountRow) error {
 		}
 		return txn.Delete(accountKey(tag, key))
 	}
+	secondary, err := accountSecondaryKeys(*r)
+	if err != nil {
+		return err
+	}
 	if err := txn.Set(accountKey(tag, key), encodeAccount(*r)); err != nil {
 		return err
 	}
-	if delegatesToPool(*r) {
-		if err := txn.Set(accountPoolKey(*r), nil); err != nil {
-			return err
-		}
-	}
-	if delegatesToDrep(*r) {
-		if err := txn.Set(accountDrepKey(*r), nil); err != nil {
+	for _, k := range secondary {
+		if err := txn.Set(k, nil); err != nil {
 			return err
 		}
 	}
@@ -307,7 +351,11 @@ func (s *Store) eachAccountUnder(prefix []byte, fn func(AccountRow) error) error
 
 // AccountsByPool calls fn with every active account delegating to pool.
 func (s *Store) AccountsByPool(pool []byte, fn func(AccountRow) error) error {
-	return s.eachAccountUnder(accountPoolPrefix(pool), fn)
+	prefix, err := accountPoolPrefix(pool)
+	if err != nil {
+		return err
+	}
+	return s.eachAccountUnder(prefix, fn)
 }
 
 // AccountsByDrep calls fn with every active account delegating to the DRep
@@ -318,7 +366,11 @@ func (s *Store) AccountsByDrep(
 	drep []byte,
 	fn func(AccountRow) error,
 ) error {
-	return s.eachAccountUnder(accountDrepPrefix(typ, drep), fn)
+	prefix, err := accountDrepPrefix(typ, drep)
+	if err != nil {
+		return err
+	}
+	return s.eachAccountUnder(prefix, fn)
 }
 
 // Accounts calls fn with every account, in key order.
@@ -359,35 +411,28 @@ func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error 
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
-	if !s.merging.Load() {
-		if err := s.dropAccountJournal(); err != nil {
-			return fmt.Errorf("badgerutxo: drop accounts: %w", err)
-		}
-		if err := s.dropRewardSeqIndex(); err != nil {
-			return fmt.Errorf("badgerutxo: drop accounts: %w", err)
-		}
+	if err := s.dropAccountJournal(); err != nil {
+		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
+	}
+	if err := s.dropRewardSeqIndex(); err != nil {
+		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
 	wb := s.newLoadSink()
 	defer wb.Cancel()
 	n := 0
 	err := feed(func(r AccountRow) error {
 		n++
+		secondary, err := accountSecondaryKeys(r)
+		if err != nil {
+			return err
+		}
 		if err := wb.Set(accountKey(r.Tag, r.Key), encodeAccount(r)); err != nil {
 			return err
 		}
-		if wb.wb == nil {
-			// A merge writes the account through setAccount, which keeps
-			// the secondary keys in step and removes the ones the account
-			// it overwrites held.
-			return nil
-		}
-		if delegatesToPool(r) {
-			if err := wb.Set(accountPoolKey(r), nil); err != nil {
+		for _, k := range secondary {
+			if err := wb.Set(k, nil); err != nil {
 				return err
 			}
-		}
-		if delegatesToDrep(r) {
-			return wb.Set(accountDrepKey(r), nil)
 		}
 		return nil
 	})
@@ -562,24 +607,30 @@ func readRewardSeq(txn *badger.Txn) (uint64, error) {
 	return binary.BigEndian.Uint64(v), nil
 }
 
-func rewardRecordKey(r RewardRecord) []byte {
-	k := make([]byte, 0, 12+len(r.Source)+len(r.Key))
-	k = append(k, RewardRecordTag)
-	k = binary.BigEndian.AppendUint64(k, r.Slot)
+func rewardRecordKey(r RewardRecord) ([]byte, error) {
+	n, err := keyPartLen(r.Source)
+	if err != nil {
+		return nil, err
+	}
+	k := binary.BigEndian.AppendUint64([]byte{RewardRecordTag}, r.Slot)
 	kind := byte(0)
 	if r.Withdrawal {
 		kind = 1
 	}
-	k = append(k, kind, byte(len(r.Source))) //nolint:gosec // a hash
+	k = append(k, kind, n)
 	k = append(k, r.Source...)
-	return append(k, credKey(r.Tag, r.Key)...)
+	return append(k, credKey(r.Tag, r.Key)...), nil
 }
 
 // HasRewardRecord reports whether r was applied.
 func (s *Store) HasRewardRecord(r RewardRecord) (bool, error) {
+	k, err := rewardRecordKey(r)
+	if err != nil {
+		return false, err
+	}
 	var ok bool
-	err := s.view(func(txn *badger.Txn) error {
-		_, err := txn.Get(rewardRecordKey(r))
+	err = s.view(func(txn *badger.Txn) error {
+		_, err := txn.Get(k)
 		if errors.Is(err, badger.ErrKeyNotFound) {
 			return nil
 		}
@@ -598,7 +649,10 @@ func putRewardRecords(txn *badger.Txn, records []RewardRecord) error {
 		return err
 	}
 	for _, r := range records {
-		k := rewardRecordKey(r)
+		k, err := rewardRecordKey(r)
+		if err != nil {
+			return err
+		}
 		seq := next
 		item, err := txn.Get(k)
 		switch {

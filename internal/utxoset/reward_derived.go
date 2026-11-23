@@ -437,21 +437,7 @@ func (s *Set) RewardCursorRow(
 // RewardDerivedEpochs lists the epochs holding a pool or account output
 // row, oldest first.
 func (s *Set) RewardDerivedEpochs() ([]uint64, error) {
-	var out []uint64
-	var last uint64
-	first := true
-	err := s.store.Rows(
-		[]byte{badgerutxo.RewardDerivedTag},
-		func(k, _ []byte) error {
-			e := binary.BigEndian.Uint64(k[1:9])
-			if first || e != last {
-				out = append(out, e)
-				last, first = e, false
-			}
-			return nil
-		},
-	)
-	return out, err
+	return s.store.DistinctUint64Keys([]byte{badgerutxo.RewardDerivedTag})
 }
 
 var _ ledger.RewardDerivedReader = (*Set)(nil)

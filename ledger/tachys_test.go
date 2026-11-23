@@ -60,20 +60,20 @@ func TestTachysEligibilityDefersWhenContextChangesDuringLoad(t *testing.T) {
 	t.Parallel()
 
 	const epochID = uint64(3)
-	db := newTestDB(t)
-	meta := db.Metadata()
+	db := fxOpenDB(t)
 	snapshotEpoch := praos.StakeSnapshotEpoch(epochID)
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, snapshotEpoch, ssPool1Hex, oneTrillion),
 		},
 		nil,
 	))
-	require.NoError(t, meta.SaveEpochSummary(
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(
 		epochSummary(snapshotEpoch, oneTrillion),
 		nil,
 	))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(&consensusSnapshot{
 		generation:        1,
 		contextGeneration: 1,
@@ -102,4 +102,43 @@ func TestTachysEligibilityDefersWhenContextChangesDuringLoad(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, IsHeaderVerificationDeferred(err), err)
 	require.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+}
+
+// A snapshot recapture that commits between the pool stake read and the total
+// read does not reach a distribution being loaded: both come from the capture
+// the load started on.
+func TestTachysDistributionReadsOneCaptureAcrossRecapture(t *testing.T) {
+	t.Parallel()
+
+	const epochID = uint64(3)
+	db := fxOpenDB(t)
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochID)
+	ls := newPoolDistr2Ledger(t, db)
+	capture := func(stake uint64) {
+		t.Helper()
+		txn := ls.ledgerDB().Begin(t.Context(), true)
+		defer func() { require.NoError(t, txn.Rollback()) }()
+		require.NoError(t, ls.ledgerDB().SavePoolStakeSnapshots(
+			[]*models.PoolStakeSnapshot{
+				markSnapshot(t, snapshotEpoch, ssPool1Hex, stake),
+			},
+			txn,
+		))
+		require.NoError(t, ls.ledgerDB().SaveEpochSummary(
+			epochSummary(snapshotEpoch, stake),
+			txn,
+		))
+		require.NoError(t, txn.Commit())
+	}
+	capture(oneTrillion)
+	ls.consensus.Store(&consensusSnapshot{
+		generation:        1,
+		contextGeneration: 1,
+		currentEpoch:      models.Epoch{EpochId: epochID},
+	})
+	ls.tachysStakeReadHook = func() { capture(2 * oneTrillion) }
+
+	distribution, err := ls.TachysDistribution(t.Context(), snapshotEpoch)
+	require.NoError(t, err)
+	require.Equal(t, uint64(oneTrillion), distribution.TotalStake())
 }

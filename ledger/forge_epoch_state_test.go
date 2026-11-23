@@ -54,7 +54,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 		fixture.currentEpoch,
 		fixture.currentPParams,
 	)
-	require.NoError(t, fixture.db.Metadata().AddNetworkDonation(
+	require.NoError(t, seedDB(t, fixture.db).AddNetworkDonation(
 		fixture.currentEpoch.StartSlot+50,
 		fixture.currentEpoch.EpochId,
 		donation,
@@ -276,7 +276,7 @@ func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
 		RatifiedEpoch: &ratifiedEpoch,
 		RatifiedSlot:  &ratifiedSlot,
 	}
-	require.NoError(t, fixture.db.SetGovernanceProposal(
+	require.NoError(t, seedDB(t, fixture.db).SetGovernanceProposal(
 		t.Context(), proposal, nil,
 	))
 	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}

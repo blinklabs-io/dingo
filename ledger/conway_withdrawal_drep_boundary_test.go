@@ -68,10 +68,11 @@ func TestConwayWithdrawalDRepGateCredentialBoundary(t *testing.T) {
 			Active:        true,
 		},
 	} {
-		require.NoError(t, db.CreateAccount(context.Background(), nil, account))
+		require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, account))
 	}
 
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionPlomin,

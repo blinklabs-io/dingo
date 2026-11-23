@@ -1313,7 +1313,20 @@ func (s *Store) loadFamily(
 	feed func(put func(k, v []byte) error) error,
 	invalidate ...[]byte,
 ) error {
-	if err := s.dropPrefix([]byte{tag}); err != nil {
+	return s.writeFamily(s.dropPrefix, tag, marker, name, feed, invalidate...)
+}
+
+// writeFamily replaces the rows under tag with the ones feed supplies, after
+// drop removes the held ones, and marks the family loaded.
+func (s *Store) writeFamily(
+	drop func(prefixes ...[]byte) error,
+	tag byte,
+	marker []byte,
+	name string,
+	feed func(put func(k, v []byte) error) error,
+	invalidate ...[]byte,
+) error {
+	if err := drop([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
 	}
 	if len(invalidate) > 0 {
@@ -1478,4 +1491,37 @@ func (s *Store) LastKeyAtOrBelow(prefix, limit []byte) ([]byte, bool, error) {
 		return nil
 	})
 	return out, out != nil, err
+}
+
+// DistinctUint64Keys returns, in order, the distinct big-endian uint64 values
+// that immediately follow prefix in its keys. It reads one key per distinct
+// value and seeks past the rest, so its cost follows the number of distinct
+// values rather than the number of rows under prefix, and it reads no values.
+func (s *Store) DistinctUint64Keys(prefix []byte) ([]uint64, error) {
+	var out []uint64
+	err := s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		seek := bytes.Clone(prefix)
+		for it.Seek(seek); it.Valid(); it.Seek(seek) {
+			k := it.Item().Key()
+			s.rangeRowsVisited.Add(1)
+			if len(k) < len(prefix)+8 {
+				return fmt.Errorf(
+					"badgerutxo: key %x under prefix %x has no uint64", k, prefix,
+				)
+			}
+			v := binary.BigEndian.Uint64(k[len(prefix) : len(prefix)+8])
+			out = append(out, v)
+			if v == math.MaxUint64 {
+				break
+			}
+			seek = binary.BigEndian.AppendUint64(bytes.Clone(prefix), v+1)
+		}
+		return nil
+	})
+	return out, err
 }

@@ -37,6 +37,7 @@ var tagFamilies = map[byte]nodesettings.Family{
 	StakeHistoryTag:      nodesettings.FamilyAccounts,
 	ImportBaselineTag:    nodesettings.FamilyAccounts,
 	WitnessTag:           nodesettings.FamilyAccounts,
+	InactivityTag:        nodesettings.FamilyAccounts,
 	DRepTag:              nodesettings.FamilyDReps,
 	DRepLinkTag:          nodesettings.FamilyDReps,
 	DormancyTag:          nodesettings.FamilyDReps,
@@ -54,6 +55,7 @@ var tagFamilies = map[byte]nodesettings.Family{
 	ResignTag:            nodesettings.FamilyCommitteeConstitution,
 	ProposalTag:          nodesettings.FamilyGovernance,
 	VoteTag:              nodesettings.FamilyGovernance,
+	RatifyPendingTag:     nodesettings.FamilyGovernance,
 	RewardOutputTag:      nodesettings.FamilyRewardOutputs,
 	RewardEpochTag:       nodesettings.FamilyRewardOutputs,
 	RewardRoundTag:       nodesettings.FamilyRewardOutputs,
@@ -66,6 +68,7 @@ var tagFamilies = map[byte]nodesettings.Family{
 	RewardPoolInputTag:   nodesettings.FamilyRewardInputs,
 	RewardSnapshotTag:    nodesettings.FamilyRewardInputs,
 	RewardPotsTag:        nodesettings.FamilyRewardInputs,
+	RewardLikelihoodTag:  nodesettings.FamilyRewardInputs,
 }
 
 // undrainedTags are the row families loaded from tables no drain empties

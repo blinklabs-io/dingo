@@ -78,10 +78,9 @@ type RewardSnapshot struct {
 	EpochNonce          []byte
 	ProtocolVersion     uint
 	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
-	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
-	// event-driven fallback capture (captureMarkSnapshot) never overwrites an
-	// authoritative row: it either claims a fresh row or is superseded. Defaults
-	// to false, so pre-existing rows and fallback captures read as provisional.
+	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot).
+	// Defaults to false, so rows written before the column existed read as
+	// provisional.
 	Authoritative bool
 	// CalculationVersion ties authoritative Mark metadata to the stake
 	// calculation that produced its accompanying pool snapshots.

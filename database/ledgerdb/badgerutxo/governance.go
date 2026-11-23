@@ -55,18 +55,6 @@ func (s *Store) LoadGovernance(feed func(put func(k, v []byte) error) error) err
 		if err := txn.Delete(legacyGovernanceKey); err != nil {
 			return err
 		}
-		if s.merging.Load() {
-			// The rows the set held keep their IDs and the sequence only
-			// grows.
-			highest, err := maxGovernanceIDs(txn)
-			if err != nil {
-				return err
-			}
-			if err := raiseGovernanceSeq(txn, &highest); err != nil {
-				return err
-			}
-			return txn.Set(governanceKey, []byte{1})
-		}
 		// The loaded rows are the whole history, so the sequence restarts
 		// above their highest IDs, which the first read derives from them.
 		if err := txn.Delete(governanceSeqKey); err != nil {

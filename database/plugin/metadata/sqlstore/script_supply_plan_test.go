@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Migration 75 drops idx_utxo_deleted_payment_script, the last full
+// Migration 74 drops idx_utxo_deleted_payment_script, the last full
 // deleted_slot-leading index on SQLite. Every query the planner could send
 // through it must still seek an index, with and without planner statistics.
 // The only deleted_slot-leading index left, idx_utxo_deleted_staking_amount, is

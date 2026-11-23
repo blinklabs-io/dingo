@@ -132,7 +132,7 @@ func (b *ImportBaseline) registration() *models.AccountImportRegistration {
 }
 
 // importBaselineReader returns the set's import baseline reader once it holds
-// the baselines, or nil when reads stay on the metadata store.
+// the baselines, or nil when the set does not serve them.
 func (ls *LedgerState) importBaselineReader(
 	txn ledgerdb.Txn,
 ) ImportBaselineReader {
