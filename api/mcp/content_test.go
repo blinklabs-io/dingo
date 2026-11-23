@@ -433,3 +433,69 @@ func readGuidanceRows(t *testing.T, db *sql.DB, query string) []map[string]any {
 	require.NoError(t, rows.Err())
 	return result
 }
+
+// TestIdentityOpCertQueryAgainstMigratedDatabase runs the operational
+// certificate query that dingo://docs/identity publishes against a migrated
+// store, where pool_opcert_sequence names the pool key by its credential id.
+func TestIdentityOpCertQueryAgainstMigratedDatabase(t *testing.T) {
+	t.Parallel()
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	nodeDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	db, err := dbtest.RawSQLiteMetadata(t, nodeDB)
+	require.NoError(t, err)
+	poolKey := []byte(strings.Repeat("\x7a", 28))
+	otherPool := []byte(strings.Repeat("\x7b", 28))
+	_, err = db.Exec(
+		`INSERT INTO pool_opcert_sequence (pool_key_id, slot, sequence)
+VALUES (?, 100, 7), (?, 200, 8), (?, 150, 3)`,
+		testutil.CredentialID(t, db, poolKey),
+		testutil.CredentialID(t, db, poolKey),
+		testutil.CredentialID(t, db, otherPool),
+	)
+	require.NoError(t, err)
+
+	server, _, err := NewMCPServer(
+		t.Context(),
+		DefaultProviderConfig(),
+		ProviderDependencies{SQLDB: db},
+	)
+	require.NoError(t, err)
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), st, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "opcert-test", Version: "1"}, nil).
+		Connect(t.Context(), ct, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+	result, err := cs.ReadResource(
+		t.Context(),
+		&mcp.ReadResourceParams{URI: "dingo://docs/identity"},
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Contents, 1)
+	match := regexp.MustCompile("`(SELECT [^`]*pool_opcert_sequence[^`]*)`").
+		FindStringSubmatch(result.Contents[0].Text)
+	require.NotNil(t, match, "identity resource publishes the opcert query")
+	query := strings.Replace(match[1], "...", "?", 1)
+	require.NoError(t, ValidateReadOnlyQuery(query))
+
+	rows, err := db.QueryContext(t.Context(), query, poolKey)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got [][2]int64
+	for rows.Next() {
+		var slot, sequence int64
+		require.NoError(t, rows.Scan(&slot, &sequence))
+		got = append(got, [2]int64{slot, sequence})
+	}
+	require.NoError(t, rows.Err())
+	require.ElementsMatch(t, [][2]int64{{100, 7}, {200, 8}}, got,
+		"the query returns only the named pool's rows")
+}

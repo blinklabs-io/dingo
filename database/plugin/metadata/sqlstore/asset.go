@@ -32,8 +32,9 @@ FROM asset_identity AS i
 INNER JOIN asset_holding AS a ON a.asset_id = i.id
 INNER JOIN utxo AS u ON u.id = a.utxo_id
 INNER JOIN utxo_address AS ua ON ua.utxo_id = u.id
+INNER JOIN address AS ad ON ad.id = ua.address_id
 WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
-GROUP BY ua.address`
+GROUP BY ad.address`
 
 func (s *Store) GetAssetHolders(
 	query models.AssetHolderQuery,
@@ -95,9 +96,9 @@ LIMIT 1`), args...).Scan(&missing)
 			return nil, 0, fmt.Errorf("check asset holder overflow: %w", err)
 		}
 	}
-	pageSQL := `SELECT ua.address, ` + sumExpression + ` AS quantity` +
+	pageSQL := `SELECT ad.address, ` + sumExpression + ` AS quantity` +
 		assetHolderGroups + ` ORDER BY quantity ` + direction +
-		`, ua.address ` + direction + ` LIMIT ? OFFSET ?`
+		`, ad.address ` + direction + ` LIMIT ? OFFSET ?`
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(pageSQL),

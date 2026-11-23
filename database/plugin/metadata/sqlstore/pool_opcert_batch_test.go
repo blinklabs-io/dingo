@@ -41,7 +41,7 @@ func TestBatchedPoolOpCertSequencesPreserveEveryObservation(t *testing.T) {
 	require.Equal(t, uint64(3), sequence)
 	var count int
 	require.NoError(t, store.readDB.QueryRow(
-		"SELECT COUNT(*) FROM pool_opcert_sequence WHERE pool_key_hash = ?",
+		"SELECT COUNT(*) FROM pool_opcert_sequence WHERE pool_key_id = "+credentialIDSubquery,
 		pool.Bytes(),
 	).Scan(&count))
 	require.Equal(t, 3, count)

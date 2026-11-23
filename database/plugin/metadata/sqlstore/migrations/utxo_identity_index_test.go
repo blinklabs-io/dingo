@@ -33,8 +33,22 @@ func TestUtxoIdentityIndexesMatchDeferredShape(t *testing.T) {
 	) {
 		byName[index.Name] = index
 	}
-	matched := 0
+	// The credential dictionary migration rebuilds utxo and
+	// address_transaction with their final indexes, so for the names it
+	// builds its definition is the one that must match the manifest.
+	rebuilt := make(map[string]bool)
+	for _, index := range utxoCredentialIndexes {
+		rebuilt[index.name] = true
+	}
+	var indexes []utxoIdentityIndex
 	for _, index := range utxoIdentityIndexes {
+		if !rebuilt[index.name] {
+			indexes = append(indexes, index)
+		}
+	}
+	indexes = append(indexes, utxoCredentialIndexes...)
+	matched := 0
+	for _, index := range indexes {
 		want, ok := byName[index.name]
 		if !ok {
 			continue

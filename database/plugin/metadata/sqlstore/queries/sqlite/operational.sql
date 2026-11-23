@@ -96,9 +96,13 @@ ON CONFLICT (epoch_id) DO UPDATE SET
     length_in_slots = excluded.length_in_slots;
 
 -- name: SetBlockNonce :exec
-INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (hash, slot) DO UPDATE SET
+INSERT INTO block_nonce (slot, hash, ordinal, nonce, is_checkpoint)
+VALUES (
+    ?, ?,
+    COALESCE((SELECT MAX(b.ordinal) + 1 FROM block_nonce AS b WHERE b.slot = ?), 0),
+    ?, ?
+)
+ON CONFLICT (slot, hash) DO UPDATE SET
     nonce = excluded.nonce,
     is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint;
 
@@ -108,10 +112,10 @@ FROM block_nonce
 WHERE hash = ? AND slot = ?;
 
 -- name: GetBlockNoncesInSlotRange :many
-SELECT hash, nonce, id, slot, is_checkpoint
+SELECT hash, nonce, ordinal, slot, is_checkpoint
 FROM block_nonce
 WHERE slot >= ? AND slot < ?
-ORDER BY slot ASC;
+ORDER BY slot ASC, ordinal ASC;
 
 -- name: GetLastBlockNonceInRange :one
 SELECT nonce
@@ -139,12 +143,15 @@ WHERE slot > ? OR (slot = ? AND hash <> ?);
 -- name: GetDatum :one
 SELECT hash, raw_datum, id, added_slot
 FROM datum
-WHERE hash = ?;
+WHERE hash = ? AND LENGTH(raw_datum) > 0;
 
 -- name: SetDatum :exec
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET raw_datum = excluded.raw_datum;
+ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = excluded.raw_datum;
 
 -- name: GetScript :one
 SELECT hash, content, id, created_slot, type
@@ -978,7 +985,9 @@ ORDER BY u.id;
 -- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
+WHERE credential_tag = ?
+  AND staking_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND deleted_slot = 0;
 
 -- name: GetScriptLockedSupply :many
 SELECT amount
@@ -997,15 +1006,18 @@ SELECT EXISTS (
 
 -- name: GetAssetMintBurnInfo :one
 SELECT
-    (SELECT first_event.tx_hash
-     FROM asset_mint_burn AS first_event
-     WHERE first_event.policy_id = ? AND first_event.name = ?
+    (SELECT t.hash
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS first_event ON first_event.asset_id = i.id
+     JOIN "transaction" AS t ON t.id = first_event.transaction_id
+     WHERE i.policy_id = ? AND i.name = ?
      ORDER BY first_event.slot ASC, first_event.tx_index ASC,
-              first_event.id ASC
+              first_event.transaction_id ASC
      LIMIT 1) AS initial_tx_hash,
-    COUNT(*) AS event_count
-FROM asset_mint_burn AS events
-WHERE events.policy_id = ? AND events.name = ?;
+    (SELECT COUNT(*)
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS events ON events.asset_id = i.id
+     WHERE i.policy_id = ? AND i.name = ?) AS event_count;
 
 -- name: CreateAccount :one
 INSERT INTO account (
@@ -1230,7 +1242,8 @@ DELETE FROM transaction_metadata_label WHERE slot > ?;
 -- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ? AND payment_script = ?;
+WHERE payment_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND payment_script = ?;
 
 -- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?;

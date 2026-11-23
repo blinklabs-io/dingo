@@ -127,12 +127,13 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	dialect := MySQLDialect()
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_addr_tx_stake_position` ON `address_transaction` (`credential_tag`, `staking_key`(255), `slot`, `tx_index`, `payment_key`(255))",
+		"CREATE INDEX `idx_addr_tx_stake_position` ON `address_transaction` (`credential_tag`, `staking_key_id`, `slot`, `tx_index`, `payment_key_id`)",
 		dialect.CreateIndexSQL(
 			"idx_addr_tx_stake_position",
 			"address_transaction",
 			[]string{
-				"credential_tag", "staking_key", "slot", "tx_index", "payment_key",
+				"credential_tag", "staking_key_id", "slot", "tx_index",
+				"payment_key_id",
 			},
 		),
 	)
@@ -151,20 +152,11 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_asset_mint_burn_lookup` ON `asset_mint_burn` (`policy_id`(255), `name`(255), `slot`)",
+		"CREATE INDEX `idx_asset_mint_burn_asset_id` ON `asset_mint_burn` (`asset_id`, `slot`, `tx_index`)",
 		dialect.CreateIndexSQL(
-			"idx_asset_mint_burn_lookup",
+			"idx_asset_mint_burn_asset_id",
 			"asset_mint_burn",
-			[]string{"policy_id", "name", "slot"},
-		),
-	)
-	require.Equal(
-		t,
-		"CREATE INDEX `idx_asset_mint_burn_fingerprint` ON `asset_mint_burn` (`fingerprint`(255))",
-		dialect.CreateIndexSQL(
-			"idx_asset_mint_burn_fingerprint",
-			"asset_mint_burn",
-			[]string{"fingerprint"},
+			[]string{"asset_id", "slot", "tx_index"},
 		),
 	)
 	require.Equal(
@@ -178,11 +170,11 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence` (`pool_key_hash`(255), `sequence`)",
+		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence` (`pool_key_id`, `sequence`)",
 		dialect.CreateIndexSQL(
 			"idx_pool_opcert_sequence_pool_sequence",
 			"pool_opcert_sequence",
-			[]string{"pool_key_hash", "sequence"},
+			[]string{"pool_key_id", "sequence"},
 		),
 	)
 	require.False(t, dialect.CanDropIndex("idx_utxo_spent_at_tx_id", "utxo"))

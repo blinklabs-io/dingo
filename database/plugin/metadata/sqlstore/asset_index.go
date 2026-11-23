@@ -55,25 +55,26 @@ func (s *Store) ListMintedAssets(
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT policy_id, name FROM (` +
-		`SELECT policy_id, name, MIN(slot) AS first_slot ` +
-		`FROM asset_mint_burn`
+	query := `SELECT i.policy_id, i.name FROM (` +
+		`SELECT m.asset_id, MIN(m.slot) AS first_slot ` +
+		`FROM asset_mint_burn AS m`
 	args := []any{}
 	if policyID != nil {
-		query += ` WHERE policy_id = ?`
+		query += ` WHERE m.asset_id IN (` +
+			`SELECT id FROM asset_identity WHERE policy_id = ?)`
 		args = append(args, policyID)
 	}
 	// The first event is the (slot, tx_index) pair minimum, so the
 	// transaction index is the smallest one within the first slot. Folding
 	// the pair into one integer overflows BIGINT once slots pass 2^31.
 	dir := orderDirection(descending)
-	query += ` GROUP BY policy_id, name) AS first_mint ` +
-		`ORDER BY first_slot ` + dir + `, (` +
+	query += ` GROUP BY m.asset_id) AS first_mint ` +
+		`JOIN asset_identity AS i ON i.id = first_mint.asset_id ` +
+		`ORDER BY first_mint.first_slot ` + dir + `, (` +
 		`SELECT MIN(mint_event.tx_index) FROM asset_mint_burn AS mint_event ` +
-		`WHERE mint_event.policy_id = first_mint.policy_id ` +
-		`AND mint_event.name = first_mint.name ` +
+		`WHERE mint_event.asset_id = first_mint.asset_id ` +
 		`AND mint_event.slot = first_mint.first_slot) ` + dir +
-		`, policy_id ` + dir + `, name ` + dir
+		`, i.policy_id ` + dir + `, i.name ` + dir
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {
@@ -103,13 +104,14 @@ func (s *Store) CountMintedAssets(
 	if err != nil {
 		return 0, err
 	}
-	query := `SELECT COUNT(*) FROM (SELECT 1 FROM asset_mint_burn`
+	query := `SELECT COUNT(*) FROM (SELECT 1 FROM asset_mint_burn AS m`
 	args := []any{}
 	if policyID != nil {
-		query += ` WHERE policy_id = ?`
+		query += ` WHERE m.asset_id IN (` +
+			`SELECT id FROM asset_identity WHERE policy_id = ?)`
 		args = append(args, policyID)
 	}
-	query += ` GROUP BY policy_id, name) AS minted`
+	query += ` GROUP BY m.asset_id) AS minted`
 	var count int
 	if err := db.QueryRowContext(
 		ctx, s.dialect.Rebind(query), args...,
@@ -134,10 +136,13 @@ func (s *Store) GetAssetMintBurnHistory(
 	}
 	dir := orderDirection(descending)
 	query := `
-SELECT id, tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index
-FROM asset_mint_burn
-WHERE policy_id = ? AND name = ?
-ORDER BY slot ` + dir + `, tx_index ` + dir + `, id ` + dir
+SELECT t.hash, i.policy_id, i.name, m.slot, m.quantity, m.tx_index
+FROM asset_identity AS i
+JOIN asset_mint_burn AS m ON m.asset_id = i.id
+JOIN "transaction" AS t ON t.id = m.transaction_id
+WHERE i.policy_id = ? AND i.name = ?
+ORDER BY m.slot ` + dir + `, m.tx_index ` + dir +
+		`, m.transaction_id ` + dir
 	query, args := addLimitOffset(
 		query,
 		[]any{policyID[:], nonNilName(assetName)},
@@ -153,41 +158,37 @@ ORDER BY slot ` + dir + `, tx_index ` + dir + `, id ` + dir
 	for rows.Next() {
 		var (
 			row      models.AssetMintBurn
-			id       int64
-			slot     sql.NullInt64
-			quantity sql.NullString
-			txIndex  sql.NullInt64
+			slot     int64
+			quantity string
+			txIndex  int64
 		)
 		if err := rows.Scan(
-			&id,
 			&row.TxHash,
 			&row.PolicyId,
 			&row.Name,
-			&row.Fingerprint,
 			&slot,
 			&quantity,
 			&txIndex,
 		); err != nil {
 			return nil, fmt.Errorf("scan asset mint burn row: %w", err)
 		}
-		row.ID = uint(id) // #nosec G115 -- autoincrement ids are positive
-		if slot.Valid {
-			row.Slot, err = checkedUint64(slot.Int64)
-			if err != nil {
-				return nil, fmt.Errorf("asset mint burn slot: %w", err)
-			}
+		row.Slot, err = checkedUint64(slot)
+		if err != nil {
+			return nil, fmt.Errorf("asset mint burn slot: %w", err)
 		}
-		if txIndex.Valid {
-			index, err := checkedUint64(txIndex.Int64)
-			if err != nil || index > uint64(^uint32(0)) {
-				return nil, fmt.Errorf(
-					"asset mint burn tx index %d out of range",
-					txIndex.Int64,
-				)
-			}
-			row.TxIndex = uint32(index) // #nosec G115 -- range checked above
+		index, err := checkedUint64(txIndex)
+		if err != nil || index > uint64(^uint32(0)) {
+			return nil, fmt.Errorf(
+				"asset mint burn tx index %d out of range", txIndex,
+			)
 		}
-		row.Quantity = quantity.String
+		row.TxIndex = uint32(index) // #nosec G115 -- range checked above
+		row.Quantity = quantity
+		// The fingerprint derives from the policy and name, so it is not
+		// stored.
+		row.Fingerprint = []byte(
+			lcommon.NewAssetFingerprint(row.PolicyId, row.Name).String(),
+		)
 		ret = append(ret, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -210,7 +211,9 @@ func (s *Store) CountAssetMintBurnHistory(
 	if err := db.QueryRowContext(
 		ctx,
 		s.dialect.Rebind(
-			`SELECT COUNT(*) FROM asset_mint_burn WHERE policy_id = ? AND name = ?`,
+			`SELECT COUNT(*) FROM asset_identity AS i `+
+				`JOIN asset_mint_burn AS m ON m.asset_id = i.id `+
+				`WHERE i.policy_id = ? AND i.name = ?`,
 		),
 		policyID[:], nonNilName(assetName),
 	).Scan(&count); err != nil {
@@ -244,9 +247,10 @@ UNION
 SELECT t.hash, a.block_hash, a.slot, a.block_index, t.id
 FROM "transaction" AS t
 JOIN applied_transaction AS a ON a.tx_id = t.id
-WHERE t.hash IN (
-    SELECT m.tx_hash FROM asset_mint_burn AS m
-    WHERE m.policy_id = ? AND m.name = ?
+WHERE t.id IN (
+    SELECT m.transaction_id FROM asset_identity AS i
+    JOIN asset_mint_burn AS m ON m.asset_id = i.id
+    WHERE i.policy_id = ? AND i.name = ?
 )`
 
 func assetTransactionsQuery(

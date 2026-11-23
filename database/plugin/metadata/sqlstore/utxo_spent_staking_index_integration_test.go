@@ -62,7 +62,7 @@ func testSpentStakingIndex(t *testing.T, store *Store, schema string) {
 	t.Helper()
 	wantColumns, wantPredicate := "deleted_slot", ""
 	if store.dialect.Name() == "postgres" {
-		wantColumns = "deleted_slot, credential_tag, staking_key, amount"
+		wantColumns = "deleted_slot, credential_tag, staking_key_id, amount"
 		wantPredicate = "WHERE (deleted_slot > 0)"
 	}
 	check := func(stage string) {
@@ -82,9 +82,9 @@ func testSpentStakingIndex(t *testing.T, store *Store, schema string) {
 		producer := fixtureIdentityRow(t, store, 0, []byte{byte(i + 1)})
 		_, err := store.writeDB.Exec(store.dialect.Rebind(
 			"INSERT INTO utxo (tx_id, output_idx, credential_tag, "+
-				"staking_key, added_slot, deleted_slot, amount, "+
+				"staking_key_id, added_slot, deleted_slot, amount, "+
 				"payment_script) VALUES (?, 0, 0, ?, 1, ?, '100', FALSE)",
-		), producer, []byte{9}, deleted)
+		), producer, fixtureCredentialID(t, store, []byte{9}), deleted)
 		require.NoError(t, err)
 	}
 	require.NoError(t, store.SetUtxosNotDeletedAfterSlot(5, nil))
@@ -137,9 +137,9 @@ func requireSpentRangeUsesIndex(t *testing.T, store *Store) {
 				"SELECT decode(lpad(to_hex(g), 64, '0'), 'hex') " +
 				"FROM generate_series(1, 50000) g",
 			"INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
-				"staking_key, added_slot, deleted_slot, amount, payment_script) " +
+				"staking_key_id, added_slot, deleted_slot, amount, payment_script) " +
 				"SELECT t.id, 0, 0, " +
-				"decode(lpad(to_hex(g % 997), 56, '0'), 'hex'), g, " +
+				"g % 997 + 1, g, " +
 				"CASE WHEN g % 50 = 0 THEN g ELSE 0 END, '100', FALSE " +
 				"FROM generate_series(1, 50000) g JOIN " + transaction +
 				" t ON t.hash = decode(lpad(to_hex(g), 64, '0'), 'hex')",
@@ -152,9 +152,9 @@ func requireSpentRangeUsesIndex(t *testing.T, store *Store) {
 			"INSERT INTO " + transaction + " (hash) " + series +
 				"SELECT UNHEX(LPAD(HEX(n), 64, '0')) FROM g",
 			"INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
-				"staking_key, added_slot, deleted_slot, amount, payment_script) " +
+				"staking_key_id, added_slot, deleted_slot, amount, payment_script) " +
 				series + "SELECT t.id, 0, 0, " +
-				"UNHEX(LPAD(HEX(n % 997), 56, '0')), n, " +
+				"n % 997 + 1, n, " +
 				"IF(n % 50 = 0, n, 0), '100', FALSE FROM g JOIN " +
 				transaction + " t ON t.hash = UNHEX(LPAD(HEX(n), 64, '0'))",
 		}

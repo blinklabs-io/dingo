@@ -20,6 +20,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // These conservative accounting weights include row/value descriptors and
@@ -43,6 +45,20 @@ type rowShape struct {
 	// resolveAssets marks queued asset holdings, whose rows name an asset by
 	// (policy_id, name) and are written through flushAssetHoldings.
 	resolveAssets bool
+	// resolveMintBurn marks queued mint and burn events, whose rows name an
+	// asset by (policy_id, name) and are written through flushAssetMintBurn.
+	resolveMintBurn bool
+	// resolveAddress marks queued address rows, which carry the encoded
+	// address in column 1 and are written with its dictionary id.
+	resolveAddress bool
+	// resolveCredentials marks queued address-transaction rows, which carry
+	// the payment credential hash in column 0 and the stake credential hash in
+	// column 2 and are written with their dictionary ids.
+	resolveCredentials bool
+	// distinctFirstColumn keeps the first queued row of each value of column
+	// 0 at flush. An upsert that updates a conflicting row cannot take one key
+	// twice in one statement on PostgreSQL.
+	distinctFirstColumn bool
 }
 
 var (
@@ -89,9 +105,10 @@ var (
 		name:  "InsertAddressTransactionBatch",
 		table: "address_transaction",
 		columns: []string{
-			"payment_key", "payment_script", "staking_key", "credential_tag",
-			"transaction_id", "slot", "tx_index",
+			"payment_key_id", "payment_script", "staking_key_id",
+			"credential_tag", "transaction_id", "slot", "tx_index",
 		},
+		resolveCredentials: true,
 	}
 	metadataLabelShape = rowShape{
 		name:  "UpsertTransactionMetadataLabelBatch",
@@ -105,27 +122,53 @@ var (
     json_value = excluded.json_value`,
 	}
 	// datum rows are content-addressed and shared between transactions, so
-	// they carry no transaction_id and are never replaced.
+	// they carry no transaction_id and a revealed datum is never replaced. A
+	// row with an empty raw_datum stands for a datum hash an output names
+	// before any transaction reveals it, and the reveal fills it in. The
+	// added_slot assignment comes first because MySQL reads the updated
+	// raw_datum in the assignments that follow it.
 	datumShape = rowShape{
 		name:    "InsertDatumBatch",
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
-		suffix:  "ON CONFLICT (hash) DO NOTHING",
+		suffix: `ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.raw_datum ELSE datum.raw_datum END`,
+		distinctFirstColumn: true,
 	}
 	utxoAddressShape = rowShape{
-		name:    "UpsertUtxoAddressBatch",
-		table:   "utxo_address",
-		columns: []string{"utxo_id", "address"},
-		suffix:  "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
+		name:           "UpsertUtxoAddressBatch",
+		table:          "utxo_address",
+		columns:        []string{"utxo_id", "address_id"},
+		suffix:         "ON CONFLICT (utxo_id) DO UPDATE SET address_id = excluded.address_id",
+		resolveAddress: true,
+	}
+	// utxoAddressOrderedShape writes the row with the page position that
+	// fillUtxoAddressOrderByIDs would otherwise set by a second statement,
+	// for outputs whose producing transaction's row id and block position
+	// the writer already knows.
+	utxoAddressOrderedShape = rowShape{
+		name:  "UpsertUtxoAddressOrderedBatch",
+		table: "utxo_address",
+		columns: []string{
+			"utxo_id", "address_id", "tx_id", "output_idx", "slot",
+			"block_index",
+		},
+		suffix: "ON CONFLICT (utxo_id) DO UPDATE SET address_id = excluded.address_id, " +
+			"tx_id = excluded.tx_id, output_idx = excluded.output_idx, " +
+			"slot = excluded.slot, block_index = excluded.block_index",
+		resolveAddress: true,
 	}
 	assetMintBurnShape = rowShape{
 		name:  "InsertAssetMintBurnBatch",
 		table: "asset_mint_burn",
 		columns: []string{
-			"tx_hash", "policy_id", "name", "fingerprint", "slot",
-			"quantity", "tx_index",
+			"transaction_id", "policy_id", "name", "slot", "quantity",
+			"tx_index",
 		},
-		suffix: "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+		resolveMintBurn: true,
 	}
 )
 
@@ -300,7 +343,6 @@ func (b *rowBatch) dropUtxoAddress(id int64) {
 		}
 		clear(entry.rows[len(kept):])
 		entry.rows = kept
-		return
 	}
 }
 
@@ -373,15 +415,46 @@ func (b *rowBatch) flush(
 			}
 			continue
 		}
+		if entry.shape.resolveMintBurn {
+			if err := flushAssetMintBurn(
+				ctx, db, s, entry.rows, parameterLimit,
+			); err != nil {
+				return err
+			}
+			continue
+		}
+		rows := entry.rows
+		if entry.shape.resolveAddress {
+			resolved, err := resolveAddressRows(ctx, db, rows, parameterLimit)
+			if err != nil {
+				return err
+			}
+			rows = resolved
+		}
+		if entry.shape.distinctFirstColumn {
+			rows = distinctByFirstColumn(rows)
+		}
+		if entry.shape.resolveCredentials {
+			resolved, err := resolveCredentialRows(
+				ctx,
+				db,
+				rows,
+				parameterLimit,
+			)
+			if err != nil {
+				return err
+			}
+			rows = resolved
+		}
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
 		placeholder := "(" + strings.TrimSuffix(
 			strings.Repeat("?, ", width), ", ",
 		) + ")"
-		for start := 0; start < len(entry.rows); start += perStatement {
-			end := min(start+perStatement, len(entry.rows))
+		for start := 0; start < len(rows); start += perStatement {
+			end := min(start+perStatement, len(rows))
 			args := make([]any, 0, (end-start)*width)
-			for _, row := range entry.rows[start:end] {
+			for _, row := range rows[start:end] {
 				args = append(args, row...)
 			}
 			query := "-- name: " + entry.shape.name + " :exec\n" +
@@ -398,9 +471,9 @@ func (b *rowBatch) flush(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
 			}
-			if entry.shape.table == "utxo_address" {
+			if entry.shape.name == utxoAddressShape.name {
 				ids := make([]int64, 0, end-start)
-				for _, row := range entry.rows[start:end] {
+				for _, row := range rows[start:end] {
 					id, _ := row[0].(int64)
 					ids = append(ids, id)
 				}
@@ -449,4 +522,48 @@ func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, s 
 	}
 	*b = deferred
 	return nil
+}
+
+// queueUtxoAddress queues utxo's address row, with its page position when
+// the producing transaction's row id and block position are known. The
+// position is the one utxoAddressOrderSet derives: the producing
+// transaction's application slot, which is the output's added slot, and its
+// block index.
+func queueUtxoAddress(
+	rows *rowBatch,
+	id int64,
+	address []byte,
+	utxo *models.Utxo,
+) {
+	txID := utxo.TransactionID
+	if txID == nil {
+		txID = utxo.CollateralReturnForTxID
+	}
+	if txID == nil || utxo.BlockIndex == nil {
+		rows.add(utxoAddressShape, id, address)
+		return
+	}
+	rows.add(
+		utxoAddressOrderedShape, id, address,
+		int64(*txID), //nolint:gosec // SQL INTEGER row id
+		int64(utxo.OutputIdx),
+		int64(utxo.AddedSlot), //nolint:gosec // SQL INTEGER slot
+		int64(*utxo.BlockIndex),
+	)
+}
+
+// distinctByFirstColumn returns rows without later rows that repeat the byte
+// value of column 0, in their original order.
+func distinctByFirstColumn(rows [][]any) [][]any {
+	seen := make(map[string]struct{}, len(rows))
+	out := make([][]any, 0, len(rows))
+	for _, row := range rows {
+		key, _ := row[0].([]byte)
+		if _, ok := seen[string(key)]; ok {
+			continue
+		}
+		seen[string(key)] = struct{}{}
+		out = append(out, row)
+	}
+	return out
 }

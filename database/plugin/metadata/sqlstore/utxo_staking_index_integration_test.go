@@ -34,7 +34,7 @@ func TestPostgresUtxoStakingIndexesPartial(t *testing.T) {
 				store.writeDB.QueryRow(`SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1`, name).
 					Scan(&definition),
 			)
-			require.Contains(t, definition, "WHERE (staking_key IS NOT NULL)")
+			require.Contains(t, definition, "WHERE (staking_key_id IS NOT NULL)")
 		}
 	}
 	check()
@@ -48,7 +48,7 @@ func TestMySQLUtxoStakingIndexesStayFull(t *testing.T) {
 	store := newIntegrationSQLStore(t, "mysql", dsn, "mysql", database)
 	check := func() {
 		t.Helper()
-		for name, want := range map[string]string{"idx_utxo_staking_key": "staking_key", "idx_utxo_staking_deleted_amount": "credential_tag,staking_key,deleted_slot,amount"} {
+		for name, want := range map[string]string{"idx_utxo_staking_key": "staking_key_id", "idx_utxo_staking_deleted_amount": "credential_tag,staking_key_id,deleted_slot,amount"} {
 			var columns string
 			require.NoError(
 				t,

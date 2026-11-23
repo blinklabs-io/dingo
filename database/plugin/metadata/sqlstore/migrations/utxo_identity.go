@@ -752,7 +752,7 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'`,
 		return fmt.Errorf("read utxo auto_increment: %w", err)
 	}
 	for _, fk := range utxoChildForeignKeys {
-		exists, err := b.mysqlConstraintExists(ctx, batch, fk.table, fk.name)
+		exists, err := mysqlConstraintExists(ctx, batch, fk.table, fk.name)
 		if err != nil {
 			return err
 		}
@@ -805,7 +805,7 @@ WHERE table_schema = DATABASE() AND table_name = 'transaction'
 		"ALTER TABLE `transaction` "+strings.Join(clauses, ", "))
 }
 
-func (b identityBackfill) mysqlConstraintExists(
+func mysqlConstraintExists(
 	ctx context.Context,
 	batch Batch,
 	table, name string,

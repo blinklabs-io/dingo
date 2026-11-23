@@ -19,7 +19,9 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -354,10 +356,11 @@ func TestAddressTransactionIndexUsesOnlyRequestedOutputFromProducer(t *testing.T
 	} {
 		_, err := store.writeDB.Exec(`
 INSERT INTO utxo (
-    tx_id, output_idx, payment_key, credential_tag, added_slot,
+    tx_id, output_idx, payment_key_id, credential_tag, added_slot,
     deleted_slot, amount, payment_script
 ) VALUES (?, ?, ?, 0, 1, 0, '1000000', FALSE)`,
-			testutil.TransactionID(t, store.writeDB, producerID), outputIndex, paymentKey,
+			testutil.TransactionID(t, store.writeDB, producerID), outputIndex,
+			testutil.CredentialID(t, store.writeDB, paymentKey),
 		)
 		require.NoError(t, err)
 	}
@@ -392,8 +395,9 @@ INSERT INTO utxo (
 	require.NoError(t, txn.Commit())
 
 	rows, err := store.writeDB.Query(`
-SELECT a.payment_key
+SELECT c.hash
 FROM address_transaction AS a
+JOIN credential AS c ON c.id = a.payment_key_id
 JOIN "transaction" AS t ON t.id = a.transaction_id
 WHERE t.hash = ?`,
 		transactionID,
@@ -428,11 +432,12 @@ func TestAddressTransactionIndexPreservesCredentialKindForInvalidInputs(t *testi
 	} {
 		_, err := store.writeDB.ExecContext(ctx, `
 INSERT INTO utxo (
-    tx_id, output_idx, payment_key, payment_script, staking_key,
+    tx_id, output_idx, payment_key_id, payment_script, staking_key_id,
     credential_tag, added_slot, deleted_slot, amount
 ) VALUES (?, 0, ?, ?, ?, 0, 1, 0, '1000000')`,
 			testutil.TransactionID(t, store.writeDB, output.txHash),
-			payment, output.script, staking,
+			testutil.CredentialID(t, store.writeDB, payment), output.script,
+			testutil.CredentialID(t, store.writeDB, staking),
 		)
 		require.NoError(t, err)
 	}
@@ -481,9 +486,11 @@ VALUES (?, ?, ?, 0, 0, TRUE)`, hash, bytes.Repeat([]byte{0xaa}, 32), slot)
 	producerID := insertTransaction(producerHash, 1)
 	_, err = store.writeDB.ExecContext(ctx, `
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, credential_tag,
+    payment_key_id, payment_script, staking_key_id, credential_tag,
     transaction_id, slot, tx_index
-) VALUES (?, TRUE, ?, 0, ?, 1, 0)`, payment, staking, producerID)
+) VALUES (?, TRUE, ?, 0, ?, 1, 0)`,
+		testutil.CredentialID(t, store.writeDB, payment),
+		testutil.CredentialID(t, store.writeDB, staking), producerID)
 	require.NoError(t, err)
 
 	sharedHash := bytes.Repeat([]byte{0x33}, 32)
@@ -499,7 +506,8 @@ INSERT INTO address_transaction (
 	var sharedRows int
 	require.NoError(t, store.readDB.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM address_transaction
-WHERE transaction_id = ? AND payment_key = ?`, sharedID, payment).Scan(&sharedRows))
+WHERE transaction_id = ? AND payment_key_id = (
+    SELECT id FROM credential WHERE hash = ?)`, sharedID, payment).Scan(&sharedRows))
 	require.Equal(t, 2, sharedRows)
 
 	keyCount, err := store.CountTransactionsByPaymentCred(payment, false, nil)
@@ -525,8 +533,9 @@ VALUES (?, ?, 10, 0, 0, TRUE)`, hash, blockHash)
 	require.NoError(t, err)
 	_, err = store.writeDB.ExecContext(ctx, `
 INSERT INTO address_transaction (
-    payment_key, transaction_id, slot, tx_index
-) VALUES (?, ?, 10, 0)`, []byte("legacy"), id)
+    payment_key_id, transaction_id, slot, tx_index
+) VALUES (?, ?, 10, 0)`,
+		testutil.CredentialID(t, store.writeDB, []byte("legacy")), id)
 	require.NoError(t, err)
 	_, err = store.writeDB.ExecContext(ctx, `
 INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)`, id)
@@ -559,7 +568,8 @@ INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)`, id)
 	var gotPayment []byte
 	var gotScript bool
 	require.NoError(t, store.readDB.QueryRowContext(ctx, `
-SELECT payment_key, payment_script FROM address_transaction WHERE transaction_id = ?`, id).
+SELECT c.hash, a.payment_script FROM address_transaction a
+JOIN credential c ON c.id = a.payment_key_id WHERE a.transaction_id = ?`, id).
 		Scan(&gotPayment, &gotScript))
 	require.Equal(t, payment, gotPayment)
 	require.True(t, gotScript)
@@ -608,7 +618,8 @@ func TestSetTransactionPersistsAssetUtxoAddress(t *testing.T) {
 
 	var address string
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT ua.address FROM utxo_address ua "+
+		"SELECT a.address FROM utxo_address ua "+
+			"JOIN address a ON a.id = ua.address_id "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
 			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		tx.Hash().Bytes(),
@@ -636,7 +647,8 @@ func TestSetTransactionPersistsAdaOnlyUtxoAddress(t *testing.T) {
 
 	var address string
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT ua.address FROM utxo_address ua "+
+		"SELECT a.address FROM utxo_address ua "+
+			"JOIN address a ON a.id = ua.address_id "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
 			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		txID,
@@ -812,9 +824,11 @@ func TestBatchedStakeDeltasCoalesceUntilFlush(t *testing.T) {
 		txID := make([]byte, 32)
 		txID[0] = byte(i + 1)
 		_, err := store.writeDB.ExecContext(t.Context(), `
-INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+INSERT INTO utxo (tx_id, output_idx, staking_key_id, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, 1, ?, ?)`,
-			testutil.TransactionID(t, store.writeDB, txID), credential.Key, int64(credential.Tag), row.deletedSlot, row.amount,
+			testutil.TransactionID(t, store.writeDB, txID),
+			testutil.CredentialID(t, store.writeDB, credential.Key),
+			int64(credential.Tag), row.deletedSlot, row.amount,
 		)
 		require.NoError(t, err)
 	}
@@ -1068,12 +1082,17 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
 
-	txHash := make([]byte, 32)
 	policyID := make([]byte, 28)
+	_, err = db.ExecContext(ctx, store.dialect.Rebind(
+		`INSERT INTO "transaction" (hash) VALUES (?)`), make([]byte, 32))
+	require.NoError(t, err)
+	var txID int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT id FROM "transaction"`).Scan(&txID))
 	rows := rowBatch{}
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("second"), []byte("fp2"), uint64(100), "-2", uint32(0))
-	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("first"), uint64(100), "5", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("second"), uint64(100), "-2", uint32(0))
+	rows.add(assetMintBurnShape, txID, policyID, []byte("first"), uint64(100), "5", uint32(0))
 
 	require.NoError(t, rows.flush(ctx, db, nil, store.dialect.ParameterLimit()))
 	var count int
@@ -1082,8 +1101,9 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	).Scan(&count))
 	require.Equal(t, 2, count)
 	var quantity string
-	require.NoError(t, db.QueryRowContext(ctx,
-		`SELECT quantity FROM asset_mint_burn WHERE name = ?`, []byte("second"),
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT m.quantity FROM asset_mint_burn m
+JOIN asset_identity i ON i.id = m.asset_id WHERE i.name = ?`, []byte("second"),
 	).Scan(&quantity))
 	require.Equal(t, "-2", quantity)
 }
@@ -1092,6 +1112,58 @@ type recordingQueryer struct {
 	queryer
 	statements []string
 }
+
+// QueryContext answers every lookup with no rows, so a dictionary resolve
+// finds nothing and the statements around it are still recorded.
+func (q *recordingQueryer) QueryContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	return emptyRowsDB.QueryContext(ctx, query, args...)
+}
+
+type emptyRowsDriver struct{}
+
+func (emptyRowsDriver) Open(string) (driver.Conn, error) {
+	return emptyRowsConn{}, nil
+}
+
+type emptyRowsConn struct{}
+
+func (emptyRowsConn) Prepare(query string) (driver.Stmt, error) {
+	return emptyRowsStmt{}, nil
+}
+func (emptyRowsConn) Close() error { return nil }
+
+func (emptyRowsConn) Begin() (driver.Tx, error) { return nil, errors.New("no tx") }
+
+type emptyRowsStmt struct{}
+
+func (emptyRowsStmt) Close() error  { return nil }
+func (emptyRowsStmt) NumInput() int { return -1 }
+func (emptyRowsStmt) Exec([]driver.Value) (driver.Result, error) {
+	return driver.RowsAffected(0), nil
+}
+func (emptyRowsStmt) Query([]driver.Value) (driver.Rows, error) {
+	return emptyRows{}, nil
+}
+
+type emptyRows struct{}
+
+func (emptyRows) Columns() []string         { return []string{"id", "hash"} }
+func (emptyRows) Close() error              { return nil }
+func (emptyRows) Next([]driver.Value) error { return io.EOF }
+
+// emptyRowsDB is a database whose every query returns no rows.
+var emptyRowsDB = func() *sql.DB {
+	sql.Register("dingo-empty-rows", emptyRowsDriver{})
+	db, err := sql.Open("dingo-empty-rows", "")
+	if err != nil {
+		panic(err)
+	}
+	return db
+}()
 
 func (q *recordingQueryer) ExecContext(
 	_ context.Context,
@@ -1144,8 +1216,10 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
 				"ex_units_cpu, \"index\", tag) " +
 				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
-			"INSERT INTO address_transaction (payment_key, payment_script, " +
-				"staking_key, credential_tag, transaction_id, slot, tx_index) " +
+			"INSERT INTO credential (hash) VALUES ($1), ($2), ($3), ($4)\n" +
+				"ON CONFLICT (hash) DO NOTHING",
+			"INSERT INTO address_transaction (payment_key_id, payment_script, " +
+				"staking_key_id, credential_tag, transaction_id, slot, tx_index) " +
 				"VALUES ($1, $2, $3, $4, $5, $6, $7), " +
 				"($8, $9, $10, $11, $12, $13, $14)",
 			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
@@ -1154,7 +1228,7 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				metadataLabelShape.suffix,
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES ($1, $2, $3), ($4, $5, $6)\n" +
-				"ON CONFLICT (hash) DO NOTHING",
+				datumShape.suffix,
 		},
 		"mysql": {
 			"INSERT INTO key_witness (vkey, signature, transaction_id, type) " +
@@ -1169,8 +1243,10 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
 				"ex_units_cpu, `index`, tag) " +
 				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
-			"INSERT INTO address_transaction (payment_key, payment_script, " +
-				"staking_key, credential_tag, transaction_id, slot, tx_index) " +
+			"INSERT INTO credential (hash) VALUES (?), (?), (?), (?)\n" +
+				"ON DUPLICATE KEY UPDATE hash = hash",
+			"INSERT INTO address_transaction (payment_key_id, payment_script, " +
+				"staking_key_id, credential_tag, transaction_id, slot, tx_index) " +
 				"VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)",
 			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
 				"slot, cbor_value, json_value) " +
@@ -1180,7 +1256,11 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				"    json_value = VALUES(json_value)",
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES (?, ?, ?), (?, ?, ?)\n" +
-				"ON DUPLICATE KEY UPDATE hash = hash",
+				"ON DUPLICATE KEY UPDATE added_slot = CASE WHEN " +
+				"LENGTH(datum.raw_datum) = 0\n" +
+				"        THEN VALUES(added_slot) ELSE datum.added_slot END,\n" +
+				"    raw_datum = CASE WHEN LENGTH(datum.raw_datum) = 0\n" +
+				"        THEN VALUES(raw_datum) ELSE datum.raw_datum END",
 		},
 	}
 	for dialect, statements := range want {
@@ -1196,7 +1276,8 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 		wantNames := []string{
 			vkeyWitnessShape.name, bootstrapWitnessShape.name,
 			witnessScriptShape.name, plutusDataShape.name,
-			redeemerShape.name, addressTransactionShape.name,
+			redeemerShape.name, "InsertCredentialBatch",
+			addressTransactionShape.name,
 			metadataLabelShape.name, datumShape.name,
 		}
 		require.Len(t, recorder.statements, len(wantNames), dialect)

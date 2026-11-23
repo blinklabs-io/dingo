@@ -114,6 +114,12 @@ const (
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	utxoEdgeClusteredSchemaRelease                      = "utxo-edge-clustered"
+	assetMintBurnIDsSchemaRelease                       = "asset-mint-burn-ids"
+	utxoAddressDictionarySchemaRelease                  = "utxo-address-dictionary"
+	blockNonceClusteredSchemaRelease                    = "block-nonce-clustered"
+	utxoCredentialDictionarySchemaRelease               = "utxo-credential-dictionary" //nolint:gosec // a migration name, not a credential
+	poolOpCertClusteredSchemaRelease                    = "pool-opcert-clustered"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -307,6 +313,12 @@ var schemaVersions = []struct {
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: utxoEdgeClusteredSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: assetMintBurnIDsSchemaRelease, Dir: "v75"},
+	{Version: 76, Name: utxoAddressDictionarySchemaRelease, Dir: "v76"},
+	{Version: 77, Name: blockNonceClusteredSchemaRelease, Dir: "v77"},
+	{Version: 78, Name: utxoCredentialDictionarySchemaRelease, Dir: "v78"},
+	{Version: 79, Name: poolOpCertClusteredSchemaRelease, Dir: "v79"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -491,6 +503,36 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
 			migration.BatchSize = assetIdentityHoldingsBatchSize
+		}
+		if version.Name == utxoEdgeClusteredSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoEdgeClusteredBackfill(dialect)
+			migration.BatchSize = utxoEdgeClusteredBatchSize
+		}
+		if version.Name == assetMintBurnIDsSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = assetMintBurnIDsBackfill(dialect)
+			migration.BatchSize = assetMintBurnIDsBatchSize
+		}
+		if version.Name == utxoAddressDictionarySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoAddressDictionaryBackfill(dialect)
+			migration.BatchSize = utxoAddressDictionaryBatchSize
+		}
+		if version.Name == blockNonceClusteredSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = blockNonceClusteredBackfill(dialect)
+			migration.BatchSize = blockNonceClusteredBatchSize
+		}
+		if version.Name == utxoCredentialDictionarySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoCredentialDictionaryBackfill(dialect)
+			migration.BatchSize = utxoCredentialDictionaryBatchSize
+		}
+		if version.Name == poolOpCertClusteredSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = poolOpCertClusteredBackfill(dialect)
+			migration.BatchSize = poolOpCertClusteredBatchSize
 		}
 		ret = append(ret, migration)
 	}

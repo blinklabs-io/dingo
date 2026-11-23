@@ -192,14 +192,14 @@ const SyncStateValue = "true"
 var Manifest = []Index{
 	{
 		Name: "idx_utxo_payment_key", Table: "utxo",
-		Columns: []string{"payment_key"},
+		Columns: []string{"payment_key_id"},
 		Notes:   "API address lookup", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_staking_key", Table: "utxo",
-		Columns: []string{"staking_key"},
-		Where:   "staking_key IS NOT NULL",
+		Columns: []string{"staking_key_id"},
+		Where:   "staking_key_id IS NOT NULL",
 		Notes:   "API stake lookup", Critical: true,
 		CatchUpDroppable: true,
 	},
@@ -224,7 +224,7 @@ var Manifest = []Index{
 		Columns: []string{
 			"deleted_slot",
 			"credential_tag",
-			"staking_key",
+			"staking_key_id",
 			"amount",
 		},
 		// Spent rows only: a live output at deleted_slot = 0 would sit at a
@@ -242,7 +242,7 @@ var Manifest = []Index{
 	},
 	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
 	// FlushBatch -> refreshRewardLiveStakeAggregates runs a per-credential
-	// live UTxO SUM (WHERE credential_tag = ? AND staking_key = ? AND
+	// live UTxO SUM (WHERE credential_tag = ? AND staking_key_id = ? AND
 	// deleted_slot = 0) on every API-mode backfill batch. With this index
 	// dropped each of those SUMs is a full scan of the growing utxo table,
 	// making the backfill quadratic: measured on preview, throughput
@@ -279,7 +279,7 @@ var Manifest = []Index{
 	},
 	{
 		Name: "idx_pool_opcert_sequence_pool_sequence", Table: "pool_opcert_sequence",
-		Columns: []string{"pool_key_hash", "sequence"},
+		Columns: []string{"pool_key_id", "sequence"},
 		Notes:   "Latest operational-certificate counter lookup", Critical: true,
 	},
 	{
@@ -321,16 +321,17 @@ var Manifest = []Index{
 	{
 		Name: "idx_addr_tx_stake_position", Table: "address_transaction",
 		Columns: []string{
-			"credential_tag", "staking_key", "slot", "tx_index", "payment_key",
+			"credential_tag", "staking_key_id", "slot", "tx_index",
+			"payment_key_id",
 		},
 		Notes: "Stake-credential address history lookup", Critical: true,
 	},
 	{
 		Name: "idx_addr_tx_payment", Table: "address_transaction",
-		Columns: []string{"payment_key"},
+		Columns: []string{"payment_key_id"},
 		Notes:   "Payment-credential address history lookup", Critical: true,
 	},
-	// Keyed by an address or a script hash, which arrive in random order, so
+	// Keyed by an address id or a script hash, which arrive in random order, so
 	// each backfill insert would dirty an unrelated leaf page. None is a
 	// conflict target or read by backfill's write path: utxo_address and
 	// redeemer_script conflict on their primary keys and are cleared by
@@ -338,14 +339,9 @@ var Manifest = []Index{
 	// API reads, so they are rebuilt before the API reports ready. None is
 	// CatchUpDroppable, which is limited to utxo, transaction and asset.
 	{
-		Name: "idx_utxo_address_address", Table: "utxo_address",
-		Columns: []string{"address"},
-		Notes:   "Address UTxO query", Critical: true,
-	},
-	{
 		Name: "idx_utxo_address_order", Table: "utxo_address",
 		Columns: []string{
-			"address", "slot", "block_index", "output_idx", "tx_id",
+			"address_id", "slot", "block_index", "output_idx", "tx_id",
 		},
 		Notes: "Address UTxO page order", Critical: true,
 	},
@@ -360,13 +356,8 @@ var Manifest = []Index{
 		Notes:   "Mint/burn history rollback", Critical: true,
 	},
 	{
-		Name: "idx_asset_mint_burn_fingerprint", Table: "asset_mint_burn",
-		Columns: []string{"fingerprint"},
-		Notes:   "Mint/burn fingerprint index",
-	},
-	{
-		Name: "idx_asset_mint_burn_lookup", Table: "asset_mint_burn",
-		Columns: []string{"policy_id", "name", "slot"},
+		Name: "idx_asset_mint_burn_asset_id", Table: "asset_mint_burn",
+		Columns: []string{"asset_id", "slot", "tx_index"},
 		Notes:   "Mint/burn history query", Critical: true,
 	},
 	{
@@ -449,11 +440,11 @@ var Retained = []Index{
 		Table: "utxo",
 		Columns: []string{
 			"credential_tag",
-			"staking_key",
+			"staking_key_id",
 			"deleted_slot",
 			"amount",
 		},
-		Where: "staking_key IS NOT NULL",
+		Where: "staking_key_id IS NOT NULL",
 		Notes: "Per-batch live-stake SUM during API-mode backfill",
 	},
 	// SetTransaction clears these tables by transaction_id on each write, so

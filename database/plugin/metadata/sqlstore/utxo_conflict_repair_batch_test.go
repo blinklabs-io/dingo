@@ -134,7 +134,8 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 		require.Equal(t, producers[i], *got.TransactionID, "output %d", i)
 		var address []byte
 		require.NoError(t, store.writeDB.QueryRow(
-			`SELECT address FROM utxo_address WHERE utxo_id = ?`, got.ID,
+			`SELECT a.address FROM utxo_address ua
+JOIN address a ON a.id = ua.address_id WHERE ua.utxo_id = ?`, got.ID,
 		).Scan(&address))
 		require.Equal(t, imported[i].Address, address)
 		var script []byte

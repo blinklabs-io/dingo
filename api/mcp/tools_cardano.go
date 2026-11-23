@@ -635,8 +635,19 @@ func registerCardanoTools(
 			}
 			defer qRows.Close()
 			queryCols, _ = qRows.Columns()
-		} else if hasCol("payment_key") {
-			// Real Dingo schema with payment_key and optional staking_key / deleted_slot
+		} else if hasCol("payment_key") || hasCol("payment_key_id") {
+			// Real Dingo schema with optional staking_key / deleted_slot. A
+			// current schema names credentials and the datum by dictionary id,
+			// which the query projects back to hashes under their original
+			// names; an older one holds the hashes in the row.
+			byID := hasCol("payment_key_id")
+			paymentWhere, stakingWhere := "payment_key = ?", "staking_key = ?"
+			projection := "*"
+			if byID {
+				paymentWhere = "payment_key_id = " + models.CredentialIDSubquery
+				stakingWhere = "staking_key_id = " + models.CredentialIDSubquery
+				projection = utxoProjection
+			}
 			pk, sk, parseErr := parseAddressOrCredential(addr)
 			if parseErr != nil {
 				return &mcp.CallToolResult{
@@ -651,13 +662,13 @@ func registerCardanoTools(
 			var args []any
 
 			if len(pk) > 0 && len(sk) > 0 {
-				whereClauses = append(whereClauses, "(payment_key = ? AND staking_key = ?)")
+				whereClauses = append(whereClauses, "("+paymentWhere+" AND "+stakingWhere+")")
 				args = append(args, pk, sk)
 			} else if len(pk) > 0 {
-				whereClauses = append(whereClauses, "payment_key = ?")
+				whereClauses = append(whereClauses, paymentWhere)
 				args = append(args, pk)
 			} else if len(sk) > 0 {
-				whereClauses = append(whereClauses, "staking_key = ?")
+				whereClauses = append(whereClauses, stakingWhere)
 				args = append(args, sk)
 			}
 
@@ -679,7 +690,7 @@ func registerCardanoTools(
 
 			whereStr := strings.Join(whereClauses, " AND ")
 			// #nosec G201 //nolint:gosec // whereStr and orderClause are constructed from safe tokens
-			query := fmt.Sprintf("SELECT * FROM utxo WHERE %s%s LIMIT ? OFFSET ?", whereStr, orderClause)
+			query := fmt.Sprintf("SELECT %s FROM utxo WHERE %s%s LIMIT ? OFFSET ?", projection, whereStr, orderClause)
 			args = append(args, limit, offset)
 
 			qRows, err = db.QueryContext(qCtx, query, args...)
@@ -1055,7 +1066,7 @@ func registerCardanoTools(
 
 		var rawDatum []byte
 		var addedSlot sql.NullInt64
-		err = db.QueryRowContext(qCtx, "SELECT raw_datum, added_slot FROM datum WHERE hash = ? LIMIT 1", hashBytes).
+		err = db.QueryRowContext(qCtx, "SELECT raw_datum, added_slot FROM datum WHERE hash = ? AND LENGTH(raw_datum) > 0 LIMIT 1", hashBytes).
 			Scan(&rawDatum, &addedSlot)
 		if err == nil {
 			slotStr := "unknown"
@@ -1218,6 +1229,10 @@ func registerCardanoTools(
 		// Within one UTxO the policy is fixed, so name order is canonical
 		// asset order. asset_id is not: it records when an identity was
 		// first seen, not the asset's position in the output.
+		paymentKeyColumn, datumHashColumn, err := utxoHashColumns(qCtx, db)
+		if err != nil {
+			return nil, nil, err
+		}
 		var q string
 		var args []any
 		if input.AssetName != "" {
@@ -1225,7 +1240,7 @@ func registerCardanoTools(
 			if len(rawName) > 32 {
 				return nil, nil, errors.New("asset name exceeds 32 bytes")
 			}
-			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, ` + paymentKeyColumn + `, u.amount, i.name, h.amount, ` + datumHashColumn + `
 				 FROM asset_identity i
 				 JOIN asset_holding h ON h.asset_id = i.id
 				 JOIN utxo u ON h.utxo_id = u.id
@@ -1240,7 +1255,7 @@ func registerCardanoTools(
 				offset,
 			}
 		} else {
-			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, ` + paymentKeyColumn + `, u.amount, i.name, h.amount, ` + datumHashColumn + `
 				 FROM asset_identity i
 				 JOIN asset_holding h ON h.asset_id = i.id
 				 JOIN utxo u ON h.utxo_id = u.id
@@ -1513,10 +1528,10 @@ func registerCardanoTools(
 		var mintQuery string
 		var mintArgs []any
 		if len(rawName) > 0 {
-			mintQuery = `SELECT tx_hash, slot FROM asset_mint_burn WHERE policy_id = ? AND name = ? ORDER BY slot ASC, tx_index ASC LIMIT 1`
+			mintQuery = `SELECT t.hash, m.slot FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id JOIN "transaction" AS t ON t.id = m.transaction_id WHERE i.policy_id = ? AND i.name = ? ORDER BY m.slot ASC, m.tx_index ASC LIMIT 1`
 			mintArgs = []any{policyBytes, rawName}
 		} else {
-			mintQuery = `SELECT tx_hash, slot FROM asset_mint_burn WHERE policy_id = ? ORDER BY slot ASC, tx_index ASC LIMIT 1`
+			mintQuery = `SELECT t.hash, m.slot FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id JOIN "transaction" AS t ON t.id = m.transaction_id WHERE i.policy_id = ? ORDER BY m.slot ASC, m.tx_index ASC LIMIT 1`
 			mintArgs = []any{policyBytes}
 		}
 		err = db.QueryRowContext(qCtx, mintQuery, mintArgs...).
@@ -1526,10 +1541,10 @@ func registerCardanoTools(
 		}
 
 		if len(rawName) > 0 {
-			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_mint_burn WHERE policy_id = ? AND name = ?`, policyBytes, rawName).
+			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id WHERE i.policy_id = ? AND i.name = ?`, policyBytes, rawName).
 				Scan(&mintCount)
 		} else {
-			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_mint_burn WHERE policy_id = ?`, policyBytes).Scan(&mintCount)
+			err = db.QueryRowContext(qCtx, `SELECT COUNT(*) FROM asset_identity AS i JOIN asset_mint_burn AS m ON m.asset_id = i.id WHERE i.policy_id = ?`, policyBytes).Scan(&mintCount)
 		}
 
 		if err != nil {
@@ -2487,4 +2502,46 @@ func runBoundedEvaluation(
 		"transaction evaluation",
 		evaluate,
 	)
+}
+
+// The projections read the hashes that utxo names by dictionary id, under the
+// column names the tools reported before the dictionaries.
+const (
+	utxoPaymentKeyProjection = "(SELECT c.hash FROM credential c " +
+		"WHERE c.id = u.payment_key_id)"
+	utxoDatumHashProjection = "(SELECT d.hash FROM datum d " +
+		"WHERE d.id = u.datum_id)"
+	utxoProjection = "id, tx_id, output_idx, collateral_return_for_tx_id, " +
+		"spent_at_tx_id, " +
+		"(SELECT c.hash FROM credential c WHERE c.id = utxo.payment_key_id) " +
+		"AS payment_key, " +
+		"(SELECT c.hash FROM credential c WHERE c.id = utxo.staking_key_id) " +
+		"AS staking_key, credential_tag, " +
+		"(SELECT d.hash FROM datum d WHERE d.id = utxo.datum_id) " +
+		"AS datum_hash, amount, payment_script, added_slot, deleted_slot"
+)
+
+// utxoHashColumns returns the expressions that read an output's payment
+// credential hash and datum hash as u.payment_key and u.datum_hash do in a
+// schema that holds them in the row, or by dictionary id in a current one.
+func utxoHashColumns(
+	ctx context.Context,
+	db *sql.DB,
+) (paymentKey, datumHash string, err error) {
+	rows, err := db.QueryContext(ctx, "SELECT * FROM utxo LIMIT 0")
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", "", err
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", err
+	}
+	if slices.Contains(cols, "payment_key_id") {
+		return utxoPaymentKeyProjection, utxoDatumHashProjection, nil
+	}
+	return "u.payment_key", "u.datum_hash", nil
 }

@@ -56,9 +56,9 @@ WITH RECURSIVE n(i) AS (
     SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d
 )
 INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key,
+    (tx_id, output_idx, credential_tag, staking_key_id,
      added_slot, deleted_slot, amount)
-SELECT i, 0, i %% 2, randomblob(28), 1, 0, '1' FROM n`,
+SELECT i, 0, i %% 2, i, 1, 0, '1' FROM n`,
 		importedUtxoRows))
 	exec("ANALYZE")
 	exec(
@@ -146,7 +146,7 @@ func TestRollbackSpentStakeRefsQuerySearchesSpenderIndex(t *testing.T) {
 // lookup used before it named the spender index and moved DISTINCT into Go.
 func legacyDistinctSpentStakeRefsQuery(n int) string {
 	return `
-SELECT DISTINCT credential_tag, staking_key FROM utxo
+SELECT DISTINCT credential_tag, ` + utxoStakingKeyExpr + ` FROM utxo
 WHERE spent_at_tx_id IN (` + bindPlaceholders(n) + `)`
 }
 
@@ -185,11 +185,13 @@ func TestRollbackSpentStakeRefsMatchLegacyDistinct(t *testing.T) {
 	for i, row := range rows {
 		_, err := store.writeDB.Exec(
 			`INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key, spent_at_tx_id,
+    (tx_id, output_idx, credential_tag, staking_key_id, spent_at_tx_id,
      added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, ?, 1, 0, '1')`,
 			testutil.TransactionID(t, store.writeDB, []byte{byte(i)}),
-			row.tag, row.key, row.spender,
+			row.tag,
+			testutil.CredentialID(t, store.writeDB, row.key),
+			row.spender,
 		)
 		require.NoError(t, err)
 	}
@@ -253,11 +255,11 @@ func TestDeleteTransactionsAfterSlotRefreshesEachCredentialOnce(t *testing.T) {
 	for i, key := range [][]byte{keyA, keyA, keyB} {
 		_, err := store.writeDB.Exec(
 			`INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key, spent_at_tx_id,
+    (tx_id, output_idx, credential_tag, staking_key_id, spent_at_tx_id,
      added_slot, deleted_slot, amount)
 VALUES (?, 0, 0, ?, ?, 1, 10, '1')`,
 			testutil.TransactionID(t, store.writeDB, []byte{byte(i)}),
-			key, spender,
+			testutil.CredentialID(t, store.writeDB, key), spender,
 		)
 		require.NoError(t, err)
 	}

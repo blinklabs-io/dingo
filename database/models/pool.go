@@ -89,7 +89,6 @@ type Pool struct {
 // struct.
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
-	ID          uint
 	Slot        uint64
 	Sequence    uint64
 }

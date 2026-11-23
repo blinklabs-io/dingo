@@ -53,7 +53,7 @@ func testLeiosAddressBatchBackend(t *testing.T, s *Store) {
 	db, ctx, err := s.dbFromTxn(txn)
 	require.NoError(t, err)
 	var address string
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT address FROM utxo_address").Scan(&address))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT a.address FROM utxo_address ua JOIN address a ON a.id = ua.address_id").Scan(&address))
 	require.Equal(t, tx.Outputs()[0].Address().String(), address)
 	require.NoError(t, txn.Commit())
 	require.Equal(t, 1, tableCounts(t, s, nil, "utxo_address")["utxo_address"])

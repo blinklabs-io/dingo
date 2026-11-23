@@ -573,10 +573,6 @@ INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_s
 VALUES (?, 1, 0, '1', 0, FALSE)`)
 	require.NoError(t, err)
 	defer utxoStmt.Close()
-	addressStmt, err := txn.Prepare(`
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
-	require.NoError(t, err)
-	defer addressStmt.Close()
 	for i := range addresses {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
@@ -584,8 +580,7 @@ INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
-		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
-		require.NoError(t, err)
+		testutil.InsertUtxoAddress(t, txn, utxoID, []byte(addresses[i]))
 		testutil.InsertAssetHolding(
 			t, txn, utxoID, policyID, assetName, amounts[i],
 		)
@@ -997,14 +992,14 @@ func insertAdapterUtxo(
 	}
 	result, err := raw.Exec(`
 INSERT INTO utxo (
-    tx_id, collateral_return_for_tx_id, payment_key,
-    staking_key, credential_tag, added_slot, deleted_slot, amount, output_idx,
+    tx_id, collateral_return_for_tx_id, payment_key_id,
+    staking_key_id, credential_tag, added_slot, deleted_slot, amount, output_idx,
     payment_script
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		producer,
 		utxo.CollateralReturnForTxID,
-		utxo.PaymentKey,
-		utxo.StakingKey,
+		testutil.CredentialID(t, raw, utxo.PaymentKey),
+		testutil.CredentialID(t, raw, utxo.StakingKey),
 		utxo.CredentialTag,
 		utxo.AddedSlot,
 		utxo.DeletedSlot,
@@ -1016,12 +1011,7 @@ INSERT INTO utxo (
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
 	if len(utxo.Address) > 0 {
-		_, err = raw.Exec(`
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			utxoID,
-			utxo.Address,
-		)
-		require.NoError(t, err)
+		testutil.InsertUtxoAddress(t, raw, utxoID, utxo.Address)
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
@@ -1581,9 +1571,10 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
 		_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, credential_tag,
+    payment_key_id, payment_script, staking_key_id, credential_tag,
     transaction_id, slot, tx_index
-) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`,
+			testutil.CredentialID(t, raw, payment), tx.ID, block.slot)
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			setIndexerTip(t, adapter, ochainsync.Tip{

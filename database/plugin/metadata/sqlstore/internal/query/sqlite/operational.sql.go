@@ -107,16 +107,17 @@ func (q *Queries) CountTransactionsByMetadataLabel(ctx context.Context, label sq
 const countTransactionsByPaymentCred = `-- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ? AND payment_script = ?
+WHERE payment_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND payment_script = ?
 `
 
 type CountTransactionsByPaymentCredParams struct {
-	PaymentKey    []byte
+	Hash          []byte
 	PaymentScript sql.NullBool
 }
 
 func (q *Queries) CountTransactionsByPaymentCred(ctx context.Context, arg CountTransactionsByPaymentCredParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, arg.PaymentKey, arg.PaymentScript)
+	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, arg.Hash, arg.PaymentScript)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -475,7 +476,7 @@ DELETE FROM block_nonce
 WHERE slot >= ?
 `
 
-func (q *Queries) DeleteBlockNoncesAfterOrigin(ctx context.Context, slot sql.NullInt64) error {
+func (q *Queries) DeleteBlockNoncesAfterOrigin(ctx context.Context, slot int64) error {
 	_, err := q.db.ExecContext(ctx, deleteBlockNoncesAfterOrigin, slot)
 	return err
 }
@@ -486,8 +487,8 @@ WHERE slot > ? OR (slot = ? AND hash <> ?)
 `
 
 type DeleteBlockNoncesAfterPointParams struct {
-	Slot   sql.NullInt64
-	Slot_2 sql.NullInt64
+	Slot   int64
+	Slot_2 int64
 	Hash   []byte
 }
 
@@ -501,7 +502,7 @@ DELETE FROM block_nonce
 WHERE slot < ?
 `
 
-func (q *Queries) DeleteBlockNoncesBeforeSlot(ctx context.Context, slot sql.NullInt64) error {
+func (q *Queries) DeleteBlockNoncesBeforeSlot(ctx context.Context, slot int64) error {
 	_, err := q.db.ExecContext(ctx, deleteBlockNoncesBeforeSlot, slot)
 	return err
 }
@@ -511,7 +512,7 @@ DELETE FROM block_nonce
 WHERE slot < ? AND is_checkpoint = FALSE
 `
 
-func (q *Queries) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(ctx context.Context, slot sql.NullInt64) error {
+func (q *Queries) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(ctx context.Context, slot int64) error {
 	_, err := q.db.ExecContext(ctx, deleteBlockNoncesBeforeSlotWithoutCheckpoints, slot)
 	return err
 }
@@ -1341,15 +1342,18 @@ func (q *Queries) GetActiveDreps(ctx context.Context) ([]Drep, error) {
 
 const getAssetMintBurnInfo = `-- name: GetAssetMintBurnInfo :one
 SELECT
-    (SELECT first_event.tx_hash
-     FROM asset_mint_burn AS first_event
-     WHERE first_event.policy_id = ? AND first_event.name = ?
+    (SELECT t.hash
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS first_event ON first_event.asset_id = i.id
+     JOIN "transaction" AS t ON t.id = first_event.transaction_id
+     WHERE i.policy_id = ? AND i.name = ?
      ORDER BY first_event.slot ASC, first_event.tx_index ASC,
-              first_event.id ASC
+              first_event.transaction_id ASC
      LIMIT 1) AS initial_tx_hash,
-    COUNT(*) AS event_count
-FROM asset_mint_burn AS events
-WHERE events.policy_id = ? AND events.name = ?
+    (SELECT COUNT(*)
+     FROM asset_identity AS i
+     JOIN asset_mint_burn AS events ON events.asset_id = i.id
+     WHERE i.policy_id = ? AND i.name = ?) AS event_count
 `
 
 type GetAssetMintBurnInfoParams struct {
@@ -1408,7 +1412,7 @@ WHERE hash = ? AND slot = ?
 
 type GetBlockNonceParams struct {
 	Hash []byte
-	Slot sql.NullInt64
+	Slot int64
 }
 
 func (q *Queries) GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error) {
@@ -1419,30 +1423,38 @@ func (q *Queries) GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([
 }
 
 const getBlockNoncesInSlotRange = `-- name: GetBlockNoncesInSlotRange :many
-SELECT hash, nonce, id, slot, is_checkpoint
+SELECT hash, nonce, ordinal, slot, is_checkpoint
 FROM block_nonce
 WHERE slot >= ? AND slot < ?
-ORDER BY slot ASC
+ORDER BY slot ASC, ordinal ASC
 `
 
 type GetBlockNoncesInSlotRangeParams struct {
-	Slot   sql.NullInt64
-	Slot_2 sql.NullInt64
+	Slot   int64
+	Slot_2 int64
 }
 
-func (q *Queries) GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]BlockNonce, error) {
+type GetBlockNoncesInSlotRangeRow struct {
+	Hash         []byte
+	Nonce        []byte
+	Ordinal      int64
+	Slot         int64
+	IsCheckpoint sql.NullBool
+}
+
+func (q *Queries) GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]GetBlockNoncesInSlotRangeRow, error) {
 	rows, err := q.db.QueryContext(ctx, getBlockNoncesInSlotRange, arg.Slot, arg.Slot_2)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []BlockNonce{}
+	items := []GetBlockNoncesInSlotRangeRow{}
 	for rows.Next() {
-		var i BlockNonce
+		var i GetBlockNoncesInSlotRangeRow
 		if err := rows.Scan(
 			&i.Hash,
 			&i.Nonce,
-			&i.ID,
+			&i.Ordinal,
 			&i.Slot,
 			&i.IsCheckpoint,
 		); err != nil {
@@ -1468,8 +1480,8 @@ WHERE slot >= ? AND slot <= ?
 `
 
 type GetBlockSlotRangeStatsParams struct {
-	Slot   sql.NullInt64
-	Slot_2 sql.NullInt64
+	Slot   int64
+	Slot_2 int64
 }
 
 type GetBlockSlotRangeStatsRow struct {
@@ -1603,16 +1615,18 @@ func (q *Queries) GetConstitution(ctx context.Context) (Constitution, error) {
 const getControlledAmountByCredential = `-- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0
+WHERE credential_tag = ?
+  AND staking_key_id = (SELECT id FROM credential WHERE hash = ?)
+  AND deleted_slot = 0
 `
 
 type GetControlledAmountByCredentialParams struct {
 	CredentialTag int64
-	StakingKey    []byte
+	Hash          []byte
 }
 
 func (q *Queries) GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.StakingKey)
+	rows, err := q.db.QueryContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -1680,7 +1694,7 @@ func (q *Queries) GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsPa
 const getDatum = `-- name: GetDatum :one
 SELECT hash, raw_datum, id, added_slot
 FROM datum
-WHERE hash = ?
+WHERE hash = ? AND LENGTH(raw_datum) > 0
 `
 
 func (q *Queries) GetDatum(ctx context.Context, hash []byte) (Datum, error) {
@@ -2169,8 +2183,8 @@ LIMIT 1
 `
 
 type GetLastBlockNonceInRangeParams struct {
-	Slot   sql.NullInt64
-	Slot_2 sql.NullInt64
+	Slot   int64
+	Slot_2 int64
 }
 
 func (q *Queries) GetLastBlockNonceInRange(ctx context.Context, arg GetLastBlockNonceInRangeParams) ([]byte, error) {
@@ -4323,24 +4337,30 @@ func (q *Queries) SetBackfillCheckpoint(ctx context.Context, arg SetBackfillChec
 }
 
 const setBlockNonce = `-- name: SetBlockNonce :exec
-INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (hash, slot) DO UPDATE SET
+INSERT INTO block_nonce (slot, hash, ordinal, nonce, is_checkpoint)
+VALUES (
+    ?, ?,
+    COALESCE((SELECT MAX(b.ordinal) + 1 FROM block_nonce AS b WHERE b.slot = ?), 0),
+    ?, ?
+)
+ON CONFLICT (slot, hash) DO UPDATE SET
     nonce = excluded.nonce,
     is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint
 `
 
 type SetBlockNonceParams struct {
+	Slot         int64
 	Hash         []byte
-	Slot         sql.NullInt64
+	Slot_2       int64
 	Nonce        []byte
 	IsCheckpoint sql.NullBool
 }
 
 func (q *Queries) SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) error {
 	_, err := q.db.ExecContext(ctx, setBlockNonce,
-		arg.Hash,
 		arg.Slot,
+		arg.Hash,
+		arg.Slot_2,
 		arg.Nonce,
 		arg.IsCheckpoint,
 	)
@@ -4438,7 +4458,10 @@ func (q *Queries) SetConstitution(ctx context.Context, arg SetConstitutionParams
 const setDatum = `-- name: SetDatum :exec
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET raw_datum = excluded.raw_datum
+ON CONFLICT (hash) DO UPDATE SET
+    added_slot = CASE WHEN LENGTH(datum.raw_datum) = 0
+        THEN excluded.added_slot ELSE datum.added_slot END,
+    raw_datum = excluded.raw_datum
 `
 
 type SetDatumParams struct {

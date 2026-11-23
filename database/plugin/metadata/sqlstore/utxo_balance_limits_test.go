@@ -68,11 +68,11 @@ func TestGetUtxoBalanceByAddressStopsAtUtxoLimit(t *testing.T) {
 		balanceLimitsUtxo(t, addr, 0x03),
 	}, nil))
 	_, err := store.writeDB.Exec(
-		`INSERT INTO utxo (tx_id, payment_key, payment_script, credential_tag,
+		`INSERT INTO utxo (tx_id, payment_key_id, payment_script, credential_tag,
     added_slot, deleted_slot, amount, output_idx)
 VALUES (?, ?, ?, 0, 4, 0, 'unparseable', 0)`,
 		testutil.TransactionID(t, store.writeDB, bytes.Repeat([]byte{0x04}, 32)),
-		addr.PaymentKeyHash().Bytes(),
+		fixtureCredentialID(t, store, addr.PaymentKeyHash().Bytes()),
 		models.PaymentScriptFromAddress(addr),
 	)
 	require.NoError(t, err)

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"log/slog"
 	"math"
 	"math/big"
@@ -3205,12 +3206,17 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// Spent history recorded against the payment credential (via a base
 	// address, so the synthetic enterprise form never matches) resolves
 	// with a zero lovelace balance.
-	_, err = store.Exec(`
+	_, err = store.Exec(
+		`
 INSERT INTO address_transaction (
-    payment_key, payment_script, staking_key, transaction_id, slot
+    payment_key_id, payment_script, staking_key_id, transaction_id, slot
 ) VALUES (?, FALSE, ?, ?, ?)`,
-		paymentKey,
-		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		testutil.CredentialID(t, store, paymentKey),
+		testutil.CredentialID(
+			t,
+			store,
+			bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		),
 		1,
 		10,
 	)

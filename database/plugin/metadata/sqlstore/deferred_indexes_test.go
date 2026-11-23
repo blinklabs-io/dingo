@@ -266,7 +266,7 @@ func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
 		"idx_utxo_staking_deleted_amount",
 	).Scan(&retained))
-	require.Contains(t, retained, "WHERE staking_key IS NOT NULL")
+	require.Contains(t, retained, "WHERE staking_key_id IS NOT NULL")
 
 	require.NoError(t, store.BuildDeferredIndexes())
 
@@ -290,7 +290,7 @@ func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 			"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
 			name,
 		).Scan(&definition))
-		require.Contains(t, definition, "WHERE staking_key IS NOT NULL",
+		require.Contains(t, definition, "WHERE staking_key_id IS NOT NULL",
 			"rebuilt %s must stay partial: %s", name, definition)
 	}
 }
@@ -329,8 +329,7 @@ func TestBulkLoadDefersAddressAndScriptIndexes(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	names := []string{
-		"idx_utxo_address_address", "idx_utxo_address_order",
-		"idx_redeemer_script_position",
+		"idx_utxo_address_order", "idx_redeemer_script_position",
 	}
 
 	require.NoError(t, store.DropDeferredIndexesContext(t.Context()))

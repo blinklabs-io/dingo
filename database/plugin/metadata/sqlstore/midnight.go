@@ -156,7 +156,7 @@ func (s *Store) GetMidnightCandidates(
 SELECT producer.hash, utxo.output_idx, datum.raw_datum
 FROM utxo
 JOIN "transaction" AS producer ON producer.id = utxo.tx_id
-LEFT JOIN datum ON datum.hash = utxo.datum_hash
+LEFT JOIN datum ON datum.id = utxo.datum_id AND LENGTH(datum.raw_datum) > 0
 WHERE utxo.deleted_slot = 0 AND `+predicates[0]),
 		args...,
 	)

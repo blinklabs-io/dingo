@@ -29,21 +29,21 @@ func sqlDialect(name string) dialectSQL {
 		return dialectSQL{
 			"BIGINT",
 			"true",
-			"$1 AND ax.drep_type = $2",
+			"$1 AND +ax.drep_type = $2",
 			"JOIN utxo",
 		}
 	case "mysql":
 		return dialectSQL{
 			"UNSIGNED",
 			"1",
-			"? AND ax.drep_type = ?",
+			"? AND +ax.drep_type = ?",
 			"JOIN utxo",
 		}
 	default:
 		return dialectSQL{
 			"INTEGER",
 			"1",
-			"? AND ax.drep_type = ?",
+			"? AND +ax.drep_type = ?",
 			"JOIN utxo INDEXED BY " + sqliteUtxoStakingLiveAmountIndex,
 		}
 	}
@@ -101,17 +101,16 @@ func VotingPowerSQL(
 			   ), 0)
 		FROM account a
 		LEFT JOIN (
-			SELECT credential_tag, staking_key,
-				   COALESCE(SUM(CAST(amount AS ` + dialect.castType + `)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND EXISTS (
-				  SELECT 1 FROM account ax
-				  WHERE ax.credential_tag = utxo.credential_tag
-				    AND ax.staking_key = utxo.staking_key
-				    AND ax.drep = ` + dialect.credentialParams + ` AND ax.active = ` + dialect.active + innerExpiry + `
-			  )
-			GROUP BY credential_tag, staking_key
+			SELECT ax.credential_tag, ax.staking_key,
+				   COALESCE(SUM(CAST(utxo.amount AS ` + dialect.castType + `)), 0) AS utxo_sum
+			FROM account ax
+			` + dialect.utxoJoin + `
+			         ON utxo.credential_tag = ax.credential_tag
+			         AND utxo.staking_key_id = (
+			             SELECT id FROM credential WHERE hash = ax.staking_key)
+			         AND utxo.deleted_slot = 0
+			WHERE ax.drep = ` + dialect.credentialParams + ` AND ax.active = ` + dialect.active + innerExpiry + `
+			GROUP BY ax.credential_tag, ax.staking_key
 		) u ON u.credential_tag = a.credential_tag
 			AND u.staking_key = a.staking_key
 		WHERE a.drep = ` + outerParams + ` AND a.active = ` + dialect.active + outerExpiry + `
@@ -158,7 +157,8 @@ func VotingPowerBatchSQL(dialectName string, expiryEpoch uint64) string {
 			FROM account ax
 			` + dialect.utxoJoin + `
 			         ON utxo.credential_tag = ax.credential_tag
-			         AND utxo.staking_key = ax.staking_key
+			         AND utxo.staking_key_id = (
+			             SELECT id FROM credential WHERE hash = ax.staking_key)
 			         AND utxo.deleted_slot = 0
 		WHERE ax.active = ` + dialect.active + ` ` + innerExpiry + `AND ax.drep IN ?
 		GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
@@ -195,7 +195,8 @@ func VotingPowerByTypeSQL(dialectName string, expiryEpoch uint64) string {
 			FROM account ax
 			` + dialect.utxoJoin + `
 				     ON utxo.credential_tag = ax.credential_tag
-				     AND utxo.staking_key = ax.staking_key
+				     AND utxo.staking_key_id = (
+				         SELECT id FROM credential WHERE hash = ax.staking_key)
 				     AND utxo.deleted_slot = 0
 			WHERE ax.active = ` + dialect.active + ` ` + innerExpiry + `AND ax.drep_type IN ?
 			GROUP BY ax.credential_tag, ax.staking_key

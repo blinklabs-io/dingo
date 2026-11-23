@@ -66,11 +66,11 @@ func TestGetAccountAddressTotalsStopsAtUtxoLimit(t *testing.T) {
 		accountLimitsUtxo(t, 0x03, stakingKey),
 	}, nil))
 	_, err := store.writeDB.Exec(
-		`INSERT INTO utxo (tx_id, staking_key, credential_tag,
+		`INSERT INTO utxo (tx_id, staking_key_id, credential_tag,
     added_slot, deleted_slot, amount, output_idx)
 VALUES (?, ?, 0, 4, 0, 'unparseable', 0)`,
 		testutil.TransactionID(t, store.writeDB, bytes.Repeat([]byte{0x04}, 32)),
-		stakingKey,
+		testutil.CredentialID(t, store.writeDB, stakingKey),
 	)
 	require.NoError(t, err)
 
@@ -228,8 +228,9 @@ func testAccountAggregateLimits(t *testing.T, store *Store) {
 	for i := range 12 {
 		_, err := store.writeDB.ExecContext(ctx, store.dialect.Rebind(
 			`INSERT INTO address_transaction
-    (staking_key, credential_tag, transaction_id, slot, tx_index)
-VALUES (?, 0, ?, ?, 0)`), stakingKey, 1000+i, 1000+i)
+    (staking_key_id, credential_tag, transaction_id, slot, tx_index)
+VALUES (?, 0, ?, ?, 0)`), fixtureCredentialID(t, store, stakingKey),
+			1000+i, 1000+i)
 		require.NoError(t, err)
 	}
 
@@ -240,7 +241,7 @@ VALUES (?, 0, ?, ?, 0)`), stakingKey, 1000+i, 1000+i)
 		}
 		_, err := sumSignedRowsBounded(
 			ctx, db,
-			`SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`,
+			`SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key_id = `+credentialIDSubquery,
 			2, models.ErrAccountAggregateLimit, uint8(0), stakingKey,
 		)
 		require.ErrorIs(t, err, models.ErrAccountAggregateLimit)

@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"database/sql"
 	"math/big"
 	"testing"
 
@@ -119,13 +120,7 @@ func testListMintedAssetsPastSlotFoldLimit(t *testing.T, store *Store) {
 	const slot = uint64(1) << 31
 	p1, p2 := assetPolicy(0x01), assetPolicy(0x02)
 	insert := func(txHash, policy []byte, slot uint64, txIndex uint32) {
-		_, err := store.writeDB.Exec(
-			store.dialect.Rebind(`INSERT INTO asset_mint_burn `+
-				`(tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index) `+
-				`VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			txHash, policy, []byte("a"), []byte("fp"), slot, "1", txIndex,
-		)
-		require.NoError(t, err)
+		insertMintBurnEvent(t, store, txHash, policy, []byte("a"), slot, txIndex, "1")
 	}
 	insert(credentialHash(0x31), p2, slot, 1)
 	insert(credentialHash(0x32), p1, slot, 2)
@@ -148,4 +143,47 @@ func testListMintedAssetsPastSlotFoldLimit(t *testing.T, store *Store) {
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	require.Equal(t, p1, filtered[0].PolicyId)
+}
+
+// insertMintBurnEvent seeds one mint event through plain SQL that runs on
+// every dialect: the identity rows are looked up first instead of inserted
+// with a SQLite-only conditional insert.
+func insertMintBurnEvent(
+	t *testing.T,
+	store *Store,
+	txHash, policy, name []byte,
+	slot uint64,
+	txIndex uint32,
+	quantity string,
+) {
+	t.Helper()
+	d := store.dialect
+	tx := d.QuoteIdentifier("transaction")
+	ensure := func(table, where, insert string, args ...any) int64 {
+		var id int64
+		err := store.writeDB.QueryRow(
+			d.Rebind(`SELECT id FROM `+table+` WHERE `+where), args...,
+		).Scan(&id)
+		if err == nil {
+			return id
+		}
+		require.ErrorIs(t, err, sql.ErrNoRows)
+		_, err = store.writeDB.Exec(d.Rebind(insert), args...)
+		require.NoError(t, err)
+		require.NoError(t, store.writeDB.QueryRow(
+			d.Rebind(`SELECT id FROM `+table+` WHERE `+where), args...,
+		).Scan(&id))
+		return id
+	}
+	txID := ensure(tx, `hash = ?`,
+		`INSERT INTO `+tx+` (hash) VALUES (?)`, txHash)
+	assetID := ensure(`asset_identity`, `policy_id = ? AND name = ?`,
+		`INSERT INTO asset_identity (policy_id, name) VALUES (?, ?)`,
+		policy, name)
+	_, err := store.writeDB.Exec(d.Rebind(
+		`INSERT INTO asset_mint_burn `+
+			`(transaction_id, asset_id, slot, tx_index, quantity) `+
+			`VALUES (?, ?, ?, ?, ?)`,
+	), txID, assetID, slot, txIndex, quantity)
+	require.NoError(t, err)
 }

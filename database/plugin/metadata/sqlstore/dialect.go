@@ -247,19 +247,8 @@ func mysqlDeferredIndexPrefix(table, column string) bool {
 }
 
 var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
-	"utxo": {
-		"payment_key": true, "staking_key": true, "amount": true,
-	},
-	"applied_transaction":  {"block_hash": true},
-	"pool_opcert_sequence": {"pool_key_hash": true},
-	"asset_mint_burn": {
-		"policy_id": true, "name": true, "fingerprint": true,
-	},
-	"address_transaction": {
-		"staking_key": true,
-		"payment_key": true,
-	},
-	"utxo_address":               {"address": true},
+	"utxo":                       {"amount": true},
+	"applied_transaction":        {"block_hash": true},
 	"redeemer_script":            {"script_hash": true},
 	"certs":                      {"block_hash": true},
 	"witness_scripts":            {"script_hash": true},

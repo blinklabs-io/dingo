@@ -116,36 +116,33 @@ const (
 	holdingRowAmount
 )
 
+const (
+	mintBurnRowTransaction = iota
+	mintBurnRowPolicy
+	mintBurnRowName
+	mintBurnRowSlot
+	mintBurnRowQuantity
+	mintBurnRowTxIndex
+)
+
 type assetIdentityKey struct {
 	policy string
 	name   string
 }
 
-// flushAssetHoldings writes queued holdings. It resolves the distinct assets
-// with chunked selects, inserts the identities that are missing, resolves
-// those again, then inserts the holdings in (utxo_id, asset_id) order so they
-// append to the primary key.
-func flushAssetHoldings(
+// ensureAssetIdentities returns the id of every asset in keys, creating the
+// identities that are missing. It resolves the distinct assets with chunked
+// selects, inserts the missing ones in key order and resolves those again.
+func ensureAssetIdentities(
 	ctx context.Context,
 	db queryer,
 	s *Store,
-	rows [][]any,
+	all []assetIdentityKey,
 	parameterLimit int,
-) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	seen := make(map[assetIdentityKey]struct{}, len(rows))
-	keys := make([]assetIdentityKey, 0, len(rows))
-	for _, row := range rows {
-		key := assetIdentityKey{
-			policy: string(
-				row[holdingRowPolicy].([]byte),
-			), //nolint:forcetypeassert
-			name: string(
-				row[holdingRowName].([]byte),
-			), //nolint:forcetypeassert
-		}
+) (map[assetIdentityKey]int64, error) {
+	seen := make(map[assetIdentityKey]struct{}, len(all))
+	keys := make([]assetIdentityKey, 0, len(all))
+	for _, key := range all {
 		if _, ok := seen[key]; !ok {
 			seen[key] = struct{}{}
 			keys = append(keys, key)
@@ -155,7 +152,7 @@ func flushAssetHoldings(
 	if err := resolveAssetIdentities(
 		ctx, db, keys, ids, parameterLimit, false,
 	); err != nil {
-		return err
+		return nil, err
 	}
 	var missing []assetIdentityKey
 	for _, key := range keys {
@@ -175,7 +172,7 @@ func flushAssetHoldings(
 		if err := insertAssetIdentities(
 			ctx, db, s, missing, parameterLimit,
 		); err != nil {
-			return err
+			return nil, err
 		}
 		// A concurrent writer may have created an identity this call's
 		// insert skipped. On the engines with snapshot reads that row is
@@ -185,8 +182,118 @@ func flushAssetHoldings(
 		if err := resolveAssetIdentities(
 			ctx, db, missing, ids, parameterLimit, lock,
 		); err != nil {
-			return err
+			return nil, err
 		}
+	}
+	return ids, nil
+}
+
+// flushAssetMintBurn writes queued mint and burn events keyed by transaction
+// and asset id, in key order so they append to the primary key. A transaction
+// that names an asset twice keeps its first event, as the unique key did.
+func flushAssetMintBurn(
+	ctx context.Context,
+	db queryer,
+	s *Store,
+	rows [][]any,
+	parameterLimit int,
+) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	keys := make([]assetIdentityKey, 0, len(rows))
+	for _, row := range rows {
+		keys = append(keys, assetIdentityKey{
+			policy: string(
+				row[mintBurnRowPolicy].([]byte),
+			), //nolint:forcetypeassert
+			name: string(
+				row[mintBurnRowName].([]byte),
+			), //nolint:forcetypeassert
+		})
+	}
+	ids, err := ensureAssetIdentities(ctx, db, s, keys, parameterLimit)
+	if err != nil {
+		return err
+	}
+	type event struct {
+		transaction int64
+		asset       int64
+		row         []any
+	}
+	events := make([]event, len(rows))
+	for i, row := range rows {
+		id, ok := ids[keys[i]]
+		if !ok {
+			return fmt.Errorf(
+				"resolve asset identity %x/%x: not found after insert",
+				keys[i].policy, keys[i].name,
+			)
+		}
+		transaction, _ := row[mintBurnRowTransaction].(int64)
+		events[i] = event{transaction: transaction, asset: id, row: row}
+	}
+	slices.SortStableFunc(events, func(a, b event) int {
+		return cmp.Or(
+			cmp.Compare(a.transaction, b.transaction),
+			cmp.Compare(a.asset, b.asset),
+		)
+	})
+	const width = 5
+	perStatement := max(1, parameterLimit/width)
+	for start := 0; start < len(events); start += perStatement {
+		end := min(start+perStatement, len(events))
+		args := make([]any, 0, (end-start)*width)
+		for _, item := range events[start:end] {
+			args = append(args,
+				item.transaction, item.asset,
+				item.row[mintBurnRowSlot],
+				item.row[mintBurnRowTxIndex],
+				item.row[mintBurnRowQuantity],
+			)
+		}
+		query := "-- name: InsertAssetMintBurnBatch :exec\n" +
+			"INSERT INTO asset_mint_burn " +
+			"(transaction_id, asset_id, slot, tx_index, quantity) VALUES " +
+			strings.TrimSuffix(
+				strings.Repeat("(?, ?, ?, ?, ?), ", end-start), ", ",
+			) +
+			"\nON CONFLICT (transaction_id, asset_id) DO NOTHING"
+		if err := s.execBatch(ctx, db, query, args...); err != nil {
+			return fmt.Errorf("insert asset_mint_burn rows: %w", err)
+		}
+	}
+	return nil
+}
+
+// flushAssetHoldings writes queued holdings. It resolves the distinct assets
+// with chunked selects, inserts the identities that are missing, resolves
+// those again, then inserts the holdings in (utxo_id, asset_id) order so they
+// append to the primary key.
+func flushAssetHoldings(
+	ctx context.Context,
+	db queryer,
+	s *Store,
+	rows [][]any,
+	parameterLimit int,
+) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	keys := make([]assetIdentityKey, 0, len(rows))
+	for _, row := range rows {
+		keys = append(keys, assetIdentityKey{
+			policy: string(
+				row[holdingRowPolicy].([]byte),
+			), //nolint:forcetypeassert
+			name: string(
+				row[holdingRowName].([]byte),
+			), //nolint:forcetypeassert
+		})
+	}
+	ids, err := ensureAssetIdentities(ctx, db, s, keys, parameterLimit)
+	if err != nil {
+		return err
 	}
 	type holding struct {
 		utxo   any

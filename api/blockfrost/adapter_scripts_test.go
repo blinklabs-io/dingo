@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -352,8 +353,8 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		if tx == firstTx {
 			// insertAdapterUtxo has no datum hash column.
 			_, err := raw.Exec(
-				`UPDATE utxo SET datum_hash = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
-				datumHash, tx.Hash,
+				`UPDATE utxo SET datum_id = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
+				testutil.DatumID(t, raw, datumHash), tx.Hash,
 			)
 			require.NoError(t, err)
 		}

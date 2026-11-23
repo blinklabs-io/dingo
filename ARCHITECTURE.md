@@ -13908,7 +13908,7 @@ widths are fixed here instead of following a release.
 The SQL store preserves that complete counter domain in signed engine integer
 columns by flipping bit 63 at its read and write boundary. This maps unsigned
 ordering directly onto signed ordering, so `MAX`, `<`, and the
-`(pool_key_hash, sequence)` index keep the ledger's order from zero through
+`(pool_key_id, sequence)` index keep the ledger's order from zero through
 `math.MaxUint64`. Migration v47 shifts legacy nonnegative values into the same
 representation. Block application, forging, and Mithril HeaderState import
 therefore share the reference's full counter range.
@@ -17763,7 +17763,7 @@ context. The page reads the label's rows through the
 `(label, slot, transaction_id)` index, so its cost follows the page offset
 rather than the number of transactions with the label. `GET /pools/{pool_id}/blocks`, `GET /epochs/{number}/blocks` and
 `GET /epochs/{number}/blocks/{pool_id}` count and page the `block_nonce` rows in
-a slot range through the `(slot, hash)` index under the request context; an
+a slot range through the `(slot, hash)` primary key under the request context; an
 offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. `GET /epochs/{number}/stakes` and `GET /epochs/{number}/stakes/{pool_id}` count and page the rows through the `(epoch, registered, id)` index, so the epoch-wide list returns in the order the snapshot was stored and needs no sort on any database, and skip the page query when the offset is at or past the count; a single pool's list keeps the credential order. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
@@ -23071,7 +23071,7 @@ total stake, registration, current pool delegation, and delegation certificate
 order; rollback therefore restores the aggregate from the same historical
 metadata used by normal account and UTxO repair. Malformed non-empty stake
 credentials are rejected before they enter the aggregate. The aggregate itself
-attributes only base-address stake, because it keys on `utxo.staking_key` and a
+attributes only base-address stake, because it keys on `utxo.staking_key_id` and a
 pointer address leaves that column empty; the pointer position is retained in
 `utxo_pointer` instead. Resolving it is inherently slot-evaluated -- a
 registration or de-registration anywhere can change which credential an existing

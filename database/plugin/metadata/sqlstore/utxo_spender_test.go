@@ -174,8 +174,10 @@ func bytes32(b byte) []byte {
 }
 
 // TestInputEdgeQueriesSearchTheEdgeIndex pins the plans of the edge reads and
-// the rollback delete: each must search the transaction-id index and never
-// scan an edge table or utxo.
+// the rollback delete: each must search the clustered primary key by
+// transaction id and never scan an edge table or utxo. The cascade from utxo
+// and the genesis removal check look edges up by utxo id, which the utxo_id
+// index serves.
 func TestInputEdgeQueriesSearchTheEdgeIndex(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -187,10 +189,13 @@ WHERE input.tx_id IN (?, ?) ORDER BY utxo.id`,
 			"rollback": `DELETE FROM ` + table + ` WHERE tx_id IN (?, ?)`,
 		} {
 			plan := explainQueryPlan(t, store, query, int64(1), int64(2))
-			require.Contains(t, plan, "USING INDEX idx_"+table+"_tx_id", "%s %s: %s", table, name, plan)
+			require.Contains(t, plan, "USING PRIMARY KEY (tx_id=?)", "%s %s: %s", table, name, plan)
 			require.NotContains(t, plan, "SCAN "+table, "%s %s: %s", table, name, plan)
 			require.NotContains(t, plan, "SCAN utxo", "%s %s: %s", table, name, plan)
 		}
+		plan := explainQueryPlan(t, store,
+			`SELECT 1 FROM `+table+` WHERE utxo_id = ?`, int64(1))
+		require.Contains(t, plan, "USING COVERING INDEX idx_"+table+"_utxo_id", "%s: %s", table, plan)
 	}
 }
 

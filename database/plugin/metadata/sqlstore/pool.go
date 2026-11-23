@@ -1040,6 +1040,13 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			// The pool's credential row is added without a read, so the
+			// common path reads only on a conflict.
+			if _, err := s.execCached(
+				ctx, db, credentialInsertSQL, poolKeyHash.Bytes(),
+			); err != nil {
+				return err
+			}
 			result, err := s.execCached(ctx, db, poolOpCertSequenceInsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
@@ -1152,6 +1159,16 @@ func (s *Store) flushPoolOpCertSequences(
 	if len(batched.opCertOrder) == 0 {
 		return nil
 	}
+	hashes := make([][]byte, 0, len(batched.opCertOrder))
+	for _, key := range batched.opCertOrder {
+		hashes = append(hashes, key.poolKeyHash.Bytes())
+	}
+	poolIDs, err := credentialDictionary.ensure(
+		ctx, db, hashes, s.dialect.ParameterLimit(),
+	)
+	if err != nil {
+		return err
+	}
 	perStatement := max(1, s.dialect.ParameterLimit()/3)
 	placeholder := "(?, ?, ?)"
 	for start := 0; start < len(batched.opCertOrder); start += perStatement {
@@ -1161,18 +1178,18 @@ func (s *Store) flushPoolOpCertSequences(
 			queued := batched.opCertSequences[key]
 			args = append(
 				args,
-				queued.key.poolKeyHash.Bytes(),
+				poolIDs[string(queued.key.poolKeyHash.Bytes())],
 				queued.slotValue,
 				queued.sequenceValue,
 			)
 		}
 		query := `-- name: InsertPoolOpCertSequenceBatch :exec
 INSERT INTO pool_opcert_sequence
-(pool_key_hash, slot, sequence) VALUES ` + strings.TrimSuffix(
+(pool_key_id, slot, sequence) VALUES ` + strings.TrimSuffix(
 			strings.Repeat(placeholder+", ", end-start),
 			", ",
 		) + `
-ON CONFLICT (pool_key_hash, slot) DO NOTHING`
+ON CONFLICT (pool_key_id, slot) DO NOTHING`
 		result, err := db.ExecContext(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("insert batched opcert counters: %w", err)
@@ -1238,14 +1255,18 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 	return nil
 }
 
+const credentialInsertSQL = `-- name: InsertCredential :exec
+INSERT INTO credential (hash) VALUES (?)
+ON CONFLICT (hash) DO NOTHING`
+
 const poolOpCertSequenceBySlotSQL = `-- name: GetPoolOpCertSequenceBySlot :one
 SELECT sequence FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot = ?`
+WHERE pool_key_id = ` + credentialIDSubquery + ` AND slot = ?`
 
 const poolOpCertSequenceInsertSQL = `-- name: InsertPoolOpCertSequence :exec
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO NOTHING`
+INSERT INTO pool_opcert_sequence (pool_key_id, slot, sequence)
+VALUES (` + credentialIDSubquery + `, ?, ?)
+ON CONFLICT (pool_key_id, slot) DO NOTHING`
 
 const poolUpdateLatestOpCertSequenceSQL = `-- name: UpdatePoolLatestOpCertSequence :execrows
 UPDATE pool SET latest_op_cert_sequence = ?
@@ -1277,7 +1298,7 @@ func (s *Store) LatestPoolOpCertSequence(
 	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequence :one
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ?`,
+WHERE pool_key_id = `+credentialIDSubquery,
 		poolKeyHash.Bytes(),
 	).Scan(&sequence)
 	if err != nil || !sequence.Valid {
@@ -1295,7 +1316,7 @@ WHERE pool_key_hash = ?`,
 const latestPoolOpCertSequenceAfterSQL = `-- name: GetLatestPoolOpCertSequenceAfter :one
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND +slot > ?`
+WHERE pool_key_id = ` + credentialIDSubquery + ` AND +slot > ?`
 
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
 // pool after afterSlot. A Mithril-restored ledger uses this to distinguish
@@ -1371,7 +1392,7 @@ LIMIT 1`,
 const latestPoolOpCertSequenceAtOrBeforeSQL = `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND +slot <= ?`
+WHERE pool_key_id = ` + credentialIDSubquery + ` AND +slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1411,7 +1432,7 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 const latestPoolOpCertSequenceInRangeSQL = `-- name: GetLatestPoolOpCertSequenceInRange :one
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND +slot >= ? AND +slot <= ?`
+WHERE pool_key_id = ` + credentialIDSubquery + ` AND +slot >= ? AND +slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequenceInRange(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1458,9 +1479,9 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 // planner chooses it, and a test EXPLAINing a hand-copied statement would keep
 // passing against the copy after the store's own SQL moved off the index.
 const LatestPoolOpCertSequencesSQL = `
-SELECT pool_key_hash, MAX(sequence)
+SELECT ` + poolOpCertKeyExpr + `, MAX(sequence)
 FROM pool_opcert_sequence
-GROUP BY pool_key_hash`
+GROUP BY pool_key_id`
 
 // LatestPoolOpCertSequences returns the highest observed op-cert sequence for
 // every pool that has issued a block, keyed by pool key hash.
@@ -1502,14 +1523,15 @@ func (s *Store) LatestPoolOpCertSequences(
 // LatestPoolOpCertCountersSQL is the statement LatestPoolOpCertCounters
 // issues.
 const LatestPoolOpCertCountersSQL = `
-SELECT c.pool_key_hash, c.max_sequence, c.max_slot, (
+SELECT (SELECT h.hash FROM credential AS h WHERE h.id = c.pool_key_id),
+       c.max_sequence, c.max_slot, (
     SELECT MAX(l.sequence) FROM pool_opcert_sequence l
-    WHERE l.pool_key_hash = c.pool_key_hash AND l.slot = c.max_slot
+    WHERE l.pool_key_id = c.pool_key_id AND l.slot = c.max_slot
 )
 FROM (
-    SELECT pool_key_hash, MAX(sequence) AS max_sequence, MAX(slot) AS max_slot
+    SELECT pool_key_id, MAX(sequence) AS max_sequence, MAX(slot) AS max_slot
     FROM pool_opcert_sequence
-    GROUP BY pool_key_hash
+    GROUP BY pool_key_id
 ) c`
 
 // LatestPoolOpCertCounters returns each pool's highest observed op-cert
@@ -1551,12 +1573,12 @@ func (s *Store) LatestPoolOpCertCounters(
 
 // PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
 // a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
-// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
-// slot) index to deliver the pools in order, and the caller deduplicates the
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_id,
+// slot) primary key to deliver the pools in order, and the caller deduplicates the
 // few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
 // so a test can pin its plan.
 const PoolOpCertSequencesChangedAfterSQL = `
-SELECT pool_key_hash
+SELECT ` + poolOpCertKeyExpr + `
 FROM pool_opcert_sequence
 WHERE slot > ?`
 
@@ -1585,11 +1607,11 @@ func scanDistinctPoolKeyHashes(rows *sql.Rows) ([][]byte, error) {
 }
 
 // PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
-// a slot, read through idx_pool_opcert_sequence_pool_slot.
+// a slot, read as a range of the (pool_key_id, slot) primary key.
 const PoolOpCertSequenceAtOrBeforeSQL = `
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot <= ?`
+WHERE pool_key_id = ` + credentialIDSubquery + ` AND slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	slot uint64,
@@ -1602,7 +1624,7 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	if err != nil {
 		return nil, err
 	}
-	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// A slot filter cannot use the (pool_key_id, sequence) index the
 	// unbounded aggregate reads, and filtering the whole table by slot reads
 	// every row at or before it. Rows after a recent slot are few, so the
 	// unbounded result is corrected for just the pools that have one.
@@ -1756,10 +1778,11 @@ func (s *Store) GetPoolBlockIssuersInSlotRange(
 		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT pool_key_hash, id, slot, sequence
+SELECT pool.hash, pool_opcert_sequence.slot, pool_opcert_sequence.sequence
 FROM pool_opcert_sequence
-WHERE slot >= ? AND slot <= ?
-ORDER BY slot ASC, pool_key_hash ASC`,
+JOIN credential AS pool ON pool.id = pool_opcert_sequence.pool_key_id
+WHERE pool_opcert_sequence.slot >= ? AND pool_opcert_sequence.slot <= ?
+ORDER BY pool_opcert_sequence.slot ASC, pool.hash ASC`,
 		startSlot,
 		endSlot,
 	)
@@ -1773,7 +1796,6 @@ ORDER BY slot ASC, pool_key_hash ASC`,
 		var sequence int64
 		if err := rows.Scan(
 			&row.PoolKeyHash,
-			&row.ID,
 			&row.Slot,
 			&sequence,
 		); err != nil {
@@ -1830,11 +1852,12 @@ WHERE slot >= ? AND slot <= ?`,
 		args = append(args, poolKeyHash.Bytes())
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT pool_key_hash, COUNT(*)
+SELECT pool.hash, COUNT(*)
 FROM pool_opcert_sequence
-WHERE slot >= ? AND slot <= ?
-  AND pool_key_hash IN (`+bindPlaceholders(len(poolKeyHashes))+`)
-GROUP BY pool_key_hash`,
+JOIN credential AS pool ON pool.id = pool_opcert_sequence.pool_key_id
+WHERE pool_opcert_sequence.slot >= ? AND pool_opcert_sequence.slot <= ?
+  AND pool.hash IN (`+bindPlaceholders(len(poolKeyHashes))+`)
+GROUP BY pool.hash`,
 		args...,
 	)
 	if err != nil {
@@ -2978,7 +3001,8 @@ GROUP BY pool`,
 		FROM account
 JOIN utxo
   ON utxo.credential_tag = account.credential_tag
- AND utxo.staking_key = account.staking_key
+ AND utxo.staking_key_id = (
+     SELECT id FROM credential WHERE hash = account.staking_key)
 WHERE account.active = TRUE AND utxo.deleted_slot = 0
   AND account.pool IN (`+bindPlaceholders(len(chunk))+`)`,
 			args...,
@@ -4034,7 +4058,8 @@ func (s *Store) restorePoolLatestOpCertSequence(
 UPDATE pool
 SET latest_op_cert_sequence = COALESCE((
     SELECT MAX(sequence) FROM pool_opcert_sequence sequence
-    WHERE sequence.pool_key_hash = pool.pool_key_hash
+    WHERE sequence.pool_key_id = (
+        SELECT id FROM credential WHERE hash = pool.pool_key_hash)
 ), ?)
 WHERE pool_key_hash IN (`+bindPlaceholders(len(batch))+`)`,
 			args...,

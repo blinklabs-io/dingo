@@ -89,8 +89,8 @@ WHERE type = 'index' AND name = 'sqlite_autoindex_datum_1'`).Scan(&autoindexes))
 
 	for _, query := range []string{
 		`SELECT raw_datum FROM datum WHERE hash = ?`,
-		`SELECT d.raw_datum FROM utxo u
-LEFT JOIN datum d ON d.hash = u.datum_hash WHERE u.datum_hash = ?`,
+		`SELECT u.id FROM datum d
+JOIN utxo u ON u.datum_id = d.id WHERE d.hash = ?`,
 	} {
 		require.Contains(t, datumQueryPlan(t, db, query),
 			"sqlite_autoindex_datum_1", query)

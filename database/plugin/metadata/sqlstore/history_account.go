@@ -209,7 +209,7 @@ a.amount AS amount, u.deleted_slot AS deleted_slot
 FROM utxo u
 JOIN asset_holding a ON a.utxo_id = u.id
 JOIN asset_identity i ON i.id = a.asset_id
-WHERE u.credential_tag = ? AND u.staking_key = ?`
+WHERE u.credential_tag = ? AND u.staking_key_id = ` + credentialIDSubquery
 	if liveOnly {
 		query += " AND u.deleted_slot = 0"
 	}
@@ -339,8 +339,8 @@ func (s *Store) GetAccountAddressTotals(
 		dest  **big.Int
 		query string
 	}{
-		{&ret.ReceivedLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`},
-		{&ret.SentLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot <> 0`},
+		{&ret.ReceivedLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key_id = ` + credentialIDSubquery},
+		{&ret.SentLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key_id = ` + credentialIDSubquery + ` AND deleted_slot <> 0`},
 	} {
 		value, err := sumSignedRowsBounded(
 			ctx,
@@ -434,7 +434,7 @@ func countAccountTransactions(
 ) (int, error) {
 	query := `SELECT COUNT(*) FROM (SELECT DISTINCT transaction_id
 FROM address_transaction
-WHERE credential_tag = ? AND staking_key = ?`
+WHERE credential_tag = ? AND staking_key_id = ` + credentialIDSubquery
 	args := []any{credentialTag, stakingKey}
 	if limit > 0 {
 		query += " LIMIT ?"

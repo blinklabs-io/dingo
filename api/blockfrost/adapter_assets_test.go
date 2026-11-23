@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 	"time"
@@ -45,12 +46,7 @@ func seedMintBurn(
 	quantity string,
 ) {
 	t.Helper()
-	_, err := raw.Exec(`
-INSERT INTO asset_mint_burn (tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index)
-VALUES (?, ?, ?, ?, ?, ?, 0)`,
-		txHash, policy, []byte(name), []byte("fp"), slot, quantity,
-	)
-	require.NoError(t, err)
+	testutil.InsertAssetMintBurn(t, raw, txHash, policy, []byte(name), slot, 0, quantity)
 }
 
 func assetUnit(policy []byte, name string) string {

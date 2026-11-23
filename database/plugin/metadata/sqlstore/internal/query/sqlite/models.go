@@ -23,11 +23,16 @@ type Account struct {
 	ExpirationEpoch sql.NullInt64
 }
 
+type Address struct {
+	ID      int64
+	Address []byte
+}
+
 type AddressTransaction struct {
 	ID            int64
-	PaymentKey    []byte
+	PaymentKeyID  sql.NullInt64
 	PaymentScript sql.NullBool
-	StakingKey    []byte
+	StakingKeyID  sql.NullInt64
 	CredentialTag int64
 	TransactionID sql.NullInt64
 	Slot          sql.NullInt64
@@ -64,14 +69,11 @@ type AssetIdentity struct {
 }
 
 type AssetMintBurn struct {
-	ID          int64
-	TxHash      []byte
-	PolicyID    []byte
-	Name        []byte
-	Fingerprint []byte
-	Slot        sql.NullInt64
-	Quantity    sql.NullString
-	TxIndex     sql.NullInt64
+	TransactionID int64
+	AssetID       int64
+	Slot          int64
+	TxIndex       int64
+	Quantity      string
 }
 
 type BackfillCheckpoint struct {
@@ -87,10 +89,10 @@ type BackfillCheckpoint struct {
 }
 
 type BlockNonce struct {
+	Slot         int64
 	Hash         []byte
+	Ordinal      int64
 	Nonce        []byte
-	ID           int64
-	Slot         sql.NullInt64
 	IsCheckpoint sql.NullBool
 }
 
@@ -123,6 +125,11 @@ type Constitution struct {
 	PolicyHash  []byte
 	AddedSlot   int64
 	DeletedSlot sql.NullInt64
+}
+
+type Credential struct {
+	ID   int64
+	Hash []byte
 }
 
 type Datum struct {
@@ -568,10 +575,10 @@ type Utxo struct {
 	OutputIdx               int64
 	CollateralReturnForTxID sql.NullInt64
 	SpentAtTxID             sql.NullInt64
-	PaymentKey              []byte
-	StakingKey              []byte
+	PaymentKeyID            sql.NullInt64
+	StakingKeyID            sql.NullInt64
 	CredentialTag           int64
-	DatumHash               []byte
+	DatumID                 sql.NullInt64
 	Amount                  sql.NullString
 	PaymentScript           sql.NullBool
 	AddedSlot               sql.NullInt64
@@ -580,7 +587,7 @@ type Utxo struct {
 
 type UtxoAddress struct {
 	UtxoID     int64
-	Address    []byte
+	AddressID  int64
 	TxID       sql.NullInt64
 	OutputIdx  sql.NullInt64
 	Slot       sql.NullInt64

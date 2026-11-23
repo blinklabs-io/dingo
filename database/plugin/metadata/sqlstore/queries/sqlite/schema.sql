@@ -49,13 +49,13 @@ CREATE TABLE epoch (
 );
 
 CREATE TABLE block_nonce (
-    hash BLOB,
+    slot INTEGER NOT NULL,
+    hash BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
     nonce BLOB,
-    id INTEGER PRIMARY KEY,
-    slot INTEGER,
     is_checkpoint BOOLEAN,
-    UNIQUE (hash, slot)
-);
+    PRIMARY KEY (slot, hash)
+) WITHOUT ROWID;
 
 CREATE TABLE datum (
     hash BLOB NOT NULL UNIQUE,
@@ -433,16 +433,22 @@ CREATE TABLE token_registry_entry (
     UNIQUE (subject)
 );
 
+CREATE TABLE credential (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash BLOB NOT NULL,
+    UNIQUE (hash)
+);
+
 CREATE TABLE utxo (
     id INTEGER PRIMARY KEY,
     tx_id INTEGER NOT NULL,
     output_idx INTEGER NOT NULL,
     collateral_return_for_tx_id INTEGER,
     spent_at_tx_id INTEGER,
-    payment_key BLOB,
-    staking_key BLOB,
+    payment_key_id INTEGER,
+    staking_key_id INTEGER,
     credential_tag INTEGER NOT NULL DEFAULT 0,
-    datum_hash BLOB,
+    datum_id INTEGER,
     amount TEXT,
     payment_script BOOLEAN,
     added_slot INTEGER,
@@ -468,30 +474,38 @@ CREATE TABLE asset_holding (
 
 CREATE INDEX idx_asset_holding_asset_id ON asset_holding(asset_id);
 
+CREATE TABLE address (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address BLOB NOT NULL,
+    UNIQUE (address)
+);
+
 CREATE TABLE utxo_address (
     utxo_id INTEGER PRIMARY KEY,
-    address BLOB NOT NULL,
+    address_id INTEGER NOT NULL,
     tx_id INTEGER,
     output_idx INTEGER,
     slot INTEGER,
     block_index INTEGER,
-    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE,
+    FOREIGN KEY (address_id) REFERENCES address(id)
 );
 
-CREATE INDEX idx_utxo_address_address ON utxo_address(address);
-CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
+CREATE INDEX idx_utxo_address_order ON utxo_address(address_id, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (
-    id INTEGER PRIMARY KEY,
-    tx_hash BLOB,
-    policy_id BLOB,
-    name BLOB,
-    fingerprint BLOB,
-    slot INTEGER,
-    quantity TEXT,
-    tx_index INTEGER,
-    UNIQUE (tx_hash, policy_id, name)
-);
+    transaction_id INTEGER NOT NULL,
+    asset_id INTEGER NOT NULL,
+    slot INTEGER NOT NULL,
+    tx_index INTEGER NOT NULL,
+    quantity TEXT NOT NULL,
+    PRIMARY KEY (transaction_id, asset_id),
+    FOREIGN KEY (transaction_id) REFERENCES "transaction"(id),
+    FOREIGN KEY (asset_id) REFERENCES asset_identity(id)
+) WITHOUT ROWID;
+
+CREATE INDEX idx_asset_mint_burn_asset_id ON asset_mint_burn(asset_id, slot, tx_index);
+CREATE INDEX idx_asset_mint_burn_slot ON asset_mint_burn(slot);
 
 CREATE TABLE account (
     staking_key BLOB,
@@ -559,9 +573,9 @@ CREATE TABLE applied_transaction (
 
 CREATE TABLE address_transaction (
     id INTEGER PRIMARY KEY,
-    payment_key BLOB,
+    payment_key_id INTEGER,
     payment_script BOOLEAN,
-    staking_key BLOB,
+    staking_key_id INTEGER,
     credential_tag INTEGER NOT NULL DEFAULT 0,
     transaction_id INTEGER,
     slot INTEGER,

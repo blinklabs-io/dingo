@@ -30,10 +30,10 @@ type Querier interface {
 	CreateMidnightRegistration(ctx context.Context, arg CreateMidnightRegistrationParams) (int64, error)
 	CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolStakeSnapshotParams) (int64, error)
 	DeleteAddressTransactionsAfterSlot(ctx context.Context, slot sql.NullInt64) error
-	DeleteBlockNoncesAfterOrigin(ctx context.Context, slot sql.NullInt64) error
+	DeleteBlockNoncesAfterOrigin(ctx context.Context, slot int64) error
 	DeleteBlockNoncesAfterPoint(ctx context.Context, arg DeleteBlockNoncesAfterPointParams) error
-	DeleteBlockNoncesBeforeSlot(ctx context.Context, slot sql.NullInt64) error
-	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(ctx context.Context, slot sql.NullInt64) error
+	DeleteBlockNoncesBeforeSlot(ctx context.Context, slot int64) error
+	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(ctx context.Context, slot int64) error
 	DeleteCommitteeMembersAddedAfterSlot(ctx context.Context, addedSlot int64) error
 	DeleteCommitteeQuorumsAfterSlot(ctx context.Context, addedSlot int64) error
 	DeleteConstitutionsAddedAfterSlot(ctx context.Context, addedSlot int64) error
@@ -96,7 +96,7 @@ type Querier interface {
 	GetAssetMintBurnInfo(ctx context.Context, arg GetAssetMintBurnInfoParams) (GetAssetMintBurnInfoRow, error)
 	GetBackfillCheckpoint(ctx context.Context, phase string) (BackfillCheckpoint, error)
 	GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error)
-	GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]BlockNonce, error)
+	GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]GetBlockNoncesInSlotRangeRow, error)
 	GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRangeStatsParams) (GetBlockSlotRangeStatsRow, error)
 	GetCommitTimestamp(ctx context.Context) (sql.NullInt64, error)
 	GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, error)

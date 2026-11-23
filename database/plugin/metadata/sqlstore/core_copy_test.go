@@ -83,9 +83,9 @@ func testConsensusCopyCarriesCoreModeState(
 	require.NoError(t, err)
 	_, err = raw.Exec(
 		source.dialect.Rebind(
-			`INSERT INTO address_transaction(id,payment_key,transaction_id,slot,tx_index) VALUES(1,?,1,12,0)`,
+			`INSERT INTO address_transaction(id,payment_key_id,transaction_id,slot,tx_index) VALUES(1,?,1,12,0)`,
 		),
-		[]byte{9},
+		int64(9),
 	)
 	require.NoError(t, err)
 	_, err = raw.Exec(

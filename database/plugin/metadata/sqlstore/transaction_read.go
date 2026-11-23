@@ -341,7 +341,7 @@ func (s *Store) GetTransactionHashesAfterSlot(
 const countTransactionsByPaymentCredSQL = `
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ? AND payment_script = ?`
+WHERE payment_key_id = ` + credentialIDSubquery + ` AND payment_script = ?`
 
 func (s *Store) CountTransactionsByPaymentCred(
 	paymentKey []byte,
@@ -528,8 +528,8 @@ func (s *Store) GetBlockSlotRangeStats(
 	row, err := q.GetBlockSlotRangeStats(
 		ctx,
 		sqlitequery.GetBlockSlotRangeStatsParams{
-			Slot:   sql.NullInt64{Int64: start, Valid: true},
-			Slot_2: sql.NullInt64{Int64: end, Valid: true},
+			Slot:   start,
+			Slot_2: end,
 		},
 	)
 	if err != nil {
@@ -735,11 +735,13 @@ func (s *Store) GetAddressesByCredential(
 		direction = "DESC"
 	}
 	query := `
-SELECT MIN(id), payment_key, credential_tag, staking_key
-FROM address_transaction
-WHERE credential_tag = ? AND staking_key = ? AND LENGTH(payment_key) > 0
-GROUP BY payment_key, credential_tag, staking_key
-ORDER BY payment_key ` + direction
+SELECT MIN(at.id), pc.hash, at.credential_tag,
+       (SELECT sc.hash FROM credential AS sc WHERE sc.id = at.staking_key_id)
+FROM address_transaction AS at
+JOIN credential AS pc ON pc.id = at.payment_key_id
+WHERE at.credential_tag = ? AND at.staking_key_id = ` + credentialIDSubquery + `
+GROUP BY pc.hash, at.credential_tag, at.staking_key_id
+ORDER BY pc.hash ` + direction
 	args := []any{credentialTag, stakingKey}
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
@@ -785,10 +787,10 @@ func (s *Store) CountAddressesByCredential(
 	}
 	var count int64
 	err = db.QueryRowContext(ctx, `
-SELECT COUNT(DISTINCT payment_key)
+SELECT COUNT(DISTINCT payment_key_id)
 FROM address_transaction
-WHERE credential_tag = ? AND staking_key = ?
-  AND LENGTH(payment_key) > 0`,
+WHERE credential_tag = ? AND staking_key_id = `+credentialIDSubquery+`
+  AND payment_key_id IS NOT NULL`,
 		credentialTag,
 		stakingKey,
 	).Scan(&count)
@@ -825,11 +827,7 @@ func (s *Store) GetAddressTransactionsByCredential(
 		from,
 		to,
 	)
-	if strings.EqualFold(order, "asc") {
-		query += " ORDER BY at.slot ASC, at.tx_index ASC, at.payment_key ASC"
-	} else {
-		query += " ORDER BY at.slot DESC, at.tx_index DESC, at.payment_key DESC"
-	}
+	query += addressTransactionOrder(order)
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
 		ctx,
@@ -902,6 +900,17 @@ func (s *Store) CountAddressTransactionsByCredential(
 	return count, nil
 }
 
+// addressTransactionOrder is the ORDER BY of an addressTransactionRangeQuery
+// page. Rows sharing a transaction are ordered by the payment key hash the
+// query projects, not by its dictionary id: ids follow first sight of a
+// credential, so ordering by id would not be the documented order.
+func addressTransactionOrder(order string) string {
+	if strings.EqualFold(order, "asc") {
+		return " ORDER BY at.slot ASC, at.tx_index ASC, payment_key ASC"
+	}
+	return " ORDER BY at.slot DESC, at.tx_index DESC, payment_key DESC"
+}
+
 func addressTransactionRangeQuery(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -909,11 +918,13 @@ func addressTransactionRangeQuery(
 	to *models.AddressTransactionPosition,
 ) (string, []any) {
 	query := `
-SELECT at.payment_key, th.hash, at.slot, at.tx_index, tx.block_hash
+SELECT (SELECT pc.hash FROM credential AS pc WHERE pc.id = at.payment_key_id)
+           AS payment_key,
+       th.hash, at.slot, at.tx_index, tx.block_hash
 FROM address_transaction at
 JOIN "transaction" th ON th.id = at.transaction_id
 JOIN applied_transaction tx ON tx.tx_id = th.id
-WHERE at.credential_tag = ? AND at.staking_key = ?`
+WHERE at.credential_tag = ? AND at.staking_key_id = ` + credentialIDSubquery
 	args := []any{credentialTag, stakingKey}
 	if from != nil {
 		query += " AND (at.slot, at.tx_index) >= (?, ?)"
@@ -972,15 +983,19 @@ func addressTransactionPredicate(
 ) (string, []any) {
 	switch {
 	case len(paymentKey) > 0 && len(stakingKey) > 0:
-		return "payment_key = ? AND credential_tag = ? AND staking_key = ?",
+		return "payment_key_id = " + credentialIDSubquery +
+				" AND credential_tag = ? AND staking_key_id = " +
+				credentialIDSubquery,
 			[]any{paymentKey, credentialTag, stakingKey}
 	case len(paymentKey) > 0:
-		return "payment_key = ? AND (staking_key IS NULL OR LENGTH(staking_key) = 0)",
+		return "payment_key_id = " + credentialIDSubquery +
+				" AND staking_key_id IS NULL",
 			[]any{
 				paymentKey,
 			}
 	case len(stakingKey) > 0:
-		return "credential_tag = ? AND staking_key = ?",
+		return "credential_tag = ? AND staking_key_id = " +
+				credentialIDSubquery,
 			[]any{credentialTag, stakingKey}
 	default:
 		return "", nil

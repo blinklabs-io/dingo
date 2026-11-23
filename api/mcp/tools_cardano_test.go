@@ -425,7 +425,7 @@ func TestCardanoToolsWithMetadataSchema(t *testing.T) {
 	_, err = db.Exec(
 		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, nonce) VALUES (9, 100, 50, X'aaaa');
  INSERT INTO epoch_summary(epoch, total_active_stake, total_pool_count, total_delegators, epoch_nonce, boundary_slot) VALUES (9,'123',1,2,X'bbbb',100);
- INSERT INTO block_nonce(hash,slot,nonce) VALUES (X'01',99,X'01'),(X'02',100,X'02'),(X'03',149,X'03'),(X'04',150,X'04');`,
+ INSERT INTO block_nonce(hash,slot,ordinal,nonce) VALUES (X'01',99,0,X'01'),(X'02',100,0,X'02'),(X'03',149,0,X'03'),(X'04',150,0,X'04');`,
 	)
 	require.NoError(t, err)
 	cs := newToolSession(t, db, 100)

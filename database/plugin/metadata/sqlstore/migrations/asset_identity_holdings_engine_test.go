@@ -40,6 +40,10 @@ type assetSplitEngine struct {
 	// tableExists reports whether the named table is in the test schema.
 	tableExists func(t *testing.T, name string) bool
 	indexExists func(t *testing.T, table, index string) bool
+	// dsn opens further connections to the test schema (MySQL only).
+	dsn string
+	// database is the name of the test schema (MySQL only).
+	database string
 }
 
 func (e *assetSplitEngine) query(q string) string {
@@ -56,10 +60,12 @@ func (e *assetSplitEngine) query(q string) string {
 	return out.String()
 }
 
-func newPostgresAssetSplitEngine(t *testing.T) *assetSplitEngine {
+func newPostgresAssetSplitEngine(
+	t *testing.T,
+	schema string,
+) *assetSplitEngine {
 	t.Helper()
 	dsn := postgresEngineTestDSN(t)
-	schema := "dingo_v73_split"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
@@ -102,10 +108,12 @@ WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
 	}
 }
 
-func newMySQLAssetSplitEngine(t *testing.T) *assetSplitEngine {
+func newMySQLAssetSplitEngine(
+	t *testing.T,
+	database string,
+) *assetSplitEngine {
 	t.Helper()
 	rootDSN := mysqlEngineTestRootDSN(t)
-	database := "dingo_v73_split"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
@@ -128,6 +136,8 @@ func newMySQLAssetSplitEngine(t *testing.T) *assetSplitEngine {
 	require.NoError(t, err)
 	return &assetSplitEngine{
 		dialect:     "mysql",
+		dsn:         cfg.FormatDSN(),
+		database:    database,
 		db:          db,
 		registry:    registry,
 		placeholder: func(int) string { return "?" },
@@ -253,10 +263,10 @@ WHERE version = ?`), true, assetSplitVersion)
 
 func TestAssetIdentityHoldingsAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t))
+	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t, "dingo_v73_split"))
 }
 
 func TestAssetIdentityHoldingsAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t))
+	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t, "dingo_v73_split"))
 }

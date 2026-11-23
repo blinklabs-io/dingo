@@ -192,7 +192,9 @@ func overlayStoreState(t testing.TB, store *Store) string {
 		 FROM asset_holding h
 		 JOIN asset_identity i ON i.id = h.asset_id
 		 JOIN utxo u ON u.id = h.utxo_id`,
-		`SELECT * FROM utxo_address`,
+		`SELECT ua.utxo_id, a.address, ua.tx_id, ua.output_idx, ua.slot,
+		        ua.block_index
+		 FROM utxo_address ua JOIN address a ON a.id = ua.address_id`,
 		`SELECT * FROM utxo_pointer`,
 		`SELECT credential_tag, staking_key, utxo_stake, reward_stake,
 		        total_stake, updated_slot FROM reward_live_stake`,

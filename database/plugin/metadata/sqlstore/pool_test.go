@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"testing"
 
@@ -32,7 +33,7 @@ import (
 const legacyLatestPoolOpCertSequenceQuery = `
 SELECT COALESCE(MAX(sequence), 0), COUNT(*)
 FROM pool_opcert_sequence
-WHERE pool_key_hash = ?`
+WHERE pool_key_id = (SELECT id FROM credential WHERE hash = ?)`
 
 // seedPoolOpCertSequence inserts n rows for a single pool, one per
 // (slot, sequence) pair -- the shape a long-producing pool leaves in
@@ -48,14 +49,15 @@ func seedPoolOpCertSequence(
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
+	poolID := testutil.CredentialID(tb, tx, poolKeyHash)
 	stmt, err := tx.Prepare(
-		"INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence) " +
+		"INSERT INTO pool_opcert_sequence (pool_key_id, slot, sequence) " +
 			"VALUES (?, ?, ?)",
 	)
 	require.NoError(tb, err)
 	for i := range n {
 		_, err := stmt.Exec(
-			poolKeyHash,
+			poolID,
 			int64(i)*20,
 			encodeOpCertSequence(uint64(i)),
 		)

@@ -61,7 +61,7 @@ func TestRollbackOpCertLookupUsesSlotRange(t *testing.T) {
 	require.Contains(
 		t,
 		plan,
-		"SEARCH pool_opcert_sequence USING INDEX "+
+		"SEARCH pool_opcert_sequence USING COVERING INDEX "+
 			"idx_pool_opcert_sequence_slot (slot>?)",
 		"depth-1 rollback must range over the discarded slot window: %s",
 		plan,

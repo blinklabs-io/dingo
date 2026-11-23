@@ -123,10 +123,12 @@ INSERT INTO "transaction" (
 				require.NoError(t, err)
 				_, err = tx.Exec(`
 INSERT INTO utxo (
-    tx_id, payment_key, added_slot, deleted_slot, amount,
+    tx_id, payment_key_id, added_slot, deleted_slot, amount,
     output_idx, payment_script
 ) VALUES (?, ?, ?, 0, '1000000', ?, FALSE)`,
-					txRowID, historyFixturePayment, slot, output,
+					txRowID,
+					testutil.CredentialID(t, tx, historyFixturePayment),
+					slot, output,
 				)
 				require.NoError(t, err)
 				refs = append(

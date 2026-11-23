@@ -171,7 +171,7 @@ func TestQAAssetNameCollision(t *testing.T) {
 	db := newSchemaDB(t)
 	_, err := db.Exec(
 		`INSERT INTO "transaction"(id,hash) VALUES(1,zeroblob(32));
- INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);`,
+ INSERT INTO utxo(id,tx_id,output_idx,payment_key_id,amount,deleted_slot) VALUES(1,1,0,NULL,'1',0);`,
 	)
 	require.NoError(t, err)
 	policy := make([]byte, 28)
@@ -307,11 +307,10 @@ func TestQAAssetSupplementalErrors(t *testing.T) {
 		t.Run(table, func(t *testing.T) {
 			t.Parallel()
 			db := newSchemaDB(t)
-			_, err := db.Exec(
-				`INSERT INTO asset_mint_burn(tx_hash,policy_id,name,slot) VALUES(zeroblob(32),zeroblob(28),x'41',1)`,
+			testutil.InsertAssetMintBurn(
+				t, db, make([]byte, 32), make([]byte, 28), []byte("A"), 1, 0, "1",
 			)
-			require.NoError(t, err)
-			_, err = db.Exec("DROP TABLE " + table)
+			_, err := db.Exec("DROP TABLE " + table)
 			require.NoError(t, err)
 			cs := newToolSession(t, db, 100)
 			text := callTool(
@@ -390,10 +389,10 @@ func FuzzQACredentialParsing(f *testing.F) {
 func TestQAMintScanFailure(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
-	_, err := db.Exec(
-		`INSERT INTO asset_mint_burn(tx_hash,policy_id,name,slot) VALUES(zeroblob(32),zeroblob(28),x'41','invalid-slot')`,
+	testutil.InsertAssetMintBurn(
+		t, db, make([]byte, 32), make([]byte, 28), []byte("A"),
+		"invalid-slot", 0, "1",
 	)
-	require.NoError(t, err)
 	cs := newToolSession(t, db, 100)
 	text := callTool(
 		t,

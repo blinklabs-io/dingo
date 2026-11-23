@@ -53,9 +53,9 @@ WITH RECURSIVE n(i) AS (
     SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
 )
 INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key,
+    (tx_id, output_idx, credential_tag, staking_key_id,
      added_slot, deleted_slot, amount)
-SELECT i, 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
+SELECT i, 0, i % 2, i, 1, 0, '1' FROM n`)
 	exec("ANALYZE")
 
 	spender := []byte(fmt.Sprintf("%032d", 1))
@@ -113,7 +113,7 @@ func TestRollbackSpenderLookupsSearchIndexUnderImportStatistics(
 	store, values := newImportedLedgerStatsStore(t)
 	statements := map[string]string{
 		"idx_utxo_spent_at_tx_id": `
-SELECT DISTINCT credential_tag, staking_key FROM utxo
+SELECT DISTINCT credential_tag, ` + utxoStakingKeyExpr + ` FROM utxo
 WHERE spent_at_tx_id IN (?)`,
 	}
 	for _, column := range spenderColumns {

@@ -141,19 +141,21 @@ const oldVotingPowerByTypeSQL = `
 		   ), 0) AS stake
 	FROM account a
 	LEFT JOIN (
-		SELECT credential_tag, staking_key,
+		SELECT credential_tag, staking_key_id,
 			   COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS utxo_sum
 		FROM utxo
 		WHERE deleted_slot = 0
 		  AND EXISTS (
 			  SELECT 1 FROM account ax
 			  WHERE ax.credential_tag = utxo.credential_tag
-			    AND ax.staking_key = utxo.staking_key
+			    AND ax.staking_key = (
+			        SELECT hash FROM credential WHERE id = utxo.staking_key_id)
 			    AND ax.active = 1 AND ax.drep_type IN (?,?)
 		  )
-		GROUP BY credential_tag, staking_key
+		GROUP BY credential_tag, staking_key_id
 	) u ON u.credential_tag = a.credential_tag
-		AND u.staking_key = a.staking_key
+		AND u.staking_key_id = (
+		    SELECT id FROM credential WHERE hash = a.staking_key)
 	WHERE a.active = 1 AND a.drep_type IN (?,?)
 	GROUP BY a.drep_type
 `
@@ -946,7 +948,7 @@ func TestLatestPoolOpCertSequencesAtOrBefore(t *testing.T) {
 		{
 			sqlstore.PoolOpCertSequenceAtOrBeforeSQL,
 			[]any{key(both), 20},
-			"idx_pool_opcert_sequence_pool_slot",
+			"USING PRIMARY KEY (pool_key_id=? AND slot<?)",
 		},
 	} {
 		rows, err := db.Query("EXPLAIN QUERY PLAN "+tc.statement, tc.args...)
@@ -2496,9 +2498,14 @@ func (d *sqliteTestDB) Create(value any) sqliteTestResult {
 			ON CONFLICT (hash) DO NOTHING`, v.TxId); err != nil {
 			break
 		}
+		if _, err = d.db.Exec(`INSERT INTO credential (hash) VALUES (?)
+			ON CONFLICT (hash) DO NOTHING`, v.StakingKey); err != nil {
+			break
+		}
 		result, err = d.db.Exec(`INSERT INTO utxo
-			(tx_id, output_idx, staking_key, credential_tag, amount, added_slot, deleted_slot)
-			VALUES ((SELECT id FROM "transaction" WHERE hash = ?), ?, ?, ?, ?, ?, 0)`,
+			(tx_id, output_idx, staking_key_id, credential_tag, amount, added_slot, deleted_slot)
+			VALUES ((SELECT id FROM "transaction" WHERE hash = ?), ?,
+			(SELECT id FROM credential WHERE hash = ?), ?, ?, ?, 0)`,
 			v.TxId, v.OutputIdx, v.StakingKey, v.CredentialTag,
 			fmt.Sprint(uint64(v.Amount)), v.AddedSlot)
 	case *models.AccountRewardDelta:

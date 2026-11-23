@@ -346,10 +346,10 @@ func TestExactAddressDeadlineInterruptsSQL(t *testing.T) {
  SELECT stored_utxo.*, candidates.n AS candidate FROM stored_utxo CROSS JOIN candidates;`)
 	require.NoError(t, err)
 	_, err = raw.Exec(
-		`INSERT INTO stored_utxo(tx_id, output_idx, payment_key, payment_script, added_slot, deleted_slot, amount)
+		`INSERT INTO stored_utxo(tx_id, output_idx, payment_key_id, payment_script, added_slot, deleted_slot, amount)
  VALUES(?,0,?,0,1,0,'1000000')`,
 		testutil.InsertTransactionIdentity(t, raw, 0, bytes.Repeat([]byte{0x33}, 32)),
-		payment,
+		testutil.CredentialID(t, raw, payment),
 	)
 	require.NoError(t, err)
 	pattern, err := models.ExactUtxoAddressPattern(address)

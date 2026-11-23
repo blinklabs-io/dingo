@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -305,13 +306,13 @@ func newEpochFixture(t *testing.T) *epochFixture {
 		{172850, 0x14, poolA},
 	} {
 		_, err := raw.Exec(
-			`INSERT INTO block_nonce (hash, nonce, slot, is_checkpoint) VALUES (?, ?, ?, FALSE)`,
+			`INSERT INTO block_nonce (hash, nonce, slot, ordinal, is_checkpoint) VALUES (?, ?, ?, 0, FALSE)`,
 			fill32(block.hash), fill32(0x00), block.slot,
 		)
 		require.NoError(t, err)
 		_, err = raw.Exec(
-			`INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence) VALUES (?, ?, 1)`,
-			block.pool, block.slot,
+			`INSERT INTO pool_opcert_sequence (pool_key_id, slot, sequence) VALUES (?, ?, 1)`,
+			testutil.CredentialID(t, raw, block.pool), block.slot,
 		)
 		require.NoError(t, err)
 	}
@@ -533,7 +534,7 @@ func TestNodeAdapterBlockListsRefuseUnretainedHistory(t *testing.T) {
 		_, err = fx.raw.Exec(`DELETE FROM block_nonce WHERE slot IN (100000, 110000)`)
 		require.NoError(t, err)
 		_, err = fx.raw.Exec(
-			`INSERT INTO block_nonce (hash, nonce, slot, is_checkpoint) VALUES (?, ?, 172870, FALSE)`,
+			`INSERT INTO block_nonce (hash, nonce, slot, ordinal, is_checkpoint) VALUES (?, ?, 172870, 0, FALSE)`,
 			fill32(0x15), fill32(0x00),
 		)
 		require.NoError(t, err)

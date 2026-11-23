@@ -347,9 +347,12 @@ func exerciseLiveUtxoDigestCarriesEveryOutputField(t *testing.T, store *Store) {
 				ctx,
 				store.dialect.Rebind(`
 INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, amount,
-    payment_key, staking_key, datum_hash)
+    payment_key_id, staking_key_id, datum_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-				tx, o.idx, 10, deleted, o.amount, o.payment, o.staking, o.datum,
+				tx, o.idx, 10, deleted, o.amount,
+				fixtureCredentialID(t, store, o.payment),
+				fixtureCredentialID(t, store, o.staking),
+				fixtureDictionaryID(t, store, datumDictionary, o.datum),
 			)
 			require.NoError(t, err)
 			if !o.spent {

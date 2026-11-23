@@ -140,11 +140,11 @@ func TestLeiosAPIBatchDefersOutputAddresses(t *testing.T) {
 	require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"], "output addresses must wait for the closure flush")
 	insertsBefore := counterValue(t, reg, "insert")
 	require.NoError(t, store.FlushBatch(acc, txn))
-	require.Equal(t, float64(2), counterValue(t, reg, "insert")-insertsBefore, "one insert for all output addresses and one for all address transactions")
+	require.Equal(t, float64(3), counterValue(t, reg, "insert")-insertsBefore, "one insert for the new addresses, one for all output address rows and one for all address transactions")
 	require.Equal(t, 3, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
-	rows, err := db.QueryContext(ctx, "SELECT ua.address FROM utxo_address ua JOIN utxo u ON u.id = ua.utxo_id ORDER BY u.id")
+	rows, err := db.QueryContext(ctx, "SELECT a.address FROM utxo_address ua JOIN address a ON a.id = ua.address_id JOIN utxo u ON u.id = ua.utxo_id ORDER BY u.id")
 	require.NoError(t, err)
 	var addresses []string
 	for rows.Next() {

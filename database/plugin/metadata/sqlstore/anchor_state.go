@@ -183,8 +183,10 @@ func (s *Store) liveUtxoDigest(
 // transaction hash index and fetching every output ever created by row id.
 func liveUtxoSetSQL(transactionTable string) string {
 	return `-- name: LiveUtxoSet :many
-SELECT t.hash, u.output_idx, u.amount, u.payment_key, u.staking_key,
-    u.datum_hash
+SELECT t.hash, u.output_idx, u.amount,
+    ` + uCredentialHash("payment_key_id") + `,
+    ` + uCredentialHash("staking_key_id") + `,
+    (SELECT d.hash FROM datum AS d WHERE d.id = u.datum_id)
 FROM utxo u
 JOIN ` + transactionTable + ` t ON t.id = u.tx_id
 WHERE u.added_slot <= ?

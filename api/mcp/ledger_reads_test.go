@@ -221,7 +221,7 @@ func seedLedgerStateRows(
 	)
 	for i, slot := range []int{1100, 1150, 1199, 1200, 1099} {
 		exec(
-			`INSERT INTO block_nonce (hash,nonce,slot,is_checkpoint) VALUES (?,?,?,0)`,
+			`INSERT INTO block_nonce (hash,nonce,slot,ordinal,is_checkpoint) VALUES (?,?,?,0,0)`,
 			hash(byte(i+1), 32),
 			hash(byte(i+1), 32),
 			slot,

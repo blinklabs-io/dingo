@@ -184,7 +184,7 @@ RETURNING id`
 	utxoAmountByOutputHead = "-- name: GetUtxoAmountByOutput :one\nSELECT amount FROM utxo WHERE "
 
 	spendScriptHashHead = `-- name: GetSpendScriptHashByOutput :one
-SELECT payment_key, payment_script FROM utxo
+SELECT ` + utxoPaymentKeyExpr + `, payment_script FROM utxo
 WHERE `
 
 	markUtxoDeletedAtSlotHead = `
@@ -212,7 +212,7 @@ WHERE `
 
 	utxoInsertColumns = `
     tx_id, output_idx, collateral_return_for_tx_id, spent_at_tx_id,
-    payment_key, staking_key, credential_tag, datum_hash, amount,
+    payment_key_id, staking_key_id, credential_tag, datum_id, amount,
     payment_script, added_slot, deleted_slot`
 
 	insertUtxoIgnoreConflictStatement = `-- name: InsertUtxoIfAbsent :one
@@ -329,7 +329,7 @@ func newSQLiteRefStatements() *sqliteRefStatements {
 			"UPDATE utxo\nSET deleted_slot = ?, spent_at_tx_id = ?\n" +
 			"WHERE id IN (" + arms + ")\n" +
 			"RETURNING " + utxoConsumedHash +
-			", output_idx, credential_tag, staking_key, amount"
+			", output_idx, credential_tag, " + utxoStakingKeyExpr + ", amount"
 	}
 	const row = "(?,?,?,?,?,?,?,?,?,?,?,?)"
 	for n := 1; n <= utxoInsertBatchSize; n++ {
@@ -357,7 +357,8 @@ func joinN(n int, sep, item string) string {
 // references the batch names.
 func utxoStakeConsumedDeltaQuery(n int, sqlite bool) string {
 	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
-		"SELECT t.hash, u.output_idx, u.credential_tag, u.staking_key, u.amount" +
+		"SELECT t.hash, u.output_idx, u.credential_tag, " +
+		uCredentialHash("staking_key_id") + ", u.amount" +
 		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 }
 
@@ -368,7 +369,7 @@ func utxoStakeConsumedDeltaQuery(n int, sqlite bool) string {
 func utxoStakeRefsByTxIDQuery(n int, sqlite bool) string {
 	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
 		"SELECT t.hash, u.output_idx, u.deleted_slot, u.credential_tag, " +
-		"u.staking_key" + utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
+		uCredentialHash("staking_key_id") + utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 }
 
 // utxoDeletionRowsQuery is the lookup of every output row of the
@@ -381,7 +382,7 @@ func utxoDeletionRowsQuery(n int, lockRows, sqlite bool) string {
 	}
 	query := "-- name: " + name + " :many\n" +
 		"SELECT u.id, t.hash, u.output_idx, u.deleted_slot, " +
-		"u.credential_tag, u.staking_key" +
+		"u.credential_tag, " + uCredentialHash("staking_key_id") +
 		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 	if lockRows {
 		query += " ORDER BY u.id FOR UPDATE OF u"

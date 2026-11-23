@@ -42,8 +42,9 @@ const MarkerPrefix = "ledger.state_drain."
 // precondition does not hold. The SQL rows are untouched.
 var ErrGateRefused = errors.New("ledger-state drain gate refused")
 
-// Table is one SQL table of a family. Key is a unique column the chunked
-// delete orders by.
+// Table is one SQL table of a family. Key is a column the chunked delete
+// orders by and the leading column of the table's key. A chunk ends at a whole
+// key value, so rows that share one are deleted together.
 type Table struct {
 	Name string
 	Key  string
@@ -135,7 +136,7 @@ var graduated = []struct {
 	tables   []Table
 	syncKeys []string
 }{
-	{nodesettings.FamilyNonces, []Table{{"block_nonce", "id"}}, nil},
+	{nodesettings.FamilyNonces, []Table{{"block_nonce", "slot"}}, nil},
 	{nodesettings.FamilyEraSwitch, nil, []string{EraSwitchSyncKey}},
 	{
 		nodesettings.FamilyNetworkDonations,
@@ -198,7 +199,11 @@ var graduated = []struct {
 		},
 		[]string{RewardStakeInputsPendingSyncKey},
 	},
-	{nodesettings.FamilyOpCerts, []Table{{"pool_opcert_sequence", "id"}}, nil},
+	{
+		nodesettings.FamilyOpCerts,
+		[]Table{{"pool_opcert_sequence", "pool_key_id"}},
+		nil,
+	},
 	// The two drain as a pair, DReps first: a certificate that changes a
 	// DRep delegation reads the account's prior delegation, and the store
 	// refuses to write while exactly one of them is drained, so no write runs

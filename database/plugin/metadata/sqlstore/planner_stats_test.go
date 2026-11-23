@@ -250,8 +250,8 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 	_, err = tx.Exec(
 		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
 			"WHERE i < 3000) INSERT INTO utxo (tx_id, output_idx, " +
-			"staking_key, credential_tag, added_slot, deleted_slot, amount) " +
-			"SELECT 1000000 + i, i % 4, randomblob(28), 0, i, 0, '1' FROM c",
+			"staking_key_id, credential_tag, added_slot, deleted_slot, amount) " +
+			"SELECT 1000000 + i, i % 4, i, 0, i, 0, '1' FROM c",
 	)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
@@ -630,8 +630,8 @@ func BenchmarkPlannerStatsResume(b *testing.B) {
 		seedStakeRefLookupUtxos(b, store, rows, 4096)
 		require.NoError(b, store.UpdatePlannerStats())
 		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
-  staking_key, credential_tag, added_slot, deleted_slot, amount)
-SELECT tx_id, output_idx + 4, staking_key, credential_tag,
+  staking_key_id, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + 4, staking_key_id, credential_tag,
   added_slot + ?, deleted_slot, amount FROM utxo`, rows)
 		require.NoError(b, err)
 		return store
@@ -681,8 +681,8 @@ func TestResumedPlannerStatsKeepFullAnalyzeSpendPlan(t *testing.T) {
 	// Grow utxo 32x so the resumed statistics describe a much smaller table.
 	for shift := range 5 {
 		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
-  staking_key, credential_tag, added_slot, deleted_slot, amount)
-SELECT tx_id, output_idx + ?, staking_key, credential_tag,
+  staking_key_id, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + ?, staking_key_id, credential_tag,
   added_slot + ?, deleted_slot, amount FROM utxo`,
 			4<<shift, 3000<<shift)
 		require.NoError(t, err)

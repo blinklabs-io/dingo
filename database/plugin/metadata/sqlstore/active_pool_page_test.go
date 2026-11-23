@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -241,8 +242,9 @@ INSERT INTO account (
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`
 INSERT INTO utxo (
-    tx_id, staking_key, credential_tag, deleted_slot, amount, output_idx
-) VALUES (?, ?, 0, 0, '1', 0)`, bytes.Repeat([]byte{0xc1}, 32), lowStake)
+    tx_id, staking_key_id, credential_tag, deleted_slot, amount, output_idx
+) VALUES (?, ?, 0, 0, '1', 0)`, bytes.Repeat([]byte{0xc1}, 32),
+		testutil.CredentialID(t, store.writeDB, lowStake))
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`
 INSERT INTO reward_live_stake (
