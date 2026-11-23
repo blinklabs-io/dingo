@@ -7113,9 +7113,10 @@ order by id, so the live stake key source
 (`rewardLiveStakeKeySource`, `nextRewardLiveStakeBatchEnd`) reads each
 credential tag as a range of `credential.hash` and probes `utxo` by credential
 id with `EXISTS`: a batch is a range of (`credential_tag`, hash), however the
-ids were issued. The address-history readers order rows with the same slot and
-transaction index by `payment_key_id` where they ordered by the payment key
-bytes. `GetAddressesByCredential` still orders by the payment key bytes, by
+ids were issued. The address-history readers still order rows with the same slot and
+transaction index by the payment key hash they project from the dictionary,
+not by `payment_key_id`: ids follow first sight of a credential, not hash
+order. `GetAddressesByCredential` also orders by the payment key bytes, by
 joining the dictionary. `account`, the `reward_*` tables, `stake_delegation`
 and the certificate tables keep their credentials by value.
 `TestUtxoCredentialDictionaryKeepsRowsAndHoldsEachHashOnce` pins the rebuild,
