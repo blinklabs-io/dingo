@@ -292,7 +292,11 @@ func addSCLSUtxo(w *scls.Writer, txID []byte, index uint32, c []byte) error {
 			index, txID, sclscardano.UTxOV0Name,
 		)
 	}
-	stored, err := decodeSCLSTxOut(c)
+	shelley, err := shelleyFormTxOut(c)
+	if err != nil {
+		return fmt.Errorf("output %x#%d: %w", txID, index, err)
+	}
+	stored, err := decodeSCLSTxOut(shelley)
 	if err != nil {
 		return fmt.Errorf("output %x#%d: %w", txID, index, err)
 	}

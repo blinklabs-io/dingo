@@ -19,6 +19,9 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -148,4 +151,43 @@ func TestLedgerTxOutMatchesTheLedgerSerialization(t *testing.T) {
 			)
 		})
 	}
+}
+
+// sclsByronTxOut returns a Byron-era tx_out as the set stores it, [address,
+// coin] with the address structure inline, and that address's bytes.
+func sclsByronTxOut(t *testing.T, coin uint64) ([]byte, []byte) {
+	t.Helper()
+	addr, err := lcommon.NewAddress(
+		"Ae2tdPwUPEZKQuZh2UndEoTKEakMYHGNjJVYmNZgJk2qqgHouxDsA5oT83n",
+	)
+	require.NoError(t, err)
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
+	stored, err := cbor.Encode(byron.ByronTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  coin,
+	})
+	require.NoError(t, err)
+	require.Equal(t,
+		append([]byte{0x82}, addrBytes...),
+		stored[:1+len(addrBytes)],
+		"the stored output must carry the address structure inline",
+	)
+	return stored, addrBytes
+}
+
+// TestLedgerTxOutTranslatesAByronOutput requires a Byron-era output to export
+// as the Shelley output the ledger holds: its address as a byte string.
+func TestLedgerTxOutTranslatesAByronOutput(t *testing.T) {
+	t.Parallel()
+	stored, addrBytes := sclsByronTxOut(t, 1_000_000)
+	shelley, err := shelleyFormTxOut(stored)
+	require.NoError(t, err)
+	out, err := decodeSCLSTxOut(shelley)
+	require.NoError(t, err)
+	got, err := ledgerTxOut(out)
+	require.NoError(t, err)
+	want := cborCat("82", "58"+hex.EncodeToString([]byte{byte(len(addrBytes))}),
+		hex.EncodeToString(addrBytes), "1a000f4240")
+	require.Equal(t, hex.EncodeToString(want), hex.EncodeToString(got))
 }

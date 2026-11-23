@@ -4715,17 +4715,20 @@ the `utxo/v0` key order) one at a time into the go-scls writer, which holds one
 chunk, and the Merkle state is logarithmic, so memory does not grow with the
 set. An output index above 65535 does not fit the 34-byte `utxo/v0` key and
 fails the export. The set keeps each output as a transaction wrote it, or as
-the MemPack import's map, so the export re-encodes it the way cardano-ledger
-serializes a Conway UTxO entry, which is what a reference export holds: the
+the MemPack import's map, and a Byron output in its Byron encoding with the
+address structure inline. The export first translates a Byron output to the
+Shelley form later eras hold, its address as a byte string, then re-encodes
+each output the way cardano-ledger serializes a Conway UTxO entry, which is
+what a reference export holds: the
 2-element array (3 with a datum hash) when there is no inline datum or script
 reference, otherwise a map with ascending keys; an asset-free value as a bare
 coin; multiasset maps in bytewise key order, indefinite-length above 23
 entries; inline datum and native script bytes unchanged; a Shelley-family
 address with bytes after its payload cropped and an out-of-range pointer
 zeroed, as the ledger's pre-Babbage decode does, and a Byron address
-unchanged. Both the stored and
-the re-encoded forms go through the go-scls typed `utxo/v0` payload codec, and
-a payload the codec rejects fails the export.
+unchanged. Both the stored and the re-encoded forms go through the go-scls
+typed `utxo/v0` payload codec, and a payload the codec rejects fails the
+export.
 
 The file is staged as `<output>.partial` (created exclusively; an existing
 output or staged file is refused) with mode 0666 less the umask, since it holds

@@ -385,6 +385,39 @@ func TestExportSCLSFailsOnAPayloadTheCodecRejects(t *testing.T) {
 	requireNoSCLSFiles(t, dir)
 }
 
+// TestExportSCLSExportsASetHoldingAByronOutput requires a Byron-era output,
+// stored with its address structure inline, to export in the Shelley form.
+func TestExportSCLSExportsASetHoldingAByronOutput(t *testing.T) {
+	t.Parallel()
+	f := newSCLSFixture(t, EraConway, sclsRefs()...)
+	stored, addrBytes := sclsByronTxOut(t, 7)
+	_, err := f.store.Apply(
+		ocommon.Point{Slot: 5001, Hash: sclsTxID(0xEF)},
+		[]badgerutxo.Output{{
+			Ref:  badgerutxo.NewRef(sclsTxID(0x40), 0),
+			Cbor: stored,
+		}},
+		nil,
+	)
+	require.NoError(t, err)
+	out := filepath.Join(t.TempDir(), "state.scls")
+	res, err := ExportSCLS(t.Context(), SCLSExportConfig{
+		Source: f.source(t),
+		Output: out,
+		Tool:   "dingo test",
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(sclsRefs())+1), res.Entries)
+	entries, _ := readSCLS(t, out)
+	last := entries[len(entries)-1]
+	require.Equal(t, sclsTxID(0x40), last.Key[:32])
+	shelley, err := cbor.Encode([]any{addrBytes, uint64(7)})
+	require.NoError(t, err)
+	wrapped, err := cbor.Encode(shelley)
+	require.NoError(t, err)
+	require.Equal(t, wrapped, last.Value)
+}
+
 // TestExportSCLSNeverReplacesAnOutputCreatedDuringTheExport requires the
 // publish to refuse, not replace, a file that appears at the output after the
 // export started.

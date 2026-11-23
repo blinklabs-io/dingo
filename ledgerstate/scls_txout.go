@@ -21,6 +21,8 @@ import (
 	"slices"
 
 	sclscardano "github.com/blinklabs-io/go-scls/cardano"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -109,6 +111,32 @@ func ledgerTxOut(out sclscardano.TxOut) ([]byte, error) {
 		res = appendBytes(res, script)
 	}
 	return res, nil
+}
+
+// shelleyFormTxOut returns a stored Byron output in the Shelley form every
+// later era holds it in. The set keeps a Byron output in its Byron encoding,
+// [address, coin], where the address is the CBOR structure itself; the ledger
+// translates it to a Shelley output whose address is a byte string holding
+// that structure (translateTxOutByronToShelley in ByronTranslation.hs). Any
+// other output is returned unchanged.
+func shelleyFormTxOut(stored []byte) ([]byte, error) {
+	if len(stored) == 0 || stored[0]&0xe0 != cborArray {
+		return stored, nil
+	}
+	var items []cbor.RawMessage
+	if _, err := cbor.Decode(stored, &items); err != nil {
+		return nil, fmt.Errorf("tx_out: %w", err)
+	}
+	if len(items) == 0 || len(items[0]) == 0 ||
+		items[0][0]&0xe0 != cborArray {
+		return stored, nil
+	}
+	if _, err := byron.NewByronTransactionOutputFromCbor(stored); err != nil {
+		return nil, err
+	}
+	res := appendHead(nil, cborArray, 2)
+	res = appendBytes(res, items[0])
+	return append(res, items[1]...), nil
 }
 
 // ledgerAddress returns the address bytes the ledger holds for an output.
