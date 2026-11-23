@@ -87,6 +87,8 @@ func evalSubmit(
 }
 
 func TestEvalTxPredicate_Match(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	leaf := stubLeaf(pA)
@@ -96,6 +98,8 @@ func TestEvalTxPredicate_Match(t *testing.T) {
 }
 
 func TestEvalTxPredicate_Not(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	leaf := stubLeaf(pA)
@@ -129,6 +133,8 @@ func TestEvalTxPredicate_Not(t *testing.T) {
 }
 
 func TestEvalTxPredicate_AllOf(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	leaf := func(_ gledger.Transaction, p *cardano.TxPattern) predOutcome {
@@ -194,6 +200,8 @@ func TestEvalTxPredicate_AllOf(t *testing.T) {
 }
 
 func TestEvalTxPredicate_AnyOf(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	pC := &cardano.TxPattern{}
@@ -218,6 +226,8 @@ func TestEvalTxPredicate_AnyOf(t *testing.T) {
 }
 
 func TestEvalTxPredicate_Nested(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	leaf := stubLeaf(pA)
@@ -254,6 +264,8 @@ func TestEvalTxPredicate_Nested(t *testing.T) {
 }
 
 func TestEvalTxPredicate_WatchParity(t *testing.T) {
+	t.Parallel()
+
 	pA := &cardano.TxPattern{}
 	pB := &cardano.TxPattern{}
 	leaf := stubLeaf(pA)
@@ -278,6 +290,8 @@ func TestEvalTxPredicate_WatchParity(t *testing.T) {
 }
 
 func TestEvalTxPredicate_EmptyNode(t *testing.T) {
+	t.Parallel()
+
 	pred := &submit.TxPredicate{}
 	require.False(
 		t,
@@ -286,6 +300,8 @@ func TestEvalTxPredicate_EmptyNode(t *testing.T) {
 }
 
 func TestEvalTxPredicate_NilTree(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(
 		t,
 		predNoMatch,
@@ -294,6 +310,8 @@ func TestEvalTxPredicate_NilTree(t *testing.T) {
 }
 
 func TestTxPredicateFromSubmit_nonCardanoMatchSetsUnevaluable(t *testing.T) {
+	t.Parallel()
+
 	node := txPredicateFromSubmit(&submit.TxPredicate{
 		Match: &submit.AnyChainTxPattern{},
 	})
@@ -304,6 +322,8 @@ func TestTxPredicateFromSubmit_nonCardanoMatchSetsUnevaluable(t *testing.T) {
 
 // Regression: not(unsupported chain) must not match every transaction.
 func TestMatchTxPredicateNode_Not_nonCardanoInner(t *testing.T) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: event.NewEventBus(nil, nil),
@@ -318,6 +338,8 @@ func TestMatchTxPredicateNode_Not_nonCardanoInner(t *testing.T) {
 
 // Regression: not(address-less Cardano pattern) must not match every tx.
 func TestMatchTxPredicateNode_Not_addresslessCardanoLeaf(t *testing.T) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: event.NewEventBus(nil, nil),
@@ -330,6 +352,8 @@ func TestMatchTxPredicateNode_Not_addresslessCardanoLeaf(t *testing.T) {
 }
 
 func TestEvalTxPredicate_MaxDepthExceeded(t *testing.T) {
+	t.Parallel()
+
 	pred := matchSubmit(&cardano.TxPattern{})
 	for range maxTxPredicateDepth {
 		pred = &submit.TxPredicate{
@@ -344,6 +368,8 @@ func TestEvalTxPredicate_MaxDepthExceeded(t *testing.T) {
 }
 
 func TestEvalTxPredicate_CycleBecomesUnevaluable(t *testing.T) {
+	t.Parallel()
+
 	node := &txPredicateNode{}
 	node.not = []*txPredicateNode{node}
 	require.Equal(
@@ -354,6 +380,8 @@ func TestEvalTxPredicate_CycleBecomesUnevaluable(t *testing.T) {
 }
 
 func TestMatchTxPredicateNode_CachesRepeatedInputLookups(t *testing.T) {
+	t.Parallel()
+
 	address := txPatternMustAddr(t, txPatternAddrA)
 	output, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: address,

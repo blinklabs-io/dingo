@@ -1361,10 +1361,13 @@ func (d *BlobStoreGCS) Start() error {
 	clientOpts := make([]option.ClientOption, 0, 1)
 	clientOpts = append(clientOpts, storage.WithDisabledClientMetrics())
 
-	client, err := storage.NewGRPCClient(
-		ctx,
-		clientOpts...,
-	)
+	var client *storage.Client
+	var err error
+	if os.Getenv("STORAGE_EMULATOR_HOST") != "" {
+		client, err = storage.NewClient(ctx, clientOpts...)
+	} else {
+		client, err = storage.NewGRPCClient(ctx, clientOpts...)
+	}
 	if err != nil {
 		cancel()
 		return fmt.Errorf(

@@ -70,11 +70,11 @@ func TestRecordedExtraEntropyForEpochTracksParameterHistory(t *testing.T) {
 	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 
 	_, entropyCbor := maryPParamsWithExtraEntropy(t, entropy)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		entropyCbor, 200, 259, eras.MaryEraDesc.Id, nil,
 	))
 	_, neutralCbor := maryPParamsWithExtraEntropy(t, nil)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		neutralCbor, 300, 260, eras.MaryEraDesc.Id, nil,
 	))
 
@@ -84,6 +84,7 @@ func TestRecordedExtraEntropyForEpochTracksParameterHistory(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	for _, tc := range []struct {
 		name  string

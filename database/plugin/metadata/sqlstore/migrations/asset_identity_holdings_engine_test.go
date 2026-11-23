@@ -263,10 +263,10 @@ WHERE version = ?`), true, assetSplitVersion)
 
 func TestAssetIdentityHoldingsAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t, "dingo_v74_split"))
+	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t, "dingo_v73_split"))
 }
 
 func TestAssetIdentityHoldingsAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t, "dingo_v74_split"))
+	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t, "dingo_v73_split"))
 }

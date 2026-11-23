@@ -34,9 +34,9 @@ func rewardOutputIDs(
 	db *database.Database,
 ) (map[string]uint, map[string]uint) {
 	t.Helper()
-	pools, err := db.Metadata().GetRewardPoolOutputs(survivalSnapshotEpoch, nil)
+	pools, err := seedDB(t, db).GetRewardPoolOutputs(survivalSnapshotEpoch, nil)
 	require.NoError(t, err)
-	accounts, err := db.Metadata().GetRewardAccountOutputs(
+	accounts, err := seedDB(t, db).GetRewardAccountOutputs(
 		survivalSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestRewardPrecomputeRestartsWhenCommittedOutputsAreGone(t *testing.T) {
 	))
 	partial, _ := rewardOutputIDs(t, db)
 	require.Len(t, partial, 4)
-	require.NoError(t, db.Metadata().DeleteRewardOutputsForEpoch(
+	require.NoError(t, seedDB(t, db).DeleteRewardOutputsForEpoch(
 		survivalSnapshotEpoch, nil,
 	))
 

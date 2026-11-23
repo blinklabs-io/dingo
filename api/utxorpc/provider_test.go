@@ -63,6 +63,8 @@ func providerDeps(t *testing.T) ProviderDependencies {
 }
 
 func TestProviderRejectsPartialTLSPair(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Utxorpc](

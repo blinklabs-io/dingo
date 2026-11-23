@@ -509,7 +509,7 @@ func newAheadReplayEnvWith(
 	cfg := LedgerStateConfig{
 		Database:              f.db,
 		ChainManager:          cm,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, f.db),
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                testLogger(),
 		PromRegistry:          prometheus.NewRegistry(),
@@ -520,7 +520,7 @@ func newAheadReplayEnvWith(
 	ls, err := NewLedgerState(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	setReplayTestLedgerOrigin(ls, eras.ConwayEraDesc, pp)
 	require.NoError(t, cm.SetLedger(ls))
 	ls.utxoPrefetchAheadAwaitReady = cfg.LedgerPrefetchAheadEnabled

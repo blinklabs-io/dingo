@@ -112,7 +112,6 @@ const (
 	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
 	immutableDBSchemaRelease                            = "immutable-db"
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
-	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 	utxoEdgeClusteredSchemaRelease                      = "utxo-edge-clustered"
@@ -312,15 +311,14 @@ var schemaVersions = []struct {
 	{Version: 69, Name: ledgerStateDrainSchemaRelease, Dir: "v69"},
 	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
-	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
-	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
-	{Version: 74, Name: assetIdentityHoldingsSchemaRelease, Dir: "v74"},
-	{Version: 75, Name: utxoEdgeClusteredSchemaRelease, Dir: "v75"},
-	{Version: 76, Name: assetMintBurnIDsSchemaRelease, Dir: "v76"},
-	{Version: 77, Name: utxoAddressDictionarySchemaRelease, Dir: "v77"},
-	{Version: 78, Name: blockNonceClusteredSchemaRelease, Dir: "v78"},
-	{Version: 79, Name: utxoCredentialDictionarySchemaRelease, Dir: "v79"},
-	{Version: 80, Name: poolOpCertClusteredSchemaRelease, Dir: "v80"},
+	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
+	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: utxoEdgeClusteredSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: assetMintBurnIDsSchemaRelease, Dir: "v75"},
+	{Version: 76, Name: utxoAddressDictionarySchemaRelease, Dir: "v76"},
+	{Version: 77, Name: blockNonceClusteredSchemaRelease, Dir: "v77"},
+	{Version: 78, Name: utxoCredentialDictionarySchemaRelease, Dir: "v78"},
+	{Version: 79, Name: poolOpCertClusteredSchemaRelease, Dir: "v79"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -1830,7 +1828,7 @@ const rewardSigmaCalculationVersion uint = 2
 // row is only re-stamped when it already agrees with the epoch's
 // independently-recorded epoch_summary.total_active_stake, which never
 // depended on calculation version either. A row that disagrees is left
-// stale on purpose: StaleConsensusStakeSnapshotsExist still fails closed on
+// stale on purpose: the node's startup provenance check still fails closed on
 // it, because reconstructing the correct value requires replaying that
 // epoch's stake distribution, which this offline, row-local backfill cannot
 // do.
@@ -2005,7 +2003,7 @@ func restampPoolStakeSnapshotBatch(
 // reward_snapshot rows whose total_active_stake already agrees with the same
 // epoch's epoch_summary.total_active_stake -- the value that never depended
 // on calculation version. A row that disagrees names an epoch the version
-// bump actually changed and is left stale; StaleConsensusStakeSnapshotsExist
+// bump actually changed and is left stale; the node's startup provenance check
 // still fails closed on it.
 func restampRewardSnapshotBatch(
 	ctx context.Context,

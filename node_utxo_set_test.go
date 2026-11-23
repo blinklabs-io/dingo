@@ -246,6 +246,7 @@ updated_slot, calculation_version) VALUES (?, 0, '1', '0', '1', 0, 0, 0)`,
 	require.NoError(t, n.backfillRewardLiveStake(t.Context()))
 	require.Equal(t, before, rows(), "rebuilt before the set was reconciled")
 
+	n.utxoSet = openTestUtxoSet(t)
 	n.utxoSetReconciled = true
 	require.NoError(t, n.backfillRewardLiveStake(t.Context()))
 	require.Equal(t, []string{fmt.Sprintf("%x=42", stakeKey)}, rows())

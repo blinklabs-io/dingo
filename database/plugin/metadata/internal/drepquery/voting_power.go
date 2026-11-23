@@ -29,21 +29,21 @@ func sqlDialect(name string) dialectSQL {
 		return dialectSQL{
 			"BIGINT",
 			"true",
-			"$1 AND ax.drep_type = $2",
+			"$1 AND +ax.drep_type = $2",
 			"JOIN utxo",
 		}
 	case "mysql":
 		return dialectSQL{
 			"UNSIGNED",
 			"1",
-			"? AND ax.drep_type = ?",
+			"? AND +ax.drep_type = ?",
 			"JOIN utxo",
 		}
 	default:
 		return dialectSQL{
 			"INTEGER",
 			"1",
-			"? AND ax.drep_type = ?",
+			"? AND +ax.drep_type = ?",
 			"JOIN utxo INDEXED BY " + sqliteUtxoStakingLiveAmountIndex,
 		}
 	}

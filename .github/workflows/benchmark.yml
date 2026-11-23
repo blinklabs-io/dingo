@@ -209,7 +209,17 @@ jobs:
             exit 0
           fi
           git commit -m "chore(benchmark-data): add run $(basename "${run_file}")"
-          git push origin HEAD:benchmark-data
+          # benchmark-baseline.yml pushes gate-runs/ to the same branch; the
+          # two never touch the same files, so a lost race only needs a rebase.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:benchmark-data; then
+              exit 0
+            fi
+            git fetch origin +benchmark-data:refs/remotes/origin/benchmark-data
+            git rebase origin/benchmark-data
+          done
+          echo "could not push benchmark-data" >&2
+          exit 1
 
       - name: report-regression
         if: steps.benchcheck.outputs.regression == 'true'

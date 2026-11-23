@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const edgeClusteredVersion = 75
+const edgeClusteredVersion = 74
 
 // edgeClusteredDB returns a database migrated through the version before the
 // rebuild, holding utxo rows 1..utxos and the given (tx_id, utxo_id) edges in

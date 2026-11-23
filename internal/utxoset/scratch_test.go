@@ -37,7 +37,10 @@ func loadSlotThree(target utxoset.ReimportTarget) (ocommon.Point, error) {
 		}
 		return nil
 	})
-	return point, err
+	if err != nil {
+		return point, err
+	}
+	return point, target.Set.FinishImport()
 }
 
 func openScratchTestSet(t *testing.T) (*utxoset.Set, string) {

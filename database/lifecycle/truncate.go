@@ -978,10 +978,9 @@ func finishPendingTruncate(
 // TruncateAfterSlot's certificate/reward-withdrawal deletes remove
 // their rows, then recompute their expiration_epoch against the
 // surviving chain once TruncateAfterSlot has restored account state.
-// Both must run in the same write transaction as TruncateAfterSlot --
-// this is the exact same CIP-0163 bookkeeping
-// ledger.LedgerState.rollback applies for a normal (security-
-// parameter-bounded) rollback; skipping it here would leave a
+// Both must run in the same write transaction as TruncateAfterSlot.
+// A ledger rollback gets the same result from the LedgerDB set's
+// journal, which this SQL path stands in for; skipping it here would leave a
 // CIP-0163-enabled network with incorrect stake/reward/DRep
 // calculations after any offline or live truncate, since rolled-away
 // activity could leave expiration_epoch renewed past what the

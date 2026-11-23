@@ -53,25 +53,25 @@ func latestCommitteeRows(
 }
 
 // The set answers the latest committee quorum and each cold credential's
-// latest resignation with the store's reads failing, as the store does, after
-// the committee writes, after a quorum is cleared and after the rollback.
+// latest resignation with the store's reads failing, after the committee
+// writes, after a quorum is cleared and after the rollback.
 func TestLatestCommitteeReadsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := setModeScenario(t)
+	scenario, _, _ := setModeScenario(t)
 	ldb := scenario.LedgerDB()
 	slots := scenario.Committee()
-	want := latestCommitteeRows(t, store, "store")
-	require.Equal(t, fmt.Sprintf("quorum %d clear", slots.NoConfidence), want[0])
-	require.Len(t, want, 2, "B's resignation is the only one")
 	reached, _ := scenario.HideStoreReads(
 		"LatestCommitteeQuorum", "LatestCommitteeResignations",
 	)
-	require.Equal(t, want, latestCommitteeRows(t, ldb, "after the writes"))
+	got := latestCommitteeRows(t, ldb, "after the writes")
+	require.Equal(t, fmt.Sprintf("quorum %d clear", slots.NoConfidence), got[0])
+	require.Len(t, got, 2, "B's resignation is the only one")
+	require.Contains(t, got[1], "resign ")
 	scenario.RollbackBeforeBoundary()
-	rolled := latestCommitteeRows(t, store, "store")
-	require.Equal(t, []string{fmt.Sprintf("quorum %d 1/2", slots.Base)}, rolled,
+	require.Equal(t,
+		[]string{fmt.Sprintf("quorum %d 1/2", slots.Base)},
+		latestCommitteeRows(t, ldb, "after the rollback"),
 		"the rollback leaves the quorum seated at the base slot")
-	require.Equal(t, rolled, latestCommitteeRows(t, ldb, "after the rollback"))
 	require.Zero(t, reached(), "a committee read reached the metadata store")
 }
 

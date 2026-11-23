@@ -85,13 +85,13 @@ WHERE version = ?`), true, poolOpCertClusteredVersion)
 func TestPoolOpCertClusteredAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	exercisePoolOpCertClustered(
-		t, newPostgresAssetSplitEngine(t, "dingo_v80_opcerts"),
+		t, newPostgresAssetSplitEngine(t, "dingo_v79_opcerts"),
 	)
 }
 
 func TestPoolOpCertClusteredAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
 	exercisePoolOpCertClustered(
-		t, newMySQLAssetSplitEngine(t, "dingo_v80_opcerts"),
+		t, newMySQLAssetSplitEngine(t, "dingo_v79_opcerts"),
 	)
 }

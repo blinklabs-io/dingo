@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const mintBurnIDsVersion = 76
+const mintBurnIDsVersion = 75
 
 type legacyMintBurnRow struct {
 	txHash any

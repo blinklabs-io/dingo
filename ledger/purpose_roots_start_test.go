@@ -41,14 +41,14 @@ func startWithUnseededChild(
 ) (*LedgerState, error) {
 	t.Helper()
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "42", nil))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "42", nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		purposeRootStartEpoch*100, purposeRootStartEpoch,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, 1000, 100, nil,
 	))
 	parentIdx := uint32(0)
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:          bytes.Repeat([]byte{0x62}, 32),
 		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
 		ProposedEpoch:   purposeRootStartEpoch - 1,
@@ -63,7 +63,7 @@ func startWithUnseededChild(
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		PromRegistry:      prometheus.NewRegistry(),

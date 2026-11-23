@@ -83,7 +83,7 @@ func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) 
 		{
 			name: "consumed UTxO prune floor",
 			prepare: func(f *chainsyncRollbackFixture) error {
-				return f.ls.db.SetSyncState(
+				return seedDB(t, f.ls.db).SetSyncState(
 					database.ConsumedUtxoPruneFloorSyncKey,
 					strconv.FormatUint(
 						f.ancestorTip.Point.Slot+1,
@@ -203,9 +203,12 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NotZero(t, txSubID)
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 
+	// The set lives under the data directory, where the restart below finds
+	// it again.
+	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -222,10 +225,10 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		Point:       targetPoint,
 		BlockNumber: raw[0].BlockNumber,
 	}
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		targetPoint.Hash, targetPoint.Slot, bytes.Repeat([]byte{0x11}, 32), true, nil,
 	))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		currentTip.Point.Hash,
 		currentTip.Point.Slot,
 		bytes.Repeat([]byte{0x22}, 32),
@@ -235,6 +238,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
+	fxJournalChain(t, ls)
 
 	injected := errors.New("injected metadata truncation failure")
 	ls.rollbackTruncateAfterSlotFunc = func(
@@ -265,6 +269,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.Equal(t, blocks[1].Cbor, intentBlocks[0].Cbor)
 	require.Equal(t, targetPoint, ls.chain.Tip().Point)
 
+	require.NoError(t, closeSet())
 	require.NoError(t, dbtest.CloseDatabase(db))
 	db, err = dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
@@ -283,9 +288,10 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		recoveryBus.Unsubscribe(TransactionEventType, recoverySubID)
 	})
 
+	recoveredSet, _ := OpenLiveSetAtForTest(t, db, dataDir)
 	recoveredLS, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           recoveredSet,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          recoveryBus,
@@ -339,7 +345,7 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -415,7 +421,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -586,7 +592,7 @@ func TestLoadRollbackIntentRefusesOversizedStoredRecord(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, seedDB(t, db).SetSyncState(
 		durableRollbackIntentSyncKey,
 		rollbackIntentRecord("["+strings.Repeat("{},", maxRollbackIntentBlocks)+"{}]"),
 		nil,

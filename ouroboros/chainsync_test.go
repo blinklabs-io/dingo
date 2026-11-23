@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"io"
 	"log/slog"
 	"net"
@@ -3171,16 +3172,19 @@ func newTestLedgerStateWithChainAtAndConfig(
 	cardanoConfig *cardano.CardanoNodeConfig,
 ) (*ledger.LedgerState, *database.Database) {
 	return newTestLedgerStateWithChainAtAndConfigAndSet(
-		t, blockCount, dataDir, cardanoConfig, livesettest.New(),
+		t, blockCount, dataDir, cardanoConfig, nil,
 	)
 }
 
+// newTestLedgerStateWithChainAtAndConfigAndSet calls prepare, when set, with
+// the LedgerDB set after the chain's blocks are applied to it and before the
+// ledger opens on it.
 func newTestLedgerStateWithChainAtAndConfigAndSet(
 	t *testing.T,
 	blockCount uint64,
 	dataDir string,
 	cardanoConfig *cardano.CardanoNodeConfig,
-	utxoSet ledger.UtxoSetWriter,
+	prepare func(*utxoset.Set),
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
 
@@ -3210,9 +3214,22 @@ func newTestLedgerStateWithChainAtAndConfigAndSet(
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
 	)
 
+	// Each block is one the ledger applied, so it is a point in the LedgerDB
+	// set's journal, which a query pinned to it reads.
+	set := livesettest.OpenLedgerDB(t, db)
+	for slot := uint64(1); slot <= blockCount; slot++ {
+		point := ocommon.NewPoint(slot, bytes.Repeat([]byte{byte(slot)}, 32))
+		require.NoError(t, set.ApplyUtxoChanges(
+			&point, []ledger.UtxoEvent{{Point: point}},
+		))
+	}
+	if prepare != nil {
+		prepare(set)
+	}
+
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           utxoSet,
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -3689,6 +3706,9 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 		BlockNumber: 2,
 	})
 	require.NoError(t, dbtest.CloseDatabase(db))
+	// The fixture's LedgerDB set opened after the leak baseline; its
+	// background goroutines are not the connection's.
+	require.NoError(t, livesettest.CloseLedgerDB(db))
 	_, _, anchorErr := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.Error(t, anchorErr, "fixture must produce an anchor lookup error")
 
@@ -5912,7 +5932,7 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: cm,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),

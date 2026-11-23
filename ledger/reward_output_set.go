@@ -83,7 +83,7 @@ type RewardOutputRef struct {
 // the rows as a rollback to that slot would leave them.
 type RewardOutputReader interface {
 	// RewardOutputsLoaded reports whether the reader holds every row up to
-	// its tip; until it does, reads stay on the metadata store.
+	// its tip; until it does, the set does not serve the reads.
 	RewardOutputsLoaded() (bool, error)
 	// RewardRounds returns every credited round, oldest first.
 	RewardRounds(ceiling *uint64) ([]models.RewardCreditRound, error)
@@ -114,7 +114,7 @@ type RewardOutputReader interface {
 }
 
 // rewardOutputReader returns the set's reward output reader once it holds the
-// rows, or nil when reads stay on the metadata store.
+// rows, or nil when the set does not serve them.
 func (ls *LedgerState) rewardOutputReader(txn ledgerdb.Txn) RewardOutputReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
@@ -639,11 +639,6 @@ func (s stagingLedgerDB) SaveRewardAccountOutputs(
 	outputs []*models.RewardAccountOutput,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.rewardOutputsDrained() {
-		if err := s.LedgerDB.SaveRewardAccountOutputs(outputs, txn); err != nil {
-			return err
-		}
-	}
 	s.stageDerivedAccounts(txn, outputs)
 	changes := make([]RewardOutputChange, 0, len(outputs))
 	for _, o := range outputs {
@@ -668,11 +663,6 @@ func (s stagingLedgerDB) DeleteRewardOutputsForEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.rewardOutputsDrained() {
-		if err := s.LedgerDB.DeleteRewardOutputsForEpoch(epoch, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{RewardDerived: []RewardDerivedChange{{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		Kind: RewardDerivedReplace, Epoch: epoch,
 	}}})
@@ -686,11 +676,6 @@ func (s stagingLedgerDB) AddAppliedRewardCreditRound(
 	round models.RewardCreditRound,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.rewardOutputsDrained() {
-		if err := s.LedgerDB.AddAppliedRewardCreditRound(round, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		RewardRounds: []RewardRoundChange{{Round: round}},
 	})
@@ -702,17 +687,7 @@ func (s stagingLedgerDB) ClaimPendingRewardCreditsForCredential(
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if s.rewardOutputsDrained() {
-		return s.claimPendingFromSet(txn, credentialTag, stakingKey)
-	}
-	out, err := s.LedgerDB.ClaimPendingRewardCreditsForCredential(
-		credentialTag, stakingKey, txn,
-	)
-	if err != nil {
-		return out, err
-	}
-	s.ls.stageRewardFolds(txn, out)
-	return out, nil
+	return s.claimPendingFromSet(txn, credentialTag, stakingKey)
 }
 
 func (s stagingLedgerDB) ClaimUnfoldedRewardCredits(
@@ -720,15 +695,7 @@ func (s stagingLedgerDB) ClaimUnfoldedRewardCredits(
 	limit int,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if s.rewardOutputsDrained() {
-		return s.claimUnfoldedFromSet(txn, snapshotEpoch, limit)
-	}
-	out, err := s.LedgerDB.ClaimUnfoldedRewardCredits(snapshotEpoch, limit, txn)
-	if err != nil {
-		return out, err
-	}
-	s.ls.stageRewardFolds(txn, out)
-	return out, nil
+	return s.claimUnfoldedFromSet(txn, snapshotEpoch, limit)
 }
 
 func sameRewardRound(a, b models.RewardCreditRound) bool {

@@ -194,7 +194,7 @@ func seatCommitteeMembers(
 	}
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), members, nil),
+		seedDB(t, db).SetCommitteeMembers(context.Background(), members, nil),
 	)
 }
 
@@ -268,7 +268,7 @@ func TestValidateTxAcceptsElectedVoterSharingHotKeyWithPendingMember(
 					pending := committeeTestCredential(order.pendingSeed)
 					hot, hotKey := committeeTestVotingKey(0x5a)
 					seatCommitteeMembers(t, db, elected)
-					seedCommitteeCredentialAuthorization(
+					committeeSeedAuthorization(
 						t,
 						db,
 						elected,
@@ -276,8 +276,8 @@ func TestValidateTxAcceptsElectedVoterSharingHotKeyWithPendingMember(
 						1,
 						1,
 					)
-					storeCommitteeUpdateProposal(t, db, 0x5b, pending, 10)
-					seedCommitteeCredentialAuthorization(
+					committeeStoreUpdateProposal(t, db, 0x5b, pending, 10)
+					committeeSeedAuthorization(
 						t,
 						db,
 						pending,
@@ -333,8 +333,8 @@ func TestValidateTxPendingCommitteeAuthorizationLastsOneEpoch(t *testing.T) {
 				seatCommitteeMembers(t, db, committeeTestCredential(0x61))
 				pending := committeeTestCredential(0x62)
 				hot, hotKey := committeeTestVotingKey(0x63)
-				storeCommitteeUpdateProposal(t, db, 0x64, pending, 10)
-				seedCommitteeCredentialAuthorization(
+				committeeStoreUpdateProposal(t, db, 0x64, pending, 10)
+				committeeSeedAuthorization(
 					t, db, pending, hot, 1, tc.authSlot,
 				)
 
@@ -373,9 +373,9 @@ func TestValidateTxRejectsHotKeyOfResignedPendingCommitteeMember(
 			seatCommitteeMembers(t, db, committeeTestCredential(0x71))
 			pending := committeeTestCredential(0x72)
 			hot, hotKey := committeeTestVotingKey(0x73)
-			storeCommitteeUpdateProposal(t, db, 0x74, pending, 10)
-			seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
-			seedCommitteeCredentialResignation(t, db, pending, 2, 2)
+			committeeStoreUpdateProposal(t, db, 0x74, pending, 10)
+			committeeSeedAuthorization(t, db, pending, hot, 1, 1)
+			committeeSeedResignation(t, db, pending, 2, 2)
 
 			err := committeeVotingValidate(
 				t, era, lv, pparams, hotKey,
@@ -412,13 +412,13 @@ func TestValidateTxSameTransactionAuthorizationElectsCommitteeVoter(
 				lv, db := committeeTestView(t, pparams)
 				elected, electedKey := committeeTestVotingKey(0x81)
 				seatCommitteeMembers(t, db, elected)
-				seedCommitteeCredentialAuthorization(
+				committeeSeedAuthorization(
 					t, db, elected, committeeTestCredential(0x82), 1, 1,
 				)
 				pending := committeeTestCredential(0x83)
 				hot, hotKey := committeeTestVotingKey(0x84)
-				storeCommitteeUpdateProposal(t, db, 0x85, pending, 10)
-				seedCommitteeCredentialAuthorization(t, db, pending, hot, 2, 2)
+				committeeStoreUpdateProposal(t, db, 0x85, pending, 10)
+				committeeSeedAuthorization(t, db, pending, hot, 2, 2)
 
 				var certs []lcommon.Certificate
 				var signers []ed25519.PrivateKey
@@ -483,11 +483,11 @@ func TestValidateTxSameTransactionAuthorizationByUnelectedColdCredential(
 					}
 				}
 				seatCommitteeMembers(t, db, seated)
-				storeCommitteeUpdateProposal(t, db, 0xc3, authorizing, 10)
+				committeeStoreUpdateProposal(t, db, 0xc3, authorizing, 10)
 				known := committeeTestCredential(0xc4)
 				hot, hotKey := committeeTestVotingKey(0xc5)
-				storeCommitteeUpdateProposal(t, db, 0xc6, known, 10)
-				seedCommitteeCredentialAuthorization(t, db, known, hot, 1, 1)
+				committeeStoreUpdateProposal(t, db, 0xc6, known, 10)
+				committeeSeedAuthorization(t, db, known, hot, 1, 1)
 
 				err := committeeVotingValidate(
 					t, era, lv, pparams, hotKey,
@@ -531,9 +531,9 @@ func TestValidateTxConwaySameTransactionResignationKeepsOtherElectedMember(
 			remaining := committeeTestCredential(0x92)
 			hot, hotKey := committeeTestVotingKey(0x93)
 			seatCommitteeMembers(t, db, resigning, remaining)
-			seedCommitteeCredentialAuthorization(t, db, resigning, hot, 1, 1)
+			committeeSeedAuthorization(t, db, resigning, hot, 1, 1)
 			if shared {
-				seedCommitteeCredentialAuthorization(
+				committeeSeedAuthorization(
 					t,
 					db,
 					remaining,
@@ -608,8 +608,8 @@ func TestValidateTxUnelectedCommitteeVoterByProtocolVersion(t *testing.T) {
 				seatCommitteeMembers(t, db, committeeTestCredential(0xa1))
 				pending := committeeTestCredential(0xa2)
 				hot, hotKey := committeeTestVotingKey(0xa3)
-				storeCommitteeUpdateProposal(t, db, 0xa4, pending, 10)
-				seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
+				committeeStoreUpdateProposal(t, db, 0xa4, pending, 10)
+				committeeSeedAuthorization(t, db, pending, hot, 1, 1)
 
 				err := committeeVotingValidate(
 					t, tc.era, lv, pparams, hotKey,
@@ -646,7 +646,7 @@ func storeCommitteeVotingTarget(
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
+		seedDB(t, db).SetGovernanceProposal(
 			context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        governanceTestHash(seed),
@@ -732,15 +732,15 @@ func TestValidateTxCommitteeActionRestrictionAtEveryProtocolVersion(
 					lv, db := committeeTestView(t, pparams)
 					require.NoError(
 						t,
-						db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+						seedDB(t, db).SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 					)
 					cold := committeeTestCredential(0xb1)
 					hot, hotKey := committeeTestVotingKey(0xb2)
 					seatCommitteeMembers(t, db, cold)
-					seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+					committeeSeedAuthorization(t, db, cold, hot, 1, 1)
 					var actionID *lcommon.GovActionId
 					if tgt.actionType == lcommon.GovActionTypeUpdateCommittee {
-						storeCommitteeUpdateProposal(
+						committeeStoreUpdateProposal(
 							t, db, 0xb3, committeeTestCredential(0xb4), 10,
 						)
 						var txID [32]byte
@@ -798,7 +798,7 @@ func TestValidateTxCommitteeHotCredentialTagIsPartOfIdentity(t *testing.T) {
 		Credential: keyHot.Credential,
 	}
 	seatCommitteeMembers(t, db, cold)
-	seedCommitteeCredentialAuthorization(t, db, cold, keyHot, 1, 1)
+	committeeSeedAuthorization(t, db, cold, keyHot, 1, 1)
 
 	member, err := lv.CommitteeHotCredentialMember(scriptHot)
 	require.NoError(t, err)
@@ -846,10 +846,10 @@ func TestValidateTxRejectsHotKeyOfRemovedCommitteeMember(t *testing.T) {
 			removed := committeeTestCredential(0xe1)
 			hot, hotKey := committeeTestVotingKey(0xe2)
 			seatCommitteeMembers(t, db, removed, committeeTestCredential(0xe3))
-			seedCommitteeCredentialAuthorization(t, db, removed, hot, 1, 1)
+			committeeSeedAuthorization(t, db, removed, hot, 1, 1)
 			require.NoError(
 				t,
-				db.SoftDeleteCommitteeMembers(
+				seedDB(t, db).SoftDeleteCommitteeMembers(
 					context.Background(),
 					[]models.CommitteeCredential{{
 						CredentialTag: uint8(removed.CredType),
@@ -901,7 +901,7 @@ func TestValidateTxCommitteeActionRestrictionForScriptHotVoter(t *testing.T) {
 			lv, db := committeeTestView(t, pparams)
 			require.NoError(
 				t,
-				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+				seedDB(t, db).SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 			)
 			cold := committeeTestCredential(0xf1)
 			hot := lcommon.Credential{
@@ -909,7 +909,7 @@ func TestValidateTxCommitteeActionRestrictionForScriptHotVoter(t *testing.T) {
 				Credential: committeeTestCredential(0xf2).Credential,
 			}
 			seatCommitteeMembers(t, db, cold)
-			seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+			committeeSeedAuthorization(t, db, cold, hot, 1, 1)
 			actionID := storeCommitteeVotingTarget(t, db, 0xf3, tc.actionType)
 
 			err := eras.ValidateTxConway(&conway.ConwayTransaction{
@@ -953,7 +953,7 @@ func TestValidateTxDRepOnlyVotePassesAtPV11(t *testing.T) {
 			lv, db := committeeTestView(t, pparams)
 			seatCommitteeMembers(t, db, committeeTestCredential(0xf8))
 			drep, drepKey := committeeTestVotingKey(0xf9)
-			seedImportedDrep(t, db, drep, 0, 1, true)
+			drepSeedRegistered(t, db, drep, new(uint64(0)), 1, true)
 
 			err := committeeVotingValidate(
 				t,

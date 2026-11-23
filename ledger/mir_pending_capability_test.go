@@ -105,7 +105,7 @@ func TestLedgerViewAnswersPendingInstantaneousRewards(t *testing.T) {
 			t.Run(e.name+"/"+dc.name, func(t *testing.T) {
 				t.Parallel()
 
-				ls, db, gdb := newMIRTestLedger(t)
+				ls, db, _ := newMIRTestLedger(t)
 				withMIRCutoffEpoch(
 					t,
 					ls,
@@ -114,14 +114,14 @@ func TestLedgerViewAnswersPendingInstantaneousRewards(t *testing.T) {
 				if dc.seed {
 					// The other pot holds a larger credit for the same
 					// credential, which must not count toward reserves.
-					seedMIRDistribution(t, gdb, mirPotReserves, 150,
+					seedMIRDistribution(t, db, mirPotReserves, 150,
 						[]models.MoveInstantaneousRewardsReward{
 							{
 								Credential: mirCred28(0x4e),
 								Amount:     big.NewInt(10),
 							},
 						})
-					seedMIRDistribution(t, gdb, mirPotTreasury, 160,
+					seedMIRDistribution(t, db, mirPotTreasury, 160,
 						[]models.MoveInstantaneousRewardsReward{
 							{
 								Credential: mirCred28(0x4e),
@@ -130,7 +130,7 @@ func TestLedgerViewAnswersPendingInstantaneousRewards(t *testing.T) {
 						})
 				}
 				// Before the epoch, so it must not count either.
-				seedMIRDistribution(t, gdb, mirPotReserves, 50,
+				seedMIRDistribution(t, db, mirPotReserves, 50,
 					[]models.MoveInstantaneousRewardsReward{
 						{
 							Credential: mirCred28(0x4e),

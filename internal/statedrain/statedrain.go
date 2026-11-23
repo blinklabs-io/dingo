@@ -165,7 +165,7 @@ var graduated = []struct {
 			{"governance_proposal_drop", "proposal_id"},
 			{"governance_proposal", "id"},
 		},
-		nil,
+		[]string{PendingRatificationSyncKey},
 	},
 	{
 		nodesettings.FamilyPParamsUpdates,
@@ -231,9 +231,10 @@ var graduated = []struct {
 			{"deregistration", "id"},
 			{"stake_registration", "id"},
 			{"stake_deregistration", "id"},
+			{"account_inactivity_activation", "staking_key"},
 			{"account", "id"},
 		},
-		nil,
+		[]string{DelegatorInactivitySyncKey},
 	},
 	// The account rollback reads the pool retirement history to tell a
 	// delegation a reap removed from one a certificate set, and only the
@@ -276,10 +277,8 @@ const (
 
 // RewardStakeInputsPendingSyncKey is the sync_state key listing the stake
 // input snapshots whose deferred write has not finished, the only sync state
-// of the reward-inputs family. The set loads the record before the family is
-// drained and keeps it until the snapshot's rows are rebuilt. A drained family
-// writes a snapshot's stake rows in the boundary's own apply, so it adds no
-// entries.
+// of the reward-inputs family. The set keeps a row per such snapshot, so its
+// stake rows are rebuilt before they are read.
 const RewardStakeInputsPendingSyncKey = "dingo:stake-reward:stake-inputs-pending"
 
 // RewardPrecomputeCursorSyncPrefix starts the sync_state key of each epoch's
@@ -289,6 +288,17 @@ const RewardStakeInputsPendingSyncKey = "dingo:stake-reward:stake-inputs-pending
 const (
 	RewardPrecomputeCursorSyncPrefix = "dingo:stake-reward:precompute-cursor:"
 	RewardEligibilityRecheckSyncKey  = "dingo:reward-credit:eligibility-recheck"
+)
+
+// PendingRatificationSyncKey is the sync_state key of the record of a
+// boundary whose ratification decision is not written yet, the sync state of
+// the governance family. DelegatorInactivitySyncKey is the key of the epoch
+// the one-time CIP-0163 activation ran at, the sync state of the accounts
+// family, whose account_inactivity_activation table lists the credentials it
+// stamped.
+const (
+	PendingRatificationSyncKey = "dingo:governance:ratify-pending"
+	DelegatorInactivitySyncKey = "delegator_inactivity_activated"
 )
 
 // EraSwitchSyncKey is the sync_state key of the recorded mid-epoch era

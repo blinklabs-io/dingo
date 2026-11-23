@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const blockNonceClusteredVersion = 78
+const blockNonceClusteredVersion = 77
 
 type legacyBlockNonce struct {
 	Hash       []byte

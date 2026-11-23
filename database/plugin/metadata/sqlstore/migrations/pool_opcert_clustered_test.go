@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const poolOpCertClusteredVersion = 80
+const poolOpCertClusteredVersion = 79
 
 // legacyPoolOpCert is one by-value pool_opcert_sequence row. A nil Slot or
 // Pool leaves the column NULL, as the nullable legacy columns allow.

@@ -165,7 +165,7 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     consensus,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, consensus),
 		ChainManager: chainManager,
 	})
 	require.NoError(t, err)

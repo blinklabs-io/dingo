@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const utxoCredentialDictionaryVersion = 79
+const utxoCredentialDictionaryVersion = 78
 
 // legacyCredentialUtxo is one by-value utxo row of the schema before the
 // credential dictionary.

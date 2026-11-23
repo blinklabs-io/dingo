@@ -20,9 +20,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -32,8 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// countingVrfKeyHashStore is the ledger's LedgerDB with the two pool VRF key
+// reads answered from fixed hashes and counted.
 type countingVrfKeyHashStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	cutoffHash   []byte
 	earliestHash []byte
 	cutoff       atomic.Int64
@@ -47,7 +48,7 @@ type countingVrfKeyHashStore struct {
 func (s *countingVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
 	_ []byte,
 	_ uint64,
-	_ types.Txn,
+	_ ledgerdb.Txn,
 ) ([]byte, bool, error) {
 	s.cutoff.Add(1)
 	if s.onCutoff != nil {
@@ -62,7 +63,7 @@ func (s *countingVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
 func (s *countingVrfKeyHashStore) GetPoolEarliestVrfKeyHashAtSlot(
 	_ []byte,
 	_ uint64,
-	_ types.Txn,
+	_ ledgerdb.Txn,
 ) ([]byte, bool, error) {
 	s.earliest.Add(1)
 	return s.earliestHash, true, nil
@@ -74,16 +75,11 @@ func newElectingVrfMemoLedger(
 	tipSlot uint64,
 ) (*LedgerState, []models.Epoch, electingSnapshot) {
 	t.Helper()
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			return store
-		},
-	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	ls := newEligibilityTestLedgerOnDB(t, nil, db)
+	store.LedgerDB = ls.ledgerDB()
+	ls.ldb = store
 	epochCache := []models.Epoch{{
 		EpochId:       5,
 		StartSlot:     1_000,

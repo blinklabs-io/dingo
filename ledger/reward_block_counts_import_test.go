@@ -71,7 +71,7 @@ func stakeRewardApplicationForTest(
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 	if fromImport {
-		require.NoError(t, meta.SetSyncState(
+		require.NoError(t, seedDB(t, db).SetSyncState(
 			mithrilLedgerSlotSyncKey,
 			"199",
 			nil,

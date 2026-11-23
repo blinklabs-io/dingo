@@ -178,13 +178,13 @@ WHERE version = ?`), true, utxoCredentialDictionaryVersion)
 func TestUtxoCredentialDictionaryAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	exerciseCredentialDictionary(
-		t, newPostgresAssetSplitEngine(t, "dingo_v79_credentials"),
+		t, newPostgresAssetSplitEngine(t, "dingo_v78_credentials"),
 	)
 }
 
 func TestUtxoCredentialDictionaryAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
 	exerciseCredentialDictionary(
-		t, newMySQLAssetSplitEngine(t, "dingo_v79_credentials"),
+		t, newMySQLAssetSplitEngine(t, "dingo_v78_credentials"),
 	)
 }

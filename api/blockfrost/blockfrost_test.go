@@ -1084,6 +1084,11 @@ func TestMetadataTransactionsCancelledContext(t *testing.T) {
 type mockNode struct {
 	historyMock
 	queryMock
+	metadataLabels                []MetadataLabelInfo
+	metadataLabelsTotal           int
+	metadataLabelsParams          PaginationParams
+	xpubAddress                   string
+	xpubErr                       error
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo
@@ -1365,6 +1370,18 @@ func (m *mockNode) AddressTransactions(
 ) ([]AddressTransactionInfo, int, error) {
 	m.lastAddressTransactionsParams = params
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
+}
+
+func (m *mockNode) MetadataLabels(
+	_ context.Context,
+	params PaginationParams,
+) ([]MetadataLabelInfo, int, error) {
+	m.metadataLabelsParams = params
+	return m.metadataLabels, m.metadataLabelsTotal, nil
+}
+
+func (m *mockNode) XpubAddress(_ []byte, _ uint32, _ uint32) (string, error) {
+	return m.xpubAddress, m.xpubErr
 }
 
 func (m *mockNode) MetadataTransactions(

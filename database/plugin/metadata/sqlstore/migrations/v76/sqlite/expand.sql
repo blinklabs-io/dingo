@@ -1,6 +1,6 @@
--- Rebuild asset_mint_burn keyed by the ids of what it names. The previous
--- table repeated the transaction hash, policy, name and a fingerprint derived
--- from them on every row, and held them again in a unique index. The pair
--- (transaction, asset) is already held once in `transaction` and
--- `asset_identity`, so a row is now the clustered key and the event itself.
-CREATE TABLE IF NOT EXISTS `asset_mint_burn_clustered` (`transaction_id` integer NOT NULL,`asset_id` integer NOT NULL,`slot` integer NOT NULL,`tx_index` integer NOT NULL,`quantity` text NOT NULL,PRIMARY KEY (`transaction_id`,`asset_id`),CONSTRAINT `fk_asset_mint_burn_clustered_transaction` FOREIGN KEY (`transaction_id`) REFERENCES `transaction`(`id`),CONSTRAINT `fk_asset_mint_burn_clustered_asset` FOREIGN KEY (`asset_id`) REFERENCES `asset_identity`(`id`)) WITHOUT ROWID;
+-- Hold each address once. utxo_address repeated the encoded address on every
+-- output and again in each index over it; it now names the address by id, and
+-- its page order index is built on that id. The copy is built next to the
+-- original and swapped in under its name by the backfill.
+CREATE TABLE IF NOT EXISTS `address` (`id` integer PRIMARY KEY AUTOINCREMENT,`address` blob NOT NULL,UNIQUE (`address`));
+CREATE TABLE IF NOT EXISTS `utxo_address_dictionary` (`utxo_id` integer PRIMARY KEY,`address_id` integer NOT NULL,`tx_id` integer,`output_idx` integer,`slot` integer,`block_index` integer,CONSTRAINT `fk_utxo_address_dictionary_utxo` FOREIGN KEY (`utxo_id`) REFERENCES `utxo`(`id`) ON DELETE CASCADE,CONSTRAINT `fk_utxo_address_dictionary_address` FOREIGN KEY (`address_id`) REFERENCES `address`(`id`));

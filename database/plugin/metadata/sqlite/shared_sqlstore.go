@@ -275,12 +275,18 @@ func vacuumWith(
 // blocks peers show as missing via the ordinary FindIntersect/chain-sync path
 // -- the same mechanism that recovers from an explicit rollback or from the
 // Badger-behind-metadata race the Cross-Store Durability Contract documents.
+//
+// threads(4) lets SQLite's sorter use helper threads for the large sorts a
+// CREATE INDEX or a whole-table ORDER BY performs, such as the deferred
+// index rebuild at the end of a backfill; ordinary statements never sort
+// enough to use them.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=journal_size_limit(67108864)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
-	"&_pragma=mmap_size(268435456)"
+	"&_pragma=mmap_size(268435456)" +
+	"&_pragma=threads(4)"
 
 // sqliteWritePragmas is appended to the write pool's DSN only.
 //
@@ -651,6 +657,14 @@ func NewSQLStore(
 // that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
+// BeforeOpenMemoryDB, when non-nil, is called with the freshly opened writer
+// of every in-memory store and that store's storage mode, before migrations
+// run. It exists so a test binary can restore an already-migrated schema into
+// the shared-cache database instead of running every migration. Production
+// code never sets it. Like BeforeOpenDataDir it must be assigned only from a
+// test package's init function.
+var BeforeOpenMemoryDB func(db *sql.DB, storageMode string) error
+
 // LazyHotStatements makes every store this package opens defer preparing its
 // hot statements to first use instead of preparing them in Start. It exists
 // for test binaries that open many short-lived stores; production code never
@@ -733,6 +747,17 @@ func openSQLStoreWithDialect(
 		readDB = writeDB
 		writeDB.SetMaxOpenConns(maxConnections)
 		writeDB.SetMaxIdleConns(maxConnections)
+		if BeforeOpenMemoryDB != nil {
+			if err := BeforeOpenMemoryDB(
+				writeDB, dependencies.StorageMode,
+			); err != nil {
+				_ = writeDB.Close()
+				return nil, nil, nil, fmt.Errorf(
+					"prepare in-memory SQLite database: %w",
+					err,
+				)
+			}
+		}
 		locker = migrations.NewProcessLocker()
 	} else {
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {

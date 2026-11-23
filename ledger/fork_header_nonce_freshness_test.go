@@ -89,6 +89,7 @@ func newForkPathFreshnessFixture(t *testing.T, queued int) *forkPathFreshnessFix
 		},
 		stamps: make(map[string]uint64),
 	}
+	attachTestLiveSet(t, f.ls)
 	f.ls.publishSnapshotsLocked()
 	prev := anchor.block.Hash()
 	for i := range queued {

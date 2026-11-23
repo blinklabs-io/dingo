@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -825,7 +826,7 @@ type adapterFixture struct {
 	adapter   *NodeAdapter
 	raw       *sql.DB
 	indexerDB *database.Database
-	utxoSet   *livesettest.Mem
+	utxoSet   *utxoset.Set
 }
 
 func newAdapterFixture(
@@ -844,7 +845,7 @@ func newAdapterFixture(
 	cm, err := chain.NewManager(context.Background(), consensus, nil)
 	require.NoError(t, err)
 
-	utxoSet := livesettest.New()
+	utxoSet := livesettest.OpenLedgerDB(t, consensus)
 	lsConfig := ledger.LedgerStateConfig{
 		Database:     consensus,
 		UtxoSet:      utxoSet,

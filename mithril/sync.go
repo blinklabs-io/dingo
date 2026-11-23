@@ -479,7 +479,7 @@ type SyncConfig struct {
 	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
 	// UtxoSet is the LedgerDB set that receives the ledger state's UTxO set
 	// and families; see ledgerstate.ImportConfig.UtxoSet.
-	UtxoSet ledgerstate.FamilyLoader
+	UtxoSet ledgerstate.CatchUpLoader
 	// InvalidateUtxoSetGovernance, when set, is called after a volatile-block
 	// cleanup has deleted governance rows from the metadata store, so a live UTxO
 	// set that kept copies of them reloads them at its next startup instead
@@ -752,22 +752,6 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
-	// A database that drained ledger-state families takes the import when
-	// the live UTxO set can hold them: the rows are written to SQL as for any
-	// database and moved into the set once the import is complete.
-	drainedImport, beginErr := db.BeginDrainedImport(ctx)
-	if beginErr != nil {
-		return SyncResult{}, beginErr
-	}
-	if drainedImport {
-		defer func() {
-			if syncErr != nil {
-				db.EndDrainedImport(ctx)
-			}
-		}()
-	} else if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
-		return SyncResult{}, err
-	}
 	catchUpStart, err = resumeStartImmutable(db, mode, catchUpStart)
 	if err != nil {
 		return SyncResult{}, err
@@ -1560,16 +1544,6 @@ func Sync(
 		return SyncResult{}, err
 	}
 	syncComplete = true
-	if drainedImport {
-		if err := ledgerstate.FinishDrainedImport(
-			ctx, db, cfg.UtxoSet,
-		); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"moving the imported ledger state into the live UTxO set: %w",
-				err,
-			)
-		}
-	}
 
 	// Record the highest imported immutable file number so a later catch-up can
 	// skip already-present archives and anchor its intersection check. Written

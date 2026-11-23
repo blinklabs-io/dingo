@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const utxoAddressDictionaryVersion = 77
+const utxoAddressDictionaryVersion = 76
 
 // legacyUtxoAddress is one by-value utxo_address row of the schema before the
 // dictionary. A nil Slot leaves the page position NULL, as a row written

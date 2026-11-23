@@ -40,7 +40,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -389,7 +388,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		LengthInSlots: 100,
 		EraId:         eras.ShelleyEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot, currentEpoch.EpochId,
 		nil, nil, nil, nil,
 		currentEpoch.EraId, currentEpoch.SlotLength, currentEpoch.LengthInSlots,
@@ -434,6 +433,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 	ls.publishSnapshotsLocked()
 	oldConsensus := ls.consensus.Load()
@@ -477,7 +477,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 		LengthInSlots: 100,
 		EraId:         eras.DijkstraEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot,
 		currentEpoch.EpochId,
 		nil,
@@ -503,6 +503,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 
 	var result *EpochRolloverResult
@@ -574,7 +575,7 @@ func dijkstraRetentionRestartLedgerState(
 		LengthInSlots: 100,
 		EraId:         eras.DijkstraEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch.StartSlot,
 		epoch.EpochId,
 		nil,
@@ -588,7 +589,7 @@ func dijkstraRetentionRestartLedgerState(
 	))
 	encoded, err := cbor.Encode(dijkstraRetentionPParams())
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		encoded,
 		epoch.StartSlot,
 		epoch.EpochId,
@@ -605,7 +606,7 @@ func dijkstraRetentionRestartLedgerState(
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(reopened))
 	})
-	return &LedgerState{
+	ls := &LedgerState{
 		db:           reopened,
 		currentEra:   eras.DijkstraEraDesc,
 		activeEras:   eras.ErasWithDijkstra,
@@ -616,6 +617,8 @@ func dijkstraRetentionRestartLedgerState(
 			Logger:            logger,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
+	return ls
 }
 
 func dijkstraRetentionNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
@@ -2133,7 +2136,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 	tipNonce := bytes.Repeat([]byte{0x22}, 32)
 	candidateNonce := bytes.Repeat([]byte{0x33}, 32)
 
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		bytes.Repeat([]byte{0x44}, 32),
 		1050,
 		tipNonce,
@@ -2166,6 +2169,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	got := ls.computeNextEpochNonce(context.Background(), ls.currentEpoch, ls.currentEra)
@@ -3025,6 +3029,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Capture original state
 	originalEra := ls.currentEra
@@ -3129,6 +3134,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Chain transitions from Byron -> Shelley -> Allegra
 	txn := db.Transaction(context.Background(), true)
@@ -3204,7 +3210,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 		AnchorHash:    bytes.Repeat([]byte{0xe2}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0xe3}, 29),
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
 
 	newCborRat := func(num, denom int64) *cbor.Rat {
 		return &cbor.Rat{Rat: big.NewRat(num, denom)}
@@ -3254,6 +3260,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
@@ -3269,7 +3276,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	})
 	require.NoError(t, err)
 
-	got, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
+	got, err := seedDB(t, db).GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	var translated dijkstra.DijkstraParameterChangeGovAction
 	_, err = cbor.Decode(got.GovActionCbor, &translated)
@@ -3351,6 +3358,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Execute epoch rollover for initial epoch
 	txn := db.Transaction(context.Background(), true)
@@ -3451,6 +3459,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// This test verifies that the pattern doesn't deadlock:
 	// 1. Take RLock to capture snapshot
@@ -3581,6 +3590,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	var wg sync.WaitGroup
 	readCount := atomic.Int32{}
@@ -3691,6 +3701,7 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			},
 		}
+		fxAttachLedgerDB(t, ls)
 
 		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
@@ -3739,6 +3750,7 @@ func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Store blocks at slots 1-5
 	for slot := uint64(1); slot <= 5; slot++ {
@@ -3781,6 +3793,7 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Store a block at slot 1 (would be orphan if tip is 0)
 	block := makeTestBlock(1, 1)
@@ -3818,6 +3831,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 		db:    db,
 		chain: cm.PrimaryChain(),
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -3829,12 +3843,12 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 
 	db := newTestDB(t)
 	boundaryHash := bytes.Repeat([]byte{0x42}, 32)
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, seedDB(t, db).SetSyncState(
 		mithrilLedgerSlotSyncKey,
 		"42",
 		nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, seedDB(t, db).SetSyncState(
 		mithrilLedgerHashSyncKey,
 		fmt.Sprintf("%x", boundaryHash),
 		nil,
@@ -3845,6 +3859,7 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3866,6 +3881,7 @@ func TestLoadMithrilTrustBoundaryAbsentKeyStartsNotMithril(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3884,7 +3900,7 @@ func TestLoadMithrilTrustBoundaryMalformedSlotReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, seedDB(t, db).SetSyncState(
 		mithrilLedgerSlotSyncKey,
 		"x",
 		nil,
@@ -3895,6 +3911,7 @@ func TestLoadMithrilTrustBoundaryMalformedSlotReturnsError(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3910,21 +3927,22 @@ func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, seedDB(t, db).SetSyncState(
 		mithrilLedgerSlotSyncKey,
 		"42",
 		nil,
 	))
-	// Close the metadata store so the subsequent GetSyncState read fails
-	// deterministically, mirroring the pattern used in
-	// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates.
-	require.NoError(t, db.Metadata().Close())
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
+	// Close the metadata store so the subsequent GetSyncState read fails
+	// deterministically, mirroring the pattern used in
+	// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates.
+	require.NoError(t, db.Metadata().Close())
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3942,13 +3960,14 @@ func TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3964,12 +3983,12 @@ func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
+	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		PromRegistry:      prometheus.NewRegistry(),
@@ -3997,6 +4016,7 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 		mithrilLedgerSlot: 42,
 		mithrilLedgerHash: boundaryHash,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4017,6 +4037,7 @@ func TestLedgerTipIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 		mithrilLedgerSlot: 42,
 		mithrilLedgerHash: boundaryHash,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.LedgerTipIntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4056,6 +4077,7 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 		db:    db,
 		chain: cm.PrimaryChain(),
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 
 	points, err := ls.IntersectPoints(context.Background(), 3)
@@ -4095,6 +4117,7 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 			BlockNumber: ledgerTipBlock.Number,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
@@ -4139,6 +4162,7 @@ func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 		},
 		mithrilLedgerSlot: 173,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
@@ -4180,6 +4204,7 @@ func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
 		},
 		mithrilLedgerSlot: 0,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4212,6 +4237,7 @@ func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
 		},
 		mithrilLedgerSlot: boundarySlot,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4250,6 +4276,7 @@ func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 		},
 		mithrilLedgerSlot: boundarySlot,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4293,6 +4320,7 @@ func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
 		},
 		mithrilLedgerSlot: boundarySlot,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4341,6 +4369,7 @@ func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
 		},
 		mithrilLedgerSlot: boundarySlot,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
@@ -4384,6 +4413,7 @@ func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
 
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	block, err := ls.authoritativeLedgerBlockAtSlot(context.Background(),
 		20,
@@ -4420,6 +4450,7 @@ func TestIntersectPointsKeepsMithrilTrustBoundaryWhenPointListIsFull(
 		},
 		mithrilLedgerSlot: 5,
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -4479,6 +4510,7 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 			BlockNumber: ledgerTipBlock.Number,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
@@ -4534,6 +4566,7 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 
 	density := ls.chainFragmentDensity(context.Background(), ls.currentTip, ls.SecurityParam())
@@ -4582,7 +4615,7 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 	tipBlock := blocks[len(blocks)-1]
 	require.NoError(
 		t,
-		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+		seedBlockNonce(t, db, tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
 	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       makeTestPoint(tipBlock),
@@ -4597,6 +4630,7 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 
 	require.NoError(t, ls.loadTip(context.Background()))
@@ -4652,6 +4686,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
@@ -4709,7 +4744,7 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 			require.NoError(t, err)
 			ls, err := NewLedgerState(LedgerStateConfig{
 				Database:       db,
-				UtxoSet:        NewMemLiveSetForTest(),
+				UtxoSet:        OpenLiveSetForTest(t, db),
 				ChainManager:   cm,
 				Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
 				EnableDijkstra: tt.enableDijkstra,
@@ -4788,7 +4823,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		require.NoError(t, err)
 		ls, err := NewLedgerState(LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4871,7 +4906,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -5293,42 +5328,48 @@ func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	var poolID [28]byte
 	for i := range poolID {
 		poolID[i] = byte(i + 1)
 	}
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+	}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 
 	sequence, found, err := ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
 	require.False(t, found)
 	require.Equal(t, uint64(0), sequence)
 
-	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 3, 10, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 7, 20, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 30, nil))
+	fxTip(t, ls, fxPoint(5))
+	for _, o := range []struct{ sequence, slot uint64 }{
+		{3, 10}, {7, 20}, {5, 30},
+	} {
+		fxBlock(t, ls, fxPoint(o.slot), func(
+			ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+		) error {
+			return ldb.UpdatePoolOpCertSequence(
+				context.Background(), pkh, o.sequence, o.slot, txn,
+			)
+		})
+	}
 
 	sequence, found, err = ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(7), sequence)
 
-	require.NoError(t, db.RestorePoolStateAtSlot(context.Background(), 15, nil))
+	fxRollback(t, ls, fxPoint(10))
 	sequence, found, err = ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -5345,26 +5386,23 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			TrustedReplay: true,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	var issuerVkey lcommon.IssuerVkey
 	for i := range issuerVkey {
 		issuerVkey[i] = byte(i + 1)
 	}
 	pkh := lcommon.PoolKeyHash(issuerVkey.Hash())
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+	}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 
 	block := &babbage.BabbageBlock{
 		BlockHeader: &babbage.BabbageBlockHeader{
@@ -5456,6 +5494,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			},
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(context.Background(),
@@ -5550,6 +5589,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(context.Background(),
@@ -5733,6 +5773,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	publishGovernanceTestEpoch(ls, 0, eras.ConwayEraDesc)
 
 	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, nil, func(
@@ -5751,7 +5792,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = db.GetDrepByCredential(context.Background(), 0, credential, true, nil)
+	_, err = seedDB(t, db).GetDrepByCredential(context.Background(), 0, credential, true, nil)
 	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }
 
@@ -5916,6 +5957,7 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 
 	processCtx, processCancel := context.WithCancel(t.Context())
@@ -6537,7 +6579,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				},
 			}
 			ls.epochCache = []models.Epoch{ls.currentEpoch}
-			attachTestLiveSet(t, ls)
+			fxAttachLedgerDB(t, ls)
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			for path, run := range map[string]func() error{
@@ -6653,6 +6695,7 @@ func TestLedgerProcessBlockAllowsSyntheticByronBlocksWithPlaceholderCbor(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	block := &envelopeTestBlock{
 		header: &envelopeTestHeader{
 			cbor:   []byte{0x80},
@@ -6737,7 +6780,7 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 
 	hook, fires := newCleanupTimerFireSignal()
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
@@ -6776,7 +6819,7 @@ func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -6834,7 +6877,7 @@ func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
 	)
 	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	require.NoError(t, ls.Close())
 
 	ls.cleanupConsumedUtxos(context.Background())
@@ -6854,7 +6897,7 @@ func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
 func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 
 	hook, fires := newCleanupTimerFireSignal()
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
@@ -6882,7 +6925,7 @@ func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
 func TestCleanupConsumedUtxos_ScheduleAfterCloseDoesNotArm(t *testing.T) {
 	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 
 	hook, fires := newCleanupTimerFireSignal()
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
@@ -6946,9 +6989,11 @@ func seedSpentUtxoForCleanup(
 // run in core mode. The upstream tip is initialized to the local tip so the
 // test represents a node that is near the network tip.
 func newLedgerStateForCleanup(
+	t *testing.T,
 	db *database.Database,
 	tipSlot uint64,
 ) *LedgerState {
+	t.Helper()
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ConwayEraDesc,
@@ -6960,6 +7005,8 @@ func newLedgerStateForCleanup(
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(tipSlot)
+	// The sweep reads the retention marks of the LedgerDB set.
+	attachTestLiveSet(t, ls)
 	return ls
 }
 
@@ -6984,7 +7031,7 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pre, "seed must succeed before cleanup")
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
@@ -7009,7 +7056,7 @@ func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	const tipSlot = 100_000 // > 50_000 default stability window
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 
 	before, err := ls.readConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -7029,7 +7076,7 @@ func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
@@ -7077,12 +7124,12 @@ func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
 	)
 	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
 
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec("DROP TABLE sync_state")
 	require.NoError(t, err)
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
 	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
@@ -7118,7 +7165,7 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 		return nil
 	}))
 
-	ls := newLedgerStateForCleanup(db, 100_000)
+	ls := newLedgerStateForCleanup(t, db, 100_000)
 	ls.cleanupBatchSizeOverride = batchLimit
 	ls.cleanupConsumedUtxos(context.Background())
 
@@ -7153,7 +7200,7 @@ func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
 	)
 	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	ls.syncUpstreamTipSlot.Store(upstreamTip)
 	ls.cleanupConsumedUtxos(context.Background())
 
@@ -7188,7 +7235,7 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pre, "seed must succeed before cleanup")
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	// No peer has ever reported a tip.
 	ls.syncUpstreamTipSlot.Store(0)
 	ls.cleanupConsumedUtxos(context.Background())
@@ -7219,7 +7266,7 @@ func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
 	)
 	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
 
-	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls := newLedgerStateForCleanup(t, db, tipSlot)
 	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
@@ -7350,7 +7397,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 	}, nil))
 
 	_, entropyCbor := maryPParamsWithExtraEntropy(t, entropy)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		entropyCbor, 200, entropyEpoch, eras.MaryEraDesc.Id, nil,
 	))
 
@@ -7382,6 +7429,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.healEmptyLabNonces(context.Background())
 
@@ -7664,7 +7712,7 @@ func newBoundaryRolloverLedger(
 		LengthInSlots: 100,
 		EraId:         eras.ShelleyEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot, currentEpoch.EpochId,
 		nil, nil, nil, nil,
 		currentEpoch.EraId, currentEpoch.SlotLength,
@@ -7692,7 +7740,7 @@ func newBoundaryRolloverLedger(
 		},
 	}
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	return ls, db
 }
 
@@ -7853,7 +7901,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	require.Equal(t, wantSlotLength, cachedEpoch.SlotLength)
 	require.Equal(t, wantEpochLength, cachedEpoch.LengthInSlots)
 
-	persistedEpoch, err := db.GetEpoch(result.NewCurrentEpoch.EpochId, nil)
+	persistedEpoch, err := seedDB(t, db).GetEpoch(result.NewCurrentEpoch.EpochId, nil)
 	require.NoError(t, err)
 	require.NotNil(t, persistedEpoch)
 	require.Equal(t, wantSlotLength, persistedEpoch.SlotLength)
@@ -7871,7 +7919,7 @@ func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
 			return nil
 		},
 	)
-	beforeEpochs, err := db.GetEpochs(nil)
+	beforeEpochs, err := seedDB(t, db).GetEpochs(nil)
 	require.NoError(t, err)
 
 	targetEpoch, err := epochAtSlot(
@@ -8119,7 +8167,7 @@ func TestProtocolParamsForSlot_PendingUpdateFailure(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	// A selected but undecodable proposal is an error, not an absent update.
-	require.NoError(t, db.SetPParamUpdate([]byte{0xaa}, []byte{0xff}, 50, 0, nil))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0xaa}, []byte{0xff}, 50, 0))
 	pparams := &shelley.ShelleyProtocolParameters{ProtocolMajor: 2}
 	ls := &LedgerState{
 		db: db, currentEra: eras.ShelleyEraDesc,
@@ -8133,6 +8181,7 @@ func TestProtocolParamsForSlot_PendingUpdateFailure(t *testing.T) {
 			Logger:            slog.New(slog.DiscardHandler),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	require.Same(t, pparams, ls.ProtocolParamsForSlot(99))
 	require.Nil(t, ls.ProtocolParamsForSlot(100),
@@ -8442,7 +8491,7 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	// currentEpoch is epoch 741, already on disk; the fixture's first
 	// rollover call transitions the boundary into 742.
 	currentEpoch := newTestEpoch(741, 74_100, 100, eras.ConwayEraDesc.Id)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot,
 		currentEpoch.EpochId,
 		currentEpoch.Nonce,
@@ -8473,24 +8522,18 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 		{741, 4_757}, // ratio 0.4757, below the 0.51 threshold
 		{742, 6_283}, // ratio 0.6283, clears the 0.51 threshold
 	} {
-		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-			&models.PoolStakeSnapshot{
-				Epoch:        row.epoch,
-				SnapshotType: models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:  []byte(hfrYesPool),
-				TotalStake:   types.Uint64(row.yesStake),
-			},
-			nil,
-		))
-		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-			&models.PoolStakeSnapshot{
-				Epoch:        row.epoch,
-				SnapshotType: models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:  []byte(hfrSilentPool),
-				TotalStake:   types.Uint64(10_000 - row.yesStake),
-			},
-			nil,
-		))
+		require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+			Epoch:        row.epoch,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  []byte(hfrYesPool),
+			TotalStake:   types.Uint64(row.yesStake),
+		}))
+		require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+			Epoch:        row.epoch,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  []byte(hfrSilentPool),
+			TotalStake:   types.Uint64(10_000 - row.yesStake),
+		}))
 	}
 
 	// Committee: one seated member, 1/1 quorum -- matches the live
@@ -8499,12 +8542,12 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	// maps it to ... the CC yes ratio is 1/1").
 	coldCredential := repeatByte(28, 0xC1)
 	hotCredential := repeatByte(28, 0xC2)
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: 1000,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
+	require.NoError(t, seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -8532,19 +8575,19 @@ INSERT INTO auth_committee_hot (
 		GovActionCbor: actionCbor,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
-	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := seedDB(t, db).GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCredential,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: []byte(hfrYesPool),
@@ -8564,6 +8607,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, pparams)
 	return &hardForkRatifyFixture{
 		ls:       ls,
@@ -8702,6 +8746,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.healEmptyLabNonces(context.Background())
 
@@ -8784,6 +8829,7 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.healEmptyLabNonces(context.Background())
 
@@ -8839,6 +8885,7 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.healEmptyLabNonces(context.Background())
 
@@ -8890,6 +8937,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.healEmptyLabNonces(context.Background())
 
@@ -8935,6 +8983,7 @@ func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -8988,6 +9037,7 @@ func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -9037,6 +9087,7 @@ func TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -9128,6 +9179,7 @@ func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -9177,6 +9229,7 @@ func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -9233,6 +9286,7 @@ func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
@@ -9275,7 +9329,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 	}, nil))
 
 	candidate := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200,
 		5,
 		bytes.Repeat([]byte{0x55}, 32),
@@ -9287,7 +9341,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 		100,
 		nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		300,
 		6,
 		append([]byte(nil), candidate...),
@@ -9315,6 +9369,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
@@ -9377,6 +9432,7 @@ func newRollbackWindowFixture(t *testing.T) *rollbackWindowFixture {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.currentTip = ledgerTip
 
 	// Rewind the chain exactly as rollbackChainAndStateDeferred does, and
@@ -9504,6 +9560,7 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
@@ -9707,6 +9764,7 @@ func TestPersistTipAfterForgedBlockUpdatesPersistedTip(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	block := newRecordForgedBlockTestBlock(42, 7)
 	require.NoError(t, ls.persistTipAfterForgedBlock(block))
@@ -9798,6 +9856,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(context.Background(),
@@ -10396,6 +10455,7 @@ func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// Slot 50: still in epoch 0 (the current epoch). The forecast returns
@@ -11600,7 +11660,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
 		EventBus:          bus,
@@ -11692,7 +11752,7 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 			if crossEpoch {
 				epochLength = 15
 			}
-			require.NoError(t, ls.db.SetEpoch(
+			require.NoError(t, seedDB(t, ls.db).SetEpoch(
 				0, 3, nonce, nil, nil, nil,
 				eras.ShelleyEraDesc.Id, 1000, epochLength, nil,
 			))
@@ -11700,18 +11760,18 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 				ProtocolMajor: 7,
 			})
 			require.NoError(t, err)
-			require.NoError(t, ls.db.SetPParams(
+			require.NoError(t, seedDB(t, ls.db).SetPParams(
 				pp, 0, 3, eras.ShelleyEraDesc.Id, nil,
 			))
 			epochID := uint64(3)
 			if crossEpoch {
 				epochID = 4
-				require.NoError(t, ls.db.SetEpoch(
+				require.NoError(t, seedDB(t, ls.db).SetEpoch(
 					15, epochID, testHashBytes("rolled-away-epoch"),
 					nil, nil, nil, eras.ShelleyEraDesc.Id, 1000, 15, nil,
 				))
 			}
-			epoch, err := ls.db.Metadata().GetEpoch(epochID, nil)
+			epoch, err := seedDB(t, ls.db).GetEpoch(epochID, nil)
 			require.NoError(t, err)
 			ls.currentEpoch = *epoch
 			ls.currentEra = eras.ShelleyEraDesc
@@ -11757,11 +11817,11 @@ func TestRollbackTransactionFailureRestoresRewardPrecompute(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	nonce := testHashBytes("reward-epoch")
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		0, 3, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1000, 100, nil,
 	))
-	epoch, err := ls.db.Metadata().GetEpoch(3, nil)
+	epoch, err := seedDB(t, ls.db).GetEpoch(3, nil)
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
@@ -11819,19 +11879,19 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 				cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
 			)
 			nonce := testHashBytes("reward-epoch")
-			require.NoError(t, db.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				200, 3, nonce, nil, nil, nil,
 				eras.ShelleyEraDesc.Id, 1, 1_000, nil,
 			))
 			cfg := seed.config
 			cfg.Database = db
 			cfg.ChainManager = cm
-			cfg.UtxoSet = NewMemLiveSetForTest()
+			cfg.UtxoSet = OpenLiveSetForTest(t, db)
 			ls, err := NewLedgerState(cfg)
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
 			t.Cleanup(func() { require.NoError(t, ls.Close()) })
-			cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+			cutoff, err := ls.rewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 			require.NoError(t, err)
 			ancestor := chain.RawBlock{
 				Slot: cutoff + 1, Hash: testHashBytes("reward-ancestor"),
@@ -11846,7 +11906,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 				[]chain.RawBlock{ancestor, current},
 			))
 			for _, block := range []chain.RawBlock{ancestor, current} {
-				require.NoError(t, db.SetBlockNonce(
+				require.NoError(t, seedBlockNonce(t, db,
 					block.Hash, block.Slot, nonce, true, nil,
 				))
 			}
@@ -11855,13 +11915,14 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 				BlockNumber: current.BlockNumber,
 			}
 			require.NoError(t, db.SetTip(ls.currentTip, nil))
+			fxJournalChain(t, ls)
 
 			require.NoError(t, ls.rollbackWithBlocks(context.Background(),
 				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), nil, false,
 			))
 			ls.rewardPrecomputeWG.Wait()
 
-			outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+			outputs, err := seedDB(t, db).GetRewardPoolOutputs(1, nil)
 			require.NoError(t, err)
 			require.Len(t, outputs, 1,
 				"rollback must replace discarded work before the next boundary")
@@ -11894,7 +11955,7 @@ func TestRollbackDoesNotRestartRewardsWithoutRestoredState(t *testing.T) {
 			ls := fixture.ls
 			// An unknown surviving era forces the post-commit state reload
 			// to fail; a no-op rollback must not reach that reload at all.
-			require.NoError(t, ls.db.SetEpoch(
+			require.NoError(t, seedDB(t, ls.db).SetEpoch(
 				0, 3, testHashBytes("unknown-era"), nil, nil, nil,
 				255, 1000, 100, nil,
 			))
@@ -11930,7 +11991,7 @@ func TestCommittedRollbackWithFloorFailureRequeuesRewardPrecompute(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	nonce := testHashBytes("reward-epoch")
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		0, 3, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1000, 100, nil,
 	))
@@ -11938,10 +11999,10 @@ func TestCommittedRollbackWithFloorFailureRequeuesRewardPrecompute(
 		ProtocolMajor: 7,
 	})
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		pp, 0, 3, eras.ShelleyEraDesc.Id, nil,
 	))
-	epoch, err := ls.db.Metadata().GetEpoch(3, nil)
+	epoch, err := seedDB(t, ls.db).GetEpoch(3, nil)
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
@@ -11949,20 +12010,8 @@ func TestCommittedRollbackWithFloorFailureRequeuesRewardPrecompute(
 	ls.rewardPrecomputeRunning = true
 	ls.rewardPrecomputePending = &event.EpochTransitionEvent{NewEpoch: 4}
 	floorErr := errors.New("injected durable floor lookup failure")
-	base := ls.db
-	failing, err := database.New(context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: floorLookupFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           floorErr,
-			},
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	faults := fxFaultedLedger(t, ls, SetFaultsForTest{})
+	faults.AfterRollback = func() { faults.LatestBlockNonce = floorErr }
 
 	err = ls.rollbackWithBlocks(context.Background(), fixture.ancestorTip.Point, nil, false)
 
@@ -12036,7 +12085,7 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
 	nonce := []byte{0x30, 0x93, 0x65, 0x6a}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
@@ -12045,13 +12094,13 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 		ProtocolMinor: 0,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
 	))
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -12169,7 +12218,7 @@ func newSameSlotCompetitorFixtureOpts(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -12184,7 +12233,7 @@ func newSameSlotCompetitorFixtureOpts(
 	if seedAncestorNonce {
 		require.NoError(
 			t,
-			db.SetBlockNonce(
+			seedBlockNonce(t, db,
 				ancestorHash,
 				sameSlotAncestorSlot,
 				[]byte("nonce-3678-ancestor"),
@@ -12195,7 +12244,7 @@ func newSameSlotCompetitorFixtureOpts(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			survivingHash,
 			sameSlotContestedSlot,
 			[]byte("nonce-3678-surviving"),
@@ -12210,7 +12259,7 @@ func newSameSlotCompetitorFixtureOpts(
 	// in-memory tip that was never applied.
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			competitorHash,
 			sameSlotContestedSlot,
 			[]byte("nonce-3678-competitor"),
@@ -12225,6 +12274,7 @@ func newSameSlotCompetitorFixtureOpts(
 	}
 	require.NoError(t, db.SetTip(appliedTip, nil))
 	ls.currentTip = appliedTip
+	fxJournalChain(t, ls)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
@@ -12388,7 +12438,7 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -12402,7 +12452,7 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	} {
 		require.NoError(
 			t,
-			db.SetBlockNonce(block.hash, block.slot, nil, false, nil),
+			seedBlockNonce(t, db, block.hash, block.slot, nil, false, nil),
 		)
 	}
 	mainTip := ochainsync.Tip{
@@ -12410,6 +12460,9 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(mainTip, nil))
 	ls.currentTip = mainTip
+	fxTip(t, ls, ocommon.NewPoint(ancestorSlot, ancestorHash))
+	fxTip(t, ls, ebbPoint)
+	fxTip(t, ls, mainTip.Point)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
@@ -12464,6 +12517,7 @@ func TestResolveRollbackTargetKeepsQueuedSameSlotTip(t *testing.T) {
 		db.SetTip(ochainsync.Tip{Point: ebbPoint, BlockNumber: 1}, nil),
 	)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	resolved, err := ls.resolveRollbackTarget(
 		context.Background(),
 		ebbPoint,
@@ -12745,7 +12799,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 		database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(db, nil, 700),
 	)
 
-	value, err := db.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
+	value, err := seedDB(t, db).GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "false", value,
 		"the surviving chain still has real data from the first update"+
@@ -12775,7 +12829,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 	// A persisted epoch table is needed for EpochBySlot to resolve the
 	// rollback slot below (epochs 0-9, 100 slots each).
 	for i := range uint64(10) {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			i*100, i, nil, nil, nil, nil, 1, 1000, 100, nil,
 		))
 	}
@@ -12786,7 +12840,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 	require.NoError(t, database.SetSyntheticV2CostModelClearedEpoch(db, nil, 5))
 	require.NoError(
 		t,
-		db.SetSyncState(database.SyntheticV2CostModelSyncKey, "false", nil),
+		seedDB(t, db).SetSyncState(database.SyntheticV2CostModelSyncKey, "false", nil),
 	)
 
 	// Roll back to before epoch 5.
@@ -12796,7 +12850,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 	)
 
 	// The boolean marker must be absent, not forced to "true".
-	value, err := db.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
+	value, err := seedDB(t, db).GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, value)
 
@@ -12850,7 +12904,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	ls.loadSyntheticV2CostModel()
 	assert.False(t, ls.syntheticV2CostModel,
 		"a rolled-back transaction must not leave the marker persisted")
-	rolledBackPParams, err := db.GetPParams(
+	rolledBackPParams, err := seedDB(t, db).GetPParams(
 		1, eras.BabbageEraDesc.Id, eras.DecodePParamsBabbage, nil,
 	)
 	require.NoError(t, err)
@@ -12876,7 +12930,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	ls.loadSyntheticV2CostModel()
 	assert.True(t, ls.syntheticV2CostModel,
 		"a committed transaction must persist the marker")
-	committedPParams, err := db.GetPParams(
+	committedPParams, err := seedDB(t, db).GetPParams(
 		1, eras.BabbageEraDesc.Id, eras.DecodePParamsBabbage, nil,
 	)
 	require.NoError(t, err)
@@ -12967,6 +13021,7 @@ func stabilityFixtureLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	return ls, db
 }
@@ -13001,19 +13056,19 @@ func seedRatifiableBootstrapHardForkInitiation(
 		GovActionCbor: cborBytes,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
-	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := seedDB(t, db).GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
 	drepCred := repeatByte(28, 0xBB)
 	stakeCred := repeatByte(28, 0xCC)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 		AddedSlot:  1,
 	}))
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: stakeCred,
 		Drep:       drepCred,
 		DrepType:   models.DrepTypeAddrKeyHash,
@@ -13027,7 +13082,7 @@ func seedRatifiableBootstrapHardForkInitiation(
 		AddedSlot:  1,
 		Amount:     types.Uint64(1_000),
 	}))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: drepCred,
@@ -13036,17 +13091,22 @@ func seedRatifiableBootstrapHardForkInitiation(
 	}, nil))
 	coldCred := repeatByte(28, 0xCE)
 	hotCred := repeatByte(28, 0xCF)
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 		{ColdCredHash: coldCred, ExpiresEpoch: currentEpoch + 10},
 	}, nil))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, coldCred, hotCred, 1, 1)
-	require.NoError(t, err)
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	committeeSeedAuthorization(
+		t, db,
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(coldCred),
+		},
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(hotCred),
+		},
+		1, 1,
+	)
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCred,
@@ -13060,16 +13120,13 @@ INSERT INTO auth_committee_hot (
 	// boundary that opened the currently active epoch. The boundary it
 	// predicts will instead tally mark[currentEpoch+1], which SNAP does not
 	// capture until that boundary runs.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        currentEpoch,
-			SnapshotType: models.PoolStakeSnapshotTypeMark,
-			PoolKeyHash:  poolCred,
-			TotalStake:   types.Uint64(1_000),
-		},
-		nil,
-	))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        currentEpoch,
+		SnapshotType: models.PoolStakeSnapshotTypeMark,
+		PoolKeyHash:  poolCred,
+		TotalStake:   types.Uint64(1_000),
+	}))
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: poolCred,
@@ -13447,7 +13504,7 @@ func newPrunedUtxoFixtureWithFillers(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -13465,14 +13522,14 @@ func newPrunedUtxoFixtureWithFillers(
 	for _, b := range blocks {
 		require.NoError(
 			t,
-			db.SetBlockNonce(b.hash, b.slot, []byte("nonce-3766"), false, nil),
+			seedBlockNonce(t, db, b.hash, b.slot, []byte("nonce-3766"), false, nil),
 		)
 	}
 
 	// One epoch covering the whole fixture grid, so the era reload that
 	// follows every rollback keeps the ledger in Conway and the stability
 	// window at 3k/f rather than falling back to the Byron default.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,
 		1,
 		[]byte("nonce-3766-epoch"),
@@ -13491,6 +13548,7 @@ func newPrunedUtxoFixtureWithFillers(
 	}
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.currentTip = tip
+	fxJournalChain(t, ls)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.mithrilLedgerSlot = mithrilLedgerSlot
 	ls.chainsyncState = SyncingChainsyncState
@@ -13747,7 +13805,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	// A floor written by another writer -- a prior run, or the sweep's own
 	// transaction before any in-process cache could observe it -- is honored
 	// immediately, with no reload step.
-	require.NoError(t, f.db.SetSyncState(
+	require.NoError(t, seedDB(t, f.db).SetSyncState(
 		database.ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(pruneFixtureRetainedSlot, 10),
 		nil,
@@ -13764,7 +13822,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	)
 
 	// A malformed value fails closed rather than reading as "nothing swept".
-	require.NoError(t, f.db.SetSyncState(
+	require.NoError(t, seedDB(t, f.db).SetSyncState(
 		database.ConsumedUtxoPruneFloorSyncKey, "not-a-slot", nil,
 	))
 	_, _, err = f.ls.rollbackBelowConsumedUtxoPruneFloor(
@@ -13801,7 +13859,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	// Put the applied ledger tip on a same-slot competitor at the floor, with
 	// a recorded nonce so the redirect treats it as genuinely applied.
 	competitorHash := testHashBytes("3766-floor-competitor")
-	require.NoError(t, f.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, f.db,
 		competitorHash,
 		pruneFixtureFloorSlot,
 		[]byte("nonce-3766-competitor"),
@@ -14197,7 +14255,7 @@ func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	require.NoError(t, err)
 	_, err = NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
-		UtxoSet: NewMemLiveSetForTest(),
+		UtxoSet: OpenLiveSetForTest(t, db),
 	})
 	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
 }
@@ -14212,7 +14270,7 @@ func TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock(t *testing.T) {
 	const boundarySlot = pruneFixtureTipSlot + 1
 	f := newPrunedUtxoFixture(t, 0)
 	completeRollover := func() {
-		require.NoError(t, f.db.SetEpoch(
+		require.NoError(t, seedDB(t, f.db).SetEpoch(
 			boundarySlot, 1,
 			[]byte("nonce-first-block"), []byte("evolving-first-block"),
 			[]byte("candidate-first-block"), []byte("last-first-block"),
@@ -14250,7 +14308,7 @@ func TestAtTipRecoveryRewindKeepsCompletedEpochBoundary(t *testing.T) {
 	t.Parallel()
 	const boundarySlot = 120_000
 	f := newPrunedUtxoFixture(t, 0)
-	require.NoError(t, f.db.SetEpoch(
+	require.NoError(t, seedDB(t, f.db).SetEpoch(
 		boundarySlot, 1,
 		[]byte("nonce-4577"), []byte("evolving-4577"),
 		[]byte("candidate-4577"), []byte("last-4577"),
@@ -14629,20 +14687,21 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			db := newTestDBForCleanup(t, mode)
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			}}
+			attachTestLiveSet(t, ls)
 			for _, nonce := range []struct {
 				slot       uint64
 				checkpoint bool
 			}{{10, true}, {20, false}, {2000, false}} {
-				require.NoError(t, db.SetBlockNonce(
+				require.NoError(t, seedBlockNonce(t, db,
 					testHashBytes(fmt.Sprintf("nonce-%d", nonce.slot)),
 					nonce.slot, nil, nonce.checkpoint, nil,
 				))
 			}
-			ls := &LedgerState{db: db, config: LedgerStateConfig{
-				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			}}
 			ls.cleanupBlockNoncesBefore(t.Context(), 1000)
-			rows, err := db.GetBlockNoncesInSlotRange(0, 3000, nil)
+			rows, err := seedDB(t, db).GetBlockNoncesInSlotRange(0, 3000, nil)
 			require.NoError(t, err)
 			var slots []uint64
 			for _, row := range rows {
@@ -14701,7 +14760,7 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 	require.NoError(t, db.BlockCreate(tipBlock, nil))
 	require.NoError(
 		t,
-		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+		seedBlockNonce(t, db, tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
 	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       makeTestPoint(tipBlock),
@@ -14716,6 +14775,7 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	reg := prometheus.NewRegistry()
 	ls.metrics.init(reg)
 	// Start loads epochs before the tip, so the epoch gauge is set while
@@ -14763,6 +14823,7 @@ func TestChainPositionGaugesExportedAtOriginTip(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	reg := prometheus.NewRegistry()
 	ls.metrics.init(reg)
 	for _, name := range chainPositionGaugeNames {
