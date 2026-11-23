@@ -120,8 +120,11 @@ limit restored afterwards) on the write connection, outside any transaction, at 
 and after each epoch rollover commits. There is no timer between rollovers. An
 epoch pass is skipped until some table's highest rowid (`MAX(rowid)`, one
 b-tree descent per table) has grown by 25%, and by at least 1000 rows, since the
-last completed pass, because a pass reads every page of every index and holds
-the only write connection while most tables barely change between epochs. The
+last completed pass, because a pass re-analyzes every table and holds the only
+write connection while most tables barely change between epochs. A table whose
+highest rowid falls, after a rollback or a vacuum that renumbers rowids, is
+measured from the lower value: one recorded at 10000 and seen at 5000 passes
+again at 6250, though that is still below the last completed pass. The
 measure is per table and not the file size: a large database whose
 `transaction` and `certs` tables were recorded at almost no rows still passes as
 they fill, and a vacuum that shrinks the file does not suppress later passes.
@@ -140,8 +143,8 @@ statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then
 plans a full scan per lookup until the next run. Every pass that runs
-re-analyzes every table, and sampling bounds the index work of each, though
-with STAT4 compiled in the pass still counts every index row. The write pool has one connection, so writers still wait
+re-analyzes every table, and sampling bounds the index work of each. The write
+pool has one connection, so writers still wait
 for the run. Sampled analysis updates
 `sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
 full `ANALYZE` remains available for completed backfills. The run is skipped

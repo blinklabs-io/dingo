@@ -38,8 +38,8 @@ const (
 
 	// plannerStatsGrowthNumerator and plannerStatsGrowthDenominator express
 	// the growth threshold, 25%, as a fraction, and plannerStatsMinGrowthRows
-	// is the least a table must grow by. A pass on a large SQLite store reads
-	// every page of every index and holds the only write connection, yet
+	// is the least a table must grow by. A pass re-analyzes every table and
+	// holds the only write connection, yet
 	// between epochs most tables barely change and the statistics barely
 	// move. An epoch pass therefore runs only once some table's highest rowid
 	// has grown by the fraction, and by the minimum, since the last completed

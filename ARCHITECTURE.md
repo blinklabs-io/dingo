@@ -2404,8 +2404,8 @@ When `Node.Run()` is called, components are initialized in this order:
     the pass again on the replacement database. The manager subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
-    trigger a run). There is no periodic timer: on a large SQLite store each
-    pass reads every index and holds the single write connection. The store
+    trigger a run). There is no periodic timer: each pass re-analyzes every
+    table and holds the single write connection. The store
     skips an epoch pass until some table's highest rowid has grown by 25% and
     by at least 1000 rows since the last completed pass. The measure is per
     table, not the file size, so a large database whose `transaction` and

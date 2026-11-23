@@ -91,7 +91,7 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 }
 
 // Uniform liveness lets the cache-refresh probe depend on stat1 alone.
-// Periodic analysis samples indexes and does not collect stat4 histograms.
+// Bounded analysis samples indexes and does not collect stat4 histograms.
 // The production spend-plan tests keep their mixed live/spent distributions.
 func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	t.Helper()
@@ -740,7 +740,7 @@ func insertGrowthRows(tb testing.TB, db *sql.DB, table string, n int) {
 	require.NoError(tb, err)
 }
 
-// An epoch pass costs a read of every index, so it runs only once some table
+// An epoch pass re-analyzes every table, so it runs only once some table
 // has grown by a quarter (and by at least the minimum row count) since the
 // last pass; startup and anchor passes always run.
 func TestOptimizePlannerStatsEpochPassWaitsForGrowth(t *testing.T) {

@@ -82,7 +82,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 				require.Zero(
 					t,
 					plannerProbeStat4Rows(t, store.writeDB),
-					"periodic maintenance must use sampled analysis",
+					"bounded maintenance must use sampled analysis",
 				)
 				var restored int
 				require.NoError(
@@ -115,7 +115,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 	}
 }
 
-// A table that keeps growing between periodic passes must have its statistics
+// A table that keeps growing between passes must have its statistics
 // retaken each pass, however small the growth since the last one.
 func TestOptimizePlannerStatsRefreshesStatsOfAGrowingTable(t *testing.T) {
 	t.Parallel()
