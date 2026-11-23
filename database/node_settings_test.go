@@ -16,6 +16,7 @@ package database
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/dbinfo"
@@ -67,9 +68,7 @@ func releasedNodeSettingsDatabase(
 	require.NoError(t, err)
 	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
-	for name, value := range extra {
-		gates[name] = value
-	}
+	maps.Copy(gates, extra)
 	if pair != "" {
 		gates["blob_store_id"] = pair
 	}
