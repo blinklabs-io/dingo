@@ -660,7 +660,6 @@ func (s *Store) SetBlockNonce(
 }
 
 // SetBlockNonces writes a block-nonce batch with one multi-row SQLite upsert.
-// A block new to its slot takes the next ordinal of the slot, in batch order.
 func (s *Store) SetBlockNonces(
 	nonces []models.BlockNonce,
 	txn types.Txn,
@@ -686,6 +685,16 @@ func (s *Store) SetBlockNonces(
 	if err != nil {
 		return err
 	}
+	return s.upsertBlockNonces(ctx, db, nonces)
+}
+
+// upsertBlockNonces writes nonces in order with multi-row SQLite upserts. A
+// block new to its slot takes the next ordinal of the slot, in slice order.
+func (s *Store) upsertBlockNonces(
+	ctx context.Context,
+	db queryer,
+	nonces []models.BlockNonce,
+) error {
 	batchSize := max(s.dialect.ParameterLimit()/5, 1)
 	for start := 0; start < len(nonces); start += batchSize {
 		end := min(start+batchSize, len(nonces))
@@ -1740,4 +1749,50 @@ func checkedUint(value int64) (uint, error) {
 		return 0, fmt.Errorf("signed SQL value %d exceeds uint width", value)
 	}
 	return uint(value), nil
+}
+
+// QueueBlockNonce queues nonce in acc. FlushBatch writes the queued nonces in
+// queue order with the same upsert semantics as SetBlockNonce.
+func (s *Store) QueueBlockNonce(
+	nonce models.BlockNonce,
+	acc types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	batched, ok := acc.(*transactionBatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"sqlstore QueueBlockNonce: wrong accumulator type %T",
+			acc,
+		)
+	}
+	if _, err := checkedInt64(nonce.Slot); err != nil {
+		return err
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
+	}
+	batched.nonces = append(batched.nonces, nonce)
+	return nil
+}
+
+// flushBlockNonces writes the queued nonces. Backends other than SQLite have
+// no multi-row upsert here and write row by row inside txn.
+func (s *Store) flushBlockNonces(
+	batched *transactionBatchAccumulator,
+	txn types.Txn,
+) error {
+	if len(batched.nonces) == 0 {
+		return nil
+	}
+	if s.dialect.Name() != "sqlite" {
+		return s.SetBlockNonces(batched.nonces, txn)
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.upsertBlockNonces(ctx, db, batched.nonces)
+		},
+	)
 }
