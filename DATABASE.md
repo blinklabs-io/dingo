@@ -7582,6 +7582,11 @@ an older snapshot can prevent reset and leave the file larger. The periodic
 TRUNCATE checkpoint below remains the operation that can reduce an idle WAL to
 zero.
 
+Each connection in both pools also sets `threads=4`, which lets SQLite's sorter
+use up to four helper threads. Only large sorts, such as a `CREATE INDEX` over a
+backfilled table, are split across them; ordinary statements sort on the calling
+thread.
+
 The write connection (not the read pool) also sets `temp_store=MEMORY`
 (`sqliteWritePragmas`). Inside a write transaction, a multi-row
 `INSERT ... RETURNING` keeps a statement journal of the pages it modifies, and
@@ -7635,9 +7640,11 @@ ledger replay, pauses this scheduled checkpoint callback. Entering bulk mode
 first drains an in-flight callback, so a TRUNCATE attempt cannot take the
 writer lock during the import's metadata writes; restoring normal pragmas
 re-enables it. Bulk mode also caps SQLite auxiliary sorter threads at
-`min(4, GOMAXPROCS-1)` for index builds; normal-mode restore resets the setting
-to zero. The writer's `wal_autocheckpoint` stays 0 throughout, so the same
-ticker runs `sqlstore.Config.BulkCheckpoint` instead: `passiveCheckpointWAL`
+`min(4, GOMAXPROCS-1)` for index builds; normal-mode restore returns the
+setting to 4, the value every connection gets from `sqliteCommonPragmas`, so
+the deferred index rebuild that runs after the restore still sorts with
+helper threads. The writer's `wal_autocheckpoint` stays 0 throughout, so the
+same ticker runs `sqlstore.Config.BulkCheckpoint` instead: `passiveCheckpointWAL`
 issues PASSIVE on its own connection, which never takes the writer lock, and
 keeps backfilling committed import frames so the WAL does not hold the whole
 import. If the caller's final pragma restore fails, the next scheduled
