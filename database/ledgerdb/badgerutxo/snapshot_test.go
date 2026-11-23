@@ -207,8 +207,8 @@ func TestSnapshotHistoricalViewPreservesItsParent(t *testing.T) {
 }
 
 // TestCheckpointableSnapshotRefusesAnUnrestorableSet requires a snapshot for
-// export to refuse a set carrying a failure mark or a pending merge, and to
-// serve a clean one.
+// export to refuse a set carrying a failure mark or an interrupted
+// ledger-state import, and to serve a clean one.
 func TestCheckpointableSnapshotRefusesAnUnrestorableSet(t *testing.T) {
 	t.Parallel()
 	s := open(t, t.TempDir())

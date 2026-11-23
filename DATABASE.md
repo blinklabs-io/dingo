@@ -4673,7 +4673,7 @@ within 43200 slots of the wall clock: a node replaying history writes none and
 counts no epoch. A write is skipped, with a warning and
 `dingo_utxo_set_checkpoints_skipped_total`, when the checkpoint directory's
 free space is not above the size of the newest checkpoint (or of the set's
-data when none exists) plus a tenth. A set with a failure mark, a pending merge or rollback or an unfinished bootstrap is refused inside the copy's read transaction, and a checkpoint that carries one is not restored. The next checkpoint and every start remove the scratch store directories a killed restore check leaves, and the checkpoint disk figure counts them. `Set.WriteCheckpoint` opens one Badger read transaction inside
+data when none exists) plus a tenth. A set with a failure mark, an interrupted ledger-state import (`mimport`), a pending rollback or an unfinished bootstrap is refused inside the copy's read transaction, and a checkpoint that carries one is not restored. The next checkpoint and every start remove the scratch store directories a killed restore check leaves, and the checkpoint disk figure counts them. `Set.WriteCheckpoint` opens one Badger read transaction inside
 `Database.PauseCommitsContext` and `Store.gate`, so no metadata commit and no
 part-written chunked batch is open when the version is fixed, reads the tip
 through that transaction, then writes every row through the same transaction
@@ -4712,8 +4712,8 @@ which fails while a node holds it, and never reads a running node's state.
 
 The checkpoint is one Badger read transaction (`Store.CheckpointableSnapshot`),
 so the tip, the era and every output come from the same version of the set.
-That snapshot refuses what `Set.WriteCheckpoint` refuses (a failure mark, a
-pending merge or rollback, an unfinished bootstrap). The export persists no
+That snapshot refuses what `Set.WriteCheckpoint` refuses (a failure mark, an
+interrupted ledger-state import, a pending rollback, an unfinished bootstrap). The export persists no
 checkpoint, so none is retained or cleaned up: the transaction ends with the
 command, and the only file left is the output.
 
