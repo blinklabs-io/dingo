@@ -93,6 +93,7 @@ func TestImportGovStateRecordsProposalSubmissionOrder(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	require.NoError(t, importGovState(
 		context.Background(),
 		cfg,
@@ -100,14 +101,14 @@ func TestImportGovStateRecordsProposalSubmissionOrder(t *testing.T) {
 	))
 
 	for position, txHash := range [][]byte{first, second} {
-		stored, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+		stored, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash, 0, nil)
 		require.NoError(t, err)
 		require.NotNil(t, stored)
 		require.Equal(t, uint64(17_500), stored.AddedSlot)
 		require.NotNil(t, stored.TxIndex)
 		require.Equal(t, uint32(position), *stored.TxIndex) //nolint:gosec
 	}
-	active, err := db.GetActiveGovernanceProposals(context.Background(), 1277, nil)
+	active, err := ledgerDBFor(t, db).GetActiveGovernanceProposals(context.Background(), 1277, nil)
 	require.NoError(t, err)
 	require.Len(t, active, 2)
 	require.Equal(t, first, active[0].TxHash)

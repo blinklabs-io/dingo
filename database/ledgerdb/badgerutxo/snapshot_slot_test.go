@@ -123,7 +123,7 @@ func TestIndexSnapshotSlotsResumesAfterACommittedChunk(t *testing.T) {
 	_, indexed, err := s.SnapshotsCapturedIn(0, 1000)
 	require.NoError(t, err)
 	require.False(t, indexed)
-	rows, err := s.Snapshots(0, "mark")
+	rows, err := s.Snapshots(0, "mark", 0)
 	require.NoError(t, err)
 	require.EqualValues(
 		t,
@@ -298,33 +298,6 @@ func TestLoadEpochStateBuildsTheCaptureIndex(t *testing.T) {
 	requireSnapshotIndexAgrees(t, s, "after the bootstrap")
 }
 
-// A merge keeps the rows the set holds, so a merged row that replaces one
-// takes the old row's entry with it, and the marker is neither set nor lost.
-func TestMergeEpochStateKeepsTheCaptureIndexInStep(t *testing.T) {
-	t.Parallel()
-	s := indexedStore(t)
-	applyEpochState(t, s, point(10, 0x10), nil,
-		snapAt(1, "go", 'a', 105), snapAt(1, "go", 'b', 150))
-
-	require.NoError(t, s.BootstrapCatchUp(point(20, 0x02),
-		func(put func(badgerutxo.Output) error) error { return put(out(0x21, 0)) },
-	))
-	require.NoError(t, s.BeginMerge())
-	moved := snap(1, "go", 'a').Row
-	moved.CapturedSlot = 170
-	added := snap(2, "go", 'c').Row
-	added.CapturedSlot = 180
-	require.NoError(t, s.LoadEpochState(
-		[]badgerutxo.EpochRow{epochRow(1, 100)},
-		[]badgerutxo.SnapshotRow{moved, added}, nil,
-	))
-	require.NoError(t, s.EndMerge(true))
-
-	requireSnapshotIndexAgrees(t, s, "after the merge")
-	require.Equal(t, []string{"1goa@170", "1gob@150", "2goc@180"},
-		capturedIn(t, s, 100, 199))
-}
-
 // A store written before the index existed reads its rows whole until
 // IndexSnapshotSlots gives each its slot and entry. A run interrupted after
 // converting some rows finishes on the next, and a store already indexed is
@@ -354,7 +327,7 @@ func TestIndexSnapshotSlotsBackfillsRowsOfAnOlderStore(t *testing.T) {
 	_, indexed, err := s.SnapshotsCapturedIn(0, 100)
 	require.NoError(t, err)
 	require.False(t, indexed)
-	rows, err := s.Snapshots(1, "go")
+	rows, err := s.Snapshots(1, "go", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte{11, 'a'}, rows[0].Value, "a legacy row reads whole")
 
@@ -367,7 +340,7 @@ func TestIndexSnapshotSlotsBackfillsRowsOfAnOlderStore(t *testing.T) {
 		capturedIn(t, s, 0, 100))
 	require.Equal(t, []string{"2goc@30"}, capturedIn(t, s, 25, 35))
 	requireSnapshotIndexAgrees(t, s, "after the backfill")
-	rows, err = s.Snapshots(1, "go")
+	rows, err = s.Snapshots(1, "go", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte{11, 'a'}, rows[0].Value, "the value reads as written")
 	require.EqualValues(t, 10, rows[0].CapturedSlot)
@@ -406,7 +379,7 @@ func TestIndexSnapshotSlotsKeepsARowWrittenDuringTheBackfill(t *testing.T) {
 	require.NoError(t, s.IndexSnapshotSlots(slotOf))
 
 	require.Equal(t, []string{"1goa@99"}, capturedIn(t, s, 0, 1000))
-	rows, err := s.Snapshots(1, "go")
+	rows, err := s.Snapshots(1, "go", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0x63}, rows[0].Value)
 	requireSnapshotIndexAgrees(t, s, "after the backfill")
@@ -424,28 +397,4 @@ func TestSnapshotValueStartingWithTheSlotMarkIsRefused(t *testing.T) {
 		SnapshotOps: []badgerutxo.SnapshotOp{op},
 	})
 	require.Error(t, err)
-}
-
-// A merge into a store that never indexed its rows leaves it unindexed, so a
-// reader keeps reading every row rather than trust a partial index.
-func TestMergeEpochStateLeavesAnUnindexedStoreUnindexed(t *testing.T) {
-	t.Parallel()
-	s := open(t, t.TempDir())
-	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	bootstrap(t, s, point(10, 0x01))
-	require.NoError(t, s.PutLegacySnapshotRowForTest(snap(1, "go", 'a').Row))
-	require.NoError(t, s.BootstrapCatchUp(point(20, 0x02),
-		func(put func(badgerutxo.Output) error) error { return put(out(0x21, 0)) },
-	))
-	require.NoError(t, s.BeginMerge())
-	added := snap(2, "go", 'c').Row
-	added.CapturedSlot = 180
-	require.NoError(t, s.LoadEpochState(
-		[]badgerutxo.EpochRow{epochRow(1, 100)},
-		[]badgerutxo.SnapshotRow{added}, nil,
-	))
-	require.NoError(t, s.EndMerge(true))
-	_, indexed, err := s.SnapshotsCapturedIn(0, 1000)
-	require.NoError(t, err)
-	require.False(t, indexed)
 }

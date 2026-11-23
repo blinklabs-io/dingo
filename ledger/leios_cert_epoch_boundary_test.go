@@ -277,7 +277,7 @@ func runLeiosCertEpochBoundaryCase(
 		Nonce:         nonce,
 		EvolvingNonce: nonce,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId,
 		nonce, nonce, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
@@ -311,7 +311,7 @@ func runLeiosCertEpochBoundaryCase(
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -571,13 +571,13 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	}
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	epoch := models.Epoch{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 1000, EraId: eras.DijkstraEraDesc.Id, Nonce: nonce, EvolvingNonce: nonce}
-	require.NoError(t, db.SetEpoch(0, 0, nonce, nonce, nil, nil, epoch.EraId, epoch.SlotLength, epoch.LengthInSlots, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(0, 0, nonce, nonce, nil, nil, epoch.EraId, epoch.SlotLength, epoch.LengthInSlots, nil))
 	cfg := newTestShelleyGenesisCfg(t)
 	cfg.ShelleyGenesis().NetworkId = "Testnet"
 	cfg.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, CardanoNodeConfig: cfg,
-		UtxoSet: NewMemLiveSetForTest(),
+		UtxoSet: OpenLiveSetForTest(t, db),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
 		EnableDijkstra: true, ManualBlockProcessing: true, TrustedReplay: true,
 		EndorserBlockProvider: func(hash []byte, _ uint64) ([]cbor.RawMessage, bool) {
@@ -658,7 +658,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 		Nonce:         nonce,
 		EvolvingNonce: nonce,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId,
 		nonce, nonce, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
@@ -673,7 +673,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 	certChecks := 0
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),

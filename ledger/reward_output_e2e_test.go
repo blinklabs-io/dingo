@@ -63,11 +63,12 @@ func newRewardOutputHarnessReads(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	var w ledger.UtxoSetWriter = set
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	if wrap != nil {
-		w = wrap(set)
+		scenario.WrapSet(func(ledger.UtxoSetWriter) ledger.UtxoSetWriter {
+			return wrap(set)
+		})
 	}
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, w)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	h := &rewardOutputHarness{
@@ -251,65 +252,6 @@ func (h *rewardOutputHarness) setOutputs(t *testing.T, ref models.StakeCredentia
 		out[r.Epoch] = uint64(r.Amount)
 	}
 	return out
-}
-
-// TestRewardOutputsLoadFromTheMetadataStore requires a set from before it kept
-// reward rows to load the eligible unfolded outputs, the credited rounds and
-// the post-snapshot credits from the metadata store, as the set that followed
-// the writers holds them.
-func TestRewardOutputsLoadFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarness(t, nil)
-	h.creditPostSnapshot(t)
-	h.saveRounds(t)
-	h.applyRound(t, 11)
-	h.applyRound(t, 12)
-	h.scenario.FoldForWithdrawal(h.deleg)
-
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.RewardOutputsLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.RewardOutputsLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	for _, ref := range []models.StakeCredentialRef{h.owner, h.deleg} {
-		want, err := h.set.CredentialRewardOutputs(ref.Tag, ref.Key, nil)
-		require.NoError(t, err)
-		got, err := fresh.CredentialRewardOutputs(ref.Tag, ref.Key, nil)
-		require.NoError(t, err)
-		require.NotEmpty(t, want)
-		require.Equal(t, want, got)
-	}
-	wantRounds, err := h.set.RewardRounds(nil)
-	require.NoError(t, err)
-	gotRounds, err := fresh.RewardRounds(nil)
-	require.NoError(t, err)
-	require.Len(t, wantRounds, 2)
-	require.Equal(t, wantRounds, gotRounds)
-	wantEpochs, err := h.set.RewardOutputEpochs(nil)
-	require.NoError(t, err)
-	gotEpochs, err := fresh.RewardOutputEpochs(nil)
-	require.NoError(t, err)
-	require.Equal(t, []uint64{11, 12, 13}, wantEpochs)
-	require.Equal(t, wantEpochs, gotEpochs)
-
-	// The loaded total stands for the sources the followed set keeps apart.
-	total := func(set *utxoset.Set) map[string]uint64 {
-		cs, err := set.PostSnapshotCredits(h.start, nil)
-		require.NoError(t, err)
-		out := map[string]uint64{}
-		for _, c := range cs {
-			out[c.Ref.MapKey()] += c.Amount
-		}
-		return out
-	}
-	require.Equal(t, total(h.set), total(fresh))
-	require.Equal(t, uint64(23), total(fresh)[h.owner.MapKey()])
 }
 
 // TestRewardOutputsEpochWipeAndEligibilityFlip requires a delete of an

@@ -38,7 +38,7 @@ func runActivate(
 	t.Helper()
 	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.activateDelegatorInactivityIfNeeded(context.Background(), txn, currentEpoch, 0)
+		return ls.activateDelegatorInactivityIfNeeded(txn, currentEpoch, 0)
 	})
 }
 
@@ -58,7 +58,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 	credB := renewTestCred(0x12)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    credA,
 			CredentialTag: 0,
 			Active:        true,
@@ -66,7 +66,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    credB,
 			CredentialTag: 0,
 			Active:        true,
@@ -75,7 +75,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 
 	require.NoError(t, runActivate(t, ls, db, epoch))
 
-	acctA, err := db.GetAccountByCredential(
+	acctA, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		credA,
@@ -85,7 +85,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, epoch+inactivity, acctA.ExpirationEpoch)
 
-	acctB, err := db.GetAccountByCredential(
+	acctB, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		credB,
@@ -95,7 +95,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, epoch+inactivity, acctB.ExpirationEpoch)
 
-	marker, err := db.GetSyncState(
+	marker, err := seedDB(t, db).GetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		nil,
 	)
@@ -124,7 +124,7 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 	cred := renewTestCred(0x21)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -137,18 +137,19 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 	// renewal or a manual operator set) to a value the second activation
 	// pass must not clobber.
 	const manualExpiration = uint64(9999)
-	require.NoError(t, db.RenewAccountExpirations(
-		context.Background(),
+	ls.stageAccountExpirations(
+		nil,
 		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, cred)},
 		manualExpiration,
-		nil,
-	))
+		0,
+	)
+	require.False(t, ls.utxoSetFailed.Load())
 
 	// A later epoch boundary reaching the activation step again must be a
 	// no-op: the marker is already set.
 	require.NoError(t, runActivate(t, ls, db, epoch+inactivity+5))
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -177,7 +178,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
 	cred := renewTestCred(0x31)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -186,7 +187,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
 
 	require.NoError(t, runActivate(t, ls, db, epoch))
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -196,7 +197,7 @@ func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), acct.ExpirationEpoch, "gate off must not stamp")
 
-	marker, err := db.GetSyncState(
+	marker, err := seedDB(t, db).GetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		nil,
 	)

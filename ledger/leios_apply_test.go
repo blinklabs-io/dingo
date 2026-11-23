@@ -1002,6 +1002,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")

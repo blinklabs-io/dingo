@@ -119,26 +119,10 @@ func readSetAsOf[T any](
 	return v, nil
 }
 
-// The ledger-state families each as-of read depends on.
-var (
-	drepFamilies = nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps)
-	govFamilies = nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyGovernance)
-	poolFamilies = nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory)
-	accountFamilies = nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts).
-			With(nodesettings.FamilyRewardOutputs)
-)
-
-// asOfRead is one ledger state read as of a slot: how the metadata store and
-// the live UTxO set answer it, when each may, and how the answers compare.
+// asOfRead is one ledger state read as of a slot, which the live UTxO set
+// answers.
 type asOfRead[T any] struct {
 	what string
-	// families are the ledger-state families whose SQL rows the metadata
-	// store's answer reads. The read fails closed once any is drained.
-	families nodesettings.FamilyMask
 	// serves reports whether the set answers the read.
 	serves func() bool
 	// current, when set and true, says the read is of the state txn sees
@@ -193,16 +177,6 @@ func (ls *LedgerState) SetDrainedFamilies(mask nodesettings.FamilyMask) {
 // DrainedFamilies returns the families whose SQL rows are gone.
 func (ls *LedgerState) DrainedFamilies() nodesettings.FamilyMask {
 	return nodesettings.FamilyMask(ls.drainedFamilies.Load())
-}
-
-// familyDrained reports whether the metadata store no longer holds f's rows.
-func (ls *LedgerState) familyDrained(f nodesettings.Family) bool {
-	return ls.DrainedFamilies().Has(f)
-}
-
-// familiesDrained reports whether any family of mask is drained.
-func (ls *LedgerState) familiesDrained(mask nodesettings.FamilyMask) bool {
-	return slices.ContainsFunc(mask.Families(), ls.familyDrained)
 }
 
 func (ls *LedgerState) unavailableAsOf(what string) error {
@@ -264,9 +238,8 @@ func (s stagingLedgerDB) GetDrepsAtSlot(
 	txn ledgerdb.Txn,
 ) ([]*models.Drep, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[[]*models.Drep]{
-		what:     fmt.Sprintf("DReps at slot %d", slot),
-		families: drepFamilies,
-		serves:   func() bool { return s.ls.drepServing(txn) != nil },
+		what:   fmt.Sprintf("DReps at slot %d", slot),
+		serves: func() bool { return s.ls.drepServing(txn) != nil },
 		fromSet: func() ([]*models.Drep, error) {
 			return s.ls.drepsAt(txn, refs, slot)
 		},
@@ -337,9 +310,8 @@ func (s stagingLedgerDB) GetDRepDelegatorsAtSlot(
 		txn,
 		slot,
 		asOfRead[map[string][]models.StakeCredentialRef]{
-			what:     fmt.Sprintf("DRep delegators at slot %d", slot),
-			families: drepFamilies.With(nodesettings.FamilyAccounts),
-			serves:   func() bool { return s.ls.drepServing(txn) != nil },
+			what:   fmt.Sprintf("DRep delegators at slot %d", slot),
+			serves: func() bool { return s.ls.drepServing(txn) != nil },
 			fromSet: func() (map[string][]models.StakeCredentialRef, error) {
 				return s.ls.drepDelegatorsAt(txn, dreps, slot)
 			},
@@ -388,9 +360,8 @@ func (s stagingLedgerDB) GetDrepRegistrationDepositsAtSlot(
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[map[string]uint64]{
-		what:     fmt.Sprintf("DRep deposits at slot %d", slot),
-		families: drepFamilies,
-		serves:   func() bool { return s.ls.registrationHistoryServes(txn) },
+		what:   fmt.Sprintf("DRep deposits at slot %d", slot),
+		serves: func() bool { return s.ls.registrationHistoryServes(txn) },
 		fromSet: func() (map[string]uint64, error) {
 			return s.ls.drepDepositsAt(txn, refs, slot)
 		},
@@ -446,7 +417,6 @@ func (s stagingLedgerDB) GetGovernanceVotesAtSlot(
 			proposalID,
 			slot,
 		),
-		families: govFamilies,
 		serves: func() bool {
 			r, err := s.ls.governanceServing(txn)
 			return err == nil && r != nil
@@ -504,9 +474,8 @@ func (s stagingLedgerDB) GetPoolRegistrationsAtSlot(
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistration, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[[]models.PoolRegistration]{
-		what:     fmt.Sprintf("pool registrations at slot %d", slot),
-		families: poolFamilies,
-		serves:   func() bool { return s.ls.poolHistoryServes(txn) != nil },
+		what:   fmt.Sprintf("pool registrations at slot %d", slot),
+		serves: func() bool { return s.ls.poolHistoryServes(txn) != nil },
 		fromSet: func() ([]models.PoolRegistration, error) {
 			return s.ls.poolRegistrationsAt(txn, pools, slot)
 		},
@@ -548,9 +517,8 @@ func (s stagingLedgerDB) GetRetiringPoolsAtSlot(
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetiringRow, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[[]models.PoolRetiringRow]{
-		what:     fmt.Sprintf("retiring pools at slot %d", slot),
-		families: poolFamilies,
-		serves:   func() bool { return s.ls.poolServing(txn) != nil },
+		what:   fmt.Sprintf("retiring pools at slot %d", slot),
+		serves: func() bool { return s.ls.poolServing(txn) != nil },
 		fromSet: func() ([]models.PoolRetiringRow, error) {
 			return s.ls.retiringPoolsAt(txn, currentEpoch, slot)
 		},
@@ -587,9 +555,8 @@ func (s stagingLedgerDB) GetPoolDepositsHeldAtSlot(
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[map[string]uint64]{
-		what:     fmt.Sprintf("pool deposits at slot %d", slot),
-		families: poolFamilies,
-		serves:   func() bool { return s.ls.poolServing(txn) != nil },
+		what:   fmt.Sprintf("pool deposits at slot %d", slot),
+		serves: func() bool { return s.ls.poolServing(txn) != nil },
 		fromSet: func() (map[string]uint64, error) {
 			return s.ls.poolDepositsAt(txn, pools, slot)
 		},
@@ -645,9 +612,8 @@ func (s stagingLedgerDB) GetAccountsByCredentialAtSlot(
 	txn ledgerdb.Txn,
 ) (map[string]*models.Account, error) {
 	return answerAsOf(s.ls, txn, slot, asOfRead[map[string]*models.Account]{
-		what:     fmt.Sprintf("accounts at slot %d", slot),
-		families: accountFamilies,
-		serves:   func() bool { return s.ls.accountServing(txn) != nil },
+		what:   fmt.Sprintf("accounts at slot %d", slot),
+		serves: func() bool { return s.ls.accountServing(txn) != nil },
 		fromSet: func() (map[string]*models.Account, error) {
 			return s.ls.accountsAt(txn, refs, slot)
 		},

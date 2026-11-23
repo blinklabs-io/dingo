@@ -1906,6 +1906,49 @@ func (d *Database) GetTransactionsByMetadataLabel(
 	return txs, nil
 }
 
+// ListMetadataLabelCounts returns the transaction metadata labels in use with
+// their transaction counts, in numeric label order (highest first when
+// descending).
+func (d *Database) ListMetadataLabelCounts(
+	ctx context.Context,
+	limit int,
+	offset int,
+	descending bool,
+	txn *Txn,
+) ([]models.MetadataLabelCount, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	labels, err := d.transactionStore().ListMetadataLabelCounts(
+		limit,
+		offset,
+		descending,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list metadata label counts: %w", err)
+	}
+	return labels, nil
+}
+
+// CountMetadataLabels returns the number of distinct transaction metadata
+// labels in use.
+func (d *Database) CountMetadataLabels(
+	ctx context.Context,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	count, err := d.transactionStore().CountMetadataLabels(txn.Metadata())
+	if err != nil {
+		return 0, fmt.Errorf("count metadata labels: %w", err)
+	}
+	return count, nil
+}
+
 // CountTransactionsByMetadataLabel returns the total number of transactions
 // that include metadata for a given label key.
 func (d *Database) CountTransactionsByMetadataLabel(

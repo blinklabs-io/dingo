@@ -224,6 +224,23 @@ WHERE r.added_slot = (
 	return ret, nil
 }
 
+// drepDelegatorsLiveSQL selects the live account rows GetDRepDelegatorsAtSlot
+// reads, restricted to one DRep credential when named is set.
+func drepDelegatorsLiveSQL(named bool) string {
+	query := `
+SELECT credential_tag, staking_key, drep_type, drep
+FROM account
+WHERE active = TRUE AND drep IS NOT NULL AND drep_type <= 1
+  AND added_slot <= ?`
+	if named {
+		// The unary plus on drep_type keeps SQLite off
+		// idx_account_drep_type_active_staking_key; see the account index
+		// notes in DATABASE.md.
+		query += " AND +drep_type = ? AND drep = ?"
+	}
+	return query
+}
+
 func (s *Store) GetDRepDelegatorsAtSlot(
 	dreps []models.StakeCredentialRef,
 	slot uint64,
@@ -262,14 +279,9 @@ func (s *Store) GetDRepDelegatorsAtSlot(
 	}
 	// Rows written at or before slot hold their state there (see
 	// GetAccountsByCredentialAtSlot).
-	liveQuery := `
-SELECT credential_tag, staking_key, drep_type, drep
-FROM account
-WHERE active = TRUE AND drep IS NOT NULL AND drep_type <= 1
-  AND added_slot <= ?`
+	liveQuery := drepDelegatorsLiveSQL(len(dreps) > 0)
 	liveArgs := [][]any{{slotValue}}
 	if len(dreps) > 0 {
-		liveQuery += " AND drep_type = ? AND drep = ?"
 		liveArgs = liveArgs[:0]
 		for _, drep := range dreps {
 			liveArgs = append(liveArgs, []any{slotValue, drep.Tag, drep.Key})

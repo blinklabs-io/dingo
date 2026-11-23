@@ -19,8 +19,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -523,40 +521,7 @@ func (s stagingLedgerDB) SetGovernanceProposal(
 	proposal *models.GovernanceProposal,
 	txn ledgerdb.Txn,
 ) error {
-	if s.ls.governanceDrained() {
-		return s.setDrainedProposal(proposal, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	}
-	if err := s.LedgerDB.SetGovernanceProposal(ctx, proposal, txn); err != nil {
-		return err
-	}
-	r := s.ls.governanceReader(txn)
-	if r == nil {
-		return nil
-	}
-	// The store wrote the row ID back into proposal.
-	if proposal.ID == 0 {
-		s.ls.failAccountStaging(fmt.Errorf(
-			"proposal %x#%d has no row ID after the write",
-			proposal.TxHash, proposal.ActionIndex,
-		))
-		return nil
-	}
-	prev, err := s.ls.proposalView(r, txn, proposal.TxHash, proposal.ActionIndex)
-	if err == nil && prev != nil && prev.ID != proposal.ID {
-		err = fmt.Errorf(
-			"proposal %x#%d has row ID %d in the set and %d in the store",
-			proposal.TxHash, proposal.ActionIndex, prev.ID, proposal.ID,
-		)
-	}
-	if err != nil {
-		s.ls.failAccountStaging(err)
-		return nil
-	}
-	puts := proposalPuts(prev, mergeProposal(prev, *proposal))
-	if len(puts) > 0 {
-		s.ls.stageGovernance(txn, LedgerChanges{Proposals: puts}) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	}
-	return nil
+	return s.setDrainedProposal(proposal, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (s stagingLedgerDB) ClearGovernanceProposalRatification(
@@ -566,38 +531,9 @@ func (s stagingLedgerDB) ClearGovernanceProposalRatification(
 	transitionSlot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if s.ls.governanceDrained() {
-		return s.clearDrainedRatification( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-			txHash, actionIndex, transitionSlot, txn,
-		)
-	}
-	err := s.LedgerDB.ClearGovernanceProposalRatification(
-		ctx, txHash, actionIndex, transitionSlot, txn,
+	return s.clearDrainedRatification( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		txHash, actionIndex, transitionSlot, txn,
 	)
-	if err != nil {
-		return err
-	}
-	r := s.ls.governanceReader(txn)
-	if r == nil {
-		return nil
-	}
-	prev, err := s.ls.proposalView(r, txn, txHash, actionIndex)
-	if err != nil || prev == nil {
-		if err == nil {
-			err = fmt.Errorf("proposal %x#%d is not in the set", txHash, actionIndex)
-		}
-		s.ls.failAccountStaging(err)
-		return nil
-	}
-	if prev.RatifiedEpoch == nil && prev.RatifiedSlot == nil {
-		return nil
-	}
-	next := cleanProposal(*prev)
-	next.RatifiedEpoch, next.RatifiedSlot = nil, nil
-	s.ls.stageGovernance(txn, LedgerChanges{Proposals: []ProposalChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		{Slot: transitionSlot, Proposal: next},
-	}})
-	return nil
 }
 
 // proposalKeyByID finds the transaction hash and action index of the
@@ -624,57 +560,7 @@ func (s stagingLedgerDB) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn ledgerdb.Txn,
 ) error {
-	if s.ls.governanceDrained() {
-		return s.setDrainedVote(vote, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	}
-	if err := s.LedgerDB.SetGovernanceVote(ctx, vote, txn); err != nil {
-		return err
-	}
-	r := s.ls.governanceReader(txn)
-	if r == nil {
-		return nil
-	}
-	var txHash []byte
-	var idx uint32
-	var found bool
-	var err error
-	if vote.ID == 0 {
-		err = errors.New("the metadata store gave the vote no row ID")
-	} else {
-		txHash, idx, found, err = s.ls.proposalKeyByID(r, txn, vote.ProposalID)
-	}
-	if err == nil && !found {
-		err = fmt.Errorf(
-			"vote on proposal %d, which is not in the set", vote.ProposalID,
-		)
-	}
-	var rows []models.GovernanceVote
-	if err == nil {
-		rows, err = s.ls.votesView(r, txn, txHash, idx)
-	}
-	if err != nil {
-		s.ls.failAccountStaging(err)
-		return nil
-	}
-	next := cleanVote(*vote)
-	var prev *models.GovernanceVote
-	for i := range rows {
-		if voterKey(rows[i]) == voterKey(next) {
-			prev = &rows[i]
-			next.AddedSlot = prev.AddedSlot
-		}
-	}
-	if sameVote(prev, &next) {
-		return nil
-	}
-	slot := vote.AddedSlot
-	if vote.VoteUpdatedSlot != nil {
-		slot = *vote.VoteUpdatedSlot
-	}
-	s.ls.stageGovernance(txn, LedgerChanges{Votes: []VoteChange{{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		Slot: slot, TxHash: bytes.Clone(txHash), ActionIndex: idx, Vote: next,
-	}}})
-	return nil
+	return s.setDrainedVote(vote, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (s stagingLedgerDB) DeleteGovernanceVotesForDrep(
@@ -685,41 +571,27 @@ func (s stagingLedgerDB) DeleteGovernanceVotesForDrep(
 	deletedSlot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	drained := s.ls.governanceDrained()
-	n := 0
-	if !drained {
-		var err error
-		n, err = s.LedgerDB.DeleteGovernanceVotesForDrep(
-			ctx, credentialTag, credential, epoch, deletedSlot, txn,
-		)
-		if err != nil {
-			return n, err
-		}
-	}
 	r := s.ls.governanceReader(txn)
 	if r == nil {
-		return n, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 	}
 	loaded, err := r.GovernanceLoaded()
 	if err != nil {
-		return n, err
+		return 0, err
 	}
 	if !loaded {
-		return n, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 	}
 	changes, err := s.ls.drepVoteDeletions(
 		r, txn, credentialTag, credential, epoch, deletedSlot,
 	)
 	if err != nil {
-		return n, err
+		return 0, err
 	}
 	if len(changes) > 0 {
 		s.ls.stageGovernance(txn, LedgerChanges{Votes: changes}) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	}
-	if drained {
-		return len(changes), nil
-	}
-	return n, nil
+	return len(changes), nil
 }
 
 // drepVoteDeletions returns the soft deletions of a DRep's live votes on the
@@ -919,14 +791,7 @@ func (s stagingLedgerDB) GetRatifiedGovernanceProposals(
 func (ls *LedgerState) governanceServing(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {
-	if ls.governanceDrained() {
-		return ls.drainedGovernanceReader(txn)
-	}
-	r := ls.governanceReader(txn)
-	if r == nil || !ls.setServes(&ls.governanceSetLoaded, r.GovernanceLoaded) {
-		return nil, ls.setFamilyUnserved(nodesettings.FamilyGovernance)
-	}
-	return r, nil
+	return ls.drainedGovernanceReader(txn)
 }
 
 // GetLastEnactedGovernanceProposal is answered from the set.

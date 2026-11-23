@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -242,6 +243,12 @@ func walSize(t *testing.T, path string) int64 {
 // creation.
 func TestSpentStakingIndexDirtiesFewPagesPerBlock(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine SQLite WAL page counting over a large "+
+			"utxo workload; the page bounds are asserted in the "+
+			"un-instrumented run",
+	)
 	const (
 		seedRows      = 60_000
 		txsPerBlock   = 20

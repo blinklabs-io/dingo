@@ -144,7 +144,7 @@ func newSigmaDenominatorLedger(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -164,11 +164,11 @@ func sigmaDenomPoolKeyHash(fill byte) []byte {
 // deliberately different totals.
 func seedSigmaDenominatorSnapshot(
 	t *testing.T,
-	db *database.Database,
+	ledgerState *ledger.LedgerState,
 	poolA, poolB []byte,
 ) {
 	t.Helper()
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+	require.NoError(t, ledgerState.LedgerDB().SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			{
 				Epoch:          sigmaDenomEpoch,
@@ -189,7 +189,7 @@ func seedSigmaDenominatorSnapshot(
 		},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SaveEpochSummary(
+	require.NoError(t, ledgerState.LedgerDB().SaveEpochSummary(
 		&models.EpochSummary{
 			Epoch:            sigmaDenomEpoch,
 			TotalActiveStake: dbtypes.Uint64(sigmaDenomSummaryTotal),
@@ -210,7 +210,7 @@ func seedSigmaDenominatorSnapshot(
 // The forging adapter used to return ledger.StakeDistribution.TotalStake,
 // which LedgerView.GetStakeDistribution accumulates by summing the mark rows
 // itself. Header verification instead reads
-// epoch_summary.total_active_stake through Metadata().GetTotalActiveStake.
+// the epoch summary's total active stake through LedgerDB's GetTotalActiveStake.
 // Two derivations of one consensus quantity: a node whose forge denominator
 // differs from its verify denominator can forge a block it would itself
 // reject, or decline a slot it is genuinely eligible for.
@@ -223,16 +223,16 @@ func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
 ) {
 	t.Parallel()
 
-	ledgerState, db := newSigmaDenominatorLedger(t)
+	ledgerState, _ := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)
-	seedSigmaDenominatorSnapshot(t, db, poolA, poolB)
+	seedSigmaDenominatorSnapshot(t, ledgerState, poolA, poolB)
 
 	// The denominator header verification resolves, read through the accessor
 	// verify_header.go uses. Captured from the database rather than restated
 	// as a literal, so the test compares the two paths instead of comparing
 	// one path to a number this test chose.
-	verifyTotal, err := db.Metadata().GetTotalActiveStake(
+	verifyTotal, err := ledgerState.LedgerDB().GetTotalActiveStake(
 		sigmaDenomEpoch,
 		models.PoolStakeSnapshotTypeMark,
 		nil,
@@ -283,12 +283,12 @@ func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
 func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 	t.Parallel()
 
-	ledgerState, db := newSigmaDenominatorLedger(t)
+	ledgerState, _ := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)
 
 	// Generation one: sigma = 3_000_000 / 5_000_000.
-	seedSigmaDenominatorSnapshot(t, db, poolA, poolB)
+	seedSigmaDenominatorSnapshot(t, ledgerState, poolA, poolB)
 
 	adapter := &stakeDistributionAdapter{ledgerState: ledgerState}
 	poolStake, total, err := adapter.GetPoolAndTotalActiveStake(
@@ -299,7 +299,7 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 
 	// Generation two: every value doubled, so sigma is identical while both
 	// halves differ. Written AFTER the read above, then read again below.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+	require.NoError(t, ledgerState.LedgerDB().SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			{
 				Epoch:          sigmaDenomEpoch,
@@ -312,7 +312,7 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SaveEpochSummary(
+	require.NoError(t, ledgerState.LedgerDB().SaveEpochSummary(
 		&models.EpochSummary{
 			Epoch:            sigmaDenomEpoch,
 			TotalActiveStake: dbtypes.Uint64(sigmaDenomSummaryTotal * 2),
@@ -353,16 +353,16 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 
 func replaceSigmaSnapshotAtomically(
 	t *testing.T,
-	db *database.Database,
+	ledgerState *ledger.LedgerState,
 	poolKeyHash []byte,
 	poolStake, totalStake uint64,
 	capturedSlot uint64,
 ) {
 	t.Helper()
-	txn := db.Transaction(context.Background(), true)
+	txn := ledgerState.LedgerDB().Begin(context.Background(), true)
 	defer func() { require.NoError(t, txn.Rollback()) }()
 
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+	require.NoError(t, ledgerState.LedgerDB().SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{{
 			Epoch:          sigmaDenomEpoch,
 			SnapshotType:   models.PoolStakeSnapshotTypeMark,
@@ -371,9 +371,9 @@ func replaceSigmaSnapshotAtomically(
 			DelegatorCount: 1,
 			CapturedSlot:   capturedSlot,
 		}},
-		txn.Metadata(),
+		txn,
 	))
-	require.NoError(t, db.Metadata().SaveEpochSummary(
+	require.NoError(t, ledgerState.LedgerDB().SaveEpochSummary(
 		&models.EpochSummary{
 			Epoch:            sigmaDenomEpoch,
 			TotalActiveStake: dbtypes.Uint64(totalStake),
@@ -382,7 +382,7 @@ func replaceSigmaSnapshotAtomically(
 			BoundarySlot:     capturedSlot,
 			SnapshotReady:    true,
 		},
-		txn.Metadata(),
+		txn,
 	))
 	require.NoError(t, txn.Commit())
 }
@@ -399,14 +399,14 @@ func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
 ) {
 	t.Parallel()
 
-	ledgerState, db := newSigmaDenominatorLedger(t)
+	ledgerState, _ := newSigmaDenominatorLedger(t)
 	poolA := sigmaDenomPoolKeyHash(0x41)
 	poolB := sigmaDenomPoolKeyHash(0x42)
 	replaceSigmaSnapshotAtomically(
-		t, db, poolA,
+		t, ledgerState, poolA,
 		sigmaDenomPoolAStake, sigmaDenomSummaryTotal, 1,
 	)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+	require.NoError(t, ledgerState.LedgerDB().SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{{
 			Epoch:          sigmaDenomEpoch,
 			SnapshotType:   models.PoolStakeSnapshotTypeMark,
@@ -453,10 +453,10 @@ func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
 		t.Fatal("sigma reader did not reach the coordinated recapture point")
 	}
 	// Generation two changes both halves while the reader is paused between
-	// its two SQL statements. The write is one transaction, matching the
+	// its two reads. The write is one transaction, matching the
 	// snapshot publication path in ledger/snapshot/rotation.go.
 	replaceSigmaSnapshotAtomically(
-		t, db, poolA,
+		t, ledgerState, poolA,
 		sigmaDenomPoolAStake*2, sigmaDenomSummaryTotal*2, 2,
 	)
 	release()

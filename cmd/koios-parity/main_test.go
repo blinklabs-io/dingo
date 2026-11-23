@@ -600,3 +600,36 @@ func TestRequireNetworkAcceptsMainnetAndRejectsUnknown(t *testing.T) {
 	_, err := requireNetwork()
 	require.Error(t, err)
 }
+
+// The ledger's own store holds no ledger state to compare, so the sqlite
+// backend reads the IndexerDB under the node's data directory, wherever a
+// metadata plugin override puts the ledger's store.
+func TestResolveDingoDBReadsTheSQLiteIndexerDB(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig and globalFlags are
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_DATA_DIR", "")
+	nodeDir := t.TempDir()
+	t.Setenv("CARDANO_DATABASE_PATH", nodeDir)
+	t.Setenv("DINGO_PLUGINS_STORAGE_METADATA_PROVIDER", "sqlite")
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DATADIR", t.TempDir(),
+	)
+	prevData := globalFlags.dingoData
+	t.Cleanup(func() { globalFlags.dingoData = prevData })
+	globalFlags.dingoData = ""
+
+	cmd := &cobra.Command{}
+	addDingoDBFlags(cmd)
+	got, err := resolveDingoDB(cmd)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(nodeDir, "indexer"), got.DataDir)
+
+	globalFlags.dingoData = t.TempDir()
+	got, err = resolveDingoDB(cmd)
+	require.NoError(t, err)
+	require.Equal(
+		t, filepath.Join(globalFlags.dingoData, "indexer"), got.DataDir,
+	)
+}

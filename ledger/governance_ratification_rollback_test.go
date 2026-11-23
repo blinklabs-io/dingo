@@ -15,10 +15,15 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,22 +41,52 @@ func TestFailedEnactmentClearRestoresRatificationOnRollback(t *testing.T) {
 		1,
 		true,
 	)
-	before := f.proposal(t, proposal)
+	before := treasuryRolloverProposal(t, f, proposal)
 	require.NotNil(t, before.RatifiedSlot)
 	originalRatifiedSlot := *before.RatifiedSlot
 
-	result := f.rollover(t, f.currentEpoch, f.currentPParams)
-	cleared := f.proposal(t, proposal)
+	// The proposal state before the boundary is the block at the last slot of
+	// the epoch, and the boundary is the block after it, so the set's journal
+	// holds the cleared marker as a change the rollback undoes.
+	rollbackPoint := ocommon.NewPoint(
+		f.currentEpoch.StartSlot+uint64(f.currentEpoch.LengthInSlots)-1,
+		bytes.Repeat([]byte{0x93}, lcommon.Blake2b256Size),
+	)
+	require.GreaterOrEqual(t, rollbackPoint.Slot, originalRatifiedSlot)
+	commitTestLedgerChanges(
+		t, f.ls, ochainsync.Tip{Point: rollbackPoint}, LedgerChanges{},
+	)
+	seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, f.currentPParams)
+	var result *EpochRolloverResult
+	require.NoError(t, f.db.Transaction(context.Background(), true).Do(
+		func(txn *database.Txn) error {
+			var err error
+			result, err = f.ls.processEpochRollover(
+				context.Background(),
+				txn,
+				f.currentEpoch,
+				eras.ConwayEraDesc,
+				f.currentPParams,
+			)
+			if err != nil {
+				return err
+			}
+			boundary := ocommon.NewPoint(
+				result.NewCurrentEpoch.StartSlot,
+				bytes.Repeat([]byte{0x94}, lcommon.Blake2b256Size),
+			)
+			f.ls.stageUtxoSet(txn, &boundary)
+			return nil
+		},
+	))
+	require.Equal(t, rollbackPoint.Slot+1, result.NewCurrentEpoch.StartSlot)
+	cleared := treasuryRolloverProposal(t, f, proposal)
 	require.Nil(t, cleared.RatifiedSlot)
 
-	rollbackPoint := result.NewCurrentEpoch.StartSlot - 1
-	require.GreaterOrEqual(t, rollbackPoint, originalRatifiedSlot)
-	require.NoError(
-		t,
-		f.db.DeleteGovernanceProposalsAfterSlot(context.Background(), rollbackPoint, nil),
-	)
+	f.ls.stageUtxoSetRollback(nil, rollbackPoint)
+	require.False(t, f.ls.utxoSetFailed.Load())
 
-	restored := f.proposal(t, proposal)
+	restored := treasuryRolloverProposal(t, f, proposal)
 	require.NotNil(
 		t,
 		restored.RatifiedSlot,
@@ -76,13 +111,13 @@ func TestEnactmentWriteHealthyControlCommitsBoundary(t *testing.T) {
 	)
 
 	result := f.rollover(t, f.currentEpoch, f.currentPParams)
-	after := f.proposal(t, proposal)
+	after := treasuryRolloverProposal(t, f, proposal)
 	require.NotNil(t, after.EnactedSlot)
 	require.Equal(t, result.NewCurrentEpoch.StartSlot, *after.EnactedSlot)
 	require.Equal(t, uint64(40), f.accountReward(t, stakeCredential))
 	treasury, _, _ := networkState(t, f.db)
 	require.Equal(t, uint64(60), treasury)
-	advancedEpoch, err := f.db.Metadata().GetEpoch(
+	advancedEpoch, err := seedDB(t, f.db).GetEpoch(
 		f.currentEpoch.EpochId+1,
 		nil,
 	)

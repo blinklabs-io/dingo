@@ -46,7 +46,8 @@ func TestApplyByronBlockRecordsAppliedPoint(t *testing.T) {
 	// Restart from origin so applying the block is a forward step that needs
 	// no earlier Byron history.
 	parentTip := ochainsync.Tip{}
-	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(parentTip.Point, nil))
+	ls.stageUtxoSetRollback(nil, parentTip.Point)
+	require.False(t, ls.utxoSetFailed.Load())
 	require.NoError(t, ls.db.SetTip(parentTip, nil))
 	ls.currentTip = parentTip
 	ls.currentTipBlockNonce = nil
@@ -62,7 +63,7 @@ func TestApplyByronBlockRecordsAppliedPoint(t *testing.T) {
 	))
 	require.Equal(t, byronPoint, ls.currentTip.Point)
 
-	rows, err := ls.db.GetBlockNoncesInSlotRange(
+	rows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(
 		byronPoint.Slot,
 		byronPoint.Slot+1,
 		nil,
@@ -105,7 +106,7 @@ func addNilNonceAppliedBlock(
 			Cbor:        []byte{0x80},
 		}}),
 	)
-	require.NoError(t, fixture.ls.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, fixture.ls.db,
 		point.Hash, point.Slot, nil, false, nil,
 	))
 	return point
@@ -156,8 +157,9 @@ func TestDurableAppliedFloorIncludesSlotZeroBlock(t *testing.T) {
 
 	db := newTestDB(t)
 	blockHash := testHashBytes("applied-slot-zero")
-	require.NoError(t, db.SetBlockNonce(blockHash, 0, nil, false, nil))
+	require.NoError(t, seedBlockNonce(t, db, blockHash, 0, nil, false, nil))
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 
 	floor, ok, err := ls.durableAppliedFloor()
 	require.NoError(t, err)
@@ -169,10 +171,11 @@ func TestEnforceDurableTipFloorLeavesOriginUnchanged(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		testHashBytes("applied-slot-zero"), 0, nil, false, nil,
 	))
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 
 	require.NoError(t, ls.enforceDurableTipFloor(t.Context()))
 	require.Equal(t, ocommon.NewPointOrigin(), ls.currentTip.Point)
@@ -232,7 +235,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -242,12 +245,13 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 
 	// The rows block application writes for Byron blocks: no nonce.
 	for _, tip := range []ochainsync.Tip{ancestorTip, byronTip} {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			tip.Point.Hash, tip.Point.Slot, nil, false, nil,
 		))
 	}
 	require.NoError(t, db.SetTip(byronTip, nil))
 	ls.currentTip = byronTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = nil
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()

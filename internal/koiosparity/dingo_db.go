@@ -39,9 +39,8 @@ import (
 type DingoDBConfig struct {
 	// Plugin is the metadata storage backend: "sqlite" (default), "postgres", or "mysql".
 	Plugin string
-	// DataDir is the Dingo node data directory.
-	// For SQLite this must contain metadata.sqlite; for other plugins it is only
-	// used to resolve the default cache path and is not required for DB access.
+	// DataDir is the directory of the SQLite IndexerDB, which must contain
+	// metadata.sqlite. Other plugins do not read it.
 	DataDir string
 	// DSN is the connection string for postgres and mysql plugins.
 	// Examples:
@@ -239,8 +238,9 @@ type DingoPoolEpochData struct {
 // "leader" row. Matches Koios /account_reward_history's own "member" type.
 const rewardTypeMember = "member"
 
-// DingoDB reads reward state directly from Dingo's metadata database.
-// It supports all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
+// DingoDB reads reward state directly from the tables of Dingo's IndexerDB,
+// which the IndexerDB writer fills from the ledger on an API node. It supports
+// all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
 type DingoDB struct {
 	db      *sql.DB
 	dialect string
@@ -659,9 +659,11 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 // independent of pool count. ctx is forwarded to the DB driver so that a
 // cancelled context aborts the query.
 // GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
-// mark pool_stake_snapshot rows for epoch. See the interface doc comment for
-// why this, and not epoch_summary.SnapshotReady, is the per-pool evidence of
-// pool-set membership.
+// mark rows for epoch of the IndexerDB's pool_stake_snapshot table, beside
+// the reward_pool_input rows GetPoolEpochDataMap reads from the same store.
+// See the interface doc comment for why this, and not
+// epoch_summary.SnapshotReady, is the per-pool evidence of pool-set
+// membership.
 func (d *DingoDB) GetPoolStakeSnapshotMembers(
 	ctx context.Context,
 	epoch uint64,

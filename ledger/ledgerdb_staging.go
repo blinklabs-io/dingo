@@ -20,15 +20,15 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// stagingLedgerDB is the LedgerDB the ledger and the snapshot manager write
-// through when the live UTxO set keeps epoch state. Each epoch, snapshot,
-// network state and donation write goes to the metadata store and is staged
-// on its transaction's batch, so the set writes the same rows in the same
-// commit.
+// stagingLedgerDB is the LedgerDB the ledger and the snapshot manager read
+// and write through. Ledger state is staged on its transaction's batch for
+// the LedgerDB set and read back from the set. What still reaches the
+// embedded metadata store is index data and node bookkeeping, never a
+// ledger-state read: the transaction and certificate history index and the
+// operational sync_state keys.
 type stagingLedgerDB struct {
 	ledgerdb.LedgerDB
 	ls *LedgerState
@@ -38,9 +38,6 @@ func (s stagingLedgerDB) SavePoolStakeSnapshots(
 	snapshots []*models.PoolStakeSnapshot,
 	txn ledgerdb.Txn,
 ) error {
-	if err := s.LedgerDB.SavePoolStakeSnapshots(snapshots, txn); err != nil {
-		return err
-	}
 	changes := make([]SnapshotChange, 0, len(snapshots))
 	for _, sn := range snapshots {
 		c := *sn
@@ -57,10 +54,6 @@ func (s stagingLedgerDB) DeletePoolStakeSnapshotsForEpoch(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) error {
-	err := s.LedgerDB.DeletePoolStakeSnapshotsForEpoch(epoch, snapshotType, txn)
-	if err != nil {
-		return err
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{Snapshots: []SnapshotChange{{
 		Kind: SnapshotDeleteForEpoch, Epoch: epoch, Type: snapshotType,
 	}}})
@@ -71,9 +64,6 @@ func (s stagingLedgerDB) DeletePoolStakeSnapshotsBeforeEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := s.LedgerDB.DeletePoolStakeSnapshotsBeforeEpoch(epoch, txn); err != nil {
-		return err
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{Snapshots: []SnapshotChange{{
 		Kind: SnapshotDeleteBeforeEpoch, Epoch: epoch,
 	}}})
@@ -84,11 +74,6 @@ func (s stagingLedgerDB) SetMidEpochEraSwitch(
 	sw database.MidEpochEraSwitch,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.ls.familyDrained(nodesettings.FamilyEraSwitch) {
-		if err := s.LedgerDB.SetMidEpochEraSwitch(sw, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{EraSwitch: &sw})
 	return nil
 }
@@ -97,11 +82,6 @@ func (s stagingLedgerDB) SetNetworkState(
 	treasury, reserves, slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.ls.familyDrained(nodesettings.FamilyNetworkDonations) {
-		if err := s.LedgerDB.SetNetworkState(treasury, reserves, slot, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{NetworkStates: []models.NetworkState{{
 		Treasury: types.Uint64(treasury),
 		Reserves: types.Uint64(reserves),
@@ -114,11 +94,6 @@ func (s stagingLedgerDB) AddNetworkDonation(
 	slot, epoch, amount uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.ls.familyDrained(nodesettings.FamilyNetworkDonations) {
-		if err := s.LedgerDB.AddNetworkDonation(slot, epoch, amount, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{Donations: []models.NetworkDonation{{
 		Slot: slot, Epoch: epoch, Amount: amount,
 	}}})
@@ -131,11 +106,6 @@ func (s stagingLedgerDB) SetPParams(
 	era uint,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.pparamsDrained() {
-		if err := s.LedgerDB.SetPParams(params, slot, epoch, era, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{PParams: []models.PParams{{
 		Cbor: slices.Clone(params), AddedSlot: slot, Epoch: epoch, EraId: era,
 	}}})
@@ -181,6 +151,7 @@ func (ls *LedgerState) stageLedgerChanges(txn ledgerdb.Txn, lc LedgerChanges) {
 		b.votes = append(b.votes, lc.Votes...)
 		b.pparamUpdates = append(b.pparamUpdates, lc.PParamUpdates...)
 		b.syncMarkers = append(b.syncMarkers, lc.SyncMarkers...)
+		b.stateMarks = append(b.stateMarks, lc.StateMarks...)
 		b.importBaselines = append(b.importBaselines, lc.ImportBaselines...)
 		b.witnesses = append(b.witnesses, lc.Witnesses...)
 	}
@@ -197,10 +168,4 @@ func (ls *LedgerState) stageLedgerChanges(txn ledgerdb.Txn, lc LedgerChanges) {
 // such as the snapshot manager whose writes must reach the live UTxO set too.
 func (ls *LedgerState) LedgerDB() ledgerdb.LedgerDB {
 	return ls.ledgerDB()
-}
-
-// keepsEpochState reports whether the live UTxO set keeps epoch state.
-func (ls *LedgerState) keepsEpochState() bool {
-	_, ok := ls.config.UtxoSet.(LedgerChangesWriter)
-	return ok
 }

@@ -488,8 +488,11 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 	supported, err := SQLiteDialect().OptimizePlannerStats(context.Background(), sqliteExec)
 	require.NoError(t, err)
 	require.True(t, supported)
-	require.Len(t, sqliteExec.statements, 1)
-	require.Contains(t, sqliteExec.statements[0], "PRAGMA optimize")
+	require.Equal(t, []string{
+		"PRAGMA analysis_limit = 1000",
+		"ANALYZE",
+		"PRAGMA analysis_limit = 0",
+	}, sqliteExec.statements)
 
 	// Explicit full ANALYZE remains available; fresh Mithril bootstraps prefer
 	// incremental planner-stat maintenance on supported backends.
@@ -675,9 +678,7 @@ func TestResumedPlannerStatsKeepFullAnalyzeSpendPlan(t *testing.T) {
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	seedPlannerStatsProbeUtxos(t, store)
 	require.NoError(t, store.UpdatePlannerStats())
-	// Grow utxo 32x: PRAGMA optimize leaves a table's statistics alone until
-	// its row count has moved by a large factor, so a smaller growth would
-	// compare a plan the optimizer never touched.
+	// Grow utxo 32x so the resumed statistics describe a much smaller table.
 	for shift := range 5 {
 		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
   staking_key, credential_tag, added_slot, deleted_slot, amount)

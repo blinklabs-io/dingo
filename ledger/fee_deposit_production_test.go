@@ -1000,7 +1000,7 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				}}}
 			},
 			setup: func(t *testing.T, fx *feeProdFixture) {
-				require.NoError(t, fx.db.CreateAccount(context.Background(), nil, &models.Account{
+				require.NoError(t, seedCreateAccount(t, fx.db, context.Background(), nil, &models.Account{
 					StakingKey:    fx.keyHash.Bytes(),
 					CredentialTag: 0,
 					Active:        true,

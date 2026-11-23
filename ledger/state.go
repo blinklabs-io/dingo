@@ -1601,6 +1601,9 @@ type LedgerState struct {
 	// Test hook called after a Tachys distribution read releases its
 	// transaction and before the consensus context is rechecked.
 	tachysDistributionLoadedHook func()
+	// Test hook called between a Tachys distribution read's pool stake read
+	// and its total active stake read.
+	tachysStakeReadHook func()
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -1850,7 +1853,7 @@ type LedgerState struct {
 	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
-	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // epoch-boundary snapshot capture (nil = no mark snapshot is captured)
 	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
 	deferredStakeInputsHook     atomic.Pointer[epochBoundaryDeferredStakeInputsHookHolder]
 	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
@@ -2488,18 +2491,16 @@ type LedgerState struct {
 	// resolved under an older value stops instead of writing: the boundary
 	// completes that round in its own transaction.
 	rewardPrecomputeFence atomic.Uint64
-	// deferredStakeInputsWG tracks the writers of deferred reward_stake_input
-	// rows (queueDeferredRewardStakeInputs), and deferredStakeInputsWriting
-	// the snapshot epochs they are writing; both are guarded by
-	// rewardPrecomputeMu like the precompute worker's registration.
-	deferredStakeInputsWG      sync.WaitGroup
-	deferredStakeInputsWriting map[uint64]struct{}
 	// rewardCreditCompactionWG tracks queueRewardCreditCompaction's job;
 	// rewardCreditCompacting and rewardCreditCompactAgain are guarded by
 	// rewardPrecomputeMu.
 	rewardCreditCompactionWG sync.WaitGroup
 	rewardCreditCompacting   bool
 	rewardCreditCompactAgain bool
+	// rewardCreditCompactionHook is a test seam, nil in production. It runs
+	// in the compaction job once the job holds the set open and before it
+	// reads it.
+	rewardCreditCompactionHook func()
 	// ratificationJob is the latest boundary's deferred RATIFY, guarded by
 	// ratificationMu; ratificationWG tracks its goroutine.
 	// deferredBoundarySnapshotHook builds a boundary's mark snapshot after
@@ -2514,11 +2515,8 @@ type LedgerState struct {
 	ratificationApplyHook func(epoch uint64)
 	// ratifyAtBoundary is a test seam: true runs RATIFY in the boundary
 	// transaction, as every boundary did before it was deferred.
-	ratifyAtBoundary bool
-	// deferredStakeInputsFailHook is a test seam, nil in production. A
-	// non-nil error it returns fails that deferred stake-input chunk.
-	deferredStakeInputsFailHook func() error
-	validationEnabled           bool
+	ratifyAtBoundary  bool
+	validationEnabled bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -3637,12 +3635,6 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 			currentTip.Point.Slot,
 		)
 	}
-	if err := ls.ledgerDB().ReconcileAlonzoPParamsUnitAfterRecovery(ctx); err != nil {
-		return errors.Join(committedRollbackErr, fmt.Errorf(
-			"reconcile Alonzo protocol-parameter unit after recovery: %w",
-			err,
-		))
-	}
 	return committedRollbackErr
 }
 
@@ -4366,7 +4358,6 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.rewardPrecomputeRetry = nil
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWG.Wait()
-	ls.deferredStakeInputsWG.Wait()
 	ls.rewardCreditCompactionWG.Wait()
 	ls.ratificationWG.Wait()
 	ls.config.Logger.Info(
@@ -4761,8 +4752,8 @@ type epochBoundarySnapshotHookHolder struct {
 // SetEpochBoundarySnapshotHook installs (or clears, with a nil fn) the
 // authoritative epoch-boundary snapshot capture. It is wired at node startup to
 // the snapshot manager's CaptureEpochBoundarySnapshot before block sync begins.
-// When no hook is set the ledger relies solely on the event-driven fallback
-// capture, preserving the pre-wiring behavior.
+// It is the only capture of the mark snapshot: with no hook set, none is
+// written.
 func (ls *LedgerState) SetEpochBoundarySnapshotHook(
 	fn func(ledgerdb.Txn, event.EpochTransitionEvent) error,
 ) {
@@ -5845,37 +5836,13 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
-	// Start a transaction. The metadata+blob truncation sweep itself lives
-	// in database.TruncateAfterSlot, shared with offline/live database
-	// truncation (database/lifecycle) — this closure wraps it with the
-	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
-	// need the epoch schedule) and captures the resulting tip/nonce for
-	// the in-memory cache reload below.
+	// The chain truncation lives in database.TruncateAfterSlot, shared with
+	// database/lifecycle. Ledger state rolls back from the LedgerDB journal
+	// when the transaction commits, so the expirations, cost-model markers
+	// and live stake need no work here.
 	finishValidationTransition := ls.beginTxValidationTransition()
 	defer finishValidationTransition()
 	err = ls.SubmitAsyncDBTxn(ctx, func(txn ledgerdb.Txn) error {
-		// CIP-0163: capture the reward-account credentials witnessed in the
-		// rolled-away blocks (added_slot > rollback slot) before
-		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
-		// their rows. Their expiration_epoch is recomputed against the
-		// surviving chain once TruncateAfterSlot has restored account
-		// state (see below). Gate off => skip.
-		var expiryAffectedRefs []models.StakeCredentialRef
-		if ls.config.DelegatorInactivityEnabled {
-			var affErr error
-			expiryAffectedRefs, affErr = ls.ledgerDB().
-				AccountsWitnessedAfterSlot(
-					ctx,
-					point.Slot,
-					txn,
-				)
-			if affErr != nil {
-				return fmt.Errorf(
-					"collect rolled-back witnessed accounts: %w",
-					affErr,
-				)
-			}
-		}
 		// The metadata store holds no utxo rows; the set rolls back from its
 		// own journal after the commit and its net change is published.
 		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
@@ -5897,50 +5864,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 		if err != nil {
 			return err
 		}
-		if err := ls.refreshUtxoSetRollbackStake(txn, point.Slot); err != nil {
-			return fmt.Errorf("refresh rolled-back UTxO stake: %w", err)
-		}
-		// CIP-0163: now that TruncateAfterSlot has deleted the rolled-away
-		// certificate/withdrawal rows and restored the remaining account
-		// fields (both ahead of its own pool/DRep/governance/etc. sweep),
-		// recompute the expiration_epoch of the affected reward accounts
-		// against the surviving chain. Gate off => no-op.
-		if err := ls.discardPendingRatificationAfterSlot(
-			txn, point.Slot,
-		); err != nil {
-			return fmt.Errorf("discard pending ratification: %w", err)
-		}
-		if err := discardRewardStakeInputsPendingAfterSlot(
-			ls.ledgerDB(), txn, point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"discard pending reward stake inputs: %w", err,
-			)
-		}
-		if err := ls.recomputeAccountExpirationsAfterRollback(
-			ctx,
-			txn,
-			point.Slot,
-			expiryAffectedRefs,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute account expirations after rollback: %w",
-				err,
-			)
-		}
-		// Undo the synthetic-PlutusV2-cost-model marker if this rollback
-		// crosses back before the epoch it was last confirmed cleared at;
-		// see database.RecomputeSyntheticV2CostModelMarkerAfterTruncate.
-		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
-			ls.db,
-			dbadapter.Unwrap(txn),
-			point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute synthetic PlutusV2 cost model marker after rollback: %w",
-				err,
-			)
-		}
+		ls.discardPendingRatificationAfterSlot(txn, point.Slot)
 		return nil
 	}, true)
 	if err != nil {
@@ -7201,10 +7125,9 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 // and pp, the protocol parameters the marker describes. An empty value falls
 // back to comparing pp's PlutusV2 cost model directly against the known
 // synthetic default -- see loadSyntheticV2CostModel's doc comment for why.
-// Shared by loadSyntheticV2CostModel (startup, and reloading the in-memory
-// mirror after database.RecomputeSyntheticV2CostModelMarkerAfterTruncate
-// resets the durable marker during a rollback) and rollback itself (which
-// cannot safely call loadSyntheticV2CostModel directly there: this must be
+// Shared by loadSyntheticV2CostModel (startup) and rollback, which reads the
+// marker as the set's rollback left it (and cannot safely call
+// loadSyntheticV2CostModel directly there: this must be
 // computed from the rolled-back pparams value before it is applied to
 // ls.currentPParams under lock, matching every other piece of rollback's
 // reloaded state).
@@ -7313,9 +7236,9 @@ func (ls *LedgerState) persistSyntheticV2CostModel(
 // markRealV2CostModelObserved durably records that real (non-synthetic)
 // PlutusV2 cost-model data was confirmed written as of epoch, both the
 // boolean marker (persistSyntheticV2CostModel) and the epoch it happened at
-// (database.SetSyntheticV2CostModelClearedEpoch) -- the latter is what lets
-// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate tell whether a
-// later rollback crosses back before this confirmation and so must undo it.
+// (database.SyntheticV2CostModelClearedEpochSyncKey, set through the
+// LedgerDB) -- the latter is what lets a rollback tell whether it crosses
+// back before this confirmation and so must undo it.
 // Both writes share the caller's txn so they commit together with the
 // pparams write they describe.
 func (ls *LedgerState) markRealV2CostModelObserved(
@@ -7328,8 +7251,8 @@ func (ls *LedgerState) markRealV2CostModelObserved(
 	// First-confirmation-wins: only write the cleared-epoch marker if none
 	// is recorded yet. A chain can enact more than one real PlutusV2
 	// cost-model update over its life; overwriting the marker on every
-	// later one would make RecomputeSyntheticV2CostModelMarkerAfterTruncate
-	// reset the marker to synthetic on a rollback that crosses back past
+	// later one would make a rollback
+	// reset the marker to synthetic when it that crosses back past
 	// only the LATEST update but not an EARLIER one -- the earlier real
 	// value still survives on the truncated chain and must not be reported
 	// as synthetic. Keeping the earliest confirmed epoch is correct for
@@ -16366,6 +16289,26 @@ func (ls *LedgerState) NewView(txn ledgerdb.Txn) *LedgerView {
 	)
 }
 
+// NewPinnedView returns a view whose reads all see the ledger state one
+// commit left, and the function that releases it. Values a caller combines,
+// such as a pool's stake and the total active stake it is a fraction of, must
+// be read through one such view: an epoch boundary that commits between two
+// unpinned reads would otherwise supply each from a different snapshot.
+func (ls *LedgerState) NewPinnedView(
+	ctx context.Context,
+) (*LedgerView, func() error, error) {
+	txn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
+	if txn == nil {
+		return nil, nil, errors.New("ledger transaction unavailable")
+	}
+	if err := ls.pinSetReadsResult(txn, false); err != nil {
+		return nil, nil, errors.Join(
+			fmt.Errorf("pin ledger state: %w", err), txn.Rollback(),
+		)
+	}
+	return ls.NewView(txn), txn.Rollback, nil
+}
+
 // TransactionByHash returns a transaction record by its hash.
 func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	hash []byte,
@@ -18631,23 +18574,17 @@ func (ls *LedgerState) indexerDB() indexerdb.Reader {
 	return dbadapter.New(ls.db)
 }
 
-// metadataLedgerDB returns the LedgerDB under ledgerDB: writes through it
-// reach the metadata store and are not staged for the live UTxO set.
-func (ls *LedgerState) metadataLedgerDB() ledgerdb.LedgerDB {
-	if sd, ok := ls.ledgerDB().(stagingLedgerDB); ok {
-		return sd.LedgerDB
-	}
-	return ls.ledgerDB()
-}
-
 // ledgerDB returns the LedgerDB consensus reads and writes through: the one
 // configured on ls, or else one over ls.db.
 func (ls *LedgerState) ledgerDB() ledgerdb.LedgerDB {
 	if ls.ldb != nil {
 		return ls.ldb
 	}
-	if ls.keepsEpochState() {
-		return stagingLedgerDB{LedgerDB: dbadapter.New(ls.db), ls: ls}
-	}
-	return dbadapter.New(ls.db)
+	return stagingLedgerDB{LedgerDB: dbadapter.New(ls.db), ls: ls}
+}
+
+// rewardLikelihoodDB returns the store of the non-myopic likelihood state,
+// which only the LedgerDB set keeps.
+func (ls *LedgerState) rewardLikelihoodDB() ledgerdb.RewardLikelihoodStore {
+	return stagingLedgerDB{ls: ls}
 }

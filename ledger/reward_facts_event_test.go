@@ -38,7 +38,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+				ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
 				bus := event.NewEventBus(nil, nil)
 				defer bus.Close()
 				ls.config.EventBus = bus
@@ -109,7 +109,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 				require.Equal(t, len(round.poolInputs), cursor.CompletedPools)
 				require.Equal(t, round.inputFingerprint, cursor.InputFingerprint)
 				require.Equal(t, uint64(200), cursor.CapturedSlot)
-				rows, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+				rows, err := ldb.GetRewardPoolOutputs(1, nil)
 				require.NoError(t, err)
 				require.Equal(t, rewardPoolOutputFingerprint(rows), cursor.OutputFingerprint)
 				require.NotEmpty(

@@ -52,6 +52,7 @@ func TestLedgerDeltaRecordsProposalBlockPosition(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	publishGovernanceTestEpoch(ls, 12, eras.ConwayEraDesc)
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, bytes.Repeat([]byte{0xAB}, 28)...),
@@ -98,7 +99,7 @@ func TestLedgerDeltaRecordsProposalBlockPosition(t *testing.T) {
 	}))
 
 	for position, tx := range []lcommon.Transaction{first, second} {
-		stored, err := db.GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
+		stored, err := seedDB(t, db).GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
 		require.NoError(t, err)
 		require.NotNil(t, stored.TxIndex)
 		require.Equal(t, uint32(position), *stored.TxIndex) //nolint:gosec

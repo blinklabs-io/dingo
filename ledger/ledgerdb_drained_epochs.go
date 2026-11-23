@@ -52,7 +52,7 @@ func (d drainedEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
 // installEpochSource gives the database the set's epochs and era switch for
 // the reads and rollbacks it runs once those families are drained.
 func (ls *LedgerState) installEpochSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetEpochSource(drainedEpochSource{ls})
 	}
 }

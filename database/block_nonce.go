@@ -176,6 +176,36 @@ func (d *Database) SetBlockNonce(
 	)
 }
 
+// SetBlockNonceBatched queues a block nonce in acc, so that FlushBatch writes
+// it with the rest of the batch in order. It writes immediately when acc is
+// nil or the metadata backend cannot queue nonces. A reader of the same
+// transaction sees the nonce only after FlushBatch.
+func (d *Database) SetBlockNonceBatched(
+	blockHash []byte,
+	slotNumber uint64,
+	nonce []byte,
+	isCheckpoint bool,
+	acc BatchAccumulator,
+	txn *Txn,
+) error {
+	queuer, ok := d.metadata.(metadata.BlockNonceBatchQueuer)
+	if !ok || acc == nil || txn == nil || txn.Metadata() == nil {
+		return d.SetBlockNonce(
+			blockHash, slotNumber, nonce, isCheckpoint, txn,
+		)
+	}
+	return queuer.QueueBlockNonce(
+		models.BlockNonce{
+			Hash:         blockHash,
+			Slot:         slotNumber,
+			Nonce:        nonce,
+			IsCheckpoint: isCheckpoint,
+		},
+		acc,
+		txn.Metadata(),
+	)
+}
+
 // SetBlockNonces stores block nonces, using a batch-capable metadata backend
 // when available.
 func (d *Database) SetBlockNonces(

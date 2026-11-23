@@ -178,7 +178,11 @@ func TestVerifyPointQueryable_PruneAnnouncedBeforePin_IsRejected(t *testing.T) {
 func newPinnedPointLedger(t *testing.T) (*LedgerState, QueryPoint) {
 	t.Helper()
 	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
+	ls := &LedgerState{
+		db:     db,
+		config: LedgerStateConfig{Logger: testLogger()},
+	}
+	attachTestLedgerDB(t, ls)
 	ls.config.CardanoNodeConfig = cardanoNodeConfigWithMaxLovelaceSupply(
 		t, 45_000_000_000_000_000,
 	)
@@ -192,10 +196,11 @@ func newPinnedPointLedger(t *testing.T) (*LedgerState, QueryPoint) {
 	hash := repeatedBytes(32, 0x0B)
 	seedBlockAtSlot(t, ls, 350, hash)
 	seedEpochs(t, ls, map[uint64]uint64{300: 3})
-	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(350, hash),
-	}, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 1_000, 300, nil))
+	point := ocommon.NewPoint(350, hash)
+	// The set's journal records the block, so the point is one it can read at.
+	require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(&point, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{Point: point}, nil))
 	return ls, QueryPoint{Slot: 350, Hash: hash}
 }
 

@@ -165,7 +165,7 @@ func TestRewardLikelihoodStakeShareUsesCirculation(t *testing.T) {
 	}
 	require.NoError(t, ls.saveRewardLikelihoodForApplication(app, 10, nil))
 
-	rows, err := ls.ledgerDB().GetRewardPoolLikelihoods(1, nil)
+	rows, err := ls.rewardLikelihoodDB().GetRewardPoolLikelihoods(1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	got, err := decodeRewardLikelihood(rows[0].LogWeights)
@@ -176,4 +176,54 @@ func TestRewardLikelihoodStakeShareUsesCirculation(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+}
+
+// Two reward updates applied in one transaction chain their likelihoods: the
+// second reads the first's pools from the transaction's staged changes, before
+// either reaches the LedgerDB set.
+func TestRewardLikelihoodChainsWithinOneTransaction(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	pool := bytes.Repeat([]byte{0x32}, 28)
+	app := func(pots uint64) *stakeRewardApplication {
+		return &stakeRewardApplication{
+			params: rewards.Parameters{
+				Decentralization: big.NewRat(0, 1),
+				ActiveSlotsCoeff: big.NewRat(1, 10),
+				EpochLength:      100,
+			},
+			pots:             &models.RewardAdaPots{CapturedSlot: pots * 100},
+			epochs:           stakeRewardEpochs{pots: pots},
+			totalCirculation: 1_000_000,
+			likelihoodPoolInputs: []*models.RewardPoolInput{{
+				PoolKeyHash:    pool,
+				DelegatedStake: 10_000,
+			}},
+			likelihoodBlockCounts: map[string]uint64{string(pool): 1},
+		}
+	}
+	txn := ls.ledgerDB().Begin(t.Context(), true)
+	require.NoError(t, ls.saveRewardLikelihoodForApplication(app(0), 100, txn))
+	require.NoError(t, ls.saveRewardLikelihoodForApplication(app(1), 200, txn))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	rows, err := ls.rewardLikelihoodDB().GetRewardPoolLikelihoods(2, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	got, err := decodeRewardLikelihood(rows[0].LogWeights)
+	require.NoError(t, err)
+	current := rewardPoolLikelihood(1, 100, rewardLeaderProbability(0.1, 0.01, 0))
+	first, err := combineRewardLikelihood(
+		make([]float32, rewardLikelihoodSampleCount), current,
+	)
+	require.NoError(t, err)
+	want, err := combineRewardLikelihood(first, current)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	state, err := ls.rewardLikelihoodDB().GetRewardLikelihoodStateAtSlot(150, nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, uint64(1), state.Epoch)
 }

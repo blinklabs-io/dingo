@@ -381,11 +381,33 @@ func runRowBatchingScenarioTolerating(
 	configure ...func(*LedgerState),
 ) *rowBatchingRun {
 	t.Helper()
+	return runRowBatchingScenarioOn(
+		t, blocks, storageMode, batching, batchSize, tolerateFailure, nil,
+		configure...,
+	)
+}
+
+// runRowBatchingScenarioOn is runRowBatchingScenarioTolerating with prepare
+// run on the fresh database before its ledger is built.
+func runRowBatchingScenarioOn(
+	t *testing.T,
+	blocks []gledger.Block,
+	storageMode string,
+	batching bool,
+	batchSize int,
+	tolerateFailure bool,
+	prepare func(*database.Database),
+	configure ...func(*LedgerState),
+) *rowBatchingRun {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
+	if prepare != nil {
+		prepare(db)
+	}
 	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	for _, block := range blocks {
@@ -395,7 +417,7 @@ func runRowBatchingScenarioTolerating(
 	cfg.ShelleyGenesis().NetworkId = "Testnet"
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:                db,
-		UtxoSet:                 NewMemLiveSetForTest(),
+		UtxoSet:                 OpenLiveSetForTest(t, db),
 		ChainManager:            cm,
 		CardanoNodeConfig:       cfg,
 		Logger:                  testLogger(),
@@ -607,6 +629,11 @@ func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
 				"the digest must be deterministic between identical runs")
 			require.Equal(t, offDigest, rowBatchingDigest(t, on.db),
 				"batched application changed the stored state")
+			offState := ledgerDBDigest(t, off.ls)
+			require.Equal(t, offState, ledgerDBDigest(t, offAgain.ls),
+				"the LedgerDB digest must be deterministic between identical runs")
+			require.Equal(t, offState, ledgerDBDigest(t, on.ls),
+				"batched application changed the LedgerDB state")
 		})
 	}
 }
@@ -622,35 +649,32 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 		t, blocks, types.StorageModeCore, true, len(blocks),
 	)
 	require.Positive(t, run.batchedTxs)
-	raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-	require.NoError(t, err)
+	ldb := run.ls.ledgerDB()
 
 	stake := rowBatchingKey(0x22)
-	active := rowBatchingQueryOne[bool](t, raw,
-		`SELECT active FROM account WHERE staking_key = ?`, stake)
-	require.True(t, active, "the registered credential is active")
-	pool := rowBatchingQueryOne[[]byte](t, raw,
-		`SELECT pool FROM account WHERE staking_key = ?`, stake)
-	require.Equal(t, rowBatchingKey(0x11), pool,
+	account, err := ldb.GetAccountByCredential(t.Context(), 0, stake, false, nil)
+	require.NoError(t, err)
+	require.True(t, account.Active, "the registered credential is active")
+	require.Equal(t, rowBatchingKey(0x11), account.Pool,
 		"the delegation must see the registration from the same chunk")
-	drep := rowBatchingQueryOne[[]byte](t, raw,
-		`SELECT drep FROM account WHERE staking_key = ?`, stake)
-	require.Equal(t, rowBatchingKey(0x33), drep)
+	require.Equal(t, rowBatchingKey(0x33), account.Drep)
 
 	require.False(t, outputLiveIn(t, run.ls, names["register"].hash, 0),
 		"the output produced earlier in the chunk is spent by its consumer")
 	require.False(t, outputLiveIn(t, run.ls, names["spend"].hash, 1))
 	require.True(t, outputLiveIn(t, run.ls, names["chain"].hash, 0))
 
-	pools := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM pool`)
-	require.Equal(t, 1, pools)
-	dreps := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM drep`)
-	require.Equal(t, 1, dreps)
-	proposals := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM governance_proposal`)
-	require.Equal(t, 1, proposals)
+	pools, err := ldb.ListPoolKeyHashes(nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{rowBatchingKey(0x11)}, pools)
+	drep, err := ldb.GetDrepByCredential(
+		t.Context(), 0, rowBatchingKey(0x33), false, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, drep.Active)
+	proposals, err := ldb.GetAllGovernanceProposals(t.Context(), nil)
+	require.NoError(t, err)
+	require.Len(t, proposals, 1)
 }
 
 // TestApplyRowBatchingSkipsValidatedDeltas pins that a delta handed back by a
@@ -679,6 +703,7 @@ func TestApplyRowBatchingSkipsValidatedDeltas(t *testing.T) {
 					db:     db,
 					config: LedgerStateConfig{ApplyRowBatchingEnabled: true},
 				}
+				attachTestLiveSet(t, ls)
 				var batched atomic.Int64
 				ls.afterBatchedTransactionWrite = func() { batched.Add(1) }
 

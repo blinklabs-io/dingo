@@ -3310,19 +3310,6 @@ func (lv *LedgerView) GetDRepVotingPower(
 	return power, nil
 }
 
-// GetExpiredDReps returns all active DReps whose expiry epoch is at or
-// before the given epoch.
-func (lv *LedgerView) GetExpiredDReps(
-	epoch uint64,
-) ([]*models.Drep, error) {
-	dreps, err := lv.ls.ledgerDB().
-		GetExpiredDReps(lv.EvaluationContext(), epoch, lv.txn)
-	if err != nil {
-		return nil, lv.storageFault("get expired dreps: %w", err)
-	}
-	return dreps, nil
-}
-
 // GetCommitteeAuthorizedCount returns the number of seated, non-resigned
 // committee members that hold a current hot-key authorization. Members
 // without a hot key are not counted and term expiry is not applied.

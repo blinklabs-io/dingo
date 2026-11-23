@@ -30,6 +30,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/blake2b"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // budgetChain serves a structural certificate chain of length certs whose
@@ -523,6 +525,12 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 
 func TestVerifySTMSignatureRejectsOverCapJSONSignature(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine parse of signatures one past each "+
+			"verification cap; the cap rejections are asserted in the "+
+			"un-instrumented run",
+	)
 
 	msg := make([]byte, 16)
 	avk := hex.EncodeToString([]byte(stmGoldenAggregateVerificationKeyJSON))
@@ -610,6 +618,12 @@ func TestProtocolMessagePartsCap(t *testing.T) {
 // message reads an empty alias and lets the real array through.
 func TestParseSTMAggregateSignatureBoundsSignersBehindCaseAlias(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine parse of a signature one past the "+
+			"signer cap; the cap rejection behind a case alias is "+
+			"asserted in the un-instrumented run",
+	)
 
 	raw, err := os.ReadFile(
 		"testdata/reference/preprod-cardano-blocks-transactions.json",

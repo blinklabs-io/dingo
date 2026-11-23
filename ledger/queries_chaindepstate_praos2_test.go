@@ -109,7 +109,7 @@ func praos2TestLedger(
 					return err
 				}
 				// The nonce fold reads each block's recorded nonce.
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					block.Hash,
 					block.Slot,
 					bytes.Repeat([]byte{0x35}, 32),
@@ -122,7 +122,7 @@ func praos2TestLedger(
 			return nil
 		}))
 	for idx, start := range epochStarts {
-		require.NoError(t, db.Metadata().SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			start, uint64(idx), nil, nil, nil, nil,
 			eraId, 1, 1000, nil,
 		))

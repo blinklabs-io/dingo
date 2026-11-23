@@ -32,7 +32,7 @@ import (
 
 const (
 	txsubmissionRequestTxIdsCount       = 10              // Number of TxIds to request from peer at one time
-	txsubmissionMaxAdmissionRetryStreak = 3               // Drop one offered TX after this many transient admission failures
+	txsubmissionMaxAdmissionRetryStreak = 3               // Pause one offered TX after this many transient admission failures
 	txsubmissionMaxBackoff              = 5 * time.Second // Cap on exponential backoff wait
 	txsubmissionBaseBackoff             = 150 * time.Millisecond
 	txsubmissionLogEvery                = 10 // Log every Nth rate limit hit after the 1st
@@ -712,10 +712,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 					var waitForHeadroom func(int64) bool
 					if limitAdmission {
 						waitForHeadroom = func(need int64) bool {
-							// A transaction that cannot fit even an empty
-							// pool waits for the whole budget and is then
-							// dropped by the retry bound; asking for more
-							// would end intake for this peer.
+							// Bound the wait to the current admission
+							// budget. The exhausted-retry path below rejects
+							// a transaction that remains larger than it.
 							limit := headroom.MaxAdmissionHeadroomBytes()
 							return headroom.WaitForAdmissionHeadroom(
 								min(need, limit),
@@ -723,17 +722,77 @@ func (o *Ouroboros) txsubmissionServerInit(
 							)
 						}
 					}
-					err = retryTxsubmissionAdmission(
-						func() error {
-							return o.mempool.AddTransaction(
-								validationCtx,
-								uint(txBody.EraId),
-								txBody.TxBody,
+					transientFailureBursts := 0
+					permanentlyRejected := false
+					for {
+						err = retryTxsubmissionAdmission(
+							func() error {
+								return o.mempool.AddTransaction(
+									validationCtx,
+									uint(txBody.EraId),
+									txBody.TxBody,
+								)
+							},
+							waitForHeadroom,
+							o.recordTxsubmissionAdmissionRetry,
+						)
+						if !errors.Is(
+							err,
+							errTxsubmissionAdmissionRetriesExhausted,
+						) {
+							break
+						}
+						full, capacityFailure := errors.AsType[*mempool.MempoolFullError](err)
+						if capacityFailure {
+							maxAdmissionBytes := headroom.MaxAdmissionHeadroomBytes()
+							if int64(full.TxSize) > maxAdmissionBytes {
+								o.config.Logger.Warn(
+									"rejecting peer transaction larger than mempool admission capacity",
+									"component", "network",
+									"protocol", "tx-submission",
+									"role", "server",
+									"connection_id", ctx.ConnectionId.String(),
+									"tx_hash", tx.Hash(),
+									"tx_size", full.TxSize,
+									"max_admission_bytes", maxAdmissionBytes,
+								)
+								permanentlyRejected = true
+								break
+							}
+						}
+						transientFailureBursts++
+						if transientFailureBursts == 1 ||
+							transientFailureBursts%txsubmissionLogEvery == 0 {
+							o.config.Logger.Warn(
+								"retaining peer transaction after repeated transient mempool admission failures",
+								"component",
+								"network",
+								"protocol",
+								"tx-submission",
+								"role",
+								"server",
+								"connection_id",
+								ctx.ConnectionId.String(),
+								"tx_hash",
+								tx.Hash(),
+								"retry_bursts",
+								transientFailureBursts,
+								"error",
+								err,
 							)
-						},
-						waitForHeadroom,
-						o.recordTxsubmissionAdmissionRetry,
-					)
+						}
+						backoffTimer.Reset(
+							txsubmissionBackoffDuration(transientFailureBursts),
+						)
+						select {
+						case <-backoffTimer.C:
+						case <-connDone:
+							return
+						}
+					}
+					if permanentlyRejected {
+						continue
+					}
 					if errors.Is(
 						err,
 						errTxsubmissionAdmissionStopped,
@@ -742,29 +801,6 @@ func (o *Ouroboros) txsubmissionServerInit(
 					}
 					if errors.Is(err, mempool.ErrMempoolStopped) {
 						return
-					}
-					if errors.Is(
-						err,
-						errTxsubmissionAdmissionRetriesExhausted,
-					) {
-						o.config.Logger.Warn(
-							"dropping peer transaction after repeated transient mempool admission failures",
-							"component",
-							"network",
-							"protocol",
-							"tx-submission",
-							"role",
-							"server",
-							"connection_id",
-							ctx.ConnectionId.String(),
-							"tx_hash",
-							tx.Hash(),
-							"retry_streak",
-							txsubmissionMaxAdmissionRetryStreak,
-							"error",
-							err,
-						)
-						continue
 					}
 					if errors.Is(
 						err,
