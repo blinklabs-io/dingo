@@ -110,6 +110,21 @@ after checking the affected-row count. An ignored conflict preserves its
 existing output ID and provenance-repair behavior. Other metadata backends
 retain their native returning or upsert paths.
 
+A spend of an output the same `Store` inserted addresses the row by primary key
+(`consumeUtxosByIDQuery`) instead of resolving the producer by transaction hash.
+`insertUtxoModelsChecked`'s ids, with the columns a spend's stake delta needs,
+are kept in the in-memory `spendCache`, which is used only when the store keeps
+utxo rows (no live UTxO source) and the dialect accepts `RETURNING` (not MySQL).
+The cache is a hint: the update matches only a live row, and an input it did not
+update takes the by-reference path. SQLite `AUTOINCREMENT` and PostgreSQL
+sequences never reuse a committed row's id, but a rolled-back SQLite insert
+frees its id. An insert's entries are therefore held on its transaction, where
+later writes in that transaction can use them, and are published to the store
+only when `Commit` succeeds. A rollback, a failed commit, a context
+cancellation that rolls the transaction back inside `database/sql`, or
+`ROLLBACK TO SAVEPOINT` discards them.
+`Reset` and `RestoreFrom` replace the rows themselves, so they empty the cache.
+
 SQLite keeps planner statistics current while the node runs. A node synced from
 genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
