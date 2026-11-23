@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	rtrace "runtime/trace"
 )
 
@@ -77,4 +78,17 @@ func inStatementRegion[T any](
 ) (T, error) {
 	defer statementRegion(ctx, query)()
 	return run()
+}
+
+// queryRowInStatementRegion is inStatementRegion for QueryRowContext. It is
+// not routed through the generic helper because nilaway cannot see that a
+// *sql.Row returned through T is non-nil, and callers Scan it unguarded.
+func queryRowInStatementRegion(
+	ctx context.Context,
+	query string,
+	stmt *sql.Stmt,
+	args ...any,
+) *sql.Row {
+	defer statementRegion(ctx, query)()
+	return stmt.QueryRowContext(ctx, args...)
 }
