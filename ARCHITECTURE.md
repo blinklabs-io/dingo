@@ -715,8 +715,7 @@ sequenceDiagram
     LS->>EB: publish TransactionEvent(rollback: true) per tx
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
-    ChM->>DB: restore account/pool/DRep state
-    LS->>DB: recompute CIP-0163 account expiration (epoch-owned)
+    LS->>DB: roll the LedgerDB set back through its journal (account, pool and DRep state, CIP-0163 expirations)
     LS->>LS: reload epoch cache, repair lab nonces
     LS->>DB: clear rollback undo outbox after truncation commits
 ```
@@ -23405,8 +23404,7 @@ Retention itself is never configurable or age-based for any of these tables
 `account_withdrawal_witness` deletes in
 `database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
 slot` for a rollback or lifecycle-truncate target slot (the same primitive
-both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
-Lifecycle Truncate" below). That target slot is derived from consensus chain
+both share, see "CIP-0163 Bookkeeping in Lifecycle Truncate" below). That target slot is derived from consensus chain
 state, not wall-clock time or per-node configuration, so it produces
 byte-identical retained history on every node that rolls back or truncates to
 the same point; a node that has not rolled back or lifecycle-truncated past a
@@ -25567,7 +25565,7 @@ the same canonical rejection from silently replaying forever. The backoff
 helpers retain bounded escalation for diagnostics, but the main retry loop
 does not sleep and retry after the terminal threshold.
 
-### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
+### CIP-0163 Bookkeeping in Lifecycle Truncate
 
 `database.RecomputeAccountExpirationsAfterTruncate`
 (`database/account_expiry_truncate.go`) and `database.EpochBySlot`
@@ -25587,8 +25585,8 @@ naming the
 one-time CIP-0163 activation stamp
 (`database.DelegatorInactivityActivatedSyncKey`) is defined once, since the
 ledger's reads through its `LedgerDB`, the load that moves a store's
-`sync_state` value into the set, and the shared rollback/truncate read/clear
-side of a store from before that move must agree on the exact same key.
+`sync_state` value into the set, and the truncate's read/clear side of a
+store from before that move must agree on the exact same key.
 
 Before this, `database/lifecycle.Truncate` called `database.TruncateAfterSlot`
 directly with no CIP-0163 hooks at all — a truncate on a CIP-0163-enabled
