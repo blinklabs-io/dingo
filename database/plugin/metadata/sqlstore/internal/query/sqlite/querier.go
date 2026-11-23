@@ -177,7 +177,7 @@ type Querier interface {
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
 	GetTransactionMetadataByHash(ctx context.Context, hash []byte) ([]byte, error)
 	GetTransactionSlotByHash(ctx context.Context, hash []byte) (sql.NullInt64, error)
-	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error)
+	GetTransactionsByBlockHash(ctx context.Context, hash []byte) ([]GetTransactionsByBlockHashRow, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
 	ImportDrep(ctx context.Context, arg ImportDrepParams) (int64, error)

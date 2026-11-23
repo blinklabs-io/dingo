@@ -253,7 +253,7 @@ func registerCardanoTools(
 			queries := []struct{ sql, source string }{
 				{"SELECT slot, hash, block_number FROM tip ORDER BY id DESC LIMIT 1", "metadata_tip"},
 				{"SELECT slot, hash, height FROM blocks ORDER BY slot DESC LIMIT 1", "metadata_blocks"},
-				{"SELECT slot, block_hash, 0 FROM applied_transaction ORDER BY slot DESC LIMIT 1", "metadata_transaction"},
+				{"SELECT a.slot, b.hash, 0 FROM applied_transaction a LEFT JOIN block_identity b ON b.id = a.block_id ORDER BY a.slot DESC LIMIT 1", "metadata_transaction"},
 			}
 			for _, query := range queries {
 				err := db.QueryRowContext(qCtx, query.sql).Scan(&slot, &rawHash, &blockHeight)
@@ -386,12 +386,25 @@ func registerCardanoTools(
 				}
 			}
 		} else {
-			if !bySlot {
-				where = "block_hash = ? OR block_hash = ?"
+			// Dingo's applied_transaction names its block through
+			// block_identity; the db-sync style tx table keeps a block_hash
+			// column.
+			sources := []struct{ from, where, hash string }{
+				{
+					"applied_transaction a JOIN block_identity b ON b.id = a.block_id",
+					"a.slot = ?", "b.hash",
+				},
+				{"tx", "slot = ?", "block_hash"},
 			}
-			for _, table := range []string{"applied_transaction", "tx"} {
+			for i := range sources {
+				if !bySlot {
+					sources[i].where = sources[i].hash + " = ? OR " +
+						sources[i].hash + " = ?"
+				}
+			}
+			for _, source := range sources {
 				// HAVING avoids scanning NULL aggregates when no transaction matches.
-				ok, err := scan("SELECT count(*), coalesce(sum(fee), 0), min(slot), min(block_hash) FROM "+table+" WHERE "+where+" HAVING count(*) > 0", &txCount, &totalFees, &slot, &rawHash)
+				ok, err := scan("SELECT count(*), coalesce(sum(fee), 0), min(slot), min("+source.hash+") FROM "+source.from+" WHERE "+source.where+" HAVING count(*) > 0", &txCount, &totalFees, &slot, &rawHash)
 				if err != nil {
 					return nil, nil, fmt.Errorf("read block transactions: %w", err)
 				}

@@ -544,9 +544,15 @@ CREATE TABLE "transaction" (
     UNIQUE (hash)
 );
 
+CREATE TABLE block_identity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash BLOB NOT NULL,
+    UNIQUE (hash)
+);
+
 CREATE TABLE applied_transaction (
     tx_id INTEGER PRIMARY KEY,
-    block_hash BLOB,
+    block_id INTEGER,
     metadata BLOB,
     slot INTEGER,
     type INTEGER,

@@ -242,8 +242,9 @@ func (s *Scenario) StoreChain(t *testing.T, db *database.Database) {
 
 const projectionQueries = `
 SELECT 'tx ' || hex(t.hash) || ' slot=' || COALESCE(a.slot, '') ||
-  ' index=' || COALESCE(a.block_index, '') || ' block=' || hex(a.block_hash)
+  ' index=' || COALESCE(a.block_index, '') || ' block=' || COALESCE(hex(b.hash), '')
 FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id
+LEFT JOIN block_identity b ON b.id = a.block_id
 UNION ALL
 SELECT 'utxo ' || hex(t.hash) || '#' || u.output_idx ||
   ' amount=' || COALESCE(u.amount, '') ||

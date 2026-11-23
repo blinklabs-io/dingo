@@ -56,9 +56,15 @@ func testBlockTotalsBackend(t *testing.T, s *Store) {
 		_, err := s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(
 			"INSERT INTO "+table+" (id,hash) VALUES (?,?)"), i+1, h)
 		require.NoError(t, err)
+		if i == 0 || i == 4 {
+			_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(
+				`INSERT INTO block_identity (hash) VALUES (?)`), block)
+			require.NoError(t, err)
+		}
 		_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
-INSERT INTO applied_transaction (tx_id,block_hash,slot,fee,block_index,valid)
-VALUES (?,?,?,?,?,?)`), i+1, block, 1, fee, i, valid)
+INSERT INTO applied_transaction (tx_id,block_id,slot,fee,block_index,valid)
+VALUES (?,(SELECT id FROM block_identity WHERE hash = ?),?,?,?,?)`),
+			i+1, block, 1, fee, i, valid)
 		require.NoError(t, err)
 		_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
 INSERT INTO utxo (id,tx_id,output_idx,amount,deleted_slot)

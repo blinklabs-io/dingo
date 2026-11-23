@@ -3271,10 +3271,11 @@ func (q *Queries) GetTokenRegistryEntry(ctx context.Context, subject string) (Ge
 }
 
 const getTransactionByHash = `-- name: GetTransactionByHash :one
-SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+SELECT t.hash, b.hash AS block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
        a.collateral_fee, a.ttl, a.block_index, a.valid
 FROM "transaction" AS t
 JOIN applied_transaction AS a ON a.tx_id = t.id
+LEFT JOIN block_identity AS b ON b.id = a.block_id
 WHERE t.hash = ?
 `
 
@@ -3384,11 +3385,12 @@ func (q *Queries) GetTransactionSlotByHash(ctx context.Context, hash []byte) (sq
 }
 
 const getTransactionsByBlockHash = `-- name: GetTransactionsByBlockHash :many
-SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+SELECT t.hash, b.hash AS block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
        a.collateral_fee, a.ttl, a.block_index, a.valid
-FROM applied_transaction AS a
+FROM block_identity AS b
+JOIN applied_transaction AS a ON a.block_id = b.id
 JOIN "transaction" AS t ON t.id = a.tx_id
-WHERE a.block_hash = ?
+WHERE b.hash = ?
 ORDER BY a.block_index ASC
 `
 
@@ -3406,8 +3408,8 @@ type GetTransactionsByBlockHashRow struct {
 	Valid         sql.NullBool
 }
 
-func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error) {
-	rows, err := q.db.QueryContext(ctx, getTransactionsByBlockHash, blockHash)
+func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, hash []byte) ([]GetTransactionsByBlockHashRow, error) {
+	rows, err := q.db.QueryContext(ctx, getTransactionsByBlockHash, hash)
 	if err != nil {
 		return nil, err
 	}

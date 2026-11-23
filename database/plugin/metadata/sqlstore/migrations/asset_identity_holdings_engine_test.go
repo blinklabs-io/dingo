@@ -56,10 +56,14 @@ func (e *assetSplitEngine) query(q string) string {
 	return out.String()
 }
 
-func newPostgresAssetSplitEngine(t *testing.T) *assetSplitEngine {
+// newPostgresAssetSplitEngine returns an engine on a fresh schema of the
+// given name, so tests running in parallel never share one.
+func newPostgresAssetSplitEngine(
+	t *testing.T,
+	schema string,
+) *assetSplitEngine {
 	t.Helper()
 	dsn := postgresEngineTestDSN(t)
-	schema := "dingo_v73_split"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
@@ -102,10 +106,14 @@ WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
 	}
 }
 
-func newMySQLAssetSplitEngine(t *testing.T) *assetSplitEngine {
+// newMySQLAssetSplitEngine returns an engine on a fresh database of the given
+// name, so tests running in parallel never share one.
+func newMySQLAssetSplitEngine(
+	t *testing.T,
+	database string,
+) *assetSplitEngine {
 	t.Helper()
 	rootDSN := mysqlEngineTestRootDSN(t)
-	database := "dingo_v73_split"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
@@ -253,10 +261,10 @@ WHERE version = ?`), true, assetSplitVersion)
 
 func TestAssetIdentityHoldingsAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t))
+	exerciseAssetSplit(t, newPostgresAssetSplitEngine(t, "dingo_v73_split"))
 }
 
 func TestAssetIdentityHoldingsAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
-	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t))
+	exerciseAssetSplit(t, newMySQLAssetSplitEngine(t, "dingo_v73_split"))
 }

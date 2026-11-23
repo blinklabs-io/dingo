@@ -109,7 +109,7 @@ func TestSQLiteTransactionInsertKeepsConflictIdentity(t *testing.T) {
 			var collateral string
 			require.NoError(
 				t,
-				db.QueryRowContext(ctx, `SELECT block_hash,slot,collateral_fee,block_index FROM applied_transaction WHERE tx_id=?`, id).
+				db.QueryRowContext(ctx, `SELECT (SELECT hash FROM block_identity WHERE id = block_id),slot,collateral_fee,block_index FROM applied_transaction WHERE tx_id=?`, id).
 					Scan(&blockHash, &slot, &collateral, &index),
 			)
 			require.Equal(t, []byte{21}, blockHash)

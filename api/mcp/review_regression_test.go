@@ -115,7 +115,7 @@ func TestReviewStatusAndQuotedSchema(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	_, err = db.Exec(
-		`CREATE TABLE applied_transaction(slot INTEGER, hash BLOB, block_hash BLOB); INSERT INTO applied_transaction VALUES (42,x'aa',x'bb'); CREATE TABLE "catalog's probe"("quoted col" TEXT);`,
+		`CREATE TABLE block_identity(id INTEGER PRIMARY KEY, hash BLOB); INSERT INTO block_identity VALUES (1,x'bb'); CREATE TABLE applied_transaction(slot INTEGER, hash BLOB, block_id INTEGER); INSERT INTO applied_transaction VALUES (42,x'aa',1); CREATE TABLE "catalog's probe"("quoted col" TEXT);`,
 	)
 	require.NoError(t, err)
 	server := mcp.NewServer(
@@ -425,7 +425,7 @@ func TestReviewTipAndLookupFailures(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(
-		`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB); CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB, fee INTEGER, block_index INTEGER); INSERT INTO "transaction" VALUES(1,x'aa'); INSERT INTO applied_transaction VALUES(1,42,x'bb',0,0)`,
+		`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB); CREATE TABLE block_identity(id INTEGER PRIMARY KEY, hash BLOB); INSERT INTO block_identity VALUES(1,x'bb'); CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_id INTEGER, fee INTEGER, block_index INTEGER); INSERT INTO "transaction" VALUES(1,x'aa'); INSERT INTO applied_transaction VALUES(1,42,1,0,0)`,
 	)
 	require.NoError(t, err)
 	cs := newToolSession(t, db, 100)

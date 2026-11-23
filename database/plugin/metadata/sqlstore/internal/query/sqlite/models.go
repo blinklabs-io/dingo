@@ -40,7 +40,7 @@ type AddressTransactionRebuildSource struct {
 
 type AppliedTransaction struct {
 	TxID          int64
-	BlockHash     []byte
+	BlockID       sql.NullInt64
 	Metadata      []byte
 	Slot          sql.NullInt64
 	Type          sql.NullInt64
@@ -84,6 +84,11 @@ type BackfillCheckpoint struct {
 	StartedAt     sql.NullTime
 	UpdatedAt     sql.NullTime
 	Completed     sql.NullBool
+}
+
+type BlockIdentity struct {
+	ID   int64
+	Hash []byte
 }
 
 type BlockNonce struct {

@@ -15,6 +15,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"regexp"
@@ -320,7 +321,8 @@ func TestSchemaGuidanceAgainstMigratedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	_, err = testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (hash, block_hash, slot, block_index, fee)
-VALUES (zeroblob(32), zeroblob(32), 123, 0, '170001')`,
+VALUES (zeroblob(32), ?, 123, 0, '170001')`,
+		bytes.Repeat([]byte{0xab}, 32),
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(`
@@ -370,6 +372,7 @@ VALUES (zeroblob(32), X'182A', 123);`)
 			require.Len(t, rows, 1)
 			require.Equal(t, "170001", rows[0]["fee_lovelace"])
 			require.Equal(t, strings.Repeat("00", 32), rows[0]["tx_hash"])
+			require.Equal(t, strings.Repeat("AB", 32), rows[0]["block_hash"])
 		case strings.Contains(query, "FROM utxo"):
 			require.Len(t, rows, 1, "spent outputs must be excluded")
 			require.Equal(t, "1000001", rows[0]["lovelace"])

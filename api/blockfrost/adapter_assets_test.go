@@ -283,8 +283,11 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 		ID:   2 + database.BlockInitialIndex,
 		Type: 0, Cbor: []byte{2},
 	}, nil))
-	_, err := raw.Exec(
-		`UPDATE applied_transaction SET block_hash = ?, block_index = 0
+	_, err := raw.Exec(`INSERT INTO block_identity (hash) VALUES (?)`, blockHash)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`UPDATE applied_transaction
+SET block_id = (SELECT id FROM block_identity WHERE hash = ?), block_index = 0
 WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		blockHash,
 		produce,

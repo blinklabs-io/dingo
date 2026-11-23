@@ -114,6 +114,7 @@ const (
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	appliedTransactionBlockIdentitySchemaRelease        = "applied-transaction-block-identity"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -307,6 +308,11 @@ var schemaVersions = []struct {
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{
+		Version: 74,
+		Name:    appliedTransactionBlockIdentitySchemaRelease,
+		Dir:     "v74",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -491,6 +497,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
 			migration.BatchSize = assetIdentityHoldingsBatchSize
+		}
+		if version.Name == appliedTransactionBlockIdentitySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = appliedTransactionBlockIdentityBackfill(dialect)
+			migration.BatchSize = appliedTransactionBlockIdentityBatchSize
 		}
 		ret = append(ret, migration)
 	}
@@ -2157,6 +2168,7 @@ func translateSchemaSQLInSchema(
 				"idx_account_drep":                    "account",
 				"idx_datum_hash":                      "datum",
 				"idx_script_hash":                     "script",
+				"idx_applied_transaction_block_hash":  "applied_transaction",
 			} {
 				value = strings.ReplaceAll(
 					value,

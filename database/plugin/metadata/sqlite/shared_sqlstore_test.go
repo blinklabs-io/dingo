@@ -1770,10 +1770,14 @@ WITH RECURSIVE seq(n) AS (
 INSERT INTO "transaction" (id, hash) SELECT n, CAST(n AS BLOB) FROM seq`, from, to)
 	require.NoError(t, err)
 	_, err = db.Exec(`
+INSERT INTO block_identity (id, hash)
+SELECT id, hash FROM "transaction" WHERE id >= ? AND id < ?`, from, to)
+	require.NoError(t, err)
+	_, err = db.Exec(`
 INSERT INTO applied_transaction (
-    tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
+    tx_id, block_id, slot, type, fee, collateral_fee, ttl, block_index, valid
 )
-SELECT id, hash, id, 0, '0', '0', '0', 0, TRUE FROM "transaction"
+SELECT id, id, id, 0, '0', '0', '0', 0, TRUE FROM "transaction"
 WHERE id >= ? AND id < ?`, from, to)
 	require.NoError(t, err)
 	for _, statement := range []string{

@@ -31,12 +31,12 @@ var _ metadata.BlockTransactionTotalsStore = (*Store)(nil)
 const blockTransactionAmountRows = `-- name: ProjectBlockTransactionAmountRows
 SELECT 0 AS is_output, tx.fee AS amount
 FROM applied_transaction tx
-WHERE tx.block_hash = ?
+WHERE tx.block_id = (SELECT id FROM block_identity WHERE hash = ?)
 UNION ALL
 SELECT 1 AS is_output, u.amount
 FROM applied_transaction tx
 LEFT JOIN utxo u ON u.tx_id = tx.tx_id AND u.collateral_return_for_tx_id IS NULL
-WHERE tx.block_hash = ?
+WHERE tx.block_id = (SELECT id FROM block_identity WHERE hash = ?)
   AND (COALESCE(tx.valid, FALSE) OR NOT EXISTS (
     SELECT 1 FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.tx_id
   ))
@@ -45,7 +45,7 @@ SELECT 1 AS is_output, (
   SELECT cr.amount FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.tx_id
 ) AS amount
 FROM applied_transaction tx
-WHERE tx.block_hash = ? AND NOT COALESCE(tx.valid, FALSE)`
+WHERE tx.block_id = (SELECT id FROM block_identity WHERE hash = ?) AND NOT COALESCE(tx.valid, FALSE)`
 
 // GetBlockTransactionTotals projects recorded fees and effective outputs.
 func (s *Store) GetBlockTransactionTotals(
