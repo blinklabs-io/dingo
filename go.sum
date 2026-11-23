@@ -123,8 +123,8 @@ github.com/bits-and-blooms/bitset v1.25.0 h1:0Ro0qF4abCkM6SqWPVj29sFhAbMPAZpaDD7
 github.com/bits-and-blooms/bitset v1.25.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
-github.com/blinklabs-io/bark v0.4.0 h1:FAFw1YZWX5K6MSOhJy57DN3Az3HqlrpWjdWhMFJNuC8=
-github.com/blinklabs-io/bark v0.4.0/go.mod h1:MF05f5UUMyms7hqRwPh20IMmmHL2XsUzUGUPoAso9mY=
+github.com/blinklabs-io/bark v0.6.0 h1:q6EUums8u9g8IhLM+LnirbuptviEUwluWQM2W2f9DhM=
+github.com/blinklabs-io/bark v0.6.0/go.mod h1:MF05f5UUMyms7hqRwPh20IMmmHL2XsUzUGUPoAso9mY=
 github.com/blinklabs-io/bursa v0.25.0 h1:Kx9wqKFjffUjttjjjc+L/+0UkrN0fALBxMJuE2sDMks=
 github.com/blinklabs-io/bursa v0.25.0/go.mod h1:bi/uzsC+XOlOTZ4iFHqmJEcz6LpMpuYZEmPpl7HrVbg=
 github.com/blinklabs-io/go-bip39 v0.2.1 h1:kE44ZAhBJ75ITHFpKT+LS+Sg4iXwo2xENRdW+y2/sLo=
