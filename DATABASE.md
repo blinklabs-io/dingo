@@ -7497,6 +7497,20 @@ another process, so `Close` logs a warning and returns, and the next open
 reports the lock. Windows children do not inherit the handle,
 so the wait is a no-op there.
 
+### Empty Memtable Files After a Hard Kill
+
+A process killed while badger creates a new memtable write-ahead file leaves a
+zero-length `*.mem` file, and badger's own open (`openMemTables`) then fails
+with `while opening fid: N err: Create a new file`. That failed open has
+already extended the file to its working size, so the on-disk blob store and
+the live UTxO set (`badgerutxo.Open`) open such a store through
+`database/internal/badgermem.Open`, which retries exactly that failure once.
+Nothing is deleted or rewritten outside badger: the repair happens inside
+badger while it holds its directory lock, so a directory another process has
+open is left alone. The blob store logs the retry as a warning.
+`reward-input-repair` opens the blob directory read-only as a writer guard and
+does not retry; the node's next start repairs the file.
+
 ### Cross-Store Durability Contract
 
 The metadata tip and the block bytes it references live in two independently
