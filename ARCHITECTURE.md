@@ -2821,6 +2821,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chain.header` | ChainManager | Ordered header-lifecycle stream. Carries one event for every authenticated Leios-era ranking-block header admitted to the header queue: `ChainHeaderAnnouncementEvent` (slot, header hash, announced endorser-block hash, issuer pool key hash, admission time, `Seq`) for an announcement, or `ChainHeaderObservedEvent` (slot, header hash, issuer pool key hash, `Seq`) otherwise. A block added without the queue (a local forge, a bulk restore) publishes only its announcement, and headers from eras without announcements publish nothing. `ChainHeaderInvalidationEvent` (highest still-valid point, discarded ranking-block hashes, reason, `Seq`) records queued headers leaving the chain. Events are enqueued under the chain mutex, so the Leios VoteManager can arm announcements, detect RB equivocation and identify the latest RB in chain-mutation order. Only the primary chain publishes: fork chains built by `NewChain` and `NewChainFromIntersect` carry no event bus, so their headers and blocks reach neither this topic nor `chain.update`. |
 | `chain.fork_detected` | ChainManager | Fork detected |
 | `database.immutable_tip_advanced` | blockpromote.Promoter | A promotion step moved the immutable tip (`blockpromote.TipAdvancedEvent`: tip hash, slot, block index, blocks promoted) |
+| `database.operation` | Bark DatabaseService | A snapshot, restore, truncate or verify operation entered a new status (`bark.DatabaseOperationEvent`: operation id, type, status, and the error when it failed). Published only while the EventService is mounted |
 | `chainselection.peer_tip_update` | ChainSelector | Peer tip updated |
 | `chainselection.chain_switch` | ChainSelector | Active peer changed |
 | `chainselection.selection` | ChainSelector | Chain selection made |
@@ -2852,6 +2853,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
 | `ledger.pool_restored` | LedgerState | Pool state restored after rollback |
+| `ledger.sync_state` | Node | The node moved between catching up to the chain tip and following it (`ledger.SyncStateEvent`: previous and current state, ledger tip slot, slots behind the wall clock). Caught up comes from the ledger's `IsAtTip` latch, which is read once because it never resets, and from `chainselection.genesis_mode_exited`; falling behind comes only from `chainselection.genesis_mode_entered`, so a node without Genesis selection reports one transition per run. Those two events arrive on separate subscriber goroutines, so each callback applies the selector's current mode (`GenesisSelectionState`) rather than the transition it announced; the ledger latch is ignored while the selector is in Genesis mode, so on a Genesis network caught up comes from the Genesis exit. Published only on a change |
+| `ledger.protocol_params` | Node | The protocol parameters in force changed (`ledger.ProtocolParamsEvent`: epoch, parameters). Checked on each `epoch.transition` against the last parameters seen, compared as the era's complete parameter set (`ledger.ProtocolParamsJSON`), so a change to a parameter the utxorpc form omits still counts; the parameters at startup are the baseline and are not published, and one check right after subscribing reports a change that landed between the two |
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block forged and adopted onto the chain |
@@ -9390,7 +9393,13 @@ to every eligible peer, not only the selected one, so headers admitted from a
 stale peer would stay in the shared header queue after selection moved to honest
 peers and make their headers look like a persistent fork. A connection whose
 latest advertised tip is stale holds no ingress slot either, and its delivered
-history still counts for corroboration. `chainsync.State` keeps each
+history still counts for corroboration. In every selection mode,
+`ChainSelector.AdvertisedTipStale` also treats a tip as stale when its block
+number is more than k below the applied local tip: candidate eligibility rejects
+such a peer as unable to extend the local chain, so it must not hold an ingress
+slot while selectable peers wait as observers. That clause compares the
+advertised tip with the selector's local tip; it reads neither the tracked tip
+nor the wall clock. `chainsync.State` keeps each
 connection's latest advertised tip and judges it against the wall clock when a
 decision is made, through `Config.AdvertisedTipStale`: the roll-forward and
 roll-backward handlers demote a connection advertising a stale tip, and every
@@ -21064,8 +21073,9 @@ Non-checkpoint block nonce rows are pruned below the last three epochs, while
 checkpoint rows are kept; API storage mode accepts older points, and for those
 the fold recomputes the nonces from the stored blocks. With this, every
 implemented leaf query that reads ledger or consensus state answers at the
-acquired point; leaves not yet implemented (#394) are refused as unsupported
-rather than answered from the tip. `queryShelleyLeaf`'s audit lists each.
+acquired point. The deliberately unanswered debug epoch-state leaves return
+`ErrQueryNotAnswered`, and unsupported leaves are refused rather than answered
+from the tip. `queryShelleyLeaf`'s audit lists each.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's
@@ -21332,8 +21342,12 @@ only when `barkEventEnabled` is true. Bark holds no credentials, so the bind
 address is the access control: enabling it defaults the listener to loopback,
 as for the lifecycle services. `eventAdapter` subscribes to the internal
 EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
-`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`) and
-converts each to a registry event with a typed payload; a rollback travelling on
+`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`,
+`ledger.sync_state`, `ledger.protocol_params`, `database.operation`) and
+converts each to a registry event with a typed payload. Protocol parameters
+travel as the complete parameter set in its era's own shape encoded as JSON
+(`ledger.ProtocolParamsJSON`), named by the payload's era, and are dropped
+with a warning when that conversion fails; a rollback travelling on
 `chain.update` stays on `chain.update` and is reported in the payload's
 `rollback` field. A subscription filter selects by registered event type or
 category pattern (`peergov.*`) and optionally by `origin_node_ids`. This
@@ -21360,8 +21374,6 @@ only accepts its own typed structs. Concurrent-stream limits
 (`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
 operator opt-ins; zero or unset means unlimited, and `PublishBatch` has no
 fixed batch cap.
-Sync state, protocol parameter and database operation events are not in the
-registry because no internal event carries that data.
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s

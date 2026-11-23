@@ -17,7 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.13
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
-	github.com/blinklabs-io/bark v0.4.0
+	github.com/blinklabs-io/bark v0.5.0
 	github.com/blinklabs-io/bursa v0.25.0
 	github.com/blinklabs-io/go-scls v0.2.0
 	github.com/blinklabs-io/gouroboros v0.220.4
@@ -35,7 +35,7 @@ require (
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.5
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
