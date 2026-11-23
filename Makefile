@@ -74,7 +74,7 @@ NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_FLAGS ?=
-MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
+MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$|/plugin/pluginrpc$$')
 
 .PHONY: all build help install uninstall mod-tidy clean format golines lint nilaway modernize import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-storage-scale bench-ci bench-gate bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
@@ -159,6 +159,24 @@ proto: $(PROTOC) ## Generate Go code from protobuf definitions
 		--go-grpc_opt=module=$(GOMODULE) \
 		--go-grpc_opt=Mmidnight/proto/midnight_state.proto=$(GOMODULE)/midnight \
 		$(ROOT_DIR)/midnight/proto/midnight_state.proto
+	PATH="$(TOOLS_BIN):$$PATH" $(PROTOC) \
+		-I $(ROOT_DIR) \
+		--go_out=$(ROOT_DIR) \
+		--go_opt=module=$(GOMODULE) \
+		--go_opt=Msdk/plugin/proto/plugin.proto=$(GOMODULE)/plugin/pluginrpc \
+		--go-grpc_out=$(ROOT_DIR) \
+		--go-grpc_opt=module=$(GOMODULE) \
+		--go-grpc_opt=Msdk/plugin/proto/plugin.proto=$(GOMODULE)/plugin/pluginrpc \
+		$(ROOT_DIR)/sdk/plugin/proto/plugin.proto
+	PATH="$(TOOLS_BIN):$$PATH" $(PROTOC) \
+		-I $(ROOT_DIR) \
+		--go_out=$(ROOT_DIR)/sdk \
+		--go_opt=module=$(GOMODULE)/sdk \
+		--go_opt=Msdk/plugin/proto/plugin.proto=$(GOMODULE)/sdk/plugin/internal/pluginrpc \
+		--go-grpc_out=$(ROOT_DIR)/sdk \
+		--go-grpc_opt=module=$(GOMODULE)/sdk \
+		--go-grpc_opt=Msdk/plugin/proto/plugin.proto=$(GOMODULE)/sdk/plugin/internal/pluginrpc \
+		$(ROOT_DIR)/sdk/plugin/proto/plugin.proto
 
 sql: ## Generate typed database/sql queries with pinned sqlc
 	$(call VERIFY_GO_MODULE,$(SQLC_MODULE),$(SQLC_VERSION),$(SQLC_SUM))

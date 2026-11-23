@@ -165,6 +165,8 @@ type Host struct {
 	// even though started no longer lists them.
 	durableCapabilityStops int
 	logger                 *slog.Logger
+	// failureHandler receives failures of started external plugins.
+	failureHandler func(Failure)
 	// progressInterval overrides defaultDurableCloseProgressInterval when
 	// positive.
 	progressInterval time.Duration

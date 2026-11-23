@@ -1,0 +1,44 @@
+// Control protocol between the Dingo node and an out-of-process plugin.
+//
+// The plugin serves this service on a Unix socket next to the capability
+// services it implements. The node repeats the source in plugin/pluginrpc
+// because it does not import the sdk module; both copies are generated from
+// this file by `make proto`.
+syntax = "proto3";
+
+package dingo.plugin.v0;
+
+service Control {
+  // Negotiate exchanges protocol and contract versions and proves the plugin
+  // holds the launch token.
+  rpc Negotiate (NegotiateRequest) returns (NegotiateResponse);
+  // Ping is the keepalive probe.
+  rpc Ping (PingRequest) returns (PingResponse);
+  // Stop asks the plugin to finish in-flight calls and exit.
+  rpc Stop (StopRequest) returns (StopResponse);
+}
+
+message NegotiateRequest {
+  // Version of this control protocol the node speaks.
+  uint32 protocol_version = 1;
+  // Capability the node resolves, written <name>/v<N>.
+  string capability = 2;
+  // Fresh random bytes the plugin must authenticate with the launch token.
+  bytes nonce = 3;
+}
+
+message NegotiateResponse {
+  // Version of this control protocol the plugin speaks.
+  uint32 protocol_version = 1;
+  string plugin_name = 2;
+  string plugin_version = 3;
+  // Capabilities the plugin implements, each written <name>/v<N>.
+  repeated string capabilities = 4;
+  // HMAC-SHA256 of the request nonce keyed by the launch token.
+  bytes proof = 5;
+}
+
+message PingRequest {}
+message PingResponse {}
+message StopRequest {}
+message StopResponse {}

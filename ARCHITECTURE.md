@@ -131,6 +131,53 @@ dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that
 fallback through their typed `dataDir` configuration.
 
+### Out-of-process plugins
+
+`plugin.RegisterExternal[S, D]` registers a provider that runs as a separate
+executable and serves its capability over gRPC. Its `bind` function turns the
+connection into the capability's service type (typically a generated client),
+so `Resolve[S, D]` returns the same typed value a compiled-in provider does and
+its callers do not change; the provider ignores `D`. Its typed configuration is
+`plugin.ExternalConfig`: `command`, `args`, `env`, `runtimeDir` and the start,
+stop and keepalive timeouts. The plugin's environment is exactly `env`; the
+host's is not inherited.
+
+Launch builds the process through a `plugin.CommandFunc` (`WithCommand`), the
+one place that owns the command line and environment, so a sandbox can wrap it
+later. The host creates a private runtime directory and a random one-time
+token, starts the process and writes one JSON line to its standard input:
+control protocol version, socket path, token. Standard input stays open; a
+plugin that sees it close exits, so a dead host leaves no orphan. The plugin
+(`sdk/plugin.Serve(manifest, impls...)`) serves its capability services and the
+`dingo.plugin.v0.Control` service on that Unix socket and rejects any call
+without the token. The socket path is kept under 100 bytes for the sun_path
+limit.
+
+`Negotiate` carries the control protocol version, the requested capability and
+a nonce. The plugin answers with its protocol version, the capabilities it
+implements and an HMAC of the nonce keyed by the token, which the host
+verifies. Versions match exactly while the SDK is pre-1.0: a different
+protocol version, or a capability with the same name at another version, is a
+startup error naming both. A process that exits before negotiating fails
+`Resolve` at once with its exit status and the tail of its standard error. A
+failed start stops the process and removes the runtime directory.
+
+After start the host pings the plugin every `keepaliveInterval` and watches the
+process. An exit or a failed ping is logged with the capability, provider and
+cause, then passed to the handler set by `Host.SetFailureHandler`, which runs on
+its own goroutine and calls `Host.Stop` to unwind every provider in reverse
+start order. Stopping a plugin sends `Control.Stop`, then SIGTERM, then
+SIGKILL, each phase bounded by `stopTimeout` and the stop context; Stop
+reports an error when a plugin needed a signal.
+
+The control protocol is `sdk/plugin/proto/plugin.proto`. `make proto` generates
+it into `sdk/plugin/internal/pluginrpc` and into `plugin/pluginrpc`, because
+the node module does not import the SDK module. External plugins need Unix
+sockets and signals; the package tests skip on Windows. The thin launcher is
+used instead of hashicorp/go-plugin (MPL-2.0) because the handshake, token
+check and process control are small, the SDK module stays free of a copyleft
+dependency, and the launch step remains a single seam.
+
 ### Shared metadata SQL store
 
 The shared `database/plugin/metadata/sqlstore` package is the composition
