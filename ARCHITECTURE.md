@@ -12485,6 +12485,14 @@ another ID would acknowledge and lose the unfetched transaction. Intake waits
 with connection-cancellable backoff rather than dropping offers. Batches are
 bounded by the limiter's burst capacity so they can eventually be admitted.
 
+When ledger validation rejects an admission, the mempool checks whether that
+transaction is already applied through the same repeatable-read validation
+session. Only an `applied_transaction` row counts; an identity-only
+`transaction` row does not. An applied transaction remains outside the
+mempool, but peer TxSubmission records it at debug level and continues intake.
+A validation failure for any transaction not applied in that snapshot remains
+an admission error.
+
 FIFO intake requests at most ten IDs per round, matching gouroboros's
 `MaxUnackedTxIds` window. The protocol rejects a request that would exceed that
 window and applies a byte budget to TxSubmission's pending messages, so a peer

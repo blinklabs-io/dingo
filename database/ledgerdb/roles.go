@@ -2115,6 +2115,13 @@ type TxHistory interface {
 		hash []byte,
 		txn Txn,
 	) (*models.Transaction, error)
+	// GetTransactionSlotByHash returns the slot of the applied transaction
+	// with hash, or false when the hash has no applied transaction row.
+	GetTransactionSlotByHash(
+		ctx context.Context,
+		hash []byte,
+		txn Txn,
+	) (uint64, bool, error)
 	// GetTransactionsByHashes returns transactions for the provided hashes.
 	GetTransactionsByHashes(
 		ctx context.Context,

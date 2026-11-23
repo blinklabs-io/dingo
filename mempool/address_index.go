@@ -41,6 +41,8 @@ type UtxoResolver interface {
 // connection its validations read. The pool resolves a transaction's
 // confirmed inputs there, after validating it, so an input the validation
 // found is found again and one it could not have found does not exist.
+// isApplied distinguishes a transaction already committed in that snapshot
+// from one rejected by ledger validation.
 // LedgerState implements it.
 type ResolvingTxValidationSessionProvider interface {
 	WithResolvingTxValidationSession(context.Context, func(
@@ -53,6 +55,7 @@ type ResolvingTxValidationSessionProvider interface {
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+		isApplied func(hash []byte) (bool, error),
 	) error) error
 }
 

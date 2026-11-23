@@ -82,6 +82,7 @@ var stagingPromoted = map[string]string{
 	"FlushBatchStakeDeltas":                  txIndex,
 	"GetLiveUtxoLovelace":                    txIndex,
 	"GetTransactionByHash":                   txIndex,
+	"GetTransactionSlotByHash":               txIndex,
 	"GetTransactionsByHashes":                txIndex,
 	"IterateLiveUtxoRefs":                    txIndex,
 	"IterateLiveUtxos":                       txIndex,

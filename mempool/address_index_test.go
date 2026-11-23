@@ -841,6 +841,7 @@ func (v *sessionConnValidator) WithResolvingTxValidationSession(
 		func() bool,
 		func(func() error) (bool, error),
 		func([]models.UtxoId) ([]models.Utxo, error),
+		func([]byte) (bool, error),
 	) error,
 ) error {
 	validate, resolve, done := v.open()
@@ -850,6 +851,7 @@ func (v *sessionConnValidator) WithResolvingTxValidationSession(
 		func() bool { return true },
 		func(commit func() error) (bool, error) { return true, commit() },
 		resolve,
+		func([]byte) (bool, error) { return false, nil },
 	)
 }
 
