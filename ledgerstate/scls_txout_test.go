@@ -84,9 +84,9 @@ func TestLedgerTxOutMatchesTheLedgerSerialization(t *testing.T) {
 		},
 		{
 			name: "more than 23 asset names is an indefinite map",
-			stored: cborCat(append(append([]string{
+			stored: cborCat(append([]string{
 				"82", addr, "8205", "a1", p1, "b818",
-			}, manyIn...))...),
+			}, manyIn...)...),
 			want: cborCat(append(append([]string{
 				"82", addr, "8205", "a1", p1, "bf",
 			}, manyWant...), "ff")...),
