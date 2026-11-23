@@ -112,7 +112,7 @@ jobs:
             echo "run-ci=true" >> "$GITHUB_OUTPUT"
           fi
           rm -rf .trusted-ci
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -297,7 +297,7 @@ jobs:
           persist-credentials: false
       - name: runner-probe-start
         run: python3 .github/scripts/runner-probe.py start
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -488,7 +488,7 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "{\"name\":\"$DINGO_TEST_GCS_BUCKET\"}" \
             "$DINGO_TEST_GCS_ENDPOINT/storage/v1/b?project=dingo-ci" >/dev/null
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -636,7 +636,7 @@ jobs:
           persist-credentials: false
       - name: runner-probe-start
         run: python3 .github/scripts/runner-probe.py start
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -696,7 +696,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
