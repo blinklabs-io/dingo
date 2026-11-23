@@ -135,34 +135,67 @@ func TestSnapshotDeleteBeyondOneTransactionCommits(t *testing.T) {
 	require.Empty(t, rows)
 }
 
-// A batch whose reward block ops span transactions and stopped between them
-// is applied again whole, and leaves the counts of one application.
+// A batch whose reward block ops span transactions and stopped after the
+// first of them, ahead of any journal record, is rewound by the failure-mark
+// recovery on restart and applied again whole: its fee is added once, whether
+// the mark takes the slot of a UTxO change or of the tip, above the fee's.
 func TestRewardBlockOpsStoppedBetweenTransactionsReplay(t *testing.T) {
 	t.Parallel()
-	s := smallTxnStore(t)
-	bootstrap(t, s, point(1, 0x01))
-	pool := bytes.Repeat([]byte{0xa1}, 28)
-	ops := []badgerutxo.RewardBlockOp{{Slot: 2, Epoch: 1, Open: true}}
-	for i := range familyOps {
-		ops = append(ops, badgerutxo.RewardBlockOp{
-			Slot: uint64(10 + i), Epoch: 1, Pool: pool, //nolint:gosec // index
-		})
-	}
-	tip := point(10+familyOps, 0x77)
-	errStop := errors.New("stopped")
-	s.SetAfterChunkForTest(func(int) error { return errStop })
-	_, err := s.ApplyLedgerBatch(
-		&tip,
-		badgerutxo.LedgerBatch{RewardBlocks: ops},
-	)
-	require.ErrorIs(t, err, errStop)
-	s.SetAfterChunkForTest(nil)
+	for _, withChange := range []bool{true, false} {
+		dir := t.TempDir()
+		openSmall := func() *badgerutxo.Store {
+			s, err := badgerutxo.Open(dir, badgerutxo.WithMemTableSize(8<<20))
+			require.NoError(t, err)
+			return s
+		}
+		s := openSmall()
+		bootstrap(t, s, point(1, 0x01))
+		pool := bytes.Repeat([]byte{0xa1}, 28)
+		ops := []badgerutxo.RewardBlockOp{
+			{Slot: 5, Epoch: 1, Open: true},
+			{Slot: 5, Epoch: 1, Fee: 7},
+		}
+		for i := range familyOps {
+			ops = append(ops, badgerutxo.RewardBlockOp{
+				Slot: uint64(10 + i), Epoch: 1, Pool: pool, //nolint:gosec // index
+			})
+		}
+		tip := point(10+familyOps, 0x77)
+		batch := badgerutxo.LedgerBatch{RewardBlocks: ops}
+		if withChange {
+			batch.Changes = []badgerutxo.Change{{
+				Point: point(8, 0x08), Added: []badgerutxo.Output{out(2, 0)},
+			}}
+		}
+		errStop := errors.New("stopped")
+		s.SetAfterChunkForTest(func(int) error { return errStop })
+		_, err := s.ApplyLedgerBatch(&tip, batch)
+		require.ErrorIs(t, err, errStop)
+		require.NoError(t, s.Close())
 
-	_, err = s.Rollback(point(1, 0x01))
-	require.NoError(t, err)
-	_, err = s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{RewardBlocks: ops})
-	require.NoError(t, err)
-	require.Equal(t, uint64(familyOps), readBlockRows(t, s, 1, nil).total)
+		s = openSmall()
+		t.Cleanup(func() { require.NoError(t, s.Close()) })
+		mark, failed, err := s.Failed()
+		require.NoError(t, err)
+		require.True(t, failed)
+		// As the live set's startup rewinds a failure mark.
+		before, found, err := s.PointBefore(mark)
+		require.NoError(t, err)
+		if found {
+			_, err = s.Rollback(before)
+			require.NoError(t, err)
+		}
+		require.NoError(t, s.ClearFailed())
+
+		_, err = s.ApplyLedgerBatch(&tip, batch)
+		require.NoError(t, err)
+		requireTip(t, s, tip)
+		requireLive(t, s, withChange, ref(2, 0))
+		got := readBlockRows(t, s, 1, nil)
+		require.Equal(t, uint64(7), got.fees, "with a change: %v", withChange)
+		require.Equal(t, uint64(familyOps), got.total)
+		require.Equal(t, uint64(familyOps), got.pools[string(pool)])
+	}
 }
 
 // A batch without a tip, changes or slotted rows whose snapshot delete spans

@@ -2955,7 +2955,8 @@ follow, in order, in transactions of their own before the last. Each is
 weighed by its writes; a snapshot delete or reward block prune by the rows it
 finds, and it deletes them in as many transactions as they need. Neither
 delete is journaled, so a stopped attempt leaves it part done and the next
-application finishes it.
+application finishes it. The other ops write state journal entries at their
+slots, which the startup rewind to the tip undoes.
 
 The live set computes account transitions rather than copying `account` rows.
 The store keeps
@@ -4556,7 +4557,11 @@ At startup `Reconcile` first rewinds a set that carries the marker, from its
 journal, to the tip before its oldest journaled commit at or after the marked
 slot, since a failed commit can leave rows its tip does not account for (a
 reward write chunk that landed after the commit's first chunk, or the outputs
-of a chunked batch that never reached its last transaction). Whatever the
+of a chunked batch that never reached its last transaction). A chunked batch
+that stopped before its first journal record leaves only state journal
+entries past the tip, which no committed batch writes, and the rewind goes to
+the tip, undoing them: a reward block fee is additive, so applying the batch
+again over them would add it twice. Whatever the
 set's tip is then, the ordinary checks apply: a set behind the ledger has the
 ledger rolled back to the set's tip (`ResumeUtxoSetFrom`) and the blocks after
 it applied again, and the marker is cleared once the set and ledger agree.
