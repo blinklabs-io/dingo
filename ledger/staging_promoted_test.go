@@ -106,6 +106,8 @@ var stagingPromoted = map[string]string{
 	"GetRewardLikelihoodStateBeforeEpoch":     noFamilyRows,
 	"GetRewardPoolLikelihoods":                noFamilyRows,
 	"SaveRewardLikelihoodState":               noFamilyRows,
+	"GetDRepDistributionSnapshot":             noFamilyRows,
+	"SaveDRepDistributionSnapshot":            noFamilyRows,
 	"DeleteRewardAccountOutputsBeforeEpoch":   writeSkips,
 	"FlushBatch":                              writeSkips,
 	"FlushBatchStakeDeltas":                   writeSkips,

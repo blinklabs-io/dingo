@@ -1907,6 +1907,20 @@ func (a Adapter) GetExpiringGovernanceProposals(
 	return a.db.GetExpiringGovernanceProposals(ctx, epoch, dbTxn(txn))
 }
 
+func (a Adapter) GetDRepDistributionSnapshot(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) (*models.DRepDistributionSnapshot, error) {
+	return a.db.Metadata().GetDRepDistributionSnapshot(epoch, metaTxn(txn))
+}
+
+func (a Adapter) SaveDRepDistributionSnapshot(
+	snapshot *models.DRepDistributionSnapshot,
+	txn ledgerdb.Txn,
+) error {
+	return a.db.Metadata().SaveDRepDistributionSnapshot(snapshot, metaTxn(txn))
+}
+
 func (a Adapter) GetGovernanceProposal(
 	ctx context.Context,
 	txHash []byte,

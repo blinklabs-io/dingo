@@ -115,6 +115,7 @@ const (
 	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	drepDistributionSnapshotSchemaRelease               = "drep-distribution-snapshot"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -309,6 +310,7 @@ var schemaVersions = []struct {
 	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
 	{Version: 74, Name: assetIdentityHoldingsSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: drepDistributionSnapshotSchemaRelease, Dir: "v75"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

@@ -10876,6 +10876,18 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 			return nil, err
 		}
 	}
+	if !validationOnly &&
+		result.NewCurrentEpoch.EraId >= eras.ConwayEraDesc.Id {
+		if err := timePhase(
+			currentEpoch.EpochId+1, "drep_distribution", func() error {
+				return ls.captureDRepDistributionSnapshot(ctx,
+					txn, currentEpoch.EpochId+1, epochStartSlot,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
 	if deferredPlan != nil || snapshotEvt != nil {
 		if err := timePhase(
 			currentEpoch.EpochId+1, "defer", func() error {

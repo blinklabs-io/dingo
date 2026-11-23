@@ -664,7 +664,22 @@ type GovernanceStore interface {
 
 	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
 	// and clears deleted_slot for any that were soft-deleted after that slot.
+	// It also removes DRep distribution snapshots of boundaries after the slot.
 	DeleteGovernanceProposalsAfterSlot(uint64, types.Txn) error
+
+	// SaveDRepDistributionSnapshot records the DRep stake distribution an
+	// epoch boundary froze, replacing any earlier record for that epoch.
+	SaveDRepDistributionSnapshot(
+		*models.DRepDistributionSnapshot,
+		types.Txn,
+	) error
+
+	// GetDRepDistributionSnapshot returns the DRep stake distribution frozen
+	// by the boundary that opened epoch, or nil when none was recorded.
+	GetDRepDistributionSnapshot(
+		uint64,
+		types.Txn,
+	) (*models.DRepDistributionSnapshot, error)
 
 	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
 	// and clears deleted_slot for any that were soft-deleted after that slot.

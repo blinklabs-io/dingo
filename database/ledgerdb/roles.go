@@ -1403,6 +1403,12 @@ type GovernanceStore interface {
 	) ([]*models.ResignCommitteeCold, error)
 	// GetConstitution returns the current constitution
 	GetConstitution(txn Txn) (*models.Constitution, error)
+	// GetDRepDistributionSnapshot returns the DRep stake distribution frozen
+	// by the boundary that opened epoch, or nil when none was recorded.
+	GetDRepDistributionSnapshot(
+		epoch uint64,
+		txn Txn,
+	) (*models.DRepDistributionSnapshot, error)
 	// GetDRepDelegators returns the stake credentials currently delegating
 	// their voting power to the given DRep, in canonical (tag, hash) order.
 	// This is the `delegators` member of the GetDRepState ledger query result.
@@ -1680,6 +1686,12 @@ type GovernanceStore interface {
 	ResolvePoolRewardAccountAutoVotes(
 		ctx context.Context,
 		snapshots []*models.PoolStakeSnapshot,
+		txn Txn,
+	) error
+	// SaveDRepDistributionSnapshot records the DRep stake distribution an
+	// epoch boundary froze, replacing any earlier record for that epoch.
+	SaveDRepDistributionSnapshot(
+		snapshot *models.DRepDistributionSnapshot,
 		txn Txn,
 	) error
 	// SetCommitteeMembers upserts governance-enacted committee members. Used

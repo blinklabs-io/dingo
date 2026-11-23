@@ -291,7 +291,8 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 }
 
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
-// answerable by every point-aware query type below -- not just that it is
+// answerable by every point-aware query type below (ShelleyGovStateQuery is
+// tip-only and not covered) -- not just that it is
 // still on this node's chain (verifyPointOnChain), but that it is not older
 // than the strictest per-query-type retention floor (the live UTxO journal
 // via liveUtxoView, consumed UTxO rows via checkUtxoRetentionWindow,
@@ -320,14 +321,16 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // a successful Acquire there already guarantees every query answers.
 // Checking every one of Dingo's independent, differently-sized retention
 // windows here, upfront, gives Dingo that same guarantee instead of
-// discovering the gap mid-query. The cost is symmetric: a connection that
-// only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
-// at a point older than UTxO's or stake distribution's own floor is now
-// also refused at Acquire, even though that specific query alone could
-// have answered -- accepted deliberately, since the protocol gives no way
-// to know in advance which query type a session will ask, and refusing a
-// point upfront is a well-defined, protocol-legal AcquireFailure, unlike
-// discovering the same gap mid-query.
+// discovering the gap mid-query. ShelleyGovStateQuery is the exception: it
+// answers only the current tip, so a point that acquires can still fail it, and
+// the failure cannot be checked here because the query is not known yet.
+// The cost is symmetric: a connection that only ever intended to ask a
+// genuinely unbounded query (queryShelleyEpochNo) at a point older than UTxO's
+// or stake distribution's own floor is now also refused at Acquire, even
+// though that specific query alone could have answered -- accepted
+// deliberately, since the protocol gives no way to know in advance which query
+// type a session will ask, and refusing a point upfront is a well-defined,
+// protocol-legal AcquireFailure, unlike discovering the same gap mid-query.
 //
 // Unpinned (at.pinned() false) always succeeds: the live tip trivially
 // satisfies every retention window.
@@ -489,6 +492,8 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 // at reaches every query type that reads ledger or consensus state, each of
 // which answers as of at; queryShelleyLeaf's doc comment audits every case,
 // and only genesis config and the ledger peer snapshot are live by design.
+// ShelleyGovStateQuery is the exception: it answers a pinned point only when
+// that point is the current tip, and refuses any other.
 //
 // Query reads current state on every call, so successive calls may observe
 // different blocks. A session that needs consistent reads across calls uses
@@ -1372,15 +1377,27 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // registration and delegation rows, and delegations carry no per-point
 // history to read back.
 //
+// Answers only the tip: ShelleyGovStateQuery (queryShelleyGovState). A pinned
+// point is answered when it is the current tip, which is what a reopened view
+// names while the chain has not advanced, and any other point is refused with
+// ErrHistoricalStateUnavailable. The DRep distribution of the epoch boundary
+// is not stored, so the state at an earlier slot cannot be rebuilt; the reply
+// is never read from the tip for a point that is not the tip. Even at the tip
+// it fails with ErrQueryNotAnswered while a governance action exists, now or
+// in the epoch-start snapshot, because the ratification outcome is not stored.
+//
 // Not answered, so the call fails with ErrQueryNotAnswered:
 // ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
 // rank pools by a performance estimate derived from a per-pool likelihood
 // history and the last boundary's reward pot, neither of which is tracked;
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which return
-// the whole epoch state in the ledger's encoding. Also not answered, with an
-// unsupported-query error: ShelleyStakePoolStateQuery on every network but
-// the Leios prototype's (LedgerStateConfig.StakePoolStateQuery), because
-// released nodes do not support it.
+// the whole epoch state in the ledger's encoding; and ShelleyGovStateQuery,
+// but only while a governance action exists, now or in the epoch-start
+// snapshot, because the ratification outcome is not stored. Also not
+// answered, with an unsupported-query error: ShelleyStakePoolStateQuery on
+// every network but the Leios prototype's
+// (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
+// support it.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
@@ -1430,6 +1447,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		)
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(ctx, q.ActionIds.Items(), at, txn)
+	case *olocalstatequery.ShelleyGovStateQuery:
+		return ls.queryShelleyGovState(ctx, at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:

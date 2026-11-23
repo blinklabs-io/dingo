@@ -727,6 +727,20 @@ WHERE NOT EXISTS (
     WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
 );
 
+-- name: SaveDRepDistributionSnapshot :one
+INSERT INTO drep_distribution_snapshot (
+    epoch, distribution, boundary_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    distribution = excluded.distribution,
+    boundary_slot = excluded.boundary_slot
+RETURNING id;
+
+-- name: GetDRepDistributionSnapshot :one
+SELECT id, epoch, distribution, boundary_slot
+FROM drep_distribution_snapshot
+WHERE epoch = ?;
+
 -- name: GetRewardAccountOutputs :many
 SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
        amount, spendable, guarded, captured_slot, boundary_slot

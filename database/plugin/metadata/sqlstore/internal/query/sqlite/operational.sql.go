@@ -1708,6 +1708,24 @@ func (q *Queries) GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsPa
 	return items, nil
 }
 
+const getDRepDistributionSnapshot = `-- name: GetDRepDistributionSnapshot :one
+SELECT id, epoch, distribution, boundary_slot
+FROM drep_distribution_snapshot
+WHERE epoch = ?
+`
+
+func (q *Queries) GetDRepDistributionSnapshot(ctx context.Context, epoch int64) (DrepDistributionSnapshot, error) {
+	row := q.db.QueryRowContext(ctx, getDRepDistributionSnapshot, epoch)
+	var i DrepDistributionSnapshot
+	err := row.Scan(
+		&i.ID,
+		&i.Epoch,
+		&i.Distribution,
+		&i.BoundarySlot,
+	)
+	return i, err
+}
+
 const getDatum = `-- name: GetDatum :one
 SELECT hash, raw_datum, id, added_slot
 FROM datum
@@ -3964,6 +3982,29 @@ WHERE deleted_slot > ?
 func (q *Queries) RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error {
 	_, err := q.db.ExecContext(ctx, restoreConstitutionsDeletedAfterSlot, deletedSlot)
 	return err
+}
+
+const saveDRepDistributionSnapshot = `-- name: SaveDRepDistributionSnapshot :one
+INSERT INTO drep_distribution_snapshot (
+    epoch, distribution, boundary_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    distribution = excluded.distribution,
+    boundary_slot = excluded.boundary_slot
+RETURNING id
+`
+
+type SaveDRepDistributionSnapshotParams struct {
+	Epoch        int64
+	Distribution []byte
+	BoundarySlot int64
+}
+
+func (q *Queries) SaveDRepDistributionSnapshot(ctx context.Context, arg SaveDRepDistributionSnapshotParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, saveDRepDistributionSnapshot, arg.Epoch, arg.Distribution, arg.BoundarySlot)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const saveEpochSummary = `-- name: SaveEpochSummary :one
