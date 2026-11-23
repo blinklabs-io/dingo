@@ -13,6 +13,6 @@ permissions:
 
 jobs:
   orchestrate:
-    uses: blinklabs-io/actions/.github/workflows/reuseable-release-dispatch.yml@e0caeb743570431ebc4e26aeea54cdf8ab6a0a33
+    uses: blinklabs-io/shared-actions/.github/workflows/reuseable-release-dispatch.yml@d90d0eef9c2d00ecac430e1b184ac2993ac768fb
     secrets:
       token: ${{ secrets.ORG_PROJECT_PAT }}
