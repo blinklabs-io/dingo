@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -175,6 +176,12 @@ func TestChunkedRowsApplyAfterTheBatchsRollback(t *testing.T) {
 // batch's.
 func TestRollbackDropsATombstonedPrefixLargerThanOneTransaction(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine rollback over 300k rows at Badger's "+
+			"real transaction limit; the small-budget chunk tests "+
+			"keep the chunking under -race",
+	)
 	for _, viaBatch := range []bool{false, true} {
 		s := open(t, t.TempDir())
 		t.Cleanup(func() { _ = s.Close() })

@@ -17,7 +17,6 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"errors"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -38,19 +37,6 @@ func (ls *LedgerState) AnchorOpCertCounters(
 	ctx context.Context,
 	anchor uint64,
 ) ([]metadata.OpCertCounter, error) {
-	drained, err := ls.anchorFamilyDrained(ctx, nodesettings.FamilyOpCerts)
-	if err != nil {
-		return nil, err
-	}
-	if !drained {
-		store, ok := ls.db.Metadata().(metadata.AnchorStateStore)
-		if !ok {
-			return nil, errors.New(
-				"ledger metadata store cannot export op-cert counters",
-			)
-		}
-		return store.ReadOpCertCountersAt(ctx, anchor, nil)
-	}
 	r := ls.opCertReader(nil)
 	if r == nil {
 		return nil, drainedUnserved(nodesettings.FamilyOpCerts)

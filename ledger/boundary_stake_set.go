@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -759,22 +758,6 @@ type poolStakeResult struct {
 	delegators map[string]uint64
 }
 
-// boundaryStakeFamilies are the families the metadata store's epoch-boundary
-// stake answer reads.
-var boundaryStakeFamilies = nodesettings.FamilyMask(0).
-	With(nodesettings.FamilyEpochs).
-	With(nodesettings.FamilyPParamsUpdates).
-	With(nodesettings.FamilyAccounts).
-	With(nodesettings.FamilyPoolsHistory).
-	With(nodesettings.FamilyRewardInputs).
-	With(nodesettings.FamilyLiveStake)
-
-// boundaryPoolFamilies are the families the metadata store's epoch-boundary
-// active pool answer reads: the pool rows, and the protocol parameters that
-// decide whether the snapshot follows the enactment.
-var boundaryPoolFamilies = poolFamilies |
-	nodesettings.FamilyMask(0).With(nodesettings.FamilyPParamsUpdates)
-
 // boundaryStakeRead is asOfRead for a read of the epoch-boundary stake. The
 // set serves it when it serves live stake and, on a chain that certifies Leios
 // closures, holds the stake, delegation, pool, witness and closure output
@@ -790,9 +773,8 @@ func boundaryStakeRead[T any](
 ) (T, error) {
 	leios := s.ls.leiosCertifies()
 	return answerAsOf(s.ls, txn, slot, asOfRead[T]{
-		what:     what,
-		families: boundaryStakeFamilies,
-		current:  func() bool { return current },
+		what:    what,
+		current: func() bool { return current },
 		serves: func() bool {
 			if leios && !s.ls.leiosStakeReady(txn) {
 				return false
@@ -1038,10 +1020,9 @@ func (s stagingLedgerDB) GetEpochBoundaryActivePoolKeyHashes(
 ) ([][]byte, error) {
 	current := s.ls.boundaryCurrent(txn, slot)
 	return answerAsOf(s.ls, txn, slot, asOfRead[[][]byte]{
-		what:     fmt.Sprintf("epoch boundary active pools at slot %d", slot),
-		families: boundaryPoolFamilies,
-		current:  func() bool { return current },
-		serves:   func() bool { return s.ls.poolServing(txn) != nil },
+		what:    fmt.Sprintf("epoch boundary active pools at slot %d", slot),
+		current: func() bool { return current },
+		serves:  func() bool { return s.ls.poolServing(txn) != nil },
 		fromSet: func() ([][]byte, error) {
 			return s.ls.boundaryActivePools(txn, slot, boundarySlot, !current)
 		},

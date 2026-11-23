@@ -114,7 +114,6 @@ func seedLateFirstBlockRound(
 	opCertBase uint64,
 ) {
 	t.Helper()
-	meta := db.Metadata()
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], k.pool)
 	pparams := &shelley.ShelleyProtocolParameters{
@@ -127,17 +126,17 @@ func seedLateFirstBlockRound(
 	}
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, performanceEpoch*100, performanceEpoch,
 		eras.ShelleyEraDesc.Id, nil,
 	))
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
-			context.Background(), poolID,
+		require.NoError(t, fxMintBlock(
+			t, db, context.Background(), poolID,
 			opCertBase+i, performanceEpoch*100+40+i, nil,
 		))
 	}
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            snapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -147,7 +146,7 @@ func seedLateFirstBlockRound(
 		BoundarySlot:     snapshotEpoch * 100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
 		Epoch:                      snapshotEpoch,
 		PoolKeyHash:                k.pool,
 		RewardAccount:              k.rewardAccount,
@@ -161,7 +160,7 @@ func seedLateFirstBlockRound(
 		CapturedSlot:               snapshotEpoch * 100,
 		BoundarySlot:               snapshotEpoch * 100,
 	}}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch: snapshotEpoch, PoolKeyHash: k.pool,
 			StakingKey: k.rewardAccount, Stake: 500, Owner: true,
@@ -200,14 +199,16 @@ func setupLateFirstBlockBoundaryFive(
 ) (*LedgerState, *database.Database, lateFirstBlockKeys) {
 	t.Helper()
 	ls, db := newLateFirstBlockTestLedger(t)
-	meta := db.Metadata()
 	k := lateFirstBlockKeys{
 		pool:          rewardCalcHash(0x11),
 		rewardAccount: rewardCalcHash(0x22),
 		member:        rewardCalcHash(0x33),
 	}
-	for e := uint64(1); e <= 5; e++ {
-		require.NoError(t, meta.SetEpoch(
+	// The boundary into an epoch runs before that epoch is recorded, and
+	// recording an epoch drops the block counts of the ones too old for any
+	// later round, so each epoch is seeded where the chain reaches it.
+	for e := uint64(1); e <= 3; e++ {
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e*100, e, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, 100, nil,
 		))
@@ -215,13 +216,13 @@ func setupLateFirstBlockBoundaryFive(
 	seedLateFirstBlockRound(t, db, k, 1, 2, 1)
 	seedLateFirstBlockRound(t, db, k, 2, 3, 11)
 	pool := models.Pool{PoolKeyHash: k.pool}
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		context.Background(), nil, &pool, &models.PoolRegistration{
 			PoolID: pool.ID, PoolKeyHash: k.pool, AddedSlot: 0,
 		},
 	))
 	for i, key := range [][]byte{k.rewardAccount, k.member} {
-		require.NoError(t, db.CreateAccount(
+		require.NoError(t, seedCreateAccount(t, db,
 			context.Background(), nil, &models.Account{
 				StakingKey: key, Pool: k.pool, Active: true,
 			},
@@ -234,7 +235,7 @@ func setupLateFirstBlockBoundaryFive(
 	// Epoch 2 and 3 have blocks; epoch 3 opens early, so the boundary into
 	// 4 applies its own round.
 	seedLateFirstBlockBlocks(t, db, 250, 310, firstBlockOfEpoch4)
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 3, Reserves: 100_000_000, Treasury: 5_000, Fees: 2_400,
 		CapturedSlot: 300,
 	}, nil))
@@ -243,14 +244,17 @@ func setupLateFirstBlockBoundaryFive(
 		return ls.applyStakeRewards(context.Background(), txn, 4, 400, false)
 	}))
 	settleRewardCredits(t, ls)
-	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, seedDB(t, db).SetEpoch(
+		400, 4, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(99_918_868), uint64(state.Reserves))
 	require.Equal(t, uint64(5_000), uint64(state.Treasury))
 	// The boundary into 4 also moved the treasury by 700 (for example a
 	// donation) and fees of epoch 3 were 3000.
-	require.NoError(t, meta.SetNetworkState(5_700, 99_918_868, 400, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(5_700, 99_918_868, 400, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 4, Reserves: 99_918_868, Treasury: 5_700, Fees: 3_000,
 		CapturedSlot: 400,
 	}, nil))
@@ -263,7 +267,7 @@ func accountRewardBalance(
 	key []byte,
 ) uint64 {
 	t.Helper()
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(), 0, key, false, nil,
 	)
 	require.NoError(t, err)
@@ -297,13 +301,13 @@ func TestApplyStakeRewardsReplaysRoundAfterLateFirstBlock(t *testing.T) {
 		accountRewardBalance(t, db, k.rewardAccount))
 	require.Equal(t, 2*lateRoundMemberReward,
 		accountRewardBalance(t, db, k.member))
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	// Applied to the pots of this boundary: 99_918_868 - 81_132 and
 	// 5_700 + 0. The pots row of epoch 3 would give 99_918_868 again.
 	require.Equal(t, uint64(99_837_736), uint64(state.Reserves))
 	require.Equal(t, uint64(5_700), uint64(state.Treasury))
-	pots, err := db.Metadata().GetRewardAdaPots(4, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(4, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_002_400), uint64(pots.Rewards))
 
@@ -311,11 +315,11 @@ func TestApplyStakeRewardsReplaysRoundAfterLateFirstBlock(t *testing.T) {
 	// fee seed, not the ended epoch's own 0.
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		ended, err := db.Metadata().GetEpoch(4, txn.Metadata())
+		ended, err := ls.ledgerDB().GetEpoch(4, txn)
 		require.NoError(t, err)
 		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
-	pots, err = db.Metadata().GetRewardAdaPots(5, nil)
+	pots, err = seedDB(t, db).GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(600), uint64(pots.Fees))
 }
@@ -331,18 +335,18 @@ func TestApplyStakeRewardsEarlyFirstBlockAppliesOwnRound(t *testing.T) {
 		accountRewardBalance(t, db, k.rewardAccount))
 	require.Equal(t, lateRoundMemberReward+2_898,
 		accountRewardBalance(t, db, k.member))
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(99_914_427), uint64(state.Reserves))
 	require.Equal(t, uint64(5_700), uint64(state.Treasury))
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		ended, err := db.Metadata().GetEpoch(4, txn.Metadata())
+		ended, err := ls.ledgerDB().GetEpoch(4, txn)
 		require.NoError(t, err)
 		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
-	pots, err := db.Metadata().GetRewardAdaPots(5, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), uint64(pots.Fees))
 }
@@ -350,9 +354,8 @@ func TestApplyStakeRewardsEarlyFirstBlockAppliesOwnRound(t *testing.T) {
 func TestReplaysPreviousStakeRewardRoundNeedsContiguousEpochs(t *testing.T) {
 	t.Parallel()
 	ls, db := newLateFirstBlockTestLedger(t)
-	meta := db.Metadata()
 	for e := uint64(1); e <= 5; e++ {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e*100, e, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, 100, nil,
 		))
@@ -374,9 +377,8 @@ func TestReplaysPreviousStakeRewardRoundReadsBlocksInTransaction(
 ) {
 	t.Parallel()
 	ls, db := newLateFirstBlockTestLedger(t)
-	meta := db.Metadata()
 	for e := uint64(1); e <= 5; e++ {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e*100, e, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, 100, nil,
 		))
@@ -411,16 +413,15 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 ) {
 	t.Parallel()
 	ls, db := newLateFirstBlockTestLedger(t)
-	meta := db.Metadata()
 	const byronEpochs = uint64(4)
 	for e := range byronEpochs {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e*100, e, nil, nil, nil, nil,
 			eras.ByronEraDesc.Id, 1, 100, nil,
 		))
 	}
 	for e := byronEpochs; e <= byronEpochs+2; e++ {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e*100, e, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, 100, nil,
 		))
@@ -434,7 +435,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 		ProtocolMajor:    2,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, byronEpochs*100, byronEpochs,
 		eras.ShelleyEraDesc.Id, nil,
 	))
@@ -442,8 +443,8 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	// 500 + 40.
 	seedLateFirstBlockBlocks(t, db, 410, 550)
 	const reserves = uint64(100_000_000)
-	require.NoError(t, meta.SetNetworkState(0, reserves, 400, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, reserves, 400, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: byronEpochs, Reserves: types.Uint64(reserves),
 		CapturedSlot: 400,
 	}, nil))
@@ -452,7 +453,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(context.Background(), txn, 5, 500, false)
 	}))
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	reserveDelta := reserves - uint64(state.Reserves)
 	treasuryDelta := uint64(state.Treasury)
@@ -463,8 +464,8 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	// round was built from.
 	const reserves5 = uint64(99_000_000)
 	const treasury5 = uint64(7_000)
-	require.NoError(t, meta.SetNetworkState(treasury5, reserves5, 500, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(treasury5, reserves5, 500, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 5, Reserves: types.Uint64(reserves5),
 		Treasury: types.Uint64(treasury5), Fees: 3_000, CapturedSlot: 500,
 	}, nil))
@@ -482,7 +483,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(context.Background(), txn, 6, 600, false)
 	}))
-	state, err = meta.GetNetworkState(nil)
+	state, err = seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.Equal(t, reserves5-reserveDelta, uint64(state.Reserves))
 	require.Equal(t, treasury5+treasuryDelta, uint64(state.Treasury))
@@ -490,11 +491,11 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	// The boundary into 6 carries the fees of 5, less the replayed seed.
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		ended, err := meta.GetEpoch(5, txn.Metadata())
+		ended, err := ls.ledgerDB().GetEpoch(5, txn)
 		require.NoError(t, err)
 		return ls.saveRewardAdaPotsForEpoch(txn, 6, *ended, 600)
 	}))
-	pots, err := meta.GetRewardAdaPots(6, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(6, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3_000), uint64(pots.Fees))
 }

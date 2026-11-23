@@ -76,8 +76,7 @@ func (s stagingLedgerDB) setEpochGetter(
 // computeEnactment computes the update the boundary into epoch enacts from
 // the set's proposals and epoch records, with the function the metadata
 // store runs. It works on a copy of currentPParams: the era's update
-// function mutates its argument, and the metadata store's write takes the
-// caller's value.
+// function mutates its argument.
 func (s stagingLedgerDB) computeEnactment(
 	r PParamUpdateReader,
 	txn ledgerdb.Txn,
@@ -123,9 +122,8 @@ func (s stagingLedgerDB) computeEnactment(
 }
 
 // ComputeAndApplyPParamUpdates stages the rows the set computed from its own
-// proposals and returns the set's result, writing the enactment to the
-// metadata store too while the family is not drained. A set that does not
-// hold every proposal cannot enact.
+// proposals and returns the set's result. A set that does not hold every
+// proposal cannot enact.
 func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 	ctx context.Context,
 	slot, epoch uint64,
@@ -148,15 +146,6 @@ func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 		r, txn, epoch, era, quorum, currentPParams,
 		decodeFunc, updateFunc, hasPlutusV2CostModelFunc,
 	)
-	if !s.pparamsDrained() {
-		res, cm, err := s.LedgerDB.ComputeAndApplyPParamUpdates(
-			ctx, slot, epoch, era, quorum, currentPParams,
-			decodeFunc, updateFunc, hasPlutusV2CostModelFunc, txn,
-		)
-		if err != nil {
-			return res, cm, err
-		}
-	}
 	if err != nil {
 		return nil, false, fmt.Errorf("compute pparam enactment: %w", err)
 	}
@@ -172,21 +161,15 @@ func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 	return computed.PParams, computed.PlutusV2CostModelWritten, nil
 }
 
-// SaveEpochSummary writes the summary to the metadata store and stages the
-// row the upsert leaves: the caller's, with snapshot_ready kept once set.
-// The prior row comes from the set; where the set does not hold the
-// summaries, the stored row is read back.
+// SaveEpochSummary stages the caller's summary, with snapshot_ready kept
+// once set. The prior row comes from the set.
 func (s stagingLedgerDB) SaveEpochSummary(
 	summary *models.EpochSummary,
 	txn ledgerdb.Txn,
 ) error {
-	drained := s.ls.familyDrained(nodesettings.FamilySummaries)
 	er, sr, _ := s.ls.epochSummaryReader(txn)
 	if er == nil || sr == nil {
-		if drained {
-			return drainedUnserved(nodesettings.FamilySummaries)
-		}
-		return s.saveEpochSummaryReadBack(summary, txn)
+		return drainedUnserved(nodesettings.FamilySummaries)
 	}
 	s.ls.utxoSetApplyMu.RLock()
 	prior, setErr := s.ls.summaryViewLocked(er, sr, txn, summary.Epoch)
@@ -194,11 +177,6 @@ func (s stagingLedgerDB) SaveEpochSummary(
 	if setErr != nil {
 		return fmt.Errorf("read epoch summary %d from the set: %w",
 			summary.Epoch, setErr)
-	}
-	if !drained {
-		if err := s.LedgerDB.SaveEpochSummary(summary, txn); err != nil {
-			return err
-		}
 	}
 	computed := *summary
 	computed.EpochNonce = slices.Clone(summary.EpochNonce)
@@ -210,48 +188,14 @@ func (s stagingLedgerDB) SaveEpochSummary(
 	return nil
 }
 
-// saveEpochSummaryReadBack stages the row as the metadata store holds it
-// after the upsert.
-func (s stagingLedgerDB) saveEpochSummaryReadBack(
-	summary *models.EpochSummary,
-	txn ledgerdb.Txn,
-) error {
-	if err := s.LedgerDB.SaveEpochSummary(summary, txn); err != nil {
-		return err
-	}
-	row, err := s.LedgerDB.GetEpochSummary(summary.Epoch, txn)
-	if err != nil {
-		return fmt.Errorf("read back epoch summary %d: %w", summary.Epoch, err)
-	}
-	if row == nil {
-		return fmt.Errorf(
-			"read back epoch summary %d: not found",
-			summary.Epoch,
-		)
-	}
-	s.ls.stageLedgerChanges(txn, LedgerChanges{
-		Summaries: []models.EpochSummary{*row},
-	})
-	return nil
-}
-
-// SetEpoch writes the epoch to the metadata store and stages the row the
-// upsert leaves, which is its arguments: every column is replaced.
+// SetEpoch stages the epoch row its arguments describe: every column is
+// replaced.
 func (s stagingLedgerDB) SetEpoch(
 	slot, epoch uint64,
 	nonce, evolvingNonce, candidateNonce, lastEpochBlockNonce []byte,
 	era, slotLength, lengthInSlots uint,
 	txn ledgerdb.Txn,
 ) error {
-	drained := s.ls.familyDrained(nodesettings.FamilyEpochs)
-	if !drained {
-		if err := s.LedgerDB.SetEpoch(
-			slot, epoch, nonce, evolvingNonce, candidateNonce,
-			lastEpochBlockNonce, era, slotLength, lengthInSlots, txn,
-		); err != nil {
-			return err
-		}
-	}
 	computed := models.Epoch{
 		Nonce:               slices.Clone(nonce),
 		EvolvingNonce:       slices.Clone(evolvingNonce),

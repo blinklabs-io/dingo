@@ -16,8 +16,11 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math/big"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -95,6 +98,11 @@ type RewardBlocksScenario struct {
 	// PrecomputeRound runs the background precompute of the round the
 	// boundary into epoch 6 applies, to completion.
 	PrecomputeRound func() error
+	// PrecomputeRoundWithBlockCommit runs PrecomputeRound and, while a
+	// chunk's transaction is open, commits a write transaction on another
+	// goroutine. It reports whether that commit completed while the chunk was
+	// still open.
+	PrecomputeRoundWithBlockCommit func() (bool, error)
 	// DeregisterMember deregisters the harness's delegator credential in the
 	// metadata store and the set at slot 11, with no certificate row.
 	DeregisterMember func()
@@ -114,10 +122,6 @@ type RewardBlocksScenario struct {
 	// StageNoncesInSet gives the set nonces the harness wrote only to the
 	// metadata store.
 	StageNoncesInSet func(rows []models.BlockNonce)
-	// WaitDeferred waits for the writer of a boundary's stake inputs.
-	WaitDeferred func()
-	// StakeInputsIncomplete is LedgerState.RewardStakeInputsIncompleteCommitted.
-	StakeInputsIncomplete func(from, through uint64) (bool, error)
 	// PotsFees is the fee total the boundary stored for epoch.
 	PotsFees func(epoch uint64) uint64
 	// Boundary applies the rollover into epoch 6.
@@ -128,6 +132,9 @@ type RewardBlocksScenario struct {
 	HideStoreReads func(names ...string) (func() int64, func(bool))
 	// DrainFamilies publishes the drained mask to the ledger.
 	DrainFamilies func(mask nodesettings.FamilyMask)
+	// FailSet makes the ledger treat its set as failed, as an update the
+	// set refused does.
+	FailSet func()
 	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
 	InstallDrainedSources func()
 	LedgerDB              func() ledgerdb.LedgerDB
@@ -234,15 +241,56 @@ func NewRewardBlocksScenarioForTest(
 		StatementGuard: guard,
 	})
 	require.NoError(t, err)
-	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
-	require.NoError(
-		t,
-		db.Metadata().IterateAccounts(nil, func(a *models.Account) error {
-			c := *a
-			return db.Metadata().ImportAccount(&c, nil)
-		}),
-	)
+	poolA := bytes.Repeat([]byte{0xa1}, 28)
+	poolB := bytes.Repeat([]byte{0xb2}, 28)
+	poolIdle := bytes.Repeat([]byte{0xc3}, 28)
+	h := newBoundaryReplayHarnessSeeded(t, db, false, func() {
+		require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 9_000, 0, nil))
+		require.NoError(
+			t,
+			db.Metadata().IterateAccounts(nil, func(a *models.Account) error {
+				c := *a
+				return db.Metadata().ImportAccount(&c, nil)
+			}),
+		)
+		if opts.Imported {
+			require.NoError(t, db.SetSyncState("mithril_ledger_slot", "8", nil))
+			meta := db.Metadata()
+			require.NoError(t, meta.SaveImportedPoolBlockCounts(
+				[]models.ImportedPoolBlockCount{
+					{
+						PoolKeyHash:    poolB,
+						Epoch:          3,
+						BlocksProduced: 2,
+						CapturedSlot:   8,
+					},
+					{
+						PoolKeyHash:    poolIdle,
+						Epoch:          3,
+						BlocksProduced: 1,
+						CapturedSlot:   8,
+					},
+					{
+						PoolKeyHash:    poolA,
+						Epoch:          4,
+						BlocksProduced: 3,
+						CapturedSlot:   8,
+					},
+				}, nil))
+			require.NoError(t, meta.SaveImportedEpochBlockTotal(3, 3, 8, nil))
+			require.NoError(t, meta.SaveImportedEpochBlockTotal(4, 3, 8, nil))
+			fees := types.Uint64(1_000)
+			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+				Epoch: 4, ImportedEpochFees: &fees, CapturedSlot: 8,
+			}, nil))
+		}
+		if opts.Round {
+			seedRewardRound(t, db, poolB)
+		}
+		if set != nil {
+			AdoptLiveSetForTest(t, db, set)
+		}
+	})
 	var generation uint64
 	if tip := h.ls.loadTipSnapshot(); tip != nil {
 		generation = tip.generation
@@ -254,42 +302,7 @@ func NewRewardBlocksScenarioForTest(
 		currentPParams: h.ls.currentPParams,
 		epochCache:     h.ls.epochCache,
 	})
-	poolA := bytes.Repeat([]byte{0xa1}, 28)
-	poolB := bytes.Repeat([]byte{0xb2}, 28)
-	poolIdle := bytes.Repeat([]byte{0xc3}, 28)
-	if opts.Imported {
-		require.NoError(t, db.SetSyncState("mithril_ledger_slot", "8", nil))
-		meta := db.Metadata()
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
-					PoolKeyHash:    poolB,
-					Epoch:          3,
-					BlocksProduced: 2,
-					CapturedSlot:   8,
-				},
-				{
-					PoolKeyHash:    poolIdle,
-					Epoch:          3,
-					BlocksProduced: 1,
-					CapturedSlot:   8,
-				},
-				{
-					PoolKeyHash:    poolA,
-					Epoch:          4,
-					BlocksProduced: 3,
-					CapturedSlot:   8,
-				},
-			}, nil))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(3, 3, 8, nil))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(4, 3, 8, nil))
-		fees := types.Uint64(1_000)
-		require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-			Epoch: 4, ImportedEpochFees: &fees, CapturedSlot: 8,
-		}, nil))
-	}
 	if opts.Round {
-		seedRewardRound(t, db, poolB)
 		window := uint64(0)
 		h.ls.rewardUpdateWindowOverride = &window
 	}
@@ -444,14 +457,14 @@ func NewRewardBlocksScenarioForTest(
 				{PoolKeyHash: poolIdle},
 			}
 			return h.ls.rewardBlockCounts(
-				h.ls.LedgerDB(), nil, epoch, inputs, big.NewRat(1, 2),
+				h.ls.LedgerDB(), nil, epoch, inputs,
 			)
 		},
 		Fees: func(epoch uint64) (uint64, error) {
 			row, err := db.GetEpoch(epoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, row)
-			return h.ls.rewardEpochFeesFor(h.ls.LedgerDB(), nil, *row)
+			return h.ls.rewardEpochFeesFor(nil, *row)
 		},
 		EpochCounts: func(epoch uint64) (map[string]uint64, uint64, bool, error) {
 			start := epoch * uint64(replayBoundaryLength)
@@ -587,6 +600,49 @@ func NewRewardBlocksScenarioForTest(
 			)
 			return err
 		},
+		PrecomputeRoundWithBlockCommit: func() (bool, error) {
+			type result struct {
+				err error
+			}
+			var once sync.Once
+			done := make(chan result, 1)
+			started, committedInChunk := false, false
+			h.ls.rewardPrecomputeBeforeSaveHook = func() {
+				once.Do(func() {
+					started = true
+					go func() {
+						ctx, cancel := context.WithTimeout(
+							context.Background(), time.Minute,
+						)
+						defer cancel()
+						txn := db.Transaction(ctx, true)
+						done <- result{err: txn.Do(func(txn *database.Txn) error {
+							return db.SetSyncState("block-commit-probe", "1", txn)
+						})}
+					}()
+					select {
+					case r := <-done:
+						require.NoError(t, r.err)
+						committedInChunk = true
+					case <-time.After(5 * time.Second):
+					}
+				})
+			}
+			_, err := h.ls.runChunkedStakeRewardPrecomputeRound(
+				replayBoundaryNewEpoch,
+				replayBoundaryEndedEra*uint64(replayBoundaryLength),
+				replayBoundaryNewEpoch*uint64(replayBoundaryLength),
+			)
+			h.ls.rewardPrecomputeBeforeSaveHook = nil
+			// A round that returns before the hook fires never starts the
+			// probe, so only a started probe that stayed behind the chunk is
+			// waited out; that keeps it from outliving the test.
+			if started && !committedInChunk {
+				r := <-done
+				require.NoError(t, r.err)
+			}
+			return committedInChunk, err
+		},
 		DeregisterMember: func() {
 			ref := models.NewStakeCredentialRef(
 				0,
@@ -672,8 +728,6 @@ func NewRewardBlocksScenarioForTest(
 		StageNoncesInSet: func(rows []models.BlockNonce) {
 			h.ls.stageBlockNonces(nil, rows, 0)
 		},
-		WaitDeferred:          h.ls.deferredStakeInputsWG.Wait,
-		StakeInputsIncomplete: h.ls.RewardStakeInputsIncompleteCommitted,
 		PotsFees: func(epoch uint64) uint64 {
 			pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
 			require.NoError(t, err)
@@ -693,6 +747,7 @@ func NewRewardBlocksScenarioForTest(
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
 		DrainFamilies: h.ls.SetDrainedFamilies,
+		FailSet:       func() { h.ls.utxoSetFailed.Store(true) },
 		InstallDrainedSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
@@ -737,7 +792,7 @@ func seedRewardRound(t *testing.T, db *database.Database, pool []byte) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetPParams(encoded, 8, 4, eras.ShelleyEraDesc.Id, nil),
+		seedDB(t, db).SetPParams(encoded, 8, 4, eras.ShelleyEraDesc.Id, nil),
 	)
 	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 5, Treasury: 1_000, Reserves: 9_000, CapturedSlot: slot,

@@ -60,6 +60,11 @@ func (a Adapter) BeginLedgerOnly(
 	return a.db.MetadataTxn(ctx, readWrite)
 }
 
+// BeginStaged opens a *database.Txn whose metadata view is read-only.
+func (a Adapter) BeginStaged(ctx context.Context) ledgerdb.Txn {
+	return a.db.StagedTxn(ctx)
+}
+
 // Run runs fn in txn through (*database.Txn).Do, or in a new read-write
 // transaction when txn is nil.
 func (a Adapter) Run(txn ledgerdb.Txn, fn func(ledgerdb.Txn) error) error {

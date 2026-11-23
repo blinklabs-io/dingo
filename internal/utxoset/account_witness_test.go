@@ -191,11 +191,12 @@ func TestLoadingUtxoSetClearsAccountWitnessFamilies(t *testing.T) {
 	_, ok, err := set.LastWitnessSlot(ref, math.MaxUint64)
 	require.NoError(t, err)
 	require.False(t, ok)
+	// The import writes these families itself, so they are loaded empty.
 	for _, loaded := range []func() (bool, error){
 		set.ImportBaselinesLoaded, set.WitnessSlotsLoaded,
 	} {
 		ok, err := loaded()
 		require.NoError(t, err)
-		require.False(t, ok)
+		require.True(t, ok)
 	}
 }

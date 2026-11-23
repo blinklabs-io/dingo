@@ -270,13 +270,9 @@ func (s *Set) ensureGovernance(ctx context.Context, ldb ledgerdb.LedgerDB) error
 	if err != nil {
 		return fmt.Errorf("utxoset: read votes: %w", err)
 	}
-	if err := s.mergeGovernanceIDs(proposals, votes); err != nil {
-		return err
-	}
 	err = s.store.LoadGovernance(func(put func(k, v []byte) error) error {
 		for _, p := range proposals {
 			key := proposalPrefix(p.TxHash, p.ActionIndex)
-			s.merge.noteProposal(key)
 			if err := put(key, encodeProposal(*p)); err != nil {
 				return err
 			}
@@ -373,95 +369,4 @@ func (s *Set) VotesAt(
 		err = s.store.RowsAt(prefix, *at, each)
 	}
 	return out, err
-}
-
-// mergeGovernanceIDs gives the proposals and votes a merge loads the row IDs
-// the set already holds for the same keys, and new ones above every ID it has
-// issued for the rest, rewriting the votes' proposal references to match. The
-// metadata store's own IDs count from its own sequence, which the set's rows
-// do not share. Outside a merge it changes nothing.
-func (s *Set) mergeGovernanceIDs(
-	proposals []*models.GovernanceProposal,
-	votes []*models.GovernanceVoteRef,
-) error {
-	if s.merge == nil {
-		return nil
-	}
-	next, err := s.store.GovernanceNextIDs()
-	if err != nil {
-		return err
-	}
-	heldID := func(key []byte) (uint, bool, error) {
-		v, ok, err := s.store.Row(key)
-		if err != nil || !ok {
-			return 0, false, err
-		}
-		if len(v) < 8 {
-			return 0, false, errMalformedGovernance
-		}
-		return uint(binary.BigEndian.Uint64(v)), true, nil
-	}
-	byOld := make(map[uint]uint, len(proposals))
-	for _, p := range proposals {
-		key := proposalPrefix(p.TxHash, p.ActionIndex)
-		id, ok, err := heldID(key)
-		if err != nil {
-			return err
-		}
-		if ok {
-			v, _, err := s.store.Row(key)
-			if err != nil {
-				return err
-			}
-			held, err := decodeProposal(key, v)
-			if err != nil {
-				return err
-			}
-			keepHeldProposalFields(&held, p)
-		} else {
-			id = uint(next.Proposal)
-			next.Proposal++
-		}
-		byOld[p.ID] = id
-		p.ID = id
-	}
-	for i := range votes {
-		r := votes[i]
-		id, ok, err := heldID(voteKey(r.TxHash, r.ActionIndex, r.Vote))
-		if err != nil {
-			return err
-		}
-		if !ok {
-			id = uint(next.Vote)
-			next.Vote++
-		}
-		r.Vote.ID = id
-		if np, ok := byOld[r.Vote.ProposalID]; ok {
-			r.Vote.ProposalID = np
-		}
-	}
-	return nil
-}
-
-// keepHeldProposalFields makes p the proposal the metadata store's import
-// writes over a row it holds: the snapshot's fields replace the held ones, the
-// slot the proposal was added at and any lifecycle mark the snapshot lacks stay,
-// and an action with no body keeps the held one.
-func keepHeldProposalFields(held, p *models.GovernanceProposal) {
-	p.AddedSlot = held.AddedSlot
-	keep := func(dst **uint64, old *uint64) {
-		if *dst == nil {
-			*dst = old
-		}
-	}
-	keep(&p.EnactedEpoch, held.EnactedEpoch)
-	keep(&p.EnactedSlot, held.EnactedSlot)
-	keep(&p.RatifiedEpoch, held.RatifiedEpoch)
-	keep(&p.RatifiedSlot, held.RatifiedSlot)
-	keep(&p.ExpiredEpoch, held.ExpiredEpoch)
-	keep(&p.ExpiredSlot, held.ExpiredSlot)
-	keep(&p.DeletedSlot, held.DeletedSlot)
-	if len(p.GovActionCbor) == 0 {
-		p.GovActionCbor = held.GovActionCbor
-	}
 }

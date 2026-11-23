@@ -35,6 +35,8 @@ type failingSet struct {
 	tips   []ocommon.Point
 }
 
+func (s *failingSet) Inner() *utxoset.Set { return s.Set }
+
 func (f *failingSet) ApplyUtxoChanges(
 	tip *ocommon.Point,
 	changes []ledger.UtxoEvent,

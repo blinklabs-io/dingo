@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -395,12 +396,10 @@ func (b *rewardInputBundle) validate() error {
 }
 
 type rewardInputStore interface {
-	RewardInputRepairStore
-	DeleteRewardSeedFailure(uint64, string, types.Txn) error
-	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
-	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
-	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
-	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+	RewardInputRepairStore[ledgerdb.Txn]
+	SaveRewardSnapshot(*models.RewardSnapshot, ledgerdb.Txn) error
+	SaveRewardPoolInputs([]*models.RewardPoolInput, ledgerdb.Txn) error
+	DeleteRewardInputsForEpoch(uint64, ledgerdb.Txn) error
 }
 
 // rewardPParamsValidator checks that the protocol-parameter history needed to
@@ -436,7 +435,7 @@ var errImportedRewardBasisUnusable = errors.New(
 // epoch in that case, because the caller's transaction is not committed.
 func seedImportedRewardInputs(
 	store rewardInputStore,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 	snapshots *ParsedSnapShots,
 	resolveParams rewardPoolParamsResolver,
 	validatePParams rewardPParamsValidator,
@@ -485,13 +484,6 @@ func seedImportedRewardInputs(
 		repairAuthoritative := existing != nil && existing.Authoritative &&
 			!complete
 		if complete {
-			if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
-				return fmt.Errorf(
-					"clearing prior reward seed failure for epoch %d: %w",
-					c.epoch,
-					err,
-				)
-			}
 			if logger != nil {
 				logger.Info(
 					"not seeding reward inputs for an imported epoch because an authoritative basis already exists",
@@ -515,14 +507,6 @@ func seedImportedRewardInputs(
 			if err := store.DeleteRewardOutputsForEpoch(c.epoch, txn); err != nil {
 				return fmt.Errorf(
 					"deleting provisional reward outputs for epoch %d: %w",
-					c.epoch, err,
-				)
-			}
-			if err := store.DeleteProvisionalRewardSnapshot(
-				c.epoch, "mark", txn,
-			); err != nil {
-				return fmt.Errorf(
-					"deleting provisional reward snapshot for epoch %d: %w",
 					c.epoch, err,
 				)
 			}
@@ -653,13 +637,6 @@ func seedImportedRewardInputs(
 		); err != nil {
 			return fmt.Errorf(
 				"seeding reward stake inputs for epoch %d: %w", c.epoch, err,
-			)
-		}
-		if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
-			return fmt.Errorf(
-				"clearing reward seed failure for epoch %d: %w",
-				c.epoch,
-				err,
 			)
 		}
 		if logger != nil {
@@ -888,9 +865,9 @@ type importedRewardStakeInputsPending struct {
 	Entries []importedRewardStakeInputsPendingEntry `json:"entries"`
 }
 
-func loadImportedRewardStakeInputsPending(store interface {
-	GetSyncState(string, types.Txn) (string, error)
-}, txn types.Txn,
+func loadImportedRewardStakeInputsPending[T any](store interface {
+	GetSyncState(string, T) (string, error)
+}, txn T,
 ) (*importedRewardStakeInputsPending, error) {
 	raw, err := store.GetSyncState(models.StakeRewardSourcePrefix+"stake-inputs-pending", txn)
 	if err != nil {
@@ -921,7 +898,7 @@ func loadImportedRewardStakeInputsPending(store interface {
 	return pending, nil
 }
 
-func importedAuthoritativeRewardBasisComplete(store rewardInputStore, txn types.Txn, snapshot *models.RewardSnapshot) (bool, error) {
+func importedAuthoritativeRewardBasisComplete(store rewardInputStore, txn ledgerdb.Txn, snapshot *models.RewardSnapshot) (bool, error) {
 	if snapshot == nil || !snapshot.Authoritative {
 		return false, nil
 	}

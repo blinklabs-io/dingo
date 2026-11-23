@@ -203,54 +203,6 @@ func TestPoolHistoryRollsBackAcrossAReRegistration(t *testing.T) {
 	require.True(t, found)
 }
 
-// TestPoolHistoryLoadsFromTheMetadataStore requires a set from before it kept
-// pool history to load every registration and retirement from the metadata
-// store, as the set that followed the certificates holds them.
-func TestPoolHistoryLoadsFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newPoolHistoryHarness(t)
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.PoolHistoryLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.PoolHistoryLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	type shape struct {
-		slot       uint64
-		vrf        []byte
-		retirement bool
-		epoch      uint64
-	}
-	shapes := func(set *utxoset.Set, pool []byte) []shape {
-		t.Helper()
-		events, err := set.PoolHistory(pool)
-		require.NoError(t, err)
-		var out []shape
-		for _, e := range events {
-			sh := shape{slot: e.Slot, retirement: e.Registration == nil, epoch: e.RetiringEpoch}
-			if e.Registration != nil {
-				sh.vrf = e.Registration.VrfKeyHash
-			}
-			out = append(out, sh)
-		}
-		return out
-	}
-	for _, pool := range [][]byte{h.slots.Pool, h.slots.Retired} {
-		want := shapes(h.set, pool)
-		require.NotEmpty(t, want)
-		require.Equal(t, want, shapes(fresh, pool), "pool %x", pool)
-	}
-	require.Equal(t, []shape{
-		{slot: h.slots.Register, vrf: h.slots.VrfA},
-		{slot: h.slots.Rotate, vrf: h.slots.VrfB},
-	}, shapes(fresh, h.slots.Pool))
-}
-
 // TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration pins the set
 // result when a registration exists only in metadata.
 func TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {

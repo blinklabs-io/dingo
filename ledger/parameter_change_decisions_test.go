@@ -110,12 +110,12 @@ func newParameterChangeFixture(
 		[]byte{0xe0},
 		bytes.Repeat([]byte{0x95}, lcommon.Blake2b224Size)...,
 	)
-	require.NoError(t, db.CreateAccount(t.Context(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey:    rewardAccount[1:],
 		CredentialTag: 0,
 		Active:        true,
 	}))
-	require.NoError(t, db.SetConstitution(&models.Constitution{
+	require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/constitution",
 		AnchorHash: bytes.Repeat([]byte{0x96}, lcommon.Blake2b256Size),
 		AddedSlot:  0,
@@ -193,7 +193,7 @@ func newParameterChangeFixture(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 
@@ -240,7 +240,7 @@ func newParameterChangeFixture(
 
 func (fx *parameterChangeFixture) proposalStored(t *testing.T) bool {
 	t.Helper()
-	_, err := fx.db.GetGovernanceProposal(
+	_, err := seedDB(t, fx.db).GetGovernanceProposal(
 		t.Context(), fx.tx.Id().Bytes(), 0, nil,
 	)
 	if err == nil {

@@ -101,7 +101,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -118,10 +118,11 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	nonce := []byte("nonce-behind-peer-tip")
 	require.NoError(
 		t,
-		db.SetBlockNonce(tip.Point.Hash, tip.Point.Slot, nonce, false, nil),
+		seedBlockNonce(t, db, tip.Point.Hash, tip.Point.Slot, nonce, false, nil),
 	)
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.currentTip = tip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = append([]byte(nil), nonce...)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()

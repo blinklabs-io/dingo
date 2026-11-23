@@ -53,7 +53,7 @@ func (s stagingLedgerDB) ListPoolKeyHashes(
 	})
 }
 
-// GetPools reads from the set when the pools-history family is drained.
+// GetPools reads from the set.
 func (s stagingLedgerDB) GetPools(
 	ctx context.Context,
 	pkhs []lcommon.PoolKeyHash,
@@ -278,7 +278,7 @@ var _ database.PoolSource = drainedPoolSource{}
 // installPoolSource gives the database the set's pools for the reads it makes
 // once the pools-history family is drained.
 func (ls *LedgerState) installPoolSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetPoolSource(drainedPoolSource{ls})
 	}
 }
@@ -324,8 +324,7 @@ func poolStatusFromEvents(
 	return status
 }
 
-// GetPoolStatus reads from the set when the pools-history family is drained,
-// answering as the metadata store does from the pool's events.
+// GetPoolStatus reads from the set, answering from the pool's events.
 func (s stagingLedgerDB) GetPoolStatus(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,

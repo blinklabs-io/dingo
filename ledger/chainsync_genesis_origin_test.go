@@ -86,7 +86,7 @@ func newGenesisChainsyncState(t *testing.T) *LedgerState {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
-			UtxoSet:           NewMemLiveSetForTest(),
+			UtxoSet:           OpenLiveSetForTest(t, db),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {

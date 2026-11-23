@@ -93,7 +93,7 @@ type PoolEventChange struct {
 // PoolHistoryReader serves pool certificate events from a live UTxO set.
 type PoolHistoryReader interface {
 	// PoolHistoryLoaded reports whether the reader holds every event up to
-	// its tip; until it does, reads stay on the metadata store.
+	// its tip; until it does, the set does not serve the reads.
 	PoolHistoryLoaded() (bool, error)
 	// PoolHistory returns every event of pool, oldest first.
 	PoolHistory(pool []byte) ([]PoolEvent, error)
@@ -106,7 +106,7 @@ func poolEventBefore(a, b PoolEvent) bool {
 }
 
 // poolHistoryReader returns the set's pool history reader once it holds the
-// history, or nil when reads stay on the metadata store.
+// history, or nil when the set does not serve them.
 func (ls *LedgerState) poolHistoryReader(txn ledgerdb.Txn) PoolHistoryReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil

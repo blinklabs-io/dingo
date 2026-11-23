@@ -47,7 +47,7 @@ func (cs *ChainSelector) catchUpBandHoldLocked(
 	localTip ochainsync.Tip,
 	entered bool,
 ) bool {
-	if cs.securityParam == 0 || localTip.BlockNumber == 0 {
+	if cs.securityParam == 0 {
 		return false
 	}
 	// Admission stages against the pending far-tip claims when it has any.

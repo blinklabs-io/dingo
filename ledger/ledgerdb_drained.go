@@ -45,10 +45,7 @@ func drainedUnserved(f nodesettings.Family) error {
 }
 
 func (ls *LedgerState) setFamilyUnserved(f nodesettings.Family) error {
-	if ls.familyDrained(f) {
-		return drainedUnserved(f)
-	}
-	return fmt.Errorf("%w: %s", ErrUtxoSetUnserved, f)
+	return drainedUnserved(f)
 }
 
 // drainedAccountsRefusal is drainedUnserved for an account read that falls
@@ -62,11 +59,7 @@ func drainedAccountsRefusal() error {
 	)
 }
 
-func (s stagingLedgerDB) noncesDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyNonces)
-}
-
-// GetBlockNonce reads from the set when the nonces family is drained.
+// GetBlockNonce reads from the set.
 func (s stagingLedgerDB) GetBlockNonce(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
@@ -83,7 +76,7 @@ func (s stagingLedgerDB) GetBlockNoncesInSlotRange(
 	return s.ls.blockNoncesInSlotRange(start, end, txn)
 }
 
-// GetLatestBlockNonce reads from the set when the nonces family is drained.
+// GetLatestBlockNonce reads from the set.
 func (s stagingLedgerDB) GetLatestBlockNonce(
 	txn ledgerdb.Txn,
 ) (models.BlockNonce, bool, error) {
@@ -99,12 +92,7 @@ func (s stagingLedgerDB) SetBlockNonce(
 	isCheckpoint bool,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.SetBlockNonce(
-		blockHash, slotNumber, nonce, isCheckpoint, txn,
-	)
+	return nil
 }
 
 // SetBlockNonces skips the SQL write of a drained nonces family.
@@ -112,10 +100,7 @@ func (s stagingLedgerDB) SetBlockNonces(
 	nonces []models.BlockNonce,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.SetBlockNonces(nonces, txn)
+	return nil
 }
 
 // DeleteBlockNoncesBeforeSlotWithoutCheckpoints skips the SQL delete of a
@@ -124,10 +109,7 @@ func (s stagingLedgerDB) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(slot, txn)
+	return nil
 }
 
 // DeleteBlockNoncesAfterPoint, for a drained nonces family, only checks that
@@ -137,9 +119,6 @@ func (s stagingLedgerDB) DeleteBlockNoncesAfterPoint(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.noncesDrained() {
-		return s.LedgerDB.DeleteBlockNoncesAfterPoint(point, txn)
-	}
 	latest, ok, err := s.ls.latestBlockNonce(txn)
 	if err != nil {
 		return err
@@ -180,7 +159,7 @@ func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 // installNonceSource gives the database the set's nonces for the rollbacks it
 // runs once the nonces family is drained.
 func (ls *LedgerState) installNonceSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetNonceSource(drainedNonceSource{ls})
 	}
 }

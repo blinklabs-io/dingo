@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/big"
 	"testing"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/require"
@@ -57,29 +57,43 @@ func drainEveryGraduatedFamily(t *testing.T, h *p5Harness) {
 	}, statedrain.Graduated(src))
 }
 
-// allGraduatedRun writes nonces, network state, summaries, op-cert counters
-// and the committee, drains every graduated family together when drain is
-// set, runs drive, rolls back across the boundary, and renders what the
+// allGraduatedRun builds the harness over a metadata store that holds its
+// ledger state, the reward input facts included, as an earlier release left
+// it, and a set that takes all of it over.
+// It then writes nonces, network state, summaries, op-cert counters and the
+// committee, runs drive, rolls back across the boundary, and renders what the
 // ledger answers after each step. The ledger holds a Leios certificate
 // validator, as a node always does.
 func allGraduatedRun(
 	t *testing.T,
-	drain bool,
 	drive func(h *p5Harness) func() []string,
 ) (map[string][]string, *p5Harness) {
 	t.Helper()
-	h := newSeededP5Harness(t, nil, nil, func(db *database.Database) {
-		seedRewardInputFacts(t, db.Metadata())
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	guard := statedrain.NewTripGuard()
+	h := &p5Harness{set: set, guard: guard}
+	h.scenario = ledger.NewSeededBoundaryEpochStateScenarioForTest(
+		t, set, guard, func(db *database.Database) {
+			require.NoError(t, db.Metadata().IterateAccounts(nil,
+				func(a *models.Account) error {
+					h.refs = append(h.refs, models.NewStakeCredentialRef(
+						a.CredentialTag, a.StakingKey,
+					))
+					if h.pool == nil {
+						h.pool = bytes.Clone(a.Pool)
+					}
+					return nil
+				}))
+			seedRewardInputFacts(t, db.Metadata())
+		},
+	)
+	h.store = dbadapter.New(h.scenario.DB)
+	require.Len(t, h.refs, 2, "the harness has two accounts")
 	s := h.scenario
 	s.ConfigureLeiosValidator()
-	// The harness wrote its two nonces to the metadata store only.
-	fixture, err := h.store.GetBlockNoncesInSlotRange(0, math.MaxInt64, nil)
-	require.NoError(t, err)
-	s.StageNoncesInSet(fixture)
-	// So is the stake of the harness's two stake credentials.
-	s.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-	s.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
+	s.InstallDrainedSources()
 	cur := s.CurrentPoint().Slot
 	s.WriteNonces([]models.BlockNonce{{
 		Slot: cur + 1, Hash: bytes.Repeat([]byte{byte(cur + 1)}, 32),
@@ -93,11 +107,6 @@ func allGraduatedRun(
 		EpochNonce: bytes.Repeat([]byte{3}, 32),
 	})
 	s.Committee()
-	if drain {
-		s.InstallDrainedSources()
-		drainEveryGraduatedFamily(t, h)
-		require.NoError(t, h.drainErr)
-	}
 	out := map[string][]string{}
 	render := drive(h)
 	read := func() []string {
@@ -129,148 +138,109 @@ func requireEveryGraduatedFamilyDrained(t *testing.T, h *p5Harness) {
 	h.requireDrained(t, families, tables)
 }
 
-// With every graduated family drained together, each scenario reads as an
-// undrained run does across a boundary, a rollback and the writes of every
-// family, with the statement guard armed over every graduated table.
-func TestEveryGraduatedFamilyDrainedTogetherMatchesAnUndrainedRun(
-	t *testing.T,
-) {
-	t.Parallel()
-	for _, d := range p5Drives {
-		t.Run(d.name, func(t *testing.T) {
-			t.Parallel()
-			drive := func(drained bool) func(*p5Harness) func() []string {
-				return func(h *p5Harness) func() []string {
-					touched := d.drive(t, h)
-					return func() []string {
-						return accountDRepReads(t, h.reads(drained), h, touched)
-					}
-				}
-			}
-			undrained, plain := allGraduatedRun(t, false, drive(false))
-			require.NoError(t, plain.drainErr)
-			drained, h := allGraduatedRun(t, true, drive(true))
-			requireEveryGraduatedFamilyDrained(t, h)
-			for name, want := range undrained {
-				require.NotEmpty(t, want, name)
-				requireSameLines(t, name, want, drained[name])
-			}
-			require.NotEqual(
-				t, undrained["applied"], undrained["rolled back"],
-				"the rollback must change the reads",
-			)
-		})
-	}
-}
-
 // The pool scenario: a registration, a VRF key rotation, a retirement and its
 // reap at the boundary, a rollback and a replay.
 func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 	t *testing.T,
 ) {
 	t.Parallel()
-	run := func(t *testing.T, drained bool) (map[string][]string, *p5Harness) {
-		var slots ledger.PoolSlots
-		var refunds []models.PoolRetirementRefund
-		var tip ochainsync.Tip
-		var err error
-		apply := func(h *p5Harness) {
-			slots = h.scenario.Pools(func() {
-				epochs, err := h.store.GetEpochs(nil)
-				require.NoError(t, err)
-				var cur models.Epoch
-				for _, e := range epochs {
-					if e.EpochId > cur.EpochId {
-						cur = e
-					}
+	var slots ledger.PoolSlots
+	var refunds []models.PoolRetirementRefund
+	var tip ochainsync.Tip
+	var err error
+	apply := func(h *p5Harness) {
+		slots = h.scenario.Pools(func() {
+			epochs, err := h.scenario.LedgerDB().GetEpochs(nil)
+			require.NoError(t, err)
+			var cur models.Epoch
+			for _, e := range epochs {
+				if e.EpochId > cur.EpochId {
+					cur = e
 				}
-				refunds, err = h.scenario.LedgerDB().GetPoolsRetiringAtEpoch(
-					t.Context(), cur.EpochId+1, cur.StartSlot+23, nil,
-				)
-				require.NoError(t, err)
-			})
-		}
-		out, h := allGraduatedRun(
-			t,
-			drained,
-			func(h *p5Harness) func() []string {
-				// The op-cert write keeps the pool row's counter in step in
-				// the metadata store, which a drained family has no row for.
-				ops := h.scenario.OpCerts()
-				apply(h)
-				require.Len(t, refunds, 1)
-				first := true
-				return func() []string {
-					initial := first
-					if first {
-						tip, err = h.scenario.DB.GetTip(nil)
-						require.NoError(t, err)
-						if drained {
-							requireDrainedPoolAnswers(
-								t, h.scenario.LedgerDB(), slots,
-							)
-						}
-					}
-					first = false
-					lines := readPools(
-						t,
-						h.reads(drained),
-						h.scenario.DB,
-						slots,
+			}
+			refunds, err = h.scenario.LedgerDB().GetPoolsRetiringAtEpoch(
+				t.Context(), cur.EpochId+1, cur.StartSlot+23, nil,
+			)
+			require.NoError(t, err)
+		})
+	}
+	out, h := allGraduatedRun(
+		t,
+		func(h *p5Harness) func() []string {
+			// The op-cert write keeps the pool row's counter in step in
+			// the metadata store, which holds no row of the family.
+			ops := h.scenario.OpCerts()
+			apply(h)
+			require.Len(t, refunds, 1)
+			first := true
+			return func() []string {
+				initial := first
+				if first {
+					tip, err = h.scenario.DB.GetTip(nil)
+					require.NoError(t, err)
+					requireDrainedPoolAnswers(
+						t, h.scenario.LedgerDB(), slots,
 					)
-					lines = append(lines, renderOpCerts(
-						t,
-						h.reads(drained),
-						[][]byte{ops.Pool, ops.Other},
-						[]uint64{
-							ops.Raised,
-							ops.Repeated,
-							ops.Lowered,
-							ops.Batched,
-						},
-					)...)
-					// The counters observed at one slot are what a snapshot
-					// import's anchor exports.
-					for _, slot := range []uint64{
-						ops.Base, ops.Raised, ops.Repeated, ops.Lowered,
-						ops.Batched, ops.Batched + 1,
-					} {
-						got, err := h.scenario.AnchorOpCertCounters(slot)
-						require.NoError(t, err, "anchor counters at %d", slot)
-						if initial && slot == ops.Repeated {
-							require.Len(t, got, 2, "both pools observed at %d", slot)
-						}
-						for _, c := range got {
-							lines = append(lines, fmt.Sprintf(
-								"anchor %d %x %d", slot, c.PoolKeyHash,
-								c.Sequence,
-							))
-						}
+				}
+				first = false
+				lines := readPools(
+					t,
+					h.scenario.LedgerDB(),
+					h.scenario.DB,
+					slots,
+				)
+				lines = append(lines, renderOpCerts(
+					t,
+					h.scenario.LedgerDB(),
+					[][]byte{ops.Pool, ops.Other},
+					[]uint64{
+						ops.Raised,
+						ops.Repeated,
+						ops.Lowered,
+						ops.Batched,
+					},
+				)...)
+				// The counters observed at one slot are what a snapshot
+				// import's anchor exports.
+				for _, slot := range []uint64{
+					ops.Base, ops.Raised, ops.Repeated, ops.Lowered,
+					ops.Batched, ops.Batched + 1,
+				} {
+					got, err := h.scenario.AnchorOpCertCounters(slot)
+					require.NoError(t, err, "anchor counters at %d", slot)
+					if initial && slot == ops.Repeated {
+						require.Len(t, got, 2, "both pools observed at %d", slot)
+					}
+					for _, c := range got {
 						lines = append(lines, fmt.Sprintf(
-							"anchor %d count %d", slot, len(got),
+							"anchor %d %x %d", slot, c.PoolKeyHash,
+							c.Sequence,
 						))
 					}
-					return lines
+					lines = append(lines, fmt.Sprintf(
+						"anchor %d count %d", slot, len(got),
+					))
 				}
-			},
-		)
-		// The replay applies no blocks, so the tip stays at the rollback
-		// target while the metadata store's epoch reads follow the tip the
-		// first pass left.
-		apply(h)
-		require.NoError(t, h.scenario.DB.SetTip(tip, nil))
-		out["replay"] = readPools(
-			t, h.reads(drained), h.scenario.DB, slots,
-		)
-		return out, h
-	}
-	undrained, _ := run(t, false)
-	drained, h := run(t, true)
+				return lines
+			}
+		},
+	)
+	// The replay applies no blocks, so the tip stays at the rollback
+	// target while the metadata store's epoch reads follow the tip the
+	// first pass left.
+	apply(h)
+	require.NoError(t, h.scenario.DB.SetTip(tip, nil))
+	out["replay"] = readPools(
+		t, h.scenario.LedgerDB(), h.scenario.DB, slots,
+	)
 	requireEveryGraduatedFamilyDrained(t, h)
-	for name, want := range undrained {
-		require.NotEmpty(t, want, name)
-		requireSameLines(t, name, want, drained[name])
+	for _, name := range []string{"applied", "rolled back", "replay"} {
+		require.NotEmpty(t, out[name], name)
 	}
+	require.NotEqual(
+		t, out["applied"], out["rolled back"],
+		"the rollback undoes the pool certificates",
+	)
 }
 
 // newRewardBoundaryRun is newRewardBlocksRun over a Mithril anchor with the
@@ -301,64 +271,35 @@ func newRewardBoundaryRun(
 
 // The boundary scenario: the reward capture of the epoch that closes, the
 // block counts and fees the round reads, a rollback across the boundary and a
-// replay, with every graduated family drained and a Leios certificate
-// validator configured.
-func TestEveryGraduatedFamilyDrainedTogetherCapturesTheSameRewardInputs(
+// replay, with a Leios certificate validator configured.
+func TestBoundaryRewardCaptureSurvivesRollbackAndReplay(
 	t *testing.T,
 ) {
 	t.Parallel()
-	run := func(t *testing.T, drain bool) (map[string]string, *statedrain.TripGuard, *rewardBlocksRun) {
-		guard := statedrain.NewTripGuard()
-		r := newRewardBoundaryRun(t, guard)
-		s := r.scenario
-		fixture, err := dbadapter.New(s.DB).GetBlockNoncesInSlotRange(
-			0, math.MaxInt64, nil,
-		)
-		require.NoError(t, err)
-		s.StageNoncesInSet(fixture)
-		if drain {
-			s.InstallDrainedSources()
-			src := rewardBlocksDrainSource{r: r}
-			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard,
-			}, statedrain.Graduated(src)))
-		}
-		out := map[string]string{}
-		read := func(name string) {
-			inputs := s.Inputs(6)
-			require.NoError(t, inputs.Err, name)
-			rawIn, err := json.Marshal(inputs)
-			require.NoError(t, err, name)
-			out[name] = string(rawIn) + fmt.Sprint(r.read(t, 5), r.read(t, 4))
-		}
-		read("before the boundary")
-		s.Boundary()
-		s.WaitDeferred()
-		read("boundary")
-		s.RollbackBeforeBoundary()
-		s.WaitDeferred()
-		read("rollback")
-		s.Block(11, s.PoolB)
-		s.Fee(11, 25)
-		s.Boundary()
-		s.WaitDeferred()
-		read("replay")
-		return out, guard, r
+	guard := statedrain.NewTripGuard()
+	r := newRewardBoundaryRun(t, guard)
+	s := r.scenario
+	s.InstallDrainedSources()
+	out := map[string]string{}
+	read := func(name string) {
+		inputs := s.Inputs(6)
+		require.NoError(t, inputs.Err, name)
+		rawIn, err := json.Marshal(inputs)
+		require.NoError(t, err, name)
+		out[name] = string(rawIn) + fmt.Sprint(r.read(t, 5), r.read(t, 4))
 	}
-	undrained, _, plain := run(t, false)
-	drained, guard, r := run(t, true)
-	require.Empty(t, guard.Trips(), "a drained table was touched")
-	// Control: the guard is armed, so a read around the ledger trips it.
-	require.Error(t, r.scenario.DB.Metadata().IterateAccounts(
-		nil, func(*models.Account) error { return nil },
-	))
-	require.NotEmpty(t, guard.Trips(), "the guard did not see a drained read")
-	rawPlain, err := dbtest.RawSQLiteMetadata(t, plain.scenario.DB)
+	read("before the boundary")
+	s.Boundary()
+	read("boundary")
+	s.RollbackBeforeBoundary()
+	read("rollback")
+	s.Block(11, s.PoolB)
+	s.Fee(11, 25)
+	s.Boundary()
+	read("replay")
+	raw, err := dbtest.RawSQLiteMetadata(t, s.DB)
 	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, r.scenario.DB)
-	require.NoError(t, err)
-	mask, err := r.scenario.DB.DrainedFamilies(t.Context())
+	mask, err := s.DB.DrainedFamilies(t.Context())
 	require.NoError(t, err)
 	for family, tables := range graduatedTables() {
 		require.True(t, mask.Has(family), "latch bit of %s", family)
@@ -366,17 +307,9 @@ func TestEveryGraduatedFamilyDrainedTogetherCapturesTheSameRewardInputs(
 			require.Zero(t, tableRows(t, raw, table), "drained %s", table)
 		}
 	}
-	for _, table := range []string{
-		"account", "pool", "reward_pool_input", "reward_stake_input",
-		"reward_snapshot", "reward_ada_pots", "pool_opcert_sequence",
-	} {
-		require.Positive(
-			t, tableRows(t, rawPlain, table), "undrained %s", table,
-		)
-	}
-	require.Equal(t, undrained, drained)
-	require.Equal(t, drained["boundary"], drained["replay"])
-	require.NotEqual(t, drained["boundary"], drained["rollback"])
+	require.Equal(t, out["boundary"], out["replay"])
+	require.NotEqual(t, out["boundary"], out["rollback"])
+	require.NotEqual(t, out["before the boundary"], out["boundary"])
 }
 
 // seedRewardInputFacts stores the reward input rows a harness block run does

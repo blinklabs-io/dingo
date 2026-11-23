@@ -135,7 +135,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:       db,
-		UtxoSet:        livesettest.New(),
+		UtxoSet:        livesettest.OpenLedgerDB(t, db),
 		ChainManager:   cm,
 		EnableDijkstra: true,
 		Logger: slog.New(

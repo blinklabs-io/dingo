@@ -470,30 +470,6 @@ RETURNING id;
 DELETE FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ? AND authoritative = false;
 
--- name: InsertRewardSnapshot :one
-INSERT INTO reward_snapshot (
-    epoch, snapshot_type, total_active_stake, total_pool_count,
-    total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version,
-    excluded_active_stake
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (epoch, snapshot_type) DO NOTHING
-RETURNING id;
-
--- name: UpdateFallbackRewardSnapshot :execrows
-UPDATE reward_snapshot
-SET total_active_stake = ?,
-    total_pool_count = ?,
-    total_delegators = ?,
-    captured_slot = ?,
-    boundary_slot = ?,
-    epoch_nonce = ?,
-    protocol_version = ?,
-    authoritative = FALSE,
-    calculation_version = ?,
-    excluded_active_stake = ?
-WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE;
-
 -- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
@@ -556,10 +532,6 @@ WHERE epoch = ?;
 -- name: DeleteImportedEpochBlockTotalForEpoch :exec
 DELETE FROM imported_epoch_block_total
 WHERE epoch = ?;
-
--- name: ReleaseFallbackRewardSnapshotGuard :execrows
-DELETE FROM reward_snapshot
-WHERE id = ? AND authoritative = FALSE;
 
 -- name: SaveRewardPoolInput :one
 INSERT INTO reward_pool_input (
@@ -671,61 +643,6 @@ ON CONFLICT (
     captured_slot = excluded.captured_slot,
     boundary_slot = excluded.boundary_slot
 RETURNING id;
-
--- name: SaveRewardLikelihoodState :one
-INSERT INTO reward_likelihood_state (
-    epoch, reward_pot, captured_slot, boundary_slot, complete
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (epoch) DO UPDATE SET
-    reward_pot = excluded.reward_pot,
-    captured_slot = excluded.captured_slot,
-    boundary_slot = excluded.boundary_slot,
-    complete = excluded.complete
-RETURNING id;
-
--- name: SaveRewardPoolLikelihood :one
-INSERT INTO reward_pool_likelihood (
-    epoch, pool_key_hash, log_weights, performance_estimate, boundary_slot
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
-    log_weights = excluded.log_weights,
-    performance_estimate = excluded.performance_estimate,
-    boundary_slot = excluded.boundary_slot
-RETURNING id;
-
--- name: DeleteRewardPoolLikelihoodsForEpoch :exec
-DELETE FROM reward_pool_likelihood WHERE epoch = ?;
-
--- name: GetRewardLikelihoodStateBeforeEpoch :one
-SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
-FROM reward_likelihood_state
-WHERE epoch < ?
-ORDER BY epoch DESC
-LIMIT 1;
-
--- name: GetRewardLikelihoodStateAtSlot :one
-SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
-FROM reward_likelihood_state
-WHERE boundary_slot <= ?
-ORDER BY boundary_slot DESC, epoch DESC
-LIMIT 1;
-
--- name: GetRewardPoolLikelihoods :many
-SELECT id, epoch, pool_key_hash, log_weights, performance_estimate,
-       boundary_slot
-FROM reward_pool_likelihood
-WHERE epoch = ?
-ORDER BY pool_key_hash ASC;
-
--- name: DeleteRewardLikelihoodStatesAfterSlot :exec
-DELETE FROM reward_likelihood_state WHERE boundary_slot > ?;
-
--- name: DeleteOrphanRewardPoolLikelihoods :exec
-DELETE FROM reward_pool_likelihood
-WHERE NOT EXISTS (
-    SELECT 1 FROM reward_likelihood_state
-    WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
-);
 
 -- name: GetRewardAccountOutputs :many
 SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
@@ -1201,9 +1118,12 @@ INSERT INTO drep (
 ON CONFLICT DO NOTHING;
 
 -- name: GetDRepDelegators :many
+-- The unary plus on drep_type keeps SQLite off
+-- idx_account_drep_type_active_staking_key; see the account index notes in
+-- DATABASE.md.
 SELECT credential_tag, staking_key
 FROM account
-WHERE drep = ? AND drep_type = ? AND active = TRUE
+WHERE drep = ? AND +drep_type = ? AND active = TRUE
 ORDER BY credential_tag, staking_key;
 
 -- name: UpdateDRepActivity :execrows

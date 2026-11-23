@@ -27,7 +27,7 @@ import (
 func TestUtxoAddressPrefixIndexDropMigration(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, path, 74)
+	migrations.SeedMigratedPrefix(t, path, 73)
 	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })

@@ -60,11 +60,10 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   call `t.Parallel()`. `goleak.VerifyNone` additionally sees the runner
   goroutine parked waiting for the parallel batch, so a goleak test cannot
   itself be parallel.
-- `internal/settingsresolve` and `bark/database_test.go` are fully sequential.
-  `settingsresolve.Apply` replaces `internal/config`'s process-global
-  `globalConfig` and the assertions read it back; `barkFakeCloudDir` is a
-  process-global the registered fake scheme resolves against with no such gate,
-  so concurrent tests would see each other's directory.
+- `internal/settingsresolve` is fully sequential. `settingsresolve.Apply`
+  replaces `internal/config`'s process-global `globalConfig` and the assertions
+  read it back. `bark`'s fake cloud schemes resolve a per-test bucket name to
+  its backing directory, so its database tests run in parallel.
 - A test that opens an on-disk badger blob store passes
   `testutil.BadgerBlobConfig()` as the provider config (or
   `badger.WithValueLogFileSize`/`WithMemTableSize` for a direct `badger.New`);

@@ -117,7 +117,10 @@ func removeAllDrepDelegators(
 		// that authoritative state so stale or missing replay index entries
 		// cannot clear an unrelated delegate or miss a real one. PV9 retains
 		// its historical reverse-membership semantics.
-		predicate = `account.active = TRUE AND account.drep_type = ? AND account.drep = ?`
+		// The unary plus on drep_type keeps SQLite off
+		// idx_account_drep_type_active_staking_key; see the account index
+		// notes in DATABASE.md.
+		predicate = `account.active = TRUE AND +account.drep_type = ? AND account.drep = ?`
 	}
 	insert := `-- name: InsertAccountDrepClearForDrep :exec
 INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)

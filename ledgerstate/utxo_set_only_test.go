@@ -38,7 +38,7 @@ func TestImportRejectingTheSnapshotLeavesTheDatabaseUnmarked(t *testing.T) {
 	t.Cleanup(func() { _ = set.Close() })
 	nonce := make([]byte, 32)
 
-	err = ImportLedgerState(t.Context(), ImportConfig{
+	err = importWholeState(t, t.Context(), ImportConfig{
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{

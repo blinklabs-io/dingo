@@ -22,9 +22,9 @@ file is only what isn't derivable.
   (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`,
   `goleak.VerifyNone`). A fixture that serializes for the whole test instead —
   `database/lifecycle`'s `setFakeCloudBackingDir` holds `fakeCloudFixtureMu`
-  until `t.Cleanup` — is parallel-safe. `internal/settingsresolve` and
-  `bark/database_test.go` stay fully sequential: their fixtures rewrite a
-  process-global (`globalConfig`, `barkFakeCloudDir`) with no such gate.
+  until `t.Cleanup` — is parallel-safe, as is `bark`'s per-test fake cloud
+  bucket. `internal/settingsresolve` stays fully sequential: its fixture
+  rewrites a process-global (`globalConfig`) with no such gate.
 - Live two-node lifecycle integration tests use the shared
   `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - The default `make` target formats and builds; tests are a separate target.

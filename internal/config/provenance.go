@@ -26,7 +26,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Source identifies where a gated configuration field's value came from.
+// Source identifies where a tracked configuration field's value came from.
 type Source int
 
 const (
@@ -44,7 +44,7 @@ const (
 	SourceFlag
 )
 
-// Provenance records, for each gated Config field (keyed by dotted field
+// Provenance records, for each tracked Config field (keyed by dotted field
 // path, e.g. "HistoryExpiry.Enabled"), whether its value came from an
 // operator or is still the built-in default.
 type Provenance map[string]Source
@@ -77,6 +77,14 @@ var gatedFieldPaths = []string{
 	"StrictUtxoValidation",
 }
 
+// provenanceFieldPaths includes persisted gates and settings whose explicit
+// zero value must survive a network- or mode-derived default.
+var provenanceFieldPaths = func() []string {
+	ret := make([]string, len(gatedFieldPaths), len(gatedFieldPaths)+1)
+	copy(ret, gatedFieldPaths)
+	return append(ret, "BlockPipelineEnabled")
+}()
+
 // GatedFieldPaths returns the dotted Config field paths that gate
 // provenance tracks. The returned slice is a defensive copy.
 func GatedFieldPaths() []string {
@@ -100,8 +108,8 @@ func FieldExists(cfg *Config, path string) bool {
 	return v.IsValid()
 }
 
-// Provenance returns a copy of the provenance recorded for c's gated
-// fields so far. A gated field never recorded is simply absent from the
+// Provenance returns a copy of the provenance recorded for c's tracked
+// fields so far. A tracked field never recorded is simply absent from the
 // result (equivalent to SourceDefault via IsExplicit).
 func (c *Config) Provenance() Provenance {
 	out := make(Provenance, len(c.provenance))
@@ -109,7 +117,7 @@ func (c *Config) Provenance() Provenance {
 	return out
 }
 
-// recordProvenance sets the provenance for a gated field, initializing the
+// recordProvenance sets the provenance for a tracked field, initializing the
 // backing map on first use.
 func (c *Config) recordProvenance(field string, source Source) {
 	if c.provenance == nil {
@@ -118,28 +126,32 @@ func (c *Config) recordProvenance(field string, source Source) {
 	c.provenance[field] = source
 }
 
-// gatedFieldPathSet indexes gatedFieldPaths for the per-flag lookup ApplyFlags
-// does over every registered flag, not just the gated ones.
-var gatedFieldPathSet = func() map[string]struct{} {
-	set := make(map[string]struct{}, len(gatedFieldPaths))
-	for _, path := range gatedFieldPaths {
+// provenanceFieldPathSet indexes provenanceFieldPaths for the per-flag lookup
+// ApplyFlags does over every registered flag.
+var provenanceFieldPathSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(provenanceFieldPaths))
+	for _, path := range provenanceFieldPaths {
 		set[path] = struct{}{}
 	}
 	return set
 }()
 
-// isGatedField reports whether path is one of the field paths provenance is
-// documented to track. Callers that iterate something broader than
-// gatedFieldPaths -- ApplyFlags walks every flagSpec -- must consult this
-// before recording, or the map fills with fields nothing ever reads and stops
-// matching its own contract. recordProvenance itself stays unguarded so
-// SetProvenanceForTest can set any path a test needs.
-func isGatedField(path string) bool {
-	_, ok := gatedFieldPathSet[path]
+// isProvenanceField reports whether path is one of the field paths provenance
+// is documented to track. ApplyFlags walks every flagSpec, so it must consult
+// this before recording or the map fills with fields nothing reads.
+func isProvenanceField(path string) bool {
+	_, ok := provenanceFieldPathSet[path]
 	return ok
 }
 
-// SetProvenanceForTest directly sets a gated field's recorded provenance,
+// SetBlockPipelineEnabled sets BlockPipelineEnabled as an operator-supplied
+// value, so later mode- or storage-derived defaulting leaves it alone.
+func (c *Config) SetBlockPipelineEnabled(enabled bool) {
+	c.BlockPipelineEnabled = enabled
+	c.recordProvenance("BlockPipelineEnabled", SourceFlag)
+}
+
+// SetProvenanceForTest directly sets a tracked field's recorded provenance,
 // bypassing CLI/env/YAML detection entirely.
 //
 // Test-only: production code must only ever populate provenance through
@@ -149,7 +161,7 @@ func (c *Config) SetProvenanceForTest(field string, source Source) {
 	c.recordProvenance(field, source)
 }
 
-// RecordSourceProvenance records, for gated fields only, whether c's
+// RecordSourceProvenance records, for tracked fields only, whether c's
 // current values came from a YAML config file or an environment variable
 // (see Provenance/IsExplicit). ApplyFlags layers SourceFlag for any
 // CLI-set field on top afterward, and unconditionally overwrites any
@@ -189,7 +201,7 @@ func (c *Config) RecordSourceProvenance(configFile string) error {
 	return nil
 }
 
-// recordYAMLProvenance marks each gated field present as a key in the
+// recordYAMLProvenance marks each tracked field present as a key in the
 // parsed YAML document as SourceYAML. It handles both YAML shapes a config
 // file may use — settings at the top level, or nested under a top-level
 // `config:` key — exactly like collectMidnightYAMLFields/mappingValue
@@ -204,7 +216,7 @@ func recordYAMLProvenance(cfg *Config, buf []byte) {
 	}
 	root := doc.Content[0]
 	configNode := mappingValue(root, "config")
-	for _, path := range gatedFieldPaths {
+	for _, path := range provenanceFieldPaths {
 		segments := yamlSegmentsForField(path)
 		if segments == nil {
 			continue
@@ -257,13 +269,13 @@ func yamlSegmentsForField(path string) []string {
 	return segments
 }
 
-// recordEnvProvenance marks each gated field whose resolved environment
+// recordEnvProvenance marks each tracked field whose resolved environment
 // variable is present in the environment as SourceEnv. It runs after
 // recordYAMLProvenance, so an environment variable overwrites a YAML
 // provenance entry for the same field, matching the documented CLI > env >
 // YAML > defaults priority.
 func recordEnvProvenance(cfg *Config) {
-	for _, path := range gatedFieldPaths {
+	for _, path := range provenanceFieldPaths {
 		for _, name := range envVarCandidatesForField(path) {
 			if _, ok := os.LookupEnv(name); ok {
 				cfg.recordProvenance(path, SourceEnv)
@@ -283,7 +295,7 @@ var (
 )
 
 // envVarCandidatesForField returns the environment variable name(s) that
-// actually set a gated field, derived from envconfigKeyAndAlt (verified
+// actually set a tracked field, derived from envconfigKeyAndAlt (verified
 // empirically per field, and per returned candidate, in
 // TestGatedFieldEnvProvenance; see the Task 5 report for the full table).
 // The primary Key is always returned; the bare Alt fallback is included
@@ -308,7 +320,7 @@ func envVarCandidatesForField(path string) []string {
 // accumulated prefix for the next segment, rather than the outer
 // "cardano" prefix being applied directly to the leaf.
 //
-// This matters for any gated field nested under a container with no
+// This matters for any tracked field nested under a container with no
 // envconfig tag of its own — e.g. HistoryExpiry.Enabled: the container
 // field's derived key ("CARDANO_HISTORYEXPIRY") becomes the leaf's real
 // prefix, so the leaf's working Key is

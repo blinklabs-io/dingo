@@ -79,6 +79,7 @@ func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{db: newTestDB(t)}
+	fxAttachLedgerDB(t, ls)
 	// The handler reads the snapshot slot from the same DB transaction as the
 	// pool data, so seed the tip in the database rather than in-memory state.
 	require.NoError(t, ls.db.SetTip(
@@ -111,6 +112,7 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{db: newTestDB(t)}
+	fxAttachLedgerDB(t, ls)
 
 	result, err := ls.queryLedgerPeerSnapshot(
 		context.Background(),
@@ -132,6 +134,7 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{db: newTestDB(t)}
+	fxAttachLedgerDB(t, ls)
 	require.NoError(t, ls.db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(0, []byte("genesis-block"))},
 		nil,
@@ -504,10 +507,12 @@ func peerSnapshotV23Ledger(t *testing.T) *LedgerState {
 	)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, cfg.ShelleyGenesis().NetworkMagic)
-	return &LedgerState{
+	ls := &LedgerState{
 		db:     newTestDB(t),
 		config: LedgerStateConfig{CardanoNodeConfig: cfg},
 	}
+	fxAttachLedgerDB(t, ls)
+	return ls
 }
 
 func peerSnapshotV23Query(kind olocalstatequery.LedgerPeerKind) *olocalstatequery.BlockQuery {
@@ -654,6 +659,7 @@ func TestQueryLedgerPeerSnapshotV23RequiresNetworkMagic(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{db: newTestDB(t)}
+	fxAttachLedgerDB(t, ls)
 	_, err := ls.Query(
 		t.Context(),
 		peerSnapshotV23Query(olocalstatequery.LedgerPeerKindBig),
@@ -682,6 +688,7 @@ func TestLedgerPeerSnapshotExportedMatchesTheQuery(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{db: newTestDB(t)}
+	fxAttachLedgerDB(t, ls)
 	require.NoError(t, ls.db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(4242, []byte("tip"))},
 		nil,

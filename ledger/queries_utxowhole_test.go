@@ -471,8 +471,11 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 	seedBabbageUtxo(t, db, 0xA1, 0, addrA, 1_000_000)
 
 	ls := newPoolDistr2Ledger(t, db)
-	set := ls.config.UtxoSet.(*querySetHistory)
+	// A set whose scan fails partway stands in for a row the store cannot
+	// read.
+	set := newQuerySetHistory()
 	set.readErr = database.ErrUtxoCborUnavailable
+	ls.config.UtxoSet = set
 
 	_, err = ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable)
@@ -581,7 +584,8 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
+	ls := newPoolDistr2Ledger(t, db)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -608,7 +612,6 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 	require.NoError(t, txn.Commit())
 	txn.Release()
 
-	ls := newPoolDistr2Ledger(t, db)
 	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
 		100: {{Added: []UtxoOutput{{
 			Ref:  models.UtxoId{Hash: txIdOld, Idx: 0},
@@ -651,7 +654,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -703,16 +706,14 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 	)
 }
 
-// TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected covers the same
-// retention floor queryShelleyUtxoByTxIn already enforces
-// (checkUtxoRetentionWindow): a pin older than what this node's spent-UTxO
-// cleanup sweep has already pruned cannot be answered correctly, so it
-// must be rejected with ErrHistoricalStateUnavailable rather than risk a
-// silently wrong (incomplete) historical set.
+// TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected requires a pin
+// older than the LedgerDB set's pruned UTxO history to be rejected with
+// ErrUtxoAsOfUnavailable rather than answered from an incomplete historical
+// set.
 func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
 	// calculateStabilityWindow returns the default (50_000) regardless of
@@ -723,14 +724,21 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+	// floor = 200_000 - 50_000 = 150_000, where the node drops the set's
+	// history. The oldest record kept is the block at 150_000, which
+	// restores the set its parent at 100_000 left; one slot behind that
+	// must reject.
+	set := attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		100_000: {},
 		150_000: {},
 		200_000: {},
 	})
+	pruner, ok := set.(interface{ PruneHistory(slot uint64) error })
+	require.True(t, ok, "the fixture's set must prune its history")
+	require.NoError(t, pruner.PruneHistory(150_000))
 	_, err := ls.queryShelleyUtxoWhole(
 		t.Context(),
-		QueryPoint{Slot: 149_999},
+		QueryPoint{Slot: 99_999},
 		nil,
 	)
 	require.Error(t, err)

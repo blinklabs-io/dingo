@@ -27,7 +27,7 @@ import (
 // keeps epoch state.
 type EpochSummaryReader interface {
 	// EpochSummariesLoaded reports whether the reader holds every summary
-	// row; until it does, reads stay on the metadata store.
+	// row; until it does, the set does not serve the reads.
 	EpochSummariesLoaded() (bool, error)
 	// EpochSummary returns epoch's summary row, or nil.
 	EpochSummary(epoch uint64) (*models.EpochSummary, error)
@@ -170,7 +170,7 @@ func (s stagingLedgerDB) GetTotalActiveStake(
 		if err != nil {
 			return 0, err
 		}
-		rows, err := s.ls.snapshotViewLocked(er, txn, epoch, snapshotType)
+		rows, err := s.ls.snapshotViewLocked(er, txn, epoch, snapshotType, 0)
 		if err != nil {
 			return 0, err
 		}

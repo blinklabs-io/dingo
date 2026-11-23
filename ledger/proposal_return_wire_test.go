@@ -406,7 +406,7 @@ func TestRejectedProposalReturnAddressPersistsNoGovernanceProposal(
 			require.ErrorContains(
 				t, decodeErr, "invalid account address type", tc.name,
 			)
-			_, err := db.GetGovernanceProposal(context.Background(), proposalID.Bytes(), 0, nil)
+			_, err := seedDB(t, db).GetGovernanceProposal(context.Background(), proposalID.Bytes(), 0, nil)
 			require.ErrorIs(
 				t, err, models.ErrGovernanceProposalNotFound, tc.name,
 			)

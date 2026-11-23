@@ -372,8 +372,8 @@ func (s *Store) fixCheckpointVersion() (
 }
 
 // ErrNotCheckpointable reports a set whose state is not one worth restoring:
-// it carries a failure mark, holds a merge or a rollback part done, or has an
-// unfinished bootstrap.
+// it carries a failure mark, holds an interrupted ledger-state import or a
+// rollback part done, or has an unfinished bootstrap.
 var ErrNotCheckpointable = errors.New("badgerutxo: the set is not in a state a checkpoint can restore")
 
 // checkCheckpointable returns ErrNotCheckpointable, saying which mark it found.
@@ -390,7 +390,7 @@ func checkCheckpointable(txn *badger.Txn) error {
 		key  []byte
 		what string
 	}{
-		{mergeKey, "a ledger-state merge is pending"},
+		{importKey, "a ledger-state import is pending"},
 		{rollbackPendingKey, "a rollback is pending"},
 	} {
 		_, err := txn.Get(m.key)

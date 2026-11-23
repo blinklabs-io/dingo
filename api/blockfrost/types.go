@@ -27,6 +27,27 @@ type HealthResponse struct {
 	IsHealthy bool `json:"is_healthy"`
 }
 
+// HealthClockResponse is returned by GET /health/clock.
+type HealthClockResponse struct {
+	ServerTime int64 `json:"server_time"`
+}
+
+// MetadataLabelResponse is one entry of GET /metadata/txs/labels.
+type MetadataLabelResponse struct {
+	Label string  `json:"label"`
+	CIP10 *string `json:"cip10"`
+	Count string  `json:"count"`
+}
+
+// XpubAddressResponse is returned by
+// GET /utils/addresses/xpub/{xpub}/{role}/{index}.
+type XpubAddressResponse struct {
+	Xpub    string `json:"xpub"`
+	Role    uint32 `json:"role"`
+	Index   uint32 `json:"index"`
+	Address string `json:"address"`
+}
+
 // BlockResponse represents a Blockfrost block object.
 type BlockResponse struct {
 	Time          int64   `json:"time"`

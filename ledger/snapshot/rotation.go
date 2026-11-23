@@ -56,19 +56,7 @@ func poolRegistrationSnapshotWindow(
 	return previousEpochStartSlot, evt.PreviousEpoch
 }
 
-// errFallbackSupersededByAuthoritative is returned internally by
-// saveSnapshotInTxn (never to an outside caller — saveSnapshot translates it
-// into saved=false, nil) when a fallback, non-authoritative write's
-// in-transaction re-check finds that an authoritative mark snapshot has
-// already landed for the target epoch/boundary. See saveSnapshot's
-// checkAuthoritativeMark parameter.
-var errFallbackSupersededByAuthoritative = errors.New(
-	"snapshot: authoritative mark snapshot already captured",
-)
-
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
-// It returns saved=false with no error when a fallback capture is superseded by
-// an authoritative capture that already landed for the target epoch.
 //
 // resolveAutoVote controls whether the CIP-1694 reward-account auto-vote is
 // computed against the live Pool/Account tables and frozen onto the snapshot
@@ -86,20 +74,6 @@ var errFallbackSupersededByAuthoritative = errors.New(
 // persisting reward inputs would make the reward calculator consume synthetic
 // current-state rows as if they were exact historical inputs. Historical rows
 // with unresolved auto-vote are tallied as PoolRewardAccountAutoVoteNone.
-//
-// checkAuthoritativeMark must be true only for the fallback (event-driven)
-// mark-snapshot capture path (captureMarkSnapshot); the authoritative
-// CaptureEpochBoundarySnapshot path always passes false. A fallback claims the
-// lockable reward_snapshot key before replacing Mark rows and is superseded
-// (this method returns errFallbackSupersededByAuthoritative) whenever an
-// authoritative row already exists. When reward inputs are available, the
-// normal ClaimFallbackRewardSnapshot marker provides that guard. Without
-// ended-epoch metadata, ClaimFallbackRewardSnapshotGuard temporarily claims the
-// same key and removes only the row it inserted before commit, preserving the
-// invariant that no reward_snapshot remains without reward inputs. In both
-// cases a concurrent authoritative writer blocks on the same key/row lock
-// (MySQL/Postgres) or is serialized by single-writer semantics (SQLite),
-// closing the check-then-write race outright rather than merely narrowing it.
 func (m *Manager) saveSnapshot(
 	ctx context.Context,
 	epoch uint64,
@@ -108,8 +82,7 @@ func (m *Manager) saveSnapshot(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
-) (bool, error) {
+) error {
 	_ = ctx
 	txn := m.db.Begin(ctx, true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
@@ -122,29 +95,11 @@ func (m *Manager) saveSnapshot(
 		evt,
 		resolveAutoVote,
 		persistRewardInputs,
-		checkAuthoritativeMark,
 		txn,
 	); err != nil {
-		switch {
-		case errors.Is(err, errFallbackSupersededByAuthoritative):
-			m.logger.Debug(
-				"authoritative mark snapshot landed concurrently; discarding fallback capture",
-				"component",
-				"snapshot",
-				"epoch",
-				epoch,
-				"snapshot_type",
-				snapshotType,
-			)
-			return false, nil
-		}
-		return false, err
+		return err
 	}
-
-	if err := txn.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return txn.Commit()
 }
 
 func (m *Manager) saveSnapshotInTxn(
@@ -155,13 +110,12 @@ func (m *Manager) saveSnapshotInTxn(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
 	txn ledgerdb.Txn,
 ) error {
 	return m.saveSnapshotInTxnDeferring(
 		ctx,
 		epoch, snapshotType, distribution, evt, resolveAutoVote,
-		persistRewardInputs, checkAuthoritativeMark, false, txn,
+		persistRewardInputs, false, txn,
 	)
 }
 
@@ -176,7 +130,6 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
 	txn ledgerdb.Txn,
 ) error {
@@ -189,7 +142,7 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 		return err
 	}
 	return m.writePreparedSnapshot(
-		prepared, checkAuthoritativeMark, deferStakeInputs, txn,
+		prepared, deferStakeInputs, txn,
 	)
 }
 
@@ -296,7 +249,6 @@ func (m *Manager) prepareSnapshot(
 // writePreparedSnapshot writes a prepared snapshot through txn.
 func (m *Manager) writePreparedSnapshot(
 	prepared *preparedSnapshot,
-	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
 	txn ledgerdb.Txn,
 ) error {
@@ -304,38 +256,11 @@ func (m *Manager) writePreparedSnapshot(
 	epoch := prepared.epoch
 	snapshotType := prepared.snapshotType
 	bundle := prepared.bundle
-	authoritative := !checkAuthoritativeMark
-	var temporaryFallbackGuardID uint
 	if bundle != nil {
-		bundle.snapshot.Authoritative = authoritative
-		if authoritative {
-			if err := ldb.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
-				return fmt.Errorf("save reward snapshot: %w", err)
-			}
-		} else {
-			proceed, err := ldb.ClaimFallbackRewardSnapshot(
-				bundle.snapshot, txn,
-			)
-			if err != nil {
-				return fmt.Errorf("claim fallback reward snapshot: %w", err)
-			}
-			if !proceed {
-				return errFallbackSupersededByAuthoritative
-			}
+		bundle.snapshot.Authoritative = true
+		if err := ldb.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
+			return fmt.Errorf("save reward snapshot: %w", err)
 		}
-	} else if checkAuthoritativeMark {
-		proceed, guardID, err := ldb.ClaimFallbackRewardSnapshotGuard(
-			epoch,
-			snapshotType,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
-		}
-		if !proceed {
-			return errFallbackSupersededByAuthoritative
-		}
-		temporaryFallbackGuardID = guardID
 	}
 
 	if err := ldb.DeletePoolStakeSnapshotsForEpoch(
@@ -365,15 +290,6 @@ func (m *Manager) writePreparedSnapshot(
 				Inputs:       bundle.stakeInputs,
 			}
 			m.mu.Unlock()
-		}
-	}
-
-	if temporaryFallbackGuardID != 0 {
-		if err := ldb.ReleaseFallbackRewardSnapshotGuard(
-			temporaryFallbackGuardID,
-			txn,
-		); err != nil {
-			return fmt.Errorf("release fallback reward snapshot guard: %w", err)
 		}
 	}
 

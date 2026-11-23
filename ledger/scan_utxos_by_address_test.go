@@ -32,7 +32,7 @@ import (
 func TestScanUtxosByAddressVisitsEveryOutput(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -69,6 +69,7 @@ func TestScanUtxosByAddressVisitsEveryOutput(t *testing.T) {
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	seen := 0
 	gotTip, err := ls.ScanUtxosByAddress(

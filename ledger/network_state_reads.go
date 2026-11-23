@@ -39,7 +39,7 @@ type NetworkStateReader interface {
 }
 
 // networkStateReader returns the set's network state reader and the read
-// mode, or false when these reads stay on the metadata store.
+// mode, or false when the set does not serve them.
 func (ls *LedgerState) networkStateReader(
 	txn ledgerdb.Txn,
 ) (NetworkStateReader, bool) {
