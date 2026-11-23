@@ -21302,7 +21302,12 @@ drawn once per run, never the host name, because every subscriber sees it. The b
 handlers only enqueue onto a bounded
 channel; one goroutine converts and appends to a ring buffer of
 `barkEventBufferSize` events that carries the delivery sequence. Subscribers
-read the ring at their own pace, so a slow remote client cannot delay any
+see each epoch number at most once during that EventService lifetime. The first
+internal `epoch.transition` for a boundary advances the adapter's epoch
+high-water mark; the later nonce-bearing block notification and any replay
+after a rollback remain available to internal ledger consumers but are not
+exported as indistinguishable copies. Subscribers read the ring at their own
+pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
 stops acknowledging a half-ring window of delivered events is closed after a
