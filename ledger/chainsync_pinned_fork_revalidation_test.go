@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -71,9 +73,6 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 	local := sign(2_100, 2, ancestor.block.Hash().Bytes())
 	fork0 := sign(2_200, 2, ancestor.block.Hash().Bytes())
 	fork1 := sign(2_300, 3, fork0.block.Hash().Bytes())
-	seedBlockPoolRegistration(t, db, ancestor.block)
-	pool := ancestor.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 5, pool[:], 1_000_000_000)
 	for _, b := range []*testBlockResult{ancestor, local} {
 		require.NoError(
 			t,
@@ -88,17 +87,28 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 		eras.BabbageEraDesc.Id, 1_000, 432_000, nil,
 	))
 
+	pparamsCbor, err := cbor.Encode(
+		&babbage.BabbageProtocolParameters{ProtocolMajor: 8},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 6, eras.BabbageEraDesc.Id, nil,
+	))
+
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: cfg,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	// The set holds ledger state once open, so seed through it.
+	seedBlockPoolRegistration(t, db, ancestor.block)
+	pool := ancestor.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 5, pool[:], 1_000_000_000)
 	ls.metrics.init(prometheus.NewRegistry())
-	ls.config.UtxoSet = newQuerySetHistory()
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
@@ -121,12 +131,12 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 		cfg, ancestorNonce, local.block,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
-		ancestorTip.Point.Hash, ancestorTip.Point.Slot, ancestorNonce,
+	require.NoError(t, seedBlockNonce(
+		t, db, ancestorTip.Point.Hash, ancestorTip.Point.Slot, ancestorNonce,
 		true, nil,
 	))
-	require.NoError(t, db.SetBlockNonce(
-		localTip.Point.Hash, localTip.Point.Slot, localNonce, false, nil,
+	require.NoError(t, seedBlockNonce(
+		t, db, localTip.Point.Hash, localTip.Point.Slot, localNonce, false, nil,
 	))
 	require.NoError(t, db.SetTip(localTip, nil))
 
@@ -146,6 +156,7 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 	ls.currentEra = eras.BabbageEraDesc
 	ls.epochCache = []models.Epoch{epoch}
 	ls.currentTip = localTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = append([]byte(nil), localNonce...)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
