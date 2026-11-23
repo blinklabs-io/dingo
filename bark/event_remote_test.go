@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -317,4 +318,84 @@ func TestRemoteEventsLogUnreachableSourceOncePerOutage(t *testing.T) {
 		return logs.count("remote event source reachable again") == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Equal(t, 1, logs.count("remote event source unreachable"))
+}
+
+// TestRemoteEventsRefuseOversizedMessage checks a source's message over
+// remoteEventMaxMessageBytes is not accepted, even when it arrives
+// compressed, and that the refusal is logged rather than retried silently.
+func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
+	t.Parallel()
+	nodeA := newEventFixture(t, nil, false)
+	busB := event.NewEventBus(nil, nil)
+	t.Cleanup(busB.Close)
+	got := newRemoteCollector(busB)
+	logs := &syncBuffer{}
+	remote, err := NewRemoteEvents(RemoteEventsConfig{
+		Logger:         slog.New(slog.NewTextHandler(logs, nil)),
+		EventBus:       busB,
+		NodeID:         "node-b",
+		Sources:        []RemoteEventSource{{Name: "a", URL: nodeA.srv.URL}},
+		HTTPClient:     nodeA.srv.Client(),
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, remote.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, remote.Stop(ctx))
+	})
+
+	waitActive(t, nodeA, 1)
+	nodeA.publishChurn(strings.Repeat("a", remoteEventMaxMessageBytes+1))
+	require.Eventually(t, func() bool {
+		return logs.count("remote event source stream refused") == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	require.Zero(t, got.count())
+}
+
+// TestRemoteEventsKeepRedirectsOnSourceOrigin checks the default client
+// follows a redirect within the source's origin and refuses one to another
+// origin without contacting it.
+func TestRemoteEventsKeepRedirectsOnSourceOrigin(t *testing.T) {
+	t.Parallel()
+	var otherHits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherHits.Add(1)
+	}))
+	t.Cleanup(other.Close)
+	var sameHits atomic.Int32
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same":
+			sameHits.Add(1)
+		case "/to-same":
+			http.Redirect(w, r, "/same", http.StatusTemporaryRedirect)
+		default:
+			http.Redirect(w, r, other.URL+"/internal", http.StatusTemporaryRedirect)
+		}
+	}))
+	t.Cleanup(source.Close)
+	r := &RemoteEvents{}
+	// The configured URL may carry credentials; they are not part of the
+	// origin.
+	configured := strings.Replace(source.URL, "http://", "http://user:pw@", 1)
+	client, ok := r.httpClient(configured).(*http.Client)
+	require.True(t, ok)
+	// The default client speaks h2c to plaintext sources; the test servers
+	// speak HTTP/1.1, so only the redirect policy is kept.
+	client = &http.Client{CheckRedirect: client.CheckRedirect}
+
+	resp, err := client.Get(source.URL + "/to-same")
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, int32(1), sameHits.Load())
+
+	resp, err = client.Get(source.URL + "/to-other")
+	if resp != nil {
+		require.NoError(t, resp.Body.Close())
+	}
+	require.ErrorContains(t, err, "redirect to origin")
+	require.Zero(t, otherHits.Load())
 }

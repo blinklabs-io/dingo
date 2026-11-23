@@ -21304,6 +21304,13 @@ new run that has already passed the old position accepts it, so that run's
 earlier events are skipped without an error. The bark client retries
 silently, so each source logs a warning when its node stops answering and an
 info line when it answers or delivers an event again, once per outage.
+The remote node is not trusted: each message read from it is capped at 16 MiB
+(`remoteEventMaxMessageBytes`, after decompression), far above any event a
+Dingo node emits, and the default client follows a redirect only within the
+source's own origin. A stream refused with `RESOURCE_EXHAUSTED`, an oversized
+message or the source's subscriber limit, is logged once and retried; an
+oversized event is not skipped, so that source stays stalled until the remote
+node no longer serves it.
 Sources are independent of `barkEventEnabled`, are set only in YAML
 or with `WithBarkEventSources`, and are started and stopped with the node.
 

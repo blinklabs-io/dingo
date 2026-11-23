@@ -180,17 +180,62 @@ func (r *RemoteEvents) Stop(ctx context.Context) error {
 	}
 }
 
+// remoteEventMaxMessageBytes bounds each message read from a remote Event
+// Service, which this node does not control: without a bound, one oversized
+// message is allocated, and decompressed, whole. It is far above any event a
+// Dingo node emits.
+const remoteEventMaxMessageBytes = 16 << 20
+
 func (r *RemoteEvents) httpClient(baseURL string) connect.HTTPClient {
 	if r.cfg.HTTPClient != nil {
 		return r.cfg.HTTPClient
 	}
 	// Streaming calls are long-lived, so the client sets no overall timeout.
+	client := &http.Client{CheckRedirect: sameOriginRedirect(baseURL)}
 	if u, err := url.Parse(baseURL); err == nil && u.Scheme == "http" {
 		protocols := &http.Protocols{}
 		protocols.SetUnencryptedHTTP2(true)
-		return &http.Client{Transport: &http.Transport{Protocols: protocols}}
+		client.Transport = &http.Transport{Protocols: protocols}
 	}
-	return &http.Client{}
+	return client
+}
+
+// sameOriginRedirect keeps redirects on the configured source's origin. The
+// default policy follows a redirect anywhere, so a compromised source could
+// point this node's requests at an internal endpoint.
+func sameOriginRedirect(
+	baseURL string,
+) func(*http.Request, []*http.Request) error {
+	allowed := eventSourceOrigin(baseURL)
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("remote events: too many redirects")
+		}
+		if origin := eventSourceOrigin(req.URL.String()); allowed == "" ||
+			origin != allowed {
+			return fmt.Errorf(
+				"remote events: redirect to origin %q refused, the source is %q",
+				origin,
+				allowed,
+			)
+		}
+		return nil
+	}
+}
+
+// eventSourceOrigin returns rawURL's scheme, host and port, without any
+// credentials, or "" when it is not an HTTP or HTTPS URL.
+func eventSourceOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	origin, _, err := normalizeArchiveOrigin(u.String())
+	if err != nil {
+		return ""
+	}
+	return origin
 }
 
 // follow subscribes to one source until ctx is done. The Event Service
@@ -200,7 +245,12 @@ func (r *RemoteEvents) httpClient(baseURL string) connect.HTTPClient {
 func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 	log := r.cfg.Logger.With("component", "remote-events", "source", src.Name)
 	reach := &reachabilityClient{next: r.httpClient(src.URL), log: log}
-	client := eventclient.New(reach, src.URL)
+	client := eventclient.New(
+		reach,
+		src.URL,
+		connect.WithReadMaxBytes(remoteEventMaxMessageBytes),
+		connect.WithInterceptors(&refusalLogger{log: log}),
+	)
 	initial := r.cfg.InitialBackoff
 	if initial <= 0 {
 		initial = remoteInitialBackoff
@@ -301,4 +351,56 @@ func (c *reachabilityClient) reachable() {
 	if c.down.CompareAndSwap(true, false) {
 		c.log.Info("remote event source reachable again")
 	}
+}
+
+// refusalLogger warns once when a source's stream fails with
+// ResourceExhausted: a message over remoteEventMaxMessageBytes, or the
+// source's subscriber limit. The Event Service client retries that code
+// without reporting it, so the source would otherwise go quiet with no log
+// line. The warning repeats only after an event has been received again.
+type refusalLogger struct {
+	log    *slog.Logger
+	warned atomic.Bool
+}
+
+func (l *refusalLogger) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return next
+}
+
+func (l *refusalLogger) WrapStreamingHandler(
+	next connect.StreamingHandlerFunc,
+) connect.StreamingHandlerFunc {
+	return next
+}
+
+func (l *refusalLogger) WrapStreamingClient(
+	next connect.StreamingClientFunc,
+) connect.StreamingClientFunc {
+	return func(
+		ctx context.Context,
+		spec connect.Spec,
+	) connect.StreamingClientConn {
+		return &refusalConn{StreamingClientConn: next(ctx, spec), l: l}
+	}
+}
+
+type refusalConn struct {
+	connect.StreamingClientConn
+	l *refusalLogger
+}
+
+func (c *refusalConn) Receive(msg any) error {
+	err := c.StreamingClientConn.Receive(msg)
+	switch {
+	case err == nil:
+		c.l.warned.Store(false)
+	case connect.CodeOf(err) == connect.CodeResourceExhausted &&
+		c.l.warned.CompareAndSwap(false, true):
+		c.l.log.Warn(
+			"remote event source stream refused; retrying",
+			"error", err,
+			"maxMessageBytes", remoteEventMaxMessageBytes,
+		)
+	}
+	return err
 }
