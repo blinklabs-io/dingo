@@ -107,9 +107,10 @@ type BlobStore interface {
 	// only holds on disk if the blob commit is durable before the metadata
 	// commit is, so Txn.Commit calls Sync between the two. Skipping it inverts
 	// the invariant on an unclean host shutdown, because the two stores flush on
-	// very different schedules: SQLite reaches disk at WAL checkpoints (every
-	// 1000 pages by default) while Badger can hold committed writes in a 128MiB
-	// memtable for hours at chain tip. The metadata tip then survives while the
+	// very different schedules: SQLite reaches disk at WAL checkpoints (a
+	// PASSIVE checkpoint every few seconds off the write connection) while
+	// Badger can hold committed writes in a 128MiB memtable for hours at chain
+	// tip. The metadata tip then survives while the
 	// blocks it references are silently discarded.
 	//
 	// Implementations whose writes are already durable on commit (remote

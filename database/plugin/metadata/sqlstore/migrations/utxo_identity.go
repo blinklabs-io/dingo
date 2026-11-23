@@ -821,7 +821,8 @@ WHERE table_schema = DATABASE() AND table_name = ?
 }
 
 // buildIndex creates the position'th secondary index. Each index is its own
-// transaction so the write-ahead log is checkpointed between builds.
+// transaction so a WAL checkpoint can backfill one build before the next
+// starts; the checkpointer can only copy committed frames.
 func (b identityBackfill) buildIndex(
 	ctx context.Context,
 	batch Batch,

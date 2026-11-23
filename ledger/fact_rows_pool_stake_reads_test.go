@@ -50,6 +50,7 @@ func (s *countingEpochSet) Epochs() ([]models.Epoch, error) {
 func (s *countingEpochSet) PoolStakeSnapshots(
 	epoch uint64,
 	typ string,
+	_ int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	return []*models.PoolStakeSnapshot{{
 		Epoch: epoch, SnapshotType: typ, PoolKeyHash: []byte{byte(epoch)},
@@ -63,7 +64,7 @@ func (s *countingEpochSet) PoolStakeSnapshotsCapturedIn(
 	var rows []*models.PoolStakeSnapshot
 	for _, epoch := range s.epochs {
 		for _, typ := range rewardSnapshotTypes {
-			snapshots, err := s.PoolStakeSnapshots(epoch.EpochId, typ)
+			snapshots, err := s.PoolStakeSnapshots(epoch.EpochId, typ, 0)
 			if err != nil {
 				return nil, err
 			}

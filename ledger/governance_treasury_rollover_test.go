@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,10 +66,10 @@ func TestProcessEpochRolloverTreasuryRatificationUsesRunningBudget(
 		f.currentEpoch.EpochId+1,
 		firstRollover.NewCurrentEpoch.EpochId,
 	)
-	assert.NotNil(t, f.proposal(t, first).RatifiedEpoch)
-	assert.Nil(t, f.proposal(t, second).RatifiedEpoch)
-	assert.Nil(t, f.proposal(t, overflow).RatifiedEpoch)
-	assert.NotNil(t, f.proposal(t, fourth).RatifiedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, first).RatifiedEpoch)
+	assert.Nil(t, treasuryRolloverProposal(t, f, second).RatifiedEpoch)
+	assert.Nil(t, treasuryRolloverProposal(t, f, overflow).RatifiedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, fourth).RatifiedEpoch)
 
 	secondRollover := f.rollover(
 		t,
@@ -80,10 +81,10 @@ func TestProcessEpochRolloverTreasuryRatificationUsesRunningBudget(
 		f.currentEpoch.EpochId+2,
 		secondRollover.NewCurrentEpoch.EpochId,
 	)
-	assert.NotNil(t, f.proposal(t, first).EnactedEpoch)
-	assert.Nil(t, f.proposal(t, second).RatifiedEpoch)
-	assert.Nil(t, f.proposal(t, overflow).RatifiedEpoch)
-	assert.NotNil(t, f.proposal(t, fourth).EnactedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, first).EnactedEpoch)
+	assert.Nil(t, treasuryRolloverProposal(t, f, second).RatifiedEpoch)
+	assert.Nil(t, treasuryRolloverProposal(t, f, overflow).RatifiedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, fourth).EnactedEpoch)
 	assert.Equal(t, uint64(70), f.accountReward(t, firstCredential))
 	assert.Equal(t, uint64(0), f.accountReward(t, secondCredential))
 	assert.Equal(t, uint64(30), f.accountReward(t, fourthCredential))
@@ -118,21 +119,21 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 		f.currentEpoch.EpochId+1,
 		firstRollover.NewCurrentEpoch.EpochId,
 	)
-	failedAfterRollover := f.proposal(t, failing)
+	failedAfterRollover := treasuryRolloverProposal(t, f, failing)
 	assert.Nil(t, failedAfterRollover.EnactedEpoch)
 	assert.Nil(t, failedAfterRollover.RatifiedEpoch)
 	assert.Nil(t, failedAfterRollover.ExpiredEpoch)
 	assert.Nil(t, failedAfterRollover.DeletedSlot)
-	assert.NotNil(t, f.proposal(t, succeeding).EnactedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, succeeding).EnactedEpoch)
 	assert.Zero(t, f.accountReward(t, failingCredential))
 	assert.Equal(t, uint64(50), f.accountReward(t, succeedingCredential))
 	treasury, reserves, _ := networkState(t, f.db)
 	assert.Equal(t, uint64(50), treasury)
 
-	retry := f.proposal(t, failing)
+	retry := treasuryRolloverProposal(t, f, failing)
 	retry.ReturnAddress = failingReturn
-	require.NoError(t, f.db.SetGovernanceProposal(context.Background(), retry, nil))
-	require.NoError(t, f.db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, f.db).SetGovernanceProposal(context.Background(), retry, nil))
+	require.NoError(t, seedDB(t, f.db).SetNetworkState(
 		70,
 		reserves,
 		firstRollover.NewCurrentEpoch.StartSlot+50,
@@ -149,8 +150,8 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 		f.currentEpoch.EpochId+2,
 		secondRollover.NewCurrentEpoch.EpochId,
 	)
-	assert.Nil(t, f.proposal(t, failing).EnactedEpoch)
-	assert.NotNil(t, f.proposal(t, failing).RatifiedEpoch)
+	assert.Nil(t, treasuryRolloverProposal(t, f, failing).EnactedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, failing).RatifiedEpoch)
 	assert.Zero(t, f.accountReward(t, failingCredential))
 	assert.Equal(t, uint64(50), f.accountReward(t, succeedingCredential))
 	treasury, _, _ = networkState(t, f.db)
@@ -166,11 +167,29 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 		f.currentEpoch.EpochId+3,
 		thirdRollover.NewCurrentEpoch.EpochId,
 	)
-	assert.NotNil(t, f.proposal(t, failing).EnactedEpoch)
+	assert.NotNil(t, treasuryRolloverProposal(t, f, failing).EnactedEpoch)
 	// The retried return account is also the withdrawal destination, so it
 	// receives the 60 withdrawn plus the refunded deposit of 1.
 	assert.Equal(t, uint64(61), f.accountReward(t, failingCredential))
 	assert.Equal(t, uint64(50), f.accountReward(t, succeedingCredential))
 	treasury, _, _ = networkState(t, f.db)
 	assert.Equal(t, uint64(10), treasury)
+}
+
+// treasuryRolloverProposal reads proposal as the fixture's ledger sees it.
+func treasuryRolloverProposal(
+	t *testing.T,
+	f *treasuryRolloverFixture,
+	proposal *models.GovernanceProposal,
+) *models.GovernanceProposal {
+	t.Helper()
+	loaded, err := f.ls.ledgerDB().GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		proposal.ActionIndex,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	return loaded
 }

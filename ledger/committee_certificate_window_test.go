@@ -75,8 +75,8 @@ func TestValidateTxCommitteeAuthorizationAfterResignation(t *testing.T) {
 				} else {
 					seatCommitteeMembers(t, db, committeeTestCredential(0x62))
 				}
-				storeCommitteeUpdateProposal(t, db, 0x63, cold, 10)
-				seedCommitteeCredentialResignation(
+				committeeStoreUpdateProposal(t, db, 0x63, cold, 10)
+				committeeSeedResignation(
 					t,
 					db,
 					cold,
@@ -124,7 +124,7 @@ func TestValidateTxCommitteeAuthorizationByMemberOfAnyPendingProposal(
 			lv, db := committeeTestView(t, pparams)
 			seatCommitteeMembers(t, db, committeeTestCredential(0x71))
 			cold, coldKey := committeeTestVotingKey(0x72)
-			storeCommitteeUpdateProposal(t, db, 0x73, cold, 10)
+			committeeStoreUpdateProposal(t, db, 0x73, cold, 10)
 			removal, err := lcommon.NewUpdateCommitteeGovAction(
 				nil,
 				[]lcommon.Credential{cold},
@@ -136,7 +136,7 @@ func TestValidateTxCommitteeAuthorizationByMemberOfAnyPendingProposal(
 			require.NoError(t, err)
 			require.NoError(
 				t,
-				db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+				seedDB(t, db).SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 					TxHash:        governanceTestHash(0x74),
 					ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 					ExpiresEpoch:  100,

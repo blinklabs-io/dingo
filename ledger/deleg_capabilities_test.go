@@ -51,28 +51,28 @@ func mirReaderView(
 
 func TestLedgerViewInstantaneousRewardsTotals(t *testing.T) {
 	t.Parallel()
-	ls, db, gdb := newMIRTestLedger(t)
+	ls, db, _ := newMIRTestLedger(t)
 	// A distribution from before the epoch is not pending.
-	seedMIRDistribution(t, gdb, mirPotReserves, 50,
+	seedMIRDistribution(t, db, mirPotReserves, 50,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(1_000)},
 		})
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 7, 50)
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+	seedMIRPotTransfer(t, db, mirPotReserves, 7, 50)
+	seedMIRDistribution(t, db, mirPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 			{Credential: mirCred28(2), Amount: big.NewInt(20)},
 		})
-	seedMIRDistribution(t, gdb, mirPotReserves, 160,
+	seedMIRDistribution(t, db, mirPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 		})
-	seedMIRDistribution(t, gdb, mirPotTreasury, 170,
+	seedMIRDistribution(t, db, mirPotTreasury, 170,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(100)},
 		})
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 300, 180)
-	seedMIRPotTransfer(t, gdb, mirPotTreasury, 40, 190)
+	seedMIRPotTransfer(t, db, mirPotReserves, 300, 180)
+	seedMIRPotTransfer(t, db, mirPotTreasury, 40, 190)
 
 	read := func(
 		t *testing.T,
@@ -217,14 +217,14 @@ func TestLedgerViewGenesisDelegationRegistry(t *testing.T) {
 	const window = 25_920
 	nextCertID := uint(1)
 	seed := func(g byte, delegate byte, vrf byte, slot uint64, certIndex uint) {
-		seedGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
+		lv.ls.stageLedgerChanges(nil, LedgerChanges{GenesisDelegations: []models.GenesisDelegation{{
 			GenesisHash:         genesisKey(g).Bytes(),
 			GenesisDelegateHash: bytes.Repeat([]byte{delegate}, 28),
 			VrfKeyHash:          bytes.Repeat([]byte{vrf}, 32),
 			AddedSlot:           slot,
 			CertIndex:           certIndex,
 			CertificateID:       nextCertID,
-		})
+		}}})
 		nextCertID++
 	}
 	// Genesis key 0x11 certifies twice in slot 100; the later certificate
@@ -296,7 +296,7 @@ func TestLedgerViewGenesisDelegationRegistry(t *testing.T) {
 func TestLedgerViewAdaPotsReportReservesAndTreasury(t *testing.T) {
 	t.Parallel()
 	ls, db, _ := newMIRTestLedger(t)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 100, nil))
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := mirReaderView(ls, txn, 100, 5)
@@ -329,7 +329,7 @@ func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ls, db, gdb := newMIRTestLedger(t)
+			ls, db, _ := newMIRTestLedger(t)
 			withMIRCutoffEpoch(t, ls, models.Epoch{
 				EpochId: 1, StartSlot: 100, LengthInSlots: 432_000,
 			})
@@ -338,9 +338,9 @@ func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
 			ls.currentPParams = pp
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
-			require.NoError(t, db.Metadata().SetNetworkState(0, 100, 100, nil))
+			require.NoError(t, seedDB(t, db).SetNetworkState(0, 100, 100, nil))
 			// 60 is pending for the credential from an earlier transaction.
-			seedMIRDistribution(t, gdb, mirPotReserves, 150,
+			seedMIRDistribution(t, db, mirPotReserves, 150,
 				[]models.MoveInstantaneousRewardsReward{
 					{Credential: mirCred28(0x31), Amount: big.NewInt(60)},
 				})

@@ -369,6 +369,7 @@ func TestImportedProducerOverlayMatchesPerRowPath(t *testing.T) {
 // hash index.
 func TestOutputLookupsDoNotScan(t *testing.T) {
 	t.Parallel()
+	skipPlanTestUnderRace(t)
 	store := newMigratedSQLiteStore(t)
 	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
 	analyzeStore(t, store)

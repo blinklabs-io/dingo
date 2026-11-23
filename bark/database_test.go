@@ -274,17 +274,6 @@ var (
 	_ lifecycle.CloudDeleter                     = &barkFakeCloudDestination{}
 )
 
-// barkFakeCloudDir is process-global and only momentarily locked, so the
-// scheme registered below resolves against whichever test wrote it last.
-// Every test in this file therefore runs sequentially -- none of them
-// calls t.Parallel. Giving the fixture a per-test identity (or the
-// serializing gate database/lifecycle's equivalent uses) is what would
-// let them run in parallel.
-var (
-	barkFakeCloudMu  sync.Mutex
-	barkFakeCloudDir string
-)
-
 // testDestinationRegistry is this test package's own instance-owned
 // registry (mirroring what composition code builds at startup — see
 // lifecycle.DestinationRegistry's doc comment), shared by every fake cloud
@@ -656,6 +645,8 @@ func init() {
 //     must
 //   - one present ONLY locally (never uploaded)
 func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, cloudBackingDir)
@@ -734,6 +725,8 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 // back successfully even when the configured cloud destination's listing
 // call errors out.
 func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 
 	localDir := installTemplateSnapshot(
@@ -764,6 +757,8 @@ func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 
 	localManifest, err := lifecycle.ReadManifest(
@@ -795,6 +790,8 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
@@ -820,6 +817,11 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
 	require.Empty(t, h.catalogCloudDestination)
+	// The startup failure must arm backoff for this destination; pin its
+	// deadline so slow setup under parallel load cannot outlast the window.
+	require.Equal(t, cloudDest, h.catalogRetry.destination)
+	require.Equal(t, initialCatalogRetry, h.catalogRetry.delay)
+	h.catalogRetry.nextAttempt = time.Now().Add(time.Hour)
 
 	dir := filepath.Join(snapshotDir, "after-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
@@ -850,6 +852,8 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 }
 
 func TestReconcileCloudSnapshotCatalogSerializesRetries(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
@@ -931,6 +935,8 @@ func TestReconcileCloudSnapshotCatalogSerializesRetries(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var attempts atomic.Int64
@@ -955,6 +961,11 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
 	require.Empty(t, h.catalogCloudDestination)
+	// The startup failure must arm backoff for this destination; pin its
+	// deadline so slow setup under parallel load cannot outlast the window.
+	require.Equal(t, cloudDest, h.catalogRetry.destination)
+	require.Equal(t, initialCatalogRetry, h.catalogRetry.delay)
+	h.catalogRetry.nextAttempt = time.Now().Add(time.Hour)
 
 	dir := filepath.Join(snapshotDir, "after-constructor-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
@@ -985,6 +996,8 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 }
 
 func TestReconcileCloudSnapshotCatalogCancellationDoesNotBackoff(t *testing.T) {
+	t.Parallel()
+
 	for _, destination := range []string{"", "cancelcatalog://bucket/snapshots"} {
 		t.Run(destination, func(t *testing.T) {
 			h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
@@ -1023,6 +1036,8 @@ func TestReconcileCloudSnapshotCatalogCancellationDoesNotBackoff(t *testing.T) {
 // while also covering the new cloud-fallback behavior.
 
 func TestRestoreFromLocalSnapshot(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	installTemplateSnapshot(t, snapshotDir, "snap1")
 
@@ -1060,6 +1075,8 @@ func TestRestoreFromLocalSnapshot(t *testing.T) {
 }
 
 func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest://" + bucket + "/prefix"
@@ -1103,6 +1120,8 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 }
 
 func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(
 		t,
 		nil,
@@ -1129,6 +1148,8 @@ func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
 // It must instead be reported as CodeUnavailable, distinct from a
 // genuine CodeNotFound.
 func TestRestoreReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandlerWithTrustKey(
 		t,
 		nil,
@@ -1147,6 +1168,8 @@ func TestRestoreReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
 }
 
 func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest://" + bucket + "/prefix"
@@ -1184,6 +1207,8 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 }
 
 func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest://" + bucket + "/prefix"
@@ -1214,6 +1239,8 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 }
 
 func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest://" + bucket + "/prefix"
@@ -1329,6 +1356,8 @@ func TestDeleteSnapshotMapsCloudDeleteContextErrors(t *testing.T) {
 }
 
 func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	h.bark.config.SnapshotCloudDestination = "barkfaketest://" + bucket + "/prefix"
@@ -1354,6 +1383,8 @@ func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
 
@@ -1379,6 +1410,8 @@ func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(
 func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest-nodelete://user:secret@" + bucket +
@@ -1414,6 +1447,8 @@ func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 // same-source) catalog: every ID appears exactly once across all pages,
 // and the last page's next_page_token is empty.
 func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	bucket := setBarkFakeCloudBackingDir(t, t.TempDir())
 	cloudDest := "barkfaketest://" + bucket + "/prefix"
@@ -1480,6 +1515,8 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
+	t.Parallel()
+
 	const cloudCount = 240
 	snapshotDir := t.TempDir()
 	manifestRoot := t.TempDir()
@@ -1561,6 +1598,8 @@ func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsRejectsStaleCatalogToken(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	write := func(id string, second int64) {
 		dir := filepath.Join(snapshotDir, id)
@@ -1596,6 +1635,8 @@ func TestListAvailableSnapshotsRejectsStaleCatalogToken(t *testing.T) {
 }
 
 func TestListAvailableSnapshotsDoesNotPublishIncompleteCloudCatalog(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	localDir := filepath.Join(snapshotDir, "local")
 	require.NoError(t, os.Mkdir(localDir, 0o755))
@@ -1641,6 +1682,8 @@ func TestListAvailableSnapshotsDoesNotPublishIncompleteCloudCatalog(t *testing.T
 }
 
 func TestSnapshotRPCManifestByteLimit(t *testing.T) {
+	t.Parallel()
+
 	for _, source := range []string{"local", "cloud"} {
 		for _, operation := range []string{"verify", "restore"} {
 			t.Run(source+"/"+operation, func(t *testing.T) {
@@ -2414,6 +2457,8 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 // TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount verifies that
 // GetDatabaseInfo reports the real tip, on-disk size, block count, and oldest slot.
 func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	for id := uint64(1); id <= 3; id++ {
@@ -3563,7 +3608,8 @@ func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
 }
 
 func TestReservedOperationCompletionIgnoresLateCancellation(t *testing.T) {
-	// Not t.Parallel: bark database fixtures share the fake-cloud backing path.
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -3604,7 +3650,8 @@ func TestReservedOperationCompletionIgnoresLateCancellation(t *testing.T) {
 }
 
 func TestCompleteOperationReservesOutcomeBeforeReleasingBusy(t *testing.T) {
-	// Not t.Parallel: bark database fixtures share the fake-cloud backing path.
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	op, ctx, err := h.startOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,

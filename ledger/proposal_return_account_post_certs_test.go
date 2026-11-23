@@ -172,7 +172,7 @@ func TestValidateTxProposalReturnAccountsSeeSameTransactionCertificates(
 			seedStakeRegistration(t, db, proposer, &d, 1, 0x62)
 			// Treasury withdrawals are checked against the enacted
 			// constitution's guardrails policy; none is set here.
-			require.NoError(t, db.SetConstitution(&models.Constitution{
+			require.NoError(t, seedDB(t, db).SetConstitution(&models.Constitution{
 				AnchorURL:  "https://example.invalid/constitution",
 				AnchorHash: bytes.Repeat([]byte{0xc1}, lcommon.Blake2b256Size),
 				AddedSlot:  1,

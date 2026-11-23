@@ -65,10 +65,11 @@ func TestCopyTableRestartsAfterTheLedgerLosesItsCursor(t *testing.T) {
 	copyPots := func(lose bool) (rows []int, cursors []int64) {
 		src, _ := newFactsDB(t)
 		dst, dstRaw := newFactsDB(t)
-		f, err := NewFactsOver(src, &pagedPots{}, dst)
-		require.NoError(t, err)
 		reader := &pagedPots{lose: lose}
-		f.srcRows = readOnlyFactRows{FactRowReader: reader}
+		ledger := newStoreLedger(t, src)
+		ledger.FactRowReader = reader
+		f, err := NewMetadataFacts(ledger, dst)
+		require.NoError(t, err)
 		var table metadata.FactTable
 		for _, ft := range metadata.FactTables {
 			if ft.Name == "reward_ada_pots" {

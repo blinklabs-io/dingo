@@ -276,7 +276,7 @@ func (f *leiosCertApplyFixture) requireEndorserEffects(want bool) {
 	t := f.t
 	t.Helper()
 	txHash := f.ebTx.Hash().Bytes()
-	utxo, err := f.db.Metadata().GetUtxo(txHash, 0, nil)
+	_, live, err := f.ls.config.UtxoSet.(UtxoSetReader).Get(txHash, 0)
 	require.NoError(t, err)
 	txs, err := f.db.GetTransactionsByHashes(
 		context.Background(),
@@ -284,7 +284,7 @@ func (f *leiosCertApplyFixture) requireEndorserEffects(want bool) {
 		nil,
 	)
 	require.NoError(t, err)
-	account, accountErr := f.db.GetAccountByCredential(
+	account, accountErr := f.ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		0,
 		f.stakeKey,
@@ -292,13 +292,13 @@ func (f *leiosCertApplyFixture) requireEndorserEffects(want bool) {
 		nil,
 	)
 	if !want {
-		require.Nil(t, utxo, "endorser transaction output reached the UTxO set")
+		require.False(t, live, "endorser transaction output reached the UTxO set")
 		require.Empty(t, txs, "endorser transaction was recorded")
 		require.NoError(t, accountErr)
 		require.Equal(t, leiosCertApplyInitialReward, uint64(account.Reward))
 		return
 	}
-	require.NotNil(t, utxo, "certified endorser output is missing")
+	require.True(t, live, "certified endorser output is missing")
 	require.Len(t, txs, 1, "certified endorser transaction is not recorded")
 	require.NoError(t, accountErr, "certified direct-deposit account is missing")
 	require.NotNil(t, account)
@@ -454,7 +454,7 @@ func TestLeiosCertifiedClosureAppliesStateBeforeValidatingNextTransaction(
 		[]gledger.Block{certifier},
 	))
 	require.NoError(t, f.process(certifier, offsets, envParent))
-	account, err := f.db.GetAccountByCredential(
+	account, err := seedDB(t, f.db).GetAccountByCredential(
 		t.Context(),
 		0,
 		pathStakeKey(pathSignerKey),
@@ -655,7 +655,7 @@ func TestLeiosCertifiedClosureRejectsInvalidDirectDeposit(t *testing.T) {
 		funds: leiosCertApplyDeposit,
 	}})
 	requireRejectedEndorserClosure(t, f)
-	_, err := f.db.GetAccountByCredential(
+	_, err := seedDB(t, f.db).GetAccountByCredential(
 		context.Background(),
 		0,
 		pathStakeKey(0x43),

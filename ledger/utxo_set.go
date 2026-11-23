@@ -136,6 +136,9 @@ type LedgerChanges struct {
 	// SyncMarkers are the commit's protocol parameter sync marker writes,
 	// in order.
 	SyncMarkers []SyncMarkerChange
+	// StateMarks are the commit's changes to the delegator inactivity
+	// activation and the pending ratification record, in order.
+	StateMarks []StateMarkChange
 	// ImportBaselines are the account import baselines the commit wrote, in
 	// order.
 	ImportBaselines []ImportBaselineChange
@@ -260,7 +263,7 @@ type LedgerChangesWriter interface {
 // BlockNonceReader serves block nonces from a LedgerChangesWriter.
 type BlockNonceReader interface {
 	// NoncesLoaded reports whether the reader holds every nonce up to its
-	// tip; until it does, nonce reads stay on the metadata store.
+	// tip; until it does, the set does not serve the reads.
 	NoncesLoaded() (bool, error)
 	BlockNonce(point ocommon.Point) ([]byte, bool, error)
 	BlockNoncesInSlotRange(start, end uint64) ([]models.BlockNonce, error)
@@ -301,10 +304,7 @@ type utxoSetBatch struct {
 	// rollbackTo rolls the set back to a point from its journal before
 	// changes apply.
 	rollbackTo *ocommon.Point
-	// rollbackRefs are the stake credentials of the outputs the rollback
-	// changes, whose live reward aggregate the truncation must refresh.
-	rollbackRefs []models.StakeCredentialRef
-	changes      []UtxoEvent
+	changes    []UtxoEvent
 	// validationOnly keeps speculative fork validation from stopping the
 	// live set when its private overlay cannot be prepared.
 	validationOnly bool
@@ -349,6 +349,7 @@ type utxoSetBatch struct {
 	votes         []VoteChange
 	pparamUpdates []PParamUpdateChange
 	syncMarkers   []SyncMarkerChange
+	stateMarks    []StateMarkChange
 	// importBaselines and witnesses are the account import baselines and
 	// witness slots txn wrote, for a set that keeps accounts.
 	importBaselines []ImportBaselineChange
@@ -380,6 +381,7 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.committee) > 0 ||
 		len(b.proposals) > 0 || len(b.votes) > 0 ||
 		len(b.pparamUpdates) > 0 || len(b.syncMarkers) > 0 ||
+		len(b.stateMarks) > 0 ||
 		len(b.importBaselines) > 0 ||
 		len(b.witnesses) > 0
 }
@@ -753,6 +755,7 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			Votes:               batch.votes,
 			PParamUpdates:       batch.pparamUpdates,
 			SyncMarkers:         batch.syncMarkers,
+			StateMarks:          batch.stateMarks,
 			ImportBaselines:     batch.importBaselines,
 			Witnesses:           batch.witnesses,
 		})
@@ -1181,22 +1184,14 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		b.rollbackTo = &p
 	}
 	ls.utxoSetMu.Unlock()
-	// The metadata truncation that follows re-reads stake, so the
-	// rolled-back set is staged in the overlay, though only the journal
-	// rollback after the commit changes the set.
+	// Later reads in txn see the rolled-back set through the overlay; only
+	// the journal rollback after the commit changes the set.
 	rb, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
 	r, readable := ls.config.UtxoSet.(UtxoSetReader)
 	if b == nil || !ok || !readable {
 		return
 	}
 	preview, err := rb.PreviewUtxoSetRollback(point)
-	if err == nil {
-		var refs []models.StakeCredentialRef
-		refs, err = ls.rollbackStakeRefs(r, txn, preview)
-		ls.utxoSetMu.Lock()
-		b.rollbackRefs = refs
-		ls.utxoSetMu.Unlock()
-	}
 	if err == nil {
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
@@ -1334,66 +1329,6 @@ func (ls *LedgerState) EachLiveUtxoStake(
 		}
 	}
 	return nil
-}
-
-// rollbackStakeRefs returns the stake credentials of the outputs a rollback
-// change adds and removes, reading removed outputs before the change.
-func (ls *LedgerState) rollbackStakeRefs(
-	r UtxoSetReader,
-	txn ledgerdb.Txn,
-	change UtxoEvent,
-) ([]models.StakeCredentialRef, error) {
-	var refs []models.StakeCredentialRef
-	add := func(cbor []byte) {
-		key, _, ok := UtxoStakeOf(cbor)
-		if !ok {
-			return
-		}
-		if tag, hash, ok := ParseCredentialStakeKey(key); ok {
-			refs = append(refs, models.NewStakeCredentialRef(tag, hash))
-		}
-	}
-	for _, o := range change.Added {
-		add(o.Cbor)
-	}
-	for _, ref := range change.Removed {
-		cbor, live, err := ls.utxoSetGet(r, txn, ref.Hash, ref.Idx)
-		if err != nil {
-			return nil, err
-		}
-		if live {
-			add(cbor)
-		}
-	}
-	return refs, nil
-}
-
-// refreshUtxoSetRollbackStake refreshes, after the metadata truncation in
-// txn, the live reward aggregate of the credentials txn's rollback changes,
-// which the metadata store finds through utxo rows when it has them.
-func (ls *LedgerState) refreshUtxoSetRollbackStake(
-	txn ledgerdb.Txn,
-	slot uint64,
-) error {
-	if txn == nil {
-		return nil
-	}
-	if ls.resumingUtxoSet.Load() {
-		// The set never applied the blocks this rollback removes from the
-		// ledger, so its journal names none of the credentials whose
-		// aggregate those blocks changed: recompute every one from the set.
-		return ls.ledgerDB().RebuildRewardLiveStake(slot, txn)
-	}
-	ls.utxoSetMu.Lock()
-	var refs []models.StakeCredentialRef
-	if b := ls.utxoSetBatches[txn]; b != nil {
-		refs = b.rollbackRefs
-	}
-	ls.utxoSetMu.Unlock()
-	if len(refs) == 0 {
-		return nil
-	}
-	return ls.ledgerDB().RefreshRewardLiveStakeRefs(refs, slot, txn)
 }
 
 // UtxoSetIterator walks a live UTxO set's committed outputs.

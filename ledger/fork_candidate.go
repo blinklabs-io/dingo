@@ -384,9 +384,6 @@ func (ls *LedgerState) validateForkCandidate(
 		if err := ls.stageUtxoSetRollbackForValidation(txn, ancestor); err != nil { //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
 			return fmt.Errorf("prepare fork validation UTxO set: %w", err)
 		}
-		if err := ls.refreshUtxoSetRollbackStake(txn, ancestor.Slot); err != nil {
-			return fmt.Errorf("prepare fork validation stake: %w", err)
-		}
 		epochs, err := ls.ledgerDB().GetEpochs(txn)
 		if err != nil {
 			return fmt.Errorf("load fork validation epochs: %w", err)

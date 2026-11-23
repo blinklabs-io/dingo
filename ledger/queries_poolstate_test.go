@@ -123,34 +123,31 @@ func seedPoolStateDevnetRegistration(
 	key := poolStateDevnetBytes(t, poolStateDevnetKeyHex)
 	ipv4 := net.IP{1, 1, 168, 192}
 	margin := &dbtypes.Rat{Rat: big.NewRat(1, 10)}
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrf,
-			RewardAccount: key,
-			Margin:        margin,
-			Pledge:        dbtypes.Uint64(1_000_000),
-			Cost:          dbtypes.Uint64(cost),
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    vrf,
+		RewardAccount: key,
+		Margin:        margin,
+		Pledge:        dbtypes.Uint64(1_000_000),
+		Cost:          dbtypes.Uint64(cost),
+	}, &models.PoolRegistration{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    vrf,
+		RewardAccount: key,
+		Margin:        margin,
+		Pledge:        dbtypes.Uint64(1_000_000),
+		Cost:          dbtypes.Uint64(cost),
+		DepositAmount: dbtypes.Uint64(poolStateDevnetDeposit),
+		MetadataUrl:   "https://example.com/p.json",
+		MetadataHash:  poolStateDevnetBytes(t, poolStateDevnetMetaHex),
+		Owners:        []models.PoolRegistrationOwner{{KeyHash: key}},
+		Relays: []models.PoolRegistrationRelay{
+			{Ipv4: &ipv4, Port: 3001},
+			{Hostname: "relay.example.com", Port: 3001},
 		},
-		&models.PoolRegistration{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    vrf,
-			RewardAccount: key,
-			Margin:        margin,
-			Pledge:        dbtypes.Uint64(1_000_000),
-			Cost:          dbtypes.Uint64(cost),
-			DepositAmount: dbtypes.Uint64(poolStateDevnetDeposit),
-			MetadataUrl:   "https://example.com/p.json",
-			MetadataHash:  poolStateDevnetBytes(t, poolStateDevnetMetaHex),
-			Owners:        []models.PoolRegistrationOwner{{KeyHash: key}},
-			Relays: []models.PoolRegistrationRelay{
-				{Ipv4: &ipv4, Port: 3001},
-				{Hostname: "relay.example.com", Port: 3001},
-			},
-			AddedSlot: addedSlot,
-		},
-		nil,
-	))
+		AddedSlot: addedSlot,
+	}))
+	fxPoolDeposit(t, ls.db, pool, addedSlot, poolStateDevnetDeposit)
 }
 
 // poolStateQuery builds GetPoolState. A nil pools slice is the unfiltered
@@ -351,7 +348,7 @@ func TestQueryPoolState_ViaGetCBOR(t *testing.T) {
 // no epoch record covers rather than answering for the live state.
 func TestQueryPoolState_PinnedPointWithoutEpochRejected(t *testing.T) {
 	t.Parallel()
-	ls := newPoolDistr2Ledger(t, newTestDB(t))
+	ls := newPoolDistr2Ledger(t, fxOpenDB(t))
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
 	seedEpochs(t, ls, map[uint64]uint64{100: 1})
 	require.NoError(t, ls.db.SetTip(ochainsync.Tip{
@@ -381,21 +378,18 @@ func TestQueryPoolState_PinnedPointIgnoresLaterRegistrations(t *testing.T) {
 		slot    uint64
 		deposit uint64
 	}{{5, 100}, {150, 300}} {
-		require.NoError(t, ls.db.Metadata().ImportPool(
-			&models.Pool{
-				PoolKeyHash:   pool,
-				VrfKeyHash:    vrf,
-				RewardAccount: repeatedBytes(28, 0x22),
-			},
-			&models.PoolRegistration{
-				PoolKeyHash:   pool,
-				VrfKeyHash:    vrf,
-				RewardAccount: repeatedBytes(28, 0x22),
-				AddedSlot:     reg.slot,
-				DepositAmount: dbtypes.Uint64(reg.deposit),
-			},
-			nil,
-		))
+		require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+			PoolKeyHash:   pool,
+			VrfKeyHash:    vrf,
+			RewardAccount: repeatedBytes(28, 0x22),
+		}, &models.PoolRegistration{
+			PoolKeyHash:   pool,
+			VrfKeyHash:    vrf,
+			RewardAccount: repeatedBytes(28, 0x22),
+			AddedSlot:     reg.slot,
+			DepositAmount: dbtypes.Uint64(reg.deposit),
+		}))
+		fxPoolDeposit(t, ls.db, pool, reg.slot, reg.deposit)
 	}
 	decode := func(at QueryPoint) olocalstatequery.PoolStateResult {
 		t.Helper()

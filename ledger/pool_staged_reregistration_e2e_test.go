@@ -26,35 +26,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBoundaryPromotesTheStagedRegistrationOfALoadedPool loads a pool whose
-// metadata rows hold the registration in force and a staged one at the same
-// slot, as a snapshot import writes them, and requires the epoch boundary to
-// promote the staged registration.
+// TestBoundaryPromotesTheStagedRegistrationOfALoadedPool loads a pool that
+// holds the registration in force and a staged one at the same slot, as a
+// snapshot import writes them, and requires the epoch boundary to promote the
+// staged registration.
 func TestBoundaryPromotesTheStagedRegistrationOfALoadedPool(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
+	require.NoError(t, set.LoadLedgerState(
+		t.Context(), dbadapter.New(scenario.DB),
+	))
 
 	pool := bytes.Repeat([]byte{0x52}, 28)
 	vrfNow := bytes.Repeat([]byte{0x53}, 32)
 	vrfNext := bytes.Repeat([]byte{0x71}, 32)
-	for i, vrf := range [][]byte{vrfNow, vrfNext} {
-		record := &models.Pool{
-			PoolKeyHash: bytes.Clone(pool), VrfKeyHash: bytes.Clone(vrf),
-			Pledge: dbtypes.Uint64(1), Cost: dbtypes.Uint64(1),
-		}
-		reg := &models.PoolRegistration{
+	registration := func(vrf []byte, index uint) *models.PoolRegistration {
+		return &models.PoolRegistration{
 			PoolKeyHash: bytes.Clone(pool), VrfKeyHash: bytes.Clone(vrf),
 			AddedSlot: 11, Pledge: dbtypes.Uint64(1), Cost: dbtypes.Uint64(1),
-			RegistrationIndex: uint(i),
+			RegistrationIndex: index,
 		}
-		require.NoError(t, scenario.DB.Metadata().ImportPool(record, reg, nil))
 	}
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(scenario.DB),
-	))
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Pools: []ledger.PoolChange{{
+			Slot: 11,
+			State: ledger.PoolState{
+				Pool:   bytes.Clone(pool),
+				Params: registration(vrfNow, 0),
+				Future: registration(vrfNext, 1),
+			},
+		}},
+	}))
 	st, err := set.PoolState(pool)
 	require.NoError(t, err)
 	require.NotNil(t, st)

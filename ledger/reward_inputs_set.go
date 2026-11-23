@@ -51,6 +51,9 @@ const (
 	// RewardInputPending replaces the snapshots whose stake rows are still
 	// being written with Pending.
 	RewardInputPending
+	// RewardInputLikelihood sets the non-myopic likelihood state of an epoch
+	// and replaces its pool likelihoods.
+	RewardInputLikelihood
 )
 
 // RewardInputChange is one change to the reward snapshot inputs the live
@@ -66,6 +69,10 @@ type RewardInputChange struct {
 	Stakes     []*models.RewardStakeInput
 	PruneBelow uint64
 	Pending    []RewardStakeInputsPendingEntry
+	// Likelihood and LikelihoodPools are a RewardInputLikelihood change's
+	// state and the pools it ranks, journaled at the state's boundary slot.
+	Likelihood      *models.RewardLikelihoodState
+	LikelihoodPools []*models.RewardPoolLikelihood
 }
 
 // RewardInputSlot is the slot a rollback to that slot or later keeps the
@@ -109,6 +116,17 @@ type RewardInputsReader interface {
 	RewardStakePending(
 		asOf *uint64,
 	) ([]RewardStakeInputsPendingEntry, error)
+	// RewardLikelihoodStates returns every likelihood state, oldest epoch
+	// first.
+	RewardLikelihoodStates(
+		asOf *uint64,
+	) ([]*models.RewardLikelihoodState, error)
+	// RewardPoolLikelihoodRows returns the pool likelihoods of epoch's
+	// state, ordered by pool.
+	RewardPoolLikelihoodRows(
+		epoch uint64,
+		asOf *uint64,
+	) ([]*models.RewardPoolLikelihood, error)
 }
 
 // rewardInputsReader returns the set's reader when it keeps reward inputs
@@ -125,7 +143,7 @@ func (ls *LedgerState) rewardInputsReader(txn ledgerdb.Txn) RewardInputsReader {
 }
 
 // rewardInputsServing returns the reader when reward input reads are
-// answered from the set, nil when they stay on the metadata store.
+// answered from the set, nil when the set does not serve them.
 func (ls *LedgerState) rewardInputsServing(
 	txn ledgerdb.Txn,
 ) RewardInputsReader {
@@ -191,6 +209,10 @@ func dropRewardInputsAfter(
 				continue
 			}
 		case RewardInputReplace, RewardInputPrune:
+		case RewardInputLikelihood:
+			if c.Likelihood.BoundarySlot > slot {
+				continue
+			}
 		case RewardInputPending:
 			c.Pending = slices.DeleteFunc(
 				slices.Clone(c.Pending),
@@ -341,6 +363,43 @@ func (v rewardInputsView) pools(
 func inPoolRange(pool, lo, hi []byte) bool {
 	return (lo == nil || bytes.Compare(pool, lo) >= 0) &&
 		(hi == nil || bytes.Compare(pool, hi) <= 0)
+}
+
+// stakeSlotBounder is a reader that reports the slots an epoch's first and
+// last stake rows were captured at without reading the epoch.
+type stakeSlotBounder interface {
+	RewardStakeSlotBounds(epoch uint64) (first, last uint64, found bool, err error)
+}
+
+// stakesCapturedOutside reports whether the epoch's stake rows were all
+// captured outside from through through, without reading them. Every stake row
+// of an epoch comes from one distribution and carries one captured slot, so an
+// epoch whose first and last rows share a slot outside the range holds no row
+// in it; an epoch whose first and last rows differ is not decided here. It is
+// false when the reader cannot tell, or when staged changes or a rollback
+// ceiling make the committed rows differ from what the view serves.
+func (v rewardInputsView) stakesCapturedOutside(
+	epoch, from, through uint64,
+) (bool, error) {
+	b, ok := v.r.(stakeSlotBounder)
+	if !ok || v.at != nil {
+		return false, nil
+	}
+	for _, c := range v.st.changes {
+		if (c.Epoch == epoch &&
+			(c.Kind == RewardInputStakes || c.Kind == RewardInputReplace)) ||
+			(c.Kind == RewardInputPrune && epoch < c.PruneBelow) {
+			return false, nil
+		}
+	}
+	first, last, found, err := b.RewardStakeSlotBounds(epoch)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return true, nil
+	}
+	return first == last && (first < from || first > through), nil
 }
 
 func (v rewardInputsView) stakes(

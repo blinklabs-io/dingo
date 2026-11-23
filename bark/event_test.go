@@ -195,6 +195,8 @@ func openSubscribe(
 }
 
 func TestEventSubscribeDeliversConvertedEvents(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := openSubscribe(t, f, eventtype.PeerChurn)
 
@@ -214,7 +216,51 @@ func TestEventSubscribeDeliversConvertedEvents(t *testing.T) {
 	require.Equal(t, "warm", data.GetNewState())
 }
 
+func TestEventSubscribePublishesEachEpochOnce(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, nil, false)
+	stream := openSubscribe(t, f, eventtype.EpochTransition)
+	publish := func(epoch uint64, nonce []byte) {
+		f.bus.Publish(
+			event.EpochTransitionEventType,
+			event.NewEvent(
+				event.EpochTransitionEventType,
+				event.EpochTransitionEvent{
+					PreviousEpoch: epoch - 1,
+					NewEpoch:      epoch,
+					BoundarySlot:  epoch * 100,
+					EpochNonce:    nonce,
+				},
+			),
+		)
+	}
+	receiveEpoch := func() uint64 {
+		t.Helper()
+		ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
+			if !stream.Receive() {
+				return nil, stream.Err()
+			}
+			return stream.Msg().GetEvent(), nil
+		})
+		var data eventv1alpha1.EpochTransitionEventData
+		require.NoError(t, ev.GetTypedData().UnmarshalTo(&data))
+		return data.GetNewEpoch()
+	}
+
+	// The internal stream deliberately emits a provisional clock event, the
+	// nonce-bearing block event, and the block event again after a rollback.
+	publish(5, nil)
+	publish(5, []byte{1})
+	publish(5, []byte{2})
+	publish(6, nil)
+
+	require.Equal(t, uint64(5), receiveEpoch())
+	require.Equal(t, uint64(6), receiveEpoch())
+}
+
 func TestEventSubscribeFilterExcludesOtherTypes(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := openSubscribe(t, f, eventtype.MempoolAddTx)
 
@@ -239,6 +285,8 @@ func TestEventSubscribeFilterExcludesOtherTypes(t *testing.T) {
 }
 
 func TestEventSubscribeRejectsUnknownType(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := startSubscribe(t, f, "nope.x")
 	require.False(t, stream.Receive())
@@ -248,6 +296,8 @@ func TestEventSubscribeRejectsUnknownType(t *testing.T) {
 // A subscriber that never reads must not slow the node's own EventBus
 // publishers or other subscribers.
 func TestEventSlowSubscriberDoesNotStallBusOrOthers(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	_ = openSubscribe(t, f) // never read from
 	fast := startSubscribe(t, f)
@@ -283,6 +333,8 @@ func TestEventSlowSubscriberDoesNotStallBusOrOthers(t *testing.T) {
 }
 
 func TestEventHubDetachesLaggingReader(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
 	for range 10 {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
@@ -356,6 +408,8 @@ func waitActive(t *testing.T, f *eventFixture, n int) {
 // The acknowledged position survives a dropped stream: reconnecting with it
 // yields exactly the events that were not acknowledged, none lost.
 func TestEventAckResumesAfterDisconnect(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	first := openAck(t, f, "sub-1", 0)
 	waitActive(t, f, 1)
@@ -496,6 +550,8 @@ func TestEventAckDeliversWithSingleEventBuffer(t *testing.T) {
 }
 
 func TestEventAckOutOfRangeWhenNotBuffered(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
 	for range 10 {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
@@ -510,6 +566,8 @@ func TestEventAckOutOfRangeWhenNotBuffered(t *testing.T) {
 }
 
 func TestEventAckRejectsDuplicateSubscriberID(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	_ = openAck(t, f, "dup", 0)
 	waitActive(t, f, 1)
@@ -519,6 +577,8 @@ func TestEventAckRejectsDuplicateSubscriberID(t *testing.T) {
 }
 
 func TestEventAckRequiresStartFirst(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := f.client.SubscribeWithAck(context.Background())
 	require.NoError(t, stream.Send(&eventv1alpha1.SubscribeWithAckRequest{
@@ -531,6 +591,8 @@ func TestEventAckRequiresStartFirst(t *testing.T) {
 }
 
 func TestEventSubscriberLimits(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, func(c *BarkConfig) {
 		c.EventMaxSubscribers = 1
 	}, false)
@@ -563,6 +625,8 @@ func TestEventSubscriberLimitsUnlimitedByDefault(t *testing.T) {
 }
 
 func TestEventPublishDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	_, err := f.client.Publish(context.Background(), connect.NewRequest(
 		&eventv1alpha1.PublishRequest{Event: &eventv1alpha1.Event{
@@ -577,6 +641,8 @@ func TestEventPublishDisabledByDefault(t *testing.T) {
 }
 
 func TestEventPublishAndBatch(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, true)
 	stream := openSubscribe(t, f)
 
@@ -624,6 +690,8 @@ func TestEventPublishAndBatch(t *testing.T) {
 }
 
 func TestEventListAndSchema(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	list, err := f.client.ListEventTypes(context.Background(),
 		connect.NewRequest(&eventv1alpha1.ListEventTypesRequest{}))
@@ -646,6 +714,8 @@ func TestEventListAndSchema(t *testing.T) {
 }
 
 func TestEventAdapterConvertsRollbackAndEpoch(t *testing.T) {
+	t.Parallel()
+
 	a := &eventAdapter{
 		eraNameForEpoch: func(uint64) (string, error) { return "conway", nil },
 	}
@@ -664,6 +734,8 @@ func TestEventAdapterConvertsRollbackAndEpoch(t *testing.T) {
 }
 
 func TestEventAdapterConvertsRollback(t *testing.T) {
+	t.Parallel()
+
 	a := &eventAdapter{}
 	out := a.convert(
 		event.NewEvent("chain.update", chain.ChainRollbackEvent{
@@ -687,6 +759,8 @@ func TestEventAdapterConvertsRollback(t *testing.T) {
 }
 
 func TestEventSubscribeCategoryPattern(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := openSubscribe(t, f, "peergov.*")
 
@@ -708,6 +782,8 @@ func TestEventSubscribeCategoryPattern(t *testing.T) {
 }
 
 func TestEventSubscribeRejectsUnknownPattern(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	stream := startSubscribe(t, f, "nope.*")
 	require.False(t, stream.Receive())
@@ -715,6 +791,8 @@ func TestEventSubscribeRejectsUnknownPattern(t *testing.T) {
 }
 
 func TestEventSubscribeOriginFilter(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -743,6 +821,8 @@ func TestEventSubscribeOriginFilter(t *testing.T) {
 }
 
 func TestEventSubscribeOriginFilterExcludesOtherNodes(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -772,6 +852,8 @@ func TestEventSubscribeOriginFilterExcludesOtherNodes(t *testing.T) {
 // An ack subscriber using the shipped client keeps every event, in order,
 // across a dropped connection.
 func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
+	t.Parallel()
+
 	f := newEventFixture(t, nil, false)
 	client := eventclient.New(f.srv.Client(), f.srv.URL)
 

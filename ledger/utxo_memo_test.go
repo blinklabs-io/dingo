@@ -245,6 +245,7 @@ func TestLedgerViewUtxoByIdDoesNotMemoizeNotFound(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	ls := &LedgerState{db: db, config: LedgerStateConfig{Logger: testLogger()}}
+	attachTestLiveSet(t, ls)
 	set := attachQueryLiveUtxoSet(t, ls, db)
 
 	txId := bytes.Repeat([]byte{0x77}, 32)

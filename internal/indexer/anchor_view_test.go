@@ -98,6 +98,30 @@ func (m *movingAnchorState) AnchorStateView(
 	}, func() {}, nil
 }
 
+// movingLedger is a ledger whose anchor state is moving.
+type movingLedger struct {
+	storeLedger
+	moving *movingAnchorState
+}
+
+func (l movingLedger) EachAnchorRewardJournal(
+	ctx context.Context, slot uint64, fn func(metadata.RewardJournalEntry) error,
+) error {
+	return l.moving.EachAnchorRewardJournal(ctx, slot, fn)
+}
+
+func (l movingLedger) AnchorImportedAccounts(
+	ctx context.Context, anchor uint64, cursor []byte, limit int,
+) ([]metadata.ImportedAccount, []byte, error) {
+	return l.moving.AnchorImportedAccounts(ctx, anchor, cursor, limit)
+}
+
+func (l movingLedger) AnchorStateView(
+	ctx context.Context,
+) (metadata.AnchorStateSource, func(), error) {
+	return l.moving.AnchorStateView(ctx)
+}
+
 // The balance an account had at the anchor is its balance less the journal
 // after it, read at one point of the ledger. A credit that lands between the
 // journal read and the account read is in the balance and not the journal, so
@@ -106,11 +130,8 @@ func TestCopyAnchorStateReadsJournalAndBalancesAtOnePoint(t *testing.T) {
 	t.Parallel()
 	src, _ := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
-
 	key := []byte("stake-credential-hash-0123456789")
-	_, err = dstRaw.Exec(`INSERT INTO account
+	_, err := dstRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, added_slot, created_slot, reward, active)
 		VALUES (?, 0, 10, 10, '0', 1)`, key)
 	require.NoError(t, err)
@@ -122,7 +143,10 @@ func TestCopyAnchorStateReadsJournalAndBalancesAtOnePoint(t *testing.T) {
 		m.afterJournal = nil
 		m.credit(5)
 	}
-	f.anchorState = moving
+	f, err := NewMetadataFacts(
+		movingLedger{storeLedger: newStoreLedger(t, src), moving: moving}, dst,
+	)
+	require.NoError(t, err)
 
 	txn := dst.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {

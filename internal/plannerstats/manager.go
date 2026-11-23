@@ -186,10 +186,8 @@ func (m *Manager) Stop() error {
 
 // Defer holds back the epoch and periodic runs until resume is called, for a
 // write burst such as a Mithril stream catch-up: a run holds SQLite's only
-// write connection, and on a database growing that fast nearly every table
-// passes the re-analysis threshold at every epoch, so the runs cost more the
-// further the burst gets and their statistics are stale again within the
-// next epoch. Every trigger that arrives while deferred collapses into one
+// write connection, and on a database growing that fast its statistics are
+// stale again within the next epoch. Every trigger that arrives while deferred collapses into one
 // run queued when the last resume is called; none is queued if nothing
 // arrived. A run already in flight when Defer is called finishes. Nested
 // calls are counted, and calling one resume more than once has no further

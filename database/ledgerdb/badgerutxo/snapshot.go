@@ -86,11 +86,26 @@ func (sn *snapshot) release() {
 // longer. A snapshot must not span a Load of any family, which drops the
 // rows the snapshot reads.
 func (s *Store) Snapshot() (*Store, error) {
+	return s.snapshotChecked(checkBootstrapComplete)
+}
+
+// CheckpointableSnapshot is Snapshot for a reader that exports the state, such
+// as an archive of the set. It refuses with ErrNotCheckpointable, or
+// ErrBootstrapIncomplete, a set Checkpointable refuses, judged on the very
+// transaction the snapshot reads through, so a mark set after the check cannot
+// be missing from what the snapshot shows.
+func (s *Store) CheckpointableSnapshot() (*Store, error) {
+	return s.snapshotChecked(checkCheckpointable)
+}
+
+func (s *Store) snapshotChecked(
+	check func(*badger.Txn) error,
+) (*Store, error) {
 	if s.snap != nil {
 		return nil, ErrSnapshotReadOnly
 	}
 	sn := &snapshot{txn: s.beginRead()}
-	if err := checkBootstrapComplete(sn.txn); err != nil {
+	if err := check(sn.txn); err != nil {
 		sn.txn.Discard()
 		return nil, err
 	}
@@ -187,9 +202,6 @@ func (s *Store) BootstrapIncomplete() (bool, error) {
 }
 
 func (s *Store) dropPrefix(prefixes ...[]byte) error {
-	if s.merging.Load() {
-		return s.dropWindowed(prefixes)
-	}
 	if drained := nodesettings.FamilyMask(s.loadsRefused.Load()); drained != 0 {
 		var held bool
 		err := s.view(func(txn *badger.Txn) error {
@@ -272,7 +284,7 @@ func rollsBackWithoutJournal(tag byte) bool {
 		RewardStakeInputTag, RewardPoolInputTag, RewardSnapshotTag,
 		RewardPotsTag, RewardDerivedTag, RewardCursorTag,
 		RewardOutputTag, RewardEpochTag, RewardRoundTag, RewardPostSnapTag,
-		ImportedBlocksTag:
+		ImportedBlocksTag, InactivityTag, RatifyPendingTag:
 		return true
 	}
 	return false

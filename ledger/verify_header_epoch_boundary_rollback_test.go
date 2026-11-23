@@ -81,7 +81,7 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 		t,
 		cm.PrimaryChain().AddLocalBlock(context.Background(), anchor.block),
 	)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash, anchorPoint.Slot, anchorNonce, false, nil,
 	))
 
@@ -111,6 +111,7 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
 		hash []byte,

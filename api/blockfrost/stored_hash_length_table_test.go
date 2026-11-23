@@ -22,6 +22,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -226,6 +227,11 @@ func newMalformedHashAdapter(
 	seed func(db *database.Database),
 ) *NodeAdapter {
 	t.Helper()
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		cardano.EmbeddedConfigPath("preview"),
+	)
+	require.NoError(t, err)
 	adapter, raw, db := newDBBackedAdapterWithIndexer(
 		t,
 		dbtest.IndexerOptions{
@@ -236,6 +242,7 @@ func newMalformedHashAdapter(
 				return store
 			},
 		},
+		nodeConfig,
 	)
 	seedEpochs(t, adapter, raw, 0, 1)
 	if seed != nil {

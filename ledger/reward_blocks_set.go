@@ -171,7 +171,7 @@ func (ls *LedgerState) rewardBlocksReader(txn ledgerdb.Txn) RewardBlocksReader {
 }
 
 // rewardBlocksServing returns the reader when reward block reads are
-// answered from the set, nil when they stay on the metadata store.
+// answered from the set, nil when the set does not serve them.
 func (ls *LedgerState) rewardBlocksServing(
 	txn ledgerdb.Txn,
 ) RewardBlocksReader {
@@ -265,7 +265,6 @@ func sameCounts(a, b map[string]uint64) bool {
 // rewardEpochFeesFor is rewardEpochFees answered from the set when the set
 // serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(
-	meta ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 	epoch models.Epoch,
 ) (uint64, error) {
@@ -280,13 +279,9 @@ func (ls *LedgerState) rewardEpochFeesFor(
 		if view.FeesKnown {
 			return view.Fees, nil
 		}
-		if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
-			return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
-		}
-	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
 		return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	return rewardEpochFees(meta, txn, epoch)
+	return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published

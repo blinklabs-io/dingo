@@ -103,7 +103,7 @@ func newExternalIngestHarnessWith(
 	if securityParam != 0 {
 		cfg.ShelleyGenesis().SecurityParam = securityParam
 	}
-	set, closeSet := OpenUtxoOnlyLiveSetForTest(t, dataDir)
+	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
 	lsCfg := LedgerStateConfig{
 		Database:              db,
 		ChainManager:          cm,
@@ -798,7 +798,7 @@ func (h *externalIngestHarness) prepareRollover(t *testing.T) {
 	epoch := h.ls.currentEpoch
 	h.ls.publishSnapshotsLocked()
 	h.ls.Unlock()
-	require.NoError(t, h.db.SetEpoch(
+	require.NoError(t, seedDB(t, h.db).SetEpoch(
 		epoch.StartSlot, epoch.EpochId,
 		epoch.Nonce, epoch.EvolvingNonce, nil, nil,
 		epoch.EraId, epoch.SlotLength, epoch.LengthInSlots,
@@ -966,6 +966,11 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 			restartDigest(t, h.db),
 			"replay after a restart diverged from an uninterrupted run",
 		)
+		require.Equal(t,
+			ledgerDBDigest(t, clean.ls),
+			ledgerDBDigest(t, h.ls),
+			"the LedgerDB state after a restart diverged from an uninterrupted run",
+		)
 	})
 
 	t.Run("live loop applies stored blocks", func(t *testing.T) {
@@ -993,6 +998,11 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 			restartDigest(t, clean.db),
 			restartDigest(t, h.db),
 			"the live loop after a restart diverged from an uninterrupted run",
+		)
+		require.Equal(t,
+			ledgerDBDigest(t, clean.ls),
+			ledgerDBDigest(t, h.ls),
+			"the LedgerDB state after a restart diverged from an uninterrupted run",
 		)
 	})
 }

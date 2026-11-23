@@ -39,6 +39,12 @@ type eventAdapter struct {
 	// does not carry. Either may be nil, which leaves the field zero.
 	epochForSlot    func(slot uint64) (uint64, error)
 	eraNameForEpoch func(epoch uint64) (string, error)
+
+	// The event hub calls convert from one goroutine. Keep the highest epoch
+	// exported there so the provisional, nonce-bearing, and rollback-replay
+	// copies on the internal bus remain one external boundary event.
+	highestEpoch    uint64
+	hasHighestEpoch bool
 }
 
 // sourceTypes lists the internal event types the adapter consumes.
@@ -91,7 +97,9 @@ func (a *eventAdapter) convert(
 			Rollback: chainRollback(d),
 		})
 	case event.EpochTransitionEvent:
-		add(eventtype.EpochTransition, a.epochTransition(d))
+		if a.shouldExportEpoch(d.NewEpoch) {
+			add(eventtype.EpochTransition, a.epochTransition(d))
+		}
 	case mempool.AddTransactionEvent:
 		add(eventtype.MempoolAddTx, &eventv1alpha1.TransactionEventData{
 			TxHash:    d.Hash,
@@ -117,6 +125,15 @@ func (a *eventAdapter) convert(
 		add(eventtype.ConnManagerConnClosed, a.connectionClosed(d))
 	}
 	return out
+}
+
+func (a *eventAdapter) shouldExportEpoch(epoch uint64) bool {
+	if a.hasHighestEpoch && epoch <= a.highestEpoch {
+		return false
+	}
+	a.highestEpoch = epoch
+	a.hasHighestEpoch = true
+	return true
 }
 
 func (a *eventAdapter) chainUpdate(

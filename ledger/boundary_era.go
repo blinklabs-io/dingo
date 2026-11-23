@@ -253,7 +253,7 @@ func (ls *LedgerState) pendingRatifiedProposals(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	rec, err := loadPendingRatification(ls.db, txn)
+	rec, err := loadPendingRatification(ls.ledgerDB(), txn)
 	if err != nil || rec == nil {
 		return nil, err
 	}

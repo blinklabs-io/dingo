@@ -32,6 +32,8 @@ import (
 )
 
 func TestRewriteVersionHandler(t *testing.T) {
+	t.Parallel()
+
 	alphaPath := "/utxorpc.v1alpha.query.QueryService/ReadParams"
 	betaPath := "/utxorpc.v1beta.query.QueryService/ReadParams"
 	calledPath := ""
@@ -50,6 +52,8 @@ func TestRewriteVersionHandler(t *testing.T) {
 }
 
 func TestUtxorpc_StartStop(t *testing.T) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: event.NewEventBus(nil, nil),
@@ -89,6 +93,8 @@ func publishServer(t *testing.T, u *Utxorpc, server *http.Server) {
 // a hard Close when a client keeps a connection open, standing in for a
 // WatchTx/WatchMempool stream that never returns.
 func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:          slog.New(slog.NewJSONHandler(&logBuf, nil)),
@@ -136,6 +142,8 @@ func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
 // TestUtxorpc_StopObservesCtxCancellation ensures cancellation interrupts a
 // slow shutdown instead of waiting for the configured shutdown timeout.
 func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:          slog.New(slog.NewJSONHandler(&logBuf, nil)),

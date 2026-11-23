@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -31,14 +32,17 @@ import (
 // UTxO set that keeps epoch state.
 type EpochStateReader interface {
 	// EpochStateLoaded reports whether the reader holds every epoch and
-	// snapshot row; until it does, reads stay on the metadata store.
+	// snapshot row; until it does, the set does not serve the reads.
 	EpochStateLoaded() (bool, error)
 	Epochs() ([]models.Epoch, error)
 	// EraSwitch returns the recorded mid-epoch era switch, or nil.
 	EraSwitch() (*database.MidEpochEraSwitch, error)
+	// PoolStakeSnapshots returns epoch's snapshot rows of typ in pool
+	// order. A positive limit stops the read after that many rows.
 	PoolStakeSnapshots(
 		epoch uint64,
 		typ string,
+		limit int,
 	) ([]*models.PoolStakeSnapshot, error)
 	// PoolStakeSnapshotsCapturedIn returns the snapshot rows of every epoch
 	// and type captured in [from, through], from one read.
@@ -83,6 +87,7 @@ type epochStateOps struct {
 	votes         []VoteChange
 	pparamUpdates []PParamUpdateChange
 	syncMarkers   []SyncMarkerChange
+	stateMarks    []StateMarkChange
 
 	importBaselines []ImportBaselineChange
 	witnesses       []WitnessChange
@@ -126,6 +131,7 @@ func epochStateOpsOf(batch *utxoSetBatch) epochStateOps {
 		votes:         slices.Clone(batch.votes),
 		pparamUpdates: slices.Clone(batch.pparamUpdates),
 		syncMarkers:   slices.Clone(batch.syncMarkers),
+		stateMarks:    slices.Clone(batch.stateMarks),
 
 		importBaselines: slices.Clone(batch.importBaselines),
 		witnesses:       slices.Clone(batch.witnesses),
@@ -265,16 +271,20 @@ func stagedRollbackEpochStarts(
 	return starts, nil
 }
 
-// snapshotView is epoch's snapshot rows of typ as txn sees the set.
+// snapshotView is epoch's snapshot rows of typ as txn sees the set, in pool
+// order. A positive limit returns only the first limit rows and reads no more
+// than that many from the set: a row among the first limit of the view is
+// either staged or among the first limit the set holds.
 func (ls *LedgerState) snapshotView(
 	r EpochStateReader,
 	txn ledgerdb.Txn,
 	epoch uint64,
 	typ string,
+	limit int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	ls.utxoSetApplyMu.RLock()
 	defer ls.utxoSetApplyMu.RUnlock()
-	return ls.snapshotViewLocked(r, txn, epoch, typ)
+	return ls.snapshotViewLocked(r, txn, epoch, typ, limit)
 }
 
 // snapshotViewLocked is snapshotView for a caller holding utxoSetApplyMu for
@@ -284,9 +294,10 @@ func (ls *LedgerState) snapshotViewLocked(
 	txn ledgerdb.Txn,
 	epoch uint64,
 	typ string,
+	limit int,
 ) ([]*models.PoolStakeSnapshot, error) {
 	ops := ls.stagedEpochStateOps(txn)
-	rows, err := r.PoolStakeSnapshots(epoch, typ)
+	rows, err := r.PoolStakeSnapshots(epoch, typ, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +346,9 @@ func (ls *LedgerState) snapshotViewLocked(
 	slices.SortFunc(out, func(a, b *models.PoolStakeSnapshot) int {
 		return bytes.Compare(a.PoolKeyHash, b.PoolKeyHash)
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 
@@ -414,7 +428,7 @@ func (ls *LedgerState) snapshotsCapturedInView(
 }
 
 // epochStateReader returns the set's epoch state reader and the read mode,
-// or false when these reads stay on the metadata store.
+// or false when the set does not serve them.
 func (ls *LedgerState) epochStateReader(
 	txn ledgerdb.Txn,
 ) (EpochStateReader, bool) {
@@ -518,6 +532,25 @@ func (s stagingLedgerDB) GetPoolStakeSnapshotsByEpoch(
 	return s.snapshotsWhere(txn, epoch, snapshotType, nil)
 }
 
+// GetPoolStakeSnapshotsByEpochBounded returns at most maxRows of the
+// snapshot rows of epoch, so a caller that asks for one row more than it
+// accepts learns the snapshot is larger without receiving all of it.
+func (s stagingLedgerDB) GetPoolStakeSnapshotsByEpochBounded(
+	epoch uint64,
+	snapshotType string,
+	maxRows int,
+	txn ledgerdb.Txn,
+) ([]*models.PoolStakeSnapshot, error) {
+	if maxRows <= 0 {
+		return nil, errors.New("pool stake snapshot row limit must be positive")
+	}
+	r, mode := s.ls.epochStateReader(txn)
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyEpochs)
+	}
+	return s.ls.snapshotView(r, txn, epoch, snapshotType, maxRows)
+}
+
 func (s stagingLedgerDB) GetPoolStakeSnapshotsForPools(
 	epoch uint64,
 	snapshotType string,
@@ -559,7 +592,7 @@ func (s stagingLedgerDB) snapshotsWhere(
 	if !mode || r == nil {
 		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyEpochs)
 	}
-	all, err := s.ls.snapshotView(r, txn, epoch, typ)
+	all, err := s.ls.snapshotView(r, txn, epoch, typ, 0)
 	if err != nil || keep == nil {
 		return all, err
 	}
