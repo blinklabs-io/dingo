@@ -1262,19 +1262,30 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
+	// The candidate's bodies are already validated and fetched, so the ledger
+	// applies them right after the rollback: the intersection tip is only a
+	// transient. Ending on the fork tip, which is behind and shorter than
+	// the local chain, proves the fork won.
 	require.EventuallyWithT(
 		t,
 		func(collect *assert.CollectT) {
+			tip := n.ledgerState.Tip().Point
 			assert.Equal(
 				collect,
-				ancestor.Slot,
-				n.ledgerState.Tip().Point.Slot,
+				forkTipBlock.SlotNumber(),
+				tip.Slot,
 				"current ledger tip slot",
+			)
+			assert.Equal(
+				collect,
+				forkTipBlock.Hash().Bytes(),
+				tip.Hash,
+				"current ledger tip hash",
 			)
 		},
 		10*time.Second,
 		20*time.Millisecond,
-		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
+		"ledger did not switch to the Genesis-selected fork rooted at slot %d",
 		ancestor.Slot,
 	)
 }
