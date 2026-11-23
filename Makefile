@@ -177,8 +177,9 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
-# CI's gate (race) job in go-test.yml runs the same suite with a 60m
-# per-package -timeout. ./ledger alone runs 9-13 minutes here.
+# CI's gate (race) job in go-test.yml runs the same suite, ./ledger alone
+# first with a 40m -timeout and the rest with 60m. ./ledger alone runs 9-13
+# minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
 	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 	@for dir in $(NESTED_GO_MODULE_DIRS); do \
