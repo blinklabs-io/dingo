@@ -68,6 +68,8 @@ func hotStatementsFor(u *utxoSQL) []string {
 		transactionIdentityInsertSQL,
 		transactionIdentityInsertReturningSQL,
 		transactionIdentityIDSQL,
+		blockIdentityIDSQL,
+		blockIdentityInsertSQL,
 		appliedTransactionInsertSQL,
 		appliedTransactionUpdateSQL,
 		committeeHotAuthorizationDeleteIDQuery,

@@ -344,6 +344,55 @@ func TestApplyPathUtxoStatementsComeFromThePreparedCache(t *testing.T) {
 	}
 }
 
+// TestBlockIdentityStatementsComeFromThePreparedCache applies transactions in
+// new blocks through the unbatched path and the batch accumulator, which
+// resolve every block hash against block_identity, and requires the lookup
+// and the insert to be prepared at Start, served from the cache, and never
+// prepared or run uncached afterwards.
+func TestBlockIdentityStatementsComeFromThePreparedCache(t *testing.T) {
+	t.Parallel()
+	store, recorder := newRecordingSQLiteStore(t)
+	statements := []struct{ name, query string }{
+		{"block identity lookup", blockIdentityIDSQL},
+		{"block identity insert", blockIdentityInsertSQL},
+	}
+	prepared := map[string]bool{}
+	for _, q := range recorder.snapshot() {
+		prepared[q] = true
+	}
+	for _, s := range statements {
+		require.True(t, prepared[s.query], "expected Start to prepare %s", s.name)
+	}
+	mark := len(recorder.snapshot())
+
+	acc, ok := store.NewBatchAccumulator().(*transactionBatchAccumulator)
+	require.True(t, ok)
+	t.Cleanup(acc.Reset)
+	txn := store.Transaction(t.Context())
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	insertBlockIdentityTx(ctx, t, store, db, 0x41, blockIdentityTestHash(0x51), 0)
+	_, _, err = acc.insertTransaction(ctx, db,
+		blockIdentityTestHash(0x42), blockIdentityTestHash(0x52), nil, 10, 0,
+		"1", "0", "0", 0, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	hits := store.cachedStatementHits()
+	after := recorder.snapshot()[mark:]
+	for _, s := range statements {
+		require.NotZero(t, hits[s.query], "%s was never served from the cache", s.name)
+		uncached := 0
+		for _, q := range after {
+			if q == s.query {
+				uncached++
+			}
+		}
+		require.Zero(t, uncached, "%s was prepared or run uncached %d times after Start", s.name, uncached)
+	}
+}
+
 type twoInputTwoOutputTx struct {
 	tx           lcommon.Transaction
 	point        ocommon.Point

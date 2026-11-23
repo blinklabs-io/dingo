@@ -696,6 +696,9 @@ func (a *transactionBatchAccumulator) insertTransaction(
 			return db.ExecContext(ctx, query, args...)
 		},
 		queryRow: func(query string, args ...any) *sql.Row {
+			if a.store != nil {
+				return a.store.queryRowCached(ctx, db, query, args...)
+			}
 			return db.QueryRowContext(ctx, query, args...)
 		},
 	}, args)
