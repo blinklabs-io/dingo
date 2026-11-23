@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"slices"
 
@@ -110,7 +111,7 @@ func (ls *LedgerState) opCertView(
 }
 
 // opCertServing returns the op-cert reader when counter reads are answered
-// from the set, or nil when they stay on the metadata store.
+// from the set, or nil when the set does not serve them.
 func (ls *LedgerState) opCertServing(txn ledgerdb.Txn) OpCertReader {
 	r := ls.opCertReader(txn)
 	if r == nil || !ls.setServes(&ls.opCertsSetLoaded, r.OpCertsLoaded) {
@@ -189,31 +190,38 @@ func (ls *LedgerState) opCertInRangeFromSet(
 // stageOpCert stages an observed counter as the metadata store records it:
 // the pool's highest sequence rises only when the observation is higher,
 // and the slot of its latest observation only moves forward. An
-// observation that changes neither stages nothing.
+// observation that changes neither stages nothing. A slot holds one block,
+// so a counter that differs from the one the pool's latest observation
+// recorded at the same slot is a conflict and stages nothing.
 func (ls *LedgerState) stageOpCert(
 	txn ledgerdb.Txn,
 	pool lcommon.PoolKeyHash,
 	sequence, slot uint64,
-) {
+) error {
 	r := ls.opCertReader(txn)
 	if r == nil {
-		// The SQL write of a drained family was skipped, so a counter the
-		// set cannot stage would be lost.
-		if ls.familyDrained(nodesettings.FamilyOpCerts) {
-			ls.failAccountStaging(drainedUnserved(nodesettings.FamilyOpCerts))
-		}
-		return
+		// The set is the only copy, so a counter it cannot stage would be
+		// lost.
+		err := drainedUnserved(nodesettings.FamilyOpCerts)
+		ls.failAccountStaging(err)
+		return err
 	}
 	prev, err := ls.opCertView(r, txn, pool.Bytes(), nil)
 	if err != nil {
 		ls.failAccountStaging(err)
-		return
+		return err
 	}
 	next := OpCertState{
 		Pool: bytes.Clone(pool.Bytes()), Sequence: sequence, Slot: slot,
 		LastSequence: sequence,
 	}
 	if prev != nil {
+		if slot == prev.Slot && sequence != prev.LastSequence {
+			return fmt.Errorf(
+				"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
+				pool.Bytes(), slot, prev.LastSequence, sequence,
+			)
+		}
 		next.Sequence = max(prev.Sequence, sequence)
 		next.Slot = max(prev.Slot, slot)
 		next.LastSequence = prev.LastSequence
@@ -223,19 +231,13 @@ func (ls *LedgerState) stageOpCert(
 		if bytes.Equal(next.Pool, prev.Pool) &&
 			next.Sequence == prev.Sequence && next.Slot == prev.Slot &&
 			next.LastSequence == prev.LastSequence {
-			return
+			return nil
 		}
 	}
 	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		OpCerts: []OpCertChange{{Slot: slot, State: next}},
 	})
-}
-
-// opCertsDrained reports whether the op-cert rows are gone from the metadata
-// store, so their SQL writes are skipped and the staged counter is the only
-// record.
-func (s stagingLedgerDB) opCertsDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyOpCerts)
+	return nil
 }
 
 // opCertUnserved is the error of a read the set did not answer: it holds no
@@ -252,16 +254,10 @@ func (s stagingLedgerDB) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.opCertsDrained() {
-		err := s.LedgerDB.UpdatePoolOpCertSequence(
-			ctx, pkh, sequence, slot, txn,
-		)
-		if err != nil {
-			return err
-		}
+	if err := s.ls.stageOpCert(txn, pkh, sequence, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		return err
 	}
-	s.ls.stageOpCert(txn, pkh, sequence, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	s.ls.stageBlockMinted(txn, pkh, slot)      //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageBlockMinted(txn, pkh, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
 }
 
@@ -273,16 +269,10 @@ func (s stagingLedgerDB) UpdatePoolOpCertSequenceBatched(
 	acc database.BatchAccumulator,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.opCertsDrained() {
-		err := s.LedgerDB.UpdatePoolOpCertSequenceBatched(
-			ctx, pkh, sequence, slot, acc, txn,
-		)
-		if err != nil {
-			return err
-		}
+	if err := s.ls.stageOpCert(txn, pkh, sequence, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		return err
 	}
-	s.ls.stageOpCert(txn, pkh, sequence, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	s.ls.stageBlockMinted(txn, pkh, slot)      //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageBlockMinted(txn, pkh, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
 }
 

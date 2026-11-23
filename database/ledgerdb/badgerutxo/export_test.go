@@ -262,7 +262,11 @@ func (s *Store) WriteLegacyRewardRecordsForTest(recs []RewardRecord) error {
 		for _, r := range recs {
 			v := make([]byte, rewardRecordAmountLen)
 			v[7] = byte(r.Amount) //nolint:gosec // a small test amount
-			if err := txn.Set(rewardRecordKey(r), v); err != nil {
+			k, err := rewardRecordKey(r)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(k, v); err != nil {
 				return err
 			}
 		}

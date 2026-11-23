@@ -284,16 +284,12 @@ func seedPoolRegistrationAtSlotAndIndex(
 	registrationIndex uint,
 ) {
 	t.Helper()
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: poolKeyHash, VrfKeyHash: vrfKeyHash},
-		&models.PoolRegistration{
-			PoolKeyHash:       poolKeyHash,
-			VrfKeyHash:        vrfKeyHash,
-			AddedSlot:         addedSlot,
-			RegistrationIndex: registrationIndex,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: poolKeyHash, VrfKeyHash: vrfKeyHash}, &models.PoolRegistration{
+		PoolKeyHash:       poolKeyHash,
+		VrfKeyHash:        vrfKeyHash,
+		AddedSlot:         addedSlot,
+		RegistrationIndex: registrationIndex,
+	}))
 }
 
 // previewEpochs builds an epoch cache with Preview's 86400-slot epochs.
@@ -893,9 +889,12 @@ func TestStartupVrfKeyUsesEpochEffectiveRegistration(t *testing.T) {
 			seedPoolRegistrationAtSlotAndIndex(
 				t, db, pool[:], currentKey, tc.currentSlot, 0,
 			)
-			seedPoolRegistrationAtSlotAndIndex(
-				t, db, pool[:], futureKey, anchorSlot, tc.futureIndex,
-			)
+			fxReregisterPool(t, db, &models.PoolRegistration{
+				PoolKeyHash:       pool[:],
+				VrfKeyHash:        futureKey,
+				AddedSlot:         anchorSlot,
+				RegistrationIndex: tc.futureIndex,
+			})
 			got, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
 			require.NoError(t, err)
 			require.True(t, found)
@@ -945,18 +944,14 @@ func TestStartupVrfKeyRetirementUsesAppliedTip(t *testing.T) {
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
 	key := bytes.Repeat([]byte{0xB5}, 32)
 	seedPoolRegistrationAtSlot(t, db, pool[:], key, tipSlot-50)
-	require.NoError(
-		t,
-		db.Metadata().RetirePools(nil, [][]byte{pool[:]}, 32, tipSlot+1),
-	)
-	require.NoError(
-		t,
-		db.Metadata().
-			SetEpoch(32*musashiEpochLength, 32, nil, nil, nil, nil, dijkstra.EraIdDijkstra, 1, musashiEpochLength, nil),
-	)
+	fxRetirePool(t, db, pool[:], 32, tipSlot+1)
+	require.NoError(t, seedDB(t, db).SetEpoch(
+		32*musashiEpochLength, 32, nil, nil, nil, nil,
+		dijkstra.EraIdDijkstra, 1, musashiEpochLength, nil,
+	))
 	databaseTip := ls.Tip()
 	databaseTip.Point.Slot = 32*musashiEpochLength + 1
-	require.NoError(t, db.Metadata().SetTip(databaseTip, nil))
+	require.NoError(t, db.SetTip(databaseTip, nil))
 	got, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
 	require.NoError(t, err)
 	require.True(t, found)

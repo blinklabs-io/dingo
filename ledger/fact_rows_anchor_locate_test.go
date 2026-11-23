@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -31,15 +32,14 @@ func (tipFailsSet) Tip() (ocommon.Point, bool, error) {
 	return ocommon.Point{}, false, errTipUnreadable
 }
 
-// Where the UTxO set at the anchor lives is a fact the comparison depends on.
-// When the set's tip cannot be read the answer is an error, not "in the
-// metadata store", which would skip the comparison of a set it never saw.
-func TestAnchorUtxoInMetadataFailsClosedWhenTheSetTipIsUnreadable(t *testing.T) {
+// A digest of the UTxO set at the anchor needs the set's tip. When the tip
+// cannot be read the answer is that error, not a digest of a set it never
+// saw.
+func TestAnchorUtxoDigestFailsWhenTheSetTipIsUnreadable(t *testing.T) {
 	t.Parallel()
 	ls := &LedgerState{config: LedgerStateConfig{
 		UtxoSet: tipFailsSet{},
 	}}
-	inMetadata, err := ls.AnchorUtxoInMetadata(10)
+	_, err := ls.AnchorUtxoDigest(context.Background(), 10)
 	require.ErrorIs(t, err, errTipUnreadable)
-	require.False(t, inMetadata)
 }

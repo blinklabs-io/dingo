@@ -67,7 +67,7 @@ func newReplayRecoveryLedgerState(
 ) (*LedgerState, error) {
 	t.Helper()
 	if config.UtxoSet == nil {
-		config.UtxoSet = NewMemLiveSetForTest()
+		config.UtxoSet = OpenLiveSetForTest(t, config.Database)
 	}
 	ls, err := NewLedgerState(config)
 	if ls != nil {
@@ -250,7 +250,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			parentTip.Point.Hash,
 			parentTip.Point.Slot,
 			[]byte("nonce-parent"),
@@ -260,7 +260,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	)
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			currentTip.Point.Hash,
 			currentTip.Point.Slot,
 			[]byte("nonce-current"),
@@ -271,6 +271,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	require.NoError(t, db.SetTip(currentTip, nil))
 
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
@@ -1044,6 +1045,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
 	ls.validationEnabled = true
 	ls.reachedTip.Store(true)
@@ -1198,6 +1200,7 @@ func testAtTipRecoveryRetainsImmutableBlocks(
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
@@ -1542,6 +1545,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-descent-tip")
 	ls.validationEnabled = true
 	ls.reachedTip.Store(true)
@@ -1929,7 +1933,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			parentTip.Point.Hash,
 			parentTip.Point.Slot,
 			[]byte("nonce-parent"),
@@ -1939,7 +1943,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	)
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			currentTip.Point.Hash,
 			currentTip.Point.Slot,
 			[]byte("nonce-current"),
@@ -1970,6 +1974,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	)
 
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
@@ -2073,7 +2078,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			parentTip.Point.Hash,
 			parentTip.Point.Slot,
 			[]byte("nonce-parent"),
@@ -2083,7 +2088,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			currentTip.Point.Hash,
 			currentTip.Point.Slot,
 			[]byte("nonce-current"),
@@ -2091,6 +2096,9 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 			nil,
 		),
 	)
+	// The set opens before the stored tip is placed, so it holds the journal
+	// of a ledger that applied these blocks rather than one loaded at the tip.
+	OpenLiveSetForTest(t, db)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
 	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
@@ -2105,6 +2113,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
@@ -2239,7 +2248,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			currentTip.Point.Hash,
 			currentTip.Point.Slot,
 			[]byte("nonce-current"),
@@ -2247,6 +2256,9 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 			nil,
 		),
 	)
+	// The set opens before the stored tip is placed, so it holds the journal
+	// of a ledger that applied these blocks rather than one loaded at the tip.
+	OpenLiveSetForTest(t, db)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
 	// This recovery test uses a synthetic Shelley-only cache. Keep the config
@@ -2270,6 +2282,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
@@ -2380,7 +2393,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			currentTip.Point.Hash,
 			currentTip.Point.Slot,
 			[]byte("nonce-current"),
@@ -2395,7 +2408,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			rewindTip.Point.Hash,
 			rewindTip.Point.Slot,
 			[]byte("nonce-rewind"),
@@ -2404,6 +2417,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 		),
 	)
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
@@ -2591,7 +2605,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	}
 	require.NoError(
 		t,
-		db.SetBlockNonce(
+		seedBlockNonce(t, db,
 			ledgerTip.Point.Hash,
 			ledgerTip.Point.Slot,
 			[]byte("nonce-nonconverging-tip"),
@@ -2602,6 +2616,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
 	ls.currentTipBlockNonce = []byte("nonce-nonconverging-tip")
+	fxJournalChain(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// Model the two earlier recovery cycles. Failure identities are
@@ -2746,7 +2761,7 @@ func newReplayRecoveryAuditLedger(
 	} {
 		require.NoError(
 			t,
-			db.SetBlockNonce(
+			seedBlockNonce(t, db,
 				tip.Point.Hash,
 				tip.Point.Slot,
 				[]byte("nonce"),
@@ -2757,6 +2772,7 @@ func newReplayRecoveryAuditLedger(
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce")
 	ls.reachedTip.Store(false)
 	ls.publishSnapshotsLocked()
@@ -2831,7 +2847,7 @@ func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
-	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
+	require.NoError(t, seedDB(t, ls.db).SetSyncState(pruneFloorSyncKey, "120", nil))
 	chainTipBefore := ls.chain.Tip().Point
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -2994,7 +3010,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	// bypassed: a withdrawal one lovelace above the persisted balance stands
 	// in for a balance that changed between validation and apply.
 	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
-	require.NoError(t, ls.db.CreateAccount(t.Context(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, ls.db, t.Context(), nil, &models.Account{
 		StakingKey:    credential,
 		CredentialTag: 0,
 		Active:        true,
@@ -3714,7 +3730,7 @@ func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
 			BlockPoint: ocommon.NewPoint(100, testHashBytes("current")),
@@ -3907,7 +3923,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
 		BlockNumber: currentBlock.BlockNumber,
 	}
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		currentTip.Point.Hash, currentTip.Point.Slot,
 		[]byte("nonce-current"), false, nil,
 	))
@@ -4042,12 +4058,13 @@ func TestReplayRecoverySpentInputIsNotMissingState(t *testing.T) {
 				// slot-based rollback can leave it.
 				floor = rawBlockTip(producerBlock)
 			}
-			require.NoError(t, db.SetBlockNonce(
+			require.NoError(t, seedBlockNonce(t, db,
 				floor.Point.Hash, floor.Point.Slot,
 				[]byte("nonce-floor"), false, nil,
 			))
 			require.NoError(t, db.SetTip(ledgerTip, nil))
 			ls.currentTip = ledgerTip
+			fxJournalChain(t, ls)
 			ls.currentTipBlockNonce = []byte("nonce-floor")
 			ls.publishSnapshotsLocked()
 
@@ -4490,6 +4507,7 @@ func newTrustWindowLedger(
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = []byte("nonce-trust-window-tip")
 	ls.mithrilLedgerSlot = anchorSlot
 	ls.validationEnabled = true

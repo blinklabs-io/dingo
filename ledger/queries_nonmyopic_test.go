@@ -115,7 +115,7 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 	require.NoError(t, err)
 	require.NotEqual(t, perfA, perfDefault)
 
-	require.NoError(t, db.Metadata().SaveRewardLikelihoodState(
+	require.NoError(t, ls.rewardLikelihoodDB().SaveRewardLikelihoodState(
 		&models.RewardLikelihoodState{
 			Epoch:        0,
 			RewardPot:    dbtypes.Uint64(nonMyopicFirstPot),
@@ -131,7 +131,7 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		}},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SaveRewardLikelihoodState(
+	require.NoError(t, ls.rewardLikelihoodDB().SaveRewardLikelihoodState(
 		&models.RewardLikelihoodState{
 			Epoch:        1,
 			RewardPot:    dbtypes.Uint64(nonMyopicSecondPot),

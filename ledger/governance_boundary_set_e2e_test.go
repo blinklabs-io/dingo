@@ -17,9 +17,7 @@ package ledger_test
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -31,15 +29,7 @@ import (
 // rather than as another epoch's snapshot.
 func TestGovernanceBoundarySnapshotServedFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	ls, boundary, proposal := ledger.GovernanceBoundaryOverSetForTest(
-		t, set,
-		func(store ledgerdb.LedgerDB) {
-			require.NoError(t, set.LoadLedgerState(t.Context(), store))
-		},
-	)
+	ls, set, boundary, proposal := ledger.GovernanceBoundaryOverSetForTest(t)
 
 	stored, ok, err := set.GovernanceBoundarySnapshotAt(742, nil)
 	require.NoError(t, err)

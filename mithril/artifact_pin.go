@@ -31,17 +31,6 @@ import (
 // completion) wipes it, so its presence means "a sync run is mid-flight against
 // this artifact" and never survives a completed sync. That is the opposite of
 // syncKeyImmutableMax, which is deliberately written after the completion clear.
-//
-// Why the pin has to exist at all: a fresh bootstrap imports ledger state with
-// Reconcile disabled, and the metadata import is insert-if-absent
-// (Store.ImportUtxos and the account/pool/DRep phases). Importing a second,
-// newer snapshot's live set over a first snapshot's partially imported rows
-// therefore leaves the union of the two — every UTxO created before the first
-// artifact's slot and spent before the second's stays live, and every account,
-// pool and DRep the second snapshot no longer carries stays active — with no
-// reconcile pass and no divergence check to remove them. The ledger-state phase
-// checkpoints cannot catch this either: they are keyed by "{digest}:{slot}", so
-// a different artifact simply looks like a fresh import.
 const syncKeyPinnedArtifact = "mithril_pinned_artifact"
 
 // pinnedArtifact is the durable identity of the Mithril artifact an in-flight

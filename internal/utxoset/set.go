@@ -110,11 +110,6 @@ type Set struct {
 	// sqlDrained is set once the metadata store has drained a ledger-state
 	// family: its rows can no longer rebuild the set, whatever Only says.
 	sqlDrained atomic.Bool
-	// mergeOverDrained is set while a merge loads the rows an import wrote
-	// to a metadata store that had drained the families: those rows carry
-	// none of the history the store lost, so the set's own rows are what the
-	// import's upserts would have found.
-	mergeOverDrained atomic.Bool
 	// ckptDir, ckptKeep and ckptMu describe where checkpoints are written;
 	// ckptWrite serializes writers.
 	ckptMu    sync.Mutex
@@ -140,11 +135,15 @@ type Set struct {
 	dir string
 	// rollBackAhead rolls a set ahead of the ledger back from its journal.
 	rollBackAhead bool
-	// merge notes the snapshot rows a merge loads; nil outside a merge.
-	merge *mergeState
 	// pruneJournal trims the rollback journal; a field so a test can fail
 	// it, which a healthy store never does right after a commit.
 	pruneJournal func(beforeSlot uint64) error
+	// holdMu guards holds and closing; holdIdle is signalled when holds
+	// reaches zero. See HoldOpen.
+	holdMu   sync.Mutex
+	holdIdle *sync.Cond
+	holds    int
+	closing  bool
 }
 
 // UpdateAnchor records the chain's immutable tip, the point k blocks behind
@@ -302,9 +301,51 @@ func Open(cfg Config) (*Set, error) {
 	return set, nil
 }
 
+// HoldOpen keeps the set open for a reader that runs outside the ledger's
+// commit path, such as a background job: Close waits for release before it
+// closes the store. ok is false once Close has begun, and the caller must
+// then not read the set, whose store panics on a read after it is closed.
+// The ledger's own Close stops its jobs first; the hold covers a set closed
+// under a ledger that was not. A hold is short and never taken while waiting
+// on something Close's caller holds.
+func (s *Set) HoldOpen() (release func(), ok bool) {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	if s.closing {
+		return nil, false
+	}
+	s.holds++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.holdMu.Lock()
+			defer s.holdMu.Unlock()
+			s.holds--
+			if s.holds == 0 && s.holdIdle != nil {
+				s.holdIdle.Broadcast()
+			}
+		})
+	}, true
+}
+
+// refuseHolds makes HoldOpen refuse and waits for every hold to be released.
+func (s *Set) refuseHolds() {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	s.closing = true
+	if s.holdIdle == nil {
+		s.holdIdle = sync.NewCond(&s.holdMu)
+	}
+	for s.holds > 0 {
+		s.holdIdle.Wait()
+	}
+}
+
 // Close closes the set and unregisters its metrics, so the set can be
-// opened again on the same registry.
+// opened again on the same registry. It first waits for every HoldOpen to be
+// released.
 func (s *Set) Close() error {
+	s.refuseHolds()
 	if s.unregister != nil {
 		s.unregister()
 		s.unregister = nil
@@ -463,6 +504,7 @@ func (s *Set) ApplyLedgerChanges(
 			inputRows,
 			derivedRows,
 			boundaryRows,
+			stateMarkRows(lc),
 		),
 	})
 	if err != nil {
@@ -627,13 +669,15 @@ func (s *Set) RollbackPreview(point ocommon.Point) (ledger.UtxoEvent, error) {
 }
 
 // PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker. A point the
-// journal does not reach is also ledger.ErrUtxoAsOfUnavailable, which a
-// replay of a past boundary takes for a boundary it cannot restore.
+// journal does not reach, or does not hold, is also
+// ledger.ErrUtxoAsOfUnavailable, which a replay of a past boundary takes for a
+// boundary it cannot restore.
 func (s *Set) PreviewUtxoSetRollback(
 	point ocommon.Point,
 ) (ledger.UtxoEvent, error) {
 	evt, err := s.RollbackPreview(point)
-	if errors.Is(err, badgerutxo.ErrRollbackBeyondJournal) {
+	if errors.Is(err, badgerutxo.ErrRollbackBeyondJournal) ||
+		errors.Is(err, badgerutxo.ErrPointNotInJournal) {
 		return evt, fmt.Errorf("%w: %w", ledger.ErrUtxoAsOfUnavailable, err)
 	}
 	return evt, err
@@ -712,12 +756,6 @@ func (s *Set) SetDrainedFamilies(drained nodesettings.FamilyMask) {
 	s.store.RefuseLoadsFor(drained)
 }
 
-// SetMergeOverDrained records that the next ledger-state merge loads rows a
-// drained metadata store was given by an import.
-func (s *Set) SetMergeOverDrained(on bool) {
-	s.mergeOverDrained.Store(on)
-}
-
 // Reconcile makes the set equal to the ledger's live set before the ledger
 // applies anything. The set's tip is always a point at which it equalled the
 // ledger, so a set at the ledger tip is already equal. A set behind it is
@@ -737,23 +775,21 @@ func (s *Set) Reconcile(
 	if err := s.finishPendingRestore(ctx); err != nil {
 		return err
 	}
+	if _, pending, err := s.store.ImportPending(); err != nil {
+		return fmt.Errorf("utxoset: read the import mark: %w", err)
+	} else if pending {
+		return badgerutxo.ErrImportPending
+	}
 	if err := s.reconcileOutputs(ctx, ldb, resume); err != nil {
 		return err
 	}
 	return s.LoadLedgerState(ctx, ldb)
 }
 
-// LoadLedgerState loads into the set the block nonces, epoch state, network
-// state, protocol parameters and accounts it lacks, from the metadata store. Reconcile calls it once the outputs agree
-// with the ledger.
+// LoadLedgerState loads into the set the ledger-state families it lacks, from
+// the metadata store of a database that kept them there. Reconcile calls it
+// once the outputs agree with the ledger.
 func (s *Set) LoadLedgerState(ctx context.Context, ldb ledgerdb.LedgerDB) error {
-	pending, err := s.store.MergePending()
-	if err != nil {
-		return fmt.Errorf("utxoset: read the merge mark: %w", err)
-	}
-	if pending {
-		return s.mergeLedgerState(ctx, ldb)
-	}
 	return s.loadFamilies(ctx, ldb)
 }
 
@@ -777,6 +813,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureInactivity(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
@@ -837,6 +876,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureGovernance(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureRatifyPending(ctx, ldb); err != nil {
 		return err
 	}
 	return s.ensurePParamUpdates(ctx, ldb)

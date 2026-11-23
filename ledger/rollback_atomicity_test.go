@@ -156,23 +156,6 @@ func TestHandleEventChainsyncRollbackFailsHardAfterChainTruncation(
 	)
 }
 
-// floorLookupFailingMetadataStore fails the durable-applied-floor lookup that
-// enforceDurableTipFloor runs. ls.rollback calls enforceDurableTipFloor from
-// two places -- the no-op branch it takes when the ledger tip already equals
-// the rollback point, and the tail of the full rollback, after the truncation
-// has committed and ls.currentTip has been published -- so this is how
-// ls.rollback fails with the ledger already sitting on the rollback point.
-type floorLookupFailingMetadataStore struct {
-	metadata.MetadataStore
-	err error
-}
-
-func (s floorLookupFailingMetadataStore) GetLatestBlockNonce(
-	_ dbtypes.Txn,
-) (models.BlockNonce, bool, error) {
-	return models.BlockNonce{}, false, s.err
-}
-
 // TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint is
 // the negative half of the sentinel's contract. ErrChainTruncatedLedgerRollbackFailed
 // means the chain truncated and the ledger did not, and the callers escalate on
@@ -191,21 +174,7 @@ func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
 	ls.publishSnapshotsLocked()
 
 	floorErr := models.ErrBlockNotFound
-	base := ls.db
-	failing, err := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: floorLookupFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           floorErr,
-			},
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	fxFaultedLedger(t, ls, SetFaultsForTest{LatestBlockNonce: floorErr})
 
 	rbErr := ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	require.Error(t, rbErr)

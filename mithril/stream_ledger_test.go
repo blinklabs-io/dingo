@@ -127,7 +127,7 @@ func TestStreamCatchUpIntoRealLedger(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      cm,
 		EventBus:          bus,
 		Logger:            logger,

@@ -15,76 +15,37 @@
 package indexer
 
 import (
-	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/stretchr/testify/require"
 )
 
-// pendingReader reads fact rows from a store and keeps the pending stake-input
-// record where the ledger does, not in the store's sync state.
-type pendingReader struct {
-	metadata.FactRowReader
+// pendingLedger keeps the pending stake-input record itself.
+type pendingLedger struct {
+	storeLedger
 	pending string
 }
 
-func (p pendingReader) RewardStakeInputsPendingState() (string, error) {
+func (p pendingLedger) RewardStakeInputsPendingState() (string, error) {
 	return p.pending, nil
 }
 
-type plainReader struct{ metadata.FactRowReader }
-
-// A copy over a fact reader takes the snapshots still being written from the
-// reader's own pending record, since a ledger whose families are drained keeps
-// that record outside the metadata store.
-func TestFactsOverAReaderUseItsPendingStakeInputs(t *testing.T) {
+// A copy takes the snapshots still being written from the ledger's pending
+// record.
+func TestFactsUseTheLedgersPendingStakeInputs(t *testing.T) {
 	t.Parallel()
 	src, _ := newFactsDB(t)
 	dst, _ := newFactsDB(t)
-	store, ok := src.Metadata().(metadata.FactRowStore)
-	require.True(t, ok)
 
-	f, err := NewFactsOver(src, pendingReader{
-		FactRowReader: store,
-		pending:       `{"entries":[{"epoch":7,"boundary_slot":70}]}`,
+	f, err := NewMetadataFacts(pendingLedger{
+		storeLedger: newStoreLedger(t, src),
+		pending:     `{"entries":[{"epoch":7,"boundary_slot":70}]}`,
 	}, dst)
 	require.NoError(t, err)
 	pending, err := f.pendingStakeInputEpochs()
 	require.NoError(t, err)
 	require.Contains(t, pending, uint64(7))
-
-	// A reader without the capability falls back to the store's sync state,
-	// which holds no record here.
-	g, err := NewFactsOver(src, plainReader{FactRowReader: store}, dst)
-	require.NoError(t, err)
-	pending, err = g.pendingStakeInputEpochs()
-	require.NoError(t, err)
-	require.Empty(t, pending)
-}
-
-// The source of a copy is never written, whichever reader supplies it.
-func TestFactsOverAReaderNeverWriteItsSource(t *testing.T) {
-	t.Parallel()
-	src, _ := newFactsDB(t)
-	dst, _ := newFactsDB(t)
-	store, ok := src.Metadata().(metadata.FactRowStore)
-	require.True(t, ok)
-	f, err := NewFactsOver(src, store, dst)
-	require.NoError(t, err)
-	require.ErrorIs(
-		t,
-		f.srcRows.WriteFactRows(metadata.FactTables[0], metadata.FactRows{}, nil),
-		errFactSourceReadOnly,
-	)
-	require.ErrorIs(
-		t, f.srcRows.DeleteFactRowsAfter(metadata.FactTables[0], 0, nil),
-		errFactSourceReadOnly,
-	)
-	_, _, err = f.srcRows.ReadFactRows(
-		context.Background(), metadata.FactTables[0], 0, 1, 0, 10, nil,
-	)
-	require.NoError(t, err)
 }
 
 // A dormant expiry bump and a dormancy reset at one slot leave two dormancy

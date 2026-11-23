@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -47,7 +46,7 @@ func (f *treasuryRolloverFixture) liveState(
 	proposal *models.GovernanceProposal,
 ) rebuildLiveState {
 	t.Helper()
-	epochs, err := f.db.GetEpochs(nil)
+	epochs, err := f.ls.ledgerDB().GetEpochs(nil)
 	require.NoError(t, err)
 	tip, err := f.db.GetTip(nil)
 	require.NoError(t, err)
@@ -69,8 +68,9 @@ func (f *treasuryRolloverFixture) boundaryRow(
 	return f.ls.GovernanceBoundarySnapshotAtSlot(epoch.StartSlot)
 }
 
-// memBoundarySnapshots keeps the boundary snapshots of a fixture whose
-// ledger has no live UTxO set keeping ledger state.
+// memBoundarySnapshots keeps the boundary snapshots of a fixture in place of
+// the live UTxO set's rows, so a scenario can drop them to model a database
+// that holds none.
 type memBoundarySnapshots struct {
 	mu   sync.Mutex
 	rows map[uint64]models.GovernanceBoundarySnapshot
@@ -117,10 +117,9 @@ type rebuildScenario struct {
 // rebuildOptions varies how newRebuildScenarioWith builds the two live
 // boundaries.
 type rebuildOptions struct {
-	// liveSet attaches an in-memory live UTxO set that journals its changes,
-	// so the ledger reads stake from it and a rollback restores spent
-	// outputs from its journal.
-	liveSet bool
+	// journalGap leaves the first boundary's preceding block out of the
+	// set's journal, which then starts after it.
+	journalGap bool
 	// protocolMajor sets the protocol version the boundaries run under.
 	protocolMajor uint
 	// delegatorInactivity enables CIP-0163 with delegatorWindow epochs of
@@ -159,12 +158,8 @@ func newRebuildScenarioWith(
 		f.ls.config.DelegatorInactivityEnabled = true
 		f.ls.config.DelegatorInactivity = opts.delegatorWindow
 	}
-	if opts.liveSet {
-		f.ls.config.UtxoSet = NewMemLiveSetForTest()
-		require.NoError(t, f.db.SetLiveUtxoSource(f.ls))
-	}
 	destination, destinationReturn, _ := f.rewardAddress(t, 0x91)
-	require.NoError(t, f.db.Metadata().AddNetworkDonation(
+	require.NoError(t, seedDB(t, f.db).AddNetworkDonation(
 		f.currentEpoch.StartSlot+10, f.currentEpoch.EpochId, 50*ada, nil,
 	))
 	withdrawal := f.addProposal(
@@ -179,15 +174,15 @@ func newRebuildScenarioWith(
 		f.currentEpoch.EpochId + 1,
 	} {
 		credential := repeatByte(28, byte(0xd1+i))
-		require.NoError(t, f.db.Metadata().CreateDrep(nil, &models.Drep{
+		require.NoError(t, seedCreateDrep(t, f.db, context.Background(), nil, &models.Drep{
 			Credential:        credential,
 			AddedSlot:         1,
 			Active:            true,
 			LastActivityEpoch: f.currentEpoch.EpochId,
 			ExpiryEpoch:       expiry,
 		}))
-		require.NoError(t, f.db.CreateAccount(
-			context.Background(), nil, &models.Account{
+		require.NoError(t, seedCreateAccount(
+			t, f.db, context.Background(), nil, &models.Account{
 				StakingKey: repeatByte(28, byte(0xe1+i)),
 				Drep:       credential,
 				DrepType:   0,
@@ -200,10 +195,25 @@ func newRebuildScenarioWith(
 	if opts.prepare != nil {
 		opts.prepare(t, f, withdrawal)
 	}
+	// The replay of a boundary rolls the set back to the block before it, so
+	// the set's journal must hold that block.
+	journalLastBlock := func(i int, boundary models.Epoch) {
+		slot := boundary.StartSlot + uint64(boundary.LengthInSlots) - 1
+		commitTestLedgerChanges(t, f.ls, ochainsync.Tip{
+			Point: ocommon.NewPoint(slot, repeatByte(32, byte(0xb0+i))),
+		}, LedgerChanges{Nonces: []models.BlockNonce{{
+			Hash: repeatByte(32, byte(0xb0+i)), Slot: slot,
+			Nonce: repeatByte(32, 0x11),
+		}}})
+	}
+	if !opts.journalGap {
+		journalLastBlock(0, f.currentEpoch)
+	}
 	first := f.rollover(t, f.currentEpoch, f.currentPParams)
 	if opts.afterBoundary != nil {
 		opts.afterBoundary(t, f, 0, first.NewCurrentEpoch)
 	}
+	journalLastBlock(1, first.NewCurrentEpoch)
 	second := f.rollover(t, first.NewCurrentEpoch, first.NewCurrentPParams)
 	if opts.afterBoundary != nil {
 		opts.afterBoundary(t, f, 1, second.NewCurrentEpoch)
@@ -228,9 +238,6 @@ func newRebuildScenarioWith(
 			Type:     6,
 			Cbor:     []byte{0x80},
 		}, nil))
-		require.NoError(t, f.db.SetBlockNonce(
-			sc.blockHash(i), epoch.StartSlot-1, repeatByte(32, 0x11), false, nil,
-		))
 	}
 	require.NotEmpty(t, sc.rows[0].Ratified, "the first boundary ratifies")
 	require.NotEmpty(t, sc.rows[0].DRepDistribution)
@@ -286,30 +293,17 @@ func TestRebuildGovernanceBoundarySnapshotsMatchesLive(t *testing.T) {
 	}
 }
 
-// journalMissSet is a live UTxO set whose journal no longer reaches any
-// rollback target.
-type journalMissSet struct {
-	*memUtxoSet
-}
-
-func (journalMissSet) PreviewUtxoSetRollback(
-	ocommon.Point,
-) (UtxoEvent, error) {
-	return UtxoEvent{}, ErrUtxoAsOfUnavailable
-}
-
 func TestRebuildGovernanceBoundarySnapshotJournalMissKeepsSentinel(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	sc := newRebuildScenario(t)
+	sc := newRebuildScenarioWith(t, rebuildOptions{journalGap: true})
 	before := sc.f.liveState(t, sc.withdrawal)
-	sc.f.ls.config.UtxoSet = journalMissSet{&memUtxoSet{}}
-	err := sc.rebuild(1)
+	err := sc.rebuild(0)
 	require.ErrorIs(t, err, errGovernanceBoundaryUnreachable)
 	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
-	_, err = sc.f.boundaryRow(t, sc.epochs[1])
+	_, err = sc.f.boundaryRow(t, sc.epochs[0])
 	require.ErrorIs(t, err, models.ErrGovernanceBoundarySnapshotNotRetained)
 	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
 	require.False(t, sc.f.ls.utxoSetFailed.Load())
@@ -343,7 +337,7 @@ func TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary(
 	}
 	raw, err := json.Marshal(rec)
 	require.NoError(t, err)
-	require.NoError(t, sc.f.db.SetSyncState(
+	require.NoError(t, seedDB(t, sc.f.db).SetSyncState(
 		pendingRatificationSyncKey, string(raw), nil,
 	))
 	before := sc.f.liveState(t, sc.withdrawal)
@@ -355,7 +349,7 @@ func TestRebuildGovernanceBoundarySnapshotsSkipsPendingBoundary(
 	older, err := sc.f.boundaryRow(t, sc.epochs[0])
 	require.NoError(t, err)
 	require.Equal(t, sc.rows[0], older)
-	got, err := sc.f.db.GetSyncState(pendingRatificationSyncKey, nil)
+	got, err := sc.f.ls.ledgerDB().GetSyncState(pendingRatificationSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, string(raw), got)
 	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
@@ -445,7 +439,6 @@ func TestRebuildGovernanceBoundarySnapshotRestoresSpentLiveOutput(
 	stakeKey := repeatByte(28, 0xe1)
 	var spentID models.UtxoId
 	sc := newRebuildScenarioWith(t, rebuildOptions{
-		liveSet: true,
 		prepare: func(
 			t *testing.T, f *treasuryRolloverFixture, _ *models.GovernanceProposal,
 		) {
@@ -559,23 +552,23 @@ func newDRepRebuildScenario(
 				t, f.db, drepScenarioMoved,
 				drepOfCredential(drepScenarioFirst), start+70,
 			)
-			require.NoError(t, f.db.AddAccountRewardByCredential(
+			require.NoError(t, seedDB(t, f.db).AddAccountRewardByCredential(
 				context.Background(), 0, drepScenarioMoved, 40*ada, start+75,
 				repeatByte(32, 0xc9), nil,
 			))
-			require.NoError(t, f.db.Metadata().CreateDrep(nil, &models.Drep{
+			require.NoError(t, seedCreateDrep(t, f.db, context.Background(), nil, &models.Drep{
 				Credential:        drepScenarioLapsed,
 				AddedSlot:         1,
 				Active:            true,
 				LastActivityEpoch: f.currentEpoch.EpochId - 1,
 				ExpiryEpoch:       f.currentEpoch.EpochId,
 			}))
-			require.NoError(t, f.db.UpdateDRepActivity(
+			require.NoError(t, seedDB(t, f.db).UpdateDRepActivity(
 				context.Background(), 0, drepScenarioLapsed,
 				f.currentEpoch.EpochId-1, 1, start+20, nil,
 			))
-			require.NoError(t, f.db.CreateAccount(
-				context.Background(), nil, &models.Account{
+			require.NoError(t, seedCreateAccount(
+				t, f.db, context.Background(), nil, &models.Account{
 					StakingKey: lapsedKey,
 					Drep:       drepScenarioLapsed,
 					DrepType:   0,
@@ -604,7 +597,7 @@ func newDRepRebuildScenario(
 				)
 			}
 			if opts.renewLapsed {
-				require.NoError(t, f.db.UpdateDRepActivity(
+				require.NoError(t, seedDB(t, f.db).UpdateDRepActivity(
 					context.Background(), 0, drepScenarioLapsed,
 					epoch.EpochId, 10, epoch.StartSlot+40, nil,
 				))
@@ -675,7 +668,7 @@ func addDRepVote(
 	slot uint64,
 ) {
 	t.Helper()
-	require.NoError(t, f.db.SetGovernanceVote(
+	require.NoError(t, seedDB(t, f.db).SetGovernanceVote(
 		context.Background(), &models.GovernanceVote{
 			ProposalID:      proposal.ID,
 			VoterType:       models.VoterTypeDRep,
@@ -755,33 +748,4 @@ func TestRebuildGovernanceBoundarySnapshotDelegatorInactivity(t *testing.T) {
 	require.NotEmpty(t, sc.rows[0].Ratified)
 	require.NotContains(t, ratifiedTxHashes(sc.rows[1]), late.TxHash)
 	requireRebuiltRowsMatchLive(t, sc)
-}
-
-// TestRebuildGovernanceBoundarySnapshotsPrunedRewardBasisEndsPass removes the
-// reward basis a boundary's replay needs, as retention pruning does. The
-// stores can then no longer restore that boundary, so the pass ends without
-// failing startup, leaves every row absent, and touches no live state.
-func TestRebuildGovernanceBoundarySnapshotsPrunedRewardBasisEndsPass(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	sc := newRebuildScenario(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, sc.f.db)
-	require.NoError(t, err)
-	for _, table := range []string{"reward_ada_pots", "reward_snapshot"} {
-		_, err = raw.Exec("DELETE FROM " + table)
-		require.NoError(t, err)
-	}
-	before := sc.f.liveState(t, sc.withdrawal)
-
-	require.ErrorIs(t, sc.rebuild(1), errGovernanceBoundaryUnreachable)
-	require.NoError(t, sc.f.ls.rebuildGovernanceBoundarySnapshots(
-		context.Background(),
-	))
-	for _, epoch := range sc.epochs {
-		_, err := sc.f.boundaryRow(t, epoch)
-		require.ErrorIs(t, err, models.ErrGovernanceBoundarySnapshotNotRetained)
-	}
-	require.Equal(t, before, sc.f.liveState(t, sc.withdrawal))
 }

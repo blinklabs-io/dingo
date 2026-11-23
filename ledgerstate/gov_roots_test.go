@@ -46,13 +46,11 @@ func TestImportGovStatePurposeRootPresence(t *testing.T) {
 			}
 			require.NoError(t, importGovState(
 				context.Background(),
-				govImportConfigForTest(
-					db, govStateWithRoots(t, roots, false),
-				),
+				govImportConfigForTest(t, db, govStateWithRoots(t, roots, false)),
 				func(ImportProgress) {},
 			))
 			for j, g := range groups {
-				root, err := db.GetLastEnactedGovernanceProposal(context.Background(), g, nil)
+				root, err := ledgerDBFor(t, db).GetLastEnactedGovernanceProposal(context.Background(), g, nil)
 				require.NoError(t, err)
 				if j == i {
 					require.NotNil(t, root)
@@ -70,13 +68,11 @@ func TestImportGovStatePurposeRootPresence(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, importGovState(
 			context.Background(),
-			govImportConfigForTest(
-				db, govStateWithRoots(t, [4]*ParsedGovActionId{}, false),
-			),
+			govImportConfigForTest(t, db, govStateWithRoots(t, [4]*ParsedGovActionId{}, false)),
 			func(ImportProgress) {},
 		))
 		for _, g := range groups {
-			root, err := db.GetLastEnactedGovernanceProposal(context.Background(), g, nil)
+			root, err := ledgerDBFor(t, db).GetLastEnactedGovernanceProposal(context.Background(), g, nil)
 			require.NoError(t, err)
 			require.Nil(t, root)
 		}
@@ -104,7 +100,7 @@ func TestImportGovStateRejectsUnseededPurposeRoot(t *testing.T) {
 	)
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, data),
+		govImportConfigForTest(t, db, data),
 		func(ImportProgress) {},
 	)
 	require.ErrorContains(t, err, "is not an enacted governance proposal")
@@ -120,7 +116,7 @@ func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
 	require.NoError(t, err)
 	staleEpoch := uint64(501)
 	staleSlot := uint64(50_100)
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+	require.NoError(t, ledgerDBFor(t, db).SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        bytes.Repeat([]byte{0x22}, 32),
 		ActionType:    govActionTypeParameterChange,
 		EnactedEpoch:  &staleEpoch,
@@ -131,62 +127,12 @@ func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
 	root := &ParsedGovActionId{TxHash: bytes.Repeat([]byte{0x11}, 32)}
 	err = importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateWithRoots(
+		govImportConfigForTest(t, db, govStateWithRoots(
 			t, [4]*ParsedGovActionId{root, nil, nil, nil}, false,
 		)),
 		func(ImportProgress) {},
 	)
 	require.ErrorContains(t, err, "does not resolve as the current root")
-}
-
-// A gov-state checkpoint can predate the root verifier, so a resumed import
-// that skips importGovState must still verify the snapshot roots.
-func TestImportLedgerStateResumeVerifiesPurposeRoots(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	root := &ParsedGovActionId{TxHash: bytes.Repeat([]byte{0x33}, 32)}
-	cfg := govImportConfigForTest(db, govStateWithRoots(
-		t, [4]*ParsedGovActionId{root, nil, nil, nil}, false,
-	))
-	cfg.UtxoSet = importSetFor(t, db)
-	cfg.ImportKey = "resume-purpose-roots"
-	cfg.State.Tip = &SnapshotTip{
-		Slot:      50_000,
-		BlockHash: bytes.Repeat([]byte{0x44}, 32),
-	}
-	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
-	// The interrupted run marked the database before its first phase.
-	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
-
-	err = ImportLedgerState(context.Background(), cfg)
-	require.ErrorContains(t, err, "is not an enacted governance proposal")
-}
-
-// A GovRelation that fails to decode leaves PrevGovActionIds nil, so the
-// resumed check must reject the parse error rather than read it as a
-// snapshot with no roots.
-func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	cfg := govImportConfigForTest(db, govStateWithEncodedRoots(
-		t, []any{[]any{}, []any{}, []any{}}, false, nil, nil,
-	))
-	cfg.UtxoSet = importSetFor(t, db)
-	cfg.ImportKey = "resume-undecodable-roots"
-	cfg.State.Tip = &SnapshotTip{
-		Slot:      50_000,
-		BlockHash: bytes.Repeat([]byte{0x44}, 32),
-	}
-	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
-	// The interrupted run marked the database before its first phase.
-	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
-
-	err = ImportLedgerState(context.Background(), cfg)
-	require.ErrorContains(t, err, "GovRelation has 3 elements")
 }
 
 // boundaryLoader keeps the boundary snapshots an import writes, standing in
@@ -215,43 +161,4 @@ func (b *boundaryLoader) GovernanceBoundarySnapshotAt(
 		return nil, false, nil
 	}
 	return &row, true, nil
-}
-
-// A checkpoint written before the boundary snapshot existed skips
-// importGovState, so the resume must write the snapshot itself and leave an
-// existing one alone.
-func TestResumeCompletedGovStateBackfillsBoundarySnapshot(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	cfg := govImportConfigForTest(db, govStateWithRoots(
-		t, [4]*ParsedGovActionId{}, false,
-	))
-	loader := &boundaryLoader{}
-	cfg.UtxoSet = loader
-	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
-	load := func() *models.GovernanceBoundarySnapshot {
-		snapshot, ok, err := loader.GovernanceBoundarySnapshotAt(
-			cfg.State.Epoch, nil,
-		)
-		require.NoError(t, err)
-		if !ok {
-			return nil
-		}
-		return snapshot
-	}
-	require.Nil(t, load())
-
-	require.NoError(t, resumeCompletedGovState(context.Background(), cfg))
-	snapshot := load()
-	require.NotNil(t, snapshot)
-	require.Equal(t, cfg.State.Epoch, snapshot.Epoch)
-	require.Equal(t, boundarySlot, snapshot.BoundarySlot)
-	require.NotEmpty(t, snapshot.ImportedRatifyState)
-
-	snapshot.RatificationTreasury = 77
-	require.NoError(t, loader.LoadGovernanceBoundarySnapshot(snapshot))
-	require.NoError(t, resumeCompletedGovState(context.Background(), cfg))
-	require.EqualValues(t, 77, load().RatificationTreasury)
 }

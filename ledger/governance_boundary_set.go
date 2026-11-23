@@ -33,20 +33,20 @@ type GovernanceBoundaryReader interface {
 	) (*models.GovernanceBoundarySnapshot, bool, error)
 }
 
-// governanceBoundarySeam stores boundary snapshots for a test ledger that
-// has no live UTxO set keeping ledger state.
+// governanceBoundarySeam stores boundary snapshots in place of the live UTxO
+// set's rows for a test ledger.
 type governanceBoundarySeam interface {
 	GovernanceBoundaryReader
 	save(*models.GovernanceBoundarySnapshot)
 }
 
 // governanceBoundaryReader returns the set's boundary snapshots, or nil when
-// the ledger's set keeps no ledger state or has stopped following it.
+// the ledger's set does not serve them or has stopped following the ledger.
 func (ls *LedgerState) governanceBoundaryReader() GovernanceBoundaryReader {
 	if ls.boundarySnapshotSeam != nil {
 		return ls.boundarySnapshotSeam
 	}
-	if !ls.keepsEpochState() || ls.utxoSetFailed.Load() {
+	if ls.utxoSetFailed.Load() {
 		return nil
 	}
 	r, ok := ls.config.UtxoSet.(GovernanceBoundaryReader)
@@ -58,8 +58,7 @@ func (ls *LedgerState) governanceBoundaryReader() GovernanceBoundaryReader {
 
 // saveGovernanceBoundarySnapshot stages snapshot for the live UTxO set in
 // txn, journaled at its boundary slot so that a rollback below the boundary
-// removes it. Without txn it is applied at once. A ledger whose set keeps no
-// ledger state retains no boundary snapshots.
+// removes it. Without txn it is applied at once.
 func (ls *LedgerState) saveGovernanceBoundarySnapshot(
 	snapshot *models.GovernanceBoundarySnapshot,
 	txn ledgerdb.Txn,
@@ -69,9 +68,6 @@ func (ls *LedgerState) saveGovernanceBoundarySnapshot(
 	}
 	if ls.boundarySnapshotSeam != nil {
 		ls.boundarySnapshotSeam.save(snapshot)
-		return nil
-	}
-	if !ls.keepsEpochState() {
 		return nil
 	}
 	ls.stageLedgerChanges(txn, LedgerChanges{

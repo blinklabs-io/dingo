@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -72,7 +73,7 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 		DataDir:                    n.config.dataDir,
 		Logger:                     n.config.logger,
 		CardanoNodeConfig:          n.config.cardanoNodeConfig,
-		FinishImport:               n.finishDrainedImport,
+		FinishImport:               n.finishPendingImport,
 		Publish:                    n.setDrainedFamilies,
 		Resume:                     n.ledgerState.ResumeUtxoSetFrom,
 		ResolveRewardInputs:        n.ledgerState.ResolvePendingRewardStakeInputs,
@@ -404,46 +405,22 @@ func (n *Node) stopUtxoSetCheckpoint() {
 	n.utxoCkptWG.Wait()
 }
 
-// finishDrainedImport completes an import of ledger state into the live UTxO
-// set that a crash left after its SQL rows were written and before the set
-// loaded them. An import that is still writing, which leaves sync_status set,
-// is refused: only the Mithril import that began it can finish it.
-func (n *Node) finishDrainedImport(ctx context.Context) error {
+// finishPendingImport finishes a ledger-state re-import the node began and
+// did not finish. Any other import a stop left in the set is refused: only
+// running the Mithril command that began it again completes it.
+func (n *Node) finishPendingImport(ctx context.Context) error {
 	if resumed, err := n.resumeLedgerReimport(ctx); resumed || err != nil {
 		return err
 	}
-	_, pending, err := n.db.DrainedImportPending(ctx)
-	if err != nil || !pending {
-		return err
+	if n.utxoSet == nil {
+		return nil
 	}
-	status, err := n.db.GetSyncState("sync_status", nil)
-	if err != nil {
-		return fmt.Errorf("read sync status: %w", err)
+	if _, pending, err := n.utxoSet.ImportPending(); err != nil {
+		return fmt.Errorf("read the live UTxO set's import mark: %w", err)
+	} else if pending {
+		return badgerutxo.ErrImportPending
 	}
-	if status != "" {
-		// An import the node began to recover the set is run again; only
-		// the Mithril command that began any other can finish it.
-		reimport, rerr := n.db.GetSyncState(database.LedgerReimportSyncKey, nil)
-		if rerr != nil {
-			return fmt.Errorf("read re-import mark: %w", rerr)
-		}
-		if reimport == "" || n.utxoSet == nil || !n.utxoSet.CanReimport() {
-			return database.ErrDrainedImportPending
-		}
-		tip, terr := n.db.GetTip(nil)
-		if terr != nil {
-			return fmt.Errorf("read ledger tip: %w", terr)
-		}
-		n.config.logger.Info(
-			"resuming a ledger-state re-import the node began",
-			"component", "dingo",
-		)
-		_, err := n.utxoSet.Reimport(ctx, tip.Point)
-		return err
-	}
-	return nodestorage.FinishDrainedImport(
-		ctx, n.db, n.utxoSet, n.config.logger,
-	)
+	return nil
 }
 
 // resumeLedgerReimport finishes a ledger-state re-import the node began and
@@ -477,9 +454,9 @@ func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, fmt.Errorf("read ledger tip: %w", err)
 	}
-	_, pending, err := n.db.DrainedImportPending(ctx)
+	_, pending, err := n.utxoSet.ImportPending()
 	if err != nil {
-		return true, err
+		return true, fmt.Errorf("read the live UTxO set's import mark: %w", err)
 	}
 	setTip, ok, err := n.utxoSet.Tip()
 	if err != nil {

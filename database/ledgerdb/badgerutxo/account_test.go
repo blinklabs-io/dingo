@@ -15,6 +15,7 @@
 package badgerutxo_test
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
@@ -420,4 +421,103 @@ func TestRewardRecordPruneKeepsWhatTheConsumerHasNotCopied(t *testing.T) {
 	require.NoError(t, s.PruneJournal(25))
 	require.Equal(t, []uint64{20, 30}, slots(t, s),
 		"a record dated after the copied slot stays")
+}
+
+// A secondary key holds a pool or DRep hash behind a one-byte length, so a
+// longer hash is refused where it enters the store instead of being filed
+// under the key of a shorter one.
+func TestAccountRejectsDelegationHashLongerThanItsKeyLength(t *testing.T) {
+	t.Parallel()
+	hash := func(n int) []byte { return bytes.Repeat([]byte{0xab}, n) }
+	row := func(pool, drep []byte) badgerutxo.AccountRow {
+		return badgerutxo.AccountRow{
+			Tag: 0, Key: []byte{1, 1}, Active: true, Pool: pool, Drep: drep,
+		}
+	}
+	apply := func(s *badgerutxo.Store, r badgerutxo.AccountRow) error {
+		tip := point(10, 0x10)
+		_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+			Accounts: []badgerutxo.AccountPut{{Slot: tip.Slot, Row: r}},
+		})
+		return err
+	}
+	load := func(s *badgerutxo.Store, r badgerutxo.AccountRow) error {
+		return s.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
+			return put(r)
+		})
+	}
+	count := func(t *testing.T, walk func(func(badgerutxo.AccountRow) error) error) int {
+		t.Helper()
+		n := 0
+		require.NoError(t, walk(func(badgerutxo.AccountRow) error { n++; return nil }))
+		return n
+	}
+	for name, write := range map[string]func(*badgerutxo.Store, badgerutxo.AccountRow) error{
+		"batch": apply, "load": load,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := open(t, t.TempDir())
+			t.Cleanup(func() { require.NoError(t, s.Close()) })
+			bootstrap(t, s, point(1, 0x01))
+			require.ErrorIs(t, write(s, row(hash(256), nil)), badgerutxo.ErrKeyPartTooLong)
+			require.ErrorIs(t, write(s, row(nil, hash(256))), badgerutxo.ErrKeyPartTooLong)
+			require.NoError(t, write(s, row(hash(255), hash(255))))
+			require.Equal(t, 1, count(t, func(fn func(badgerutxo.AccountRow) error) error {
+				return s.AccountsByPool(hash(255), fn)
+			}))
+			require.Equal(t, 1, count(t, func(fn func(badgerutxo.AccountRow) error) error {
+				return s.AccountsByDrep(0, hash(255), fn)
+			}))
+			// A 256-byte hash truncates to the length of an empty one.
+			require.Zero(t, count(t, func(fn func(badgerutxo.AccountRow) error) error {
+				return s.AccountsByPool(nil, fn)
+			}))
+			abstain := row(nil, nil)
+			abstain.DrepType = 2
+			require.NoError(t, write(s, abstain))
+			require.Equal(t, 1, count(t, func(fn func(badgerutxo.AccountRow) error) error {
+				return s.AccountsByDrep(2, nil, fn)
+			}))
+		})
+	}
+	t.Run("read", func(t *testing.T) {
+		t.Parallel()
+		s := open(t, t.TempDir())
+		t.Cleanup(func() { require.NoError(t, s.Close()) })
+		bootstrap(t, s, point(1, 0x01))
+		none := func(badgerutxo.AccountRow) error { return nil }
+		require.ErrorIs(t, s.AccountsByPool(hash(256), none), badgerutxo.ErrKeyPartTooLong)
+		require.ErrorIs(t, s.AccountsByDrep(0, hash(256), none), badgerutxo.ErrKeyPartTooLong)
+	})
+}
+
+// A reward record's key holds its source behind a one-byte length.
+func TestRewardRecordRejectsSourceLongerThanItsKeyLength(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	rec := func(n int) badgerutxo.RewardRecord {
+		return badgerutxo.RewardRecord{
+			Slot: 10, Source: bytes.Repeat([]byte{7}, n), Tag: 0, Key: []byte{1, 1},
+		}
+	}
+	apply := func(r badgerutxo.RewardRecord) error {
+		tip := point(10, 0x10)
+		_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+			RewardRecords: []badgerutxo.RewardRecord{r},
+		})
+		return err
+	}
+	require.ErrorIs(t, apply(rec(256)), badgerutxo.ErrKeyPartTooLong)
+	_, err := s.HasRewardRecord(rec(256))
+	require.ErrorIs(t, err, badgerutxo.ErrKeyPartTooLong)
+	require.NoError(t, apply(rec(255)))
+	ok, err := s.HasRewardRecord(rec(255))
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = s.HasRewardRecord(rec(0))
+	require.NoError(t, err)
+	require.False(t, ok, "a 256-byte source must not be filed as an empty one")
 }

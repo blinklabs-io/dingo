@@ -22,7 +22,6 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
@@ -60,21 +59,7 @@ func decodePendingStakeInputs(raw string) ([]pendingStakeInput, error) {
 // ledgerPendingStakeInputs returns the snapshots the ledger has not finished
 // writing stake inputs for.
 func (f *MetadataFacts) ledgerPendingStakeInputs() ([]pendingStakeInput, error) {
-	var raw string
-	var err error
-	if ro, ok := f.srcRows.(readOnlyFactRows); ok {
-		if r, ok := ro.pending(); ok {
-			raw, err = r.RewardStakeInputsPendingState()
-		} else {
-			raw, err = f.src.Metadata().GetSyncState(
-				models.RewardStakeInputsPendingKey, nil,
-			)
-		}
-	} else {
-		raw, err = f.src.Metadata().GetSyncState(
-			models.RewardStakeInputsPendingKey, nil,
-		)
-	}
+	raw, err := f.ledger.RewardStakeInputsPendingState()
 	if err != nil {
 		return nil, fmt.Errorf("indexer: read pending stake inputs: %w", err)
 	}
@@ -234,7 +219,7 @@ func (f *MetadataFacts) copyEpochRows(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rows, next, err := f.srcRows.ReadFactRows(
+		rows, next, err := f.ledger.ReadFactRows(
 			ctx, table, from, through, cursor, factPageRows, nil,
 		)
 		if errors.Is(err, metadata.ErrFactCursorLost) && restarts < maxCursorRestarts {

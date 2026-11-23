@@ -22,7 +22,6 @@ import (
 	"math"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -99,7 +98,7 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 			)
 			require.NoError(
 				t,
-				db.Metadata().
+				ledgerDBFor(t, db).
 					ImportAccount(&models.Account{StakingKey: stake, AddedSlot: 1000, Reward: 700, Active: true}, nil),
 			)
 			cfg := ImportConfig{
@@ -114,6 +113,7 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 				},
 				EpochLength: func(uint) (uint, uint, error) { return 1, 100, nil },
 			}
+			cfg = importTargetForTest(t, cfg)
 			for range 2 {
 				require.NoError(
 					t,
@@ -124,30 +124,30 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 					),
 				)
 			}
-			stored, err := db.Metadata().GetGovernanceProposal(hash, 0, nil)
+			stored, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), hash, 0, nil)
 			require.NoError(t, err)
 			require.NotNil(t, stored)
-			sameEpoch, err := db.GetExpiredAwaitingDropGovernanceProposals(
+			sameEpoch, err := ledgerDBFor(t, db).GetExpiredAwaitingDropGovernanceProposals(
 				t.Context(),
 				10,
 				nil,
 			)
 			require.NoError(t, err)
 			require.Empty(t, sameEpoch)
-			nextEpoch, err := db.GetExpiredAwaitingDropGovernanceProposals(
+			nextEpoch, err := ledgerDBFor(t, db).GetExpiredAwaitingDropGovernanceProposals(
 				t.Context(),
 				11,
 				nil,
 			)
 			require.NoError(t, err)
-			txn := db.MetadataTxn(t.Context(), true)
+			txn := ledgerDBFor(t, db).Begin(t.Context(), true)
 			defer txn.Release()
 			pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
 			pp.ProtocolVersion.Major = 10
 			_, err = governance.ProcessEpoch(
 				t.Context(),
 				&governance.EpochInput{
-					DB:           dbadapter.New(db),
+					DB:           ledgerDBFor(t, db),
 					Txn:          txn,
 					PrevEpoch:    10,
 					NewEpoch:     11,
@@ -158,7 +158,7 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.NoError(t, txn.Commit())
-			account, err := db.GetAccountByCredential(
+			account, err := ledgerDBFor(t, db).GetAccountByCredential(
 				t.Context(),
 				0,
 				stake,
@@ -181,14 +181,14 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 			require.NotNil(t, stored.ExpiredSlot)
 			require.Equal(t, uint64(1000), *stored.ExpiredSlot)
 			require.Len(t, nextEpoch, 1)
-			credits, err := db.Metadata().
+			credits, err := ledgerDBFor(t, db).
 				GetPostSnapshotRewardCreditEvents(1100, nil)
 			require.NoError(t, err)
 			require.Len(t, credits, 1)
 			require.Equal(t, stake, credits[0].StakingKey)
 			require.Equal(t, uint64(100_000_000_000), uint64(credits[0].Amount))
 			require.True(t, credits[0].PostSnapshot)
-			later, err := db.GetExpiredAwaitingDropGovernanceProposals(
+			later, err := ledgerDBFor(t, db).GetExpiredAwaitingDropGovernanceProposals(
 				t.Context(),
 				12,
 				nil,
@@ -226,13 +226,13 @@ func TestImportedExpiredGovStateRejectsMalformedVerdicts(t *testing.T) {
 			require.NotNil(t, parsed)
 			require.Error(t, parsed.PulsingStateParseError)
 			_, _, err := parseImportedGovState(
-				ImportConfig{
+				importTargetForTest(t, ImportConfig{
 					State: &RawLedgerState{
 						EraIndex:     EraConway,
 						GovStateData: data,
 						Epoch:        10,
 					},
-				},
+				}),
 			)
 			require.ErrorContains(t, err, "pulsing state")
 		})

@@ -31,12 +31,12 @@ var errGovernanceBoundaryUnreachable = errors.New(
 // forced on against the committed mark distribution, and takes the snapshot
 // the shared governance code produced. The transaction is then rolled back, so
 // the live ledger, tip and UTxO set are untouched, and the row is written to
-// the set at its boundary slot. A ledger whose set keeps no ledger state skips
-// the pass. A boundary already holding a row is skipped, which makes the
+// the set at its boundary slot. A ledger with no readable set skips the
+// pass. A boundary already holding a row is skipped, which makes the
 // pass idempotent and resumable after a crash between boundaries.
 //
 // A boundary the stores cannot restore ends the pass: the live UTxO set's
-// journal no longer reaches it, its target lies below the Mithril trust
+// journal no longer reaches or does not hold it, its target lies below the Mithril trust
 // boundary, the consumed-output sweep removed what the restore needs, or
 // retention pruned the reward basis its rollover reads. Its row and every
 // older one stay absent and reads of them report
@@ -51,7 +51,7 @@ func (ls *LedgerState) rebuildGovernanceBoundarySnapshots(
 	if err != nil {
 		return fmt.Errorf("list epochs: %w", err)
 	}
-	pending, err := loadPendingRatification(ls.db, nil)
+	pending, err := loadPendingRatification(ls.ledgerDB(), nil)
 	if err != nil {
 		return fmt.Errorf("read pending ratification: %w", err)
 	}

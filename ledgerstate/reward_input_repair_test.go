@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -159,7 +160,7 @@ func TestImportedAuthoritativeBasisCompleteness(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(
 					t,
-					db.Metadata().
+					ledgerDBFor(t, db).
 						SetEpoch(0, 9, nil, nil, nil, nil, 6, 1, 100, nil),
 				)
 				snapshot := twoPoolSnapshot()
@@ -167,38 +168,38 @@ func TestImportedAuthoritativeBasisCompleteness(t *testing.T) {
 				bundle.snapshot.Authoritative = true
 				require.NoError(
 					t,
-					db.Metadata().SaveRewardSnapshot(bundle.snapshot, nil),
+					ledgerDBFor(t, db).SaveRewardSnapshot(bundle.snapshot, nil),
 				)
 				require.NoError(
 					t,
-					db.Metadata().SaveRewardPoolInputs(bundle.poolInputs, nil),
+					ledgerDBFor(t, db).SaveRewardPoolInputs(bundle.poolInputs, nil),
 				)
 				rows := bundle.stakeInputs
 				if pending {
 					rows = rows[:1]
 					require.NoError(
 						t,
-						db.Metadata().
+						ledgerDBFor(t, db).
 							SetSyncState("dingo:stake-reward:stake-inputs-pending", `{"entries":[{"epoch":10,"boundary_slot":100}]}`, nil),
 					)
 				}
 				require.NoError(
 					t,
-					db.Metadata().SaveRewardStakeInputs(rows, nil),
+					ledgerDBFor(t, db).SaveRewardStakeInputs(rows, nil),
 				)
 				complete, err := importedAuthoritativeRewardBasisComplete(
-					db.Metadata(),
+					ledgerDBFor(t, db),
 					nil,
 					bundle.snapshot,
 				)
 				require.NoError(t, err)
 				require.Equal(t, !pending, complete)
-				tx := db.MetadataTxn(context.Background(), true)
+				tx := ledgerDBFor(t, db).Begin(context.Background(), true)
 				require.NoError(
 					t,
 					seedImportedRewardInputs(
-						db.Metadata(),
-						tx.Metadata(),
+						ledgerDBFor(t, db),
+						tx,
 						&ParsedSnapShots{
 							Mark: *snapshot,
 							Set:  *snapshot,
@@ -212,10 +213,10 @@ func TestImportedAuthoritativeBasisCompleteness(t *testing.T) {
 					),
 				)
 				require.NoError(t, tx.Commit())
-				actual, err := db.Metadata().GetRewardStakeInputs(10, nil)
+				actual, err := ledgerDBFor(t, db).GetRewardStakeInputs(10, nil)
 				require.NoError(t, err)
 				require.Len(t, actual, 3)
-				retained, err := db.Metadata().
+				retained, err := ledgerDBFor(t, db).
 					GetRewardSnapshot(10, "mark", nil)
 				require.NoError(t, err)
 				require.True(t, retained.Authoritative)
@@ -435,16 +436,11 @@ func TestImportedRewardInputPendingStateFailsClosed(t *testing.T) {
 	bundle.snapshot.Authoritative = true
 	require.NoError(
 		t,
-		db.Metadata().SaveRewardStakeInputs(bundle.stakeInputs, nil),
+		ledgerDBFor(t, db).SaveRewardStakeInputs(bundle.stakeInputs, nil),
 	)
 	for _, raw := range []string{"null", "{}", `{"entries":{}}`, `{"entries":[],"unknown":1}`, `{"entries":[{"epoch":10,"boundary_slot":100,"unknown":1}]}`, `{"entries":[{"epoch":10}]}`} {
-		require.NoError(
-			t,
-			db.Metadata().
-				SetSyncState(models.StakeRewardSourcePrefix+"stake-inputs-pending", raw, nil),
-		)
 		complete, err := importedAuthoritativeRewardBasisComplete(
-			db.Metadata(),
+			pendingStateStore{ledgerDBFor(t, db), raw},
 			nil,
 			bundle.snapshot,
 		)
@@ -452,19 +448,25 @@ func TestImportedRewardInputPendingStateFailsClosed(t *testing.T) {
 		require.False(t, complete, raw)
 	}
 	for _, raw := range []string{"", `{"entries":null}`, `{"entries":[]}`} {
-		require.NoError(
-			t,
-			db.Metadata().
-				SetSyncState(models.StakeRewardSourcePrefix+"stake-inputs-pending", raw, nil),
-		)
 		complete, err := importedAuthoritativeRewardBasisComplete(
-			db.Metadata(),
+			pendingStateStore{ledgerDBFor(t, db), raw},
 			nil,
 			bundle.snapshot,
 		)
 		require.NoError(t, err, raw)
 		require.True(t, complete, raw)
 	}
+}
+
+// pendingStateStore serves raw as every sync state value, which the set
+// itself would refuse to hold when it is malformed.
+type pendingStateStore struct {
+	rewardInputStore
+	raw string
+}
+
+func (s pendingStateStore) GetSyncState(string, ledgerdb.Txn) (string, error) {
+	return s.raw, nil
 }
 
 func TestRewardInputRepairRequiresExplicitTransaction(t *testing.T) {
