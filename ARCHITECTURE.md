@@ -24022,6 +24022,40 @@ POOLREAP precedes SNAP.
    `WaitEpochBoundaryJob` before reading proposal deposits and active
    proposals.
 
+   RATIFY hands each Conway boundary's governance snapshot (the DRep
+   distribution the pulser froze and the RATIFY outcome) to
+   `governance.EpochInput.SaveBoundarySnapshot`. The ledger stages it as
+   `LedgerChanges.GovernanceBoundaries` in the commit that applies the
+   decision, the boundary's own or the deferred job's, and the live UTxO set
+   keeps it as a `#` row keyed by the opened epoch and journaled at the
+   boundary slot, so rollback needs no separate delete. Journal pruning keeps
+   the newest row below the floor and drops older ones; a ledger-state import
+   writes its own boundary row through `ledgerstate.GovernanceBoundaryLoader`.
+   `LedgerState.GovernanceBoundarySnapshotAtSlot` serves an acquired point.
+   No metadata or IndexerDB table holds these rows.
+
+   At start-up, after the rollback intent and any pending RATIFY record are
+   recovered and before block processing resumes,
+   `rebuildGovernanceBoundarySnapshots` writes the governance boundary snapshot
+   of every Conway-or-later epoch the live UTxO set has none for, newest first. Each boundary is
+   replayed in a write transaction that is always rolled back: it is truncated
+   to the last block below the boundary by the code a live rollback uses
+   (`truncateLedgerStateInTxn`, which stages the live UTxO set's rollback as an
+   overlay and returns, rather than fails the set on, a journal that does not
+   reach the target), then `processEpochRolloverWithOptions` runs with a
+   `boundaryReplay`: validation-only, but RATIFY decides and applies at once
+   against the committed `mark` rows read before the truncation. The
+   `boundaryReplay` keeps the snapshot RATIFY hands to
+   `governance.EpochInput.SaveBoundarySnapshot`, the transaction is rolled
+   back, and the snapshot is written to the live UTxO set's `#` row family at
+   its boundary slot. A live boundary passes the same callback, which stages
+   the row in the batch of the commit that applies RATIFY. A boundary the
+   journal does not reach or hold, the Mithril trust boundary or the
+   consumed-output prune floor cannot reach, or whose reward basis retention
+   has pruned, stops the pass,
+   leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and every older
+   epoch. A ledger with no readable set skips the pass.
+
    A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
    leaves its mark snapshot to the same job. At the SNAP point the boundary
    only reads the stake rows of the pools POOLREAP is about to retire

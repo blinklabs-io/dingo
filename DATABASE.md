@@ -2974,6 +2974,7 @@ UTxO changes. Their tags and markers are declared in
 | `U` + epoch + kind 0x61 + credential tag + key length + key + pool length + pool + type length + reward type | one account reward output of a snapshot epoch, credited or not: a flag byte (spendable, guarded), amount, captured slot and boundary slot (8 bytes each). The credential comes first so one credential's outputs of an epoch share a prefix |
 | `Z` + epoch | the epoch's reward precompute cursor, the JSON `sync_state` carries |
 | `mroutputs` | set once the `U` and `Z` rows of every epoch reward calculation can still read are loaded |
+| `#` + epoch (8 bytes, big-endian) | the governance snapshot of the Conway boundary that opens that epoch: the boundary slot (8 bytes, big-endian), then `models.GovernanceBoundarySnapshot` as JSON. See [Governance boundary snapshots](#governance-boundary-snapshots) |
 | `mrbseq` | a big-endian `uint64` every rollback increments in the transaction that makes it; it differs from a value read earlier exactly when a rollback has run in between (a rollback that undoes several batches increments it several times) |
 | `mrbpend` | the point a rollback in more than one transaction is restoring, set before its first transaction that leaves the set between two states it held and cleared by its last. A store that starts with it finishes the rollback (`Store.ResumeRollback`, which `Set.Reconcile` calls before it rewinds a failure mark), and `ApplyLedgerBatch` refuses with `ErrRollbackPending` until then |
 | `mimport` | a ledger-state import in progress: the snapshot point, then a byte that is `1` once the snapshot's outputs are all in the set. It is written before the import changes a row and removed by the import's last write (`Store.EndImport`); a store that holds it refuses to be reconciled (`ErrImportPending`) or checkpointed |
@@ -3525,6 +3526,59 @@ per era with `ListPParamsForEra` and ordered by row ID, donations with
 `MetadataStore.ListNetworkDonations`, and network states are walked down
 with `GetNetworkStateAsOfSlot`. A bootstrap drops them and clears the
 markers.
+
+#### Governance boundary snapshots
+
+Each Conway-or-later epoch boundary keeps one `#` row, keyed by the epoch it
+opens, holding what Conway's `DRepPulser.hs` freezes there and what RATIFY
+decides from it: the complete DRep stake distribution (reward balances, live
+UTxO stake and active proposal deposits, grouped by delegated DRep, with
+AlwaysAbstain and AlwaysNoConfidence; delegator inactivity removes no
+registered DRep from it), the post-ENACT committee, quorum, constitution,
+purpose roots and encoded protocol parameters, then the ordered ratified and
+expired action references, the remaining treasury and the delayed flag. The
+proposal action bodies complete the staged enact state. A ledger-state
+import writes the imported pulser's distribution, encoded RatifyState and
+protocol parameters instead. Only the set holds these rows; the metadata
+store and the IndexerDB have no copy, and no API reads them.
+
+The row is written in the batch of the commit that applies RATIFY, which for
+a deferred RATIFY is a commit after the boundary, and is journaled at the
+boundary slot either way, so a rollback below the boundary removes it through
+the state journal and a rollback that keeps the boundary keeps it.
+Reprocessing a boundary replaces the row in the same batch as the proposal
+lifecycle changes, and keeps the expirations already stored for the
+boundary. `LedgerState.GovernanceBoundarySnapshotAtSlot` serves a local state
+query acquired at a slot: it reads the row of the epoch holding the slot as
+of that slot (`RowAt`), returns nil for a pre-Conway epoch, and returns
+`models.ErrGovernanceBoundarySnapshotNotRetained` for a Conway-or-later epoch
+without a row, never another epoch's row or live voting state.
+
+Journal pruning keeps, among the rows whose boundary lies below the prune
+slot, only the newest: it holds the epoch the journal floor is in, which every
+slot still inside the rollback window reads. A full bootstrap drops the rows
+with the rest of the set; a catch-up keeps them, after rolling the set back to
+the snapshot's point when it is ahead, which removes the rows above it. Either
+import then writes the snapshot's own boundary row with no journal entry,
+since no rollback crosses the imported point, and an import resumed from a
+checkpoint that passed the governance phase writes it when it is missing.
+
+A set that began keeping these rows after some boundaries of the rollback
+window passed is filled at start-up, newest first: after any interrupted
+rollback or pending RATIFY is recovered and before block processing resumes,
+`LedgerState.rebuildGovernanceBoundarySnapshots` replays each missing
+boundary's rollover in a write transaction truncated to the last block below
+it, with the live UTxO set's rollback staged as an overlay and RATIFY forced
+on against the committed `mark` pool-stake rows of the opened epoch, takes the
+snapshot RATIFY produced, rolls the transaction back and writes the row at
+its boundary slot. Nothing the replay stages survives. A boundary that
+already has a row is skipped, so the pass is idempotent and resumes after a
+crash; the boundary named by `dingo:governance:ratify-pending` is left to its
+own job. A boundary the stores cannot restore ends the pass, leaving it and
+every older epoch without a row: the set's journal no longer reaches or
+does not hold the block below it, that block is below the Mithril trust boundary, the
+consumed-output sweep removed what the restore needs, the committed `mark`
+snapshot is missing, or retention pruned the reward basis its rollover reads.
 
 ### Live UTxO set as the only copy
 

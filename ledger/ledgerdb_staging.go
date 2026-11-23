@@ -154,6 +154,9 @@ func (ls *LedgerState) stageLedgerChanges(txn ledgerdb.Txn, lc LedgerChanges) {
 		b.stateMarks = append(b.stateMarks, lc.StateMarks...)
 		b.importBaselines = append(b.importBaselines, lc.ImportBaselines...)
 		b.witnesses = append(b.witnesses, lc.Witnesses...)
+		b.governanceBoundaries = append(
+			b.governanceBoundaries, lc.GovernanceBoundaries...,
+		)
 	}
 	if txn == nil {
 		b := &utxoSetBatch{}

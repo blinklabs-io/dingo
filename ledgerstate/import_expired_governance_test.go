@@ -22,6 +22,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -140,7 +142,7 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 			require.NoError(t, err)
 			txn := ledgerDBFor(t, db).Begin(t.Context(), true)
 			defer txn.Release()
-			pp := &conway.ConwayProtocolParameters{}
+			pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
 			pp.ProtocolVersion.Major = 10
 			_, err = governance.ProcessEpoch(
 				t.Context(),
