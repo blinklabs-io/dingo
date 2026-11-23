@@ -15,11 +15,10 @@
 package indexer
 
 import (
-	"bytes"
-	rtrace "runtime/trace"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/tracing/tracetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,13 +29,15 @@ func TestWriterStepRecordsTraceRegions(t *testing.T) {
 	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 3).
 		WithFacts(&recordingFacts{log: &[]string{}})
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	err := w.CatchUp(t.Context())
-	rtrace.Stop()
+	var err error
+	trace := tracetest.Capture(t, func() {
+		err = w.CatchUp(t.Context())
+	})
 	require.NoError(t, err)
 
-	for _, name := range []string{
+	tracetest.RequireRegions(
+		t,
+		trace,
 		tracing.RegionIndexerReadBlocks,
 		tracing.RegionIndexerBatch,
 		tracing.RegionIndexerCopyFacts,
@@ -44,12 +45,5 @@ func TestWriterStepRecordsTraceRegions(t *testing.T) {
 		tracing.RegionIndexerPatchFacts,
 		tracing.RegionSQLCommit,
 		tracing.RegionBlobCommit,
-	} {
-		require.Truef(
-			t,
-			bytes.Contains(buf.Bytes(), []byte(name)),
-			"execution trace has no region %q",
-			name,
-		)
-	}
+	)
 }

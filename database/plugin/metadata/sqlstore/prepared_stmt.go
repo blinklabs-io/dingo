@@ -815,9 +815,9 @@ func (s *Store) queryRowCached(
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		endRegion := statementRegion(ctx, query)
-		row := stmt.QueryRowContext(ctx, args...)
-		endRegion()
+		row, _ := inStatementRegion(ctx, query, func() (*sql.Row, error) {
+			return stmt.QueryRowContext(ctx, args...), nil
+		})
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).

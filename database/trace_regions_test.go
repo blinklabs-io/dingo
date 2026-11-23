@@ -15,11 +15,10 @@
 package database
 
 import (
-	"bytes"
-	rtrace "runtime/trace"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/tracing/tracetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,19 +26,15 @@ import (
 func TestBlobOnlyCommitRecordsBlobCommitRegion(t *testing.T) {
 	db := newTestDB(t)
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	txn, err := db.BlockBatchTxnContext(t.Context())
-	if err == nil {
-		err = txn.Commit()
-	}
-	rtrace.Stop()
+	var err error
+	trace := tracetest.Capture(t, func() {
+		var txn *Txn
+		txn, err = db.BlockBatchTxnContext(t.Context())
+		if err == nil {
+			err = txn.Commit()
+		}
+	})
 	require.NoError(t, err)
 
-	require.Truef(
-		t,
-		bytes.Contains(buf.Bytes(), []byte(tracing.RegionBlobCommit)),
-		"execution trace has no region %q",
-		tracing.RegionBlobCommit,
-	)
+	tracetest.RequireRegions(t, trace, tracing.RegionBlobCommit)
 }

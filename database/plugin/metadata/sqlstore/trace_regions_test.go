@@ -15,12 +15,12 @@
 package sqlstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	rtrace "runtime/trace"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing/tracetest"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -29,27 +29,21 @@ const traceTestQuery = "-- name: TraceTestStatement :exec\nINSERT INTO t VALUES 
 
 // Not t.Parallel: only one execution trace can run per process.
 func TestStatementAndPhaseRegionsAreRecorded(t *testing.T) {
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
 	ctx := context.Background()
-	statementRegion(ctx, traceTestQuery)()
-	p := startPhases(ctx, "dingo.sqlstore.tx.first")
-	p.next(ctx, "dingo.sqlstore.tx.second")
-	p.end()
-	rtrace.Stop()
+	trace := tracetest.Capture(t, func() {
+		statementRegion(ctx, traceTestQuery)()
+		p := startPhases(ctx, "dingo.sqlstore.tx.first")
+		p.next(ctx, "dingo.sqlstore.tx.second")
+		p.end()
+	})
 
-	for _, name := range []string{
+	tracetest.RequireRegions(
+		t,
+		trace,
 		"dingo.sql.TraceTestStatement",
 		"dingo.sqlstore.tx.first",
 		"dingo.sqlstore.tx.second",
-	} {
-		require.Truef(
-			t,
-			bytes.Contains(buf.Bytes(), []byte(name)),
-			"execution trace has no region %q",
-			name,
-		)
-	}
+	)
 }
 
 // Not t.Parallel: only one execution trace can run per process.
@@ -57,32 +51,104 @@ func TestSetTransactionRecordsPhaseRegions(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	tx, point, _, _ := assetOutputTx(t, 0x61)
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	err := store.SetTransaction(tx, point, 0, nil, true, nil, 0)
-	rtrace.Stop()
+	var err error
+	trace := tracetest.Capture(t, func() {
+		err = store.SetTransaction(tx, point, 0, nil, true, nil, 0)
+	})
 	require.NoError(t, err)
 
-	for _, name := range []string{
+	tracetest.RequireRegionOrder(
+		t,
+		trace,
 		"dingo.sqlstore.tx.prepare",
 		"dingo.sqlstore.tx.identity",
 		"dingo.sqlstore.tx.produced",
 		"dingo.sqlstore.tx.api_details",
 		"dingo.sqlstore.tx.spend",
 		"dingo.sqlstore.tx.supply_stake",
-	} {
-		require.Truef(
-			t,
-			bytes.Contains(buf.Bytes(), []byte(name)),
-			"execution trace has no region %q",
-			name,
-		)
-	}
+	)
+}
+
+// The overlay resolves inputs and returns before the SQL path's spend and
+// stake phases, so it marks its own.
+//
+// Not t.Parallel: only one execution trace can run per process.
+func TestSetTransactionOverlayRecordsPhaseRegions(t *testing.T) {
+	chain := buildOverlayChain(t, 1)
+	store := newMigratedSQLiteStore(t)
+	seedOverlayChain(t, store, chain)
+
+	trace := tracetest.Capture(t, func() {
+		applyOverlayChain(t, store, chain, true)
+	})
+
+	tracetest.RequireRegionOrder(
+		t,
+		trace,
+		"dingo.sqlstore.tx.prepare",
+		"dingo.sqlstore.tx.identity",
+		"dingo.sqlstore.tx.produced",
+		"dingo.sqlstore.tx.spend",
+		"dingo.sqlstore.tx.supply_stake",
+	)
+}
+
+// emptyLiveUtxoSource is a live UTxO set holding no outputs.
+type emptyLiveUtxoSource struct{}
+
+func (emptyLiveUtxoSource) LiveUtxoCbor(
+	types.Txn, []byte, uint32,
+) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+func (emptyLiveUtxoSource) LiveUtxoStake(
+	types.Txn, uint8, []byte,
+) (uint64, error) {
+	return 0, nil
+}
+
+func (emptyLiveUtxoSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
+	return nil, nil
+}
+
+func (emptyLiveUtxoSource) EachLiveUtxoStake(
+	types.Txn, func(uint8, []byte, uint64) error,
+) error {
+	return nil
+}
+
+// A live UTxO source returns before the SQL path's spend and stake phases,
+// so it marks its own.
+//
+// Not t.Parallel: only one execution trace can run per process.
+func TestSetTransactionLiveUtxoRecordsPhaseRegions(t *testing.T) {
+	store := newMigratedSQLiteStore(t)
+	store.SetLiveUtxoSource(emptyLiveUtxoSource{})
+	tx, point, _, _ := assetOutputTx(t, 0x62)
+
+	var err error
+	trace := tracetest.Capture(t, func() {
+		err = store.SetTransaction(tx, point, 0, nil, true, nil, 0)
+	})
+	require.NoError(t, err)
+
+	tracetest.RequireRegionOrder(
+		t,
+		trace,
+		"dingo.sqlstore.tx.prepare",
+		"dingo.sqlstore.tx.identity",
+		"dingo.sqlstore.tx.produced",
+		"dingo.sqlstore.tx.spend",
+		"dingo.sqlstore.tx.supply_stake",
+	)
 }
 
 // Not t.Parallel: testing.AllocsPerRun measures the whole process.
 func TestRegionsDoNotAllocateWhenTracingIsOff(t *testing.T) {
-	require.False(t, rtrace.IsEnabled())
+	tracetest.SkipIfTracing(t)
 	ctx := context.Background()
 	allocs := testing.AllocsPerRun(100, func() {
 		statementRegion(ctx, traceTestQuery)()
@@ -91,18 +157,6 @@ func TestRegionsDoNotAllocateWhenTracingIsOff(t *testing.T) {
 		p.end()
 	})
 	require.Zero(t, allocs)
-}
-
-func requireTraceRegions(t *testing.T, trace []byte, names ...string) {
-	t.Helper()
-	for _, name := range names {
-		require.Truef(
-			t,
-			bytes.Contains(trace, []byte(name)),
-			"execution trace has no region %q",
-			name,
-		)
-	}
 }
 
 // The store has no PromRegistry, so no countingQueryer wraps its queryer and
@@ -126,31 +180,32 @@ func TestCachedStatementsRecordStatementRegions(t *testing.T) {
 		validString("1"),
 	)
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	_, execErr := store.execCached(
-		ctx, db, committeeHotAuthorizationDeleteIDQuery, int64(1),
-	)
-	var id int64
-	rowErr := store.queryRowCached(
-		ctx, db, transactionIdentityIDSQL, []byte{0},
-	).Scan(&id)
-	queryRows, rowsErr := store.queryRowsCached(
-		ctx, db, poolOpCertSequenceBySlotSQL, []byte{0}, int64(0),
-	)
-	if rowsErr == nil {
-		rowsErr = queryRows.Close()
-	}
-	flushErr := rows.flush(ctx, db, store, store.dialect.ParameterLimit())
-	rtrace.Stop()
+	var execErr, rowErr, rowsErr, flushErr error
+	trace := tracetest.Capture(t, func() {
+		_, execErr = store.execCached(
+			ctx, db, committeeHotAuthorizationDeleteIDQuery, int64(1),
+		)
+		var id int64
+		rowErr = store.queryRowCached(
+			ctx, db, transactionIdentityIDSQL, []byte{0},
+		).Scan(&id)
+		var queryRows *sql.Rows
+		queryRows, rowsErr = store.queryRowsCached(
+			ctx, db, poolOpCertSequenceBySlotSQL, []byte{0}, int64(0),
+		)
+		if rowsErr == nil {
+			rowsErr = queryRows.Close()
+		}
+		flushErr = rows.flush(ctx, db, store, store.dialect.ParameterLimit())
+	})
 	require.NoError(t, execErr)
 	require.ErrorIs(t, rowErr, sql.ErrNoRows)
 	require.NoError(t, rowsErr)
 	require.NoError(t, flushErr)
 
-	requireTraceRegions(
+	tracetest.RequireRegions(
 		t,
-		buf.Bytes(),
+		trace,
 		"dingo.sql.DeleteCommitteeHotAuthorizationByID",
 		"dingo.sql.GetTransactionIdentityID",
 		"dingo.sql.GetPoolOpCertSequenceBySlot",
@@ -171,24 +226,25 @@ func TestInstrumentedQueryerRecordsStatementRegions(t *testing.T) {
 	q := countingQueryer{queryer: db, counter: counter}
 	ctx := context.Background()
 
-	var buf bytes.Buffer
-	require.NoError(t, rtrace.Start(&buf))
-	_, execErr := q.ExecContext(ctx, "-- name: TraceExecStatement :exec\nSELECT 1")
-	rows, queryErr := q.QueryContext(ctx, "-- name: TraceQueryStatement :many\nSELECT 1")
-	if queryErr == nil {
-		queryErr = rows.Close()
-	}
-	var one int
-	rowErr := q.QueryRowContext(ctx, "-- name: TraceRowStatement :one\nSELECT 1").
-		Scan(&one)
-	rtrace.Stop()
+	var execErr, queryErr, rowErr error
+	trace := tracetest.Capture(t, func() {
+		_, execErr = q.ExecContext(ctx, "-- name: TraceExecStatement :exec\nSELECT 1")
+		var rows *sql.Rows
+		rows, queryErr = q.QueryContext(ctx, "-- name: TraceQueryStatement :many\nSELECT 1")
+		if queryErr == nil {
+			queryErr = rows.Close()
+		}
+		var one int
+		rowErr = q.QueryRowContext(ctx, "-- name: TraceRowStatement :one\nSELECT 1").
+			Scan(&one)
+	})
 	require.NoError(t, execErr)
 	require.NoError(t, queryErr)
 	require.NoError(t, rowErr)
 
-	requireTraceRegions(
+	tracetest.RequireRegions(
 		t,
-		buf.Bytes(),
+		trace,
 		"dingo.sql.TraceExecStatement",
 		"dingo.sql.TraceQueryStatement",
 		"dingo.sql.TraceRowStatement",
