@@ -185,7 +185,7 @@ func initForgingMetrics(
 	m.forgeMissedLeaderSlots = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_missed_leader_slots_total",
-			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals",
+			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals and slots a shared KES signer had already signed for another producer",
 		},
 	)
 

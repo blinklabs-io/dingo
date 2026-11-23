@@ -1854,7 +1854,9 @@ not durably adopted:
   and did not turn into a block of its own on the chain after leader selection:
   a build, validation or adoption failure, a post-selection refusal, or an
   equal-slot alternative that lost. KES and tip safety refusals before leader
-  selection are excluded. It is not a count of leader slots that passed;
+  selection are excluded, and so is a slot a shared KES signer had already
+  signed for another producer, which moves neither this counter nor
+  `Forge_could_not_forge_int`. It is not a count of leader slots that passed;
   `dingo_leader_scheduled_slots_elapsed_total` is. When the ledger detects a
   slot battle it asks the forgers which one forged the local block
   (`ledger.SlotBattleOutcomeRecorder`, resolved by block hash from the slot
@@ -13409,7 +13411,9 @@ exception. A parent slot past the forged slot refuses on
 `errChainTipAheadOfSlot` and moves none of those three. What records it there
 is `cardano_node_metrics_Forge_could_not_forge_int`, which
 `checkAndForgeProduction` increments for every failed build before it asks
-whether the failure was a tip-gate refusal.
+whether the failure was a tip-gate refusal. The one failed build it does not
+count is a shared KES signer reporting that it already signed the slot, which
+is a yield rather than a failure.
 `TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
 reading: no fallback result, no slot battle, no stale-tip skip.
 
@@ -14440,7 +14444,10 @@ tell a client whether another producer uses the same key. It defaults off, so
 an unshared producer retains the intentional ability to forge without a peer.
 When the agent reports that another header was already signed for the slot, a
 configured shared producer records a normal shared-signing yield rather than a
-failed forge or signing request. Every other refusal and signing error remains
+failed forge or signing request: the forge timing outcome is
+`shared_kes_yielded`, and the slot moves neither
+`Forge_could_not_forge_int` nor `dingo_forge_missed_leader_slots_total`
+nor the signing failure counter. Every other refusal and signing error remains
 a failure. An unshared producer also retains the failure behavior for that
 refusal, because it indicates an unexpected competing header.
 
