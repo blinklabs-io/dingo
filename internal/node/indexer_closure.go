@@ -82,8 +82,8 @@ func (b *Backfill) indexClosure(
 	if err != nil {
 		return err
 	}
-	offsets, err := dledger.EndorserBlockOffsets(
-		txs, bodies, closure.EndorserBlockSlot,
+	offsets, err := dledger.EndorserBlockTransactionOffsets(
+		txs, bodies, closure.RawTransactions(), closure.EndorserBlockSlot,
 		closure.EndorserBlockHash,
 	)
 	if err != nil {

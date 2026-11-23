@@ -258,6 +258,74 @@ func (d *Database) PutLeiosClosure(
 	return nil
 }
 
+// PutLeiosTransactionBacking stores the encoded endorser-block transaction
+// list as the backing that transaction offsets resolve into, and makes it
+// resolvable from memory.
+func (d *Database) PutLeiosTransactionBacking(
+	slot uint64,
+	hash []byte,
+	transactions []byte,
+) error {
+	store, err := d.LeiosDB()
+	if err != nil {
+		return err
+	}
+	ref := leiosRef(slot, hash)
+	var writeErr error
+	if backingStore, ok := store.(leiosdb.TransactionBackingStore); ok {
+		writeErr = backingStore.PutTransactionBacking(ref, transactions)
+	} else {
+		writeErr = store.PutClosure(ref, transactions)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("store Leios transaction backing: %w", writeErr)
+	}
+	if len(hash) == 32 && d.cborCache != nil {
+		var blockHash [32]byte
+		copy(blockHash[:], hash)
+		d.cborCache.cacheBlockCbor(slot, blockHash, transactions)
+	}
+	return nil
+}
+
+// CanUseLeiosTransactionBacking reports whether new offsets for an endorser
+// block may target its transaction-list record. Historical standalone backing
+// keeps its original byte layout so already stored offsets remain valid.
+func (d *Database) CanUseLeiosTransactionBacking(
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	blobStore, release := d.PinBlob()
+	defer release()
+	if blobStore == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	txn := blobStore.NewTransaction(false)
+	if txn == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	defer txn.Rollback() //nolint:errcheck
+	_, _, err := blobStore.GetBlock(txn, slot, hash)
+	switch {
+	case err == nil:
+		return false, nil
+	case !errors.Is(err, types.ErrBlobKeyNotFound):
+		return false, err
+	}
+	store, err := d.LeiosDB()
+	if err != nil {
+		return false, err
+	}
+	backingStore, ok := store.(leiosdb.TransactionBackingStore)
+	if !ok {
+		return false, nil
+	}
+	standalone, err := backingStore.HasStandaloneClosure(
+		leiosRef(slot, hash),
+	)
+	return !standalone, err
+}
+
 // RollbackLeiosPins removes the endorser-block pins certified by ranking
 // blocks above point and lowers the store's watermarks to it. It returns the
 // number of pins removed.
