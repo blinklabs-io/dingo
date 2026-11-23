@@ -626,7 +626,7 @@ func (s *Store) applyLedgerTxn(
 	res *ApplyResult,
 ) error {
 	if batch.DeleteNoncesAfter != nil {
-		err := rollbackLedgerState(txn, *batch.DeleteNoncesAfter)
+		err := rollbackLedgerState(txn, *batch.DeleteNoncesAfter, nil)
 		if err != nil {
 			return err
 		}
