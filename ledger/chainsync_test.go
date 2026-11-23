@@ -10408,11 +10408,6 @@ func TestRecoverAfterLocalRollbackRevalidatesRetainedHeader(t *testing.T) {
 	require.Equal(t, 1, f.ls.chain.HeaderCount())
 	f.ls.blockfetchRequestRangeCleanup()
 
-	sibling := createTestBlockWithNonceAtSlotsAndBlockNumber(
-		t, [32]byte{81}, nonce,
-		header.SlotNumber()+1, header.SlotNumber()+200,
-		ancestor.Point.Hash, &blockNumber, tamperNone,
-	).block.Header()
 	f.ls.publishSnapshotsLocked()
 	f.ls.forkHeaderNonceCacheMutex.Lock()
 	f.ls.forkHeaderPathCache = nil
@@ -10437,18 +10432,10 @@ func TestRecoverAfterLocalRollbackRevalidatesRetainedHeader(t *testing.T) {
 	}()
 	testutil.RequireReceive(t, checked, testutil.AsyncWait,
 		"recovery reached the opcert commit")
-	admitted := make(chan error, 1)
-	go func() {
-		admitted <- f.ls.ValidatePeerChainSelectionHeaderCrypto(connID, sibling)
-	}()
-	select {
-	case err := <-admitted:
-		require.NoError(t, err)
-	case <-time.After(100 * time.Millisecond):
-		unblock()
-		require.NoError(t, testutil.RequireReceive(
-			t, admitted, testutil.AsyncWait, "competing header verification",
-		))
+	verificationLock := f.ls.peerHeaderVerificationLock(connID)
+	if verificationLock.TryLock() {
+		verificationLock.Unlock()
+		require.FailNow(t, "rollback replay did not serialize peer verification")
 	}
 	unblock()
 	result = testutil.RequireReceive(t, recovered, testutil.AsyncWait,

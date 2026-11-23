@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
@@ -334,9 +335,7 @@ func (ls *LedgerState) validatePeerChainSelectionHeaderCrypto(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) error {
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(connIdKey(connId)))
-	mu := &ls.peerHeaderVerificationMutex[hash.Sum32()%64]
+	mu := ls.peerHeaderVerificationLock(connId)
 	mu.Lock()
 	defer mu.Unlock()
 	return ls.validateChainSelectionHeaderCrypto(
@@ -345,6 +344,14 @@ func (ls *LedgerState) validatePeerChainSelectionHeaderCrypto(
 		header,
 		true,
 	)
+}
+
+func (ls *LedgerState) peerHeaderVerificationLock(
+	connId ouroboros.ConnectionId,
+) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(connIdKey(connId)))
+	return &ls.peerHeaderVerificationMutex[hash.Sum32()%64]
 }
 
 func (ls *LedgerState) validateChainSelectionHeaderCrypto(
