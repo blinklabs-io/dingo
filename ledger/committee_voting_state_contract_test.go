@@ -61,9 +61,9 @@ func TestValidateTxCommitteeHotCredentialTagByAuthorizationPath(t *testing.T) {
 						seatCommitteeMembers(t, db, cold)
 					} else {
 						seatCommitteeMembers(t, db, committeeTestCredential(0x63))
-						storeCommitteeUpdateProposal(t, db, 0x64, cold, 10)
+						committeeStoreUpdateProposal(t, db, 0x64, cold, 10)
 					}
-					seedCommitteeCredentialAuthorization(
+					committeeSeedAuthorization(
 						t, db, cold, authorized, 1, epochStartSlot,
 					)
 

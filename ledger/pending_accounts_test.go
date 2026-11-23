@@ -71,7 +71,7 @@ func newPendingAccountsFixtureWithRule(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: key,
 		Reward:     types.Uint64(balance),
 		Active:     true,
@@ -115,6 +115,7 @@ func newPendingAccountsFixtureWithRule(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return &pendingAccountsFixture{
@@ -462,7 +463,7 @@ func TestValidateTxWithOverlayFollowsPublicationAtSameTip(t *testing.T) {
 	// tip stays where it is, as an epoch rollover does.
 	credential, err := models.CredentialTagFromUint(f.credential.CredType)
 	require.NoError(t, err)
-	require.NoError(t, f.ls.db.AddAccountRewardByCredential(
+	require.NoError(t, seedDB(t, f.ls.db).AddAccountRewardByCredential(
 		context.Background(),
 		credential,
 		f.credential.Credential[:],

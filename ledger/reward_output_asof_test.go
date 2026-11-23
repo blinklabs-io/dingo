@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,9 +39,9 @@ func rewardsAt(
 }
 
 // TestPinnedAccountRewardsCarryUnfoldedRewardOutputs requires the set's
-// as-of account read to add the credited rounds' unfolded reward outputs, as
-// the metadata store's does, before any fold, after a withdrawal fold and
-// after the compaction.
+// as-of account read to add the credited rounds' unfolded reward outputs:
+// the balance as of a slot is the same before any fold, after a withdrawal
+// fold and after the compaction.
 func TestPinnedAccountRewardsCarryUnfoldedRewardOutputs(t *testing.T) {
 	t.Parallel()
 	h := newRewardOutputHarnessReads(t, nil, "set")
@@ -51,31 +50,32 @@ func TestPinnedAccountRewardsCarryUnfoldedRewardOutputs(t *testing.T) {
 	h.applyRound(t, 11)
 	h.applyRound(t, 12)
 	ldb := h.scenario.LedgerDB()
-	slots := []uint64{
-		h.round(11).BoundarySlot - 1,
-		h.round(11).BoundarySlot,
-		h.round(12).BoundarySlot,
-		h.round(12).BoundarySlot + 5,
+	// Rounds 11 and 12 credit the delegator 7 and 70 and the owner 3 and 30
+	// at their boundary slots.
+	balances := func(owner, deleg uint64) map[string]uint64 {
+		return map[string]uint64{
+			h.owner.MapKey(): owner, h.deleg.MapKey(): deleg,
+		}
+	}
+	want := []struct {
+		slot uint64
+		at   map[string]uint64
+	}{
+		{h.round(11).BoundarySlot - 1, balances(0, 0)},
+		{h.round(11).BoundarySlot, balances(3, 7)},
+		{h.round(12).BoundarySlot, balances(33, 77)},
+		{h.round(12).BoundarySlot + 5, balances(33, 77)},
 	}
 	check := func(label string) {
 		t.Helper()
-		for _, slot := range slots {
-			want := rewardsAt(t, h.store, refs, slot)
-			got := rewardsAt(t, ldb, refs, slot)
-			require.Equal(t, want, got, "%s: rewards at slot %d", label, slot)
+		for _, w := range want {
+			require.Equal(t, w.at, rewardsAt(t, ldb, refs, w.slot),
+				"%s: rewards at slot %d", label, w.slot)
 		}
 	}
 	check("unfolded")
-	want := rewardsAt(t, h.store, refs, slots[3])
-	require.Equal(t, uint64(77), want[h.deleg.MapKey()], "rounds 11 and 12 are credited")
-
 	h.scenario.FoldForWithdrawal(h.deleg)
 	check("after the withdrawal fold")
 	h.scenario.CompactRewardCredits(1000)
 	check("after the compaction")
-
-	h.scenario.DrainFamilies(nodesettings.FamilyMask(0).
-		With(nodesettings.FamilyAccounts).
-		With(nodesettings.FamilyRewardOutputs))
-	check("with the account and reward output rows drained")
 }

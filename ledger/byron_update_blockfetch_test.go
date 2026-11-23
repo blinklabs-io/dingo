@@ -212,14 +212,14 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 		cm.PrimaryChain().
 			AddRawBlocks(context.Background(), []chain.RawBlock{parent}),
 	)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 100, nil,
 	))
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
-		UtxoSet:            NewMemLiveSetForTest(),
+		UtxoSet:            OpenLiveSetForTest(t, db),
 		ChainManager:       cm,
 		CardanoNodeConfig:  nodeConfig,
 		EventBus:           bus,
@@ -246,6 +246,7 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 	}
 	ls.Lock()
 	ls.currentTip = parentTip
+	fxJournalChain(t, ls)
 	ls.currentEra = eras.ByronEraDesc
 	ls.currentEpoch = epoch
 	ls.epochCache = []models.Epoch{epoch}

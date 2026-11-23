@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -54,7 +55,13 @@ func TestProtocolParamsForSlotForecastsVersionTriggeredEra(t *testing.T) {
 		require.NoError(t, err)
 		ls := newQuorumMetVersionBumpLedger(t, cfg, db)
 		if !bump {
-			require.NoError(t, db.DeletePParamUpdatesAfterSlot(t.Context(), 0, nil))
+			// The delegate replaces the fixture's proposal with one that
+			// keeps the current version, so no bump is pending.
+			keep, err := cbor.Encode(map[uint64]any{
+				14: lcommon.ProtocolParametersProtocolVersion{Major: 8},
+			})
+			require.NoError(t, err)
+			pparamSeedUpdate(t, db, []byte{0xaa}, keep, 11, 0)
 		}
 		testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
 		ls.chain = testChain

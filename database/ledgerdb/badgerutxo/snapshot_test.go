@@ -207,8 +207,8 @@ func TestSnapshotHistoricalViewPreservesItsParent(t *testing.T) {
 }
 
 // TestCheckpointableSnapshotRefusesAnUnrestorableSet requires a snapshot for
-// export to refuse a set carrying a failure mark or a pending merge, and to
-// serve a clean one.
+// export to refuse a set carrying a failure mark or an interrupted
+// ledger-state import, and to serve a clean one.
 func TestCheckpointableSnapshotRefusesAnUnrestorableSet(t *testing.T) {
 	t.Parallel()
 	s := open(t, t.TempDir())
@@ -220,7 +220,7 @@ func TestCheckpointableSnapshotRefusesAnUnrestorableSet(t *testing.T) {
 	requireLive(t, clean, true, ref(1, 0))
 	require.NoError(t, clean.Close())
 
-	require.NoError(t, s.BootstrapCatchUp(
+	require.NoError(t, s.BootstrapImportCatchUp(
 		point(12, 2),
 		func(put func(badgerutxo.Output) error) error {
 			return put(out(2, 0))
@@ -228,8 +228,8 @@ func TestCheckpointableSnapshotRefusesAnUnrestorableSet(t *testing.T) {
 	))
 	_, err = s.CheckpointableSnapshot()
 	require.ErrorIs(t, err, badgerutxo.ErrNotCheckpointable)
-	require.ErrorContains(t, err, "merge")
-	require.NoError(t, s.EndMerge(true))
+	require.ErrorContains(t, err, "import")
+	require.NoError(t, s.EndImport())
 
 	require.NoError(t, s.MarkFailed(11))
 	_, err = s.CheckpointableSnapshot()

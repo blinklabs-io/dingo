@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -51,7 +52,7 @@ const mithrilLedgerBlocks = 20
 type mithrilTestLedger struct {
 	ls     *ledger.LedgerState
 	db     *database.Database
-	utxos  *livesettest.Mem
+	utxos  *utxoset.Set
 	cm     *chain.ChainManager
 	blocks []gledger.Block
 	next   gledger.Block
@@ -74,7 +75,7 @@ func newMithrilTestLedger(t *testing.T) mithrilTestLedger {
 	bus := event.NewEventBus(nil, logger)
 	cm, err := chain.NewManager(t.Context(), db, bus)
 	require.NoError(t, err)
-	utxos := livesettest.New()
+	utxos := livesettest.OpenLedgerDB(t, db)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
 		UtxoSet:           utxos,

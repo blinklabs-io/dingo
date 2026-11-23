@@ -225,35 +225,6 @@ func TestAccountsChangedInBelowTheFloorSurvivesAPrune(t *testing.T) {
 	require.Equal(t, []byte{9}, keys, "account 9 was added at slot 20")
 }
 
-// A merge's reconcile marks inactive, at the tip's slot, an account the
-// snapshot no longer lists. That slot is below the floor the merge raised, so
-// an index built while the merge ran does not name the account there.
-func TestAccountsChangedInBelowTheFloorFollowsAMerge(t *testing.T) {
-	t.Parallel()
-	s := open(t, t.TempDir())
-	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	bootstrap(t, s, point(11, 0x01))
-	loadAccountsAtSlots(t, s, 1, 2, 3)
-
-	require.NoError(t, s.BeginMerge())
-	loadAccountsAtSlots(t, s, 1, 2)
-	keys, covered := changedIn(t, s, 1, 11)
-	require.True(t, covered)
-	require.Equal(t, []byte{1, 2, 3}, keys)
-
-	stale := accountAt(3, 11)
-	stale.Active = false
-	_, err := s.ApplyLedgerBatch(nil, badgerutxo.LedgerBatch{
-		Accounts: []badgerutxo.AccountPut{{Slot: 11, Row: stale}},
-	})
-	require.NoError(t, err)
-	require.NoError(t, s.EndMerge(true))
-
-	keys, covered = changedIn(t, s, 11, 11)
-	require.True(t, covered)
-	require.Equal(t, []byte{3}, keys, "the reconcile wrote account 3 at slot 11")
-}
-
 // changedInOnce reads every account added in [from, through] in one call, so
 // one transaction serves the whole range.
 func changedInOnce(
@@ -330,32 +301,4 @@ func TestAccountsChangedInBelowTheFloorIgnoresAnIndexFromANewerRead(t *testing.T
 	require.True(t, covered)
 	require.Equal(t, []byte{1, 2, 3, 4, 5}, keys,
 		"the older transaction holds account 3 at slot 3")
-}
-
-// A merge's reconcile writes below the floor between its loads and its end,
-// so an index built while the merge runs does not serve a read after that
-// write, even before the merge ends.
-func TestAccountsChangedInBelowTheFloorFollowsAMergeBeforeItEnds(t *testing.T) {
-	t.Parallel()
-	s := open(t, t.TempDir())
-	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	bootstrap(t, s, point(11, 0x01))
-	loadAccountsAtSlots(t, s, 1, 2, 3)
-
-	require.NoError(t, s.BeginMerge())
-	loadAccountsAtSlots(t, s, 1, 2)
-	keys, covered := changedInOnce(t, s, 1, 11)
-	require.True(t, covered)
-	require.Equal(t, []byte{1, 2, 3}, keys)
-
-	stale := accountAt(3, 11)
-	stale.Active = false
-	_, err := s.ApplyLedgerBatch(nil, badgerutxo.LedgerBatch{
-		Accounts: []badgerutxo.AccountPut{{Slot: 11, Row: stale}},
-	})
-	require.NoError(t, err)
-	keys, covered = changedInOnce(t, s, 11, 11)
-	require.True(t, covered)
-	require.Equal(t, []byte{3}, keys, "the reconcile wrote account 3 at slot 11")
-	require.NoError(t, s.EndMerge(true))
 }

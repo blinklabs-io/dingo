@@ -119,8 +119,8 @@ func (s *Set) checkpointDir() (string, int) {
 
 // WriteCheckpoint writes a checkpoint of the set at its current tip, keeps the
 // newest SetCheckpointDir keep of them and returns the one it wrote. A set
-// with a failure mark, a pending merge or rollback, or no tip has no state
-// worth restoring and is refused.
+// with a failure mark, an interrupted ledger-state import, a pending rollback,
+// or no tip has no state worth restoring and is refused.
 // Only one checkpoint is written at a time.
 func (s *Set) WriteCheckpoint(ctx context.Context) (Checkpoint, error) {
 	return s.writeCheckpoint(ctx, false)

@@ -304,7 +304,7 @@ func (ls *LedgerState) nonMyopicState(
 	if err != nil {
 		return nil, err
 	}
-	likelihoodState, err := ls.ledgerDB().GetRewardLikelihoodStateAtSlot(
+	likelihoodState, err := ls.rewardLikelihoodDB().GetRewardLikelihoodStateAtSlot(
 		tip.Point.Slot,
 		txn,
 	)
@@ -331,7 +331,7 @@ func (ls *LedgerState) nonMyopicState(
 			"a complete likelihood history through the acquired point",
 		)
 	}
-	likelihoods, err := ls.ledgerDB().GetRewardPoolLikelihoods(
+	likelihoods, err := ls.rewardLikelihoodDB().GetRewardPoolLikelihoods(
 		likelihoodState.Epoch,
 		txn,
 	)

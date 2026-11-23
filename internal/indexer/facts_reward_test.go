@@ -45,9 +45,8 @@ func newRewardFixture(t *testing.T) *rewardFixture {
 	t.Helper()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
-	_, err = dstRaw.Exec(`INSERT INTO account
+	f := newStoreFacts(t, src, dst)
+	_, err := dstRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, added_slot, created_slot, reward, active)
 		VALUES (?, 0, 10, 10, '40', 1)`, rewardTestKey)
 	require.NoError(t, err)
@@ -170,9 +169,9 @@ func TestMetadataFactsOrdersRewardJournalPageByCredential(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
+	var err error
 	keys := [][]byte{
 		[]byte("stake-z-credential-0123456789"),
 		[]byte("stake-a-credential-0123456789"),
@@ -213,10 +212,9 @@ func TestMetadataFactsDefersStakeInputsTheLedgerStillWrites(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
-	_, err = srcRaw.Exec(`INSERT INTO reward_stake_input
+	_, err := srcRaw.Exec(`INSERT INTO reward_stake_input
 		(epoch, pool_key_hash, credential_tag, staking_key, stake, owner,
 		 registered, captured_slot, boundary_slot)
 		VALUES (10, ?, 0, ?, '7', 0, 1, 100, 100),
@@ -258,7 +256,7 @@ func TestMetadataFactsDefersStakeInputsTheLedgerStillWrites(t *testing.T) {
 
 // countingRows counts the rows each read of the reward journal returns.
 type countingRows struct {
-	metadata.FactRowStore
+	metadata.LedgerFacts
 	journalRows int
 }
 
@@ -270,7 +268,7 @@ func (c *countingRows) ReadFactRows(
 	limit int,
 	txn types.Txn,
 ) (metadata.FactRows, int64, error) {
-	rows, next, err := c.FactRowStore.ReadFactRows(
+	rows, next, err := c.LedgerFacts.ReadFactRows(
 		ctx, table, from, through, cursor, limit, txn,
 	)
 	if table.Name == metadata.AccountRewardCreditTable.Name && from == 100 &&
@@ -290,8 +288,8 @@ func TestMetadataFactsReadsAFoldedCreditOnceAcrossLaterSegments(t *testing.T) {
 		VALUES (?, ?, 'member', 10, 0, '7', 1, 0, 50, 100, 0)`,
 		[]byte("dormant-credential-hash-012345678"), rewardTestPool)
 	require.NoError(t, err)
-	counter := &countingRows{FactRowStore: r.f.srcRows}
-	r.f.srcRows = counter
+	counter := &countingRows{LedgerFacts: r.f.ledger}
+	r.f.ledger = counter
 
 	r.copyRange(t, 0, 150)
 	r.ledgerFolds(t)

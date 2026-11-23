@@ -70,7 +70,7 @@ func newMithrilBoundaryLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 	)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

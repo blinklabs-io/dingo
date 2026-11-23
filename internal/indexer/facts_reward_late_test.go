@@ -40,8 +40,7 @@ func newLateRewardFixture(t *testing.T) *lateRewardFixture {
 	t.Helper()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 	return &lateRewardFixture{
 		src: src, dst: dst, srcRaw: srcRaw, dstRaw: dstRaw, f: f,
 	}
@@ -51,8 +50,7 @@ func newLateRewardFixture(t *testing.T) *lateRewardFixture {
 // stores, so only what the IndexerDB persisted survives.
 func (l *lateRewardFixture) restart(t *testing.T) {
 	t.Helper()
-	f, err := NewMetadataFacts(l.src, l.dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, l.src, l.dst)
 	l.f = f
 }
 

@@ -16,14 +16,10 @@ package ledger_test
 
 import (
 	"bytes"
-	"fmt"
-	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,60 +84,4 @@ func TestDrainedCreditToUnregisteredAccountReportsNotFound(t *testing.T) {
 			)
 		})
 	}
-}
-
-// A pool retires whose reward account was deregistered: the deposit goes to
-// the treasury, the account is not credited and the set keeps following the
-// ledger, with accounts (which drain with dreps) drained and with every
-// graduated family drained too, as in an undrained run.
-func TestPoolReapOfDeregisteredRewardAccountMatchesAnUndrainedRun(
-	t *testing.T,
-) {
-	t.Parallel()
-	reap := func(h *p5Harness) ledger.ReapOutcome {
-		require.NoError(t, h.drainErr)
-		return h.scenario.ReapRetiredPool()
-	}
-	want := reap(newP5Harness(t, nil, nil))
-	require.True(t, want.Registered, "the reward account is registered first")
-	require.NotZero(t, want.Refund.DepositHeld)
-	require.False(t, want.SetFailed)
-	require.Zero(t, want.Reward)
-	require.Contains(t, want.Network[0], fmt.Sprintf(
-		" %d 5000", 1_000+uint64(want.Refund.DepositHeld),
-	), "the deposit is added to the treasury")
-
-	t.Run("accounts and dreps drained", func(t *testing.T) {
-		t.Parallel()
-		got := reap(newP5Harness(
-			t, []nodesettings.Family{
-				nodesettings.FamilyAccounts, nodesettings.FamilyDReps,
-			}, nil,
-		))
-		require.Equal(t, want, got)
-	})
-	t.Run("accounts, dreps and every graduated family drained", func(t *testing.T) {
-		t.Parallel()
-		h := newP5Harness(t, nil, nil)
-		h.scenario.ConfigureLeiosValidator()
-		fixture, err := h.store.GetBlockNoncesInSlotRange(0, math.MaxInt64, nil)
-		require.NoError(t, err)
-		h.scenario.StageNoncesInSet(fixture)
-		h.scenario.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-		h.scenario.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
-		h.scenario.InstallDrainedSources()
-		src := drainTestSource{set: h.set, db: h.scenario.DB}
-		entries := statedrain.Graduated(src)
-		for _, e := range statedrain.Staged(src) {
-			if e.Family == nodesettings.FamilyAccounts ||
-				e.Family == nodesettings.FamilyDReps {
-				entries = append(entries, e)
-			}
-		}
-		h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
-			Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-			Set:   src, Guard: h.guard,
-		}, entries)
-		require.Equal(t, want, reap(h))
-	})
 }

@@ -24,9 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -66,28 +64,6 @@ func spendTxCbor(
 	return txCbor, tx.Hash().String()
 }
 
-func seedLedgerUtxo(
-	t *testing.T,
-	db *database.Database,
-	txID []byte,
-	index uint32,
-	amount uint64,
-) {
-	t.Helper()
-	outputCbor, err := cbor.Encode([]any{revalidationTestAddress, amount})
-	require.NoError(t, err)
-	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId:      txID,
-			OutputIdx: index,
-			AddedSlot: 1,
-		}); err != nil {
-			return err
-		}
-		return db.Blob().SetUtxo(txn.Blob(), txID, index, outputCbor)
-	}))
-}
-
 // confirmSpend records in the ledger a block whose transaction txHash spent
 // the given output and created output 0 worth amount, then republishes the
 // ledger snapshots as a block application does.
@@ -99,16 +75,12 @@ func confirmSpend(
 	amount uint64,
 ) {
 	t.Helper()
-	require.NoError(t, f.ls.db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]types.UtxoKey{{TxId: spentID, OutputIdx: 0}},
-		2,
+	require.NoError(t, f.ls.config.UtxoSet.ApplyUtxoChanges(
+		nil, []UtxoEvent{{Removed: []models.UtxoId{{Hash: spentID}}}},
 	))
 	id, err := hex.DecodeString(txHash)
 	require.NoError(t, err)
-	seedLedgerUtxo(t, f.ls.db, id, 0, amount)
-	attachTestLiveSet(t, f.ls)
+	seedTestLiveOutput(t, f.ls, id, 0, amount)
 	f.ls.Lock()
 	f.ls.publishSnapshotsLocked()
 	f.ls.Unlock()
@@ -151,8 +123,8 @@ func TestMempoolRevalidationKeepsDescendantOfConfirmedParent(t *testing.T) {
 					&shelley.ShelleyProtocolParameters{},
 				)
 				rootID := bytes.Repeat([]byte{0x5a}, 32)
-				seedLedgerUtxo(t, f.ls.db, rootID, 0, 10_000_000)
-				attachTestLiveSet(t, f.ls)
+				fxAttachLedgerDB(t, f.ls)
+				seedTestLiveOutput(t, f.ls, rootID, 0, 10_000_000)
 				parentCbor, parentHash := spendTxCbor(t, rootID, 0, 9_000_000)
 				parentID, err := hex.DecodeString(parentHash)
 				require.NoError(t, err)

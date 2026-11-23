@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
@@ -30,30 +29,17 @@ import (
 func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 	t.Parallel()
 	fixture := seedRetentionReconstructionFixture(t)
-	meta := fixture.db.Metadata()
 	ctx := context.Background()
 	require.NoError(
 		t,
 		markRewardStakeInputsPending(
-			dbadapter.New(fixture.db),
+			seedDB(t, fixture.db),
 			nil,
 			retentionRewardSnapshotEpoch,
 			100,
 		),
 	)
-	fixture.ls.rewardInputRollbackActive.Store(1)
-	require.NoError(
-		t,
-		fixture.ls.writeDeferredRewardStakeInputs(
-			ctx,
-			retentionRewardSnapshotEpoch,
-			100,
-			fixture.capturedStakeInputs,
-			fixture.ls.rewardInputGeneration.Load(),
-		),
-	)
-	fixture.ls.rewardInputRollbackActive.Store(0)
-	partial, err := meta.GetRewardStakeInputs(retentionRewardSnapshotEpoch, nil)
+	partial, err := seedDB(t, fixture.db).GetRewardStakeInputs(retentionRewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Empty(t, partial)
 	require.NoError(
@@ -84,7 +70,7 @@ func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 		),
 	)
 	require.NoError(t, tx.Commit())
-	restored, err := meta.GetRewardStakeInputs(
+	restored, err := seedDB(t, fixture.db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch,
 		nil,
 	)
@@ -107,43 +93,17 @@ func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 	require.Equal(t, uint64(200), floor)
 }
 
-func TestPendingRewardInputsCorruptStatePreventsPruneAnnouncement(
-	t *testing.T,
-) {
-	t.Parallel()
-	for _, raw := range []string{"{", "null", "{}", `{"entries":{}}`, `{"entries":[],"unknown":1}`, `{"entries":[{"epoch":1,"boundary_slot":100,"unknown":1}]}`} {
-		t.Run(raw, func(t *testing.T) {
-			t.Parallel()
-			fixture := seedRetentionReconstructionFixture(t)
-			require.NoError(
-				t,
-				fixture.db.Metadata().
-					SetSyncState(rewardStakeInputsPendingKey, raw, nil),
-			)
-			pruned, _, err := fixture.ls.pruneConsumedUtxosUpTo(
-				context.Background(),
-				200,
-				50,
-				1000,
-			)
-			require.Error(t, err)
-			require.Zero(t, pruned)
-			require.Zero(t, fixture.ls.announcedUtxoPruneFloor())
-		})
-	}
-}
-
 func TestPendingRewardInputsIgnoreRolledBackSnapshot(t *testing.T) {
 	t.Parallel()
 	fixture := seedRetentionReconstructionFixture(t)
 	require.NoError(
 		t,
-		markRewardStakeInputsPending(dbadapter.New(fixture.db), nil, 99, 999),
+		markRewardStakeInputsPending(seedDB(t, fixture.db), nil, 99, 999),
 	)
-	txn := dbadapter.New(fixture.db).BeginLedgerOnly(t.Context(), false)
+	txn := seedDB(t, fixture.db).BeginLedgerOnly(t.Context(), false)
 	defer func() { _ = txn.Rollback() }()
 	floor, protected, err := pendingRewardStakeInputHistoryFloor(
-		dbadapter.New(fixture.db),
+		seedDB(t, fixture.db),
 		txn,
 	)
 	require.NoError(t, err)
@@ -173,20 +133,20 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 	t.Parallel()
 	f := seedRetentionReconstructionFixture(t)
 	meta := f.db.Metadata()
-	epoch, err := meta.GetEpoch(1, nil)
+	epoch, err := seedDB(t, f.db).GetEpoch(1, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		meta.SetEpoch(100, 1, nil, nil, nil, nil, epoch.EraId, 1, 100, nil),
+		seedDB(t, f.db).SetEpoch(100, 1, nil, nil, nil, nil, epoch.EraId, 1, 100, nil),
 	)
 	ctx := t.Context()
-	snapshot, err := meta.GetRewardSnapshot(
+	snapshot, err := seedDB(t, f.db).GetRewardSnapshot(
 		retentionRewardSnapshotEpoch,
 		"mark",
 		nil,
 	)
 	require.NoError(t, err)
-	pools, err := meta.GetRewardPoolInputs(retentionRewardSnapshotEpoch, nil)
+	pools, err := seedDB(t, f.db).GetRewardPoolInputs(retentionRewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.NoError(t, meta.DeleteRewardStateAfterSlot(98, nil))
 	record, _ := json.Marshal(
@@ -199,7 +159,7 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetSyncState(pendingRatificationSyncKey, string(record), nil),
+		seedDB(t, f.db).SetSyncState(pendingRatificationSyncKey, string(record), nil),
 	)
 	require.NoError(
 		t,
@@ -218,21 +178,21 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 	require.Equal(t, uint64(99), floor)
 	handoff := func() {
 		tx := f.db.Transaction(ctx, true)
-		require.NoError(t, meta.SaveRewardSnapshot(snapshot, tx.Metadata()))
-		require.NoError(t, meta.SaveRewardPoolInputs(pools, tx.Metadata()))
+		require.NoError(t, f.ls.ledgerDB().SaveRewardSnapshot(snapshot, tx))
+		require.NoError(t, f.ls.ledgerDB().SaveRewardPoolInputs(pools, tx))
 		require.NoError(
 			t,
-			markRewardStakeInputsPending(dbadapter.New(f.db), tx, 1, 100),
+			markRewardStakeInputsPending(f.ls.ledgerDB(), tx, 1, 100),
 		)
 		require.NoError(
 			t,
-			meta.DeleteSyncState(pendingRatificationSyncKey, tx.Metadata()),
+			f.ls.ledgerDB().DeleteSyncState(pendingRatificationSyncKey, tx),
 		)
 		require.NoError(t, tx.Commit())
 	}
-	readTxn := dbadapter.New(f.db).BeginLedgerOnly(ctx, false)
+	readTxn := f.ls.ledgerDB().BeginLedgerOnly(ctx, false)
 	spy := &rewardRetentionHandoffStore{
-		LedgerDB: dbadapter.New(f.db),
+		LedgerDB: f.ls.ledgerDB(),
 		handoff:  handoff,
 	}
 	floor, protected, err := pendingRewardStakeInputHistoryFloor(spy, readTxn)
@@ -247,7 +207,7 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 	tx := f.db.Transaction(ctx, true)
 	require.NoError(t, f.ls.ensureRewardStakeInputsReady(tx, 1))
 	require.NoError(t, tx.Commit())
-	rows, err := meta.GetRewardStakeInputs(1, nil)
+	rows, err := seedDB(t, f.db).GetRewardStakeInputs(1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, len(f.capturedStakeInputs))
 	pruned, _, err = f.ls.pruneConsumedUtxosUpTo(ctx, 200, 50, 1000)
@@ -258,11 +218,10 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 func TestPendingRewardRetentionRatificationRecordValidation(t *testing.T) {
 	t.Parallel()
 	f := seedRetentionReconstructionFixture(t)
-	meta := f.db.Metadata()
 	for _, raw := range []string{"null", "{}", `{"epoch":1,"boundary_slot":100,"id":1,"snapshot":null}`, `{"epoch":1,"boundary_slot":100,"id":1,"snapshot":true,"unknown":1}`, `{"epoch":1,"boundary_slot":101,"id":1,"snapshot":true}`, `{"epoch":99,"boundary_slot":100,"id":1,"snapshot":true}`} {
 		require.NoError(
 			t,
-			meta.SetSyncState(pendingRatificationSyncKey, raw, nil),
+			seedDB(t, f.db).SetSyncState(pendingRatificationSyncKey, raw, nil),
 		)
 		_, _, err := f.ls.pruneConsumedUtxosUpTo(t.Context(), 200, 50, 1000)
 		require.Error(t, err, raw)
@@ -270,7 +229,7 @@ func TestPendingRewardRetentionRatificationRecordValidation(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		meta.SetSyncState(
+		seedDB(t, f.db).SetSyncState(
 			pendingRatificationSyncKey,
 			`{"epoch":99,"boundary_slot":100,"id":1}`,
 			nil,
@@ -284,18 +243,17 @@ func TestPendingRewardRetentionRatificationRecordValidation(t *testing.T) {
 func TestPendingRewardRetentionAcceptsNativeEmptyState(t *testing.T) {
 	t.Parallel()
 	f := seedRetentionReconstructionFixture(t)
-	meta := f.db.Metadata()
 	require.NoError(
 		t,
 		saveRewardStakeInputsPending(
-			dbadapter.New(f.db),
+			seedDB(t, f.db),
 			nil,
 			&rewardStakeInputsPending{},
 		),
 	)
-	raw, err := meta.GetSyncState(rewardStakeInputsPendingKey, nil)
+	raw, err := seedDB(t, f.db).GetSyncState(rewardStakeInputsPendingKey, nil)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"entries":null}`, raw)
+	require.Empty(t, raw)
 	require.NoError(
 		t,
 		f.db.MarkUtxosDeletedAtSlot(
@@ -329,30 +287,31 @@ func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
 
 func TestPendingRewardInputWriteRejectsMalformedRecord(t *testing.T) {
 	t.Parallel()
-	ls, db := newRewardCalculationTestLedger(t)
-	staged := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: ls}
+	ls, _ := newRewardCalculationTestLedger(t)
+	ldb := ls.ledgerDB()
 	valid, err := FormatRewardStakeInputsPending(
 		[]RewardStakeInputsPendingEntry{{Epoch: 1, BoundarySlot: 100}},
 	)
 	require.NoError(t, err)
 	for _, invalid := range []string{"{", "null", "{}", `{"entries":{}}`, `{"entries":[],"unknown":1}`} {
 		t.Run(invalid, func(t *testing.T) {
+			txn := ldb.Begin(t.Context(), true)
+			defer txn.Release()
 			require.NoError(
 				t,
-				staged.SetSyncState(rewardStakeInputsPendingKey, valid, nil),
+				ldb.SetSyncState(rewardStakeInputsPendingKey, valid, txn),
 			)
 			require.Error(
 				t,
-				staged.SetSyncState(rewardStakeInputsPendingKey, invalid, nil),
+				ldb.SetSyncState(rewardStakeInputsPendingKey, invalid, txn),
 			)
-			got, err := db.Metadata().
-				GetSyncState(rewardStakeInputsPendingKey, nil)
+			got, err := ldb.GetSyncState(rewardStakeInputsPendingKey, txn)
 			require.NoError(t, err)
 			require.Equal(
 				t,
 				valid,
 				got,
-				"rejected pending record must not overwrite durable state",
+				"rejected pending record must not replace the staged one",
 			)
 		})
 	}

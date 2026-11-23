@@ -142,10 +142,10 @@ func TestQueryHardForkEraHistory_EraStartsAtTransitionEpochAcrossAGap(
 
 	db := newTestDB(t)
 	// Babbage epoch 0, then Conway epoch 3 with epochs 1 and 2 empty.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.BabbageEraDesc.Id, 1000, 100, nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		300, 3, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1000, 100, nil,
 	))
 	ls := &LedgerState{
@@ -160,6 +160,7 @@ func TestQueryHardForkEraHistory_EraStartsAtTransitionEpochAcrossAGap(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)

@@ -482,22 +482,38 @@ func (s *Store) Epochs() ([]EpochRow, error) {
 }
 
 // Snapshots returns the snapshot rows of epoch, of typ when it is not
-// empty, in key order.
-func (s *Store) Snapshots(epoch uint64, typ string) ([]SnapshotRow, error) {
+// empty, in key order, which within a type is pool order. A positive limit
+// stops the read after that many rows.
+func (s *Store) Snapshots(
+	epoch uint64,
+	typ string,
+	limit int,
+) ([]SnapshotRow, error) {
 	prefix := snapshotEpochPrefix(epoch)
 	if typ != "" {
 		prefix = snapshotTypePrefix(epoch, typ)
 	}
 	var out []SnapshotRow
 	err := s.view(func(txn *badger.Txn) error {
-		return eachPrefix(txn, prefix, func(k, v []byte) error {
-			r, err := decodeSnapshotKey(k, v)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			if limit > 0 && len(out) >= limit {
+				return nil
+			}
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			r, err := decodeSnapshotKey(it.Item().KeyCopy(nil), v)
 			if err != nil {
 				return err
 			}
 			out = append(out, r)
-			return nil
-		})
+		}
+		return nil
 	})
 	return out, err
 }
@@ -706,7 +722,6 @@ func (s *Store) LoadEpochState(
 			return fmt.Errorf("badgerutxo: load epochs: %w", err)
 		}
 	}
-	merging := s.merging.Load()
 	for _, r := range snapshots {
 		if len(r.Value) > 0 && r.Value[0] == snapshotMark {
 			return errSnapshotMark
@@ -715,12 +730,8 @@ func (s *Store) LoadEpochState(
 		if err := wb.Set(k, encodeSnapshotValue(r.CapturedSlot, r.Value)); err != nil {
 			return fmt.Errorf("badgerutxo: load snapshots: %w", err)
 		}
-		// A merge writes through setRow, which also moves the index entry
-		// of a row it replaces.
-		if !merging {
-			if err := wb.Set(snapshotSlotKey(r.CapturedSlot, k), nil); err != nil {
-				return fmt.Errorf("badgerutxo: load snapshots: %w", err)
-			}
+		if err := wb.Set(snapshotSlotKey(r.CapturedSlot, k), nil); err != nil {
+			return fmt.Errorf("badgerutxo: load snapshots: %w", err)
 		}
 	}
 	if err := wb.Flush(); err != nil {
@@ -731,17 +742,13 @@ func (s *Store) LoadEpochState(
 			if err := txn.Set(eraSwitchKey, eraSwitch.encode()); err != nil {
 				return err
 			}
-		} else if !merging {
-			// A merge keeps the last switch the set recorded.
+		} else {
 			if err := txn.Delete(eraSwitchKey); err != nil {
 				return err
 			}
 		}
-		if !merging {
-			// A merge adds to rows the set may hold without the index.
-			if err := txn.Set(snapshotSlotsKey, []byte{1}); err != nil {
-				return err
-			}
+		if err := txn.Set(snapshotSlotsKey, []byte{1}); err != nil {
+			return err
 		}
 		if err := txn.Delete(legacyEpochStateKey); err != nil {
 			return err

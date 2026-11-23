@@ -25,7 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -73,7 +73,7 @@ func historicalSpendTxCbor(
 
 func seedHistoricalSubmissionUtxo(
 	t *testing.T,
-	set *livesettest.Mem,
+	set *utxoset.Set,
 	txID []byte,
 ) {
 	t.Helper()

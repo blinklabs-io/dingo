@@ -59,7 +59,8 @@ func TestBackfillRewardLiveStakeLeavesADrainedFamilyAlone(t *testing.T) {
 	)
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: openTestUtxoSet(t),
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},

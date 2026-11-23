@@ -29,20 +29,26 @@ var accountListReadNames = []string{
 	"GetActiveDelegatorCredentialsByPool", "GetDRepDelegators",
 }
 
-// requireAccountListReads reads every account list read through the ledger's
-// LedgerDB and requires each answer to be the metadata store's.
-func (h *liveStakeHarness) requireAccountListReads(
+// accountListReads is what the account list reads answer through the ledger's
+// LedgerDB.
+type accountListReads struct {
+	active     []models.StakeCredentialRef
+	counts     map[string]uint64
+	delegators []models.StakeCredentialRef
+	drep       []models.StakeCredentialRef
+}
+
+// readAccountLists makes every account list read through the ledger's
+// LedgerDB, for the harness pool and the delegators of drepKey.
+func (h *liveStakeHarness) readAccountLists(
 	t *testing.T,
 	stage string,
-	drepKeys ...[]byte,
-) []models.StakeCredentialRef {
+	drepKey []byte,
+) accountListReads {
 	t.Helper()
 	ldb := h.scenario.LedgerDB()
 	pools := []lcommon.PoolKeyHash{
 		lcommon.PoolKeyHash(lcommon.NewBlake2b224(h.pool)),
-		lcommon.PoolKeyHash(
-			lcommon.NewBlake2b224(bytes.Repeat([]byte{0xee}, 28)),
-		),
 	}
 	sorted := func(refs []models.StakeCredentialRef) []models.StakeCredentialRef {
 		out := slices.Clone(refs)
@@ -51,56 +57,73 @@ func (h *liveStakeHarness) requireAccountListReads(
 		})
 		return out
 	}
-	wa, err := h.store.GetActiveAccountCredentials(nil)
+	var (
+		got accountListReads
+		err error
+	)
+	got.active, err = ldb.GetActiveAccountCredentials(nil)
 	require.NoError(t, err, stage)
-	ga, err := ldb.GetActiveAccountCredentials(nil)
+	got.active = sorted(got.active)
+	got.counts, err = ldb.GetActiveDelegatorCountsByPool(pools, nil)
 	require.NoError(t, err, stage)
-	require.Equal(t, sorted(wa), sorted(ga), stage)
-	wn, err := h.store.GetActiveDelegatorCountsByPool(pools, nil)
+	byPool, err := ldb.GetActiveDelegatorCredentialsByPool(pools, nil)
 	require.NoError(t, err, stage)
-	gn, err := ldb.GetActiveDelegatorCountsByPool(pools, nil)
+	got.delegators = byPool[string(h.pool)]
+	got.drep, err = ldb.GetDRepDelegators(t.Context(), 0, drepKey, nil)
 	require.NoError(t, err, stage)
-	require.Equal(t, wn, gn, stage)
-	wc, err := h.store.GetActiveDelegatorCredentialsByPool(pools, nil)
-	require.NoError(t, err, stage)
-	gc, err := ldb.GetActiveDelegatorCredentialsByPool(pools, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wc, gc, stage)
-	for _, key := range drepKeys {
-		wd, err := h.store.GetDRepDelegators(t.Context(), 0, key, nil)
-		require.NoError(t, err, stage)
-		gd, err := ldb.GetDRepDelegators(t.Context(), 0, key, nil)
-		require.NoError(t, err, stage)
-		require.ElementsMatch(t, wd, gd, stage)
-		require.Equal(t, len(wd), len(gd), stage)
-	}
-	return gc[string(h.pool)]
+	return got
 }
 
-// TestAccountListReadsFromTheLiveUtxoSet reads the account list reads in set
-// mode with the metadata store's failing, through a vote delegation, a pool
-// reap and a rollback, and requires every answer to be the store's.
+// requireAccountListReads makes every account list read through the ledger's
+// LedgerDB, for each of drepKeys, and returns the harness pool's delegators.
+func (h *liveStakeHarness) requireAccountListReads(
+	t *testing.T,
+	stage string,
+	drepKeys ...[]byte,
+) []models.StakeCredentialRef {
+	t.Helper()
+	var delegators []models.StakeCredentialRef
+	for _, key := range drepKeys {
+		delegators = h.readAccountLists(t, stage, key).delegators
+	}
+	return delegators
+}
+
+// TestAccountListReadsFromTheLiveUtxoSet reads the account lists from the
+// LedgerDB set through a pool reap, a vote delegation and a rollback, with
+// the metadata store's reads hidden.
 func TestAccountListReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
 	h := newLiveStakeHarnessWithReads(t, false, "set")
 	reached, _ := h.scenario.HideStoreReads(accountListReadNames...)
 	h.scenario.ApplyBoundary()
 	drepKey := bytes.Repeat([]byte{0x5d}, 28)
-	require.Equal(t, []models.StakeCredentialRef{h.owner, h.deleg},
-		h.requireAccountListReads(t, "initial", drepKey))
+	both := []models.StakeCredentialRef{h.owner, h.deleg}
+
+	got := h.readAccountLists(t, "initial", drepKey)
+	require.Equal(t, both, got.active)
+	require.Equal(t, map[string]uint64{string(h.pool): 2}, got.counts)
+	require.Equal(t, both, got.delegators)
+	require.Empty(t, got.drep)
+
 	h.scenario.Reap(h.pool)
-	require.Empty(t, h.requireAccountListReads(t, "after a pool reap", drepKey))
+	got = h.readAccountLists(t, "after a pool reap", drepKey)
+	require.Equal(t, both, got.active, "a reap leaves the accounts registered")
+	require.Zero(t, got.counts[string(h.pool)])
+	require.Empty(t, got.delegators)
+	require.Empty(t, got.drep)
+
 	h.scenario.VoteDelegate(h.owner, drepKey, 0, 8)
-	h.requireAccountListReads(t, "after a vote delegation", drepKey)
-	delegators, err := h.store.GetDRepDelegators(t.Context(), 0, drepKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, []models.StakeCredentialRef{h.owner}, delegators)
+	got = h.readAccountLists(t, "after a vote delegation", drepKey)
+	require.Equal(t, []models.StakeCredentialRef{h.owner}, got.drep)
+	require.Empty(t, got.delegators)
+
 	h.scenario.RollbackBeforeBoundary()
-	require.Len(
-		t,
-		h.requireAccountListReads(t, "after the rollback", drepKey),
-		2,
-	)
+	got = h.readAccountLists(t, "after the rollback", drepKey)
+	require.Equal(t, both, got.active)
+	require.Equal(t, map[string]uint64{string(h.pool): 2}, got.counts)
+	require.Equal(t, both, got.delegators, "the rollback restores the delegations")
+	require.Empty(t, got.drep, "the rollback undoes the vote delegation")
 	require.Zero(
 		t,
 		reached(),

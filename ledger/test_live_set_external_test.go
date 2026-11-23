@@ -15,77 +15,39 @@
 package ledger_test
 
 import (
-	"context"
-	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/stretchr/testify/require"
 )
 
 func init() {
 	ledger.OpenLiveSetForTest = func(t testing.TB, db *database.Database) ledger.UtxoSetWriter {
 		t.Helper()
-		set := livesettest.Open(t)
-		require.NoError(t, set.Reconcile(
-			context.Background(), dbadapter.New(db), nil,
-		))
-		return set
+		return livesettest.OpenLedgerDB(t, db)
 	}
-	ledger.OpenUtxoOnlyLiveSetForTest = func(
-		t testing.TB, dataDir string,
+	ledger.LiveSetOfForTest = func(db *database.Database) (ledger.UtxoSetWriter, bool) {
+		set, ok := livesettest.LedgerDBOf(db)
+		return set, ok
+	}
+	ledger.AdoptLiveSetForTest = func(
+		t testing.TB, db *database.Database, set ledger.UtxoSetWriter,
+	) {
+		t.Helper()
+		inner, ok := set.(*utxoset.Set)
+		if !ok {
+			// A test's wrapper around the set it observes or fails.
+			inner = set.(interface{ Inner() *utxoset.Set }).Inner()
+		}
+		livesettest.AdoptLedgerDB(t, db, inner)
+	}
+	ledger.OpenLiveSetAtForTest = func(
+		t testing.TB, db *database.Database, dataDir string,
 	) (ledger.UtxoSetWriter, func() error) {
 		t.Helper()
-		set, err := utxoset.Open(utxoset.Config{
-			Dir:          utxoset.DirFor(dataDir),
-			Logger:       slog.New(slog.DiscardHandler),
-			Only:         true,
-			MemTableSize: 8 << 20,
-		})
-		require.NoError(t, err)
-		return utxoOnlySet{set}, set.Close
+		set := livesettest.OpenLedgerDBAt(t, db, dataDir)
+		return set, func() error { return livesettest.CloseLedgerDB(db) }
 	}
-	ledger.NewMemLiveSetForTest = func() ledger.UtxoSetWriter {
-		return livesettest.New()
-	}
-}
-
-// utxoOnlySet exposes a production live set's outputs and nothing else, so a
-// ledger on it keeps every other ledger-state family in the metadata store.
-type utxoOnlySet struct{ set *utxoset.Set }
-
-func (u utxoOnlySet) ApplyUtxoChanges(
-	tip *ocommon.Point,
-	changes []ledger.UtxoEvent,
-) error {
-	return u.set.ApplyUtxoChanges(tip, changes)
-}
-
-func (u utxoOnlySet) Get(txID []byte, index uint32) ([]byte, bool, error) {
-	return u.set.Get(txID, index)
-}
-
-func (u utxoOnlySet) Sum(key []byte) (uint64, error) {
-	return u.set.Sum(key)
-}
-
-func (u utxoOnlySet) EachUtxo(
-	fn func(txID []byte, index uint32, cbor []byte) error,
-) error {
-	return u.set.EachUtxo(fn)
-}
-
-func (u utxoOnlySet) RollbackUtxoSet(point ocommon.Point) (ledger.UtxoEvent, error) {
-	return u.set.RollbackUtxoSet(point)
-}
-
-func (u utxoOnlySet) PreviewUtxoSetRollback(
-	point ocommon.Point,
-) (ledger.UtxoEvent, error) {
-	return u.set.PreviewUtxoSetRollback(point)
 }

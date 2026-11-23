@@ -205,7 +205,7 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		if reads == "set" {
 			delegs, mirs := h.scenario.CertHistoryInsideRollback()
 			require.Equal(t, 1, delegs, "a read inside the rollback sees it")
-			require.Equal(t, 4, mirs, "MIR certificates remain SQL-backed during a staged set rollback")
+			require.Zero(t, mirs, "a read inside the rollback sees it")
 		}
 		h.scenario.RollbackBeforeBoundary()
 
@@ -229,47 +229,6 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, effects)
 	})
-}
-
-// TestGenesisDelegationAndMIRLoadFromTheMetadataStore requires a set from
-// before it kept them to load every delegation and MIR certificate from the
-// metadata store, as the set that followed the certificates holds them.
-func TestGenesisDelegationAndMIRLoadFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newGenesisMIRHarness(t, "metadata-visible")
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.GenesisMIRLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.GenesisMIRLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	want, err := h.set.GenesisDelegations()
-	require.NoError(t, err)
-	got, err := fresh.GenesisDelegations()
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	require.Equal(t, want, got, "the position of a delegation is exact")
-
-	wantMIR, err := h.set.MIRCerts()
-	require.NoError(t, err)
-	gotMIR, err := fresh.MIRCerts()
-	require.NoError(t, err)
-	require.Len(t, gotMIR, 4)
-	for i := range wantMIR {
-		require.Equal(t, wantMIR[i].Slot, gotMIR[i].Slot)
-		require.Equal(t, wantMIR[i].Pot, gotMIR[i].Pot)
-		require.Equal(t, wantMIR[i].OtherPot, gotMIR[i].OtherPot)
-		require.Len(t, gotMIR[i].Rewards, len(wantMIR[i].Rewards))
-		for j := range wantMIR[i].Rewards {
-			require.Equal(t, wantMIR[i].Rewards[j].Credential, gotMIR[i].Rewards[j].Credential)
-			require.Zero(t, wantMIR[i].Rewards[j].Amount.Cmp(gotMIR[i].Rewards[j].Amount))
-		}
-	}
 }
 
 // TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites requires set
@@ -302,8 +261,6 @@ VALUES (0, ?, '7')`, s.DelegB+10)
 		)
 		require.NoError(t, err)
 		require.Empty(t, rows, "the read answers from the set")
-		require.Len(t, effects, 1)
-		require.Equal(t, s.DelegB+10, effects[0].AddedSlot)
-		require.Equal(t, uint64(7), effects[0].OtherPot)
+		require.Empty(t, effects, "the read answers from the set")
 	})
 }

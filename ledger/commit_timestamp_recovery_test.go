@@ -163,6 +163,7 @@ func TestRecoverCommitTimestampConflictInitializesBlockInventory(t *testing.T) {
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
@@ -220,7 +221,7 @@ func TestRecoverCommitTimestampConflictUsesOriginWithoutAppliedAncestor(
 ) {
 	t.Parallel()
 
-	fixture := newChainsyncRollbackFixture(t)
+	fixture := newChainsyncRollbackFixtureFromOrigin(t)
 	require.NoError(
 		t,
 		fixture.ls.chain.Rollback(context.Background(), ocommon.Point{}),
@@ -268,6 +269,7 @@ func TestCleanupOrphanedBlobsUsesOnePinnedStore(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	require.NoError(t, ls.cleanupOrphanedBlobs(1))
 
 	readOriginal := original.NewTransaction(false)
@@ -322,6 +324,7 @@ func TestRecoverCommitTimestampConflictRewindsChainManagerTip(t *testing.T) {
 					),
 				},
 			}
+			attachTestLiveSet(t, ls)
 
 			require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
@@ -370,6 +373,7 @@ func TestRecoverCommitTimestampConflictKeepsChainWhenRewindRefused(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
@@ -404,6 +408,7 @@ func TestRecoverCommitTimestampConflictFailsClosedOnLaterDeleteError(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.armContinuationAudit(context.Background(), rawBlockTip(raw[1]).Point, "test rollback")
 
 	err = ls.RecoverCommitTimestampConflict(context.Background())
@@ -436,6 +441,7 @@ func TestRecoverCommitTimestampConflictSerializesTipDecisionWithCleanup(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	nextHash := testHashBytes("commit-ts-recovery-concurrent-add")
 	next := chain.RawBlock{
 		Slot:        raw[4].Slot + 10,
@@ -475,6 +481,7 @@ func TestRecoverCommitTimestampConflictKeepsAppendAfterRewind(t *testing.T) {
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	next := chain.RawBlock{
 		Slot:        raw[2].Slot + 1,
 		Hash:        testHashBytes("commit-ts-recovery-post-rewind-add"),
@@ -564,6 +571,7 @@ func TestRecoverCommitTimestampConflictFailsClosedOnUnindexedOrphanDeleteError(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	err = ls.RecoverCommitTimestampConflict(context.Background())
 
@@ -607,6 +615,7 @@ func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
 					),
 				},
 			}
+			attachTestLiveSet(t, ls)
 			forkPoint := rawBlockTip(raw[tc.forkIndex]).Point
 			ls.armContinuationAudit(context.Background(), forkPoint, "test rollback")
 

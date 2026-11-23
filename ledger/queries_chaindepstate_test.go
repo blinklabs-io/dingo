@@ -65,6 +65,7 @@ func newChainDepStateLedger(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls
 }
@@ -129,7 +130,7 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	db := newTestDB(t)
 	// The epoch has to span the slot the reply reports, since the nonces are
 	// read from whichever epoch contains it.
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,                     // slot
 		epochID,               // epoch
 		epochNonce,            // nonce
@@ -254,21 +255,21 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 				}, txn); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(tipHash, tipSlot, tipNonce, false, txn)
+				return seedBlockNonce(t, db, tipHash, tipSlot, tipNonce, false, txn)
 			}),
 	)
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, bytes.Repeat([]byte{3}, 32), nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
 	))
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart,                  // slot
 		1,                           // epoch
 		bytes.Repeat([]byte{4}, 32), // nonce
@@ -282,7 +283,7 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 	))
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(
+		seedDB(t, db).UpdatePoolOpCertSequence(
 			context.Background(),
 			pkh,
 			3,
@@ -389,7 +390,7 @@ func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
 			// A single epoch in this era, spanning the slot the reply
 			// reports. The nonces are immaterial here; the version tag is
 			// what is under test.
-			require.NoError(t, db.Metadata().SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				0,      // slot
 				0,      // epoch
 				nil,    // nonce
@@ -492,18 +493,18 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 				}
 				// The evolving nonce as of each block, which is what the ledger
 				// records per block and what consensus folds forward.
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					tipHash, tipSlot, tipNonce, false, txn,
 				)
 			}),
 	)
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart,                  // slot
 		1,                           // epoch
 		bytes.Repeat([]byte{2}, 32), // nonce
@@ -625,7 +626,7 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 					}, txn); err != nil {
 						return err
 					}
-					if err := db.SetBlockNonce(
+					if err := seedBlockNonce(t, db,
 						blk.hash, blk.slot, blk.nonce, false, txn,
 					); err != nil {
 						return err
@@ -635,7 +636,7 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 			}),
 	)
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart,                  // slot
 		1,                           // epoch
 		bytes.Repeat([]byte{2}, 32), // nonce
@@ -732,17 +733,17 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 				// A synced node records each block's evolving nonce as it applies it.
 				// Without the rows the nonce fold falls back to re-decoding block
 				// CBOR, which these placeholder bodies cannot satisfy.
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					parentHash, 1100, bytes.Repeat([]byte{0x35}, 32), false, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					tipHash, 1200, bytes.Repeat([]byte{0x36}, 32), false, txn,
 				)
 			}),
 	)
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000,       // slot
 		1,          // epoch
 		nil,        // nonce
@@ -821,7 +822,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 				}, txn); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					tipHash, 1200, bytes.Repeat([]byte{0x37}, 32), false, txn,
 				)
 			}),
@@ -849,7 +850,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 			}),
 	)
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000, 1, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
 	))
 	require.NoError(t, db.SetTip(
@@ -888,7 +889,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
 
 	db := newTestDB(t)
 	carriedLab := bytes.Repeat([]byte{0x41}, 32)
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
 	))
 
@@ -928,7 +929,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
 	carriedLab := bytes.Repeat([]byte{0x61}, 32)
 	absentTip := bytes.Repeat([]byte{0x62}, 32)
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000, 1, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
 	))
 	// A well-formed tip hash with no block stored under it.
@@ -982,7 +983,7 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 	db := newTestDB(t)
 	// Epoch 0's nonce is what the reply must carry as the previous-epoch
 	// nonce once the chain has moved on to epoch 1.
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,             // slot
 		0,             // epoch
 		previousNonce, // nonce
@@ -994,7 +995,7 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 		1000,          // lengthInSlots
 		nil,           // txn
 	))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000,         // slot
 		1,            // epoch
 		currentNonce, // nonce
@@ -1058,7 +1059,7 @@ func TestQueryShelleyDebugChainDepState_PreviousEpochNonceAcrossSparseRows(
 		slot, epoch uint64
 		nonce       []byte
 	}{{0, 0, previousNonce}, {5000, 5, currentNonce}} {
-		require.NoError(t, db.Metadata().SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			row.slot, row.epoch, row.nonce, nil, nil, nil, 0, 1, 1000, nil,
 		))
 	}
@@ -1104,7 +1105,7 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 	))
 	// The lookup resolves the tip slot to an epoch, so that epoch has to span
 	// it.
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,    // slot
 		0,    // epoch
 		nil,  // nonce
@@ -1118,23 +1119,19 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 	))
 
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+	}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 1, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 5, 1, nil),
 	)
 
 	ls := newChainDepStateLedger(t, db)
@@ -1177,7 +1174,7 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
 	))
 
@@ -1190,7 +1187,7 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 	gonePkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(gone))
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), gonePkh, 7, 1, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), gonePkh, 7, 1, nil),
 	)
 
 	ls := newChainDepStateLedger(t, db)
@@ -1225,7 +1222,7 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
 	))
 
@@ -1239,15 +1236,15 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 	// the highest, so ordering by slot cannot stand in for the maximum.
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 2, 10, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 2, 10, nil),
 	)
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 9, 20, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 9, 20, nil),
 	)
 	require.NoError(
 		t,
-		db.UpdatePoolOpCertSequence(context.Background(), pkh, 4, 30, nil),
+		seedDB(t, db).UpdatePoolOpCertSequence(context.Background(), pkh, 4, 30, nil),
 	)
 
 	ls := newChainDepStateLedger(t, db)
@@ -1278,7 +1275,7 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	const (
 		pinnedSlot uint64 = 1100
 		lateSlot   uint64 = 1950
@@ -1313,7 +1310,7 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 			}, txn); err != nil {
 				return err
 			}
-			if err := db.SetBlockNonce(
+			if err := seedBlockNonce(t, db,
 				b.hash, b.slot, b.nonce, false, txn,
 			); err != nil {
 				return err
@@ -1328,7 +1325,7 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 		{1000, 1, firstEpochNonce},
 		{2000, 2, secondEpochNonce},
 	} {
-		require.NoError(t, db.Metadata().SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			e.start,
 			e.id,
 			e.nonce,
@@ -1343,9 +1340,9 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 	}
 	early := lcommon.PoolKeyHash(lcommon.NewBlake2b224(bytes.Repeat([]byte{0x91}, 28)))
 	late := lcommon.PoolKeyHash(lcommon.NewBlake2b224(bytes.Repeat([]byte{0x92}, 28)))
-	require.NoError(t, db.UpdatePoolOpCertSequence(t.Context(), early, 1, pinnedSlot, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(t.Context(), late, 5, lateSlot, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(t.Context(), early, 2, tipSlot, nil))
+	require.NoError(t, seedDB(t, db).UpdatePoolOpCertSequence(t.Context(), early, 1, pinnedSlot, nil))
+	require.NoError(t, seedDB(t, db).UpdatePoolOpCertSequence(t.Context(), late, 5, lateSlot, nil))
+	require.NoError(t, seedDB(t, db).UpdatePoolOpCertSequence(t.Context(), early, 2, tipSlot, nil))
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
 		nil,
@@ -1436,14 +1433,14 @@ func TestQueryShelleyDebugChainDepState_NoncesIgnoreAbandonedSibling(
 				return err
 			}
 		}
-		if err := db.SetBlockNonce(
+		if err := seedBlockNonce(t, db,
 			parentHash, parentSlot, bytes.Repeat([]byte{0x94}, 32), false, txn,
 		); err != nil {
 			return err
 		}
-		return db.SetBlockNonce(pinnedHash, pinnedSlot, pinnedNonce, false, txn)
+		return seedBlockNonce(t, db, pinnedHash, pinnedSlot, pinnedNonce, false, txn)
 	}))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000, 1, bytes.Repeat([]byte{0x02}, 32),
 		bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32),
 		bytes.Repeat([]byte{0x03}, 32), eras.ConwayEraDesc.Id, 1, 1000, nil,
@@ -1530,13 +1527,13 @@ func TestQueryShelleyDebugChainDepState_CandidateIgnoresAbandonedPreCutoffBlock(
 			{ancestorSlot, ancestorHash, ancestorNonce},
 			{pinnedSlot, pinnedHash, pinnedNonce},
 		} {
-			if err := db.SetBlockNonce(n.hash, n.slot, n.nonce, false, txn); err != nil {
+			if err := seedBlockNonce(t, db, n.hash, n.slot, n.nonce, false, txn); err != nil {
 				return err
 			}
 		}
 		return nil
 	}))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1000, 1, bytes.Repeat([]byte{0x02}, 32),
 		bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32),
 		bytes.Repeat([]byte{0x03}, 32), eras.ConwayEraDesc.Id, 1, 1000, nil,

@@ -31,6 +31,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -69,11 +71,6 @@ func updateMithrilReadyState(
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
 ) error {
-	// The clear below deletes every key outside the keep-list, which omits
-	// the drain markers.
-	if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
-		return err
-	}
 	tipTxn := db.MetadataTxn(ctx, false)
 	ledgerTip, err := db.GetTip(tipTxn)
 	tipTxn.Release()
@@ -115,7 +112,7 @@ func updateMithrilReadyState(
 				key == metadata.PlannerStatsBackfillSyncKey ||
 				key == nodeconsensus.DatabaseIdentitySyncKey ||
 				key == database.UtxoSetOnlySyncKey ||
-				key == database.DrainedImportSyncKey ||
+				strings.HasPrefix(key, statedrain.MarkerPrefix) ||
 				key == database.HistoryExpiryCursorSyncKey ||
 				strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
 				continue
@@ -411,6 +408,13 @@ func importPreparedLedgerState(
 	// full import pass (so its snapshot key set is complete), so resume is
 	// disabled by leaving the import key empty.
 	importKey := importCheckpointKey(reconcile, result, state.Tip.Slot)
+	set, ok := utxoSet.(dledger.UtxoSetWriter)
+	if !ok {
+		return 0, nil, errors.New(
+			"the live UTxO set cannot take a ledger-state import",
+		)
+	}
+	ledgerDB := dledger.NewImportLedgerDB(db, set, logger)
 
 	// Import the ledger state
 	if err := ledgerstate.ImportLedgerState(
@@ -422,6 +426,7 @@ func importPreparedLedgerState(
 			ImportKey: importKey,
 			Reconcile: reconcile,
 			UtxoSet:   utxoSet,
+			LedgerDB:  ledgerDB,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),
