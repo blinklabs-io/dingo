@@ -1023,6 +1023,8 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"               envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"             envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	// BackfillBatchSize is accepted for configuration compatibility and has
+	// no effect: the IndexerDB writer sizes its own batches.
 	BackfillBatchSize int `yaml:"backfillBatchSize"             envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop that reads blocks back from the primary chain and applies
