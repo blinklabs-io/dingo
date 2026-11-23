@@ -42,6 +42,8 @@ func (s *datumLookupStub) Datums(
 // Blake2b-256 hash. It is a malformed request, not a missing datum, and must
 // not reach the lookup, which would zero-pad it into a different hash.
 func TestReadDataRejectsWrongLengthKey(t *testing.T) {
+	t.Parallel()
+
 	stub := &datumLookupStub{}
 	_, querySrv := newTipHeightServers(t, stub)
 
