@@ -20,31 +20,61 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/internal/badgermem"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
-// TestRemoveEmptyKeepsEverythingElse checks only zero-length *.mem files are
-// removed, and a missing directory is not an error.
-func TestRemoveEmptyKeepsEverythingElse(t *testing.T) {
+func closedStore(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("k"), []byte("v"))
+	}))
+	require.NoError(t, db.Close())
+	return dir
+}
+
+// TestOpenRetriesEmptyMemtable checks an empty memtable file left by an
+// interrupted shutdown no longer stops the store opening, and data survives.
+func TestOpenRetriesEmptyMemtable(t *testing.T) {
+	t.Parallel()
+	dir := closedStore(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "00099.mem"), nil, 0o600))
+
+	db, retried, err := badgermem.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	require.True(t, retried)
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("k"))
+		if err != nil {
+			return err
+		}
+		v, err := item.ValueCopy(nil)
+		require.Equal(t, []byte("v"), v)
+		return err
+	}))
+}
+
+// TestOpenLeavesAHeldDirectoryAlone checks a directory another handle holds
+// is neither retried nor modified: badger's lock check fails before it reaches
+// the memtable files.
+func TestOpenLeavesAHeldDirectoryAlone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	write := func(name string, data []byte) {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o600))
-	}
-	write("00001.mem", nil)
-	write("00002.mem", []byte("wal"))
-	write("000001.vlog", nil)
-	write("MANIFEST", []byte("m"))
-
-	removed, err := badgermem.RemoveEmpty(dir)
+	holder, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
 	require.NoError(t, err)
-	require.Equal(t, []string{"00001.mem"}, removed)
-	for _, name := range []string{"00002.mem", "000001.vlog", "MANIFEST"} {
-		require.FileExists(t, filepath.Join(dir, name))
-	}
-	require.NoFileExists(t, filepath.Join(dir, "00001.mem"))
+	t.Cleanup(func() { require.NoError(t, holder.Close()) })
+	empty := filepath.Join(dir, "00099.mem")
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
 
-	removed, err = badgermem.RemoveEmpty(filepath.Join(dir, "missing"))
+	db, retried, err := badgermem.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.Error(t, err)
+	require.Nil(t, db)
+	require.False(t, retried)
+	info, err := os.Stat(empty)
 	require.NoError(t, err)
-	require.Empty(t, removed)
+	require.Zero(t, info.Size())
 }

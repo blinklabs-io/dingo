@@ -479,21 +479,17 @@ func (db *BlobStoreBadger) open() error {
 			WithValueThreshold(db.valueThreshold).
 			WithCompression(db.badgerCompression()).
 			WithZSTDCompressionLevel(db.compressionLevel)
-		removed, err := badgermem.RemoveEmpty(blobDir)
+		var retried bool
+		blobDb, retried, err = badgermem.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open on-disk: %w", err)
 		}
 		// The store opens before init installs the discard logger.
-		if len(removed) > 0 && db.logger != nil {
+		if retried && db.logger != nil {
 			db.logger.Warn(
-				"removed empty badger memtable files left by an interrupted shutdown",
+				"reopened badger store after an empty memtable file left by an interrupted shutdown",
 				"dir", blobDir,
-				"files", removed,
 			)
-		}
-		blobDb, err = badger.Open(badgerOpts)
-		if err != nil {
-			return fmt.Errorf("badger open on-disk: %w", err)
 		}
 	}
 	db.db = blobDb

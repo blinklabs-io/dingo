@@ -12,51 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package badgermem repairs badger memtable files an interrupted shutdown
-// leaves behind, before badger opens the directory.
+// Package badgermem opens badger stores that an interrupted shutdown left
+// with an empty memtable file.
 package badgermem
 
 import (
-	"errors"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
+
+	badger "github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
-// RemoveEmpty deletes zero-length memtable write-ahead files (*.mem) in dir
-// and returns the names it removed. A missing dir is not an error.
+// Open opens the store described by opts. When the first attempt fails only
+// because of an empty memtable file, it opens once more and reports retried.
 //
-// A process killed while badger creates a new memtable file leaves it empty.
-// badger's openMemTables (memtable.go) opens every existing *.mem, and for an
-// empty one the mmap helper returns z.NewFile, which openMemTables treats as
-// fatal ("while opening fid: N err: Create a new file"), so the store cannot
-// open. An empty write-ahead file holds no entries, and badger would treat it
-// as new anyway, so removing it loses nothing.
-func RemoveEmpty(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+// A process killed while badger creates a new memtable write-ahead file (*.mem)
+// leaves it empty. badger's openMemTables (memtable.go) treats the z.NewFile
+// result for such a file as fatal ("while opening fid: N err: Create a new
+// file"), but the failed attempt has already extended the file to its working
+// size, so the second attempt opens it as an empty memtable. That repair
+// happens inside badger while it holds its directory lock, so a directory
+// another process has open is never modified: its lock check fails first, and
+// that error is not retried.
+func Open(opts badger.Options) (db *badger.DB, retried bool, err error) {
+	db, err = badger.Open(opts)
+	if err == nil || !emptyMemtable(err) {
+		return db, false, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	var removed []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".mem") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			return removed, err
-		}
-		if info.Size() != 0 {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
-			return removed, err
-		}
-		removed = append(removed, e.Name())
-	}
-	return removed, nil
+	db, err = badger.Open(opts)
+	return db, true, err
+}
+
+// emptyMemtable reports whether err is badger's empty-memtable open failure.
+// badger flattens the cause into the message (y.Wrap formats it with %+v
+// outside debug builds), so errors.Is cannot see z.NewFile.
+func emptyMemtable(err error) bool {
+	msg := err.Error()
+	return strings.HasPrefix(msg, "while opening memtables") &&
+		strings.HasSuffix(msg, z.NewFile.Error())
 }

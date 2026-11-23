@@ -7491,13 +7491,15 @@ so the wait is a no-op there.
 
 A process killed while badger creates a new memtable write-ahead file leaves a
 zero-length `*.mem` file, and badger's own open (`openMemTables`) then fails
-with `while opening fid: N err: Create a new file`. Before opening a directory,
-the on-disk blob store and the live UTxO set (`badgerutxo.Open`) remove
-zero-length `*.mem` files (`database/internal/badgermem`); an empty
-write-ahead file holds no entries, so nothing is lost. The blob store logs the
-removal as a warning. `reward-input-repair` opens the blob directory read-only
-as a writer guard and leaves such a file in place; the node's next start
-removes it.
+with `while opening fid: N err: Create a new file`. That failed open has
+already extended the file to its working size, so the on-disk blob store and
+the live UTxO set (`badgerutxo.Open`) open such a store through
+`database/internal/badgermem.Open`, which retries exactly that failure once.
+Nothing is deleted or rewritten outside badger: the repair happens inside
+badger while it holds its directory lock, so a directory another process has
+open is left alone. The blob store logs the retry as a warning.
+`reward-input-repair` opens the blob directory read-only as a writer guard and
+does not retry; the node's next start repairs the file.
 
 ### Cross-Store Durability Contract
 

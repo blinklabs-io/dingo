@@ -161,10 +161,7 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if s.blockCacheSize > 0 {
 		opts = opts.WithBlockCacheSize(s.blockCacheSize)
 	}
-	if _, err := badgermem.RemoveEmpty(dir); err != nil {
-		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
-	}
-	db, err := badger.Open(opts)
+	db, _, err := badgermem.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
