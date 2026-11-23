@@ -247,7 +247,10 @@ Grafana. If running in a managed environment, add
 `marcusolsson-dynamictext-panel` to your `GF_INSTALL_PLUGINS` list.
 
 **Business Text header is visible but does not update** Re-import the dashboard
-JSON so the panel includes its **After content ready** JavaScript. Do not set
+JSON so the panel includes its **After content ready** JavaScript. If the
+dashboard is provisioned from files, replace the JSON in the provisioning
+directory instead: a UI re-import does not change the provisioned source, and
+the next provisioning update restores the old header. Do not set
 `disable_sanitize_html = true` to troubleshoot this: the setting does not
 enable that JavaScript. It disables HTML sanitization for the entire Grafana
 instance, allowing dashboard content to inject scripts into viewers' browsers.
