@@ -114,32 +114,37 @@ was written.
 | `blob/aws` (S3) | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or `~/.aws/credentials`; `AWS_ENDPOINT` for MinIO | yes, via CI's MinIO service |
 | `metadata/postgres` | `POSTGRES_PASSWORD` or `POSTGRES_DSN` | yes, via CI's `postgres:16` service |
 | `metadata/mysql` | `MYSQL_ROOT_PASSWORD` or `MYSQL_DSN` (needs `CREATE DATABASE`) | yes, via CI's `mysql:8` service |
-| `blob/gcs` | `GOOGLE_APPLICATION_CREDENTIALS` or ADC file | no — no GCS emulator exists in this repository, so this plugin's conformance/migration/resource tests only run manually against a real bucket |
+| `blob/gcs` | `STORAGE_EMULATOR_HOST`, or `GOOGLE_APPLICATION_CREDENTIALS`/ADC for a real bucket; `DINGO_TEST_GCS_BUCKET` names the bucket | yes, via CI's in-memory fake GCS service |
 
 Each plugin's `TestBlobStoreUnreachableEndpointFailsWithoutHanging` /
 `TestMetadataStoreUnreachableHostFailsWithoutHanging` test needs none of the
 above: it points at a closed local port, so it always runs, everywhere.
-`gcs`'s bad-credentials test also always runs, because
-`storage.NewGRPCClient` loads and parses the credentials file eagerly
-(unlike the AWS SDK, which only builds a client and defers all validation to
-first use).
+Production GCS uses the gRPC transport; setting `STORAGE_EMULATOR_HOST` selects
+the SDK's HTTP transport for an emulator without changing real-bucket behavior.
 
 ## Running locally
 
-Bring up Postgres, MySQL, and MinIO matching CI exactly, then run the tagged
-suite:
+The GCS checks can run locally without cloud credentials. In one terminal,
+start the same in-memory emulator image used by
+`.github/workflows/go-test.yml`. In another terminal, create a dedicated
+bucket and run the required suites:
 
 ```bash
-docker compose -f internal/test/conformance/docker-compose.yml up -d
-docker run -d --name dingo-minio -p 9000:9000 -p 9001:9001 blinklabs/minio:main
-# create the MinIO bucket named by DINGO_TEST_S3_BUCKET (default
-# "dingo-test-bucket") using any S3 client pointed at AWS_ENDPOINT
-
-AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
-AWS_ENDPOINT=http://127.0.0.1:9000/ AWS_REGION=us-east-1 \
-POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres POSTGRES_DATABASE=dingo_test \
-MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_ROOT_PASSWORD=mysql \
-  go test -tags dingo_extra_plugins ./database/plugin/blob/... ./database/plugin/metadata/... ./internal/integration/...
+docker run --rm --name dingo-gcs -p 127.0.0.1:4443:4443 \
+  fsouza/fake-gcs-server:1.56.1 \
+  -scheme http -backend memory -public-host 127.0.0.1:4443
+curl --fail --request POST --header 'Content-Type: application/json' \
+  --data '{"name":"dingo-test"}' \
+  'http://127.0.0.1:4443/storage/v1/b?project=dingo-test'
+STORAGE_EMULATOR_HOST=http://127.0.0.1:4443 \
+DINGO_TEST_GCS_BUCKET=dingo-test DINGO_REQUIRE_GCS_TESTS=1 \
+  go test -tags dingo_extra_plugins \
+  -run '^(TestBlobStoreConformance|TestBlobStoreResourceLifecycle)$' \
+  ./database/plugin/blob/gcs
+STORAGE_EMULATOR_HOST=http://127.0.0.1:4443 \
+DINGO_TEST_GCS_BUCKET=dingo-test DINGO_REQUIRE_GCS_TESTS=1 \
+  go test -tags dingo_extra_plugins -run '^TestBlobStoreMigrationGCS$' \
+  ./internal/integration
 ```
 
 Without any of those environment variables set: a plain, untagged

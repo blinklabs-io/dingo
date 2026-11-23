@@ -1295,10 +1295,13 @@ and "Conformance tests" in `database/plugin/PLUGIN_DEVELOPMENT.md` for how to
 wire a new plugin's conformance test and which environment variables each
 cloud/database backend needs. Cloud- and database-backed plugins skip their
 credential-requiring tests cleanly (never fail `go test ./...`) when
-unconfigured; note that no GCS emulator exists in this repository (unlike
-S3's MinIO in CI), so the `gcs` plugin's conformance, migration, and
-resource-cleanup coverage only run manually against a real bucket, never in
-CI.
+unconfigured. The service gate runs GCS conformance, Badger-to-GCS migration,
+and repeated provider lifecycle checks against an in-memory GCS emulator on
+every merge-group validation and manual CI dispatch (and on pull requests
+while the merge queue is disabled). The gate requires each named suite to
+report a pass, uses a bucket private to the workflow run plus per-test object
+prefixes, and relies on test cleanup and the ephemeral service container to
+remove objects on both successful and failed runs.
 
 ## Database Lifecycle (Snapshot, Restore, Truncate)
 
