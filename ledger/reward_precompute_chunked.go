@@ -734,6 +734,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 
 // resumableRewardPrecomputeCursor returns the persisted cursor for round and
 // the pool index to resume from, or a nil cursor when Pass 2 must start over.
+// A resumed unfinished cursor's captured slot replaces round.capturedSlot.
 // A finished cursor is returned only when its output fingerprint still
 // matches the stored pool outputs.
 func (ls *LedgerState) resumableRewardPrecomputeCursor(
@@ -778,6 +779,14 @@ func (ls *LedgerState) resumableRewardPrecomputeCursor(
 	if !found || index != cursor.CompletedPools ||
 		len(poolOutputs) != cursor.CompletedPools {
 		return nil, 0, nil
+	}
+	// Every output row of a round carries one captured slot. The captured
+	// slot is not part of the input fingerprint, and the boundary and startup
+	// resume at a different one than the background run, so a resumed round
+	// adopts the slot its committed rows already carry. A finished round
+	// writes no more rows, and a discarded cursor has no rows to match.
+	if cursor.CapturedSlot != 0 {
+		round.capturedSlot = cursor.CapturedSlot
 	}
 	return cursor, index, nil
 }

@@ -104,6 +104,9 @@ type Querier interface {
 	GetCommitteeQuorum(ctx context.Context) (sql.NullString, error)
 	GetConstitution(ctx context.Context) (Constitution, error)
 	GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) ([]sql.NullString, error)
+	// The unary plus on drep_type keeps SQLite off
+	// idx_account_drep_type_active_staking_key; see the account index notes in
+	// DATABASE.md.
 	GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsParams) ([]GetDRepDelegatorsRow, error)
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)

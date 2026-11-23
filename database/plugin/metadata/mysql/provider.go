@@ -302,6 +302,7 @@ func openStore(
 	}
 	store, err := sqlstore.New(sqlstore.Config{
 		GenesisStakingEmpty: deps.GenesisStakingEmpty,
+		ScratchDir:          deps.DataDir,
 		WriteDB:             db,
 		ReadDB:              db,
 		Dialect:             sqlstore.MySQLDialect(),

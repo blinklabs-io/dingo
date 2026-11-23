@@ -343,7 +343,8 @@ jobs:
         if: always()
         run: python3 .github/scripts/runner-probe.py end
 
-  # Tier 2. Linux with Postgres, MySQL and MinIO (fake s3) services, running
+  # Tier 2. Linux with Postgres, MySQL, MinIO (fake S3) and fake GCS services,
+  # running
   # only what the services add: the dingo_db_integration suites, the live
   # two-node lifecycle tests, and the packages whose tests read a service
   # variable. Everything else in the tree already ran in check and gate (race).
@@ -375,6 +376,16 @@ jobs:
         ports:
           - 9000:9000
           - 9001:9001
+      gcs:
+        # No Blink Labs image provides a GCS emulator. This upstream service
+        # implements the JSON API selected by STORAGE_EMULATOR_HOST.
+        image: fsouza/fake-gcs-server:1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef
+        env:
+          FAKE_GCS_BACKEND: memory
+          FAKE_GCS_PUBLIC_HOST: 127.0.0.1:4443
+          FAKE_GCS_SCHEME: http
+        ports:
+          - 4443:4443
     env:
       DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-services
       DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-services
@@ -392,6 +403,9 @@ jobs:
       AWS_ENDPOINT: "http://127.0.0.1:9000/"
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
+      DINGO_TEST_GCS_ENDPOINT: http://127.0.0.1:4443
+      DINGO_TEST_GCS_BUCKET: dingo-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      DINGO_REQUIRE_GCS_TESTS: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
@@ -455,6 +469,25 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: setup-s3-bucket
         run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
+      - name: setup-gcs-bucket
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error \
+              "$DINGO_TEST_GCS_ENDPOINT/storage/v1/b" >/dev/null; then
+              break
+            fi
+            if (( attempt == 30 )); then
+              echo "GCS emulator did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "{\"name\":\"$DINGO_TEST_GCS_BUCKET\"}" \
+            "$DINGO_TEST_GCS_ENDPOINT/storage/v1/b?project=dingo-ci" >/dev/null
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version-file: go.mod
@@ -504,6 +537,32 @@ jobs:
         # These two-node tests exercise live Truncate/Restore while a real
         # producer is forging and the syncer is connected over loopback.
         run: make test-live-lifecycle
+      - name: go-test-gcs
+        run: |
+          set -euo pipefail
+          run_suite() (
+            package="$1"
+            pattern="$2"
+            shift 2
+            output="$(mktemp)"
+            trap 'rm -f "$output"' EXIT
+            STORAGE_EMULATOR_HOST="$DINGO_TEST_GCS_ENDPOINT" \
+              go test -json -tags dingo_extra_plugins -timeout 10m \
+              -run "$pattern" "$package" | tee "$output"
+            for test_name in "$@"; do
+              if ! jq -s -e --arg test "$test_name" \
+                'any(.[]; .Action == "pass" and .Test == $test)' \
+                "$output" >/dev/null; then
+                echo "required GCS test did not pass: $test_name" >&2
+                exit 1
+              fi
+            done
+          )
+          run_suite ./database/plugin/blob/gcs \
+            '^(TestBlobStoreConformance|TestBlobStoreResourceLifecycle)$' \
+            TestBlobStoreConformance TestBlobStoreResourceLifecycle
+          run_suite ./internal/integration '^TestBlobStoreMigrationGCS$' \
+            TestBlobStoreMigrationGCS
       - name: go-test-service-packages
         # The packages whose tests read a service variable, found from the
         # tree rather than listed by hand, so a new service-backed test is
@@ -524,6 +583,9 @@ jobs:
             case "$pkg" in
               */internal/docsparity) continue ;;
               */database/plugin/metadata/sqlstore|*/database/plugin/metadata/postgres|*/database/plugin/metadata/mysql|*/internal/node) continue ;;
+              # Its GCS migration runs above; its other service references
+              # configure benchmarks, which this command does not run.
+              */internal/integration) continue ;;
             esac
             if grep -qsE "$pattern" "$dir"/*_test.go; then
               pkgs+=("$pkg")

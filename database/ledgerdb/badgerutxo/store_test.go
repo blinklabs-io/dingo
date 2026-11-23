@@ -17,6 +17,8 @@ package badgerutxo_test
 import (
 	"bytes"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
@@ -155,6 +157,27 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	_, err := s.Apply(blk, []badgerutxo.Output{out(2, 0)}, nil)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
+
+	s = open(t, dir)
+	defer s.Close()
+	requireCount(t, s, 2)
+	requireTip(t, s, blk)
+	requireLive(t, s, true, ref(2, 0))
+}
+
+// TestOpenAfterInterruptedShutdown checks the store opens with its contents
+// intact when a kill left an empty memtable file, which badger alone refuses
+// to open.
+func TestOpenAfterInterruptedShutdown(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := open(t, dir)
+	bootstrap(t, s, point(0, 0), out(1, 0))
+	blk := point(3, 3)
+	_, err := s.Apply(blk, []badgerutxo.Output{out(2, 0)}, nil)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "00099.mem"), nil, 0o600))
 
 	s = open(t, dir)
 	defer s.Close()

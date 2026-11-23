@@ -165,17 +165,21 @@ with their existing components.
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and
-(on its own two-minute ticker, independent of the reclaim cadence) a best-effort
-`PRAGMA wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
-connection (never the write pool) — see `checkpointWAL` and `Store.Checkpoint`
-in DATABASE.md's write-amplification discussion for why the commit-triggered
-`wal_autocheckpoint` alone cannot shrink the WAL file's on-disk size even when
-it fully succeeds. `journal_size_limit` caps a reset WAL at 64 MiB, while the
-periodic TRUNCATE can reduce it to zero; an active reader can prevent either
-operation from reclaiming space. Bulk metadata imports drain and pause the
-scheduled TRUNCATE callback until normal pragmas are restored, while
-commit-triggered auto-checkpoints remain enabled. If the final restore fails,
-the next scheduled callback retries it before checkpointing. The tagged
+(on its own two-second ticker, independent of the reclaim cadence) a PASSIVE
+`wal_checkpoint`, with a best-effort TRUNCATE attempt on every 60th tick,
+against a dedicated short-timeout connection (never the write pool) — see
+`checkpointWAL` and `Store.Checkpoint` in DATABASE.md's write-amplification
+discussion for why PASSIVE checkpointing alone cannot shrink the WAL file's
+on-disk size even when it fully succeeds. `journal_size_limit` caps a reset WAL
+at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active reader
+can prevent either operation from reclaiming space. Bulk metadata imports drain
+and pause the scheduled callback until normal pragmas are restored; the write
+connection's automatic checkpoint stays disabled, and the ticker runs a
+PASSIVE-only `BulkCheckpoint` instead so the WAL is still backfilled. Startup
+migrations run before the scheduled ticker starts, so `Store.Start` runs
+`BulkCheckpoint` on the same cadence until the upgrade returns. If the
+final restore fails, the next scheduled callback retries it before
+checkpointing. The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in `sqlstore`
@@ -264,7 +268,14 @@ connection; canceling it mid-transaction triggers `database/sql`'s documented
 auto-rollback of the underlying `*sql.Tx`, which is asynchronous to the
 `cancel()` call and (for `database/sql`'s pooling) discards rather than idles
 the aborted connection. `database/plugin/metadata/sqlstore/live_stake_test.go`
-covers both.
+covers both. A write transaction's statements receive `ctx` through
+`context.WithoutCancel`: a driver that watches a cancellable context per
+statement (`modernc.org/sqlite` starts a goroutine and installs a progress
+handler for each one) would otherwise pay that on every statement of a
+transaction issuing thousands. Cancellation then does not interrupt a running
+write statement; `dbFromTxn` returns `ctx.Err()` to the next store call, and the
+rollback above ends the transaction. Read transactions keep the cancellable
+`ctx`, so cancellation interrupts their statements.
 
 Two gaps in that propagation are deliberate:
 - The nil-`txn` "autocommit" path (`dbFromTxn(nil)`/`readDBFromTxn(nil)`, used
@@ -2019,6 +2030,7 @@ dingo/
 │   ├── snapshot.go      # Snapshot parsing
 │   ├── import.go        # Ledger state import
 │   ├── utxo.go          # UTXO state handling
+│   ├── scls_export.go   # SCLS (CIP-0165) export of the UTxO set
 │   └── certstate.go     # Certificate state handling
 ├── mempool/             # Transaction pool
 │   ├── backend.go       # FIFO/DAG backend contract and constructors
@@ -2043,7 +2055,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
-├── sdk/                 # Plugin SDK, a separate Go module
+├── sdk/                 # Plugin SDK, a separate Go module (chain role contracts, Cardano roles)
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
 ├── api/                     # Transport-facing API packages
@@ -2383,7 +2395,7 @@ When `Node.Run()` is called, components are initialized in this order:
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
     Planner statistics managers (`internal/plannerstats.Manager`): for the
-    consensus store, the startup `PRAGMA optimize` pass runs after any
+    consensus store, the startup incremental planner-statistics pass runs after any
     commit-timestamp recovery and before the ledger starts processing blocks,
     to populate statistics before the first block batch. An API node runs a
     second manager over the IndexerDB: it starts after the API listeners and
@@ -2396,11 +2408,10 @@ When `Node.Run()` is called, components are initialized in this order:
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
     block application after the startup pass can be re-analyzed before the
-    next rollover. The optimizer considers every table while retaining SQLite's
-    temporary sampling limit. An explicit optimizer mask must retain that bit;
-    omitting it permits unrestricted index analysis. The single write connection
-    is held during maintenance, so unrestricted analysis here would stop block
-    application for the duration of each scan. The tick shares the worker with
+    next rollover. Each pass analyzes every table under a temporary
+    `analysis_limit`, sampling each index rather than reading it whole. The
+    single write connection is held during maintenance, so unrestricted
+    analysis here would stop block application for the duration of each scan. The tick shares the worker with
     the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
@@ -3887,10 +3898,16 @@ below).
 `internal/indexer` holds the writer: one goroutine pulls
 canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
 `ChainSource` (`DatabaseSource` over the ledger database), and commits each
-batch's rows, ledger facts and new tip in one transaction. A batch whose
+batch's rows, ledger facts and new tip in one transaction. The node's writer
+sizes a batch by content as well as by blocks (`Writer.WithSparseBatches`):
+once it has read its block limit, it keeps reading while the blocks hold less
+than `indexer.SparseBatchBytes` of CBOR, up to `indexer.SparseBatchFactor`
+times the limit, so ranges of near-empty blocks commit less often. A batch whose
 blob writes exceed one Badger transaction (`badger.ErrTxnTooBig`) is retried
-at half as many blocks, down to a single block, which fails as an ordinary
-error; each commit doubles the batch back toward its configured size. A
+smaller: a batch that read past its limit first halves that reach, and one
+within its limit is retried at half as many blocks, down to a single block,
+which fails as an ordinary error; each commit doubles both back toward their
+configured sizes. A
 `FactsSource`
 (`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
 by natural key, and the writer splits a batch at each boundary so a boundary's
@@ -3938,7 +3955,11 @@ while the abandoned blocks are stored and otherwise to the newest tip
 checkpoint on the chain. A checkpoint left by the former history backfill
 seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
 from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
-the ledger resolve and check a closure through one loader.
+the ledger resolve and check a closure through one loader. `IndexBlocks`
+decodes a batch's blocks and computes their transaction offsets on worker
+goroutines, which stay a bounded number of blocks ahead of the writer; the
+writer takes each block in order, so a decode error fails the batch at its
+block.
 
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the
@@ -3950,7 +3971,11 @@ the ledger database (`MetadataFacts` as `AnchorFacts`: applied-transaction
 count and a streamed digest of the live UTxO set at the anchor, through the
 `metadata.AnchorStateStore` capability) and applies the imported account state
 in one transaction with the phase marker (`Backfill` as `AnchorRestorer`, the
-history backfill's restore at its anchor). Each phase commits its own marker
+history backfill's restore at its anchor). Once that transaction commits, the
+writer takes one planner-statistics pass over the IndexerDB
+(`Writer.finalizePlannerStats`): the bounded form where the backend has one
+and the full refresh otherwise. A failure is logged, not returned, because the
+anchor is already durable. Each phase commits its own marker
 under `indexer_bootstrap`, so a stop resumes in the phase that has work left;
 `indexerdb.Store.ReadyServing` is not ready until the phase is `done` and the
 tip has passed the recorded anchor. The ledger serves the imported accounts,
@@ -4837,6 +4862,18 @@ automatic snapshots; its default is 30 seconds, and zero is unbounded.
 `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each
 backup wrote.
 
+#### SCLS export of the live UTxO set
+
+`dingo database export-scls` (`cmd/dingo/database.go`) is wiring only: it opens
+the set with `dblifecycle.OpenUtxoSet`, takes `ledgerstate.NewSCLSSource` (one
+`badgerutxo.Store.CheckpointableSnapshot` read transaction) and calls
+`ledgerstate.ExportSCLS`, releasing both on every exit path. The conversion
+lives in `ledgerstate` behind the narrow `SCLSSource` interface (tip, era,
+outputs in key order); the container and `utxo/v0` codecs stay in go-scls.
+The export is offline, persists no checkpoint, and stages, verifies and hard-links
+its output as described in `DATABASE.md`. It declares itself a parity export of
+the `utxo/v0` namespace in the manifest, not a bootstrap artifact.
+
 #### Recoverable remote live restore
 
 Local Badger/SQLite restore remains isolated in a sibling directory until its
@@ -5468,6 +5505,13 @@ Ledger apply collects block-nonce rows for its database batch and persists them
 through the optional `metadata.BlockNonceBatchStore` capability in the same
 transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
 backends retain the per-row fallback.
+
+Indexer replay (`Backfill.computeBlockNonce`) queues each block's nonce row in
+its batch accumulator through the optional `metadata.BlockNonceBatchQueuer`
+capability, and `FlushBatch` writes the queued rows in queue order before the
+batch commits. The running nonce is held in memory, so nothing reads
+`block_nonce` inside the batch window. A backend without the capability, or a
+call without an accumulator, writes each row immediately.
 
 
 Key models in `database/models/`:
@@ -8571,7 +8615,7 @@ exists. With the `AND active = TRUE` conjunct `GetAccountsByCredential` adds for
 chain per row, so each chunk costs `O(active rows × refs)` and the "batched"
 read becomes slower than the per-item loop it replaced as the account table
 grows. Outside Mithril sync and metadata backfill, SQLite statistics come from
-`internal/plannerstats.Manager`'s incremental `PRAGMA optimize` at startup,
+`internal/plannerstats.Manager`'s bounded `ANALYZE` at startup,
 after each epoch rollover and every minute (see DATABASE.md), so a
 genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper.
@@ -8967,9 +9011,12 @@ for itself, is still refused. After a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
-catch-up allowance, `localTip + 2*securityParam`). It also prevents a peer's
-unbounded advertisement from suppressing other peers or forcing a
-chain-switch resync. A tip update that carries no delivered frontier at all
+catch-up allowance, `localTip + 2*securityParam`). The allowance, far-frontier
+corroboration and the catch-up band hold below apply from an empty local chain
+too, bounded as block 0, so a node syncing from genesis does not refuse an
+honest peer whose header batch moves its frontier more than `securityParam`.
+It also prevents a peer's unbounded advertisement from suppressing other peers
+or forcing a chain-switch resync. A tip update that carries no delivered frontier at all
 is recorded as having delivered nothing: the advertised tip is never
 substituted for a missing observed frontier, and the peer is bounded and
 compared as block 0 until it delivers a header.
@@ -12401,12 +12448,14 @@ their outputs have moved into ledger state. The DAG backend never
 watermark-evicts transactions. Its TxSubmission intake waits for sufficient
 admission headroom, while direct submissions receive `MempoolFullError` above
 the rejection watermark. A transaction that repeatedly loses the available
-headroom race to another peer is dropped after a bounded retry streak so that
-one offer cannot stall the connection indefinitely. An admission whose ledger
-snapshot moves during reconciliation is retried under the same bound.
-Exhausting that bound drops the peer's already-acknowledged transaction without
-a verdict so repeated snapshot movement cannot stall the connection
-indefinitely. A CBOR decode failure rejects the complete reply; three
+headroom race to another peer is retried in bounded bursts with
+connection-cancellable backoff. An admission whose ledger snapshot moves
+during reconciliation follows the same path. Exhausting one burst retains the
+current offer and pauses intake before another burst, so a transaction with no
+admission verdict is never acknowledged and lost. If the retained mempool size
+still exceeds the refreshed admission capacity after a retry burst, intake
+rejects that transaction and continues with later offers from the peer. A CBOR
+decode failure rejects the complete reply; three
 consecutive invalid replies stop intake for that connection. Mempool validation
 rejections for decoded transactions are logged and dropped without stopping
 the peer's intake pump; peer, protocol, or mempool shutdown still terminates the
@@ -21298,7 +21347,12 @@ drawn once per run, never the host name, because every subscriber sees it. The b
 handlers only enqueue onto a bounded
 channel; one goroutine converts and appends to a ring buffer of
 `barkEventBufferSize` events that carries the delivery sequence. Subscribers
-read the ring at their own pace, so a slow remote client cannot delay any
+see each epoch number at most once during that EventService lifetime. The first
+internal `epoch.transition` for a boundary advances the adapter's epoch
+high-water mark; the later nonce-bearing block notification and any replay
+after a rollback remain available to internal ledger consumers but are not
+exported as indistinguishable copies. Subscribers read the ring at their own
+pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
 stops acknowledging a half-ring window of delivered events is closed after a
@@ -21717,6 +21771,30 @@ Package isolation is enforced by direction, ownership, and composition:
   gouroboros, so every other contract stays chain-neutral. The module is
   released with `sdk/vX.Y.Z` tags and stays at major version 0, with every
   contract versioned `v0` and experimental, until a 1.0 is declared.
+- `sdk/chain/` holds the chain-neutral role contracts: `Ledger`, `Consensus`,
+  `Network` and the optional `Mempool`, plus `ChainID`, `Point`, `Tip` and the
+  `Payload` that carries a block, header or transaction between roles. A
+  payload holds a small decoded view, optionally the encoded bytes, and
+  optionally the chain's own decoded value. Two built-in roles pass the decoded
+  value through `chain.NativeOf` without encoding; an external role reads
+  `Bytes`, which encodes only then and fails with `ErrNoEncoding` rather than
+  return empty bytes. Each role follows an existing seam: the ledger handed to
+  `ChainManager.SetLedger` and its `ValidateTx`, the forger's `LeaderChecker`,
+  `BlockValidator` and `BlockBroadcaster`, chain selection's tip comparison,
+  and the mempool `AddTransaction` and `RemoveTransaction`. `Ledger.ValidateTx`
+  validates against the applied state alone; the overlay validation the
+  mempool and block builder call, which adds the effects of earlier
+  transactions in the same block, takes the node module's `utxoref` types and
+  is not part of the role.
+- `sdk/cardano/` implements every role (`LedgerRole`, `ConsensusRole`,
+  `NetworkRole`, `MempoolRole`) over small source interfaces that the node's
+  own types already satisfy: `LedgerSource` and `ForgedBlockValidator` by
+  `ledger.LedgerState`, `LeaderSource` by the leader schedule and the forger's
+  `LeaderChecker`, `NetworkSink` by the forger's `BlockBroadcaster`, and
+  `MempoolSource` by `mempool.Mempool`. The node module does not import the
+  sdk, so `internal/architecture` compiles those pairings in a temporary
+  workspace holding both modules. Nothing in the node calls through these roles
+  yet, so no existing path changes.
 
 ### Import Boundary Check
 
@@ -24356,7 +24434,8 @@ primary chain (`chain.Chain`) and decodes them into `gouroboros/ledger.Block`
 values before handing a batch to `ledgerProcessBlocksFromSource` for validation
 and apply, exactly as before. When `LedgerStateConfig.BlockPipelineEnabled` is
 set (config `blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
-`--block-pipeline-enabled`; default off), `LedgerState` owns a
+`--block-pipeline-enabled`; default on in core mode except on Musashi),
+`LedgerState` owns a
 `github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with decode workers
 set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 `GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)

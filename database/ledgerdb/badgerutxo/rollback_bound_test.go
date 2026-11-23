@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,12 @@ func journaledRows(slot uint64, epoch byte, n int, value byte) []badgerutxo.RowP
 // transaction holds, and the rollback of a block after it must still run.
 func TestRollbackRestoresMoreJournaledRowsThanOneTransactionHolds(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine rollback over 70k journaled rows at "+
+			"Badger's real transaction limit; the small-budget "+
+			"rollback tests keep the chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	start := point(0, 0)
@@ -199,6 +206,12 @@ func TestSmallRollbackLeavesNoMark(t *testing.T) {
 // transaction holds undoes them in bounded transactions first.
 func TestBatchRollbackUndoesMoreJournaledRowsThanOneTransactionHolds(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine batch rollback over 70k journaled rows "+
+			"at Badger's real transaction limit; the small-budget "+
+			"rollback tests keep the chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	bootstrap(t, s, point(0, 0))

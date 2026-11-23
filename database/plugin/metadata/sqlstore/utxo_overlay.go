@@ -978,7 +978,7 @@ func (s *Store) writeOverlay(
 			}
 			addresses.add(utxoAddressShape, out.id, address)
 		}
-		if err := addresses.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+		if err := addresses.flush(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 			return err
 		}
 	}
@@ -1370,7 +1370,7 @@ func (s *Store) flushOverlay(
 		return err
 	}
 	if err := accumulator.rows.flush(
-		ctx, db, s.dialect.ParameterLimit(),
+		ctx, db, s, s.dialect.ParameterLimit(),
 	); err != nil {
 		return overlayWriteError("flush batch rows", err)
 	}
