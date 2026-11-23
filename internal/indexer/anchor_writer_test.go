@@ -18,13 +18,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,11 +126,20 @@ type anchorRig struct {
 
 func newAnchorRig(t *testing.T, blocks int, anchorNumber uint64) *anchorRig {
 	t.Helper()
+	return newAnchorRigWithStore(t, blocks, anchorNumber, newTestStore(t))
+}
+
+func newAnchorRigWithStore(
+	t *testing.T,
+	blocks int,
+	anchorNumber uint64,
+	store *indexerdb.Store,
+) *anchorRig {
+	t.Helper()
 	log := &[]string{}
 	chain := &anchoredChain{
 		fakeChain: newFakeChain(blocks, "c"), anchorNumber: anchorNumber,
 	}
-	store := newTestStore(t)
 	facts := &anchorFacts{recordingFacts: &recordingFacts{log: log}}
 	idx := &countingIndexer{
 		loggingIndexer: &loggingIndexer{
@@ -352,5 +365,210 @@ func TestWriterDebitsWithdrawalsOnlyPastTheAnchor(t *testing.T) {
 	require.Len(t, idx.modes, 30)
 	for number, debited := range idx.modes {
 		require.Equal(t, number > 12, debited, "block %d", number)
+	}
+}
+
+// plannerStatsProbe records the incremental planner-statistics runs the
+// metadata store is asked for. Embedding only the interface keeps the
+// store's other optional statistics interfaces out of the wrapper's method
+// set, so the Writer can reach the incremental form alone.
+type plannerStatsProbe struct {
+	metadata.MetadataStore
+	mu       sync.Mutex
+	triggers []string
+}
+
+func (p *plannerStatsProbe) OptimizePlannerStatsContext(
+	ctx context.Context, trigger string,
+) (types.PlannerStatsResult, error) {
+	p.mu.Lock()
+	p.triggers = append(p.triggers, trigger)
+	p.mu.Unlock()
+	return p.MetadataStore.(metadata.IncrementalPlannerStatsUpdater).
+		OptimizePlannerStatsContext(ctx, trigger)
+}
+
+func (p *plannerStatsProbe) runs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.triggers)
+}
+
+// The statistics the API plans with after the backfill must not be the last
+// periodic ones: reaching the anchor takes exactly one more, bounded pass.
+func TestWriterTakesOneFinalPlannerStatsPassAtTheAnchor(t *testing.T) {
+	t.Parallel()
+	probe := &plannerStatsProbe{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{}},
+		func(m metadata.MetadataStore) metadata.MetadataStore {
+			probe.MetadataStore = m
+			return probe
+		},
+	)
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(db, db, 10)
+	require.NoError(t, err)
+	r := newAnchorRigWithStore(t, 30, 12, store)
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, []string{"anchor"}, probe.runs())
+
+	// Following the ledger past the anchor takes no further pass.
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, []string{"anchor"}, probe.runs())
+}
+
+// fullPassProbe stands in for a backend with no incremental statistics form
+// (PostgreSQL, MySQL): OptimizePlannerStatsContext reports Supported=false and
+// only the full refresh does anything.
+type fullPassProbe struct {
+	metadata.MetadataStore
+	mu   sync.Mutex
+	full int
+}
+
+func (p *fullPassProbe) OptimizePlannerStatsContext(
+	context.Context, string,
+) (types.PlannerStatsResult, error) {
+	return types.PlannerStatsResult{}, nil
+}
+
+func (p *fullPassProbe) UpdatePlannerStatsContext(context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.full++
+	return nil
+}
+
+func (p *fullPassProbe) fullRuns() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.full
+}
+
+// A backend without the incremental form still gets its final pass at the
+// anchor, through the full refresh.
+func TestWriterFallsBackToAFullPlannerStatsPassAtTheAnchor(t *testing.T) {
+	t.Parallel()
+	probe := &fullPassProbe{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{}},
+		func(m metadata.MetadataStore) metadata.MetadataStore {
+			probe.MetadataStore = m
+			return probe
+		},
+	)
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(db, db, 10)
+	require.NoError(t, err)
+	r := newAnchorRigWithStore(t, 30, 12, store)
+	require.NoError(t, r.w.CatchUp(context.Background()))
+	require.Equal(t, 1, probe.fullRuns())
+}
+
+// failingStatsProbe fails the anchor's planner-statistics pass: the
+// incremental form with incrementalErr, or, when that is nil, reports the form
+// unsupported and fails the full refresh with fullErr.
+type failingStatsProbe struct {
+	metadata.MetadataStore
+	incrementalErr error
+	fullErr        error
+}
+
+func (p *failingStatsProbe) OptimizePlannerStatsContext(
+	context.Context, string,
+) (types.PlannerStatsResult, error) {
+	return types.PlannerStatsResult{Supported: p.incrementalErr != nil},
+		p.incrementalErr
+}
+
+func (p *failingStatsProbe) UpdatePlannerStatsContext(context.Context) error {
+	return p.fullErr
+}
+
+// warnRecorder keeps the warning records a logger emits.
+type warnRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *warnRecorder) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+
+func (h *warnRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *warnRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *warnRecorder) WithGroup(string) slog.Handler { return h }
+
+// errorFor returns the error attribute of the first record with message msg.
+func (h *warnRecorder) errorFor(msg string) (error, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != msg {
+			continue
+		}
+		var found error
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" {
+				found, _ = a.Value.Any().(error)
+				return false
+			}
+			return true
+		})
+		return found, true
+	}
+	return nil, false
+}
+
+// The anchor is durable once PhaseDone commits, so a failed statistics pass
+// at the anchor is logged and catch-up still reaches the ledger tip, whichever
+// form of the pass failed.
+func TestWriterLogsAFailedAnchorPlannerStatsPass(t *testing.T) {
+	t.Parallel()
+	injected := errors.New("injected planner statistics failure")
+	for name, probe := range map[string]*failingStatsProbe{
+		"incremental": {incrementalErr: injected},
+		"full":        {fullErr: injected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabaseWithMetadataWrapper(
+				t,
+				dbtest.Options{Config: &database.Config{}},
+				func(m metadata.MetadataStore) metadata.MetadataStore {
+					probe.MetadataStore = m
+					return probe
+				},
+			)
+			require.NoError(t, err)
+			store, err := indexerdb.NewStore(db, db, 10)
+			require.NoError(t, err)
+			r := newAnchorRigWithStore(t, 30, 12, store)
+			warnings := &warnRecorder{}
+			r.w.logger = slog.New(warnings)
+
+			require.NoError(t, r.w.CatchUp(context.Background()))
+			logged, ok := warnings.errorFor(
+				"indexer final planner statistics failed",
+			)
+			require.True(t, ok, "the failed pass is logged")
+			require.ErrorIs(t, logged, injected)
+			phase, err := r.store.Bootstrap(nil)
+			require.NoError(t, err)
+			require.Equal(t, indexerdb.PhaseDone, phase)
+			tip, err := r.store.Tip(nil)
+			require.NoError(t, err)
+			require.Equal(t, uint64(29), tip.BlockNumber)
+		})
 	}
 }

@@ -343,6 +343,43 @@ func inPoolRange(pool, lo, hi []byte) bool {
 		(hi == nil || bytes.Compare(pool, hi) <= 0)
 }
 
+// stakeSlotBounder is a reader that reports the slots an epoch's first and
+// last stake rows were captured at without reading the epoch.
+type stakeSlotBounder interface {
+	RewardStakeSlotBounds(epoch uint64) (first, last uint64, found bool, err error)
+}
+
+// stakesCapturedOutside reports whether the epoch's stake rows were all
+// captured outside from through through, without reading them. Every stake row
+// of an epoch comes from one distribution and carries one captured slot, so an
+// epoch whose first and last rows share a slot outside the range holds no row
+// in it; an epoch whose first and last rows differ is not decided here. It is
+// false when the reader cannot tell, or when staged changes or a rollback
+// ceiling make the committed rows differ from what the view serves.
+func (v rewardInputsView) stakesCapturedOutside(
+	epoch, from, through uint64,
+) (bool, error) {
+	b, ok := v.r.(stakeSlotBounder)
+	if !ok || v.at != nil {
+		return false, nil
+	}
+	for _, c := range v.st.changes {
+		if (c.Epoch == epoch &&
+			(c.Kind == RewardInputStakes || c.Kind == RewardInputReplace)) ||
+			(c.Kind == RewardInputPrune && epoch < c.PruneBelow) {
+			return false, nil
+		}
+	}
+	first, last, found, err := b.RewardStakeSlotBounds(epoch)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return true, nil
+	}
+	return first == last && (first < from || first > through), nil
+}
+
 func (v rewardInputsView) stakes(
 	epoch uint64,
 	lo, hi []byte,

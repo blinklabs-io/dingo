@@ -115,7 +115,8 @@ type Store struct {
 	// put a row below the floor, each of which invalidates it.
 	added         addedIndexes
 	rowsRewritten atomic.Uint64
-	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	// rangeRowsVisited counts the rows and index entries the range, prefix,
+	// and added-row readers stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
 	rewardIndexVisited atomic.Uint64
