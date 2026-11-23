@@ -714,6 +714,7 @@ func newForecastForkFixture(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	systemStart := cfg.ShelleyGenesis().SystemStart
 	shape := hardfork.Shape{
 		SystemStart: systemStart,
@@ -1315,6 +1316,7 @@ func TestAwaitChainsyncHeaderAdmissionResyncsWhenNoWorkCanAdvanceForecast(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	systemStart := cfg.ShelleyGenesis().SystemStart
 	const headerSlot = 500_000
 	arrival := systemStart.Add(600_000 * time.Second)
@@ -1428,6 +1430,7 @@ func TestAwaitChainsyncHeaderAdmissionWaitsForUnappliedChainBlocks(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	systemStart := cfg.ShelleyGenesis().SystemStart
 	const headerSlot = 500_000
 	arrival := systemStart.Add(600_000 * time.Second)
@@ -2241,6 +2244,7 @@ func newObserverForkTestLedgerAt(
 			},
 		},
 	}
+	attachTestLiveSet(t, ls)
 	systemStart := cfg.ShelleyGenesis().SystemStart
 	shape := hardfork.Shape{
 		SystemStart: systemStart,

@@ -193,7 +193,7 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 			addressBytes, err := address.Bytes()
 			require.NoError(t, err)
 			inputTxId := seedBabbageUtxo(t, db, 0x31, 0, address, 1_000_000)
-			attachTestLiveSet(t, ls)
+			fxAttachLedgerDB(t, ls)
 			updateCbor := []byte{0xa1, 0x00, 0x01} // {minFeeA: 1}
 
 			// newTx encodes a real era transaction spending the seeded
@@ -290,7 +290,7 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 				})
 			}
 			storedRows := func() []models.PParamUpdate {
-				rows, err := db.Metadata().GetPParamUpdates(epoch, nil)
+				rows, err := seedDB(t, db).GetPParamUpdates(epoch, nil)
 				require.NoError(t, err)
 				return rows
 			}
@@ -300,13 +300,15 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 				pp := ec.pparams
 				before, err := cbor.Encode(pp)
 				require.NoError(t, err)
-				require.NoError(t, db.ApplyPParamUpdates(
+				pp, _, err = ls.ledgerDB().ComputeAndApplyPParamUpdates(
 					context.Background(),
-					0, submission+1, ec.desc.Id, quorum, &pp,
+					0, submission+1, ec.desc.Id, quorum, pp,
 					ec.desc.DecodePParamsUpdateFunc,
 					ec.desc.PParamsUpdateFunc,
+					ec.desc.ParamUpdateHasPlutusV2CostModelFunc,
 					nil,
-				))
+				)
+				require.NoError(t, err)
 				after, err := cbor.Encode(pp)
 				require.NoError(t, err)
 				return !bytes.Equal(before, after)
@@ -392,13 +394,7 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 			for _, key := range fabricated {
 				require.NoError(
 					t,
-					db.SetPParamUpdate(
-						key[:],
-						updateCbor,
-						start,
-						unvalidated,
-						nil,
-					),
+					fxSeedPParamUpdate(t, db, key[:], updateCbor, start, unvalidated),
 				)
 			}
 			require.True(t, enactsFromStore(unvalidated))

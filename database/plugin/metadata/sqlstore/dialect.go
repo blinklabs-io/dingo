@@ -28,6 +28,8 @@ import (
 // behind this interface.
 type Dialect interface {
 	Name() string
+	// SupportsReturning reports whether UPDATE and INSERT accept RETURNING.
+	SupportsReturning() bool
 	Rebind(string) string
 	QuoteIdentifier(string) string
 	ParameterLimit() int
@@ -325,7 +327,7 @@ func SQLiteDialect() Dialect {
 			"PRAGMA synchronous = NORMAL",
 			"PRAGMA cache_size = -50000",
 			"PRAGMA temp_store = MEMORY",
-			"PRAGMA threads = 0",
+			"PRAGMA threads = 4",
 			"PRAGMA wal_autocheckpoint = 0",
 		),
 		analyze: execStatements("ANALYZE"),
@@ -482,6 +484,12 @@ func rebindPostgres(query string) string {
 		}
 	}
 	return result.String()
+}
+
+// SupportsReturning reports whether UPDATE and INSERT accept a RETURNING
+// clause.
+func (d dialect) SupportsReturning() bool {
+	return d.name != "mysql"
 }
 
 // sqliteAnalysisLimit is the rows per index a bounded ANALYZE samples.

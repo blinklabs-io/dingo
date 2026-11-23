@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -40,7 +39,7 @@ func (f *hardForkRatifyFixture) reloadProposal(
 	t *testing.T,
 ) *models.GovernanceProposal {
 	t.Helper()
-	loaded, err := f.db.GetGovernanceProposal(context.Background(),
+	loaded, err := seedDB(t, f.db).GetGovernanceProposal(context.Background(),
 		f.proposal.TxHash, f.proposal.ActionIndex, nil,
 	)
 	require.NoError(t, err)
@@ -145,9 +144,10 @@ func newHardForkRatifyLiveStakeFixture(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	OpenLiveSetForTest(t, db)
 
 	currentEpoch := newTestEpoch(741, 74_100, 100, eras.ConwayEraDesc.Id)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		currentEpoch.StartSlot,
 		currentEpoch.EpochId,
 		currentEpoch.Nonce,
@@ -172,19 +172,18 @@ func newHardForkRatifyLiveStakeFixture(
 
 	coldCredential := repeatByte(28, 0xD1)
 	hotCredential := repeatByte(28, 0xD2)
-	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+	require.NoError(t, seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: 1000,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, coldCredential, hotCredential, 1, 1)
-	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
+	committeeSeedAuthorization(
+		t, db,
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(coldCredential)},
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(hotCredential)},
+		1, 1,
+	)
 
 	action := &lcommon.HardForkInitiationGovAction{Type: 1}
 	action.ProtocolVersion.Major = 10
@@ -205,19 +204,19 @@ INSERT INTO auth_committee_hot (
 		GovActionCbor: actionCbor,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
-	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := seedDB(t, db).GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCredential,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: []byte(hfrLiveYesPool),
@@ -237,6 +236,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	// Wire the authoritative persist hook, matching production, but not the
 	// SNAP-point fast-path stake hook: this synthetic fixture seeds
@@ -244,13 +244,9 @@ INSERT INTO auth_committee_hot (
 	// processing, so the live reward aggregate ComputeEpochBoundarySnapshot's
 	// fast path reads is empty here even though the historical
 	// reconstruction both CaptureEpochBoundarySnapshot and
-	// CurrentBoundarySPOStakeRows fall back to is not. That fallback path is
-	// exactly what a real node also uses whenever the fast path is unset or
-	// fails (TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred), so
-	// this is still a realistic, supported configuration -- not a
-	// fixture-only shortcut.
+	// CurrentBoundarySPOStakeRows fall back to is not.
 	snapshotMgr := snapshot.NewManager(
-		dbadapter.New(db),
+		ls.LedgerDB(),
 		newTestEventBus(t, nil),
 		nil,
 	)
@@ -288,8 +284,8 @@ INSERT INTO auth_committee_hot (
 
 // seedLiveDelegatedStake registers a pool with one delegator holding amount
 // (in whole ADA-equivalent units matching the fixture's 10_000-unit ratio
-// scale) as live Pool/Account/UTxO state, matching how a normal sync
-// populates the tables the SNAP-point calculator reads.
+// scale) as live pool, account and output state in db's open LedgerDB set,
+// which the SNAP-point calculator reads.
 func seedLiveDelegatedStake(
 	t *testing.T,
 	db *database.Database,
@@ -303,7 +299,7 @@ func seedLiveDelegatedStake(
 	}
 	stakingKey = stakingKey[:28]
 
-	require.NoError(t, db.ImportPool(context.Background(), nil, &models.Pool{
+	require.NoError(t, fxImportPool(t, db, context.Background(), nil, &models.Pool{
 		PoolKeyHash: []byte(poolKeyHash),
 		VrfKeyHash:  make([]byte, 32),
 		Pledge:      1_000_000,
@@ -317,19 +313,16 @@ func seedLiveDelegatedStake(
 		Margin:      &types.Rat{Rat: big.NewRat(1, 100)},
 		VrfKeyHash:  make([]byte, 32),
 	}))
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: stakingKey,
 		Pool:       []byte(poolKeyHash),
 		AddedSlot:  74_100,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       repeatByte(32, poolKeyHash[len(poolKeyHash)-1]),
-		OutputIdx:  0,
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(amount),
-		AddedSlot:  74_100,
-	}))
+	txID := repeatByte(32, poolKeyHash[len(poolKeyHash)-1])
+	ls := seedLedgerOf(db)
+	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	seedTestStakedOutput(t, ls, txID, 0, stakingKey, amount)
 }
 
 // TestHardForkInitiation_RatifiesFromLiveStakeWithHookWired proves the

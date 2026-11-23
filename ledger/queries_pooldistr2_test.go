@@ -62,6 +62,7 @@ func newPoolDistr2Ledger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	attachQueryLiveUtxoSet(t, ls, db)
 	ls.publishSnapshotsLocked()
 	return ls
@@ -78,28 +79,25 @@ func seedPoolDistr2Fixture(
 	snapshotEpoch uint64,
 ) lcommon.PoolKeyHash {
 	t.Helper()
+	// The set is opened first: pool and snapshot rows a fixture leaves in
+	// the metadata store reach the set only beside the epoch rows a real
+	// store keeps with them.
+	OpenLiveSetForTest(t, db)
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(stake),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  vrfKeyHash,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        snapshotEpoch,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(stake),
+		CapturedSlot: 1,
+	}))
 	return pkh
 }
 
@@ -133,7 +131,7 @@ func decodePoolDistr2Result(
 func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	vrfA := make([]byte, 32)
 	for i := range vrfA {
@@ -222,7 +220,7 @@ func poolDistr2QueryFor(
 func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	vrfA := make([]byte, 32)
 	for i := range vrfA {
@@ -281,7 +279,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	vrfA := make([]byte, 32)
 	for i := range vrfA {
@@ -322,7 +320,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
@@ -357,7 +355,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	orphan := make([]byte, 28)
 	for i := range orphan {
@@ -365,16 +363,13 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 	}
 	orphanPkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(orphan))
 	// Stake in the snapshot, but no pool or registration row to match it.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        0,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  orphanPkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(5_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  orphanPkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(5_000_000),
+		CapturedSlot: 1,
+	}))
 
 	healthy := make([]byte, 28)
 	for i := range healthy {
@@ -427,7 +422,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	staleVrf := make([]byte, 32)
 	for i := range staleVrf {
@@ -445,27 +440,20 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	// The pool row keeps the superseded key; the registration carries the one
 	// in force.
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: staleVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  currentVrf,
-			AddedSlot:   2,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        0,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(1_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: staleVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  currentVrf,
+		AddedSlot:   2,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(1_000_000),
+		CapturedSlot: 1,
+	}))
 
 	ls := newPoolDistr2Ledger(t, db)
 
@@ -518,30 +506,23 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		supersededVrf[i] = 0x01
 	}
 	require.NotEqual(t, supersededVrf, acceptedVrfHash.Bytes())
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: supersededVrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  acceptedVrfHash.Bytes(),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: supersededVrf}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  acceptedVrfHash.Bytes(),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 
 	// Save the mark snapshot used by epoch 5 before validation. The non-zero
 	// capture slot forces the snapshot-aligned historical lookup.
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        4,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(2_000_000),
-			CapturedSlot: 4_000_100,
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        4,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(2_000_000),
+		CapturedSlot: 4_000_100,
+	}))
 
 	// The premise: this block passes the validator. Whatever key that took is
 	// the key an operator's schedule has to be computed against.
@@ -551,16 +532,13 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		"fixture must be a block the validator accepts",
 	)
 
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        0,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(2_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(2_000_000),
+		CapturedSlot: 1,
+	}))
 
 	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
@@ -595,7 +573,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	const (
 		epochStart  uint64 = 5000
@@ -624,18 +602,15 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	pkh := seedPoolDistr2Fixture(
 		t, db, poolKey, vrfKey, 3_000_000, txnSnapshot,
 	)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        staleSnapshot,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(7_000_000),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        staleSnapshot,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(7_000_000),
+		CapturedSlot: 1,
+	}))
 
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart,        // slot
 		txnEpoch,          // epoch
 		nil,               // nonce
@@ -703,7 +678,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	vrfA := make([]byte, 32)
 	for i := range vrfA {
@@ -728,7 +703,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	// What rotation writes beside the rows: the same total, marked ready, which
 	// is what makes GetTotalActiveStake prefer it over summing.
-	require.NoError(t, db.Metadata().SaveEpochSummary(
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(
 		&models.EpochSummary{
 			Epoch:            snapshotEpoch,
 			TotalActiveStake: dbtypes.Uint64(4_000_000),
@@ -806,7 +781,7 @@ func poolDistr2ExpectedBody() []byte {
 
 func seedPoolDistr2SinglePool(t *testing.T) *LedgerState {
 	t.Helper()
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	seedPoolDistr2Fixture(
 		t,
 		db,
@@ -877,14 +852,18 @@ func TestQueryShelleyStakeDistribution2_ViaGetCBORBytes(t *testing.T) {
 	t.Parallel()
 
 	ls := seedPoolDistr2SinglePool(t)
-	seedLiveStakeFixture(
-		t,
-		ls.db,
-		bytes.Repeat([]byte{0x11}, 28),
-		bytes.Repeat([]byte{0xAA}, 32),
-		3_000_000,
-		1,
-	)
+	pool := bytes.Repeat([]byte{0x11}, 28)
+	require.NoError(t, seedCreateAccount(
+		t, ls.db, t.Context(), nil, &models.Account{
+			StakingKey: pool,
+			Pool:       pool,
+			AddedSlot:  1,
+			Active:     true,
+		},
+	))
+	txID := make([]byte, 32)
+	copy(txID, pool)
+	seedTestStakedOutput(t, ls, txID, 0, pool, 3_000_000)
 	seedLiveTip(t, ls)
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{

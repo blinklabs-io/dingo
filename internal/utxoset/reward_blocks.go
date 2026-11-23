@@ -57,7 +57,22 @@ func (s *Set) ensureRewardBlocks(
 	if err != nil {
 		return fmt.Errorf("utxoset: read reward block counts: %w", err)
 	}
-	err = s.store.LoadRewardBlocks(func(put func(k, v []byte) error) error {
+	return s.loadRewardBlocks(s.store.LoadRewardBlocks, epochs)
+}
+
+// ReplaceRewardBlocks replaces the block counts and fees the set holds with
+// the ones of epochs, which a ledger-state import computes.
+func (s *Set) ReplaceRewardBlocks(
+	epochs map[uint64]ledger.RewardEpochBlocks,
+) error {
+	return s.loadRewardBlocks(s.store.ReplaceRewardBlocks, epochs)
+}
+
+func (s *Set) loadRewardBlocks(
+	load func(feed func(put func(k, v []byte) error) error) error,
+	epochs map[uint64]ledger.RewardEpochBlocks,
+) error {
+	err := load(func(put func(k, v []byte) error) error {
 		for epoch, e := range epochs {
 			if e.CountsKnown {
 				err := put(

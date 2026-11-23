@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -139,23 +138,14 @@ func (f *forgeRevalidationFixture) seedUtxo(
 		OutputAddress: f.address,
 		OutputAmount:  value,
 	}
-	require.NoError(t, f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId:       txId,
-			OutputIdx:  0,
-			PaymentKey: f.address.PaymentKeyHash().Bytes(),
-			AddedSlot:  1,
-			Amount:     dbtypes.Uint64(value),
-		}); err != nil {
-			return err
-		}
-		encoded, err := cbor.Encode(output)
-		if err != nil {
-			return err
-		}
-		return f.db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
-	}))
-	attachTestLiveSet(t, f.ls)
+	encoded, err := cbor.Encode(output)
+	require.NoError(t, err)
+	require.NoError(t, f.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txId, Idx: 0},
+			Cbor: encoded,
+		}},
+	}}))
 	return shelley.ShelleyTransactionInput{
 		TxId:        lcommon.NewBlake2b256(txId),
 		OutputIndex: 0,
@@ -287,13 +277,12 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 		f := newForgeRevalidationFixture(t)
 		in := f.seedUtxo(t, value)
 		queued := f.pendingSpend(t, in, value, fee, f.key)
-		require.NoError(t, f.db.MarkUtxosDeletedAtSlot(
-			context.Background(),
+		require.NoError(t, f.ls.config.UtxoSet.ApplyUtxoChanges(
 			nil,
-			[]dbtypes.UtxoKey{{TxId: in.TxId.Bytes(), OutputIdx: 0}},
-			2,
+			[]UtxoEvent{{Removed: []models.UtxoId{{
+				Hash: in.TxId.Bytes(), Idx: 0,
+			}}}},
 		))
-		attachTestLiveSet(t, f.ls)
 		require.Empty(t, f.forge(t, queued))
 		require.Empty(t, f.mempool.removed)
 	})

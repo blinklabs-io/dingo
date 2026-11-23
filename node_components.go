@@ -274,8 +274,8 @@ func (n *Node) configureSnapshotManager() error {
 	)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
-	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
-	// only the event-driven fallback capture.
+	// Set before CaptureGenesisSnapshot/sync; with a nil hook (never set) no
+	// mark snapshot is captured.
 	// The stake read runs at the SNAP point (after MIR and before POOLREAP/
 	// enactment) and the row write at the end of the rollover, both inside the
 	// same transaction.

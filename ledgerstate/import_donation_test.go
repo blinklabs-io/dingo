@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
@@ -108,22 +109,20 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 			)
 			require.NoError(t, err)
 			t.Cleanup(func() { dbtest.CloseDatabase(db) })
-			meta := db.Metadata()
+			meta := ledgerDBFor(t, db)
 			require.NoError(t, meta.AddNetworkDonation(
 				priorSlot, epoch-1, 11, nil,
 			))
 			require.NoError(t, meta.AddNetworkDonation(
 				localSlot, epoch, 22, nil,
 			))
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
 
 			nonce := make([]byte, 32)
 			state := &RawLedgerState{
 				Epoch:               epoch,
 				Donation:            tc.donation,
-				EraIndex:            EraConway,
-				EraBounds:           make([]EraBound, EraConway+1),
+				EraIndex:            EraBabbage,
+				EraBounds:           make([]EraBound, EraBabbage+1),
 				EpochNonce:          nonce,
 				EvolvingNonce:       nonce,
 				CandidateNonce:      nonce,
@@ -133,42 +132,44 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 					BlockHash: make([]byte, 32),
 				},
 			}
+			// A catch-up keeps the set's families, so the rows local
+			// replay wrote before it are there to replace.
 			cfg := ImportConfig{
-				UtxoSet:  importSetFor(t, db),
-				Database: db,
-				Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-				State:    state,
+				Reconcile: true,
+				UtxoSet:   importSetFor(t, db),
+				Database:  db,
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				State:     state,
 				EpochLength: func(uint) (uint, uint, error) {
 					return 1, 1_000, nil
 				},
 			}
 			// Twice, as a resumed import re-runs the sweep.
 			for range 2 {
-				require.NoError(t, ImportLedgerState(
+				require.NoError(t, importWholeState(
+					t,
 					context.Background(), cfg,
 				))
 				sum, err := meta.SumNetworkDonationsForEpoch(epoch, nil)
 				require.NoError(t, err)
 				require.Equal(t, tc.want, sum,
 					"the anchor epoch's donations must be the snapshot's")
-				var count int
-				require.NoError(t, raw.QueryRow(
-					"SELECT COUNT(*) FROM network_donation WHERE epoch = ?",
-					epoch,
-				).Scan(&count))
+				rows, err := meta.ListNetworkDonations(nil)
+				require.NoError(t, err)
+				var anchor []models.NetworkDonation
+				for _, r := range rows {
+					if r.Epoch == epoch {
+						anchor = append(anchor, r)
+					}
+				}
 				if tc.want == 0 {
-					require.Zero(t, count,
+					require.Empty(t, anchor,
 						"zero snapshot donations must leave no anchor row")
 				} else {
-					require.Equal(t, 1, count,
+					require.Len(t, anchor, 1,
 						"the snapshot donation must be stored as one row")
-					var slot, amount int64
-					require.NoError(t, raw.QueryRow(
-						"SELECT slot, amount FROM network_donation WHERE epoch = ?",
-						epoch,
-					).Scan(&slot, &amount))
-					require.Equal(t, int64(anchorSlot), slot)
-					require.Equal(t, int64(tc.want), amount)
+					require.Equal(t, anchorSlot, anchor[0].Slot)
+					require.Equal(t, tc.want, anchor[0].Amount)
 				}
 				prior, err := meta.SumNetworkDonationsForEpoch(
 					epoch-1, nil,

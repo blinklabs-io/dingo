@@ -1368,6 +1368,21 @@ type TransactionStore interface {
 		types.Txn,
 	) (int, error)
 
+	// ListMetadataLabelCounts returns the transaction metadata labels in use,
+	// each with the number of transactions carrying it, in numeric label
+	// order (highest first when descending). It skips offset labels and
+	// returns at most limit; a limit of zero or less applies no limit.
+	ListMetadataLabelCounts(
+		int, // limit
+		int, // offset
+		bool, // descending
+		types.Txn,
+	) ([]models.MetadataLabelCount, error)
+
+	// CountMetadataLabels returns the number of distinct transaction
+	// metadata labels in use.
+	CountMetadataLabels(types.Txn) (int, error)
+
 	// SetTransaction stores a transaction with its metadata.
 	SetTransaction(
 		lcommon.Transaction,
@@ -2600,17 +2615,6 @@ type MetadataStore interface {
 	// with canonical account and live-UTxO metadata.
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
-	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
-	// stake snapshots or Mark reward metadata use an older calculation
-	// version. Such snapshots cannot safely be recreated from a pruned database.
-	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
-
-	// StaleConsensusStakeSnapshotEpochs returns the distinct epochs
-	// StaleConsensusStakeSnapshotsExist's stale rows belong to, for
-	// diagnostics only -- so the operator-facing error naming a rebootstrap
-	// requirement can name exactly which epochs are affected.
-	StaleConsensusStakeSnapshotEpochs(types.Txn) ([]uint64, error)
-
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
 
@@ -3150,62 +3154,12 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
-	SaveRewardLikelihoodState(
-		*models.RewardLikelihoodState,
-		[]*models.RewardPoolLikelihood,
-		types.Txn,
-	) error
-
-	GetRewardLikelihoodStateBeforeEpoch(
-		uint64,
-		types.Txn,
-	) (*models.RewardLikelihoodState, error)
-
-	GetRewardLikelihoodStateAtSlot(
-		uint64,
-		types.Txn,
-	) (*models.RewardLikelihoodState, error)
-
-	GetRewardPoolLikelihoods(
-		uint64,
-		types.Txn,
-	) ([]*models.RewardPoolLikelihood, error)
-
 	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
 	// overwriting any existing row for the (epoch, snapshot_type) pair
 	// (including its authoritative flag). Used by the authoritative
 	// epoch-rollover capture, which must always win over a fallback row.
 	SaveRewardSnapshot(
 		*models.RewardSnapshot,
-		types.Txn,
-	) error
-
-	// ClaimFallbackRewardSnapshot atomically reserves the (epoch, snapshot_type)
-	// reward snapshot marker for a fallback (non-authoritative) capture,
-	// returning false when an authoritative snapshot already occupies it so the
-	// caller abandons the fallback rather than overwriting the authoritative
-	// row. See rewardstate.ClaimFallbackSnapshot.
-	ClaimFallbackRewardSnapshot(
-		*models.RewardSnapshot,
-		types.Txn,
-	) (bool, error)
-
-	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that cannot
-	// persist reward inputs against the authoritative epoch-rollover capture.
-	// It returns proceed=false when an authoritative row already exists. A
-	// non-zero guard ID identifies a temporary row that the caller must delete
-	// in the same transaction before commit.
-	ClaimFallbackRewardSnapshotGuard(
-		uint64, // epoch
-		string, // snapshotType
-		types.Txn,
-	) (bool, uint, error)
-
-	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
-	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
-	// that claimed the guard.
-	ReleaseFallbackRewardSnapshotGuard(
-		uint, // guardID
 		types.Txn,
 	) error
 
@@ -3806,13 +3760,6 @@ type PlannerStatsPresenceChecker interface {
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
-
-// DrainedFamilyResetter is the optional capability a metadata store offers to
-// forget every drained family, for an import that writes their rows again.
-// SetDrainedFamilies only widens, so it cannot lift the mask.
-type DrainedFamilyResetter interface {
-	ResetDrainedFamilies()
-}
 
 // DrainedFamilyAware is the optional capability a metadata store offers to
 // stop writing, rolling back and pruning the tables of drained ledger-state

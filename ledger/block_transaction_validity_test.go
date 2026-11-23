@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -178,18 +177,6 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				},
 			}
 
-			require.NoError(
-				t,
-				db.CreateUtxo(context.Background(), nil, &models.Utxo{
-					TxId: regularInputID, OutputIdx: 0, AddedSlot: 1,
-				}),
-			)
-			require.NoError(
-				t,
-				db.CreateUtxo(context.Background(), nil, &models.Utxo{
-					TxId: collateralInputID, OutputIdx: 0, AddedSlot: 1,
-				}),
-			)
 			initialTip := ochainsync.Tip{Point: ocommon.Point{
 				Slot: 1, Hash: []byte("unchanged-tip"),
 			}}
@@ -233,6 +220,9 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				},
 				currentEra: testEra,
 			}
+			attachTestLiveSet(t, ls)
+			seedTestLiveOutput(t, ls, regularInputID, 0, 5_000_000)
+			seedTestLiveOutput(t, ls, collateralInputID, 0, 5_000_000)
 			block := &validityOutcomeTestBlock{
 				header: &gdijkstra.DijkstraBlockHeader{
 					BabbageBlockHeader: babbage.BabbageBlockHeader{
@@ -273,44 +263,41 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 			require.True(t, phase1Reached)
 			require.True(t, phase2Reached)
 
-			regular, err := db.Metadata().
-				GetUtxoIncludingSpent(regularInputID, 0, nil)
-			require.NoError(t, err)
-			collateral, err := db.Metadata().
-				GetUtxoIncludingSpent(collateralInputID, 0, nil)
-			require.NoError(t, err)
-			outputRow, err := db.Metadata().
-				GetUtxoIncludingSpent(tx.Hash().Bytes(), 0, nil)
-			require.NoError(t, err)
-			returnRow, err := db.Metadata().
-				GetUtxoIncludingSpent(tx.Hash().Bytes(), 1, nil)
-			require.NoError(t, err)
+			live := func(txID []byte, index uint32) bool {
+				_, ok, err := ls.config.UtxoSet.(UtxoSetReader).Get(txID, index)
+				require.NoError(t, err)
+				return ok
+			}
+			regularLive := live(regularInputID, 0)
+			collateralLive := live(collateralInputID, 0)
+			outputLive := live(tx.Hash().Bytes(), 0)
+			returnLive := live(tx.Hash().Bytes(), 1)
 			tip, err := db.GetTip(nil)
 			require.NoError(t, err)
 
 			mismatch := tt.declaredValid == tt.phase2Fails
 			if mismatch {
 				require.Error(t, processErr)
-				require.Zero(t, regular.DeletedSlot)
-				require.Zero(t, collateral.DeletedSlot)
-				require.Nil(t, outputRow)
-				require.Nil(t, returnRow)
+				require.True(t, regularLive)
+				require.True(t, collateralLive)
+				require.False(t, outputLive)
+				require.False(t, returnLive)
 				require.Equal(t, initialTip, tip)
 				return
 			}
 			require.NoError(t, processErr)
 			require.Equal(t, initialTip, tip)
 			if tt.declaredValid {
-				require.Equal(t, uint64(10), regular.DeletedSlot)
-				require.Zero(t, collateral.DeletedSlot)
-				require.NotNil(t, outputRow)
-				require.Nil(t, returnRow)
+				require.False(t, regularLive)
+				require.True(t, collateralLive)
+				require.True(t, outputLive)
+				require.False(t, returnLive)
 				return
 			}
-			require.Zero(t, regular.DeletedSlot)
-			require.Equal(t, uint64(10), collateral.DeletedSlot)
-			require.Nil(t, outputRow)
-			require.NotNil(t, returnRow)
+			require.True(t, regularLive)
+			require.False(t, collateralLive)
+			require.False(t, outputLive)
+			require.True(t, returnLive)
 		})
 	}
 }
@@ -391,6 +378,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				},
 				currentEra: testEra,
 			}
+			attachTestLiveSet(t, ls)
 			block := &validityOutcomeTestBlock{
 				header: &gdijkstra.DijkstraBlockHeader{
 					BabbageBlockHeader: babbage.BabbageBlockHeader{
@@ -498,6 +486,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 				config:     LedgerStateConfig{Logger: testLogger()},
 				currentEra: testEra,
 			}
+			attachTestLiveSet(t, ls)
 			block := &validityOutcomeTestBlock{
 				header: &byron.ByronMainBlockHeader{},
 				txs:    []lcommon.Transaction{tx},

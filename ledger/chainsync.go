@@ -10472,8 +10472,8 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// new epoch row is persisted later in this transaction; the stamp and
 	// durable marker still commit or roll back atomically with it.
 	if err := timePhase(
-		currentEpoch.EpochId+1, "inactivity_activation", func() error {
-			return ls.activateDelegatorInactivityIfNeeded(ctx,
+		currentEpoch.EpochId+1, "inactivity_activation", func() error { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+			return ls.activateDelegatorInactivityIfNeeded(
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -10536,9 +10536,8 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	}
 	hardForkHere := majorVersionChanges(currentPParams, govOut.UpdatedPParams)
 	if hardForkHere && snapDeferred {
-		// The SNAP-point capture registered above would otherwise stop the
-		// epoch-transition fallback when this boundary's own capture does not
-		// persist.
+		// This boundary captures its mark snapshot itself, so the SNAP-point
+		// capture registered above is not written.
 		ls.discardDeferredBoundarySnapshot(currentEpoch.EpochId + 1)
 		snapDeferred = false
 	}
@@ -10868,9 +10867,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	default:
 		if err := timePhase(
 			currentEpoch.EpochId+1, "snap_persist", func() error {
-				return ls.captureEpochBoundarySnapshot(ctx,
-					txn, currentEpoch, result,
-				)
+				return ls.captureEpochBoundarySnapshot(txn, currentEpoch, result)
 			},
 		); err != nil {
 			return nil, err
@@ -10919,10 +10916,9 @@ func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
 // prevEpoch.EpochId+1 starting at boundarySlot) and matches the event the
 // persist half builds from that record.
 //
-// A failure is isolated with a savepoint so it cannot poison the rollover
-// transaction on backends that abort a transaction on SQL error. The persist
-// half then uses the boundary-aware historical reconstruction; load mode also
-// records the failure so an incomplete capture is surfaced to the operator.
+// A failed read fails the rollover: the mark distribution has no other
+// source, so the boundary transaction is abandoned and the pipeline retries
+// it.
 func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	txn ledgerdb.Txn,
 	prevEpoch models.Epoch,
@@ -10941,43 +10937,11 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	}
 	evt.ProtocolVersion = protocolVersion
 
-	const savepoint = "epoch_boundary_snapshot_stake"
-	if err := txn.SavePoint(savepoint); err != nil {
-		ls.config.Logger.Warn(
-			"snap-point stake savepoint unavailable; deferring stake read to snapshot persist",
-			"error",
-			err,
-			"epoch",
-			evt.NewEpoch,
-			"component",
-			"ledger",
-		)
-		return nil
-	}
 	dropStaged := ls.markUtxoSetBatch(txn)
 	if err := hook(txn, evt); err != nil {
 		dropStaged()
-		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
-			ls.config.Logger.Error(
-				"failed to roll back snap-point stake savepoint",
-				"error", rbErr,
-				"read_error", err,
-				"epoch", evt.NewEpoch,
-				"component", "ledger",
-			)
-			return fmt.Errorf(
-				"roll back snap-point stake savepoint (read error: %w): %w",
-				err, rbErr,
-			)
-		}
-		ls.config.Logger.Warn(
-			"snap-point stake read failed; deferring stake read to snapshot persist",
-			"error",
-			err,
-			"epoch",
-			evt.NewEpoch,
-			"component",
-			"ledger",
+		return fmt.Errorf(
+			"read epoch %d snap-point stake: %w", evt.NewEpoch, err,
 		)
 	}
 	return nil
@@ -11025,13 +10989,6 @@ func (ls *LedgerState) currentBoundarySPOStakeState(
 	return &governance.SPOVotingState{Dist: rows, TotalStake: total}, nil
 }
 
-// captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
-// inside the epoch-rollover write transaction so the mark snapshot commits
-// atomically with the epoch it describes (and the event-driven fallback then
-// skips it). The capture is wrapped in a metadata savepoint: a capture failure
-// rolls back only the snapshot's own writes and lets the rollover proceed,
-// deferring to the fallback rather than wedging the epoch boundary. The capture
-// writes only metadata, so a metadata savepoint fully covers it.
 func (ls *LedgerState) boundarySnapshotEvent(
 	prevEpoch models.Epoch,
 	result *EpochRolloverResult,
@@ -11049,7 +11006,12 @@ func (ls *LedgerState) boundarySnapshotEvent(
 	}
 }
 
-func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
+// captureEpochBoundarySnapshot invokes the snapshot hook inside the
+// epoch-rollover write transaction, so the mark snapshot commits atomically
+// with the epoch it describes. It is the only capture of that snapshot: a
+// failure fails the rollover, because an epoch committed without its mark
+// snapshot has no stake distribution to elect leaders or pay rewards from.
+func (ls *LedgerState) captureEpochBoundarySnapshot(
 	txn ledgerdb.Txn,
 	prevEpoch models.Epoch,
 	result *EpochRolloverResult,
@@ -11058,44 +11020,16 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 	if hook == nil {
 		return nil
 	}
-	newEpoch := result.NewCurrentEpoch
 	evt := ls.boundarySnapshotEvent(prevEpoch, result)
-	const savepoint = "epoch_boundary_snapshot"
-	if err := txn.SavePoint(savepoint); err != nil {
-		ls.config.Logger.Warn(
-			"epoch-boundary snapshot savepoint unavailable; deferring to fallback capture",
-			"error",
-			err,
-			"epoch",
-			newEpoch.EpochId,
-			"component",
-			"ledger",
-		)
-		return nil
-	}
-	dropStaged := ls.markUtxoSetBatch(txn)
 	err := hook(txn, evt)
 	if err == nil {
-		err = ls.takeDeferredRewardStakeInputs(ctx, txn)
+		err = ls.takeDeferredRewardStakeInputs(txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
-		dropStaged()
-		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
-			return fmt.Errorf(
-				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",
-				err,
-				rbErr,
-			)
-		}
-		ls.config.Logger.Warn(
-			"authoritative epoch-boundary snapshot capture failed; deferring to fallback capture",
-			"error",
-			err,
-			"epoch",
-			newEpoch.EpochId,
-			"component",
-			"ledger",
+		return fmt.Errorf(
+			"capture epoch %d boundary snapshot: %w",
+			result.NewCurrentEpoch.EpochId, err,
 		)
 	}
 	return nil

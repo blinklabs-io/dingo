@@ -136,10 +136,9 @@ func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	meta := db.Metadata()
+	db := fxOpenDB(t)
 	// Only pool1 has a current-epoch (mark) snapshot; set/go are empty.
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, 2, ssPool1Hex, oneTrillion),
 		},
@@ -148,8 +147,9 @@ func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 	// Only the mark total exists (2e12, both pools). The set/go epochs have
 	// no data, so their totals are 0 and must be reported as the NonZero
 	// minimum 1 -- matching cardano-node -- giving totals [2e12, 1, 1].
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(2, twoTrillion), nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
@@ -168,9 +168,8 @@ func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 func TestQueryStakeSnapshotAllPools(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	meta := db.Metadata()
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	db := fxOpenDB(t)
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			// mark (current epoch 2)
 			markSnapshot(t, 2, ssPool1Hex, oneTrillion),
@@ -184,9 +183,10 @@ func TestQueryStakeSnapshotAllPools(t *testing.T) {
 	))
 	// mark and set totals are 2e12; the go epoch has no data, so goTotal is
 	// clamped to the NonZero minimum 1, giving totals [2e12, 2e12, 1].
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(1, twoTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(2, twoTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(1, twoTrillion), nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
@@ -208,16 +208,16 @@ func TestQueryStakeSnapshotAllPools(t *testing.T) {
 func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	meta := db.Metadata()
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	db := fxOpenDB(t)
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, 0, ssPool1Hex, oneTrillion),
 		},
 		nil,
 	))
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(0, oneTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(0, oneTrillion), nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 0}},
 	)
@@ -260,20 +260,20 @@ func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
 func TestQueryStakeSnapshotAllPoolsIncludesRetiredPool(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	meta := db.Metadata()
+	db := fxOpenDB(t)
 	// pool1 is active (mark@epoch 2). pool2 retired: it only appears in the
 	// previous epoch's snapshot, which is the current epoch's "set".
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, 2, ssPool1Hex, oneTrillion),
 			markSnapshot(t, 1, ssPool2Hex, oneTrillion),
 		},
 		nil,
 	))
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(1, oneTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(2, twoTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(1, oneTrillion), nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
@@ -323,8 +323,9 @@ func consensusAtVersion(epoch uint64, major uint) *consensusSnapshot {
 func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(consensusAtVersion(2, 10))
 
 	inner := serialisedInner(t, ls, ssQueryOnePoolHex)
@@ -350,8 +351,9 @@ func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
 func TestQueryStakeSnapshotNonexistentPoolPV11(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(consensusAtVersion(2, 11))
 
 	inner := serialisedInner(t, ls, ssQueryOnePoolHex)
@@ -370,9 +372,8 @@ func TestQueryStakeSnapshotNonexistentPoolPV11(t *testing.T) {
 func TestQueryStakeSnapshotAllPoolsPV11OmitsZeroStake(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	meta := db.Metadata()
-	require.NoError(t, meta.SavePoolStakeSnapshots(
+	db := fxOpenDB(t)
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, 2, ssPool1Hex, oneTrillion), // has stake
 			markSnapshot(
@@ -384,8 +385,9 @@ func TestQueryStakeSnapshotAllPoolsPV11OmitsZeroStake(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, oneTrillion), nil))
+	require.NoError(t, seedDB(t, db).SaveEpochSummary(epochSummary(2, oneTrillion), nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.consensus.Store(consensusAtVersion(2, 11))
 
 	inner := serialisedInner(t, ls, ssQueryAllPoolsHex)

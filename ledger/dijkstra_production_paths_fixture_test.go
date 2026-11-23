@@ -213,7 +213,7 @@ func newPathFixture(
 		if account.script {
 			tag = 1
 		}
-		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    pathStakeKey(account.key),
 			CredentialTag: tag,
 			AddedSlot:     pathOriginSlot,
@@ -389,13 +389,13 @@ func newPathFixture(
 	fillUnsetRats(reflect.ValueOf(f.pparams))
 	pparamsCbor, err := cbor.Encode(f.pparams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 0, 0, eras.DijkstraEraDesc.Id, nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil,
 	))
-	attachTestLiveSet(t, ls)
+	attachTestLedgerDB(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	f.ls = ls
@@ -439,7 +439,7 @@ func (f *pathFixture) storeOriginAndBlock(withBlock bool) {
 		Hash: f.originHash,
 		Type: gledger.BlockTypeDijkstra,
 	}, nil))
-	require.NoError(f.t, f.db.SetBlockNonce(
+	require.NoError(f.t, seedBlockNonce(f.t, f.db,
 		f.originHash,
 		pathOriginSlot,
 		bytes.Repeat([]byte{0xf2}, lcommon.Blake2b256Size),
@@ -604,7 +604,7 @@ func (f *pathFixture) reward(key byte) uint64 {
 // rewardOf is the balance of the key (tag 0) or script (tag 1) account.
 func (f *pathFixture) rewardOf(tag uint8, key byte) uint64 {
 	f.t.Helper()
-	account, err := f.db.GetAccountByCredential(
+	account, err := f.ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		tag,
 		pathStakeKey(key),
@@ -628,11 +628,11 @@ func (f *pathFixture) inputUnspent(index int) bool {
 		}
 	}
 	for _, input := range inputs {
-		utxo, err := f.db.Metadata().GetUtxo(
-			input.Id().Bytes(), input.Index(), nil,
+		_, ok, err := f.ls.config.UtxoSet.(UtxoSetReader).Get(
+			input.Id().Bytes(), input.Index(),
 		)
 		require.NoError(f.t, err)
-		if utxo == nil {
+		if !ok {
 			return false
 		}
 	}
@@ -685,7 +685,7 @@ func (f *pathFixture) registeredAccounts(index int) []pathAccountID {
 // accountPresent reports whether the reward account exists.
 func (f *pathFixture) accountPresent(id pathAccountID) bool {
 	f.t.Helper()
-	_, err := f.db.GetAccountByCredential(
+	_, err := f.ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		uint8(id.tag), id.hash.Bytes(), false, nil,
 	)

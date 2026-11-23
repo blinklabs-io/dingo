@@ -952,7 +952,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"BlockPipelineEnabled",
 		"block-pipeline-enabled",
-		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
+		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default on in core mode except Musashi)",
 	),
 	boolFlag(
 		"BlockPipelineValidateEnabled",
@@ -1434,10 +1434,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
-		// Only gated fields, per provenance's documented contract: this loop
+		// Only tracked fields, per provenance's documented contract: this loop
 		// walks every registered flag, and recording the rest would fill the
 		// map with entries nothing reads.
-		if isGatedField(spec.field) {
+		if isProvenanceField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}

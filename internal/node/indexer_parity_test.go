@@ -299,9 +299,12 @@ const (
 	parityUnfilteredSearch = `{"maxItems":50}`
 )
 
-// normalizeParity removes the two things that differ between a database the
-// released version wrote and one the current code loads from the same chain,
-// neither of which is chain data.
+// normalizeParity removes what differs between a database the released
+// version wrote and one the current code loads from the same chain, none of
+// which is chain data.
+//
+// The clock route reports each node's wall clock when it answers, and the two
+// requests are made one after the other, so its value is dropped.
 //
 // Pool metadata documents are fetched from the network by each node on its
 // own schedule, so everything but the registered hash and URL is dropped.
@@ -324,6 +327,10 @@ func normalizeParity(
 		return body
 	}
 	switch {
+	case path == "/health/clock" || path == "/api/v0/health/clock":
+		if m, ok := v.(map[string]any); ok {
+			delete(m, "server_time")
+		}
 	case strings.SplitN(path, "?", 2)[0] == "/api/v0/pools/extended":
 		if list, ok := v.([]any); ok {
 			for _, row := range list {

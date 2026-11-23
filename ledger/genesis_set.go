@@ -138,6 +138,12 @@ func (ls *LedgerState) stageGenesisPools(
 		if prev != nil {
 			continue
 		}
+		if len(reg.LeiosKeyPublic) > 0 {
+			// The reference ledger registers a genesis pool's key in its
+			// initial epoch.
+			genesisEpoch := uint64(0)
+			reg.LeiosKeyRegistrationEpoch = &genesisEpoch
+		}
 		deposit := poolDeposit
 		ls.stagePool(txn, 0, PoolState{
 			Pool:        bytes.Clone(reg.PoolKeyHash),

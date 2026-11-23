@@ -913,13 +913,14 @@
 # validateHistorical: true
 
 # Decode blocks in the chainsync replay loop with a small parallel worker
-# pool instead of one at a time (default: false). Not consensus-affecting --
-# only changes how CBOR decode work is scheduled, not validation or apply
-# behavior. See ARCHITECTURE.md ("Block Processing Pipeline").
+# pool instead of one at a time (default: true in core mode, false in API mode
+# and on Musashi). Not consensus-affecting -- only changes how CBOR decode work
+# is scheduled, not validation or apply behavior. See ARCHITECTURE.md ("Block
+# Processing Pipeline").
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
-# blockPipelineEnabled: false
+# blockPipelineEnabled: true
 
 # Also validate VRF/KES and OpCert crypto during block-pipeline replay with a
 # parallel worker pool (default: false). Requires blockPipelineEnabled.

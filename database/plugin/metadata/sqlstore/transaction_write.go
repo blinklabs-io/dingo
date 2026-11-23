@@ -1172,6 +1172,7 @@ func (s *Store) setTransactionWithAccumulator(
 		transactionIsNew   bool
 		batchedStakeDeltas []stakeCredentialDelta
 		repairedUtxoIDs    []int64
+		insertedSpends     map[string]spendCacheEntry
 	)
 	err := s.withWriteTransaction(
 		txn,
@@ -1419,6 +1420,9 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return fmt.Errorf("create transaction outputs: %w", err)
 			}
+			insertedSpends = s.insertedSpendEntries(
+				producedModelPtrs, producedInserted,
+			)
 			if batchedAccumulator != nil && s.storageMode == types.StorageModeAPI {
 				for i, created := range producedInserted {
 					if !created {
@@ -1495,6 +1499,27 @@ func (s *Store) setTransactionWithAccumulator(
 				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
+				// Outputs this store inserted are spent by row id; the rest,
+				// and any cached row the update did not find live, go by
+				// reference below.
+				var cachedUpdated map[string]struct{}
+				if cached := s.takeCachedSpends(txn, batch); len(cached) > 0 {
+					var deltas []stakeCredentialDelta
+					cachedUpdated, deltas, err = s.spendCachedRows(
+						ctx, db, cached, point.Slot, transactionID,
+					)
+					if err != nil {
+						return err
+					}
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
+					rest := make([]models.UtxoId, 0, len(batch))
+					for _, ref := range batch {
+						if _, ok := cachedUpdated[utxoIdentityKey(ref.Hash, ref.Idx)]; !ok {
+							rest = append(rest, ref)
+						}
+					}
+					batch = rest
+				}
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
 					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*4)
@@ -1515,7 +1540,7 @@ func (s *Store) setTransactionWithAccumulator(
 					}
 					updated = updatedRows
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
-				} else if s.dialect.Name() == "sqlite" {
+				} else if s.dialect.Name() == "sqlite" && len(batch) == 1 {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
 						u.bindRef(
@@ -1602,7 +1627,8 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if historicalBackfill {
 				if s.dialect.Name() != "sqlite" {
-					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+					// Appended: deltas of outputs spent by row id are already in.
+					refDeltas, err := s.queryUtxoStakeConsumedDeltas(
 						ctx,
 						db,
 						spentRefs,
@@ -1610,6 +1636,9 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
+					consumedStakeDeltas = append(
+						consumedStakeDeltas, refDeltas...,
+					)
 				}
 				// Historical replay defers account-derived fields to the final
 				// rebuild, but it still changes the live UTxO set. Keep its
@@ -1627,7 +1656,8 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 			}
 			if s.dialect.Name() != "sqlite" {
-				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+				// Appended: deltas of outputs spent by row id are already in.
+				refDeltas, err := s.queryUtxoStakeConsumedDeltas(
 					ctx,
 					db,
 					spentRefs,
@@ -1635,6 +1665,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if err != nil {
 					return err
 				}
+				consumedStakeDeltas = append(consumedStakeDeltas, refDeltas...)
 			}
 			// An input this write did not actually spend still names a
 			// credential the full-scan path would have refreshed, so keep it
@@ -1684,6 +1715,9 @@ func (s *Store) setTransactionWithAccumulator(
 		err = fmt.Errorf(
 			"flushing bounded metadata rows: %w", staged.flushErr,
 		)
+	}
+	if err == nil {
+		s.rememberInsertedOutputs(txn, insertedSpends)
 	}
 	if err != nil || batchedAccumulator == nil {
 		return err

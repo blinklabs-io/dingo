@@ -55,6 +55,8 @@ func (l *intersectionLimitLedger) Tip() ochainsync.Tip {
 }
 
 func TestStreamingIntersectionLimit(t *testing.T) {
+	t.Parallel()
+
 	const limit = 2
 	for _, method := range []string{"FollowTip", "WatchTx"} {
 		for _, count := range []int{0, limit - 1, limit, limit + 1} {

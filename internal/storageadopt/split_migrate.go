@@ -534,7 +534,13 @@ func (m *splitMigration) prepareCopy(
 	}
 	// Snapshots whose stake inputs the ledger is still writing are the
 	// writer's to copy once they finish; the copy holds them only in part.
-	pending, err := source.Metadata().GetSyncState(
+	// The source's sync state names them only while it holds the reward
+	// inputs: once they have moved into the LedgerDB the record is there,
+	// and the read is refused rather than answered with none.
+	if _, err := source.EffectiveDrainedFamilies(ctx); err != nil {
+		return err
+	}
+	pending, err := source.GetSyncState(
 		models.RewardStakeInputsPendingKey, nil,
 	)
 	if err != nil {

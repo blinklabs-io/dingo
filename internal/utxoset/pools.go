@@ -46,20 +46,23 @@ type poolRelayEnc struct {
 
 type poolRegEnc struct {
 	cbor.StructAsArray
-	Vrf            []byte
-	Reward         []byte
-	RewardTag      uint8
-	MetadataURL    string
-	MetadataHash   []byte
-	LeiosPublic    []byte
-	LeiosProof     []byte
-	Owners         [][]byte
-	Relays         []poolRelayEnc
-	Pledge         uint64
-	Cost           uint64
-	Margin         string
-	AddedSlot      uint64
-	LeiosKeyEpochs []uint64
+	Vrf          []byte
+	Reward       []byte
+	RewardTag    uint8
+	MetadataURL  string
+	MetadataHash []byte
+	LeiosPublic  []byte
+	LeiosProof   []byte
+	Owners       [][]byte
+	Relays       []poolRelayEnc
+	Pledge       uint64
+	Cost         uint64
+	Margin       string
+	AddedSlot    uint64
+	// LeiosKeyEpochs is the epoch the Leios key was registered in, empty
+	// when it is not known. LeiosAgeUnknown marks a key imported without one.
+	LeiosKeyEpochs  []uint64
+	LeiosAgeUnknown bool
 }
 
 type legacyPoolRegEnc struct {
@@ -79,8 +82,9 @@ type legacyPoolRegEnc struct {
 	AddedSlot    uint64
 }
 
-// The fixed-array encoding grew by appending LeiosKeyEpochs. Accept the old
-// length so a node can restart on a live set written before that field existed.
+// The fixed-array encoding grew by appending LeiosKeyEpochs and
+// LeiosAgeUnknown. Accept the old length so a node can restart on a live set
+// written before those fields existed.
 func (e *poolRegEnc) UnmarshalCBOR(data []byte) error {
 	var fields []cbor.RawMessage
 	if _, err := cbor.Decode(data, &fields); err != nil {
@@ -101,7 +105,7 @@ func (e *poolRegEnc) UnmarshalCBOR(data []byte) error {
 			Margin: legacy.Margin, AddedSlot: legacy.AddedSlot,
 		}
 		return nil
-	case 14:
+	case 15:
 		type currentPoolRegEnc poolRegEnc
 		var current currentPoolRegEnc
 		if _, err := cbor.Decode(data, &current); err != nil {
@@ -142,6 +146,7 @@ func encodePoolReg(r *models.PoolRegistration) []poolRegEnc {
 		MetadataHash: r.MetadataHash, LeiosPublic: r.LeiosKeyPublic,
 		LeiosProof: r.LeiosKeyPossessionProof, Pledge: uint64(r.Pledge),
 		Cost: uint64(r.Cost), AddedSlot: r.AddedSlot,
+		LeiosAgeUnknown: r.LeiosKeyRegistrationAgeUnknown,
 	}
 	if r.LeiosKeyRegistrationEpoch != nil {
 		e.LeiosKeyEpochs = []uint64{*r.LeiosKeyRegistrationEpoch}
@@ -176,6 +181,7 @@ func decodePoolReg(pool []byte, es []poolRegEnc) (*models.PoolRegistration, erro
 		MetadataHash: e.MetadataHash, LeiosKeyPublic: e.LeiosPublic,
 		LeiosKeyPossessionProof: e.LeiosProof, Pledge: types.Uint64(e.Pledge),
 		Cost: types.Uint64(e.Cost), AddedSlot: e.AddedSlot,
+		LeiosKeyRegistrationAgeUnknown: e.LeiosAgeUnknown,
 	}
 	if len(e.LeiosKeyEpochs) > 0 {
 		r.LeiosKeyRegistrationEpoch = &e.LeiosKeyEpochs[0]
@@ -302,16 +308,10 @@ func (s *Set) ensurePools(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	}
 	err = s.store.LoadPools(func(put func(k, v []byte) error) error {
 		for _, st := range states {
-			if s.merge != nil && s.mergeOverDrained.Load() {
-				if err := s.mergeHeldPool(&st, epoch); err != nil {
-					return err
-				}
-			}
 			v, err := encodePoolState(st)
 			if err != nil {
 				return err
 			}
-			s.merge.notePool(poolKey(st.Pool))
 			if err := put(poolKey(st.Pool), v); err != nil {
 				return err
 			}
@@ -322,35 +322,6 @@ func (s *Set) ensurePools(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return fmt.Errorf("utxoset: load pools: %w", err)
 	}
 	s.logger.Info("loaded pools into the live UTxO set", "pools", len(states))
-	return nil
-}
-
-// mergeHeldPool applies a snapshot's registration of a pool the set already
-// holds as the metadata store's import does over the history a drain removed
-// from it: the
-// registration in force at the start of the current epoch stays in effect
-// and a newer one waits as the registration for the next boundary. A pool the
-// set does not hold, or one the snapshot's registration does not supersede,
-// takes the snapshot's state as is.
-func (s *Set) mergeHeldPool(st *ledger.PoolState, epoch models.Epoch) error {
-	held, err := s.PoolState(st.Pool)
-	if err != nil {
-		return err
-	}
-	if held == nil || held.Params == nil || st.Params == nil ||
-		st.Params.AddedSlot <= held.Params.AddedSlot ||
-		st.Params.AddedSlot < epoch.StartSlot {
-		return nil
-	}
-	base := held.Params
-	if held.Future != nil && held.Future.AddedSlot < epoch.StartSlot &&
-		held.Future.AddedSlot < st.Params.AddedSlot {
-		base = held.Future
-	}
-	if st.Future == nil {
-		st.Future = st.Params
-	}
-	st.Params = base
 	return nil
 }
 

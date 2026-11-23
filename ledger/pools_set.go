@@ -85,6 +85,8 @@ func CleanPoolRegistration(
 		Pledge:                     r.Pledge,
 		Cost:                       r.Cost,
 		AddedSlot:                  r.AddedSlot,
+
+		LeiosKeyRegistrationAgeUnknown: r.LeiosKeyRegistrationAgeUnknown,
 	}
 	for _, o := range r.Owners {
 		c.Owners = append(
@@ -121,7 +123,7 @@ func (ls *LedgerState) poolReader(txn ledgerdb.Txn) PoolReader {
 }
 
 // poolServing returns the pool reader when pool reads are answered from the
-// set, or nil when they stay on the metadata store.
+// set, or nil when the set does not serve them.
 func (ls *LedgerState) poolServing(txn ledgerdb.Txn) PoolReader {
 	r := ls.poolReader(txn)
 	if r == nil || !ls.setServes(&ls.poolsSetLoaded, r.PoolsLoaded) {
@@ -215,6 +217,9 @@ func (ls *LedgerState) stagePoolCertificate(
 		if err != nil {
 			return true, err
 		}
+		if err := ls.stampLeiosKeyRegistration(txn, &reg, prev, effective); err != nil {
+			return true, err
+		}
 		next := PoolState{Pool: bytes.Clone(c.Operator[:])}
 		if prev == nil {
 			next.Params = &reg
@@ -252,6 +257,55 @@ func (ls *LedgerState) stagePoolCertificate(
 		return true, nil
 	}
 	return false, nil
+}
+
+// stampLeiosKeyRegistration records on reg the epoch its Leios key is
+// registered in, as the reference ledger's mkStakePoolState does. A pool that
+// is not registered registers the key in the epoch of the transaction. A
+// registered pool's new parameters are adopted at the next boundary against
+// the key in effect, never against parameters still waiting: the same key and
+// possession proof keep its epoch, unknown included, and any other key is
+// registered in the epoch after the transaction's. The epoch stays unset when
+// the epoch history does not cover effective, the slot the transaction
+// executed in.
+func (ls *LedgerState) stampLeiosKeyRegistration(
+	txn ledgerdb.Txn,
+	reg *models.PoolRegistration,
+	prev *PoolState,
+	effective uint64,
+) error {
+	if len(reg.LeiosKeyPublic) == 0 {
+		return nil
+	}
+	if prev != nil && prev.Params != nil &&
+		len(prev.Params.LeiosKeyPublic) > 0 &&
+		bytes.Equal(prev.Params.LeiosKeyPublic, reg.LeiosKeyPublic) &&
+		bytes.Equal(
+			prev.Params.LeiosKeyPossessionProof,
+			reg.LeiosKeyPossessionProof,
+		) {
+		active := prev.Params
+		if e := active.LeiosKeyRegistrationEpoch; e != nil {
+			epoch := *e
+			reg.LeiosKeyRegistrationEpoch = &epoch
+		}
+		reg.LeiosKeyRegistrationAgeUnknown = active.LeiosKeyRegistrationAgeUnknown
+		return nil
+	}
+	epochs, err := ls.epochRows(txn)
+	if err != nil {
+		return fmt.Errorf("read epochs for Leios key registration: %w", err)
+	}
+	current, ok := epochAt(epochs, effective)
+	if !ok {
+		return nil
+	}
+	epoch := current.EpochId
+	if prev != nil {
+		epoch++
+	}
+	reg.LeiosKeyRegistrationEpoch = &epoch
+	return nil
 }
 
 // poolKeys returns every pool the set holds or the batches txn sees have

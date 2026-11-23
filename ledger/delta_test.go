@@ -300,6 +300,9 @@ func TestLedgerDeltaBatchFlushesStakeBetweenDeltas(t *testing.T) {
 		StorageMode: dbtypes.StorageModeAPI,
 	})
 	require.NoError(t, err)
+	// The set takes over the database before the recorder wraps its store:
+	// the recorder forwards only the writes this test observes.
+	set := OpenLiveSetForTest(t, baseDB)
 	store := &ledgerDeltaBatchStoreRecorder{MetadataStore: baseDB.Metadata()}
 	db, err := database.New(context.Background(), baseDB.Config(), database.Stores{
 		Blob:     baseDB.Blob(),
@@ -315,8 +318,10 @@ func TestLedgerDeltaBatchFlushesStakeBetweenDeltas(t *testing.T) {
 		config: LedgerStateConfig{
 			EventBus: bus,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			UtxoSet:  set,
 		},
 	}
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	first := newTransactionEventTestDelta(t, 31, 0)
 	second := newTransactionEventTestDelta(t, 32, 0)
 	batch := NewLedgerDeltaBatch()
@@ -352,6 +357,7 @@ func TestLedgerDeltaBatchAPIStorageFlushesTransactionMetadata(t *testing.T) {
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	t.Run("commit persists queued metadata", func(t *testing.T) {
 		delta := newTransactionEventTestDelta(t, 21, 0)
@@ -539,6 +545,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -583,7 +590,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 		return delta.processGovernance(context.Background(), ls, tx, 0, txn, nil)
 	}))
 
-	got, err := db.GetGovernanceProposal(
+	got, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(),
 		tx.Hash().Bytes(),
 		0,
@@ -621,7 +628,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepTwo,
 		AddedSlot:     1,
@@ -641,6 +648,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		db:             db,
 		currentPParams: &babbage.BabbageProtocolParameters{ProtocolMajor: 9},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -681,7 +689,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		return tx
 	}
 	apply(delegate(0x41, drepTwo), 2, 0x42)
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(), 0, stakeCredential, true, nil,
 	)
 	require.NoError(t, err)
@@ -705,7 +713,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 	unregister.WithId(bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size))
 	unregister.WithValid(true)
 	apply(unregister, 3, 0x44)
-	account, err = db.GetAccountByCredential(
+	account, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(), 0, stakeCredential, true, nil,
 	)
 	require.NoError(t, err)
@@ -740,6 +748,7 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -794,21 +803,21 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return delta.apply(context.Background(), ls, txn)
 	}))
-	drep, err := db.GetDrepByCredential(
+	drep, err := seedDB(t, db).GetDrepByCredential(
 		context.Background(), 0, drepCredential, true, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
-	storedProposal, err := db.GetGovernanceProposal(
+	storedProposal, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(), tx.Hash().Bytes(), 0, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, storedProposal)
 	require.Equal(t, uint64(100), storedProposal.ProposedEpoch)
 	require.Equal(t, uint64(120), storedProposal.ExpiresEpoch)
-	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
+	dormantEpochs, err := seedDB(t, db).GetDormantDRepEpochs(context.Background(), nil)
 	require.NoError(t, err)
 	require.Zero(t, dormantEpochs)
 }
@@ -823,7 +832,7 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 
 	drepCredential := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
 	proposalHash := bytes.Repeat([]byte{0x62}, lcommon.Blake2b256Size)
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(
 		context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        proposalHash,
@@ -857,6 +866,7 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -912,7 +922,7 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 		return delta.apply(context.Background(), ls, txn)
 	}))
 
-	drep, err := db.GetDrepByCredential(
+	drep, err := seedDB(t, db).GetDrepByCredential(
 		context.Background(), 0, drepCredential, true, nil,
 	)
 	require.NoError(t, err)
@@ -920,15 +930,15 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(123), drep.ExpiryEpoch,
 		"PV9 registration must include the imported dormant epochs after same-transaction vote activity")
-	proposal, err := db.GetGovernanceProposal(
+	proposal, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(), proposalHash, 0, nil,
 	)
 	require.NoError(t, err)
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := seedDB(t, db).GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(models.VoteYes), votes[0].Vote)
-	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
+	dormantEpochs, err := seedDB(t, db).GetDormantDRepEpochs(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), dormantEpochs)
 }
@@ -955,6 +965,7 @@ func TestProcessGovernanceAllowsDRepDeregistrationWithoutConwayParameters(
 		db:           db,
 		currentEpoch: models.Epoch{EpochId: 10},
 	}
+	attachTestLiveSet(t, ls)
 	delta := NewLedgerDelta(
 		ocommon.NewPoint(100, bytes.Repeat([]byte{0x33}, lcommon.Blake2b256Size)),
 		uint(conway.EraIdConway),
@@ -988,6 +999,7 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 			KeyDeposit: uint(keyDeposit),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -1065,27 +1077,22 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 		return delta.apply(context.Background(), ls, txn)
 	}))
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	rows, err := raw.Query(`
-SELECT hex(c.block_hash), sr.deposit_amount
-FROM stake_registration sr
-JOIN certs c ON c.id = sr.certificate_id
-ORDER BY c.cert_index`)
-	require.NoError(t, err)
-	defer rows.Close()
-	var deposits []string
-	for rows.Next() {
-		var blockHash string
-		var deposit string
-		require.NoError(t, rows.Scan(&blockHash, &deposit))
-		require.Equal(t, fmt.Sprintf("%X", point.Hash), blockHash)
-		deposits = append(deposits, deposit)
+	var deposits []uint64
+	for i, cert := range certs {
+		cred := cert.(*lcommon.StakeRegistrationCertificate).StakeCredential
+		history, err := ls.ledgerDB().GetAccountRegistrationHistoryByCredential(
+			context.Background(), 0, cred.Credential[:], 10, 0, "asc", nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, history, 1, "certificate %d", i)
+		require.Equal(t, "registered", history[0].Action)
+		require.Equal(t, point.Hash, history[0].BlockHash)
+		require.NotNil(t, history[0].Deposit, "certificate %d", i)
+		deposits = append(deposits, *history[0].Deposit)
 	}
-	require.NoError(t, rows.Err())
 	require.Len(t, deposits, certCount)
 	firstDeposit := deposits[0]
-	require.Contains(t, []string{"2000000", "4000000"}, firstDeposit)
+	require.Contains(t, []uint64{2_000_000, 4_000_000}, firstDeposit)
 	for i, deposit := range deposits {
 		require.Equal(t, firstDeposit, deposit, "certificate %d", i)
 	}
@@ -1128,6 +1135,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 			ConwayProtocolParameters: previousPParams,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -1137,7 +1145,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -1175,7 +1183,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(
+	drep, err := seedDB(t, db).GetDrepByCredential(
 		context.Background(),
 		0,
 		credentialBytes,
@@ -1197,13 +1205,13 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0x71}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    credentialBytes,
 		AddedSlot:     1,
 		Active:        true,
 	}))
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: 1,
 		Credential:    credentialBytes,
 		AddedSlot:     1,
@@ -1215,7 +1223,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		ExpiresEpoch: 200,
 		AddedSlot:    3,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
 	var actionHash [32]byte
 	copy(actionHash[:], proposalHash)
 	keyVoter := &lcommon.Voter{
@@ -1224,7 +1232,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	}
 	actionID := &lcommon.GovActionId{TransactionId: actionHash, GovActionIdx: 0}
 	updatedSlot := uint64(10)
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 0,
@@ -1233,7 +1241,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		AddedSlot:          updatedSlot,
 		VoteUpdatedSlot:    &updatedSlot,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 1,
@@ -1262,6 +1270,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		currentEpoch:   models.Epoch{EpochId: 10},
 		currentPParams: &pparams,
 	}
+	attachTestLiveSet(t, ls)
 	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0x74}, 32)}
 	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	txn := db.Transaction(context.Background(), true)
@@ -1276,7 +1285,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		)
 	}))
 
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := seedDB(t, db).GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(1), votes[0].VoterCredentialTag,
@@ -1295,7 +1304,7 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 	credentialBytes := bytes.Repeat([]byte{0x75}, lcommon.Blake2b224Size)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    credentialBytes,
 		AddedSlot:     1,
@@ -1307,9 +1316,9 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 		ExpiresEpoch: 200,
 		AddedSlot:    3,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
 	updatedSlot := uint64(10)
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 0,
@@ -1328,6 +1337,7 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 		},
 	})
 	ls := &LedgerState{db: db, currentEpoch: models.Epoch{EpochId: 10}}
+	attachTestLiveSet(t, ls)
 	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	point := ocommon.Point{
 		Slot: 30,
@@ -1341,7 +1351,7 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 		)
 	}))
 
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := seedDB(t, db).GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Empty(t, votes)
 }
@@ -1355,7 +1365,7 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 
 	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
 	stakeCredential := bytes.Repeat([]byte{0x52}, lcommon.Blake2b224Size)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepCredential,
 		AddedSlot:     10,
@@ -1404,6 +1414,7 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	if len(ls.epochCache) == 0 {
 		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
 		ls.currentEra = eras.ConwayEraDesc
@@ -1423,13 +1434,13 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 		return delta.apply(context.Background(), ls, txn)
 	}))
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(), 0, stakeCredential, true, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, drepCredential, account.Drep)
-	activeDrep, err := db.GetDrepByCredential(
+	activeDrep, err := seedDB(t, db).GetDrepByCredential(
 		context.Background(), 0, drepCredential, true, nil,
 	)
 	require.NoError(t, err)
@@ -1604,9 +1615,10 @@ func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
 
 	db := newDonationTestDB(t)
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	maxUint64 := ^uint64(0)
 
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
 	delta := &LedgerDelta{
 		Transactions: []TransactionRecord{
@@ -1622,7 +1634,7 @@ func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "overflows uint64")
 
-	total, err := db.Metadata().SumNetworkDonationsForEpoch(0, nil)
+	total, err := seedDB(t, db).SumNetworkDonationsForEpoch(0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), total, "no donation row recorded on overflow")
 
@@ -1645,6 +1657,7 @@ func TestClosureGovernanceUsesParentEpochBeforeAndAfterRollover(t *testing.T) {
 			db := newTestDB(t)
 			pparams := mockledger.NewMockConwayProtocolParams()
 			ls := &LedgerState{db: db, currentEra: eras.ConwayEraDesc, currentPParams: &pparams}
+			attachTestLiveSet(t, ls)
 			parentEpoch := models.Epoch{EpochId: 5, StartSlot: 900, LengthInSlots: 100, EraId: conway.EraIdConway}
 			ls.currentEpoch = parentEpoch
 			ls.epochCache = []models.Epoch{parentEpoch}
@@ -1672,7 +1685,7 @@ func TestClosureGovernanceUsesParentEpochBeforeAndAfterRollover(t *testing.T) {
 			require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				return delta.processGovernance(t.Context(), ls, tx, 0, txn, nil)
 			}))
-			proposal, err := db.GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
+			proposal, err := seedDB(t, db).GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
 			require.NoError(t, err)
 			require.Equal(t, uint64(5), proposal.ProposedEpoch)
 		})

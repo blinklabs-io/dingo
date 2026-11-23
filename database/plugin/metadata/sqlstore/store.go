@@ -44,6 +44,11 @@ type Config struct {
 	// could point introspection clients at a different database. It is empty
 	// for in-memory SQLite and other backends, and immutable after construction.
 	SQLitePath string
+	// ScratchDir holds temporary files sized by the stored data, such as the
+	// spool the UTxO set digest sorts the live set in. Empty selects the
+	// directory of SQLitePath, or the operating system's temporary directory
+	// when that is empty too.
+	ScratchDir string
 	// SQLiteOverlayInsertRows opts an eager-preparing SQLite provider into
 	// wider overlay INSERTs after transaction-local limit and trigger checks.
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
@@ -161,7 +166,12 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	// spendMu guards spends, the outputs this store inserted that a later
+	// spend can address by row id (see spendCache).
+	spendMu                 sync.Mutex
+	spends                  spendCache
 	sqlitePath              string
+	scratchDir              string
 	sqliteOverlayInsertRows int
 	writeDB                 *sql.DB
 	readDB                  *sql.DB
@@ -185,6 +195,11 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
+
+	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
+	// run of the digest spool, when non-zero. Only tests set it, to make the
+	// spool merge many runs.
+	utxoDigestRunBytes int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
@@ -401,6 +416,7 @@ func New(config Config) (*Store, error) {
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
+		scratchDir:                  config.ScratchDir,
 		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
 		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,
@@ -474,8 +490,10 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	// Like Reset, a restore replaces the on-disk/remote schema and data out
 	// from under any statement prepared before it ran; invalidate the cache
 	// regardless of outcome so a later call always re-prepares against
-	// whatever RestoreFrom actually left behind.
+	// whatever RestoreFrom actually left behind. The restored rows carry
+	// their own ids, so no remembered spend id still names its output.
 	s.closePreparedStatements()
+	s.forgetSpendCache()
 	return err
 }
 
@@ -512,6 +530,8 @@ func (s *Store) Reset(ctx context.Context) error {
 	// whether reset succeeded or failed partway, rather than assume a
 	// partial failure left every cached statement's table intact.
 	s.closePreparedStatements()
+	// The recreated tables restart their id sequences.
+	s.forgetSpendCache()
 	return err
 }
 
@@ -1363,6 +1383,9 @@ type sqlTxn struct {
 	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
 	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
 	overlayAccumulator *transactionBatchAccumulator
+	// spends holds the spend-cache entries of outputs this transaction
+	// inserted; Commit publishes them once the commit succeeds.
+	spends map[string]spendCacheEntry
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1382,7 +1405,10 @@ func (t *sqlTxn) Commit() error {
 	err := t.tx.Commit()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
+	} else if t.owner != nil {
+		t.owner.publishSpendEntries(t.spends)
 	}
+	t.spends = nil
 	for accumulator := range t.batchBefore {
 		accumulator.resetStatement()
 	}
@@ -1404,6 +1430,7 @@ func (t *sqlTxn) Rollback() error {
 	t.finished = true
 	defer t.releaseConnection()
 	t.restoreBatches(t.batchBefore)
+	t.spends = nil
 	t.batchBefore = nil
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
@@ -1474,6 +1501,8 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
+		// Ids inserted after the savepoint are freed for reuse.
+		t.spends = nil
 		t.restoreBatches(t.batchSavepoints[name])
 		for i, savepointName := range slices.Backward(t.savepointOrder) {
 			if savepointName == name {

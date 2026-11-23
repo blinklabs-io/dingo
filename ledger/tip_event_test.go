@@ -84,7 +84,7 @@ func TestBlockBatchCommitPublishesTipEvent(t *testing.T) {
 	t.Cleanup(func() { bus.Unsubscribe(TipEventType, subID) })
 
 	parentTip := ochainsync.Tip{}
-	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(parentTip.Point, nil))
+	fxRollback(t, ls, parentTip.Point)
 	require.NoError(t, ls.db.SetTip(parentTip, nil))
 	ls.currentTip = parentTip
 	ls.currentTipBlockNonce = nil

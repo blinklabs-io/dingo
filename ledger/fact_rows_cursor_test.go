@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -92,10 +93,22 @@ func TestStakeInputPagesSurviveAPruneBetweenPages(t *testing.T) {
 	}
 }
 
-// prunableOutputs serves one account output row per epoch it still holds.
+// prunableOutputs serves one pool and one account output row per epoch it
+// still holds.
 type prunableOutputs struct {
 	RewardDerivedReader
 	epochs []uint64
+}
+
+func (p *prunableOutputs) RewardPoolOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolOutput, error) {
+	if !slices.Contains(p.epochs, epoch) {
+		return nil, nil
+	}
+	return []*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: []byte{byte(epoch)}, CapturedSlot: epoch,
+	}}, nil
 }
 
 func (p *prunableOutputs) RewardAccountOutputRows(
@@ -182,6 +195,64 @@ func TestSetFactPagesResumeAfterTheLastKeyServed(t *testing.T) {
 	// restarted from a guessed position.
 	_, _, err := ls.pageSetFactRows(table, 0, 100, 99, 2, read, nil)
 	require.ErrorIs(t, err, ErrFactCursorLost)
+}
+
+// slottedOutputs serves one pool and one account output row per epoch,
+// captured at the slot given for the epoch, and counts the epochs whose
+// account rows were read.
+type slottedOutputs struct {
+	RewardDerivedReader
+	slots        map[uint64]uint64
+	accountReads atomic.Int64
+}
+
+func (o *slottedOutputs) RewardPoolOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolOutput, error) {
+	return []*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: []byte{byte(epoch)},
+		CapturedSlot: o.slots[epoch],
+	}}, nil
+}
+
+func (o *slottedOutputs) RewardAccountOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardAccountOutput, error) {
+	o.accountReads.Add(1)
+	return []*models.RewardAccountOutput{{
+		Epoch: epoch, StakingKey: []byte{byte(epoch)},
+		CapturedSlot: o.slots[epoch],
+	}}, nil
+}
+
+// An epoch whose pool rows are all outside the range has its account rows
+// neither read nor served, while an epoch inside it, at either bound, still
+// does; the pool copy serves the in-range pool rows.
+func TestRewardOutputFactCopiesSkipEpochsOutsideTheRange(t *testing.T) {
+	t.Parallel()
+	epochs := []uint64{1, 2, 3, 4}
+	outputs := &slottedOutputs{slots: map[uint64]uint64{
+		1: 50, 2: 100, 3: 150, 4: 200,
+	}}
+
+	page, cursor, err := accountOutputPageOver(outputs, epochs, 100, 150, 0, 100)
+	require.NoError(t, err)
+	require.Zero(t, cursor)
+	var served []int64
+	for _, r := range page.Rows {
+		served = append(served, r[3].(int64))
+	}
+	require.Equal(t, []int64{2, 3}, served)
+	require.EqualValues(t, 2, outputs.accountReads.Load(),
+		"account rows of epochs outside the range were read")
+
+	rows, err := poolOutputRowsOver(outputs, epochs, 100, 150)
+	require.NoError(t, err)
+	served = nil
+	for _, r := range rows.Rows {
+		served = append(served, r[2].(int64))
+	}
+	require.Equal(t, []int64{2, 3}, served)
 }
 
 // slotBoundedInputs serves epochs 1 to 3, each with one pool and stake rows
