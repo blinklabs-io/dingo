@@ -665,14 +665,10 @@ sample is still available:
 The runner compiles the host-side tests before starting the nodes so a cold
 build cannot consume the bootstrap sampling window.
 
-`GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
-needs beyond the ones already used elsewhere in this harness) did not have
-server-side support in Dingo before this scenario — they were part of the
-`// TODO (#394)` block in `ledger/queries.go`'s query dispatcher. They are
-implemented in `ledger/queries_stakedistribution.go` and
-`ledger/queries_utxowhole.go`, closing out #394 for those two query types
-specifically (the rest of that TODO block is unrelated to this scenario and
-remains open).
+`GetStakeDistribution` and `GetUTxOWhole` are the two queries `SnapshotAtTip`
+needs beyond those used elsewhere in this harness. Their implementations live
+in `ledger/queries_stakedistribution.go` and `ledger/queries_utxowhole.go`; this
+scenario exercises both against the reference node at the same acquired point.
 
 Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) answers every
 query in a session from a ledger snapshot opened at `Acquire`, and
