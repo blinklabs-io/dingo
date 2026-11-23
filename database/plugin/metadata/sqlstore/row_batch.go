@@ -40,6 +40,9 @@ type rowShape struct {
 	table   string
 	columns []string
 	suffix  string
+	// resolveAssets marks queued asset holdings, whose rows name an asset by
+	// (policy_id, name) and are written through flushAssetHoldings.
+	resolveAssets bool
 }
 
 var (
@@ -108,12 +111,6 @@ var (
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
 		suffix:  "ON CONFLICT (hash) DO NOTHING",
-	}
-	assetShape = rowShape{
-		name:    "InsertAssetBatch",
-		table:   "asset",
-		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
-		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
 	}
 	utxoAddressShape = rowShape{
 		name:    "UpsertUtxoAddressBatch",
@@ -360,6 +357,7 @@ func (b *rowBatch) EstimatedSizeBytes() int64 {
 func (b *rowBatch) flush(
 	ctx context.Context,
 	db queryer,
+	s *Store,
 	parameterLimit int,
 ) error {
 	if b.empty() {
@@ -367,6 +365,14 @@ func (b *rowBatch) flush(
 	}
 	defer b.clearRows()
 	for _, entry := range b.entries {
+		if entry.shape.resolveAssets {
+			if err := flushAssetHoldings(
+				ctx, db, s, entry.rows, parameterLimit,
+			); err != nil {
+				return err
+			}
+			continue
+		}
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
 		placeholder := "(" + strings.TrimSuffix(
@@ -387,7 +393,7 @@ func (b *rowBatch) flush(
 			if entry.shape.suffix != "" {
 				query += "\n" + entry.shape.suffix
 			}
-			if _, err := db.ExecContext(ctx, query, args...); err != nil {
+			if err := s.execBatch(ctx, db, query, args...); err != nil {
 				return fmt.Errorf(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
@@ -424,7 +430,7 @@ func (b *rowBatch) clone() rowBatch {
 
 // flushExceptClosureAPIRows keeps only API lookup/history rows queued. Assets,
 // datums and script-related rows remain visible before the next tx validates.
-func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, parameterLimit int) error {
+func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, s *Store, parameterLimit int) error {
 	var immediate, deferred rowBatch
 	immediate.trackSize = b.trackSize
 	deferred.trackSize = b.trackSize
@@ -438,7 +444,7 @@ func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, pa
 			target.add(entry.shape, row...)
 		}
 	}
-	if err := immediate.flush(ctx, db, parameterLimit); err != nil {
+	if err := immediate.flush(ctx, db, s, parameterLimit); err != nil {
 		return err
 	}
 	*b = deferred

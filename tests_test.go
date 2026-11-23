@@ -252,8 +252,8 @@ func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
 					ListenAddress: "127.0.0.1:0",
 				}),
 				WithNetwork(tt.network),
+				WithBlockPipelineEnabled(tt.blockPipelineEnabled),
 			)
-			cfg.cfg.BlockPipelineEnabled = tt.blockPipelineEnabled
 			n, err := New(cfg)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)

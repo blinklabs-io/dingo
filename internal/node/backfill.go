@@ -71,15 +71,20 @@ type backfillBatchLimitSetter interface {
 	)
 }
 
-func backfillBatchLimitReached(
-	flushedBytes int64,
-	acc database.BatchAccumulator,
-) bool {
+// backfillRowBufferFull reports whether the queued metadata rows should be
+// written into the open SQL transaction now. Only the queue counts: rows
+// already written are in the transaction whether they went in one statement
+// or many, so once a transaction is over its byte estimate, flushing after
+// every transaction bounds nothing and only splits the multi-row inserts
+// into per-transaction statements. Committing at the estimate is the
+// caller's decision (backfillTransactionByteLimitReached).
+func backfillRowBufferFull(acc database.BatchAccumulator) bool {
 	if sizer, ok := acc.(backfillBatchSizer); ok &&
 		sizer.Len() >= DefaultBackfillBatchRows {
 		return true
 	}
-	return backfillTransactionByteLimitReached(flushedBytes, acc)
+	sizer, ok := acc.(backfillBatchByteSizer)
+	return ok && sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes
 }
 
 func backfillTransactionByteLimitReached(
@@ -132,7 +137,11 @@ type Backfill struct {
 	// writeCheckpoint persists a checkpoint; tests replace it to inject
 	// failures. Nil uses the metadata store.
 	writeCheckpoint func(*models.BackfillCheckpoint) error
-	computeOffsets  func(
+	// decodeWorkers overrides the number of goroutines IndexBlocks decodes
+	// blocks on. Zero sizes it from GOMAXPROCS; tests set it to observe the
+	// workers independently of the host.
+	decodeWorkers  int
+	computeOffsets func(
 		uint64,
 		[]byte,
 		[]byte,
@@ -704,12 +713,15 @@ func (b *Backfill) recoverNonce(point ocommon.Point) {
 // nonce for the given block. Updates b.runningNonce.
 // isCheckpoint should be true for the first block in each
 // epoch (must be computed before processEpochBoundary
-// updates lastEpochId).
+// updates lastEpochId). The row is queued in acc and written
+// by FlushBatch; the running nonce is held in memory, so
+// nothing reads it back from the database within a batch.
 func (b *Backfill) computeBlockNonce(
 	parsedBlock gledger.Block,
 	point ocommon.Point,
 	eraId uint,
 	isCheckpoint bool,
+	acc database.BatchAccumulator,
 	txn *database.Txn,
 ) error {
 	if !b.computeNonces {
@@ -735,9 +747,9 @@ func (b *Backfill) computeBlockNonce(
 	}
 	b.runningNonce = nonce
 
-	if err := b.db.SetBlockNonce(
+	if err := b.db.SetBlockNonceBatched(
 		point.Hash, point.Slot,
-		nonce, isCheckpoint, txn,
+		nonce, isCheckpoint, acc, txn,
 	); err != nil {
 		return fmt.Errorf(
 			"storing block nonce at slot %d: %w",
@@ -1396,7 +1408,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if !endSlotSet || blk.Slot < endSlot {
 			if nErr := b.computeBlockNonce(
 				parsedBlock, point, eraId,
-				isNewEpoch, batchTxn,
+				isNewEpoch, acc, batchTxn,
 			); nErr != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -1685,7 +1697,7 @@ func (b *Backfill) processBlockTxsBatched(
 					err,
 				)
 			}
-			if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
+			if backfillRowBufferFull(acc) {
 				flushStart := time.Now()
 				if sizer, ok := acc.(backfillBatchByteSizer); ok {
 					b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()

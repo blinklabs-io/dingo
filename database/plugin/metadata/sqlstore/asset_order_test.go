@@ -55,16 +55,17 @@ func TestUtxoAssetsReadInCanonicalOrderRegardlessOfInsertion(t *testing.T) {
 			},
 		},
 	}
+	// Give policy 2 the lower identity id, so holdings sit in non-canonical
+	// order by asset id.
+	_, err := db.Exec(
+		`INSERT INTO asset_identity (policy_id, name) VALUES (?, ?), (?, ?)`,
+		p2.Bytes(), []byte("a"), p1.Bytes(), []byte("a"),
+	)
+	require.NoError(t, err)
 	require.NoError(
 		t,
 		store.AddUtxos([]models.UtxoSlot{{Utxo: utxo, Slot: 1}}, nil),
 	)
-	// Move the policy 1 row after the policy 2 row in insertion order.
-	_, err := db.Exec(
-		`UPDATE asset SET id = id + 1000 WHERE policy_id = ?`,
-		p1.Bytes(),
-	)
-	require.NoError(t, err)
 
 	got, err := store.GetUtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{MatchAllAddresses: true},

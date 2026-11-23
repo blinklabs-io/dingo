@@ -145,3 +145,18 @@ func TestEveryGraduatedFamilyDrainedRewardRoundRechecksAfterARollback(
 	requireMemberUnspendable(t, s)
 	require.Empty(t, guard.Trips(), "a drained table was touched")
 }
+
+// With the reward families drained, a precompute chunk writes only the live
+// UTxO set, so a block commit proceeds while the chunk's transaction is open
+// rather than waiting for the metadata store's write connection.
+func TestDrainedRewardPrecomputeChunkLeavesTheWriteConnectionFree(
+	t *testing.T,
+) {
+	t.Parallel()
+	r, guard := drainedRewardRoundRun(t)
+	committed, err := r.scenario.PrecomputeRoundWithBlockCommit()
+	require.NoError(t, err)
+	require.True(t, committed,
+		"a block commit waited for the precompute chunk's write connection")
+	require.Empty(t, guard.Trips(), "a drained table was touched")
+}

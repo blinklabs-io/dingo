@@ -44,6 +44,11 @@ type Config struct {
 	// could point introspection clients at a different database. It is empty
 	// for in-memory SQLite and other backends, and immutable after construction.
 	SQLitePath string
+	// ScratchDir holds temporary files sized by the stored data, such as the
+	// spool the UTxO set digest sorts the live set in. Empty selects the
+	// directory of SQLitePath, or the operating system's temporary directory
+	// when that is empty too.
+	ScratchDir string
 	// SQLiteOverlayInsertRows opts an eager-preparing SQLite provider into
 	// wider overlay INSERTs after transaction-local limit and trigger checks.
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
@@ -85,15 +90,24 @@ type Config struct {
 	VacuumInterval time.Duration
 	// Checkpoint is an optional provider-owned hook run on its own ticker,
 	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
-	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
-	// so the on-disk WAL file can be shrunk back down on a schedule, rather
-	// than relying solely on the commit-triggered wal_autocheckpoint passive
-	// checkpoint, which never truncates. This is best-effort: an active read
+	// run a periodic WAL checkpoint off the write path (see
+	// sqlite.checkpointWAL), PASSIVE on most ticks and TRUNCATE on some, so
+	// commits never checkpoint themselves and the on-disk WAL file can be
+	// shrunk back down on a schedule. This is best-effort: an active read
 	// snapshot can leave a given attempt busy, deferring the reduction to a
 	// later tick instead of guaranteeing an unconditional size ceiling. Left
 	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
 	// same convention Maintenance/MaintenanceInterval already use.
-	Checkpoint         func(context.Context) error
+	Checkpoint func(context.Context) error
+	// BulkCheckpoint, when set, runs on the Checkpoint ticker in place of
+	// Checkpoint while bulk-load pragmas are active, which suppress
+	// Checkpoint, and on the same cadence while Start runs migrations, before
+	// the Checkpoint ticker starts. It must not take the writer lock: the
+	// import or migration keeps committing on the write connection
+	// throughout. SQLite uses it for a PASSIVE checkpoint, because its write
+	// connection never checkpoints at commit and an import or upgrade would
+	// otherwise leave its whole write set in the WAL.
+	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
 	// SyncCommits is an optional provider-owned hook that makes every commit
 	// that returned before it began durable. A provider whose commits are
@@ -153,6 +167,7 @@ type Config struct {
 // driver selection; metadata behavior belongs here.
 type Store struct {
 	sqlitePath              string
+	scratchDir              string
 	sqliteOverlayInsertRows int
 	writeDB                 *sql.DB
 	readDB                  *sql.DB
@@ -176,6 +191,11 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
+
+	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
+	// run of the digest spool, when non-zero. Only tests set it, to make the
+	// spool merge many runs.
+	utxoDigestRunBytes int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
@@ -264,6 +284,7 @@ type Store struct {
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
 	checkpoint       func(context.Context) error
+	bulkCheckpoint   func(context.Context) error
 	checkpointEvery  time.Duration
 	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
@@ -277,10 +298,11 @@ type Store struct {
 	bulkConn         *sql.Conn
 	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
 	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
-	// import can keep bulk mode active for hours; checkpointing the same SQLite
-	// database during that interval adds lock traffic without improving recovery,
+	// import can keep bulk mode active for hours; a writer-blocking checkpoint
+	// during that interval adds lock traffic without improving recovery,
 	// because the import is explicitly incomplete until its final ready-state
-	// transaction commits.
+	// transaction commits. Only bulkCheckpoint, which must not block the
+	// writer, runs then.
 	scheduledWorkMu    sync.Mutex
 	bulkMode           bool
 	bulkRestorePending bool
@@ -386,6 +408,7 @@ func New(config Config) (*Store, error) {
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
+		scratchDir:                  config.ScratchDir,
 		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
 		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,
@@ -403,6 +426,7 @@ func New(config Config) (*Store, error) {
 		vacuum:                      config.Vacuum,
 		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
+		bulkCheckpoint:              config.BulkCheckpoint,
 		checkpointEvery:             config.CheckpointInterval,
 		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
@@ -571,7 +595,10 @@ func (s *Store) Start(ctx context.Context) error {
 			Logger:        s.logger,
 			Rebind:        s.dialect.Rebind,
 		}
-		if err := runner.Run(ctx); err != nil {
+		stopCheckpoint := s.startMigrationCheckpoint(ctx)
+		err := runner.Run(ctx)
+		stopCheckpoint()
+		if err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
 		}
 	}
@@ -616,12 +643,14 @@ func (s *Store) ReadPoolStats() sql.DBStats {
 
 // Transaction begins a write transaction bound to ctx: every statement a
 // caller issues against the returned Txn (via a domain method's txn
-// parameter) runs with this ctx, and per database/sql's own BeginTx
+// parameter) carries this ctx's values, and per database/sql's own BeginTx
 // contract, canceling it rolls the transaction back rather than leaving it
-// to time out on its own. Begin failures are retained on the returned
-// transaction because the historical MetadataStore contract cannot return
-// an error from this method. A nil ctx is treated as context.Background(),
-// matching prior behavior for any caller that does not supply one.
+// to time out on its own. Cancellation does not interrupt a statement
+// already running; the store call that follows fails with ctx.Err(). Begin
+// failures are retained on the returned transaction because the historical
+// MetadataStore contract cannot return an error from this method. A nil ctx
+// is treated as context.Background(), matching prior behavior for any caller
+// that does not supply one.
 func (s *Store) Transaction(ctx context.Context) types.Txn {
 	return s.transaction(ctx, false)
 }
@@ -917,8 +946,8 @@ func (s *Store) closeVacuumAdmission() {
 }
 
 // startCheckpointTicker runs s.checkpoint on its own ticker, independent of
-// maintenance and vacuum cadences. WAL checkpointing needs to run every 1-5
-// minutes to bound WAL growth, not once a day. Mirrors
+// maintenance and vacuum cadences. WAL checkpointing needs to run every few
+// seconds to bound WAL growth, not once a day. Mirrors
 // startMaintenance's admission/cancellation shape (checkpointState,
 // checkpointCancel, checkpointDone) exactly, as a distinct instance rather
 // than a shared one, so a slow VACUUM can never delay or skip a checkpoint
@@ -977,6 +1006,45 @@ func (s *Store) startCheckpointTicker() {
 	}()
 }
 
+// startMigrationCheckpoint runs s.bulkCheckpoint on the checkpoint cadence
+// while startup migrations commit on the write connection, and returns the
+// function that stops it. The scheduled checkpoint ticker starts only once the
+// store is ready, so without this a provider whose writer never checkpoints at
+// commit would keep every migration batch in the WAL until the upgrade ends.
+// bulkCheckpoint is used rather than s.checkpoint because it never takes the
+// writer lock the migration holds between batches.
+func (s *Store) startMigrationCheckpoint(ctx context.Context) func() {
+	if s.bulkCheckpoint == nil || s.checkpointEvery <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := s.bulkCheckpoint(ctx)
+				if err != nil && ctx.Err() == nil {
+					s.logger.Warn(
+						"metadata database WAL checkpoint during upgrade failed",
+						"dialect", s.dialect.Name(),
+						"error", err,
+					)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
 // whose provider commits durably.
 func (s *Store) SyncCommits(ctx context.Context) error {
@@ -991,7 +1059,10 @@ func (s *Store) runCheckpoint(ctx context.Context) error {
 	defer s.scheduledWorkMu.Unlock()
 	if s.bulkMode {
 		if !s.bulkRestorePending {
-			return nil
+			if s.bulkCheckpoint == nil {
+				return nil
+			}
+			return s.bulkCheckpoint(ctx)
 		}
 		if err := s.restoreNormalPragmas(ctx); err != nil {
 			return fmt.Errorf("restoring normal pragmas: %w", err)
@@ -1020,7 +1091,9 @@ func (s *Store) closeCheckpointAdmission() {
 // ctx its owning Transaction/ReadTransaction call was given, so every
 // statement issued against it -- through whichever domain method's txn
 // parameter it arrived through -- is bound to that same caller-supplied
-// ctx without that method needing a ctx parameter of its own.
+// ctx without that method needing a ctx parameter of its own. A write
+// transaction's statements get that ctx without its cancellation (see below);
+// a call made after cancellation returns ctx.Err().
 func (s *Store) dbFromTxn(
 	txn types.Txn,
 ) (queryer, context.Context, error) {
@@ -1052,6 +1125,20 @@ func (s *Store) dbFromTxn(
 		db = barrierQueryer{queryer: db, store: s, accumulator: acc}
 	}
 	ctx := sqlTransaction.ctx
+	if !sqlTransaction.readOnly && ctx != nil {
+		// Statements cannot observe cancellation, so the store call checks it.
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		// A driver may watch a cancellable context for every statement:
+		// modernc.org/sqlite starts a goroutine and installs a progress
+		// handler per statement, which a write transaction issuing tens of
+		// thousands of short statements pays for each time. The transaction
+		// was begun with ctx, so cancelling it still rolls the transaction
+		// back; a running statement finishes instead of being interrupted,
+		// and the next one fails on the closed transaction.
+		ctx = context.WithoutCancel(ctx)
+	}
 	if s.liveUtxo != nil {
 		ctx = context.WithValue(ctx, liveUtxoTxnKey{}, txn)
 	}
@@ -1270,7 +1357,8 @@ type sqlTxn struct {
 	// ctx is the context.Context this transaction was begun with (via
 	// Transaction/ReadTransaction). dbFromTxn hands it back alongside the
 	// queryer so every statement issued against this txn -- through
-	// whichever domain method's txn parameter -- is bound to it.
+	// whichever domain method's txn parameter -- is bound to it, without
+	// its cancellation for a write transaction.
 	ctx      context.Context
 	release  func()
 	beginErr error

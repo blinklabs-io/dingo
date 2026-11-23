@@ -15,14 +15,18 @@
 package metadata
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"hash"
+	"math"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
 // FactTable describes a table of ledger facts: rows the ledger derives at
@@ -134,7 +138,9 @@ type RewardPrecomputeCursorReader interface {
 // ErrFactCursorLost is returned by a fact read whose cursor names an export
 // the reader no longer holds, as after a restart between pages. The caller
 // starts the table again from the beginning.
-var ErrFactCursorLost = errors.New("fact read cursor names no export in progress")
+var ErrFactCursorLost = errors.New(
+	"fact read cursor names no export in progress",
+)
 
 // CommitSyncer is an optional capability of a metadata store whose commits
 // are not durable when they return. SyncCommits returns only once every commit
@@ -587,14 +593,40 @@ func NewUtxoDigester() *UtxoDigester {
 
 // Add folds in one output: its transaction hash, index, lovelace as a decimal
 // string, payment and staking credentials and datum hash, and, when withCbor,
-// its stored CBOR.
+// its stored CBOR as a snapshot import writes it (see canonicalOutputCbor).
 func (d *UtxoDigester) Add(
 	txHash []byte,
 	index uint32,
 	amount string,
 	payment, staking, datum []byte,
 	withCbor bool,
-	cbor []byte,
+	outCbor []byte,
+) {
+	if withCbor {
+		outCbor = canonicalOutputCbor(outCbor)
+	}
+	d.AddCanonical(
+		txHash, index, amount, payment, staking, datum, withCbor, outCbor,
+	)
+}
+
+// CanonicalOutputCbor returns an output's CBOR in the form Add digests. It
+// reads only its argument, so it can run on any goroutine ahead of
+// AddCanonical.
+func CanonicalOutputCbor(raw []byte) []byte {
+	return canonicalOutputCbor(raw)
+}
+
+// AddCanonical is Add for an output whose CBOR is already in the form
+// CanonicalOutputCbor returns. It hashes outCbor as given, so
+// AddCanonical(..., CanonicalOutputCbor(c)) and Add(..., c) digest equally.
+func (d *UtxoDigester) AddCanonical(
+	txHash []byte,
+	index uint32,
+	amount string,
+	payment, staking, datum []byte,
+	withCbor bool,
+	outCbor []byte,
 ) {
 	var buf [8]byte
 	write := func(field []byte) {
@@ -610,9 +642,303 @@ func (d *UtxoDigester) Add(
 	binary.BigEndian.PutUint64(buf[:], uint64(index))
 	d.h.Write(buf[:])
 	if withCbor {
-		write(cbor)
+		write(outCbor)
 	}
 	d.count++
+}
+
+// canonicalOutputCbor returns an output's CBOR as a snapshot import stores
+// it: the map form {0: address, 1: value, 2: datum, 3: script ref} with the
+// value in the MemPack form (see canonicalValueCbor) and every other field
+// re-encoded with its shortest heads, keeping an inline datum's and a native
+// script's own bytes. An output created as the legacy array [address, value]
+// or [address, value, datum hash] keeps the array in its block, and a block
+// keeps its own ordering and heads, so the same output would otherwise digest
+// differently from its imported copy. The result is a fixed point of this
+// function. Anything that does not decode as such an output, including an
+// output or a reference script followed by bytes past its CBOR item, is
+// returned unchanged.
+func canonicalOutputCbor(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var fields map[uint64]cbor.RawMessage
+	switch raw[0] >> 5 {
+	case 4:
+		var ok bool
+		if fields, ok = legacyOutputFields(raw); !ok {
+			return raw
+		}
+	case 5:
+		if err := decodeWhole(raw, &fields); err != nil {
+			return raw
+		}
+	default:
+		return raw
+	}
+	value, ok := fields[1]
+	if !ok {
+		return raw
+	}
+	canonValue, ok := canonicalValueCbor(value)
+	if !ok {
+		return raw
+	}
+	fields[1] = canonValue
+	for key, canon := range map[uint64]func(
+		cbor.RawMessage,
+	) (cbor.RawMessage, bool){
+		0: canonicalBytesCbor,
+		2: canonicalDatumCbor,
+		3: canonicalScriptRefCbor,
+	} {
+		field, present := fields[key]
+		if !present {
+			continue
+		}
+		if fields[key], ok = canon(field); !ok {
+			return raw
+		}
+	}
+	out, err := cbor.Encode(fields)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// canonicalBytesCbor re-encodes a byte string with its shortest length head
+// and as one definite-length string.
+func canonicalBytesCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	var b []byte
+	if err := decodeWhole(raw, &b); err != nil {
+		return nil, false
+	}
+	out, err := cbor.Encode(b)
+	return out, err == nil
+}
+
+// tag24Content returns the byte string a tag 24 item wraps.
+func tag24Content(raw cbor.RawMessage) ([]byte, bool) {
+	if len(raw) < 2 || raw[0] != 0xd8 || raw[1] != 24 {
+		return nil, false
+	}
+	var b []byte
+	if err := decodeWhole(raw[2:], &b); err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// canonicalDatumCbor re-encodes a datum option, [0, hash] or
+// [1, #6.24(bytes)], as the snapshot import does (ledgerstate
+// encodeMempackTxOut). The inline datum's own bytes are kept.
+func canonicalDatumCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	var pair []cbor.RawMessage
+	if err := decodeWhole(raw, &pair); err != nil || len(pair) != 2 {
+		return nil, false
+	}
+	var kind uint64
+	if err := decodeWhole(pair[0], &kind); err != nil {
+		return nil, false
+	}
+	var item any
+	switch kind {
+	case 0:
+		var hash []byte
+		if err := decodeWhole(pair[1], &hash); err != nil {
+			return nil, false
+		}
+		item = hash
+	case 1:
+		datum, ok := tag24Content(pair[1])
+		if !ok {
+			return nil, false
+		}
+		item = cbor.Tag{Number: 24, Content: datum}
+	default:
+		return nil, false
+	}
+	out, err := cbor.Encode([]any{kind, item})
+	return out, err == nil
+}
+
+// canonicalScriptRefCbor re-encodes a reference script,
+// #6.24(bytes .cbor [type, script]), as the snapshot import does (ledgerstate
+// encodeMempackScriptRef): a native script's CBOR is kept, a Plutus script's
+// bytes get the shortest head.
+func canonicalScriptRefCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	inner, ok := tag24Content(raw)
+	if !ok {
+		return nil, false
+	}
+	var pair []cbor.RawMessage
+	if err := decodeWhole(inner, &pair); err != nil || len(pair) != 2 {
+		return nil, false
+	}
+	var typ uint64
+	if err := decodeWhole(pair[0], &typ); err != nil || typ > 3 {
+		return nil, false
+	}
+	script := pair[1]
+	if typ != 0 {
+		if script, ok = canonicalBytesCbor(script); !ok {
+			return nil, false
+		}
+	}
+	inner, err := cbor.Encode([]any{typ, script})
+	if err != nil {
+		return nil, false
+	}
+	out, err := cbor.Encode(cbor.Tag{Number: 24, Content: inner})
+	return out, err == nil
+}
+
+// legacyOutputFields maps a legacy array output onto the fields of the map
+// form.
+func legacyOutputFields(raw []byte) (map[uint64]cbor.RawMessage, bool) {
+	var items []cbor.RawMessage
+	if err := decodeWhole(raw, &items); err != nil {
+		return nil, false
+	}
+	if len(items) < 2 || len(items) > 3 {
+		return nil, false
+	}
+	addr := items[0]
+	if len(addr) > 0 && addr[0]>>5 == 4 {
+		// A Byron-era output inlines its address as a CBOR array; the map
+		// form carries those same bytes inside a byte string.
+		wrapped, err := cbor.Encode([]byte(addr))
+		if err != nil {
+			return nil, false
+		}
+		addr = wrapped
+	}
+	fields := map[uint64]cbor.RawMessage{0: addr, 1: items[1]}
+	if len(items) == 3 {
+		var dh []byte
+		if err := decodeWhole(items[2], &dh); err != nil {
+			return nil, false
+		}
+		dat, err := cbor.Encode([]any{uint64(0), dh})
+		if err != nil {
+			return nil, false
+		}
+		fields[2] = cbor.RawMessage(dat)
+	}
+	return fields, true
+}
+
+// canonicalValueCbor re-encodes an output value the way the snapshot import
+// does (ledgerstate encodeMempackValue): zero quantities, then policies left
+// empty, are dropped; a value with no assets left is its bare coin;
+// otherwise [coin, {policy: {name: quantity}}] with policies and names in
+// plain bytewise order (not CBOR's length-first order) and every integer and
+// map length in its shortest form. The ledgerstate tests pin the two to the
+// same bytes.
+func canonicalValueCbor(raw []byte) (cbor.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var coin uint64
+	var assets map[cbor.ByteString]map[cbor.ByteString]uint64
+	switch raw[0] >> 5 {
+	case 0:
+		if err := decodeWhole(raw, &coin); err != nil {
+			return nil, false
+		}
+	case 4:
+		var pair []cbor.RawMessage
+		if err := decodeWhole(raw, &pair); err != nil || len(pair) != 2 {
+			return nil, false
+		}
+		if err := decodeWhole(pair[0], &coin); err != nil {
+			return nil, false
+		}
+		if err := decodeWhole(pair[1], &assets); err != nil {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	type namedQty struct {
+		name []byte
+		qty  uint64
+	}
+	type policyAssets struct {
+		policy []byte
+		assets []namedQty
+	}
+	var policies []policyAssets
+	for policy, byName := range assets {
+		pa := policyAssets{policy: policy.Bytes()}
+		for name, qty := range byName {
+			if qty != 0 {
+				pa.assets = append(pa.assets, namedQty{name.Bytes(), qty})
+			}
+		}
+		if len(pa.assets) == 0 {
+			continue
+		}
+		slices.SortFunc(pa.assets, func(a, b namedQty) int {
+			return bytes.Compare(a.name, b.name)
+		})
+		policies = append(policies, pa)
+	}
+	if len(policies) == 0 {
+		return appendCborHead(nil, 0, coin), true
+	}
+	slices.SortFunc(policies, func(a, b policyAssets) int {
+		return bytes.Compare(a.policy, b.policy)
+	})
+	out := appendCborHead(nil, 4, 2)
+	out = appendCborHead(out, 0, coin)
+	out = appendCborHead(out, 5, uint64(len(policies)))
+	for _, pa := range policies {
+		out = appendCborHead(out, 2, uint64(len(pa.policy)))
+		out = append(out, pa.policy...)
+		out = appendCborHead(out, 5, uint64(len(pa.assets)))
+		for _, a := range pa.assets {
+			out = appendCborHead(out, 2, uint64(len(a.name)))
+			out = append(out, a.name...)
+			out = appendCborHead(out, 0, a.qty)
+		}
+	}
+	return out, true
+}
+
+var errTrailingCbor = errors.New("trailing bytes after CBOR item")
+
+// decodeWhole decodes data, which must hold exactly one CBOR item. Bytes
+// past the item would be dropped by re-encoding, so a stored output carrying
+// them would canonicalise to, and digest as, the clean output.
+func decodeWhole(data []byte, dest any) error {
+	n, err := cbor.Decode(data, dest)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return errTrailingCbor
+	}
+	return nil
+}
+
+// appendCborHead appends a CBOR item head of the given major type with its
+// argument in the shortest form.
+func appendCborHead(dst []byte, major byte, n uint64) []byte {
+	m := major << 5
+	switch {
+	case n < 24:
+		return append(dst, m|byte(n))
+	case n <= math.MaxUint8:
+		return append(dst, m|24, byte(n))
+	case n <= math.MaxUint16:
+		return binary.BigEndian.AppendUint16(append(dst, m|25), uint16(n))
+	case n <= math.MaxUint32:
+		return binary.BigEndian.AppendUint32(append(dst, m|26), uint32(n))
+	default:
+		return binary.BigEndian.AppendUint64(append(dst, m|27), n)
+	}
 }
 
 // Sum returns the digest of the outputs added so far.

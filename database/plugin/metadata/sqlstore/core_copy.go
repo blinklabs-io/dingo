@@ -54,6 +54,8 @@ const (
 var coreCopyAPITables = []string{
 	"address_transaction",
 	"address_transaction_rebuild_source",
+	"asset_holding",
+	"asset_identity",
 	"redeemer_script",
 	"transaction_metadata_label",
 }

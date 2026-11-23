@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -92,10 +93,22 @@ func TestStakeInputPagesSurviveAPruneBetweenPages(t *testing.T) {
 	}
 }
 
-// prunableOutputs serves one account output row per epoch it still holds.
+// prunableOutputs serves one pool and one account output row per epoch it
+// still holds.
 type prunableOutputs struct {
 	RewardDerivedReader
 	epochs []uint64
+}
+
+func (p *prunableOutputs) RewardPoolOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolOutput, error) {
+	if !slices.Contains(p.epochs, epoch) {
+		return nil, nil
+	}
+	return []*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: []byte{byte(epoch)}, CapturedSlot: epoch,
+	}}, nil
 }
 
 func (p *prunableOutputs) RewardAccountOutputRows(
@@ -182,4 +195,163 @@ func TestSetFactPagesResumeAfterTheLastKeyServed(t *testing.T) {
 	// restarted from a guessed position.
 	_, _, err := ls.pageSetFactRows(table, 0, 100, 99, 2, read, nil)
 	require.ErrorIs(t, err, ErrFactCursorLost)
+}
+
+// slottedOutputs serves one pool and one account output row per epoch,
+// captured at the slot given for the epoch, and counts the epochs whose
+// account rows were read.
+type slottedOutputs struct {
+	RewardDerivedReader
+	slots        map[uint64]uint64
+	accountReads atomic.Int64
+}
+
+func (o *slottedOutputs) RewardPoolOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolOutput, error) {
+	return []*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: []byte{byte(epoch)},
+		CapturedSlot: o.slots[epoch],
+	}}, nil
+}
+
+func (o *slottedOutputs) RewardAccountOutputRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardAccountOutput, error) {
+	o.accountReads.Add(1)
+	return []*models.RewardAccountOutput{{
+		Epoch: epoch, StakingKey: []byte{byte(epoch)},
+		CapturedSlot: o.slots[epoch],
+	}}, nil
+}
+
+// An epoch whose pool rows are all outside the range has its account rows
+// neither read nor served, while an epoch inside it, at either bound, still
+// does; the pool copy serves the in-range pool rows.
+func TestRewardOutputFactCopiesSkipEpochsOutsideTheRange(t *testing.T) {
+	t.Parallel()
+	epochs := []uint64{1, 2, 3, 4}
+	outputs := &slottedOutputs{slots: map[uint64]uint64{
+		1: 50, 2: 100, 3: 150, 4: 200,
+	}}
+
+	page, cursor, err := accountOutputPageOver(outputs, epochs, 100, 150, 0, 100)
+	require.NoError(t, err)
+	require.Zero(t, cursor)
+	var served []int64
+	for _, r := range page.Rows {
+		served = append(served, r[3].(int64))
+	}
+	require.Equal(t, []int64{2, 3}, served)
+	require.EqualValues(t, 2, outputs.accountReads.Load(),
+		"account rows of epochs outside the range were read")
+
+	rows, err := poolOutputRowsOver(outputs, epochs, 100, 150)
+	require.NoError(t, err)
+	served = nil
+	for _, r := range rows.Rows {
+		served = append(served, r[2].(int64))
+	}
+	require.Equal(t, []int64{2, 3}, served)
+}
+
+// slotBoundedInputs serves epochs 1 to 3, each with one pool and stake rows
+// captured at slots[epoch], and counts the stake rows it was asked for.
+type slotBoundedInputs struct {
+	RewardInputsReader
+	slots map[uint64][]uint64
+	reads []uint64
+}
+
+func (p *slotBoundedInputs) RewardPoolRows(
+	epoch uint64, _ *uint64,
+) ([]*models.RewardPoolInput, error) {
+	return []*models.RewardPoolInput{{Epoch: epoch, PoolKeyHash: []byte{1}}}, nil
+}
+
+func (p *slotBoundedInputs) RewardStakeRows(
+	epoch uint64, lo, _ []byte, _ *uint64,
+) ([]*models.RewardStakeInput, error) {
+	p.reads = append(p.reads, epoch)
+	var out []*models.RewardStakeInput
+	for i, slot := range p.slots[epoch] {
+		out = append(out, &models.RewardStakeInput{
+			Epoch: epoch, PoolKeyHash: lo, StakingKey: []byte{byte(i)},
+			CapturedSlot: slot,
+		})
+	}
+	return out, nil
+}
+
+func (p *slotBoundedInputs) RewardStakeSlotBounds(
+	epoch uint64,
+) (first, last uint64, found bool, err error) {
+	s := p.slots[epoch]
+	if len(s) == 0 {
+		return 0, 0, false, nil
+	}
+	return s[0], s[len(s)-1], true, nil
+}
+
+// A stake input page for a slot range reads the stake rows of the epochs
+// captured inside the range only; an epoch whose rows are not all captured at
+// one slot is read in full, and a row outside the range is still dropped.
+func TestStakeInputPageReadsOnlyEpochsCapturedInTheSlotRange(t *testing.T) {
+	t.Parallel()
+	inputs := &slotBoundedInputs{slots: map[uint64][]uint64{
+		1: {10, 10, 10},
+		2: {50, 50, 50},
+		3: {10, 60, 60},
+	}}
+	ex := rewardInputsExport{
+		view:   rewardInputsView{r: inputs},
+		epochs: []uint64{1, 2, 3},
+	}
+
+	got, cursor, err := stakeInputPageOver(ex, 40, 100, 0, 100)
+	require.NoError(t, err)
+	require.Zero(t, cursor)
+	require.Equal(t, []uint64{2, 3}, inputs.reads,
+		"epoch 1 is captured outside the range and must not be read")
+	require.Len(t, got.Rows, 5, "epoch 2's three rows and epoch 3's two")
+}
+
+// A stake input page reads in full an epoch whose committed rows the view
+// does not serve as they are: one with staged stake rows, and every epoch of
+// a view with a rollback ceiling.
+func TestStakeInputPageReadsEpochsTheViewChanges(t *testing.T) {
+	t.Parallel()
+	staged := &models.RewardStakeInput{
+		Epoch: 1, PoolKeyHash: []byte{1}, StakingKey: []byte{9},
+		CapturedSlot: 50,
+	}
+	inputs := &slotBoundedInputs{slots: map[uint64][]uint64{
+		1: {10, 10},
+		2: {10, 10},
+	}}
+	ex := rewardInputsExport{
+		view: rewardInputsView{r: inputs, st: rewardInputsStaged{
+			changes: []RewardInputChange{{
+				Kind: RewardInputStakes, Epoch: 1,
+				Stakes: []*models.RewardStakeInput{staged},
+			}},
+		}},
+		epochs: []uint64{1, 2},
+	}
+	got, _, err := stakeInputPageOver(ex, 40, 100, 0, 100)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1}, inputs.reads,
+		"epoch 1 has staged rows and must be read")
+	require.Len(t, got.Rows, 1, "the staged row captured in the range")
+
+	inputs.reads = nil
+	ceiling := uint64(30)
+	ex = rewardInputsExport{
+		view:   rewardInputsView{r: inputs, at: &ceiling},
+		epochs: []uint64{1, 2},
+	}
+	_, _, err = stakeInputPageOver(ex, 40, 100, 0, 100)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 2}, inputs.reads,
+		"a view with a rollback ceiling reads every epoch")
 }

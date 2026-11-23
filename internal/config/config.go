@@ -26,7 +26,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -232,6 +234,11 @@ func (c *Config) ApplyRunModeOverrides(effectiveMode RunMode) {
 	}
 	c.StorageMode = storageModeAPI
 	c.BlockProducer = true
+	// The pipeline default follows the storage mode, which was just
+	// overridden, so derive it again unless an operator set it.
+	if !c.Provenance().IsExplicit("BlockPipelineEnabled") {
+		c.BlockPipelineEnabled = BlockPipelineEnabledByDefault(c)
+	}
 }
 
 // RequiresListeners reports whether an (effective) run mode runs as a
@@ -494,13 +501,27 @@ type KoiosParityConfig struct {
 	// AllowPrivateAddresses permits a private, loopback, or special-use
 	// BaseURL. Leave false for the default outbound request guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
-	// Strict stops/cancels the node on the first Koios/tool error or
-	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The exceptions are an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet) and
-	// a fetch that fails on Koios's daily quota; both are logged and
-	// recorded, and the epoch is retried, but neither stops the node.
-	Strict bool `yaml:"strict"                envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// Strict stops/cancels the node on the first tool error, local cache
+	// error or non-pass parity result, rather than logging it and continuing
+	// normal operation. Three failures are logged, recorded and retried
+	// instead: an epoch whose only significant mismatches are reference_lag
+	// (Koios's data has not caught up yet) and a fetch that fails on Koios's
+	// daily quota never stop the node, and a Koios request that failed
+	// because Koios is unavailable (a transport error, timeout, 5xx or
+	// exhausted 408 budget) stops it only after UnavailableRetryLimit
+	// consecutive attempts.
+	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// UnavailableRetryLimit bounds how many consecutive attempts at one
+	// epoch's check may fail because Koios is unavailable (a transport
+	// error, timeout, 5xx or exhausted 408 budget; daily-quota exhaustion
+	// never counts).
+	// In strict mode the attempt that reaches it stops the node; in
+	// non-strict mode it is logged at ERROR and the check keeps retrying. A
+	// Koios answer, including one that is still reference lag, resets the
+	// count. A failed check is retried every ten minutes at the fastest, so
+	// the default of 144 is at least about 24 hours of continuous
+	// unavailability. 0 selects the default.
+	UnavailableRetryLimit int `yaml:"unavailableRetryLimit" envconfig:"DINGO_KOIOS_PARITY_UNAVAILABLE_RETRY_LIMIT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
@@ -885,7 +906,26 @@ type Config struct {
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints"          envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
 	// service. It defaults to false.
-	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled"                         envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	// BarkEventEnabled mounts Bark's EventService, which streams the node's
+	// internal events to remote subscribers. It defaults to false.
+	BarkEventEnabled bool `yaml:"barkEventEnabled" envconfig:"DINGO_BARK_EVENT_ENABLED"`
+	// BarkEventPublishEnabled additionally lets EventService accept Publish
+	// and PublishBatch. It requires BarkEventEnabled and defaults to false.
+	BarkEventPublishEnabled bool `yaml:"barkEventPublishEnabled" envconfig:"DINGO_BARK_EVENT_PUBLISH_ENABLED"`
+	// BarkEventNodeID is the origin_node_id EventService puts on this
+	// node's events. Empty selects a random identifier for each process
+	// run, so no host or infrastructure name is published.
+	BarkEventNodeID string `yaml:"barkEventNodeId" envconfig:"DINGO_BARK_EVENT_NODE_ID"`
+	// BarkEventBufferSize is how many delivered events EventService keeps for
+	// resuming subscribers. Zero selects the default.
+	BarkEventBufferSize int `yaml:"barkEventBufferSize" envconfig:"DINGO_BARK_EVENT_BUFFER_SIZE"`
+	// BarkEventMaxSubscribers bounds concurrent EventService streams. Zero
+	// or unset means unlimited.
+	BarkEventMaxSubscribers int `yaml:"barkEventMaxSubscribers" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS"`
+	// BarkEventMaxSubscribersPerClient bounds concurrent EventService streams
+	// from one caller address. Zero or unset means unlimited.
+	BarkEventMaxSubscribersPerClient int `yaml:"barkEventMaxSubscribersPerClient" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT"`
 	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
@@ -987,9 +1027,10 @@ type Config struct {
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop that reads blocks back from the primary chain and applies
 	// them to the ledger. Not consensus-affecting -- it only changes how
-	// CBOR decode work is scheduled, not validation or apply behavior -- but
-	// defaults off until throughput and stability are proven (phase 1 of the
-	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
+	// CBOR decode work is scheduled, not validation or apply behavior. It is
+	// enabled by default in core mode except on Musashi, whose extended Conway
+	// headers require a decoder the pipeline does not provide. See
+	// ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"          envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled checks VRF/KES and OpCert header
 	// cryptography serially during block-pipeline replay. It requires
@@ -1319,16 +1360,16 @@ type Config struct {
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
 
 	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
-	// maintenance (PRAGMA optimize) before block processing starts and after
-	// each epoch rollover. A database that never ran ANALYZE has no
-	// sqlite_stat1, and without it some queries scan most of a large table
-	// instead of seeking an index. The first run on a large database
-	// analyzes every table and can take minutes; later runs are near-free.
+	// maintenance (a bounded ANALYZE) before block processing starts, after
+	// each epoch rollover and once a minute. A database that never ran
+	// ANALYZE has no sqlite_stat1, and without it some queries scan most of a
+	// large table instead of seeking an index. Each run samples at most 1000
+	// rows per index, so it stays short on a large database.
 	// Enabled by default; this is an escape hatch, not a tuning knob. Other
 	// metadata backends are unaffected.
 	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
 
-	// provenance records, for gated fields only, whether their value came
+	// provenance records, for tracked fields, whether their value came
 	// from an operator (CLI flag, environment variable, or YAML file) or
 	// is still the built-in default. Populated by ApplyFlags and
 	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
@@ -1349,6 +1390,327 @@ type PluginsConfig struct {
 	Consensus hostplugin.Selection `yaml:"consensus"`
 	Mempool   hostplugin.Selection `yaml:"mempool"`
 	API       APIPluginsConfig     `yaml:"api"`
+	// Extra holds the selections for every capability that has no field above,
+	// keyed by capability name. In YAML the name's dot-separated segments nest
+	// under plugins, so "example.widget" is plugins.example.widget with
+	// provider and config keys, exactly as storage.blob is plugins.storage.blob.
+	Extra map[string]hostplugin.Selection `yaml:"-"`
+}
+
+// UnmarshalYAML decodes the built-in selections into their fields and routes
+// every other selection into Extra. A mapping is a selection when it has a
+// provider or config key, directly or through a merge key; any other mapping
+// is a namespace whose keys extend the capability name. A key that is neither
+// a built-in field nor part of a selection is an error.
+//
+// Decoding runs on the parsed nodes, never on re-encoded YAML: an alias may
+// refer to an anchor anywhere in the document only while the nodes keep their
+// links, and errors must report source lines. Node.Decode does not enforce
+// known fields, so checkPluginFields does that first.
+func (p *PluginsConfig) UnmarshalYAML(node *yaml.Node) error {
+	node = resolvePluginsAlias(node)
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: plugins must be a mapping", node.Line)
+	}
+	extras := make(map[string]*yaml.Node)
+	fixed, _, err := splitPluginsNode(
+		node, "", extras, make(map[*yaml.Node]bool),
+	)
+	if err != nil {
+		return err
+	}
+	if fixed != nil {
+		if err := checkPluginFields(
+			fixed, reflect.TypeFor[PluginsConfig](),
+		); err != nil {
+			return err
+		}
+		type fixedPlugins PluginsConfig
+		if err := fixed.Decode((*fixedPlugins)(p)); err != nil {
+			return err
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(extras)) {
+		selectionNode, ok := extras[name]
+		if !ok || selectionNode == nil {
+			continue
+		}
+		if err := checkPluginFields(
+			selectionNode, reflect.TypeFor[hostplugin.Selection](),
+		); err != nil {
+			return fmt.Errorf("plugins selection %s: %w", name, err)
+		}
+		var selection hostplugin.Selection
+		if err := selectionNode.Decode(&selection); err != nil {
+			return fmt.Errorf("plugins selection %s: %w", name, err)
+		}
+		if p.Extra == nil {
+			p.Extra = make(map[string]hostplugin.Selection)
+		}
+		p.Extra[name] = selection
+	}
+	return nil
+}
+
+// builtinPluginSelectionPaths are the plugins.* paths that have a struct
+// field, keyed by capability name.
+var builtinPluginSelectionPaths = map[string]struct{}{
+	"storage.blob":     {},
+	"storage.metadata": {},
+	"consensus":        {},
+	"mempool":          {},
+	"api.blockfrost":   {},
+	"api.kupo":         {},
+	"api.mesh":         {},
+	"api.utxorpc":      {},
+	"api.mcp":          {},
+}
+
+func resolvePluginsAlias(node *yaml.Node) *yaml.Node {
+	for node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	return node
+}
+
+func isMergeKey(key *yaml.Node) bool {
+	return key.Kind == yaml.ScalarNode && key.Value == "<<" &&
+		key.ShortTag() == "!!merge"
+}
+
+// pluginMappingEntries returns the key and value pairs of a mapping with its
+// merge keys applied: an explicit key wins over a merged one, and an earlier
+// merged mapping wins over a later one. visiting holds the mappings whose
+// merges are being expanded, so a merge that reaches its own mapping is an
+// error rather than unbounded recursion.
+func pluginMappingEntries(
+	node *yaml.Node,
+	visiting map[*yaml.Node]bool,
+) ([]*yaml.Node, error) {
+	if visiting[node] {
+		return nil, fmt.Errorf(
+			"line %d: merge key refers to the mapping that contains it",
+			node.Line,
+		)
+	}
+	visiting[node] = true
+	defer delete(visiting, node)
+	var explicit, merged []*yaml.Node
+	seen := make(map[string]bool)
+	explicitLine := make(map[string]int)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		if !isMergeKey(key) {
+			// The decoder's duplicate-key check never sees a namespace
+			// or extra selection, which are taken apart here.
+			if line, ok := explicitLine[key.Value]; ok {
+				return nil, fmt.Errorf(
+					"line %d: mapping key %q already defined at line %d",
+					key.Line,
+					key.Value,
+					line,
+				)
+			}
+			explicitLine[key.Value] = key.Line
+			explicit = append(explicit, key, value)
+			seen[key.Value] = true
+			continue
+		}
+		value = resolvePluginsAlias(value)
+		sources := []*yaml.Node{value}
+		if value.Kind == yaml.SequenceNode {
+			sources = value.Content
+		}
+		for _, source := range sources {
+			source = resolvePluginsAlias(source)
+			if source.Kind != yaml.MappingNode {
+				return nil, fmt.Errorf(
+					"line %d: merge key value must be a mapping or a sequence of mappings",
+					source.Line,
+				)
+			}
+			pairs, err := pluginMappingEntries(source, visiting)
+			if err != nil {
+				return nil, err
+			}
+			merged = append(merged, pairs...)
+		}
+	}
+	for i := 0; i+1 < len(merged); i += 2 {
+		if seen[merged[i].Value] {
+			continue
+		}
+		seen[merged[i].Value] = true
+		explicit = append(explicit, merged[i], merged[i+1])
+	}
+	return explicit, nil
+}
+
+func isPluginSelection(pairs []*yaml.Node) bool {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		switch pairs[i].Value {
+		case "provider", "config":
+			return true
+		}
+	}
+	return false
+}
+
+// splitPluginsNode walks the plugins mapping. It returns a mapping holding
+// only what the struct decode must see, with namespace merge keys applied,
+// and collects selection nodes for non-built-in capabilities into extras. The
+// bool reports whether extras were taken from beneath node, so a namespace
+// emptied that way is dropped. onPath holds the namespaces being walked, so an
+// alias to an enclosing namespace is an error rather than unbounded recursion.
+func splitPluginsNode(
+	node *yaml.Node,
+	path string,
+	extras map[string]*yaml.Node,
+	onPath map[*yaml.Node]bool,
+) (*yaml.Node, bool, error) {
+	node = resolvePluginsAlias(node)
+	if node.Kind != yaml.MappingNode {
+		return node, false, nil
+	}
+	if onPath[node] {
+		return nil, false, fmt.Errorf(
+			"line %d: plugins.%s refers to a mapping that contains it",
+			node.Line,
+			path,
+		)
+	}
+	pairs, err := pluginMappingEntries(node, make(map[*yaml.Node]bool))
+	if err != nil {
+		return nil, false, err
+	}
+	if path != "" && isPluginSelection(pairs) {
+		if _, ok := builtinPluginSelectionPaths[path]; ok {
+			return node, false, nil
+		}
+		if slices.ContainsFunc(
+			hostplugin.AllCapabilities(),
+			func(c hostplugin.Capability) bool { return c.Name() == path },
+		) {
+			return nil, false, fmt.Errorf(
+				"line %d: plugins.%s has no selection",
+				node.Line,
+				path,
+			)
+		}
+		if err := validatePluginSelectionName(path); err != nil {
+			return nil, false, fmt.Errorf("line %d: %w", node.Line, err)
+		}
+		// A host cannot declare a name nested with a built-in one, and
+		// the built-in environment overlay would claim its variables.
+		for _, builtin := range hostplugin.AllCapabilities() {
+			name := builtin.Name()
+			if strings.HasPrefix(path, name+".") ||
+				strings.HasPrefix(name, path+".") {
+				return nil, false, fmt.Errorf(
+					"line %d: plugins.%s nests with built-in capability %s",
+					node.Line,
+					path,
+					name,
+				)
+			}
+		}
+		if _, ok := extras[path]; ok {
+			return nil, false, fmt.Errorf(
+				"line %d: plugins.%s is already defined",
+				node.Line,
+				path,
+			)
+		}
+		extras[path] = node
+		return nil, true, nil
+	}
+	onPath[node] = true
+	defer delete(onPath, node)
+	out := &yaml.Node{
+		Kind:   yaml.MappingNode,
+		Tag:    node.Tag,
+		Line:   node.Line,
+		Column: node.Column,
+	}
+	tookExtras := false
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, value := pairs[i], pairs[i+1]
+		child := key.Value
+		if path != "" {
+			child = path + "." + key.Value
+		}
+		kept, took, err := splitPluginsNode(value, child, extras, onPath)
+		if err != nil {
+			return nil, false, err
+		}
+		tookExtras = tookExtras || took
+		if kept == nil || (took && len(kept.Content) == 0) {
+			continue
+		}
+		out.Content = append(out.Content, key, kept)
+	}
+	if tookExtras && len(out.Content) == 0 {
+		return nil, true, nil
+	}
+	return out, tookExtras, nil
+}
+
+// checkPluginFields reports a mapping key that names no field of t, the check
+// a decoder enforcing known fields makes, with the key's source line. It
+// descends only into struct-typed fields, so free-form provider config maps
+// are not checked.
+func checkPluginFields(node *yaml.Node, t reflect.Type) error {
+	node = resolvePluginsAlias(node)
+	if node.Kind != yaml.MappingNode || t.Kind() != reflect.Struct {
+		return nil
+	}
+	fields := make(map[string]reflect.Type, t.NumField())
+	for field := range t.Fields() {
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("yaml"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fields[name] = field.Type
+	}
+	pairs, err := pluginMappingEntries(node, make(map[*yaml.Node]bool))
+	if err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key := pairs[i]
+		fieldType, ok := fields[key.Value]
+		if !ok {
+			return fmt.Errorf(
+				"line %d: field %s not found in type %s",
+				key.Line,
+				key.Value,
+				t,
+			)
+		}
+		if err := checkPluginFields(pairs[i+1], fieldType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePluginSelectionName checks that name could be a capability name by
+// parsing it at an arbitrary contract version.
+func validatePluginSelectionName(name string) error {
+	if _, err := hostplugin.ParseCapability(name + "/v0"); err != nil {
+		return fmt.Errorf(
+			"plugins.%s is not a capability selection: %w",
+			name,
+			err,
+		)
+	}
+	return nil
 }
 
 type StoragePluginsConfig struct {
@@ -2035,6 +2397,15 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
 	clone.Plugins.API.Mcp = clonePluginSelection(cfg.Plugins.API.Mcp)
+	if cfg.Plugins.Extra != nil {
+		clone.Plugins.Extra = make(
+			map[string]hostplugin.Selection,
+			len(cfg.Plugins.Extra),
+		)
+		for name, selection := range cfg.Plugins.Extra {
+			clone.Plugins.Extra[name] = clonePluginSelection(selection)
+		}
+	}
 	if cfg.provenance != nil {
 		clone.provenance = make(Provenance, len(cfg.provenance))
 		maps.Copy(clone.provenance, cfg.provenance)
@@ -2168,6 +2539,16 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("process plugin environment: %w", err)
 		}
 	}
+	// The environment names no capability version, so a selection present in
+	// the loaded configuration is overlaid at the lowest one. Only the name
+	// shapes the variable prefix.
+	for name, selection := range cfg.Plugins.Extra {
+		capability := hostplugin.Capability(name + "/v0")
+		if err := hostplugin.ApplyEnvironment(capability, &selection, pluginEnviron); err != nil {
+			return nil, fmt.Errorf("process plugin environment: %w", err)
+		}
+		cfg.Plugins.Extra[name] = selection
+	}
 
 	// LoadConfig only parses and merges configuration sources; it makes
 	// no semantic judgments about the merged values. CLI flags are a
@@ -2281,6 +2662,9 @@ func (c *Config) ApplyDefaults() {
 	if c.MetricsBindAddr == "" {
 		c.MetricsBindAddr = DefaultMetricsBindAddr
 	}
+	if !c.Provenance().IsExplicit("BlockPipelineEnabled") {
+		c.BlockPipelineEnabled = BlockPipelineEnabledByDefault(c)
+	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
 	}
@@ -2378,6 +2762,17 @@ func (c *Config) ApplyDefaults() {
 	if c.TracingEndpoint != "" {
 		c.Tracing = true
 	}
+}
+
+// BlockPipelineEnabledByDefault reports whether cfg's final network and
+// storage mode select parallel replay when no operator source sets the flag.
+func BlockPipelineEnabledByDefault(cfg *Config) bool {
+	if cfg == nil ||
+		cfg.Network == ouroboros.NetworkCardanoMusashi.Name ||
+		cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic {
+		return false
+	}
+	return cfg.StorageMode == "" || cfg.StorageMode == storageModeCore
 }
 
 // DebugListenAddress returns the dedicated pprof TCP listen address. The

@@ -947,6 +947,29 @@ func (s *Set) RewardStakeRows(
 	return out, err
 }
 
+// RewardStakeSlotBounds returns the slots the epoch's first and last stake
+// rows, in key order, were captured at, and false when the epoch holds none.
+// It reads those two rows only.
+func (s *Set) RewardStakeSlotBounds(
+	epoch uint64,
+) (first, last uint64, found bool, err error) {
+	fk, fv, lk, lv, found, err := s.store.EdgeRows(
+		badgerutxo.RewardStakeInputEpochPrefix(epoch),
+	)
+	if err != nil || !found {
+		return 0, 0, false, err
+	}
+	f, err := decodeRewardStake(fk, fv)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	l, err := decodeRewardStake(lk, lv)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return f.CapturedSlot, l.CapturedSlot, true, nil
+}
+
 // RewardStakePending returns the snapshots whose stake rows are still being
 // written, oldest first.
 func (s *Set) RewardStakePending(
@@ -980,14 +1003,8 @@ func (s *Set) RewardInputEpochs() (snapshots, pots []uint64, err error) {
 		badgerutxo.RewardStakeInputTag, badgerutxo.RewardPoolInputTag,
 		badgerutxo.RewardSnapshotTag,
 	} {
-		var last uint64
-		first := true
-		err = s.store.Rows([]byte{tag}, func(k, _ []byte) error {
-			e := binary.BigEndian.Uint64(k[1:9])
-			if first || e != last {
-				seen[e] = struct{}{}
-				last, first = e, false
-			}
+		err = s.store.EachDistinctEpoch(tag, func(e uint64) error {
+			seen[e] = struct{}{}
 			return nil
 		})
 		if err != nil {

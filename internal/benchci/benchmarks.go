@@ -60,6 +60,9 @@ var CuratedBenchmarks = []string{
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
 
+	// utxorpc request latency.
+	"BenchmarkReadParamsRequest", // api/utxorpc/benchmark_test.go
+
 	// Query latency. Each of these seeds the record it queries from the
 	// immutable fixture and fails if the query does not hit, so a
 	// benchcheck delta here is a query-cost change rather than a miss
@@ -108,3 +111,17 @@ var TrackedBenchmarks = append(
 	append([]string{}, CuratedBenchmarks...),
 	LockContentionBenchmarks...,
 )
+
+// GateBenchmarks is the small subset compared on every pull request that
+// touches node code: base and head are built and run interleaved on one
+// runner (.github/scripts/bench-gate.sh) and compared with
+// GateRegressionThresholdPercent. Each entry is also in CuratedBenchmarks, so
+// the weekly run keeps its history. Keep this list in sync with the
+// BENCH_REGEX in bench-gate.sh.
+var GateBenchmarks = []string{
+	"BenchmarkChainSyncFromGenesis",                // sync throughput, ledger/benchmark_test.go
+	"BenchmarkRealBlockProcessing",                 // sync of real blocks, ledger/benchmark_test.go
+	"BenchmarkBlockProcessingThroughput",           // block-apply latency, ledger/benchmark_test.go
+	"BenchmarkBlockProcessingThroughputPredecoded", // block-apply latency, ledger/benchmark_test.go
+	"BenchmarkReadParamsRequest",                   // utxorpc request latency, api/utxorpc/benchmark_test.go
+}

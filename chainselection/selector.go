@@ -2270,7 +2270,10 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// network tip has no upper bound over a node that is far behind, and
 		// recorded references only lag the peers delivering the chain.
 		referenceAheadOfCatchUpFloor := referenceBlock > catchUpFloor
-		if observedReject && cs.localTip.BlockNumber > 0 &&
+		// An empty local chain is bounded as block 0, not exempted: from
+		// genesis the node is as far behind as it can be, and without the
+		// relaxation one header batch past K refuses every honest peer.
+		if observedReject &&
 			(referenceStale || referenceAheadOfCatchUpFloor) {
 			maxPlausibleBlock = max(maxPlausibleBlock, catchUpCeiling)
 			observedReject = observedBlock > maxPlausibleBlock

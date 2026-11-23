@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
 
 // redactedPlaceholder replaces a secret-bearing value in a rendered log.
@@ -63,6 +65,9 @@ const (
 	// section is walked so its own keys are classified by name, and a
 	// value of any other shape at the same key is redacted.
 	logProviderSection
+	// logSelectionMap renders a map of capability name to plugin selection,
+	// keeping each provider name and walking each provider config by key.
+	logSelectionMap
 )
 
 // logSecretConfigFields are the Config field paths (dotted Go field names)
@@ -141,6 +146,12 @@ var logPlainConfigFields = []string{
 	"BarkArchiveMaxConcurrentFetches",
 	"BarkBlockDownloadAllowPrivateAddresses",
 	"BarkClientCAFilePath",
+	"BarkEventBufferSize",
+	"BarkEventEnabled",
+	"BarkEventMaxSubscribers",
+	"BarkEventMaxSubscribersPerClient",
+	"BarkEventNodeID",
+	"BarkEventPublishEnabled",
 	"BarkHost",
 	"BarkLifecycleEnabled",
 	"BarkLifecycleOperatorCertificateFingerprints",
@@ -226,6 +237,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.GraceHours",
 	"KoiosParity.Network",
 	"KoiosParity.Strict",
+	"KoiosParity.UnavailableRetryLimit",
 	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
 	"LeiosPersistenceRetentionSlots",
@@ -399,6 +411,7 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 		logURLOrPath:      logURLOrPathConfigFields,
 		logHostOnly:       logHostOnlyConfigFields,
 		logProviderConfig: logProviderConfigFields,
+		logSelectionMap:   logSelectionMapConfigFields,
 	} {
 		for _, path := range paths {
 			classes[path] = class
@@ -406,6 +419,12 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 	}
 	return classes
 })
+
+// logSelectionMapConfigFields are Config field paths holding selections for
+// capabilities that have no field of their own, keyed by capability name.
+var logSelectionMapConfigFields = []string{
+	"Plugins.Extra",
+}
 
 // providerConfigPlainKeys are the lower-cased keys a compiled-in plugin
 // provider accepts in its free-form configuration map that carry no
@@ -569,6 +588,8 @@ func classedValue(v reflect.Value, class logClass) slog.Value {
 			func(s string) string { return s },
 			plainValue,
 		)
+	case logSelectionMap:
+		return selectionMapValue(v)
 	case logProviderSection:
 		// A section is rendered by providerConfigEntry, which reaches
 		// here only for a value that is not one.
@@ -645,6 +666,38 @@ func mappedValue(
 	default:
 		return fallback(v)
 	}
+}
+
+// selectionMapValue renders a map[string]plugin.Selection. The provider name
+// is rendered; the provider config is walked by key, so an unclassified key
+// is redacted. Any other shape is redacted whole.
+func selectionMapValue(v reflect.Value) slog.Value {
+	selections, ok := reflect.TypeAssert[map[string]hostplugin.Selection](v)
+	if !ok {
+		return redactedValue(v)
+	}
+	names := make([]string, 0, len(selections))
+	for name := range selections {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	attrs := make([]slog.Attr, 0, len(names))
+	for _, name := range names {
+		selection := selections[name]
+		attrs = append(attrs, slog.Attr{
+			Key: name,
+			Value: slog.GroupValue(
+				slog.String("provider", selection.Provider),
+				slog.Attr{
+					Key: "config",
+					Value: providerConfigValue(
+						reflect.ValueOf(selection.Config),
+					),
+				},
+			),
+		})
+	}
+	return slog.GroupValue(attrs...)
 }
 
 // providerConfigValue renders a plugin provider's free-form configuration

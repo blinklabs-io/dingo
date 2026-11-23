@@ -247,8 +247,9 @@ func (s *Store) buildDeferredIndexesWithProgress(
 	after func(string, time.Duration),
 ) error {
 	if s.dialect.Name() == "sqlite" {
-		// SQLite runs wal_autocheckpoint at commit, so one transaction around
-		// all CREATE INDEX statements would defer it until the rebuild ends.
+		// The WAL checkpointer can only backfill committed frames, so one
+		// transaction around all CREATE INDEX statements would keep every
+		// index build in the WAL until the rebuild ends.
 		var missing []deferred.Index
 		err := s.withDeferredIndexWriteContext(
 			buildCtx,
