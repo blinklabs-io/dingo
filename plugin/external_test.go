@@ -15,9 +15,7 @@
 package plugin
 
 import (
-	"bufio"
 	"context"
-	_ "embed"
 	"maps"
 	"os"
 	"os/exec"
@@ -28,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/pluginfixture"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -35,70 +34,7 @@ import (
 	"log/slog"
 )
 
-//go:embed testdata/testplugin.go.txt
-var testPluginSource string
-
-const externalTestCapability Capability = "example.widget/v0"
-
-// goModDirective returns the go version the module at path declares.
-func goModDirective(t *testing.T, goMod string) string {
-	t.Helper()
-	f, err := os.Open(goMod)
-	require.NoError(t, err)
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if v, ok := strings.CutPrefix(scanner.Text(), "go "); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	require.NoError(t, scanner.Err())
-	t.Fatalf("%s declares no go version", goMod)
-	return ""
-}
-
-// buildTestPlugin compiles the test plugin from a module that requires
-// nothing but the sdk, found through a temporary workspace, and returns the
-// executable path.
-func buildTestPlugin(t *testing.T) string {
-	t.Helper()
-	sdkDir, err := filepath.Abs(filepath.Join("..", "sdk"))
-	require.NoError(t, err)
-	goVersion := goModDirective(t, filepath.Join("..", "go.mod"))
-	// The go command matches a module against go.work's use paths through its
-	// resolved working directory, so a symlinked temporary directory (macOS
-	// /var -> /private/var) would leave the plugin module outside the
-	// workspace.
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	pluginDir := filepath.Join(dir, "tp")
-	require.NoError(t, os.Mkdir(pluginDir, 0o755))
-	files := map[string]string{
-		filepath.Join(pluginDir, "go.mod"): "module testplugin\n\ngo " +
-			goVersion + "\n",
-		filepath.Join(pluginDir, "main.go"): testPluginSource,
-		filepath.Join(dir, "go.work"): "go " + goVersion + "\n\nuse (\n\t\"" +
-			filepath.ToSlash(sdkDir) + "\"\n\t./tp\n)\n",
-	}
-	for path, content := range files {
-		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	}
-	goBin, err := exec.LookPath("go")
-	require.NoError(t, err)
-	out := filepath.Join(dir, "testplugin")
-	cmd := exec.CommandContext(t.Context(), goBin, "build", "-buildvcs=false", "-o", out, "./tp")
-	cmd.Dir = dir
-	// GOFLAGS is cleared because a -mod flag is rejected in workspace mode.
-	cmd.Env = append(
-		os.Environ(),
-		"GOWORK="+filepath.Join(dir, "go.work"),
-		"GOFLAGS=",
-	)
-	if combined, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build test plugin: %v\n%s", err, combined)
-	}
-	return out
-}
+const externalTestCapability Capability = pluginfixture.Capability
 
 // externalHarness registers the test plugin on a fresh host and records the
 // process it launches.
@@ -204,7 +140,7 @@ func TestExternalPlugin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("external plugins use Unix sockets and signals")
 	}
-	binary := buildTestPlugin(t)
+	binary := pluginfixture.Build(t)
 
 	t.Run("launch negotiate use stop", func(t *testing.T) {
 		t.Parallel()

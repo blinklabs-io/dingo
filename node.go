@@ -394,6 +394,16 @@ func New(cfg Config) (*Node, error) {
 			requests: make(chan ShutdownRequest, 1),
 		},
 	}
+	// A started external plugin that exits or stops answering ends the node
+	// through the same fatal path as any other component failure, so Run
+	// returns the plugin's error and shutdown stops providers in reverse
+	// order.
+	pluginHost.SetFailureHandler(func(f plugin.Failure) {
+		n.cancelForFatal(fmt.Errorf(
+			"plugin %s/%s failed: %w",
+			f.Capability.Name(), f.Provider, f.Err,
+		))
+	})
 	for capability, selection := range cfg.pluginSelections {
 		// API capabilities are validated against their *merged* config
 		// (shared api.tls defaults folded in) so an invalid

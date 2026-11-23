@@ -165,8 +165,11 @@ failed start stops the process and removes the runtime directory.
 After start the host pings the plugin every `keepaliveInterval` and watches the
 process. An exit or a failed ping is logged with the capability, provider and
 cause, then passed to the handler set by `Host.SetFailureHandler`, which runs on
-its own goroutine and calls `Host.Stop` to unwind every provider in reverse
-start order. Stopping a plugin sends `Control.Stop`, then SIGTERM, then
+its own goroutine. `Node.New` installs a handler that records the failure as the
+node's fatal error and cancels the node, the path every fatal component failure
+takes: `Run` returns an error naming the plugin and its cause, and the ordinary
+shutdown stops the host's providers in reverse start order. The handler never
+calls `Host.Stop` itself, so shutdown owns the only stop. Stopping a plugin sends `Control.Stop`, then SIGTERM, then
 SIGKILL, each phase bounded by `stopTimeout` and the stop context; Stop
 reports an error when a plugin needed a signal.
 

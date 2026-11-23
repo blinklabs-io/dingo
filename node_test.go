@@ -54,6 +54,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/pluginfixture"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -74,6 +75,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // TestAPIProviderConfigMergesTopLevelDefault asserts a provider selection
@@ -2041,6 +2044,59 @@ func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
 	assert.Equal(t, int32(1), blockfrostProbe.stops.Load())
 	assert.Zero(t, meshProbe.starts.Load())
 	assert.Zero(t, meshProbe.stops.Load())
+}
+
+func TestNodeRunEndsWhenExternalPluginFails(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("external plugins use Unix sockets and signals")
+	}
+
+	binary := pluginfixture.Build(t)
+	n := newAPIPluginRuntimeNode(t)
+	WithMeshPort(0)(&n.config)
+	n.config.syncCompatFields()
+	const external plugin.Capability = pluginfixture.Capability
+	require.NoError(t, n.pluginHost.Declare(external))
+	require.NoError(t, plugin.RegisterExternal[healthpb.HealthClient, struct{}](
+		n.pluginHost,
+		plugin.Descriptor{Capability: external, Name: "testplugin"},
+		func(cc grpc.ClientConnInterface) healthpb.HealthClient {
+			return healthpb.NewHealthClient(cc)
+		},
+	))
+	// Not under t.TempDir: its path can exceed the Unix socket limit.
+	runtimeDir, err := os.MkdirTemp("", "dn")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+
+	// The probe starts during Run's API composition, so the plugin is
+	// launched and crashed while the node is running.
+	probe := &apiLifecycleProbe{}
+	probe.onStart = func() error {
+		client, err := plugin.Resolve[healthpb.HealthClient](
+			n.ctx, n.pluginHost, external, "testplugin",
+			map[string]any{"command": binary, "runtimeDir": runtimeDir},
+			struct{}{},
+		)
+		if err != nil {
+			return err
+		}
+		// The process exits as it answers; the call may fail either way.
+		_, _ = client.Check(
+			n.ctx, &healthpb.HealthCheckRequest{Service: "crash"},
+		)
+		return nil
+	}
+	registerAPIProbe(t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 18081)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	err = n.Run(ctx)
+	require.ErrorContains(t, err, "plugin example.widget/testplugin failed")
+	require.ErrorContains(t, err, "exit status 7")
+	require.NoError(t, n.Stop())
 }
 
 func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
