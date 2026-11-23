@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -432,6 +433,11 @@ func (ls *LedgerState) validateForkCandidate(
 			Point:       ancestor,
 			BlockNumber: parentBlock.Number,
 		}
+		live := ls.loadConsensusSnapshot()
+		if live == nil {
+			return errors.New("fork validation consensus snapshot unavailable")
+		}
+		epochCache := slices.Clone(epochs)
 		for _, block := range blocks {
 			if block.SlotNumber() >= currentEpoch.StartSlot+
 				uint64(currentEpoch.LengthInSlots) {
@@ -444,6 +450,7 @@ func (ls *LedgerState) validateForkCandidate(
 				if transitionErr != nil {
 					return transitionErr
 				}
+				epochCache = append(epochCache, currentEpoch)
 			}
 			point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 			var offsets *database.BlockIngestionResult
@@ -464,6 +471,13 @@ func (ls *LedgerState) validateForkCandidate(
 				return fmt.Errorf("validate candidate block at slot %d: %w", point.Slot, err)
 			}
 			if delta != nil {
+				candidate := *live
+				candidate.currentEpoch = currentEpoch
+				candidate.currentEra = currentEra
+				candidate.currentPParams = pparams
+				candidate.prevEraPParams = prevPParams
+				candidate.epochCache = epochCache
+				delta.consensus = &candidate
 				if err := delta.apply(ctx, ls, txn); err != nil {
 					delta.Release()
 					return fmt.Errorf("stage candidate block at slot %d: %w", point.Slot, err)

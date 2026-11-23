@@ -99,7 +99,20 @@ type LedgerDelta struct {
 	// LedgerDeltaBatch.apply keeps such a batch on the per-transaction path.
 	validated          bool
 	closureContextSlot *uint64
-	stageApplyEvents   func([]TransactionEvent)
+	// consensus replaces the live consensus snapshot for a delta applied to
+	// a fork candidate, whose epoch cache and protocol parameters differ
+	// from the selected chain's once it crosses a boundary.
+	consensus        *consensusSnapshot
+	stageApplyEvents func([]TransactionEvent)
+}
+
+// consensusFor is the consensus snapshot the delta's rules read: the
+// candidate's when one is set, the live one otherwise.
+func (d *LedgerDelta) consensusFor(ls *LedgerState) *consensusSnapshot {
+	if d.consensus != nil {
+		return d.consensus
+	}
+	return ls.loadConsensusSnapshot()
 }
 
 func NewLedgerDelta(
@@ -119,6 +132,7 @@ func NewLedgerDelta(
 	delta.strictConsumedInputs = false
 	delta.validated = false
 	delta.closureContextSlot = nil
+	delta.consensus = nil
 	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
@@ -144,6 +158,7 @@ func (d *LedgerDelta) Release() {
 	d.strictConsumedInputs = false
 	d.validated = false
 	d.closureContextSlot = nil
+	d.consensus = nil
 	d.stageApplyEvents = nil
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
@@ -269,7 +284,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				}
 			}
 			if len(certs) > 0 && !snapshotLoaded {
-				snapshot := ls.loadConsensusSnapshot()
+				snapshot := d.consensusFor(ls)
 				if snapshot == nil {
 					certDepositsMapPool.Put(certDeposits)
 					return errors.New(
@@ -606,7 +621,7 @@ func (d *LedgerDelta) processGovernance(
 	if d.closureContextSlot != nil {
 		contextSlot = *d.closureContextSlot
 	}
-	snapshot := ls.loadConsensusSnapshot()
+	snapshot := d.consensusFor(ls)
 	if snapshot == nil {
 		return errors.New("governance consensus snapshot not yet published")
 	}
