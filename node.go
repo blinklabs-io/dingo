@@ -1586,6 +1586,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	n.subscribeCaughtUpMarkerEvents()
+	n.subscribeLedgerStateEvents()
 	n.subscribeEquivocationDetector()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
