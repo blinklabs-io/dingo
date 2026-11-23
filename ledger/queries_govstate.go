@@ -46,19 +46,20 @@ var noFuturePParams = cbor.RawMessage{0x81, 0x00}
 // The roots, committee, constitution and protocol parameters are read as they
 // stand at the tip. The reference node also returns the DRep pulsing state it
 // froze at the boundary that opened the epoch and the ratification outcome
-// computed from it. Dingo stores neither, and a ratification outcome cannot be
+// computed from it. The pulsing snapshot's DRep distribution is the one the
+// boundary recorded and its pool distribution is the boundary's mark snapshot,
+// so neither moves with stake during the epoch; the query is refused when
+// either is missing. A ratification outcome is not stored and cannot be
 // rebuilt from live state. It is empty exactly when no governance action
 // exists to ratify, expire or enact, so the query is answered only then, with
 // empty proposals, no enacted or expired actions, no delay and no scheduled
 // parameter change; while an action is pending it fails with
-// ErrQueryNotAnswered rather than report no outcome. The DRep and pool
-// distributions are read live, so they can differ from the node's once stake
-// moves within an epoch.
+// ErrQueryNotAnswered rather than report no outcome.
 //
 // A pinned point is answered only when it is the current tip, which is what a
 // reopened view names while the chain has not advanced; the live state is then
-// the state at that point. Any other point is refused, because the stake
-// distributions of the epoch boundary cannot be rebuilt for an earlier slot.
+// the state at that point. Any other point is refused, because the committee,
+// constitution and roots are read as they stand at the tip.
 func (ls *LedgerState) queryShelleyGovState(
 	ctx context.Context,
 	at QueryPoint,
@@ -75,8 +76,8 @@ func (ls *LedgerState) queryShelleyGovState(
 			!bytes.Equal(tip.Point.Hash, at.Hash) {
 			return nil, fmt.Errorf(
 				"%w: governance state as of slot %d cannot be "+
-					"reconstructed -- the DRep distribution of the epoch "+
-					"boundary is not stored",
+					"reconstructed -- the committee, constitution and "+
+					"governance roots are read at the tip",
 				ErrHistoricalStateUnavailable,
 				at.Slot,
 			)
@@ -115,7 +116,6 @@ func (ls *LedgerState) queryShelleyGovState(
 	}
 	pulsing, err := ls.govStatePulsingState(
 		ctx,
-		at,
 		txn,
 		epoch,
 		roots,
@@ -400,7 +400,6 @@ func encodeWrappedReply(reply any) (cbor.RawMessage, error) {
 // completed pulser: the epoch snapshot followed by the ratify state.
 func (ls *LedgerState) govStatePulsingState(
 	ctx context.Context,
-	at QueryPoint,
 	txn ledgerdb.Txn,
 	epoch models.Epoch,
 	roots olocalstatequery.PrevGovActionIds,
@@ -409,7 +408,7 @@ func (ls *LedgerState) govStatePulsingState(
 	currentPParams cbor.RawMessage,
 	prevPParams cbor.RawMessage,
 ) (cbor.RawMessage, error) {
-	drepDistr, err := ls.govStateDRepDistribution(ctx, txn)
+	drepDistr, err := ls.govStateDRepDistribution(epoch, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +423,7 @@ func (ls *LedgerState) govStatePulsingState(
 	if err != nil {
 		return nil, err
 	}
-	poolDistr, err := ls.govStatePoolDistribution(ctx, at, txn)
+	poolDistr, err := ls.govStatePoolDistribution(epoch, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -505,10 +504,65 @@ func drepStateFromReply(reply any) (olocalstatequery.DRepStateResult, error) {
 	return state, nil
 }
 
-// govStateDRepDistribution returns the stake delegated to each registered DRep
-// and to the predefined options, encoded as a bare map: the snapshot carries
-// the map itself, without the single-element wrapper a query reply adds.
+// govStateDRepDistribution returns the DRep distribution the boundary that
+// opened epoch froze for the pulser. Live voting power moves with every stake
+// transfer, reward and registration in the epoch, while the reference pulser
+// keeps the distribution of its boundary, so only the recorded one is served.
+// A boundary this node did not process, such as one before a snapshot import
+// or an upgrade, recorded none, and the query is then refused.
 func (ls *LedgerState) govStateDRepDistribution(
+	epoch models.Epoch,
+	txn ledgerdb.Txn,
+) (cbor.RawMessage, error) {
+	snapshot, err := ls.ledgerDB().GetDRepDistributionSnapshot(
+		epoch.EpochId, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get DRep distribution snapshot: %w", err)
+	}
+	if snapshot == nil {
+		return nil, queryNotAnswered(
+			"GetGovState", missingDRepDistributionSnapshot,
+		)
+	}
+	return cbor.RawMessage(snapshot.Distribution), nil
+}
+
+// captureDRepDistributionSnapshot records the DRep distribution of a boundary
+// for the epoch it opens. It runs in the rollover transaction after enactment,
+// proposal refunds and donations, before any block of the new epoch, which is
+// the state the reference pulser starts from.
+func (ls *LedgerState) captureDRepDistributionSnapshot(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	epoch uint64,
+	boundarySlot uint64,
+) error {
+	distr, err := ls.liveDRepDistribution(ctx, txn)
+	if err != nil {
+		return fmt.Errorf(
+			"compute DRep distribution of epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	if err := ls.ledgerDB().SaveDRepDistributionSnapshot(
+		&models.DRepDistributionSnapshot{
+			Epoch:        epoch,
+			Distribution: distr,
+			BoundarySlot: boundarySlot,
+		},
+		txn,
+	); err != nil {
+		return fmt.Errorf("save DRep distribution of epoch %d: %w", epoch, err)
+	}
+	return nil
+}
+
+// liveDRepDistribution returns the stake delegated to each registered DRep and
+// to the predefined options, encoded as a bare map: the snapshot carries the
+// map itself, without the single-element wrapper a query reply adds.
+func (ls *LedgerState) liveDRepDistribution(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (cbor.RawMessage, error) {
@@ -584,19 +638,36 @@ func (ls *LedgerState) govStateDRepDistribution(
 }
 
 // govStatePoolDistribution returns each pool's stake as the pulsing snapshot
-// records it.
+// records it: the mark snapshot the boundary that opened epoch captured, not
+// the older one that elects its leaders. That boundary may leave the capture
+// to a background job; until the job writes it the query is refused.
 func (ls *LedgerState) govStatePoolDistribution(
-	ctx context.Context,
-	at QueryPoint,
+	epoch models.Epoch,
 	txn ledgerdb.Txn,
 ) (map[ledger.Blake2b224]uint64, error) {
-	dist, err := ls.PoolStakeDistribution(ctx, nil, at, txn)
+	pending, err := loadPendingRatification(ls.db, txn)
 	if err != nil {
 		return nil, err
 	}
-	pools := make(map[ledger.Blake2b224]uint64, len(dist.Pools))
-	for _, pool := range dist.Pools {
-		pools[ledger.Blake2b224(pool.PoolKeyHash)] = pool.Stake
+	if pending != nil && pending.Snapshot && pending.Epoch == epoch.EpochId {
+		return nil, queryNotAnswered(
+			"GetGovState", missingBoundaryPoolSnapshot,
+		)
+	}
+	rows, err := ls.ledgerDB().GetPoolStakeSnapshotsByEpoch(
+		epoch.EpochId, models.PoolStakeSnapshotTypeMark, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get mark pool stake snapshot of epoch %d: %w", epoch.EpochId, err,
+		)
+	}
+	pools := make(map[ledger.Blake2b224]uint64, len(rows))
+	for _, row := range rows {
+		if row == nil || len(row.PoolKeyHash) != len(ledger.Blake2b224{}) {
+			continue
+		}
+		pools[ledger.Blake2b224(row.PoolKeyHash)] = uint64(row.TotalStake)
 	}
 	return pools, nil
 }

@@ -98,6 +98,7 @@ func TestQueryShelleyGovStateAssemblesLedgerGovernanceState(t *testing.T) {
 		AddedSlot:     10,
 	}
 	require.NoError(t, db.SetGovernanceProposal(ctx, enacted, nil))
+	recordGovStateBoundary(t, ls)
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)
@@ -170,6 +171,7 @@ func TestQueryShelleyGovStateNoConfidenceReportsNoCommittee(t *testing.T) {
 		AddedSlot:  1,
 	}, nil))
 
+	recordGovStateBoundary(t, ls)
 	reply, err := ls.queryShelleyLeaf(
 		ctx, &olocalstatequery.ShelleyGovStateQuery{}, QueryPoint{}, nil, 13,
 	)
@@ -240,6 +242,7 @@ func TestQueryShelleyGovStateCarriesDRepAndPoolStake(t *testing.T) {
 	ls.currentEpoch = models.Epoch{EpochId: 0}
 	ls.publishSnapshotsLocked()
 
+	recordGovStateBoundary(t, ls)
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)
@@ -294,6 +297,16 @@ func TestQueryShelleyGovStateSeatsGenesisCommitteeWithoutEnactedQuorum(
 	assert.NotNil(t, committee.Threshold.Rat)
 }
 
+// recordGovStateBoundary records the DRep distribution of the boundary that
+// opened the ledger's current epoch, as the rollover does.
+func recordGovStateBoundary(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	epoch := ls.currentEpoch
+	require.NoError(t, ls.captureDRepDistributionSnapshot(
+		context.Background(), nil, epoch.EpochId, epoch.StartSlot,
+	))
+}
+
 // newGovStateLedger returns a Conway ledger at the given epoch with a
 // constitution recorded, the minimum GetGovState needs.
 func newGovStateLedger(
@@ -324,6 +337,7 @@ func TestQueryShelleyGovStateAnswersPinnedPointAtTheTip(t *testing.T) {
 	tip := ocommon.NewPoint(350, repeatedBytes(32, 0x0b))
 	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
 
+	recordGovStateBoundary(t, ls)
 	_, err := ls.queryShelleyGovState(
 		context.Background(),
 		QueryPoint{Slot: tip.Slot, Hash: tip.Hash},
@@ -414,6 +428,7 @@ func TestQueryShelleyGovStateSnapshotHoldsOnlyBoundaryDReps(t *testing.T) {
 		}))
 	}
 
+	recordGovStateBoundary(t, ls)
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)
@@ -461,6 +476,9 @@ func TestQueryShelleyGovStatePreviousParametersFollowTheViewEpoch(
 		Point: ocommon.NewPoint(2050, repeatedBytes(32, 0x0b)),
 	}, nil))
 
+	require.NoError(t, ls.captureDRepDistributionSnapshot(
+		ctx, nil, 20, 2000,
+	))
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)
@@ -515,6 +533,7 @@ func TestQueryShelleyGovStateConvertsPreviousParametersToTheCurrentEra(
 		Point: ocommon.NewPoint(2050, repeatedBytes(32, 0x0b)),
 	}, nil))
 
+	recordGovStateBoundary(t, ls)
 	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
 	require.NoError(t, err)
 	state := decodeGovStateReply(t, reply)

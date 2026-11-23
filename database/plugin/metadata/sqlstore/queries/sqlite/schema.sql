@@ -281,6 +281,13 @@ CREATE TABLE reward_likelihood_state (
     complete BOOLEAN NOT NULL
 );
 
+CREATE TABLE drep_distribution_snapshot (
+    id INTEGER PRIMARY KEY,
+    epoch INTEGER NOT NULL UNIQUE,
+    distribution BLOB NOT NULL,
+    boundary_slot INTEGER NOT NULL
+);
+
 CREATE TABLE reward_pool_likelihood (
     id INTEGER PRIMARY KEY,
     epoch INTEGER NOT NULL,

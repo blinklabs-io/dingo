@@ -111,6 +111,7 @@ type Querier interface {
 	// idx_account_drep_type_active_staking_key; see the account index notes in
 	// DATABASE.md.
 	GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsParams) ([]GetDRepDelegatorsRow, error)
+	GetDRepDistributionSnapshot(ctx context.Context, epoch int64) (DrepDistributionSnapshot, error)
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)
 	GetDrepByHash(ctx context.Context, credential []byte) (Drep, error)
@@ -203,6 +204,7 @@ type Querier interface {
 	ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error)
 	RestoreCommitteeMembersDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
+	SaveDRepDistributionSnapshot(ctx context.Context, arg SaveDRepDistributionSnapshotParams) (int64, error)
 	SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryParams) (int64, error)
 	SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error
 	SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error

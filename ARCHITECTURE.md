@@ -8342,7 +8342,8 @@ epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) remain deliberatel
 unanswered: they return the whole epoch or new-epoch state in the ledger's
 encoding, which Dingo does not hold in that form. Each fails with
 `ErrQueryNotAnswered`, which names the query and what is missing;
-`GetGovState` fails the same way only while a governance action is pending.
+`GetGovState` fails the same way while a governance action is pending or the
+boundary's DRep or `mark` pool distribution is not recorded.
 The LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
@@ -21054,10 +21055,17 @@ proposals, no enacted or expired actions, no delay, a zero treasury as the
 reference node reports, and no scheduled parameter change. While an action is
 pending the query fails with `ErrQueryNotAnswered`, which ends the session,
 instead of reporting no outcome. The DRep pulsing snapshot's DRep state is read
-as of the last slot before the epoch began; its DRep distribution (registered
-DReps and the two predefined options that hold stake) and its pool distribution
-are read live, without the delegator-inactivity gate, so they can differ from
-the node's once stake moves within an epoch.
+as of the last slot before the epoch began. Its DRep distribution (registered
+DReps and the two predefined options that hold stake, without the
+delegator-inactivity gate) is the one the boundary recorded in
+`drep_distribution_snapshot`: the Conway rollover computes it after
+enactment, proposal refunds and donations, before any block of the new epoch,
+so stake transfers, rewards and registrations within the epoch do not move it.
+Its pool distribution is the boundary's `mark` snapshot of the epoch, not the
+older one that elects its leaders. The query fails with `ErrQueryNotAnswered`
+when the boundary recorded no DRep distribution (it was crossed before a
+snapshot import or an upgrade) and while a deferred boundary job has not yet
+written the `mark` snapshot.
 
 `DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
 acquired block instead of the tip: its slot as the last slot, the epoch rows

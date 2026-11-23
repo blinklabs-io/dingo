@@ -132,3 +132,14 @@ type ResignCommitteeCold struct {
 	CertificateID     uint
 	AddedSlot         uint64
 }
+
+// DRepDistributionSnapshot is the DRep stake distribution an epoch boundary
+// froze for the governance pulser of the epoch it opened. Distribution is the
+// CBOR map from DRep to lovelace, as the DRep pulsing snapshot carries it.
+// BoundarySlot is the first slot of Epoch.
+type DRepDistributionSnapshot struct {
+	Distribution []byte
+	ID           uint
+	Epoch        uint64
+	BoundarySlot uint64
+}

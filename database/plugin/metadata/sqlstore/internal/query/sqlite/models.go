@@ -154,6 +154,13 @@ type DrepDelegator struct {
 	RemovedSlot        sql.NullInt64
 }
 
+type DrepDistributionSnapshot struct {
+	ID           int64
+	Epoch        int64
+	Distribution []byte
+	BoundarySlot int64
+}
+
 type DrepDormancyHistory struct {
 	ID                    int64
 	AddedSlot             int64

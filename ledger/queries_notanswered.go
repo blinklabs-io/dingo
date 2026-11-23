@@ -38,6 +38,15 @@ const (
 	missingRatificationOutcome = "the completed ratification outcome of the " +
 		"epoch boundary, which is not stored, while a governance action is " +
 		"pending"
+	// missingDRepDistributionSnapshot is what GetGovState reports when the
+	// boundary that opened the epoch recorded no DRep distribution.
+	missingDRepDistributionSnapshot = "the DRep stake distribution of the " +
+		"boundary that opened the epoch, which only a boundary this node " +
+		"processed records"
+	// missingBoundaryPoolSnapshot is what GetGovState reports while the
+	// boundary's mark pool snapshot is still being written.
+	missingBoundaryPoolSnapshot = "the mark pool stake snapshot of the " +
+		"boundary that opened the epoch, which is still being written"
 	// missingEpochState is the whole ledger state the debug queries return.
 	missingEpochState = "the whole epoch state in the ledger's encoding, " +
 		"which is not held in that form"

@@ -855,6 +855,11 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 					args: []any{slot},
 				},
 				{
+					query: `DELETE FROM drep_distribution_snapshot
+				 WHERE boundary_slot > ?`,
+					args: []any{slot},
+				},
+				{
 					query: `UPDATE governance_proposal
 				 SET ratified_epoch = (
 				     SELECT history.ratified_epoch

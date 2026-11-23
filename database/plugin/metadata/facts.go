@@ -378,6 +378,12 @@ var FactTables = []FactTable{
 		Paged:       true,
 	},
 	{
+		Name:        "drep_distribution_snapshot",
+		SlotColumns: []string{"boundary_slot"},
+		Key:         []string{"epoch"},
+		Paged:       true,
+	},
+	{
 		Name:        "network_state",
 		SlotColumns: []string{"slot"},
 		Key:         []string{"slot"},
