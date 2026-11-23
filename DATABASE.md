@@ -325,10 +325,14 @@ no transaction row is dropped; a row whose `transaction_id` and `tx_id` hash
 disagree keeps the linked producer and is logged), copies the input edges a
 fixed number per batch, so an output named by many transactions cannot make a
 batch unbounded, checks the row counts,
-swaps the new tables in for the old ones in one transaction and builds the
-secondary indexes before it completes. It is resumable from its cursor at every
-batch. PostgreSQL and MySQL keep `transaction` in place and drop its columns
-after the copy. A database that ran the unmerged `utxo-spender-tx-ids`,
+swaps the new tables in for the old ones and builds the secondary indexes before
+it completes. SQLite and PostgreSQL make the swap in the runner transaction.
+MySQL uses one atomic `RENAME TABLE` statement for both `utxo` tables, retains
+the old table until the foreign keys and `transaction` columns are complete,
+and resumes from either side of that rename after an interruption. It is
+resumable from its cursor at every batch. PostgreSQL and MySQL keep
+`transaction` in place and drop its columns after the copy. A database that ran
+the unmerged `utxo-spender-tx-ids`,
 `utxo-input-edge-tx-ids` or `utxo-producer-output-index` migrations has no
 upgrade path and is resynced.
 
