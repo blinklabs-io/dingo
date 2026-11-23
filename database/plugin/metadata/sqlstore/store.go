@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"regexp"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -1398,7 +1400,7 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	err := t.tx.Commit()
+	err := t.commitTx()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
 	} else if t.owner != nil {
@@ -1412,6 +1414,15 @@ func (t *sqlTxn) Commit() error {
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
 	return err
+}
+
+// commitTx commits the SQL transaction inside its trace region, ended by
+// defer so a panicking commit cannot leave it open.
+func (t *sqlTxn) commitTx() error {
+	if t.ctx != nil {
+		defer rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit).End()
+	}
+	return t.tx.Commit()
 }
 
 func (t *sqlTxn) Rollback() error {

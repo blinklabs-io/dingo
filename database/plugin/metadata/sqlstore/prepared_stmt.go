@@ -400,7 +400,13 @@ func (s *Store) execBatch(
 					s.sqlOperations.WithLabelValues(op).Inc()
 				}
 				start := time.Now()
-				_, err := stmt.ExecContext(ctx, args...)
+				_, err := inStatementRegion(
+					ctx,
+					query,
+					func() (sql.Result, error) {
+						return stmt.ExecContext(ctx, args...)
+					},
+				)
 				if s.sqlQueryDuration != nil {
 					s.sqlQueryDuration.WithLabelValues(op, name).
 						Observe(time.Since(start).Seconds())
@@ -812,7 +818,7 @@ func (s *Store) queryRowCached(
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		row := stmt.QueryRowContext(ctx, args...)
+		row := queryRowInStatementRegion(ctx, query, stmt, args...)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -846,7 +852,13 @@ func (s *Store) execCached(
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		result, err := stmt.ExecContext(ctx, args...)
+		result, err := inStatementRegion(
+			ctx,
+			query,
+			func() (sql.Result, error) {
+				return stmt.ExecContext(ctx, args...)
+			},
+		)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -927,7 +939,9 @@ func (s *Store) queryRowsCached(
 		}
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		rows, err := stmt.QueryContext(ctx, args...)
+		rows, err := inStatementRegion(ctx, query, func() (*sql.Rows, error) {
+			return stmt.QueryContext(ctx, args...)
+		})
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
