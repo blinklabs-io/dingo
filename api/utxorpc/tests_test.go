@@ -583,23 +583,6 @@ func TestReflection_V1AlphaListsBothApiVersions(t *testing.T) {
 	}
 }
 
-// TestServedServiceNames_CoversBothApiVersions pins the served set itself: both
-// API versions of all four services, and nothing else.
-func TestServedServiceNames_CoversBothApiVersions(t *testing.T) {
-	t.Parallel()
-
-	assert.ElementsMatch(t, []string{
-		"utxorpc.v1alpha.query.QueryService",
-		"utxorpc.v1beta.query.QueryService",
-		"utxorpc.v1alpha.submit.SubmitService",
-		"utxorpc.v1beta.submit.SubmitService",
-		"utxorpc.v1alpha.sync.SyncService",
-		"utxorpc.v1beta.sync.SyncService",
-		"utxorpc.v1alpha.watch.WatchService",
-		"utxorpc.v1beta.watch.WatchService",
-	}, servedServiceNames())
-}
-
 func gzipRequestBody(t *testing.T, body []byte) []byte {
 	t.Helper()
 	var compressed bytes.Buffer

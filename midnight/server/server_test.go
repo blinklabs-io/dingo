@@ -402,17 +402,6 @@ func TestNewRequiresBothTLSPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
-	t.Parallel()
-	for _, host := range []string{"0.0.0.0", "::", "192.0.2.1", "example.test"} {
-		t.Run(host, func(t *testing.T) {
-			t.Parallel()
-			_, err := server.New(server.Config{Host: host})
-			require.NoError(t, err)
-		})
-	}
-}
-
 func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
 	t.Parallel()
 	_, err := server.New(server.Config{

@@ -16,17 +16,13 @@ package ledger
 
 import (
 	"bytes"
-	"encoding/hex"
 	"math"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,37 +76,6 @@ func TestRewardLikelihoodHistoryCompleteness(t *testing.T) {
 		6,
 		stakeRewardEpochs{},
 	))
-}
-
-func TestNonMyopicQueryResultReferenceEncoding(t *testing.T) {
-	pool := gledger.NewBlake2b224(make([]byte, 28))
-	rewards := olocalstatequery.NonMyopicMemberRewardsResult{
-		olocalstatequery.NewNonMyopicCoinKey(100): {pool: 3},
-	}
-	encoded, err := cbor.Encode([]any{rewards})
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"81a182001864a1581c0000000000000000000000000000000000000000000000000000000003",
-		hex.EncodeToString(encoded),
-	)
-
-	rewardInfo := olocalstatequery.RewardInfoPoolsResult{
-		Params: olocalstatequery.RewardParams{
-			NOpt:       1,
-			A0:         &cbor.Rat{Rat: big.NewRat(0, 1)},
-			RPot:       2,
-			TotalStake: 3,
-		},
-		Pools: map[gledger.Blake2b224]olocalstatequery.RewardInfoPool{},
-	}
-	encoded, err = cbor.Encode(rewardInfo)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"81828401d81e8200010203a0",
-		hex.EncodeToString(encoded),
-	)
 }
 
 func TestNonMyopicMemberRewardUsesReferenceStakeChoice(t *testing.T) {

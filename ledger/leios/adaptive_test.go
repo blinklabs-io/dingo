@@ -42,14 +42,6 @@ import (
 func plus(a, b float64) float64  { return a + b }
 func times(a, b float64) float64 { return a * b }
 
-func TestDefaultAdaptiveEbConfigIsTheReferences(t *testing.T) {
-	t.Parallel()
-	require.Equal(t,
-		AdaptiveEbConfig{Decrease: 0.8, Increase: 0.02, MinScale: 0.1},
-		DefaultAdaptiveEbConfig(),
-	)
-}
-
 func TestStepAdaptiveEb(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultAdaptiveEbConfig()

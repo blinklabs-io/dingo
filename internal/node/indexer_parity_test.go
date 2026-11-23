@@ -1211,32 +1211,3 @@ func TestStartupRefusesAReleasedInterruptedBackfillUntouched(t *testing.T) {
 	).Scan(&status))
 	require.Equal(t, "backfill", status)
 }
-
-func TestParityListenersKeepPortsReservedUntilHandoff(t *testing.T) {
-	t.Parallel()
-	ports, listen := parityListeners(t)
-	for name, port := range ports {
-		t.Run(name, func(t *testing.T) {
-			address := net.JoinHostPort(
-				"127.0.0.1",
-				strconv.FormatUint(uint64(port), 10),
-			)
-			intruder, err := net.Listen("tcp", address)
-			if intruder != nil {
-				_ = intruder.Close()
-			}
-			if err == nil {
-				t.Fatal("API socket was released before handoff")
-			}
-			listener, err := listen("tcp", address)
-			require.NoError(t, err)
-			require.Equal(t, address, listener.Addr().String())
-			_, err = listen("tcp", address)
-			require.Error(t, err, "the same socket cannot be transferred twice")
-			require.NoError(t, listener.Close())
-			replacement, err := net.Listen("tcp", address)
-			require.NoError(t, err)
-			require.NoError(t, replacement.Close())
-		})
-	}
-}

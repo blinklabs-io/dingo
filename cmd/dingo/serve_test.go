@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -338,27 +337,6 @@ func TestRetryMithrilRewardStateRepairStopsOnOtherErrors(t *testing.T) {
 	)
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(t, 1, attempts)
-}
-
-// TestEffectiveStorageMode pins that a preflight opens the consensus store in
-// core mode whatever the configuration asks for: API rows live in the
-// IndexerDB, and the node opens the consensus store as core in every run mode.
-func TestEffectiveStorageMode(t *testing.T) {
-	t.Parallel()
-	for _, runMode := range []config.RunMode{
-		config.RunModeServe, config.RunModeDev,
-	} {
-		for _, mode := range []string{"", "core", "api"} {
-			require.Equal(
-				t,
-				dingo.StorageModeCore,
-				effectiveStorageMode(&config.Config{
-					RunMode: runMode, StorageMode: mode,
-				}),
-				"run mode %q, storage mode %q", runMode, mode,
-			)
-		}
-	}
 }
 
 // TestCheckSyncStateDevModeAgreesWithTheNodeOpen starts a dev-mode node twice

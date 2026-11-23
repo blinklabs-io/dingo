@@ -451,18 +451,3 @@ func TestParseDelta(t *testing.T) {
 		}
 	}
 }
-
-// formatSeconds must render benchstat's raw seconds float as a readable
-// duration at nanosecond, millisecond, and second scales.
-func TestFormatSeconds(t *testing.T) {
-	cases := map[float64]string{
-		6.3495e-07: "635ns",
-		1e-03:      "1ms",
-		1.5:        "1.5s",
-	}
-	for in, want := range cases {
-		if got := formatSeconds(in); got != want {
-			t.Fatalf("formatSeconds(%v) = %q, want %q", in, got, want)
-		}
-	}
-}

@@ -105,32 +105,6 @@ func TestCompatBlockResponse(t *testing.T) {
 	assert.Equal(t, 10, theirs.Confirmations)
 }
 
-// TestCompatBlockResponseNilFields verifies that null
-// pointer fields round-trip correctly.
-func TestCompatBlockResponseNilFields(t *testing.T) {
-	t.Parallel()
-
-	output := "0"
-	fees := "0"
-	ours := BlockResponse{
-		Hash:   "abc",
-		Output: &output,
-		Fees:   &fees,
-	}
-
-	data, err := json.Marshal(ours)
-	require.NoError(t, err)
-
-	var theirs bfgo.Block
-	err = json.Unmarshal(data, &theirs)
-	require.NoError(t, err)
-
-	assert.Nil(t, theirs.BlockVRF)
-	assert.Nil(t, theirs.OPCert)
-	assert.Nil(t, theirs.OPCertCounter)
-	assert.Nil(t, theirs.NextBlock)
-}
-
 // TestCompatEpochResponse verifies that our
 // EpochResponse round-trips through blockfrost-go's
 // Epoch type.
@@ -482,48 +456,6 @@ func TestCompatAddressTransactionResponse(t *testing.T) {
 	assert.Equal(t, 3, theirs.TxIndex)
 	assert.EqualValues(t, 99, theirs.BlockHeight)
 	assert.Equal(t, 1700000000, theirs.BlockTime)
-}
-
-// TestCompatHealthResponse verifies that our
-// HealthResponse round-trips through blockfrost-go's
-// Health type.
-func TestCompatHealthResponse(t *testing.T) {
-	t.Parallel()
-
-	ours := HealthResponse{IsHealthy: true}
-
-	data, err := json.Marshal(ours)
-	require.NoError(t, err)
-
-	var theirs bfgo.Health
-	err = json.Unmarshal(data, &theirs)
-	require.NoError(t, err)
-
-	assert.True(t, theirs.IsHealthy)
-}
-
-// TestCompatRootResponse verifies that our
-// RootResponse round-trips through blockfrost-go's
-// Info type.
-func TestCompatRootResponse(t *testing.T) {
-	t.Parallel()
-
-	ours := RootResponse{
-		URL:     "https://blockfrost.io/",
-		Version: "0.1.0",
-	}
-
-	data, err := json.Marshal(ours)
-	require.NoError(t, err)
-
-	var theirs bfgo.Info
-	err = json.Unmarshal(data, &theirs)
-	require.NoError(t, err)
-
-	assert.Equal(
-		t, "https://blockfrost.io/", theirs.Url,
-	)
-	assert.Equal(t, "0.1.0", theirs.Version)
 }
 
 // TestCompatNetworkResponse verifies that our

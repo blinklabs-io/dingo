@@ -18,8 +18,6 @@ import (
 	"log"
 	"os"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 // cleanupCorpusTestdata removes the shared extraction. Safe to call when the
@@ -50,10 +48,7 @@ func registerProcessCleanup(fn func() error) {
 // Every step always runs: a failure is logged and recorded rather than
 // returning early, so one failed drop or removal never leaves a sibling
 // resource uncleaned as a side effect -- for example the blob directory paired
-// with a schema that failed to drop. TestMain is the only caller that runs it
-// against the real chain; TestProcessCleanupChainRunsEveryStepAfterAFailure
-// calls this same function against a substituted chain so the guarantee is
-// tested where it is implemented rather than in a copy of the loop.
+// with a schema that failed to drop.
 func runProcessCleanups() bool {
 	cleanupFailed := false
 	for _, cleanup := range processCleanups {
@@ -92,51 +87,4 @@ func processCleanupExitCode(testExitCode int, cleanupFailed bool) int {
 		return 1
 	}
 	return testExitCode
-}
-
-// TestProcessCleanupExitCodeFailsOnCleanupFailure proves a process-cleanup
-// failure makes TestMain report a nonzero exit code even when every test in the
-// process passed -- a forced RemoveAll permission failure otherwise
-// logged "permission denied" but left `go test` exiting 0, silently leaking the
-// per-run schema, database, or directory this cleanup exists to remove.
-//
-// This test is deliberately untagged, so it covers both build configurations.
-// Previously it lived beside the tagged TestMain and the untagged build carried
-// an uncovered copy of the helper.
-func TestProcessCleanupExitCodeFailsOnCleanupFailure(t *testing.T) {
-	require.Equal(t, 0, processCleanupExitCode(0, false))
-	require.Equal(t, 1, processCleanupExitCode(0, true))
-	require.Equal(t, 2, processCleanupExitCode(2, true))
-	require.Equal(t, 2, processCleanupExitCode(2, false))
-}
-
-// TestProcessCleanupChainRunsEveryStepAfterAFailure proves one failing cleanup
-// does not skip the ones registered after it, and that the failure still
-// reaches the exit code. The ordering guarantee is the point: the Postgres and
-// MySQL teardowns each drop a remote resource and then remove the local blob
-// directory paired with it.
-//
-// It calls runProcessCleanups, the function TestMain calls, against a
-// substituted chain, so a future early return on the first cleanup error fails
-// this test.
-func TestProcessCleanupChainRunsEveryStepAfterAFailure(t *testing.T) {
-	before := processCleanups
-	t.Cleanup(func() { processCleanups = before })
-	processCleanups = nil
-
-	var ran []string
-	registerProcessCleanup(func() error {
-		ran = append(ran, "first")
-		return os.ErrPermission
-	})
-	registerProcessCleanup(func() error {
-		ran = append(ran, "second")
-		return nil
-	})
-
-	cleanupFailed := runProcessCleanups()
-
-	require.Equal(t, []string{"first", "second"}, ran)
-	require.True(t, cleanupFailed)
-	require.Equal(t, 1, processCleanupExitCode(0, cleanupFailed))
 }

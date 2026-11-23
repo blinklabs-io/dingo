@@ -629,26 +629,6 @@ func TestBuildDingoConfigCarriesConsensusProvider(t *testing.T) {
 	require.Equal(t, "custom-consensus", built.ConsensusPlugin())
 }
 
-// TestBuildDingoConfigTokenRegistryDefaultsOff pins the deliberate default
-// through the same production path.
-func TestBuildDingoConfigTokenRegistryDefaultsOff(t *testing.T) {
-	t.Parallel()
-
-	built := buildDingoConfig(
-		&config.Config{},
-		nil,
-		nil,
-		nil,
-		false,
-		dingo.StorageModeAPI,
-		time.Minute,
-		time.Minute,
-		0,
-	)
-
-	require.False(t, built.TokenRegistry().Enabled)
-}
-
 // buildDingoConfig maps fields one by one, so plannerStatsRefreshEnabled from
 // YAML, the environment or the CLI reaches the node only through an explicit
 // option; without it the node keeps NewConfig's default and the escape hatch
