@@ -160,3 +160,11 @@ func (f *DeferredHeaderRecoveryFixture) AppendReplacementBlock() ocommon.Point {
 	))
 	return makeTestPoint(replacement)
 }
+
+// PoolOutputRowsOver and AccountOutputPageOver run the reward output fact
+// copies over a caller's derived reader, for tests in the external ledger_test
+// package that seed the UTxO set the ledger itself must not import.
+var (
+	PoolOutputRowsOver    = poolOutputRowsOver
+	AccountOutputPageOver = accountOutputPageOver
+)

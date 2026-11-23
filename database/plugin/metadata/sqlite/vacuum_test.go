@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -203,4 +204,24 @@ INSERT INTO vacuum_replenish SELECT zeroblob(8192) FROM n`, free+1),
 	})
 	require.ErrorContains(t, err, "incremental vacuum made no progress")
 	require.Equal(t, 1, chunks)
+}
+
+// TestSQLiteWriterAllowsSorterThreads checks the effective threads pragma on a
+// live writer connection, before and after a bulk-mode round trip: the
+// deferred index rebuild runs outside bulk mode and needs helper threads.
+func TestSQLiteWriterAllowsSorterThreads(t *testing.T) {
+	t.Parallel()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: t.TempDir()},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	require.Equal(t, 4, pragmaInt(t, writeDB, "threads"))
+
+	dialect := sqlstore.SQLiteDialect()
+	require.NoError(t, dialect.SetBulkMode(t.Context(), writeDB))
+	require.NoError(t, dialect.RestoreNormalMode(t.Context(), writeDB))
+	require.Equal(t, 4, pragmaInt(t, writeDB, "threads"))
 }

@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // assetPagesHash derives a uniformly distributed 28-byte policy id, as a real
@@ -44,6 +46,12 @@ func assetPagesHash(n uint64) []byte {
 // behaviour, and the assertion is a ratio rather than a frame count.
 func TestAssetHoldingInsertsDirtyFewPages(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine SQLite page counting over a large "+
+			"asset-holding workload; the page bounds are asserted in "+
+			"the un-instrumented run",
+	)
 	const (
 		assets     = 5000
 		seedUtxos  = 20000
@@ -142,7 +150,7 @@ VALUES (?, ?, ?, '1')`,
 			})
 		}
 		require.NoError(t, flushAssetHoldings(
-			t.Context(), tx, rows, store.dialect.ParameterLimit(),
+			t.Context(), tx, nil, rows, store.dialect.ParameterLimit(),
 		))
 	})
 	control := measure(func(tx *sql.Tx, utxo uint64) {

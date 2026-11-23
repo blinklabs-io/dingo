@@ -34,8 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -115,18 +113,28 @@ func (s *cancelingSource) Anchor(
 
 // anchorFixture is a node's storage as `mithril sync` leaves it: the ledger
 // database holds the chain and, in its live UTxO set, the ledger state at a
-// later point than the anchor it records. refAtAnchor and refAtTip are the
+// later point than the anchor it records. refAtAnchor and refAtTip give the
 // tables of an IndexerDB indexed from genesis at the anchor and at the chain's
 // end, which an IndexerDB bootstrapped at the anchor must reproduce.
 type anchorFixture struct {
-	consensus   *database.Database
-	indexerDB   *database.Database
-	indexerRaw  *sql.DB
-	deps        dingo.IndexerWriterDeps
-	anchor      models.Block
-	tip         ochainsync.Tip
-	refAtAnchor map[string][]string
-	refAtTip    map[string][]string
+	consensus  *database.Database
+	indexerDB  *database.Database
+	indexerRaw *sql.DB
+	deps       dingo.IndexerWriterDeps
+	anchor     models.Block
+	tip        ochainsync.Tip
+}
+
+// refAtAnchor and refAtTip are asked for when a test compares, not when it
+// sets up, so the genesis index is built while the other tests run.
+func (f *anchorFixture) refAtAnchor(t *testing.T) map[string][]string {
+	t.Helper()
+	return anchorReference(t).atAnchor
+}
+
+func (f *anchorFixture) refAtTip(t *testing.T) map[string][]string {
+	t.Helper()
+	return anchorReference(t).atTip
 }
 
 // anchorSkipTables differ by construction: the IndexerDB takes the import
@@ -139,52 +147,8 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f := &anchorFixture{}
 
-	dirAnchor := copyImmutableChunkPrefix(t, anchorChunks)
-	dirChain := copyImmutableChunkPrefix(t, chainChunks)
-
-	// The reference: a ledger database loaded to the anchor and indexed from
-	// genesis, read there and again at the end of the chain.
-	ref := newEquivalenceDB(t)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dirAnchor, ref,
-	))
-	anchorTip, err := ref.GetTip(nil)
-	require.NoError(t, err)
-	refLedger, closeRefLedger := openFactLedger(t, ref)
-	_, refRaw := indexFromGenesis(t, ref, refLedger, nil)
-	f.refAtAnchor = dumpTables(t, refRaw)
-	closeRefLedger()
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dirChain, ref,
-	))
-	// A second index from genesis, not the first one followed to the tip:
-	// the rows of an epoch whose reward round completed past the anchor are
-	// then the final ones.
-	refLedger, _ = openFactLedger(t, ref)
-	_, refRaw = indexFromGenesis(t, ref, refLedger, nil)
-	f.refAtTip = dumpTables(t, refRaw)
-	for _, name := range anchorSkipTables {
-		delete(f.refAtAnchor, name)
-		delete(f.refAtTip, name)
-	}
-
-	dataDir := t.TempDir()
-	selections := internalplugins.StorageSelections{
-		Blob: plugin.Selection{
-			Provider: "badger", Config: testutil.BadgerBlobConfig(),
-		},
-		Metadata: plugin.Selection{
-			Provider: "sqlite",
-			Config:   map[string]any{},
-		},
-	}
-	deps := internalplugins.StorageDependencies{
-		DataDir: dataDir, StorageMode: "core", Logger: logger,
-	}
-	dbConfig := &database.Config{
-		DataDir: dataDir, Logger: logger, StorageMode: "core",
-		IndexerLayout: "split", Network: "preview",
-	}
+	dataDir := anchorStoreTemplate.copyDir(t)
+	dbConfig, selections, deps := storeConfig(dataDir)
 	runtime, err := internalplugins.OpenDatabase(
 		ctx,
 		dbConfig,
@@ -193,14 +157,12 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	)
 	require.NoError(t, err)
 	f.consensus = runtime.Database
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dirChain, f.consensus,
-	))
+	anchorPt := anchorPoint(t)
 	f.tip, err = f.consensus.GetTip(nil)
 	require.NoError(t, err)
-	require.Greater(t, f.tip.Point.Slot, anchorTip.Point.Slot)
+	require.Greater(t, f.tip.Point.Slot, anchorPt.Slot)
 
-	f.anchor, err = database.BlockByHash(ctx, f.consensus, anchorTip.Point.Hash)
+	f.anchor, err = database.BlockByHash(ctx, f.consensus, anchorPt.Hash)
 	require.NoError(t, err)
 	require.NoError(t, f.consensus.SetSyncState(
 		"mithril_ledger_slot", strconv.FormatUint(f.anchor.Slot, 10), nil,
@@ -315,7 +277,7 @@ func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	// ledger filled in afterwards, so the pot of an epoch whose round
 	// completed past the anchor is ahead of the reference's at that
 	// point. It is compared at the end of the chain, where both are final.
-	atAnchor := maps.Clone(f.refAtAnchor)
+	atAnchor := maps.Clone(f.refAtAnchor(t))
 	delete(atAnchor, "reward_ada_pots")
 	got := dumpTables(t, f.indexerRaw)
 	for _, name := range anchorSkipTables {
@@ -331,7 +293,7 @@ func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	tip, err = store.Tip(nil)
 	require.NoError(t, err)
 	require.Equal(t, f.tip.Point.Hash, tip.Hash)
-	f.requireTablesAt(t, f.refAtTip)
+	f.requireTablesAt(t, f.refAtTip(t))
 }
 
 var errStopped = errors.New("stopped")
@@ -434,7 +396,7 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	require.True(t, ready)
 
 	// The result is the one an uninterrupted bootstrap reaches.
-	atAnchor := maps.Clone(f.refAtAnchor)
+	atAnchor := maps.Clone(f.refAtAnchor(t))
 	delete(atAnchor, "reward_ada_pots")
 	got := dumpTables(t, f.indexerRaw)
 	for _, name := range anchorSkipTables {

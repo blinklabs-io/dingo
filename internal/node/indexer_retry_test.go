@@ -17,8 +17,6 @@ package node
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -53,15 +51,9 @@ func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 ) {
 	t.Parallel()
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	consensus := newEquivalenceDB(t)
-	dir := copyImmutableChunkPrefix(t, equivalenceChunks)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dir, consensus,
-	))
+	consensus := chainStoreTemplate.openEquivalence(t)
 	ls, _ := openFactLedger(t, consensus)
-	_, wantRaw := indexFromGenesis(t, consensus, ls, nil)
 
 	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
 	store, ledgerFacts, bf := equivalenceParts(t, consensus, idxDB, ls)
@@ -74,5 +66,5 @@ func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 	require.NoError(t, w.CatchUp(ctx))
 	require.GreaterOrEqual(t, facts.calls, 4)
 
-	requireSameTables(t, dumpTables(t, wantRaw), dumpTables(t, idxRaw))
+	requireSameTables(t, chainReference(t), dumpTables(t, idxRaw))
 }

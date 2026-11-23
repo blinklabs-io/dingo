@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -29,6 +30,12 @@ import (
 // Badger transaction takes, so the set has to write it in several.
 func TestApplyUtxoChangesWritesALargeTiplessBatchInGroups(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine write of a tipless batch larger than "+
+			"one store transaction; the grouped write is asserted in "+
+			"the un-instrumented jobs",
+	)
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
