@@ -905,10 +905,13 @@ func (cs *ChainSelector) AdvertisedTipStale(tip ochainsync.Tip) bool {
 	if cs.advertisedTipStaleLocked(&PeerChainTip{Tip: tip}) {
 		return true
 	}
-	return cs.securityParam > 0 && cs.localTipKnown &&
-		cs.localTip.BlockNumber > 0 &&
-		safeAddUint64(tip.BlockNumber, cs.securityParam) <
-			cs.localTip.BlockNumber
+	return cs.localTipKnown &&
+		cs.tipBlockFarBehindLocalLocked(tip.BlockNumber)
+}
+
+func (cs *ChainSelector) tipBlockFarBehindLocalLocked(blockNumber uint64) bool {
+	return cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+		safeAddUint64(blockNumber, cs.securityParam) < cs.localTip.BlockNumber
 }
 
 // staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
@@ -3659,9 +3662,7 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	// frontier: selection compares the delivered block number, and each
 	// delivered header is bounded by checkPeerTipPlausibleLocked.
 	if peerTip.awaitingFirstHeader {
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
-				cs.localTip.BlockNumber {
+		if cs.tipBlockFarBehindLocalLocked(peerTip.Tip.BlockNumber) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping rollback-registered peer advertising a tip "+
@@ -3675,9 +3676,7 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 			return false
 		}
 	} else {
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
-				cs.localTip.BlockNumber {
+		if cs.tipBlockFarBehindLocalLocked(selectionTip.BlockNumber) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping implausibly-behind peer",
