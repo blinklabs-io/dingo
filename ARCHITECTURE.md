@@ -8972,9 +8972,12 @@ for itself, is still refused. After a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
-catch-up allowance, `localTip + 2*securityParam`). It also prevents a peer's
-unbounded advertisement from suppressing other peers or forcing a
-chain-switch resync. A tip update that carries no delivered frontier at all
+catch-up allowance, `localTip + 2*securityParam`). The allowance, far-frontier
+corroboration and the catch-up band hold below apply from an empty local chain
+too, bounded as block 0, so a node syncing from genesis does not refuse an
+honest peer whose header batch moves its frontier more than `securityParam`.
+It also prevents a peer's unbounded advertisement from suppressing other peers
+or forcing a chain-switch resync. A tip update that carries no delivered frontier at all
 is recorded as having delivered nothing: the advertised tip is never
 substituted for a missing observed frontier, and the peer is bounded and
 compared as block 0 until it delivers a header.
