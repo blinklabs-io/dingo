@@ -2497,6 +2497,10 @@ type LedgerState struct {
 	rewardCreditCompactionWG sync.WaitGroup
 	rewardCreditCompacting   bool
 	rewardCreditCompactAgain bool
+	// rewardCreditCompactionHook is a test seam, nil in production. It runs
+	// in the compaction job once the job holds the set open and before it
+	// reads it.
+	rewardCreditCompactionHook func()
 	// ratificationJob is the latest boundary's deferred RATIFY, guarded by
 	// ratificationMu; ratificationWG tracks its goroutine.
 	// deferredBoundarySnapshotHook builds a boundary's mark snapshot after

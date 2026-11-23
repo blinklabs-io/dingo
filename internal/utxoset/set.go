@@ -138,6 +138,12 @@ type Set struct {
 	// pruneJournal trims the rollback journal; a field so a test can fail
 	// it, which a healthy store never does right after a commit.
 	pruneJournal func(beforeSlot uint64) error
+	// holdMu guards holds and closing; holdIdle is signalled when holds
+	// reaches zero. See HoldOpen.
+	holdMu   sync.Mutex
+	holdIdle *sync.Cond
+	holds    int
+	closing  bool
 }
 
 // UpdateAnchor records the chain's immutable tip, the point k blocks behind
@@ -295,9 +301,51 @@ func Open(cfg Config) (*Set, error) {
 	return set, nil
 }
 
+// HoldOpen keeps the set open for a reader that runs outside the ledger's
+// commit path, such as a background job: Close waits for release before it
+// closes the store. ok is false once Close has begun, and the caller must
+// then not read the set, whose store panics on a read after it is closed.
+// The ledger's own Close stops its jobs first; the hold covers a set closed
+// under a ledger that was not. A hold is short and never taken while waiting
+// on something Close's caller holds.
+func (s *Set) HoldOpen() (release func(), ok bool) {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	if s.closing {
+		return nil, false
+	}
+	s.holds++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.holdMu.Lock()
+			defer s.holdMu.Unlock()
+			s.holds--
+			if s.holds == 0 && s.holdIdle != nil {
+				s.holdIdle.Broadcast()
+			}
+		})
+	}, true
+}
+
+// refuseHolds makes HoldOpen refuse and waits for every hold to be released.
+func (s *Set) refuseHolds() {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	s.closing = true
+	if s.holdIdle == nil {
+		s.holdIdle = sync.NewCond(&s.holdMu)
+	}
+	for s.holds > 0 {
+		s.holdIdle.Wait()
+	}
+}
+
 // Close closes the set and unregisters its metrics, so the set can be
-// opened again on the same registry.
+// opened again on the same registry. It first waits for every HoldOpen to be
+// released.
 func (s *Set) Close() error {
+	s.refuseHolds()
 	if s.unregister != nil {
 		s.unregister()
 		s.unregister = nil

@@ -2725,6 +2725,14 @@ operations and a failed Mithril restore, and the re-import scratch set closes
 the same way. Non-durable providers and every other shutdown component keep
 the single deadline.
 
+The set's store panics on a read after it is closed, so no reader may outlive
+it. `LedgerState.Close` waits for every job the ledger started, and the node
+closes the set only after that close is confirmed. The reward credit
+compaction job additionally holds the set open for each of its transactions
+(`utxoset.Set.HoldOpen`): `Set.Close` refuses new holds and waits for the ones
+taken, so a set closed under a ledger that was not closed first is not read
+by that job afterwards.
+
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
 network protocol callback on a full ledger subscriber, while a blockfetch
