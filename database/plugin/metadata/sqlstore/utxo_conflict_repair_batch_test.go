@@ -72,7 +72,7 @@ func replayConflicting(
 			if err != nil {
 				return err
 			}
-			return rows.flush(ctx, db, store.dialect.ParameterLimit())
+			return rows.flush(ctx, db, store, store.dialect.ParameterLimit())
 		},
 	))
 	return inserted

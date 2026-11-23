@@ -326,13 +326,8 @@ func firstN(s []string, n int) []string {
 func TestIndexerWriterRollbackMatchesAFreshIndex(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	consensus := newEquivalenceDB(t)
-	dir := copyImmutableChunkPrefix(t, equivalenceChunks)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dir, consensus,
-	))
+	consensus := chainStoreTemplate.openEquivalence(t)
 	ls, _ := openFactLedger(t, consensus)
 
 	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)

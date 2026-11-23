@@ -29,6 +29,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 var addColumnPattern = regexp.MustCompile(
@@ -881,6 +883,12 @@ func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
 // the coverage this test exists for is unchanged.
 func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine replay of each shipped migration "+
+			"against its own database copy; the replay is asserted in "+
+			"the un-instrumented run",
+	)
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	// Each version replays against a database migrated exactly through that

@@ -1201,9 +1201,12 @@ INSERT INTO drep (
 ON CONFLICT DO NOTHING;
 
 -- name: GetDRepDelegators :many
+-- The unary plus on drep_type keeps SQLite off
+-- idx_account_drep_type_active_staking_key; see the account index notes in
+-- DATABASE.md.
 SELECT credential_tag, staking_key
 FROM account
-WHERE drep = ? AND drep_type = ? AND active = TRUE
+WHERE drep = ? AND +drep_type = ? AND active = TRUE
 ORDER BY credential_tag, staking_key;
 
 -- name: UpdateDRepActivity :execrows

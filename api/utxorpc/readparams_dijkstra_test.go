@@ -32,6 +32,8 @@ import (
 )
 
 func TestReadParams_Dijkstra(t *testing.T) {
+	t.Parallel()
+
 	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
 	ratPtr := func(n, d int64) *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(n, d)} }
 	pp := &dijkstra.DijkstraProtocolParameters{

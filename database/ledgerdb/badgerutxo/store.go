@@ -37,6 +37,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/blinklabs-io/dingo/database/internal/badgermem"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -115,7 +116,8 @@ type Store struct {
 	// put a row below the floor, each of which invalidates it.
 	added         addedIndexes
 	rowsRewritten atomic.Uint64
-	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	// rangeRowsVisited counts the rows and index entries the range, prefix,
+	// and added-row readers stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
 	rewardIndexVisited atomic.Uint64
@@ -160,7 +162,7 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if s.blockCacheSize > 0 {
 		opts = opts.WithBlockCacheSize(s.blockCacheSize)
 	}
-	db, err := badger.Open(opts)
+	db, _, err := badgermem.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}

@@ -234,6 +234,11 @@ func (c *Config) ApplyRunModeOverrides(effectiveMode RunMode) {
 	}
 	c.StorageMode = storageModeAPI
 	c.BlockProducer = true
+	// The pipeline default follows the storage mode, which was just
+	// overridden, so derive it again unless an operator set it.
+	if !c.Provenance().IsExplicit("BlockPipelineEnabled") {
+		c.BlockPipelineEnabled = BlockPipelineEnabledByDefault(c)
+	}
 }
 
 // RequiresListeners reports whether an (effective) run mode runs as a
@@ -1028,9 +1033,10 @@ type Config struct {
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop that reads blocks back from the primary chain and applies
 	// them to the ledger. Not consensus-affecting -- it only changes how
-	// CBOR decode work is scheduled, not validation or apply behavior -- but
-	// defaults off until throughput and stability are proven (phase 1 of the
-	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
+	// CBOR decode work is scheduled, not validation or apply behavior. It is
+	// enabled by default in core mode except on Musashi, whose extended Conway
+	// headers require a decoder the pipeline does not provide. See
+	// ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"          envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled checks VRF/KES and OpCert header
 	// cryptography serially during block-pipeline replay. It requires
@@ -1360,16 +1366,16 @@ type Config struct {
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
 
 	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
-	// maintenance (PRAGMA optimize) before block processing starts and after
-	// each epoch rollover. A database that never ran ANALYZE has no
-	// sqlite_stat1, and without it some queries scan most of a large table
-	// instead of seeking an index. The first run on a large database
-	// analyzes every table and can take minutes; later runs are near-free.
+	// maintenance (a bounded ANALYZE) before block processing starts, after
+	// each epoch rollover and once a minute. A database that never ran
+	// ANALYZE has no sqlite_stat1, and without it some queries scan most of a
+	// large table instead of seeking an index. Each run samples at most 1000
+	// rows per index, so it stays short on a large database.
 	// Enabled by default; this is an escape hatch, not a tuning knob. Other
 	// metadata backends are unaffected.
 	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
 
-	// provenance records, for gated fields only, whether their value came
+	// provenance records, for tracked fields, whether their value came
 	// from an operator (CLI flag, environment variable, or YAML file) or
 	// is still the built-in default. Populated by ApplyFlags and
 	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
@@ -2668,6 +2674,9 @@ func (c *Config) ApplyDefaults() {
 	if c.MetricsBindAddr == "" {
 		c.MetricsBindAddr = DefaultMetricsBindAddr
 	}
+	if !c.Provenance().IsExplicit("BlockPipelineEnabled") {
+		c.BlockPipelineEnabled = BlockPipelineEnabledByDefault(c)
+	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
 	}
@@ -2765,6 +2774,17 @@ func (c *Config) ApplyDefaults() {
 	if c.TracingEndpoint != "" {
 		c.Tracing = true
 	}
+}
+
+// BlockPipelineEnabledByDefault reports whether cfg's final network and
+// storage mode select parallel replay when no operator source sets the flag.
+func BlockPipelineEnabledByDefault(cfg *Config) bool {
+	if cfg == nil ||
+		cfg.Network == ouroboros.NetworkCardanoMusashi.Name ||
+		cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic {
+		return false
+	}
+	return cfg.StorageMode == "" || cfg.StorageMode == storageModeCore
 }
 
 // DebugListenAddress returns the dedicated pprof TCP listen address. The

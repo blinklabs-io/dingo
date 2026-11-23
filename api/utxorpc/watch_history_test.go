@@ -168,6 +168,8 @@ func TestWatchTxHistoryTracker_BlockCountStillApplies(t *testing.T) {
 func TestConnect_WatchTx_EvictedHistoryRollbackRebuildsFromBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Find the first fixture block that carries transactions.
 	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	txIdx := -1
@@ -217,6 +219,8 @@ func TestConnect_WatchTx_EvictedHistoryRollbackRebuildsFromBlocks(
 // If a rolled-back block cannot be found at all, the stream must fail rather
 // than end the rebuild early and leave the client on the abandoned chain.
 func TestConnect_WatchTx_UnavailableRolledBackBlockFailsStream(t *testing.T) {
+	t.Parallel()
+
 	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	start := findEmptyFixtureRun(t, scan, 2)
 	blocks := scan[:start+2]
@@ -250,6 +254,8 @@ func TestConnect_WatchTx_UnavailableRolledBackBlockFailsStream(t *testing.T) {
 // End to end: after a rollback removes entries from a stream's undo history,
 // their bytes are released from the shared budget.
 func TestConnect_WatchTx_RollbackReleasesHistoryBudget(t *testing.T) {
+	t.Parallel()
+
 	// Find the first fixture block that carries transactions.
 	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	txIdx := -1

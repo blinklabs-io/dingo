@@ -108,7 +108,7 @@ WHERE h.utxo_id = ? AND i.policy_id = ? AND i.name = ?`,
 	require.Equal(t, 1, queuedHoldings,
 		"the holding stays queued until the batch flushes")
 	require.NoError(t, queued.flush(
-		context.Background(), store.writeDB, store.dialect.ParameterLimit(),
+		context.Background(), store.writeDB, nil, store.dialect.ParameterLimit(),
 	))
 	require.Equal(t, "9", holdingAmount(
 		batched.ID, batched.Assets[0].PolicyId, batched.Assets[0].Name,
