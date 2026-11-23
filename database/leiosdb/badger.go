@@ -37,11 +37,11 @@ const SubdirName = "leios"
 // operation stop at that point exactly as a crash would, leaving the records
 // already committed.
 const (
-	// HookPinCopied fires in Pin after the content is copied into the
-	// immutable partition and before the pin record is written.
+	// HookPinCopied fires in Pin after the payload is ready in stable storage
+	// and before the pin record is written.
 	HookPinCopied = "pin-copied"
-	// HookPinCopy fires in Pin after each individual record copy commits, so
-	// a test can interrupt between the manifest and the transactions.
+	// HookPinCopy fires in Pin after each legacy record copy commits, so a test
+	// can interrupt between the manifest and the transactions.
 	HookPinCopy = "pin-copy"
 	// HookPinRecorded fires in Pin after the pin record is committed.
 	HookPinRecorded = "pin-recorded"
@@ -193,6 +193,46 @@ func (s *BadgerStore) has(txn types.Txn, key []byte) (bool, error) {
 	}
 }
 
+func (s *BadgerStore) setIfChanged(
+	txn types.Txn,
+	key []byte,
+	value []byte,
+) error {
+	stored, err := s.get(txn, key)
+	switch {
+	case err == nil && bytes.Equal(stored, value):
+		return nil
+	case err != nil && !errors.Is(err, ErrNotFound):
+		return err
+	default:
+		return s.bs.Set(txn, key, value)
+	}
+}
+
+func (s *BadgerStore) setTransactionList(
+	txn types.Txn,
+	eb Ref,
+	value []byte,
+) error {
+	alias, err := s.has(txn, recordKey(partData, eb, kindBacking))
+	if err != nil {
+		return err
+	}
+	if alias {
+		stored, err := s.get(txn, recordKey(partData, eb, kindTxs))
+		if err != nil {
+			return fmt.Errorf("read offset backing: %w", err)
+		}
+		if !bytes.Equal(stored, value) {
+			return errors.New(
+				"leiosdb: transaction list differs from offset backing",
+			)
+		}
+		return nil
+	}
+	return s.setIfChanged(txn, recordKey(partData, eb, kindTxs), value)
+}
+
 func (s *BadgerStore) readWatermarks(txn types.Txn) (Watermarks, error) {
 	var wm Watermarks
 	val, err := s.get(txn, keyPinnedThrough)
@@ -242,10 +282,7 @@ func (s *BadgerStore) PutVolatile(eb Ref, content Content) error {
 		if err != nil {
 			return err
 		}
-		part := byte(partVolatile)
-		if pinned {
-			part = partImmutable
-		} else {
+		if !pinned {
 			wm, err := s.readWatermarks(txn)
 			if err != nil {
 				return err
@@ -253,16 +290,21 @@ func (s *BadgerStore) PutVolatile(eb Ref, content Content) error {
 			if eb.Slot < wm.GCBefore {
 				return ErrBehindImmutableTip
 			}
+			if err := s.setIfChanged(
+				txn,
+				recordKey(partVolatile, eb, kindVolatile),
+				nil,
+			); err != nil {
+				return err
+			}
 		}
-		if err := s.bs.Set(
-			txn, recordKey(part, eb, kindManifest), content.Manifest,
+		if err := s.setIfChanged(
+			txn, recordKey(partData, eb, kindManifest), content.Manifest,
 		); err != nil {
 			return err
 		}
 		if content.Txs != nil {
-			if err := s.bs.Set(
-				txn, recordKey(part, eb, kindTxs), txsVal,
-			); err != nil {
+			if err := s.setTransactionList(txn, eb, txsVal); err != nil {
 				return err
 			}
 		}
@@ -273,19 +315,21 @@ func (s *BadgerStore) PutVolatile(eb Ref, content Content) error {
 	})
 }
 
-// settlePending drops the pending-pin index entry once the immutable
-// partition holds both the manifest and the transaction list.
+// settlePending drops the pending-pin index entry once one readable partition
+// holds both the manifest and the transaction list.
 func (s *BadgerStore) settlePending(txn types.Txn, eb Ref) error {
-	hasM, err := s.has(txn, recordKey(partImmutable, eb, kindManifest))
-	if err != nil {
-		return err
-	}
-	hasT, err := s.has(txn, recordKey(partImmutable, eb, kindTxs))
-	if err != nil {
-		return err
-	}
-	if hasM && hasT {
-		return s.deleteIfPresent(txn, pendingKey(eb))
+	for _, part := range []byte{partData, partImmutable, partVolatile} {
+		hasM, err := s.has(txn, recordKey(part, eb, kindManifest))
+		if err != nil {
+			return err
+		}
+		hasT, err := s.has(txn, recordKey(part, eb, kindTxs))
+		if err != nil {
+			return err
+		}
+		if hasM && hasT {
+			return s.deleteIfPresent(txn, pendingKey(eb))
+		}
 	}
 	return nil
 }
@@ -313,28 +357,75 @@ func (s *BadgerStore) PutClosure(eb Ref, closure []byte) error {
 		if err != nil {
 			return err
 		}
-		part := byte(partVolatile)
-		if pinned {
-			part = partImmutable
+		if err := s.setIfChanged(
+			txn, recordKey(partData, eb, kindClosure), closure,
+		); err != nil {
+			return err
 		}
-		return s.bs.Set(txn, recordKey(part, eb, kindClosure), closure)
+		if !pinned {
+			return s.setIfChanged(
+				txn,
+				recordKey(partVolatile, eb, kindVolatile),
+				nil,
+			)
+		}
+		return nil
 	})
 }
 
-// readOrder returns the partitions to read for the block, in order. The
-// immutable partition is consulted only once the block has a pin record: Pin
-// copies its records one commit at a time and writes the pin record last, so
-// an interrupted pin leaves a partial immutable copy that must stay invisible
-// while the volatile copy is the complete one.
+// PutTransactionBacking implements Store.
+func (s *BadgerStore) PutTransactionBacking(
+	eb Ref,
+	transactions []byte,
+) error {
+	if len(eb.Hash) == 0 {
+		return errors.New("leiosdb: empty endorser block hash")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	return s.commit(func(txn types.Txn) error {
+		pinned, err := s.has(txn, recordKey(partImmutable, eb, kindPin))
+		if err != nil {
+			return err
+		}
+		if err := s.setTransactionList(txn, eb, transactions); err != nil {
+			return err
+		}
+		if err := s.setIfChanged(
+			txn,
+			recordKey(partData, eb, kindBacking),
+			nil,
+		); err != nil {
+			return err
+		}
+		if !pinned {
+			return s.setIfChanged(
+				txn,
+				recordKey(partVolatile, eb, kindVolatile),
+				nil,
+			)
+		}
+		return nil
+	})
+}
+
+// readOrder returns the payload partitions to read for the block, in order.
+// Current payloads stay in the data partition across pinning. The legacy
+// immutable partition is consulted only once the block has a pin record: old
+// Pin copies its records one commit at a time and writes the pin record last,
+// so an interrupted copy must stay invisible while volatile data is complete.
 func (s *BadgerStore) readOrder(txn types.Txn, eb Ref) ([]byte, error) {
 	pinned, err := s.has(txn, recordKey(partImmutable, eb, kindPin))
 	if err != nil {
 		return nil, err
 	}
 	if pinned {
-		return []byte{partImmutable, partVolatile}, nil
+		return []byte{partData, partImmutable, partVolatile}, nil
 	}
-	return []byte{partVolatile}, nil
+	return []byte{partData, partVolatile}, nil
 }
 
 // Get implements Store.
@@ -350,6 +441,7 @@ func (s *BadgerStore) Get(eb Ref) (Content, error) {
 		if err != nil {
 			return err
 		}
+		var partialManifest []byte
 		for _, part := range parts {
 			manifest, err := s.get(txn, recordKey(part, eb, kindManifest))
 			if errors.Is(err, ErrNotFound) {
@@ -358,11 +450,9 @@ func (s *BadgerStore) Get(eb Ref) (Content, error) {
 			if err != nil {
 				return err
 			}
-			out.Manifest = manifest
-			// The transactions come from the same partition as the
-			// manifest they complete. A pinned block can hold a partial
-			// immutable record while its volatile copy is already gone,
-			// but never the reverse, because Pin moves both together.
+			// The transactions come from the same partition as the manifest
+			// they complete. During migration, a partial current record can
+			// coexist with complete legacy content; prefer the complete pair.
 			txsRaw, err := s.get(txn, recordKey(part, eb, kindTxs))
 			switch {
 			case err == nil:
@@ -370,10 +460,17 @@ func (s *BadgerStore) Get(eb Ref) (Content, error) {
 				if derr != nil {
 					return fmt.Errorf("decode transactions: %w", derr)
 				}
-				out.Txs = txs
+				out = Content{Manifest: manifest, Txs: txs}
+				return nil
 			case !errors.Is(err, ErrNotFound):
 				return err
 			}
+			if partialManifest == nil {
+				partialManifest = manifest
+			}
+		}
+		if partialManifest != nil {
+			out.Manifest = partialManifest
 			return nil
 		}
 		return ErrNotFound
@@ -411,6 +508,14 @@ func (s *BadgerStore) GetClosure(eb Ref) ([]byte, error) {
 	}
 	var out []byte
 	err := s.view(func(txn types.Txn) error {
+		alias, err := s.has(txn, recordKey(partData, eb, kindBacking))
+		if err != nil {
+			return err
+		}
+		if alias {
+			out, err = s.get(txn, recordKey(partData, eb, kindTxs))
+			return err
+		}
 		parts, err := s.readOrder(txn, eb)
 		if err != nil {
 			return err
@@ -429,6 +534,36 @@ func (s *BadgerStore) GetClosure(eb Ref) ([]byte, error) {
 		return ErrNotFound
 	})
 	return out, err
+}
+
+// HasStandaloneClosure implements TransactionBackingStore.
+func (s *BadgerStore) HasStandaloneClosure(eb Ref) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false, ErrClosed
+	}
+	standalone := false
+	err := s.view(func(txn types.Txn) error {
+		alias, err := s.has(txn, recordKey(partData, eb, kindBacking))
+		if err != nil || alias {
+			return err
+		}
+		parts, err := s.readOrder(txn, eb)
+		if err != nil {
+			return err
+		}
+		for _, part := range parts {
+			standalone, err = s.has(
+				txn, recordKey(part, eb, kindClosure),
+			)
+			if err != nil || standalone {
+				return err
+			}
+		}
+		return nil
+	})
+	return standalone, err
 }
 
 // IsPinned implements Store.
@@ -458,8 +593,10 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 		return PinResult{}, ErrClosed
 	}
 	var (
-		result PinResult
-		vals   = map[byte][]byte{}
+		result         PinResult
+		vals           = map[byte][]byte{}
+		dataComplete   bool
+		dataHasBacking bool
 	)
 	pinKey := recordKey(partImmutable, eb, kindPin)
 	err := s.view(func(txn types.Txn) error {
@@ -468,6 +605,24 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 			result.AlreadyPinned = pinned
 			return err
 		}
+		hasM, err := s.has(txn, recordKey(partData, eb, kindManifest))
+		if err != nil {
+			return err
+		}
+		hasT, err := s.has(txn, recordKey(partData, eb, kindTxs))
+		if err != nil {
+			return err
+		}
+		dataComplete = hasM && hasT
+		hasC, err := s.has(txn, recordKey(partData, eb, kindClosure))
+		if err != nil {
+			return err
+		}
+		hasAlias, err := s.has(txn, recordKey(partData, eb, kindBacking))
+		if err != nil {
+			return err
+		}
+		dataHasBacking = hasC || hasAlias
 		for _, kind := range []byte{kindManifest, kindTxs, kindClosure} {
 			val, err := s.get(txn, recordKey(partVolatile, eb, kind))
 			if errors.Is(err, ErrNotFound) {
@@ -483,15 +638,16 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 	if err != nil || result.AlreadyPinned {
 		return result, err
 	}
-	// One transaction per copied value: a closure or a dense transaction list
-	// can be large, and the pin must not be refused for the size of the
-	// transaction that carries it. A copy left behind by an interruption is
-	// overwritten by the retry, and is unreachable until the pin record
-	// exists because reads consult the immutable partition only for a block
-	// that has a pin record.
+	// Legacy values still need one transaction per copied value: a closure or a
+	// dense transaction list can be large, and the pin must not be refused for
+	// the size of the transaction that carries it. A copy left behind by an
+	// interruption is overwritten by the retry, and is unreachable until the
+	// pin record exists because reads consult the immutable partition only for
+	// a block that has a pin record.
 	for _, kind := range []byte{kindManifest, kindTxs, kindClosure} {
 		val, ok := vals[kind]
-		if !ok {
+		if !ok || (dataComplete &&
+			(kind != kindClosure || dataHasBacking)) {
 			continue
 		}
 		if err := s.update(func(txn types.Txn) error {
@@ -506,9 +662,9 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 	if err := s.fire(HookPinCopied); err != nil {
 		return result, err
 	}
-	_, hasM := vals[kindManifest]
-	_, hasT := vals[kindTxs]
-	result.ContentPending = !hasM || !hasT
+	_, legacyM := vals[kindManifest]
+	_, legacyT := vals[kindTxs]
+	result.ContentPending = !dataComplete && (!legacyM || !legacyT)
 	if err := s.commit(func(txn types.Txn) error {
 		if err := s.bs.Set(txn, pinKey, encodeRef(certifier)); err != nil {
 			return err
@@ -520,10 +676,15 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 				return err
 			}
 		}
+		if err := s.deleteIfPresent(
+			txn, recordKey(partVolatile, eb, kindVolatile),
+		); err != nil {
+			return err
+		}
 		if result.ContentPending {
 			return s.bs.Set(txn, pendingKey(eb), encodeRef(certifier))
 		}
-		return nil
+		return s.deleteIfPresent(txn, pendingKey(eb))
 	}); err != nil {
 		return result, fmt.Errorf("record pin: %w", err)
 	}
@@ -600,7 +761,7 @@ func (s *BadgerStore) GarbageCollect(
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
-		keys, err := s.volatileKeysBelow(effective, gcBatchKeys)
+		keys, err := s.volatileDeleteKeysBelow(effective, gcBatchKeys)
 		if err != nil {
 			return deleted, err
 		}
@@ -624,9 +785,10 @@ func (s *BadgerStore) GarbageCollect(
 	}
 }
 
-// volatileKeysBelow lists up to limit volatile keys with a slot below slot.
-// A pinned block has no volatile keys, so nothing here needs a pin check.
-func (s *BadgerStore) volatileKeysBelow(
+// volatileDeleteKeysBelow lists one delete batch below slot. Current volatile
+// markers expand to their stable payload records; legacy payload keys delete
+// directly. A defensive pin check makes a stale marker harmless.
+func (s *BadgerStore) volatileDeleteKeysBelow(
 	slot uint64,
 	limit int,
 ) ([][]byte, error) {
@@ -643,11 +805,41 @@ func (s *BadgerStore) volatileKeysBelow(
 			if item == nil {
 				continue
 			}
-			key := item.Key()
+			key := bytes.Clone(item.Key())
 			if len(key) < 9 || binary.BigEndian.Uint64(key[1:9]) >= slot {
 				break
 			}
-			keys = append(keys, bytes.Clone(key))
+			eb, kind, err := parseRecordKey(key)
+			if err != nil {
+				return err
+			}
+			group := [][]byte{key}
+			if kind == kindVolatile {
+				pinned, err := s.has(
+					txn, recordKey(partImmutable, eb, kindPin),
+				)
+				if err != nil {
+					return err
+				}
+				if !pinned {
+					for _, dataKind := range []byte{
+						kindManifest, kindTxs, kindClosure, kindBacking,
+					} {
+						dataKey := recordKey(partData, eb, dataKind)
+						exists, err := s.has(txn, dataKey)
+						if err != nil {
+							return err
+						}
+						if exists {
+							group = append(group, dataKey)
+						}
+					}
+				}
+			}
+			if len(keys) > 0 && len(keys)+len(group) > limit {
+				break
+			}
+			keys = append(keys, group...)
 			if len(keys) >= limit {
 				break
 			}
@@ -685,7 +877,7 @@ func (s *BadgerStore) MaxSlot() (uint64, bool, error) {
 		found   bool
 	)
 	err := s.view(func(txn types.Txn) error {
-		for _, part := range []byte{partVolatile, partImmutable} {
+		for _, part := range []byte{partData, partVolatile, partImmutable} {
 			slot, ok, err := s.maxManifestSlot(txn, part)
 			if err != nil {
 				return err
@@ -776,16 +968,24 @@ func (s *BadgerStore) PendingPins() ([]PendingPin, error) {
 	return out, err
 }
 
-// demote moves a pinned endorser block back to the volatile partition and
-// removes its pin. The records are copied before the pin is removed, one
-// transaction per value, so an interruption leaves the block pinned and the
-// retry repeats the copy. The records are kept rather than deleted because
-// the chain may still reference them: transaction offsets resolve into the
-// closure, and a certification that survives the rollback pins the block
-// again without needing its content refetched.
+// demote moves a pinned endorser block back to volatile retention and removes
+// its pin. Current payloads only need their marker restored. Legacy records
+// are copied before the pin is removed, one transaction per value, so an
+// interruption leaves the block pinned and the retry repeats the copy. The
+// records are kept because the chain may still reference them.
 func (s *BadgerStore) demote(eb Ref) error {
 	vals := map[byte][]byte{}
+	dataExists := false
 	if err := s.view(func(txn types.Txn) error {
+		for _, kind := range []byte{
+			kindManifest, kindTxs, kindClosure, kindBacking,
+		} {
+			exists, err := s.has(txn, recordKey(partData, eb, kind))
+			if err != nil {
+				return err
+			}
+			dataExists = dataExists || exists
+		}
 		for _, kind := range []byte{kindManifest, kindTxs, kindClosure} {
 			val, err := s.get(txn, recordKey(partImmutable, eb, kind))
 			if errors.Is(err, ErrNotFound) {
@@ -812,6 +1012,15 @@ func (s *BadgerStore) demote(eb Ref) error {
 		}
 	}
 	return s.update(func(txn types.Txn) error {
+		if dataExists {
+			if err := s.setIfChanged(
+				txn,
+				recordKey(partVolatile, eb, kindVolatile),
+				nil,
+			); err != nil {
+				return err
+			}
+		}
 		for _, kind := range []byte{
 			kindManifest, kindTxs, kindClosure, kindPin,
 		} {
