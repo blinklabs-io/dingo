@@ -4605,6 +4605,39 @@ func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
 	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
 }
 
+func TestChainsyncConfigDemotesPraosPeerFarBehindLocalTip(t *testing.T) {
+	t.Parallel()
+
+	const securityParam = uint64(20)
+	n := &Node{config: NewConfig()}
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			SecurityParam:             securityParam,
+			DisableEventSubscriptions: true,
+		},
+	)
+	n.chainSelector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(1000, []byte("local")),
+		BlockNumber: 1000,
+	})
+	state := chainsync.NewStateWithConfig(nil, nil, n.chainsyncConfig())
+	connId := newNodeTestConnId(3105)
+	require.True(t, state.AddClientConnId(connId))
+	require.True(t, state.RecordClientAdvertisedTip(connId, ochainsync.Tip{
+		Point:       ocommon.NewPoint(979, []byte("lagging")),
+		BlockNumber: 979,
+	}))
+
+	assert.Equal(
+		t,
+		[]ouroboros.ConnectionId{connId},
+		state.DemoteStaleAdvertisingClients(),
+	)
+	observabilityOnly, tracked := state.ClientObservabilityOnly(connId)
+	require.True(t, tracked)
+	assert.True(t, observabilityOnly)
+}
+
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
 func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	t *testing.T,
