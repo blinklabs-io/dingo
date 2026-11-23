@@ -195,7 +195,7 @@ VALUES (?, ?, 0, 1, 0, '1')`), id, id)
 		}
 		db := newDialectQueryer(tx, store.dialect.Name())
 		if err := flushAssetHoldings(
-			t.Context(), db, rows, store.dialect.ParameterLimit(),
+			t.Context(), db, nil, rows, store.dialect.ParameterLimit(),
 		); err != nil {
 			return err
 		}

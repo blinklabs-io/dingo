@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -65,6 +66,9 @@ type transactionBatchAccumulator struct {
 	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
+	// store routes the applied-transaction statements through the Store's
+	// prepared statements; nil runs them unprepared.
+	store                *Store
 	mysql                bool
 	sqlite               bool
 	backfillBatchLimits  func() (int64, int)
@@ -84,6 +88,9 @@ type transactionBatchAccumulator struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	// nonces holds block nonces queued by QueueBlockNonce, in application
+	// order, until FlushBatch writes them.
+	nonces []models.BlockNonce
 	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
 	// attached one; nil on the per-row path.
 	overlay *utxoOverlay
@@ -113,6 +120,7 @@ type transactionBatchCheckpoint struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	nonces          []models.BlockNonce
 	overlay         *utxoOverlay
 	overlayVersion  uint64
 }
@@ -156,6 +164,7 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
 		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
+		nonces:          slices.Clone(a.nonces),
 		overlay:         a.overlay,
 	}
 	if a.overlay != nil {
@@ -183,6 +192,7 @@ func (a *transactionBatchAccumulator) restore(
 	a.opCertOrder = append(
 		[]poolOpCertSequenceKey(nil),
 		checkpoint.opCertOrder...)
+	a.nonces = slices.Clone(checkpoint.nonces)
 	if len(checkpoint.stakeDeltas) > 0 {
 		a.stakeDeltas = make(
 			map[string]pendingStakeCredentialDelta,
@@ -676,6 +686,9 @@ func (a *transactionBatchAccumulator) insertTransaction(
 			return a.transactionInsert.QueryRowContext(ctx, hash)
 		},
 		exec: func(query string, args ...any) (sql.Result, error) {
+			if a.store != nil {
+				return a.store.execCached(ctx, db, query, args...)
+			}
 			return db.ExecContext(ctx, query, args...)
 		},
 		queryRow: func(query string, args ...any) *sql.Row {
@@ -717,12 +730,13 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.stakeDeltaOrder = nil
 	a.opCertSequences = nil
 	a.opCertOrder = nil
+	a.nonces = nil
 	a.overlay = nil
 }
 
 // Len reports pending metadata rows for the API backfill batch bound.
 func (a *transactionBatchAccumulator) Len() int {
-	length := len(a.stakeDeltaOrder) + len(a.opCertOrder)
+	length := len(a.stakeDeltaOrder) + len(a.opCertOrder) + len(a.nonces)
 	for i := range a.rows.entries {
 		length += len(a.rows.entries[i].rows)
 	}
@@ -756,6 +770,7 @@ func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{
 		sqlite:        s.dialect.Name() == "sqlite",
 		sqlOperations: s.sqlOperations,
+		store:         s,
 	}
 }
 
@@ -777,7 +792,11 @@ func (s *Store) FlushBatch(
 		}
 	}
 	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
-		len(batched.opCertOrder) > 0 || batched.overlay != nil {
+		len(batched.opCertOrder) > 0 || len(batched.nonces) > 0 ||
+		batched.overlay != nil {
+		if err := s.flushBlockNonces(batched, txn); err != nil {
+			return err
+		}
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
@@ -788,7 +807,7 @@ func (s *Store) FlushBatch(
 					return s.flushOverlay(ctx, db, batched)
 				}
 				if err := batched.rows.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
@@ -944,6 +963,7 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 		sqlite:           s.dialect.Name() == "sqlite",
 		leiosAPIRowsOnly: true,
 		sqlOperations:    s.sqlOperations,
+		store:            s,
 	}
 }
 
@@ -957,6 +977,7 @@ func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulat
 		sqlite:               s.dialect.Name() == "sqlite",
 		validatedAPIRowsOnly: true,
 		sqlOperations:        s.sqlOperations,
+		store:                s,
 	}
 }
 
@@ -1165,7 +1186,7 @@ func (s *Store) setTransactionWithAccumulator(
 					maxRows,
 					func() error {
 						return staged.flush(
-							ctx, db, s.dialect.ParameterLimit(),
+							ctx, db, s, s.dialect.ParameterLimit(),
 						)
 					},
 					batchedAccumulator.backfillBatchFlushed,
@@ -1343,7 +1364,7 @@ func (s *Store) setTransactionWithAccumulator(
 					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
 						return err
 					}
-					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 						return err
 					}
 					return nil
@@ -1382,7 +1403,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if batchedAccumulator != nil {
 					return nil
 				}
-				return staged.flush(ctx, db, s.dialect.ParameterLimit())
+				return staged.flush(ctx, db, s, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1436,13 +1457,13 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if batchedAccumulator != nil &&
 				batchedAccumulator.apiRowsOnly() {
-				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+				if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
 			}
 			if batchedAccumulator == nil {
 				if err := staged.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}

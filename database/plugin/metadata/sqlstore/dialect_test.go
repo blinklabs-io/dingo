@@ -30,7 +30,7 @@ import (
 )
 
 // TestSQLiteBulkModeTunesAndRestoresConnectionPragmas guards the bulk-only
-// sorter limit and restores the writer's raised checkpoint threshold.
+// sorter limit and keeps the writer's automatic checkpoint disabled.
 func TestSQLiteBulkModeTunesAndRestoresConnectionPragmas(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
@@ -48,7 +48,7 @@ func TestSQLiteBulkModeTunesAndRestoresConnectionPragmas(t *testing.T) {
 
 	var pages int
 	require.NoError(t, db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages))
-	require.Equal(t, 10000, pages)
+	require.Zero(t, pages)
 	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
 	require.Equal(t, 4, workerThreads)
 }
