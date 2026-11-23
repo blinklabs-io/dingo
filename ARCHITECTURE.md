@@ -3964,6 +3964,18 @@ goroutines, which stay a bounded number of blocks ahead of the writer; the
 writer takes each block in order, so a decode error fails the batch at its
 block.
 
+The IndexerDB keeps the network's script-locked lovelace as a running aggregate
+(`script_locked_supply`, one cumulative-total row per slot whose commit changed
+it; the Blockfrost network endpoint reads the newest row). The metadata insert
+and spend primitives write its deltas in the transaction that changes the `utxo`
+rows, so a replay from genesis builds it as it indexes. The writer trims it in
+each batch that adds a checkpoint, to the base row at the oldest retained
+checkpoint (`indexerdb.Store.PruneScriptLockedSupply`): a writer rollback never
+lands below that checkpoint, and one to the chain's origin rebuilds the
+aggregate from the restored rows. The consensus store keeps its live set in the
+LedgerDB and nothing reads its table; rows written while it still held `utxo`
+rows stay after the ledger-state drain deletes them.
+
 A chain imported from a Mithril snapshot adds a bootstrap in front of that
 loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the
 ledger database recorded (`AnchorChain`), and `Writer.Prepare` records it in

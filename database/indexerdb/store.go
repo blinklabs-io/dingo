@@ -184,6 +184,32 @@ func (s *Store) AddCheckpoint(tip Tip, txn *database.Txn) error {
 	return s.setOldestCheckpoint(remaining, txn)
 }
 
+// PruneScriptLockedSupply trims the script-locked supply aggregate to the
+// oldest checkpoint, the lowest block a rollback of this IndexerDB lands on:
+// writer rollbacks go to a parent-link ancestor within the ledger's rollback
+// window or to a retained checkpoint, so the rows older than the base at that
+// checkpoint are unreachable. Call it in the transaction that adds the
+// checkpoint. A rollback to the chain's origin, which no checkpoint covers,
+// still reads a correct total, because the aggregate then rebuilds from the
+// restored rows.
+func (s *Store) PruneScriptLockedSupply(txn *database.Txn) error {
+	oldest, known, err := s.oldestCheckpoint(txn)
+	if err != nil || !known {
+		return err
+	}
+	v, err := s.state.GetSyncState(
+		checkpointKey(Tip{BlockNumber: oldest}), txn,
+	)
+	if err != nil || v == "" {
+		return err
+	}
+	cp, err := decodeTip(v)
+	if err != nil {
+		return err
+	}
+	return s.db.PruneScriptLockedSupplyBefore(cp.Slot, txn)
+}
+
 // checkpointOldestKey holds the block number of the oldest checkpoint. Its
 // prefix differs from checkpointPrefix, so a checkpoint listing never returns
 // it.

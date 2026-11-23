@@ -266,31 +266,12 @@ var utxoTableScan = regexp.MustCompile(`(?m)^SCAN utxo( AS \w+)?$`)
 // idx_utxo_deleted_staking_amount could serve and checks the plan of every
 // statement it issues: none may pass over the utxo table, and the readers that
 // range over spent rows must choose the partial index. The scenarios run with
-// no planner statistics and again after ANALYZE.
-//
-// idx_utxo_deleted_payment_script also leads with deleted_slot and holds every
-// row, so while it exists the planner may choose it over the partial index for
-// a spent-row range. The "supply index dropped" variant removes it so that the
-// partial index is the only deleted_slot candidate and the choice rests on the
-// statement text alone; the other variant keeps the production schema.
+// no planner statistics and again after ANALYZE. The partial index is the only
+// deleted_slot-leading index on the schema, so the choice rests on the
+// statement text alone.
 func TestSpentStakingIndexReadersKeepAnIndex(t *testing.T) {
 	t.Parallel()
 	skipPlanTestUnderRace(t)
-	for _, dropSupplyIndex := range []bool{false, true} {
-		name := "supply index present"
-		if dropSupplyIndex {
-			name = "supply index dropped"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			skipPlanTestUnderRace(t)
-			checkSpentStakingIndexReaders(t, dropSupplyIndex)
-		})
-	}
-}
-
-func checkSpentStakingIndexReaders(t *testing.T, dropSupplyIndex bool) {
-	t.Helper()
 	store, recorder := newRecordingSQLiteStore(t)
 	seedChurnUtxos(t, store, "shelley", 20_000)
 	// A handful of pointer outputs, as on mainnet. With none, ANALYZE leaves
@@ -308,12 +289,6 @@ func checkSpentStakingIndexReaders(t *testing.T, dropSupplyIndex bool) {
 	).Scan(&definition))
 	require.Contains(t, definition, "WHERE deleted_slot > 0",
 		"the readers below are only meaningful against the partial index")
-	if dropSupplyIndex {
-		_, err = store.writeDB.Exec("DROP INDEX idx_utxo_deleted_payment_script")
-		require.NoError(t, err)
-		// Idle read connections keep the schema they loaded at Start.
-		require.NoError(t, store.refreshReadPool(t.Context()))
-	}
 
 	for _, stage := range []string{"no statistics", "analyzed"} {
 		if stage == "analyzed" {
@@ -358,9 +333,6 @@ func checkSpentStakingIndexReaders(t *testing.T, dropSupplyIndex bool) {
 				}
 			}
 			joined := strings.Join(plans, "\n")
-			if !dropSupplyIndex {
-				continue
-			}
 			if scenario.wholeSet {
 				require.Regexp(t, utxoTableScan, joined,
 					"%s/%s is the pass over every live row", stage, scenario.name)

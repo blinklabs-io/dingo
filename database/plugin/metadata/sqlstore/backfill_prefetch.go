@@ -116,6 +116,7 @@ func scanBackfillPrefetchRows(rows *sql.Rows) error {
 			amount      sql.NullString
 			deletedSlot sql.NullInt64
 			spentAt     sql.NullInt64
+			script      sql.NullBool
 		)
 		if err := rows.Scan(
 			&id,
@@ -126,6 +127,7 @@ func scanBackfillPrefetchRows(rows *sql.Rows) error {
 			&amount,
 			&deletedSlot,
 			&spentAt,
+			&script,
 		); err != nil {
 			return err
 		}

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net"
 	"regexp"
 	"strconv"
@@ -114,6 +115,7 @@ const (
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	scriptLockedSupplySchemaRelease                     = "script-locked-supply-aggregate"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -307,6 +309,7 @@ var schemaVersions = []struct {
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: scriptLockedSupplySchemaRelease, Dir: "v74"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -450,6 +453,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.BatchSize = poolCurrentStateBatchPools
 			migration.Backfill = poolCurrentStateBackfill
+		}
+		if version.Name == scriptLockedSupplySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = scriptLockedSupplyBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2132,6 +2139,11 @@ func translateSchemaSQLInSchema(
 			)
 			value = strings.ReplaceAll(
 				value,
+				"DROP INDEX IF EXISTS `idx_utxo_deleted_payment_script`",
+				"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
+			)
+			value = strings.ReplaceAll(
+				value,
 				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
 				"DROP INDEX `idx_asset_name_hex` ON `asset`",
 			)
@@ -2559,4 +2571,88 @@ WHERE utxo_id > ? AND utxo_id <= ?`), lastID, upper.Int64)
 		Cursor: strconv.FormatInt(upper.Int64, 10),
 		Rows:   rows,
 	}, nil
+}
+
+// scriptLockedSupplyBackfill seeds script_locked_supply with the sum the
+// dropped index used to serve. It runs before the contract statement drops
+// that index, so the scan is index-assisted when the index exists. A store
+// with no live script-locked lovelace gets no row, which reads as zero; so
+// does a store that keeps no utxo rows.
+//
+// The row sits at the newest slot the store's tip and utxo rows record: a
+// rollback below that slot drops the seed and rebuilds by scan, whereas a seed
+// stamped below a later change would survive a rollback to a slot it counts.
+func scriptLockedSupplyBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var total uint64
+	var slot int64
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT amount, added_slot FROM utxo "+
+			"WHERE payment_script = TRUE AND deleted_slot = 0",
+	))
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("scan script-locked supply: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw sql.NullString
+		var added int64
+		if err := rows.Scan(&raw, &added); err != nil {
+			return BatchResult{}, err
+		}
+		slot = max(slot, added)
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := strconv.ParseUint(raw.String, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse utxo amount %q: %w",
+				raw.String,
+				err,
+			)
+		}
+		if amount > math.MaxInt64-total {
+			return BatchResult{}, errors.New(
+				"script-locked supply exceeds int64",
+			)
+		}
+		total += amount
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return BatchResult{}, err
+	}
+	if total == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	var spent, tip sql.NullInt64
+	if err := batch.Tx.QueryRowContext(
+		ctx, "SELECT MAX(deleted_slot) FROM utxo",
+	).Scan(&spent); err != nil {
+		return BatchResult{}, fmt.Errorf("read newest spend slot: %w", err)
+	}
+	err = batch.Tx.QueryRowContext(ctx, "SELECT slot FROM tip WHERE id = 1").
+		Scan(&tip)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf("read tip slot: %w", err)
+	}
+	slot = max(slot, spent.Int64, tip.Int64)
+	// Replace rather than upsert: MySQL has no ON CONFLICT, and a resumed
+	// run must not duplicate the seed row.
+	if _, err := batch.Tx.ExecContext(
+		ctx, "DELETE FROM script_locked_supply",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("clear script-locked supply: %w", err)
+	}
+	if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+		"INSERT INTO script_locked_supply (slot, amount) VALUES (?, ?)",
+	), slot, int64(total)); err != nil {
+		return BatchResult{}, fmt.Errorf("seed script-locked supply: %w", err)
+	}
+	return BatchResult{Cursor: batch.Cursor, Rows: 1, Done: true}, nil
 }

@@ -32,12 +32,14 @@ const spendCacheLimit = 1 << 20
 
 // spendCacheEntry is what a spend needs from an output this store inserted:
 // its row id, to address the row by primary key, and the columns the spend's
-// stake delta is computed from. None of them changes after insert.
+// stake and script-locked supply deltas are computed from. None of them
+// changes after insert.
 type spendCacheEntry struct {
-	id         int64
-	tag        int64
-	stakingKey []byte
-	amount     sql.NullString
+	id            int64
+	tag           int64
+	stakingKey    []byte
+	amount        sql.NullString
+	paymentScript bool
 }
 
 // spendCache maps an output reference to the row this store inserted for it.
@@ -84,6 +86,7 @@ func (s *Store) insertedSpendEntries(
 				String: decimalUint64(u.Amount),
 				Valid:  true,
 			},
+			paymentScript: u.PaymentScript,
 		}
 	}
 	return out
@@ -171,15 +174,16 @@ func (s *Store) takeCachedSpends(
 }
 
 // spendCachedRows marks the cached rows spent by primary key and reports the
-// references whose row it updated, with their stake deltas. A row already
-// spent or deleted is not updated and not reported.
+// references whose row it updated, with their stake deltas and the
+// script-locked lovelace they took out of the live set. A row already spent
+// or deleted is not updated and not reported.
 func (s *Store) spendCachedRows(
 	ctx context.Context,
 	db queryer,
 	cached map[string]spendCacheEntry,
 	slot uint64,
 	transactionID int64,
-) (map[string]struct{}, []stakeCredentialDelta, error) {
+) (map[string]struct{}, []stakeCredentialDelta, int64, error) {
 	byID := make(map[int64]string, len(cached))
 	args := make([]any, 0, 2+len(cached))
 	args = append(args, slot, transactionID)
@@ -191,37 +195,48 @@ func (s *Store) spendCachedRows(
 		ctx, db, consumeUtxosByIDQuery(len(cached)), args...,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer rows.Close()
 	updated := make(map[string]struct{}, len(cached))
 	var deltas []stakeCredentialDelta
+	var scriptLocked int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		key, ok := byID[id]
 		if !ok {
-			return nil, nil, fmt.Errorf(
+			return nil, nil, 0, fmt.Errorf(
 				"consume UTxO by id: unexpected row %d",
 				id,
 			)
 		}
 		e := cached[key]
 		updated[key] = struct{}{}
+		locked, err := scriptLockedContribution(
+			sql.NullBool{Bool: e.paymentScript, Valid: true}, e.amount,
+		)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+		if err != nil {
+			return nil, nil, 0, err
+		}
 		delta, ok, err := consumedUtxoStakeDelta(e.tag, e.stakingKey, e.amount)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if ok {
 			deltas = append(deltas, delta)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
-	return updated, deltas, nil
+	return updated, deltas, scriptLocked, nil
 }
 
 // consumeUtxosByIDQuery marks n rows spent by primary key. The texts for

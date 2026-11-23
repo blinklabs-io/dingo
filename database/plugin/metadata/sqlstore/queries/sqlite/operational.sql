@@ -980,10 +980,6 @@ SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 
--- name: GetScriptLockedSupply :many
-SELECT amount
-FROM utxo
-WHERE payment_script = TRUE AND deleted_slot = 0;
 
 -- AssetHeld reports whether any retained holding, live or spent and not yet
 -- pruned, exists for the asset. An identity with no holding does not count.

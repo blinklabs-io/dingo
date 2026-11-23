@@ -198,9 +198,13 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 			var r consumedRow
 			var txID, key []byte
 			if returnStake {
-				require.NoError(t, rows.Scan(
-					&txID, &r.outputIdx, &r.tag, &key, &r.amount,
-				))
+				dest := []any{&txID, &r.outputIdx, &r.tag, &key, &r.amount}
+				// The current query also returns payment_script; the
+				// legacy form it is compared against does not.
+				if cols, err := rows.Columns(); err == nil && len(cols) == 6 {
+					dest = append(dest, new(sql.NullBool))
+				}
+				require.NoError(t, rows.Scan(dest...))
 			} else {
 				require.NoError(t, rows.Scan(&txID, &r.outputIdx))
 			}

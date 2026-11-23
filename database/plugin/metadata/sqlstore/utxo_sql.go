@@ -63,6 +63,7 @@ type utxoSQL struct {
 	sqlite bool
 
 	getSpendState      string
+	scriptSupplyState  string
 	getSpendStateHash  string
 	repairConflicted   string
 	getLiveByRef       string
@@ -89,6 +90,7 @@ func newUtxoSQL(sqlite bool) *utxoSQL {
 	u := &utxoSQL{
 		sqlite:            sqlite,
 		getSpendState:     getUtxoSpendStateHead + refEq,
+		scriptSupplyState: getUtxoScriptSupplyStateHead + refEq,
 		getSpendStateHash: getUtxoSpendStateHashHead + refEq,
 		repairConflicted:  repairConflictedUtxoHead + refEq + repairConflictedUtxoTail,
 		getLiveByRef:      getLiveUtxoByRefHead + refEq + " AND deleted_slot = 0",
@@ -154,6 +156,12 @@ func (u *utxoSQL) bindHashes(args []any, hashes [][]byte, size int) []any {
 const (
 	getUtxoSpendStateHead = `-- name: GetUtxoSpendState :one
 SELECT deleted_slot, spent_at_tx_id
+FROM utxo WHERE `
+
+	// getUtxoScriptSupplyStateHead reads what a spend or un-spend moves
+	// into or out of the script-locked total.
+	getUtxoScriptSupplyStateHead = `-- name: GetUtxoLiveStateForScriptSupply :one
+SELECT deleted_slot, payment_script, amount
 FROM utxo WHERE `
 
 	// getUtxoSpendStateHashHead projects the spender's hash for readers
@@ -329,7 +337,7 @@ func newSQLiteRefStatements() *sqliteRefStatements {
 			"UPDATE utxo\nSET deleted_slot = ?, spent_at_tx_id = ?\n" +
 			"WHERE id IN (" + arms + ")\n" +
 			"RETURNING " + utxoConsumedHash +
-			", output_idx, credential_tag, staking_key, amount"
+			", output_idx, credential_tag, staking_key, amount, payment_script"
 	}
 	const row = "(?,?,?,?,?,?,?,?,?,?,?,?)"
 	for n := 1; n <= utxoInsertBatchSize; n++ {
@@ -357,8 +365,8 @@ func joinN(n int, sep, item string) string {
 // references the batch names.
 func utxoStakeConsumedDeltaQuery(n int, sqlite bool) string {
 	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
-		"SELECT t.hash, u.output_idx, u.credential_tag, u.staking_key, u.amount" +
-		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
+		"SELECT t.hash, u.output_idx, u.credential_tag, u.staking_key, u.amount, " +
+		"u.payment_script" + utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 }
 
 // utxoStakeRefsByTxIDQuery is the lookup of the stake credentials of every
@@ -381,7 +389,7 @@ func utxoDeletionRowsQuery(n int, lockRows, sqlite bool) string {
 	}
 	query := "-- name: " + name + " :many\n" +
 		"SELECT u.id, t.hash, u.output_idx, u.deleted_slot, " +
-		"u.credential_tag, u.staking_key" +
+		"u.credential_tag, u.staking_key, u.amount, u.payment_script" +
 		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 	if lockRows {
 		query += " ORDER BY u.id FOR UPDATE OF u"

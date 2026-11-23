@@ -569,6 +569,9 @@ func (w *Writer) step(
 		if err := w.store.AddCheckpoint(newTip, txn); err != nil {
 			return err
 		}
+		if err := w.store.PruneScriptLockedSupply(txn); err != nil {
+			return err
+		}
 		return w.store.SetTip(newTip, txn)
 	})
 	if err != nil {
