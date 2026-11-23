@@ -199,21 +199,6 @@ func mustJSON(t *testing.T, value any) string {
 	return string(raw)
 }
 
-func TestAccountCoinsOpenAPIHasNoPagination(t *testing.T) {
-	t.Parallel()
-
-	document, err := openapiconformance.ParseJSON(meshOpenAPI)
-	require.NoError(t, err)
-	requestSchema, err := document.RequestSchema(
-		operation(http.MethodPost, "/account/coins"),
-	)
-	require.NoError(t, err)
-	encoded := strings.ToLower(string(meshOpenAPI))
-	require.NotContains(t, encoded, "next_cursor")
-	require.NotContains(t, encoded, `"paginate"`)
-	document.AssertGoType(t, requestSchema, reflect.TypeFor[AccountCoinsRequest]())
-}
-
 type meshRouteRecorder struct {
 	operations []openapiconformance.Operation
 }

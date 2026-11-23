@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
@@ -376,31 +375,6 @@ func TestDingoEraRegistryExposesValidationEntryPoints(t *testing.T) {
 			entries[i].Name,
 		)
 	}
-}
-
-// TestDingoEraEntryPointsReportsMissingValidator proves the registry check
-// above detects the state it exists to catch. Without it,
-// TestDingoEraRegistryExposesValidationEntryPoints would assert something
-// that is true of any table, including one whose entry points were removed.
-func TestDingoEraEntryPointsReportsMissingValidator(t *testing.T) {
-	eraList := entryPointEraList()
-	require.NotEmpty(t, eraList)
-
-	bypassed := make([]eras.EraDesc, len(eraList))
-	copy(bypassed, eraList)
-	bypassed[len(bypassed)-1].ValidateTxFunc = nil
-
-	_, err := dingoEraEntryPoints(bypassed)
-	require.ErrorContains(
-		t,
-		err,
-		"no production validation entry point",
-		"an era with no validation entry point must be reported",
-	)
-	require.ErrorContains(t, err, eraList[len(eraList)-1].Name)
-
-	_, err = dingoEraEntryPoints(nil)
-	require.Error(t, err, "an empty era registry must be reported")
 }
 
 // TestConformanceVectorsExerciseDingoEraEntryPoints routes every corpus

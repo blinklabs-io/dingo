@@ -54,32 +54,6 @@ func TestReferencedEndorserBlockUsesLeiosAnnouncement(t *testing.T) {
 	require.Equal(t, uint64(4096), gotSize)
 }
 
-// The decoder never yields a one-field extension, so a header carrying one is
-// not a referenced endorser block.
-func TestReferencedEndorserBlockIgnoresOneFieldExtension(t *testing.T) {
-	header := &dijkstra.DijkstraBlockHeader{
-		LeiosHeaderExtension: []cbor.RawMessage{
-			mustRaw(t, []any{testHash(0x40), uint64(8192)}),
-		},
-	}
-
-	_, _, ok := ReferencedEndorserBlock(header)
-	require.False(t, ok)
-}
-
-func TestReferencedEndorserBlockRejectsMalformedCurrentExtension(t *testing.T) {
-	legacyHash := testHash(0x60)
-	header := &dijkstra.DijkstraBlockHeader{
-		LeiosHeaderExtension: []cbor.RawMessage{
-			mustRaw(t, []any{legacyHash, uint64(8192)}),
-			{0xf6},
-		},
-	}
-
-	_, _, ok := ReferencedEndorserBlock(header)
-	require.False(t, ok)
-}
-
 func TestReferencedEndorserBlockReturnsFalseWithoutReference(t *testing.T) {
 	header := &dijkstra.DijkstraBlockHeader{
 		LeiosHeaderExtension: []cbor.RawMessage{

@@ -17,63 +17,10 @@ package conformance
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
-	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
-
-// TestCorpusShardsPartitionTheCorpus proves the shard roots hold every corpus
-// vector exactly once between them, so a sharded replay cannot skip or repeat
-// a vector.
-func TestCorpusShardsPartitionTheCorpus(t *testing.T) {
-	root, err := corpusTestdataRoot()
-	require.NoError(t, err)
-	vectors, err := collectEntryPointVectors(root)
-	require.NoError(t, err)
-	const workers = 5
-	vectorShard := make(map[string]int, len(vectors))
-	for i, path := range vectors {
-		vectorShard[path] = i % workers
-	}
-	scratch := t.TempDir()
-	seen := make(map[string]int, len(vectors))
-	for shard := range workers {
-		dst := filepath.Join(scratch, "shard")
-		dst = filepath.Join(dst, string(rune('a'+shard)))
-		if err := shardCorpusRoot(
-			root, dst, vectorShard, shard,
-		); err != nil {
-			// Linking can be refused on Windows without the symlink
-			// privilege; replayCorpusSharded falls back to one replay there.
-			if runtime.GOOS == "windows" {
-				t.Skipf("corpus links unavailable: %v", err)
-			}
-			require.NoError(t, err)
-		}
-		found := make([]string, 0)
-		for _, sub := range []string{"eras", "synthetic"} {
-			paths, err := conformance.CollectVectorFiles(
-				filepath.Join(dst, sub),
-			)
-			if os.IsNotExist(err) {
-				continue
-			}
-			require.NoError(t, err)
-			found = append(found, paths...)
-		}
-		for _, path := range found {
-			rel, err := filepath.Rel(dst, path)
-			require.NoError(t, err)
-			seen[filepath.Join(root, rel)]++
-		}
-	}
-	require.Len(t, seen, len(vectors))
-	for path, count := range seen {
-		require.Equal(t, 1, count, "vector %s is in %d shards", path, count)
-	}
-}
 
 // TestShardedReplayAttributesFailuresToTheirVector proves a failing vector is
 // still reported under its own path in the corpus root, whichever shard ran

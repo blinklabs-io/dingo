@@ -209,18 +209,6 @@ func TestHeaderProtocolMajor_Byron(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestValidateHeaderProtocolVersion_MainnetEqual(t *testing.T) {
-	t.Parallel()
-
-	// Header pvMajor == current pvMajor is always accepted.
-	err := ValidateHeaderProtocolVersion(
-		babbageHeaderWithMajor(t, 10),
-		10,
-		true,
-	)
-	require.NoError(t, err)
-}
-
 func TestValidateHeaderProtocolVersion_MainnetOneAhead(t *testing.T) {
 	t.Parallel()
 

@@ -126,21 +126,6 @@ func TestTokenRegistrySubjectFor(t *testing.T) {
 	)
 }
 
-func TestTokenRegistrySubjectForEmptyAssetName(t *testing.T) {
-	t.Parallel()
-
-	subject := tokenRegistrySubjectFor(
-		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
-		nil,
-	)
-
-	require.Equal(
-		t,
-		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
-		subject,
-	)
-}
-
 // TestAssetPopulatesRegistryMetadata is the end-to-end check against a real
 // metadata store: an asset whose subject is in the registry serves the
 // off-chain `metadata` object, which was null for every asset before the

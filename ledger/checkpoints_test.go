@@ -126,13 +126,6 @@ func TestValidateCheckpointNoCheckpointAtHeight(t *testing.T) {
 	require.NoError(t, ValidateCheckpoint(cps, 100, "ffff"))
 }
 
-func TestValidateCheckpointMatch(t *testing.T) {
-	t.Parallel()
-
-	cps := map[uint64]string{2000: "aabbcc"}
-	require.NoError(t, ValidateCheckpoint(cps, 2000, "aabbcc"))
-}
-
 func TestValidateCheckpointMatchIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 

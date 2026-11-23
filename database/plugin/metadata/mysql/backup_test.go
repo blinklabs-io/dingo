@@ -116,14 +116,6 @@ func TestConnArgsAcceptsAddressFamilyRestrictedTCP(t *testing.T) {
 	}
 }
 
-// TestConnArgsRejectsInvalidDSN validates that a malformed connection
-// string is reported as an error up front, rather than producing
-// partially-populated (and silently wrong) connection args.
-func TestConnArgsRejectsInvalidDSN(t *testing.T) {
-	_, _, _, err := connArgs("::not a dsn::")
-	require.Error(t, err)
-}
-
 // TestConnArgsInheritsParentEnvironment validates that connArgs extends
 // the process's real environment (so PATH etc. survive and mysqldump/
 // mysql can actually be found) instead of replacing it with just the

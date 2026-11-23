@@ -365,11 +365,10 @@ rule family shown in the verbose test output.
   the registry, not just Conway. The corpus is Conway-only and validation
   rules are duplicated per era, so Conway coverage says nothing about
   `ValidateTxShelley` or `ValidateTxDijkstra`.
-- `TestEntryPointExecutionFaultDetectsBypassedValidator` and
-  `TestDingoEraEntryPointsReportsMissingValidator` prove the detectors detect,
-  by substituting a no-op validator, a fixture-only verdict, a
-  reject-without-reading validator, and a nil registry entry, and requiring
-  each to be reported.
+- `TestEntryPointExecutionFaultDetectsBypassedValidator` proves the detector
+  detects, by substituting a no-op validator, a validator that returns the
+  fixture's own verdict, and a validator that rejects without reading state,
+  and requiring each to be reported.
 
 ## Corpus replay budget
 

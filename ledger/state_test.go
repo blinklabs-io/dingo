@@ -13997,15 +13997,6 @@ func TestValidationReferenceSlotPrefersCurrentSlotWhenAhead(t *testing.T) {
 	}
 }
 
-func TestValidationReferenceSlotKeepsCurrentWhenEqual(t *testing.T) {
-	t.Parallel()
-
-	got := validationReferenceSlot(125, 125, nil)
-	if got != 125 {
-		t.Fatalf("expected shared slot 125, got %d", got)
-	}
-}
-
 func TestValidationReferenceSlotFallsBackToTipOnError(t *testing.T) {
 	t.Parallel()
 

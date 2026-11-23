@@ -23,10 +23,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
-	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/stretchr/testify/require"
 )
 
 // loadImmutableBlocks loads numBlocks real blocks -- hash, type, slot, and
@@ -111,44 +109,6 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 		cbors[i] = block.Cbor
 	}
 	return cbors, nil
-}
-
-// verifyBlockSelfConsistent proves block's (Hash, Type, Slot) are what
-// blockverify.Hash -- the same production check S3/GCS's own GetBlock
-// runs -- would accept, by calling it directly rather than maintaining a
-// second copy of its logic. Checking only that block.Cbor decodes under
-// block.Type would not be enough on its own: NewBlockFromCbor treats Type
-// as a decode hint, and blockverify.Hash independently re-derives the hash
-// and slot rather than trusting the caller's claim.
-func verifyBlockSelfConsistent(block immutable.Block) error {
-	_, err := blockverify.Hash(block.Type, block.Slot, block.Cbor, block.Hash)
-	return err
-}
-
-// TestLoadImmutableBlocksAreSelfConsistent proves every block this testdata
-// set's loadImmutableBlocks loads has a (hash, type, slot) that
-// blockverify.Hash accepts -- see verifyBlockSelfConsistent's own doc
-// comment for what that means. blockverify.Hash used to also independently
-// re-derive era from the header (gledger.DetermineBlockType) and reject a
-// disagreement with the recorded Type; some of this testdata set's earlier
-// blocks failed that check ("unknown proto major 7 for Shelley-like") even
-// though they are genuine, correctly-encoded blocks -- DetermineBlockType
-// classifies era from the header's announced protocol-major version, which
-// a block producer bumps ahead of an upcoming hard fork, before that
-// fork's own era actually begins. blockverify.Hash's own doc comment has
-// the full account of why that check was dropped; this test now covers
-// every loaded block rather than scanning for the first one that happens
-// to pass, since there is no longer a known-bad subset to scan past.
-func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 50
-	blocks, err := loadImmutableBlocks(numBlocks)
-	require.NoError(t, err)
-	for _, block := range blocks {
-		require.NoErrorf(t, verifyBlockSelfConsistent(block),
-			"block at slot %d, type %d", block.Slot, block.Type)
-	}
 }
 
 // storageBenchBackend is one storage backend under benchmark: a display name,

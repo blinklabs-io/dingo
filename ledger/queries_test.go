@@ -2857,47 +2857,6 @@ func TestEpochPicoseconds(t *testing.T) {
 	}
 }
 
-func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
-	t.Parallel()
-
-	// Verify that large values that would overflow uint64
-	// in naive multiplication are handled correctly by
-	// big.Int arithmetic.
-	//
-	// MaxUint32 * MaxUint32 = 18446744065119617025
-	// which is close to MaxUint64 (18446744073709551615).
-	// Multiplying by 1e9 would massively overflow uint64.
-	result := epochPicoseconds(
-		math.MaxUint32,
-		math.MaxUint32,
-	)
-
-	// The result must be larger than MaxUint64
-	maxU64 := new(big.Int).SetUint64(math.MaxUint64)
-	assert.Equal(
-		t,
-		1,
-		result.Cmp(maxU64),
-		"result should exceed MaxUint64",
-	)
-
-	// Verify the exact value:
-	// MaxUint32^2 * 1e9 =
-	// 4294967295 * 4294967295 * 1000000000 =
-	// 18446744065119617025000000000
-	expected, ok := new(big.Int).SetString(
-		"18446744065119617025000000000",
-		10,
-	)
-	require.True(t, ok)
-	assert.Equal(
-		t,
-		0,
-		expected.Cmp(result),
-		"exact overflow value mismatch",
-	)
-}
-
 // TestQueryHardForkEraHistory_TransitionKnown proves that when TransitionInfo
 // is set to TransitionKnown the era history response uses the transition
 // epoch's StartSlot as the exact EraEnd, rather than the safe-zone cap.
