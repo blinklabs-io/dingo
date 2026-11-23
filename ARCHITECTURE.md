@@ -10920,6 +10920,13 @@ advertised tip is not a header and is not checked until its header arrives.
 Networks whose configuration ships no `CheckpointsFile` (preprod, devnet, as in
 upstream `cardano-node`) enforce nothing here.
 
+Rollback recovery replays retained peer headers only with a proof from the
+current ledger generation. If a rollback invalidated the recorded proof, the
+header is checked again against the restored state before entering the queue;
+a failed or deferred check leaves it out. Admission and recovery serialize
+verification for the same peer so one check cannot replace the other's cached
+fork path while its operational-certificate counters are being checked.
+
 When full-block header verification needs an epoch nonce that is not cached yet,
 blockfetch first flushes already-received predecessor blocks from the pending
 batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce

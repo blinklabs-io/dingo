@@ -2663,6 +2663,9 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// Admission and rollback replay share each peer's mutable fork proof.
+	// Stripes serialize those checks without retaining locks for closed peers.
+	peerHeaderVerificationMutex [64]sync.Mutex
 	// statelessHeaderVerdicts shares successful stateless header crypto
 	// verdicts across peer connections.
 	statelessHeaderVerdicts statelessHeaderVerdictCache

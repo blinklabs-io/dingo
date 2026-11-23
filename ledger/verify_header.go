@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math/big"
 	"slices"
 	"strconv"
@@ -323,8 +324,23 @@ func (ls *LedgerState) ValidatePeerChainSelectionHeaderCrypto(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) error {
+	return ls.validatePeerChainSelectionHeaderCrypto(
+		context.Background(), connId, header,
+	)
+}
+
+func (ls *LedgerState) validatePeerChainSelectionHeaderCrypto(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+) error {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(connIdKey(connId)))
+	mu := &ls.peerHeaderVerificationMutex[hash.Sum32()%64]
+	mu.Lock()
+	defer mu.Unlock()
 	return ls.validateChainSelectionHeaderCrypto(
-		context.Background(),
+		ctx,
 		connId,
 		header,
 		true,
@@ -520,8 +536,18 @@ func (ls *LedgerState) ValidatePeerChainSelectionHeaderCryptoWithGeneration(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) (uint64, error) {
+	return ls.validatePeerChainSelectionHeaderCryptoWithGeneration(
+		context.Background(), connId, header,
+	)
+}
+
+func (ls *LedgerState) validatePeerChainSelectionHeaderCryptoWithGeneration(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+) (uint64, error) {
 	return ls.withStableHeaderVerificationContext(func() error {
-		return ls.ValidatePeerChainSelectionHeaderCrypto(connId, header)
+		return ls.validatePeerChainSelectionHeaderCrypto(ctx, connId, header)
 	})
 }
 
