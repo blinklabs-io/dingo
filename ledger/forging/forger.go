@@ -3254,7 +3254,9 @@ type forgeBuildStats struct {
 	// so the caller counts it once adoption has succeeded and counts the
 	// slot lost otherwise. Empty when selection completed on the first
 	// attempt, and when the fallback build itself failed -- that path is
-	// already counted where it happens, because no adoption follows it.
+	// already counted where it happens, because no adoption follows it --
+	// except that a build refused because a shared KES signer already signed
+	// the slot is a yield to the signing producer and is counted nowhere.
 	fallbackResult string
 }
 

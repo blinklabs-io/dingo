@@ -4130,11 +4130,16 @@ func TestSharedKESSignerAlreadySignedDoesNotCountFallbackAsLost(
 
 	require.NoError(t, forger.checkAndForgeProduction(t.Context()))
 	require.Equal(t, 1, builder.emptyCalls)
-	require.Zero(t, testutil.ToFloat64(
-		forger.metrics.forgeSelectionFallback.WithLabelValues(
-			forgeSelectionResultLost,
-		),
-	))
+	// A yield is not an outcome of the fallback, so no result is counted.
+	for _, result := range []string{
+		forgeSelectionResultRetried,
+		forgeSelectionResultEmpty,
+		forgeSelectionResultLost,
+	} {
+		require.Zero(t, testutil.ToFloat64(
+			forger.metrics.forgeSelectionFallback.WithLabelValues(result),
+		), result)
+	}
 	require.Zero(t, testutil.ToFloat64(forger.metrics.forgeCouldNot))
 	require.Zero(t, testutil.ToFloat64(
 		forger.metrics.forgeMissedLeaderSlots,
