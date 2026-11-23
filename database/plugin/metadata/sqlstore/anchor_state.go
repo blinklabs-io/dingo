@@ -16,6 +16,9 @@ package sqlstore
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -23,6 +26,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -285,6 +290,19 @@ func (s *Store) LiveUtxoDigestWithOutputs(
 	return s.liveUtxoDigest(ctx, atSlot, resolve, txn, utxoDigestPage)
 }
 
+// digestScratchDir is the directory the digest spool is created in:
+// Config.ScratchDir, else the SQLite database's directory, else empty for the
+// operating system's temporary directory.
+func (s *Store) digestScratchDir() string {
+	if s.scratchDir != "" {
+		return s.scratchDir
+	}
+	if s.sqlitePath != "" {
+		return filepath.Dir(s.sqlitePath)
+	}
+	return ""
+}
+
 func (s *Store) liveUtxoDigest(
 	ctx context.Context,
 	atSlot uint64,
@@ -303,11 +321,13 @@ func (s *Store) liveUtxoDigest(
 	if txn == nil {
 		txCtx = ctx
 	}
+	runBytes := utxoDigestRunBytes
+	if s.utxoDigestRunBytes > 0 {
+		runBytes = s.utxoDigestRunBytes
+	}
 	spool, err := spoolLiveOutputs(txCtx, db, s.dialect.Rebind(
-		liveUtxoSetSQL(
-			s.dialect.Name(), s.dialect.QuoteIdentifier("transaction"),
-		),
-	), slot)
+		liveUtxoSetSQL(s.dialect.QuoteIdentifier("transaction")),
+	), slot, s.digestScratchDir(), runBytes)
 	if err != nil {
 		return metadata.UtxoSetDigest{}, fmt.Errorf("digest utxo set: %w", err)
 	}
@@ -335,25 +355,18 @@ func (s *Store) liveUtxoDigest(
 	return d.Sum(), nil
 }
 
-// liveUtxoSetSQL selects the outputs live at a slot in digest order. Walking
-// the transaction hash index in order to satisfy the ORDER BY fetches every
-// output ever created by row id to keep the live ones; scanning utxo for the
-// live rows and sorting them reads the table once. On SQLite the unary plus
-// stops the planner choosing the index walk to avoid the sort. PostgreSQL
-// rejects unary plus on bytea, so the hint is confined to SQLite.
-func liveUtxoSetSQL(dialect, transactionTable string) string {
-	orderKey := "t.hash"
-	if dialect == "sqlite" {
-		orderKey = "+t.hash"
-	}
+// liveUtxoSetSQL selects the outputs live at a slot, in no particular order;
+// the spool sorts them. With no ORDER BY to satisfy, the planner scans utxo
+// for the live rows and reads the table once, rather than walking the
+// transaction hash index and fetching every output ever created by row id.
+func liveUtxoSetSQL(transactionTable string) string {
 	return `-- name: LiveUtxoSet :many
 SELECT t.hash, u.output_idx, u.amount, u.payment_key, u.staking_key,
     u.datum_hash
 FROM utxo u
 JOIN ` + transactionTable + ` t ON t.id = u.tx_id
 WHERE u.added_slot <= ?
-  AND (u.deleted_slot = 0 OR u.deleted_slot > ?)
-ORDER BY ` + orderKey + `, u.output_idx`
+  AND (u.deleted_slot = 0 OR u.deleted_slot > ?)`
 }
 
 // AppliedTransactionCount implements metadata.AnchorStateStore.
@@ -493,16 +506,22 @@ func digestOutputs(
 // digestResolveWorkers bounds the goroutines resolving one digest chunk.
 const digestResolveWorkers = 8
 
-// outputSpool holds the live outputs in digest order on disk. The sorted scan
-// is read to its end and its cursor closed before any output is resolved: a
-// resolver begins its own read transaction, so a cursor held open across
-// resolves would need a second read connection per resolving goroutine and
-// would stall a read pool of one. The scan also pins its read snapshot only
-// for the time it takes to read, not for the whole digest.
+// outputSpool holds the live outputs on disk and returns them in digest
+// order. The scan is read to its end and its cursor closed before any output
+// is resolved: a resolver begins its own read transaction, so a cursor held
+// open across resolves would need a second read connection per resolving
+// goroutine and would stall a read pool of one. The scan also pins its read
+// snapshot only for the time it takes to read, not for the whole digest.
+//
+// The spool sorts the rows itself rather than asking the database to: it is
+// an external merge sort whose runs are written to one file in the store's
+// scratch directory, so all of the digest's disk use lands where the store
+// keeps its data. SQLite would spill an ORDER BY of the whole set into the
+// process's temporary directory, and only a process-wide setting moves that.
 type outputSpool struct {
 	file     *os.File
-	r        *bufio.Reader
 	unlinked bool
+	runs     outputRunHeap
 }
 
 func spoolLiveOutputs(
@@ -510,26 +529,36 @@ func spoolLiveOutputs(
 	db queryer,
 	query string,
 	slot int64,
+	dir string,
+	runBytes int,
 ) (*outputSpool, error) {
-	file, err := os.CreateTemp("", "dingo-utxo-digest-*")
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	file, err := os.CreateTemp(dir, ".dingo-utxo-digest-*")
 	if err != nil {
 		return nil, err
 	}
 	// Unlinking the open file means a process killed mid-digest leaves no
 	// spool behind. Windows refuses, so close removes it there.
 	sp := &outputSpool{file: file, unlinked: os.Remove(file.Name()) == nil}
-	if err := sp.fill(ctx, db, query, slot); err != nil {
+	if err := sp.fill(ctx, db, query, slot, runBytes); err != nil {
 		sp.close()
 		return nil, err
 	}
 	return sp, nil
 }
 
+// fill writes the scan as sorted runs of about runBytes encoded bytes each,
+// then opens a reader on every run for the merge.
 func (sp *outputSpool) fill(
 	ctx context.Context,
 	db queryer,
 	query string,
 	slot int64,
+	runBytes int,
 ) error {
 	rs, err := db.QueryContext(ctx, query, slot, slot)
 	if err != nil {
@@ -537,7 +566,30 @@ func (sp *outputSpool) fill(
 	}
 	defer rs.Close()
 	w := bufio.NewWriterSize(sp.file, spoolBufferSize)
-	var scratch []byte
+	var (
+		arena   []byte
+		spans   [][2]int
+		offset  int64
+		bounds  [][2]int64
+		scratch [][]byte
+	)
+	flush := func() error {
+		if len(spans) == 0 {
+			return nil
+		}
+		slices.SortFunc(spans, func(a, b [2]int) int {
+			return compareSpoolRecords(arena[a[0]:a[1]], arena[b[0]:b[1]])
+		})
+		for _, span := range spans {
+			if _, err := w.Write(arena[span[0]:span[1]]); err != nil {
+				return err
+			}
+		}
+		bounds = append(bounds, [2]int64{offset, int64(len(arena))})
+		offset += int64(len(arena))
+		arena, spans = arena[:0], spans[:0]
+		return nil
+	}
 	for rs.Next() {
 		var o liveOutput
 		if err := rs.Scan(
@@ -545,58 +597,83 @@ func (sp *outputSpool) fill(
 		); err != nil {
 			return err
 		}
-		scratch = scratch[:0]
-		for _, field := range [][]byte{
-			o.txHash, []byte(o.amount.String), o.payment, o.staking, o.datum,
-		} {
-			scratch = binary.AppendUvarint(scratch, uint64(len(field)))
-			scratch = append(scratch, field...)
+		start := len(arena)
+		arena = binary.AppendUvarint(arena, uint64(len(o.txHash)))
+		arena = append(arena, o.txHash...)
+		arena = binary.AppendUvarint(arena, uint64(o.idx)) //nolint:gosec
+		scratch = append(scratch[:0],
+			[]byte(o.amount.String), o.payment, o.staking, o.datum,
+		)
+		for _, field := range scratch {
+			arena = binary.AppendUvarint(arena, uint64(len(field)))
+			arena = append(arena, field...)
 		}
-		scratch = binary.AppendUvarint(scratch, uint64(o.idx)) //nolint:gosec
-		if _, err := w.Write(scratch); err != nil {
-			return err
+		spans = append(spans, [2]int{start, len(arena)})
+		if len(arena) >= runBytes {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 	}
 	if err := rs.Err(); err != nil {
 		return err
 	}
+	if err := flush(); err != nil {
+		return err
+	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
-		return err
+	for _, b := range bounds {
+		run := &outputRun{r: bufio.NewReaderSize(
+			io.NewSectionReader(sp.file, b[0], b[1]), spoolRunReadBuffer,
+		)}
+		ok, err := run.advance()
+		if err != nil {
+			return err
+		}
+		if ok {
+			sp.runs = append(sp.runs, run)
+		}
 	}
-	sp.r = bufio.NewReaderSize(sp.file, spoolBufferSize)
+	heap.Init(&sp.runs)
 	return nil
+}
+
+// compareSpoolRecords orders two encoded records by transaction hash, then
+// output index, the order the digest defines. A record starts with the
+// length-prefixed hash and the index, so only that prefix is decoded.
+func compareSpoolRecords(a, b []byte) int {
+	ha, ia := spoolRecordKey(a)
+	hb, ib := spoolRecordKey(b)
+	if c := bytes.Compare(ha, hb); c != 0 {
+		return c
+	}
+	return cmp.Compare(ia, ib)
+}
+
+func spoolRecordKey(rec []byte) ([]byte, uint64) {
+	size, n := binary.Uvarint(rec)
+	hash := rec[n : n+int(size)] //nolint:gosec
+	idx, _ := binary.Uvarint(rec[n+int(size):])
+	return hash, idx
 }
 
 // next returns up to n outputs, or none once the spool is exhausted.
 func (sp *outputSpool) next(n int) ([]liveOutput, error) {
 	outputs := make([]liveOutput, 0, n)
-	for len(outputs) < n {
-		var o liveOutput
-		var fields [5][]byte
-		for i := range fields {
-			size, err := binary.ReadUvarint(sp.r)
-			if err != nil {
-				if i == 0 && errors.Is(err, io.EOF) {
-					return outputs, nil
-				}
-				return nil, fmt.Errorf("read spooled output: %w", err)
-			}
-			fields[i] = make([]byte, size)
-			if _, err := io.ReadFull(sp.r, fields[i]); err != nil {
-				return nil, fmt.Errorf("read spooled output: %w", err)
-			}
-		}
-		idx, err := binary.ReadUvarint(sp.r)
+	for len(outputs) < n && len(sp.runs) > 0 {
+		run := sp.runs[0]
+		outputs = append(outputs, run.head)
+		ok, err := run.advance()
 		if err != nil {
-			return nil, fmt.Errorf("read spooled output: %w", err)
+			return nil, err
 		}
-		o.txHash, o.payment, o.staking, o.datum = fields[0], fields[2], fields[3], fields[4]
-		o.amount = sql.NullString{String: string(fields[1]), Valid: true}
-		o.idx = int64(idx) //nolint:gosec
-		outputs = append(outputs, o)
+		if ok {
+			heap.Fix(&sp.runs, 0)
+		} else {
+			heap.Pop(&sp.runs)
+		}
 	}
 	return outputs, nil
 }
@@ -608,4 +685,85 @@ func (sp *outputSpool) close() {
 	}
 }
 
-const spoolBufferSize = 1 << 20
+// outputRun reads one sorted run back; head is its next output.
+type outputRun struct {
+	r    *bufio.Reader
+	head liveOutput
+}
+
+// advance reads the run's next output into head, reporting false at the end
+// of the run.
+func (run *outputRun) advance() (bool, error) {
+	readField := func(first bool) ([]byte, error) {
+		size, err := binary.ReadUvarint(run.r)
+		if err != nil {
+			if first && errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
+			return nil, fmt.Errorf("read spooled output: %w", err)
+		}
+		field := make([]byte, size)
+		if _, err := io.ReadFull(run.r, field); err != nil {
+			return nil, fmt.Errorf("read spooled output: %w", err)
+		}
+		return field, nil
+	}
+	var o liveOutput
+	var err error
+	if o.txHash, err = readField(true); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		return false, err
+	}
+	idx, err := binary.ReadUvarint(run.r)
+	if err != nil {
+		return false, fmt.Errorf("read spooled output: %w", err)
+	}
+	o.idx = int64(idx) //nolint:gosec
+	var amount []byte
+	for _, dst := range []*[]byte{&amount, &o.payment, &o.staking, &o.datum} {
+		if *dst, err = readField(false); err != nil {
+			return false, err
+		}
+	}
+	o.amount = sql.NullString{String: string(amount), Valid: true}
+	run.head = o
+	return true, nil
+}
+
+// outputRunHeap orders the runs by their head output, for the k-way merge.
+type outputRunHeap []*outputRun
+
+func (h *outputRunHeap) Len() int { return len(*h) }
+
+func (h *outputRunHeap) Less(i, j int) bool {
+	a, b := (*h)[i].head, (*h)[j].head
+	if c := bytes.Compare(a.txHash, b.txHash); c != 0 {
+		return c < 0
+	}
+	return a.idx < b.idx
+}
+
+func (h *outputRunHeap) Swap(i, j int) { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
+
+func (h *outputRunHeap) Push(x any) {
+	*h = append(*h, x.(*outputRun)) //nolint:forcetypeassert
+}
+
+func (h *outputRunHeap) Pop() any {
+	old := *h
+	run := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return run
+}
+
+const (
+	spoolBufferSize = 1 << 20
+	// spoolRunReadBuffer is each run's read buffer during the merge, kept
+	// small because a mainnet set spools as dozens of runs.
+	spoolRunReadBuffer = 64 << 10
+	// utxoDigestRunBytes is the encoded size of one sorted run, which bounds
+	// the rows the spool holds in memory to sort.
+	utxoDigestRunBytes = 16 << 20
+)

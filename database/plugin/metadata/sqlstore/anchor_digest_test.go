@@ -23,14 +23,12 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -309,44 +307,6 @@ func TestLiveUtxoDigestResolvesWithASingleReadConnection(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-}
-
-func TestLiveUtxoSetQueryScansUtxoInsteadOfWalkingTheHashIndex(t *testing.T) {
-	t.Parallel()
-	s := newFilePlannerStatsStore(t, prometheus.NewRegistry())
-	_, err := s.writeDB.Exec(`WITH RECURSIVE n(i) AS (
- SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<20000
-) INSERT INTO "transaction"(id,hash) SELECT i,randomblob(32) FROM n`)
-	require.NoError(t, err)
-	// Half the outputs are live, which statistics make the index walk look
-	// cheaper than scanning utxo.
-	_, err = s.writeDB.Exec(`WITH RECURSIVE n(i) AS (
- SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<20000
-) INSERT INTO utxo(tx_id,output_idx,added_slot,deleted_slot,amount)
-SELECT i,0,1,CASE WHEN i%2=0 THEN 0 ELSE 2 END,'1' FROM n`)
-	require.NoError(t, err)
-	_, err = s.writeDB.Exec("ANALYZE")
-	require.NoError(t, err)
-	require.NoError(t, s.refreshReadPool(context.Background()))
-
-	query := liveUtxoSetSQL("sqlite", `"transaction"`)
-	legacy := strings.ReplaceAll(query, "+t.hash", "t.hash")
-	require.Contains(
-		t, explainQueryPlan(t, s, legacy, 50, 50), "idx_transaction_hash",
-		"fixture must reproduce the index walk",
-	)
-	plan := explainQueryPlan(t, s, query, 50, 50)
-	require.NotContains(t, plan, "idx_transaction_hash")
-	require.Contains(t, plan, "SCAN u")
-}
-
-func TestLiveUtxoSetQueryKeepsNonSQLiteOrderKey(t *testing.T) {
-	t.Parallel()
-	for _, d := range []string{"postgres", "mysql"} {
-		q := liveUtxoSetSQL(d, "transaction")
-		require.Contains(t, q, "ORDER BY t.hash, u.output_idx", d)
-		require.NotContains(t, q, "+t.hash", d)
-	}
 }
 
 // exerciseLiveUtxoDigestCarriesEveryOutputField digests outputs whose

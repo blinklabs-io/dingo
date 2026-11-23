@@ -5305,11 +5305,15 @@ journal before it kept them). Then:
    names in bytewise order, shortest integer heads), and the address, datum
    and reference script with shortest length heads around an inline datum's
    and a native script's own bytes. A SQL store reads the set in one
-   sorted statement into a file in the operating system's temporary
-   directory (`TMPDIR`), roughly the size of the live set's keys, amounts
-   and credentials and unlinked once open where the platform allows, and
-   closes that cursor before resolving any output, so
-   resolvers can take their own read connections; outputs are then resolved
+   unordered statement and sorts it itself, as an external merge sort of
+   16 MiB runs, into one file in the metadata store's scratch directory:
+   the SQLite database's directory, or the node's data directory for
+   PostgreSQL and MySQL. The file is roughly the size of the live set's
+   keys, amounts and credentials, is unlinked once open where the platform
+   allows, and the database runs no sort, so nothing spills into the
+   operating system's temporary directory. The store closes that cursor
+   before resolving any output, so resolvers can take their own read
+   connections; outputs are then resolved
    and canonicalized in chunks on several goroutines and hashed in order. The
    ledger's digest
    is taken when the anchor is recorded and kept as `indexer_anchor_digest`,
