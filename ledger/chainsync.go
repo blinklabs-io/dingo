@@ -7078,6 +7078,13 @@ func (ls *LedgerState) tryResolveForkPinned(
 				ls.lifecycleContext(), e.ConnectionId, forkEvent.BlockHeader,
 			)
 			if err != nil {
+				ls.config.Logger.Debug(
+					"failed to revalidate fork header after rollback",
+					"component", "ledger",
+					"error", err,
+					"slot", forkEvent.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
 				ls.requestChainsyncResync(
 					e.ConnectionId,
 					event.ChainsyncResyncReasonPersistentFork,
