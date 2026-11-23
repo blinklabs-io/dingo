@@ -37,6 +37,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/blinklabs-io/dingo/database/internal/badgermem"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -159,6 +160,9 @@ func Open(dir string, options ...Option) (*Store, error) {
 	}
 	if s.blockCacheSize > 0 {
 		opts = opts.WithBlockCacheSize(s.blockCacheSize)
+	}
+	if _, err := badgermem.RemoveEmpty(dir); err != nil {
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
 	db, err := badger.Open(opts)
 	if err != nil {
