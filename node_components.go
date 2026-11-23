@@ -39,11 +39,16 @@ import (
 )
 
 func (n *Node) databaseConfig() *database.Config {
+	storageFeatures := make([]string, len(n.config.storageFeatures))
+	for i, feature := range n.config.storageFeatures {
+		storageFeatures[i] = string(feature)
+	}
 	return &database.Config{
 		DataDir:              n.config.dataDir,
 		Logger:               n.config.logger,
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
+		StorageFeatures:      storageFeatures,
 		IndexerLayout:        n.indexerLayout(),
 		Network:              n.config.network,
 		NetworkMagic:         n.config.networkMagic,

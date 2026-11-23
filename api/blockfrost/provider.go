@@ -68,6 +68,12 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIBlockfrost,
 			Name:        "builtin",
 			Description: "built-in Blockfrost-compatible HTTP API",
+			Storage: plugin.StorageRequirements{
+				Tier: plugin.StorageTierAPI,
+				Features: []plugin.StorageFeature{
+					plugin.StorageFeatureBlockfrost,
+				},
+			},
 		},
 		DefaultProviderConfig,
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Blockfrost, plugin.Instance, error) {

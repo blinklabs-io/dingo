@@ -20,13 +20,35 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 )
+
+func TestQueryDatabaseUsesConsensusStoreWithoutIndexer(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	want := ochainsync.Tip{
+		Point:       ocommon.NewPoint(42, []byte{0xaa}),
+		BlockNumber: 7,
+	}
+	require.NoError(t, db.SetTip(want, nil))
+
+	queryDB := NewIndexerQueryDatabase(db, nil, nil)
+	got, err := queryDB.Tip()
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	ready, err := queryDB.Ready(indexerdb.KindCurrent)
+	require.NoError(t, err)
+	require.True(t, ready)
+}
 
 // recordingQueryDB answers queries itself; calls counts what reached it.
 type recordingQueryDB struct {

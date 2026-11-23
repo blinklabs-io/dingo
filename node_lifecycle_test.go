@@ -2753,6 +2753,9 @@ func TestReinitializeAPIServersPreservesListenerFactory(t *testing.T) {
 	)
 	WithStorageMode(StorageModeAPI)(&n.config)
 	n.config.syncCompatFields()
+	storageFeatures, err := n.storagePlan()
+	require.NoError(t, err)
+	n.config.storageFeatures = storageFeatures
 	indexer, err := dbtest.NewDatabase(t, &database.Config{})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(indexer, indexer, 10)

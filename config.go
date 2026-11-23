@@ -54,10 +54,11 @@ type StorageMode string
 const (
 	// StorageModeCore stores only consensus and chain state data.
 	// Witnesses, scripts, datums, redeemers, and tx metadata CBOR
-	// are skipped. Suitable for block producers with no APIs.
+	// are skipped. Current-chain consumers such as UTxO RPC may use it.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
+	// (blockfrost, mesh, kupo, and historical UTxO RPC queries) in
+	// addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -277,6 +278,7 @@ type Config struct {
 	splitIndexer                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	storageFeatures                 []hostplugin.StorageFeature
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
 	// apiConfig mirrors cfg.API -- the shared api.tls policy
@@ -1504,7 +1506,7 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server.
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Utxorpc.Config["port"] = port

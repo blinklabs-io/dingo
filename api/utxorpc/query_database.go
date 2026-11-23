@@ -28,8 +28,9 @@ import (
 )
 
 // QueryDatabase is the store the QueryService reads UTxOs, datums and
-// transaction records from: the IndexerDB, whose tip and readiness the service
-// reports and honors. Sync, watch, submit and evaluation stay on the ledger.
+// transaction records from. An API-tier node uses the IndexerDB; a core-tier
+// node uses the consensus database. Sync, watch, submit and evaluation stay on
+// the ledger.
 type QueryDatabase interface {
 	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	TransactionByHash(
@@ -53,8 +54,9 @@ type QueryDatabase interface {
 	Ready(kind indexerdb.Kind) (bool, error)
 }
 
-// indexerQueryDatabase reads UTxOs, datums and transactions from the
-// IndexerDB and reports its tip.
+// indexerQueryDatabase reads UTxOs, datums and transactions from db. When an
+// IndexerDB store is present it reports that store's readiness and tip;
+// otherwise the consensus database is immediately ready and supplies its tip.
 type indexerQueryDatabase struct {
 	db    *database.Database
 	store *indexerdb.Store
@@ -103,6 +105,9 @@ func (q *indexerQueryDatabase) UtxosByAddressBoundedPage(
 }
 
 func (q *indexerQueryDatabase) Tip() (ochainsync.Tip, error) {
+	if q.store == nil {
+		return q.db.GetTip(nil)
+	}
 	tip, err := q.store.Tip(nil)
 	if err != nil {
 		return ochainsync.Tip{}, err
@@ -114,6 +119,9 @@ func (q *indexerQueryDatabase) Tip() (ochainsync.Tip, error) {
 }
 
 func (q *indexerQueryDatabase) Ready(kind indexerdb.Kind) (bool, error) {
+	if q.ready == nil {
+		return true, nil
+	}
 	return q.ready(kind)
 }
 

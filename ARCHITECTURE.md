@@ -70,10 +70,13 @@ network magic and versioned provider identity, so a Tachys node refuses a Praos
 peer before exchanging chain data even when both use the same genesis. The
 ledger supplies state to the provider and retains ownership of epochs, nonces,
 transactions, rollback, and stake snapshots; producer credentials stay with the
-block producer. Each API provider (Blockfrost, Kupo, Mesh, UTxO RPC) is resolved
-only in API storage mode and only when its configured port is nonzero, so
-core-mode nodes and disabled ports resolve none of them. Failures unwind
-providers in reverse order. Normal shutdown orders APIs, mempool,
+block producer. Every storage consumer declares its minimum ordered tier and
+named storage features. `Node.New` builds one registry from the enabled
+consumers and refuses startup when the operator-selected `storageMode` does not
+include a consumer's tier, naming every incompatible consumer and tier. The
+`api` tier enables the complete declared feature registry; the `core` tier can
+serve UTxO RPC from current-chain storage. Disabled ports resolve no provider.
+Failures unwind providers in reverse order. Normal shutdown orders APIs, mempool,
 ledger/database, then storage. Database receives provider-owned stores through
 `database.Stores`. Before API providers start, API-mode database startup runs
 the one-time, cancellable backfill for rendered addresses of all retained UTxOs;
@@ -2427,15 +2430,15 @@ When `Node.Run()` is called, components are initialized in this order:
     Wiring below for how the apparent cycle is resolved.
 17. ConnectionManager listener start
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
-19. UTxO RPC server (if API storage mode and port configured)
+19. UTxO RPC server (if its core-tier feature and port are configured)
 20. Bark C2/archive server (if port configured)
-21. Midnight gRPC server (if API storage mode and
+21. Midnight gRPC server (if its API-tier feature and
     `midnight.serverEnabled`, with a non-zero port)
-22. Blockfrost API (if API storage mode and port configured)
-23. Kupo API (if API storage mode and port configured)
-24. Mesh API (if API storage mode and port configured)
-25. Off-chain metadata fetcher (if API storage mode)
-26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
+22. Blockfrost API (if its API-tier feature and port are configured)
+23. Kupo API (if its API-tier feature and port are configured)
+24. Mesh API (if its API-tier feature and port are configured)
+25. Off-chain metadata fetcher (if its API-tier feature is enabled)
+26. CIP-26 token registry sync (if its API-tier feature and tokenRegistry.enabled)
 27. Block forger + leader election (if block producer mode)
 28. Node-managed Mithril coordinator (if `mithril.enabled` and the caller
     supplied `WithMithrilCatchUp`; see Node-managed Mithril)
@@ -3999,10 +4002,11 @@ health) stay ungated; Blockfrost's `network` routes read the IndexerDB and are
 gated as current state. The Blockfrost mempool endpoints resolve a pooled
 transaction's confirmed inputs and deposit parameters from the ledger store at
 the ledger tip, because the IndexerDB may not have reached it.
-UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`, which the node
-builds over the IndexerDB with `utxorpc.NewIndexerQueryDatabase`. It answers
-`Unavailable` while the IndexerDB is not ready and reports its tip; sync,
-watch, submit and evaluation stay on the ledger.
+UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`. The node builds
+it over the IndexerDB in API mode and the consensus database in core mode. The
+API-mode service answers `Unavailable` while the IndexerDB is not ready and
+reports its tip; the core-mode service is immediately ready and reports the
+consensus tip. Sync, watch, submit and evaluation stay on the ledger.
 
 A reader never mixes the two stores in one transaction or takes an API row
 from the ledger store: a `sqlstore` transaction is valid only on the store
@@ -4163,9 +4167,21 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset
-  tracking. Required when any client-facing API server (Blockfrost, Kupo, Mesh,
-  UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not
-  part of that API surface.
+  tracking.
+
+The operator still chooses `storageMode`; consumers do not promote it. API
+providers, indexers and hooks declare an ordered minimum tier (`core` or `api`)
+and named storage features. Startup aggregates all enabled declarations and
+refuses an insufficient tier before opening storage. UTxO RPC declares `core`.
+The Midnight indexer and server, CIP-26 registry, and off-chain metadata
+fetcher declare `api`. Selecting `api` enables every feature known to the
+composed plugin host, including disabled consumers, so the storage shape does
+not depend on which listener starts first. In `core`, only enabled consumers'
+features enter the registry. The registry is composition state passed into the
+database alongside the selected mode; it is derived again on startup and adds
+no persisted gate or database-format contract. The existing `storage_mode`
+latch remains authoritative and still refuses a core database reopening as
+api. Bark remains a separate Dingo-to-Dingo protocol.
 
 In core mode, the ledger's background consumed-UTxO pruner is advisory: it
 defers while the local tip is materially behind the known upstream tip, so its
@@ -4305,8 +4321,9 @@ to `127.0.0.1:50051`; an explicitly empty host is normalized to that loopback
 default before validation. Plaintext and TLS are both supported; TLS is
 enabled when the shared certificate/key pair is configured. Dingo does not
 add authentication to this Acropolis-compatible native gRPC surface.
-`Config.Validate` rejects `serverEnabled` outside API storage mode, a zero port
-while enabled, and `reflectionEnabled` without the server. When the server is
+Storage declaration validation rejects `serverEnabled` outside its API tier;
+`Config.Validate` rejects a zero port while enabled and
+`reflectionEnabled` without the server. When the server is
 disabled, its host and port are inactive and do not participate in port
 validation or listener collision checks.
 
@@ -17128,8 +17145,8 @@ index catalog nor a recorded statistics refresh establishes ledger readiness.
 ## External Interfaces
 
 Dingo provides four client-facing APIs plus Bark. All are optional and gated by
-port configuration. UTxO RPC, Blockfrost, Kupo, and Mesh are general-purpose
-external APIs and require `storageMode: api`. Bark is different: it is Dingo's
+port configuration. UTxO RPC declares the `core` storage tier; Blockfrost,
+Kupo, and Mesh declare `api`. Bark is different: it is Dingo's
 own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose
 application API. The health probes below are not an application API at all: they
 are operational surface for a container runtime or orchestrator, and are the one
@@ -17158,9 +17175,9 @@ step, the header-verification settle wait, and ledger batch apply/commit on
 the database worker goroutine that runs it) that let an execution trace
 attribute holder time; they record only while a trace is being captured.
 
-The health listener is **not** gated on storage mode. The four API
-listeners start only when `storageMode.IsAPI()`, so a probe wired the same
-way would be inert in the default `core` mode — the mode the shipped
+The health listener is **not** gated on storage mode. Application listeners
+start only when their declared storage feature is enabled, so a probe wired to
+an API-tier feature would be inert in the default `core` mode — the mode the shipped
 image runs. It binds `bindAddr`, the address the relay/NtN
 listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
@@ -21529,9 +21546,9 @@ automatically for every API-storage-mode node. An existing api-mode
 deployment that relied on that implicit start must now set
 `midnight.enabled: true` (or `--midnight-enabled` / `DINGO_MIDNIGHT_ENABLED`)
 explicitly, or the indexer silently stops running on upgrade even though
-storage mode has not changed. `Config.Validate` rejects the reverse
-mistake (`midnight.enabled: true` with a non-api storage mode) at startup
-with a message naming both settings.
+storage mode has not changed. Storage declaration validation rejects the
+reverse mistake (`midnight.enabled: true` with a non-api storage mode) at
+startup and names the Midnight indexer and its required tier.
 
 Backfill and live indexing resolve timestamps before writing block data or
 advancing the checkpoint. Decode and timestamp errors stop backfill or reach
@@ -22245,11 +22262,11 @@ independently of the public `bindAddr` and private `privateBindAddr`. A wildcard
 pprof listener therefore requires an explicit override of the dedicated setting;
 both serving modes and Mithril snapshot sync use the same resolved address. Port
 checks apply only to the listeners a given invocation actually starts, derived
-from the *effective* run mode plus the storage mode: the serving modes start the
-relay, metrics, debug, and bark listeners, plus the private TCP listener only
-when `privatePort` is non-zero (and, under `api` storage or
-a configured `dev` run mode — which forces `api` storage — the
-UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
+from the *effective* run mode plus declared storage features: the serving modes
+start the relay, metrics, debug, bark, and core-tier UTxORPC listeners, plus the
+private TCP listener only when `privatePort` is non-zero (and, under `api`
+storage or a configured `dev` run mode — which forces `api` storage — the
+Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot sync (`dingo sync --mithril` or `dingo mithril sync`)
 starts only the metrics and debug listeners; `mithril serve` starts only the
 artifact server, and only that command validates the `mithril.server` port,

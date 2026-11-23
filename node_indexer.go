@@ -363,10 +363,11 @@ func (m *indexerMeshLedger) UtxoBalanceByAddressAtSlot(
 	return m.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
 }
 
-// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB.
+// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB when
+// present, otherwise the consensus database's current-chain data.
 func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
 	return utxorpc.NewIndexerQueryDatabase(
-		n.indexerDB, n.indexerStore, n.apiReadiness(),
+		n.apiDatabase(), n.indexerStore, n.apiReadiness(),
 	)
 }
 

@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,8 @@ type Config struct {
 	Logger       *slog.Logger
 	DataDir      string
 	StorageMode  string // "core" or "api"
+	// StorageFeatures is the sorted registry enabled by composed consumers.
+	StorageFeatures []string
 	// Role is empty for the ledger's own database and RoleIndexer for the
 	// IndexerDB. An indexer database holds no commit timestamp: that value
 	// pairs the ledger's two stores, and the IndexerDB's own transaction
@@ -226,6 +229,22 @@ type Database struct {
 	// UTxO rollback below their slot marks disturbed (see noteUtxoRollback).
 	utxoAsOfReadsMu sync.Mutex
 	utxoAsOfReads   map[*utxoAsOfRead]struct{}
+}
+
+// StorageFeatures returns the named storage features enabled for this store.
+func (d *Database) StorageFeatures() []string {
+	if d == nil || d.config == nil {
+		return nil
+	}
+	return slices.Clone(d.config.StorageFeatures)
+}
+
+// HasStorageFeature reports whether name is enabled for this store.
+func (d *Database) HasStorageFeature(name string) bool {
+	if d == nil || d.config == nil {
+		return false
+	}
+	return slices.Contains(d.config.StorageFeatures, name)
 }
 
 func (d *Database) acquireReadSnapshotAdmission(
@@ -616,6 +635,7 @@ func New(
 	// Create a copy of the config to avoid mutating the original
 	cfgVal := *config
 	configCopy := &cfgVal
+	configCopy.StorageFeatures = slices.Clone(config.StorageFeatures)
 	if configCopy.StorageMode == "" {
 		configCopy.StorageMode = types.StorageModeCore
 	}

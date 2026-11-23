@@ -882,7 +882,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 // Startup era history preparation publishes both the epoch cache and applied tip so
 // timestamp conversion uses the persisted tip's forecast horizon.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
+	if !midnightIndexerActive(n.config.storageFeatures, n.config.midnight) {
 		return nil
 	}
 	if err := n.prepareEpochCache(n.ctx); err != nil {
@@ -1177,7 +1177,8 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
+	if n.storageFeatureEnabled(plugin.StorageFeatureUtxorpc) &&
+		utxorpcPort > 0 {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
@@ -1199,7 +1200,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
+	if midnightServerActive(n.config.storageFeatures, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1221,7 +1222,8 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
+	if n.storageFeatureEnabled(plugin.StorageFeatureBlockfrost) &&
+		blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState, n.mempool, n.indexerStore,
 		)
@@ -1249,7 +1251,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
+	if n.storageFeatureEnabled(plugin.StorageFeatureKupo) && kupoPort > 0 {
 		adapter, err := kupo.NewNodeAdapter(
 			n.ledgerState, n.indexerStore,
 		)
@@ -1277,7 +1279,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && meshPort > 0 {
+	if n.storageFeatureEnabled(plugin.StorageFeatureMesh) && meshPort > 0 {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1317,7 +1319,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if mcpPort > 0 {
+	if n.storageFeatureEnabled(plugin.StorageFeatureMCP) && mcpPort > 0 {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
 			mcpSelection.Provider, mcpSelection.Config,
@@ -1337,7 +1339,7 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
-	if n.apiStorageMode().IsAPI() {
+	if n.storageFeatureEnabled(plugin.StorageFeatureOffchainMetadata) {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -1348,7 +1350,8 @@ func (n *Node) reinitializeAPIServers() error {
 		if err := n.offchainMetadataFetcher.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("restarting off-chain metadata fetcher: %w", err)
 		}
-		if n.config.tokenRegistry.Enabled {
+		if n.storageFeatureEnabled(plugin.StorageFeatureCIP26) &&
+			n.config.tokenRegistry.Enabled {
 			sync, err := n.newTokenRegistrySync()
 			if err != nil {
 				return fmt.Errorf("recreate token registry sync: %w", err)
