@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,6 +55,12 @@ func bigChanges(points, perPoint int) []badgerutxo.Change {
 
 func TestApplyBatchLargerThanOneTransactionApplies(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine apply of 120k outputs at Badger's real "+
+			"transaction limit; the small-budget chunk tests keep the "+
+			"chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	start := point(0, 0)

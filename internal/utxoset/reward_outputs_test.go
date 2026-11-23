@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,12 @@ import (
 // of which is a row, an index row and two journal entries.
 func TestRewardWriteLargerThanAStoreTransactionIsApplied(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine write of 60k reward outputs across "+
+			"store transactions; the chunked write is asserted in the "+
+			"un-instrumented jobs",
+	)
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
