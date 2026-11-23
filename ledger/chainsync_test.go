@@ -11917,30 +11917,45 @@ func newChainsyncRollbackFixtureAt(
 	seed func(),
 ) *chainsyncRollbackFixture {
 	t.Helper()
+	ancestorHash := testHashBytes("ancestor-block")
+	currentHash := testHashBytes("current-block")
+	return newChainsyncRollbackFixtureWithBlocks(
+		t, db,
+		chain.RawBlock{
+			Slot:        10,
+			Hash:        ancestorHash,
+			BlockNumber: 1,
+			Type:        1,
+			Cbor:        chainsyncFixtureBlockCbor,
+		},
+		chain.RawBlock{
+			Slot:        currentSlot,
+			Hash:        currentHash,
+			BlockNumber: 2,
+			Type:        1,
+			PrevHash:    ancestorHash,
+			Cbor:        chainsyncFixtureBlockCbor,
+		},
+		seed,
+	)
+}
+
+// newChainsyncRollbackFixtureWithBlocks is newChainsyncRollbackFixtureAt over
+// the given ancestor and current blocks, for a test whose fork validation
+// decodes them.
+func newChainsyncRollbackFixtureWithBlocks(
+	t *testing.T,
+	db *database.Database,
+	ancestorBlock, currentBlock chain.RawBlock,
+	seed func(),
+) *chainsyncRollbackFixture {
+	t.Helper()
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
 	)
-
-	ancestorHash := testHashBytes("ancestor-block")
-	currentHash := testHashBytes("current-block")
-	ancestorBlock := chain.RawBlock{
-		Slot:        10,
-		Hash:        ancestorHash,
-		BlockNumber: 1,
-		Type:        1,
-		Cbor:        chainsyncFixtureBlockCbor,
-	}
-	currentBlock := chain.RawBlock{
-		Slot:        currentSlot,
-		Hash:        currentHash,
-		BlockNumber: 2,
-		Type:        1,
-		PrevHash:    ancestorHash,
-		Cbor:        chainsyncFixtureBlockCbor,
-	}
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
@@ -11957,8 +11972,8 @@ func newChainsyncRollbackFixtureAt(
 		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
 		BlockNumber: currentBlock.BlockNumber,
 	}
-	ancestorNonce := []byte("nonce-ancestor")
-	currentNonce := []byte("nonce-current")
+	ancestorNonce := testHashBytes("nonce-ancestor")
+	currentNonce := testHashBytes("nonce-current")
 
 	require.NoError(
 		t,

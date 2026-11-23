@@ -308,7 +308,11 @@ type utxoSetBatch struct {
 	// validationOnly keeps speculative fork validation from stopping the
 	// live set when its private overlay cannot be prepared.
 	validationOnly bool
-	validationErr  error
+	// epochCache is the epoch cache of the fork candidate a validation-only
+	// batch stages. The live cache does not hold an epoch the candidate
+	// opens, so the staging that resolves a slot to its epoch reads this one.
+	epochCache    []models.Epoch
+	validationErr error
 	// nonces are the block nonces txn wrote, and pruneNoncesBefore the
 	// slot its nonce prune reached, for a set that keeps nonces.
 	nonces            []models.BlockNonce
@@ -1225,6 +1229,31 @@ func (ls *LedgerState) stageUtxoSetRollbackForValidation(
 	})
 	ls.stageUtxoSetRollback(txn, point)
 	return ls.utxoSetValidationError(txn)
+}
+
+// setForkValidationEpochs gives txn's validation-only batch the epoch cache
+// of the fork candidate it validates.
+func (ls *LedgerState) setForkValidationEpochs(
+	txn ledgerdb.Txn,
+	epochs []models.Epoch,
+) {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.epochCache = slices.Clone(epochs)
+	})
+}
+
+// forkValidationEpochs returns the epoch cache of the fork candidate txn
+// validates, nil when txn is not a fork validation.
+func (ls *LedgerState) forkValidationEpochs(txn ledgerdb.Txn) []models.Epoch {
+	if txn == nil {
+		return nil
+	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	if batch := ls.utxoSetBatches[txn]; batch != nil && batch.validationOnly {
+		return batch.epochCache
+	}
+	return nil
 }
 
 func (ls *LedgerState) utxoSetValidationError(txn ledgerdb.Txn) error {

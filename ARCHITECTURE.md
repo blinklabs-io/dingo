@@ -861,7 +861,11 @@ chain remains unchanged. The ledger then opens a rollback-only transaction,
 reconstructs state at the common ancestor, and runs the normal block envelope,
 transaction, certificate, governance, epoch-transition, and nonce processing
 over every candidate block. The transaction is always rolled back; validation
-does not persist candidate metadata or Leios endorser-block data. An incomplete,
+does not persist candidate metadata or Leios endorser-block data. Governance,
+certificate-deposit, and reward-block staging resolve epochs and protocol
+parameters from the candidate's own epoch cache, not the published snapshot,
+so a candidate that crosses a boundary the selected chain has not reached
+validates without stopping the live UTxO set. An incomplete,
 misordered, stale, or invalid candidate is discarded without changing the
 primary chain or ledger tip. A validated candidate may switch only while the
 primary tip and consensus generation still match the values used for selection

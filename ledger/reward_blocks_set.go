@@ -285,12 +285,19 @@ func (ls *LedgerState) rewardEpochFeesFor(
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published
-// epoch cache. ok is false before the ledger has published a cache holding
+// epoch cache, or from the candidate's own cache while txn validates a fork
+// candidate that may open epochs the published one lacks. ok is false before the ledger has published a cache holding
 // any epoch, when there is no epoch to count in; a cache that holds epochs but
 // covers none of slot is an error.
 func (ls *LedgerState) rewardEpochOfSlot(
+	txn ledgerdb.Txn,
 	slot uint64,
 ) (epoch models.Epoch, ok bool, err error) {
+	// A fork candidate may open epochs the published cache does not hold yet.
+	if cache := ls.forkValidationEpochs(txn); cache != nil {
+		epoch, err = epochForSlotInCache(cache, slot)
+		return epoch, err == nil, err
+	}
 	if ls.loadConsensusSnapshot() == nil {
 		return epoch, false, nil
 	}
@@ -312,7 +319,7 @@ func (ls *LedgerState) stageBlockMinted(
 	if ls.rewardBlocksReader(txn) == nil {
 		return
 	}
-	epoch, ok, err := ls.rewardEpochOfSlot(slot)
+	epoch, ok, err := ls.rewardEpochOfSlot(txn, slot)
 	if err != nil {
 		ls.failAccountStaging(fmt.Errorf("resolve block epoch: %w", err))
 		return
@@ -389,7 +396,7 @@ func (ls *LedgerState) stageTransactionFee(
 	if opts.LedgerContextSlot != nil {
 		execSlot = *opts.LedgerContextSlot
 	}
-	epoch, ok, err := ls.rewardEpochOfSlot(execSlot)
+	epoch, ok, err := ls.rewardEpochOfSlot(txn, execSlot)
 	if err != nil {
 		ls.failAccountStaging(fmt.Errorf("resolve fee epoch: %w", err))
 		return

@@ -438,6 +438,7 @@ func (ls *LedgerState) validateForkCandidate(
 			return errors.New("fork validation consensus snapshot unavailable")
 		}
 		epochCache := slices.Clone(epochs)
+		ls.setForkValidationEpochs(txn, epochCache) //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
 		for _, block := range blocks {
 			if block.SlotNumber() >= currentEpoch.StartSlot+
 				uint64(currentEpoch.LengthInSlots) {
@@ -451,6 +452,7 @@ func (ls *LedgerState) validateForkCandidate(
 					return transitionErr
 				}
 				epochCache = append(epochCache, currentEpoch)
+				ls.setForkValidationEpochs(txn, epochCache) //nolint:contextcheck // rollback-only transaction never runs its after-commit callback
 			}
 			point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 			var offsets *database.BlockIngestionResult
