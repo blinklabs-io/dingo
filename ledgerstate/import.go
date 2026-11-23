@@ -453,7 +453,8 @@ type ImportConfig struct {
 	// receives the snapshot's UTxO set: the import marks the database
 	// (database.UtxoSetOnlySyncKey), writes no utxo rows or output CBOR to
 	// the metadata and blob stores, and reads UTxO stake from the set. A
-	// Reconcile import needs a set that is also a FamilyLoader.
+	// Reconcile import keeps the set's older ledger-state families when the
+	// set is also a CatchUpLoader.
 	UtxoSet UtxoSetLoader
 	// LedgerDB is the LedgerDB the import writes the snapshot's ledger state
 	// through, over UtxoSet. It is required.
