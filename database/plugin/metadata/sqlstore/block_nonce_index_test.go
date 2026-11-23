@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,6 +127,12 @@ func TestBlockNonceLookupsUseAnIndex(t *testing.T) {
 // ascending slot appends to the same few right-edge pages.
 func TestBlockNonceInsertsDirtyFewIndexPages(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine SQLite page counting over a large block "+
+			"nonce workload; the page bounds are asserted in the "+
+			"un-instrumented run",
+	)
 	const (
 		seedRows  = 60000
 		batchSize = 50
