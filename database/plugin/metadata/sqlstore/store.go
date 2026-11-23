@@ -44,6 +44,11 @@ type Config struct {
 	// could point introspection clients at a different database. It is empty
 	// for in-memory SQLite and other backends, and immutable after construction.
 	SQLitePath string
+	// ScratchDir holds temporary files sized by the stored data, such as the
+	// spool the UTxO set digest sorts the live set in. Empty selects the
+	// directory of SQLitePath, or the operating system's temporary directory
+	// when that is empty too.
+	ScratchDir string
 	// SQLiteOverlayInsertRows opts an eager-preparing SQLite provider into
 	// wider overlay INSERTs after transaction-local limit and trigger checks.
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
@@ -162,6 +167,7 @@ type Config struct {
 // driver selection; metadata behavior belongs here.
 type Store struct {
 	sqlitePath              string
+	scratchDir              string
 	sqliteOverlayInsertRows int
 	writeDB                 *sql.DB
 	readDB                  *sql.DB
@@ -185,6 +191,11 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
+
+	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
+	// run of the digest spool, when non-zero. Only tests set it, to make the
+	// spool merge many runs.
+	utxoDigestRunBytes int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
@@ -397,6 +408,7 @@ func New(config Config) (*Store, error) {
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
+		scratchDir:                  config.ScratchDir,
 		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
 		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,

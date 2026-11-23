@@ -596,6 +596,32 @@ func (d *UtxoDigester) Add(
 	withCbor bool,
 	outCbor []byte,
 ) {
+	if withCbor {
+		outCbor = canonicalOutputCbor(outCbor)
+	}
+	d.AddCanonical(
+		txHash, index, amount, payment, staking, datum, withCbor, outCbor,
+	)
+}
+
+// CanonicalOutputCbor returns an output's CBOR in the form Add digests. It
+// reads only its argument, so it can run on any goroutine ahead of
+// AddCanonical.
+func CanonicalOutputCbor(raw []byte) []byte {
+	return canonicalOutputCbor(raw)
+}
+
+// AddCanonical is Add for an output whose CBOR is already in the form
+// CanonicalOutputCbor returns. It hashes outCbor as given, so
+// AddCanonical(..., CanonicalOutputCbor(c)) and Add(..., c) digest equally.
+func (d *UtxoDigester) AddCanonical(
+	txHash []byte,
+	index uint32,
+	amount string,
+	payment, staking, datum []byte,
+	withCbor bool,
+	outCbor []byte,
+) {
 	var buf [8]byte
 	write := func(field []byte) {
 		binary.BigEndian.PutUint64(buf[:], uint64(len(field)))
@@ -610,7 +636,7 @@ func (d *UtxoDigester) Add(
 	binary.BigEndian.PutUint64(buf[:], uint64(index))
 	d.h.Write(buf[:])
 	if withCbor {
-		write(canonicalOutputCbor(outCbor))
+		write(outCbor)
 	}
 	d.count++
 }

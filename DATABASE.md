@@ -5297,7 +5297,7 @@ journal before it kept them). Then:
 2. `index` builds the dropped indexes (a build resumed after a stop builds what
    is missing), then verifies the rows at the anchor: the `applied_transaction`
    count equals the replay's count, and a SHA-256 over the live UTxO set at the
-   anchor, streamed in pages in (transaction hash, output index) order, equals
+   anchor, read in (transaction hash, output index) order, equals
    the digest of the ledger database's set (outputs added at or before the
    anchor and not spent at or before it). Each output's stored CBOR (assets,
    inline datum, reference script) is part of the digest, hashed as a snapshot
@@ -5307,7 +5307,18 @@ journal before it kept them). Then:
    policies dropped, a bare coin when no assets remain, policies and asset
    names in bytewise order, shortest integer heads), and the address, datum
    and reference script with shortest length heads around an inline datum's
-   and a native script's own bytes. The ledger's digest
+   and a native script's own bytes. A SQL store reads the set in one
+   unordered statement and sorts it itself, as an external merge sort of
+   16 MiB runs, into one file in the metadata store's scratch directory:
+   the SQLite database's directory, or the node's data directory for
+   PostgreSQL and MySQL. The file is roughly the size of the live set's
+   keys, amounts and credentials, is unlinked once open where the platform
+   allows, and the database runs no sort, so nothing spills into the
+   operating system's temporary directory. The store closes that cursor
+   before resolving any output, so resolvers can take their own read
+   connections; outputs are then resolved
+   and canonicalized in chunks on several goroutines and hashed in order. The
+   ledger's digest
    is taken when the anchor is recorded and kept as `indexer_anchor_digest`,
    because the ledger's core-mode sweep deletes spent rows and the set at the
    anchor cannot be digested once its `consumed_utxo_prune_floor` is past it.
