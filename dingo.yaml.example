@@ -1543,10 +1543,10 @@
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
 # SQLite only: keep planner statistics current with a bounded ANALYZE, run
-# before block processing starts, after each epoch rollover and once a minute.
-# A database synced from genesis otherwise never has statistics and some
-# queries scan most of a large table. Each run samples at most 1000 rows per
-# index, so it stays short on a large database. Escape hatch only.
+# before block processing starts and after each epoch rollover once some table
+# has grown enough since the last run. A database synced from genesis
+# otherwise never has statistics and some queries scan most of a large table.
+# Each run samples at most 1000 rows per index. Escape hatch only.
 # Default: true
 # CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
 # plannerStatsRefreshEnabled: true

@@ -117,7 +117,16 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
 bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
 limit restored afterwards) on the write connection, outside any transaction, at startup,
-after each epoch rollover commits, and once a minute in between. `PRAGMA
+and after each epoch rollover commits. There is no timer between rollovers. An
+epoch pass is skipped until some table's highest rowid (`MAX(rowid)`, one
+b-tree descent per table) has grown by 25%, and by at least 1000 rows, since the
+last completed pass, because a pass reads every page of every index and holds
+the only write connection while most tables barely change between epochs. The
+measure is per table and not the file size: a large database whose
+`transaction` and `certs` tables were recorded at almost no rows still passes as
+they fill, and a vacuum that shrinks the file does not suppress later passes.
+Startup, resume and anchor passes always run. The table sizes of the last pass
+are held in memory, since a restart runs a startup pass. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
@@ -130,17 +139,17 @@ maintenance does not delay API availability:
 statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then
-plans a full scan per lookup until the next run. Every pass re-analyzes every
-table, however little it changed since the last one, and sampling bounds the
-index work of each. The write pool has one connection, so writers still wait
+plans a full scan per lookup until the next run. Every pass that runs
+re-analyzes every table, and sampling bounds the index work of each, though
+with STAT4 compiled in the pass still counts every index row. The write pool has one connection, so writers still wait
 for the run. Sampled analysis updates
 `sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
 full `ANALYZE` remains available for completed backfills. The run is skipped
 during a bulk load. A node-managed Mithril stream
-catch-up defers the epoch and periodic runs for its duration
+catch-up defers the epoch runs for its duration
 (`plannerstats.Manager.Defer`): on a database it is filling, each run holds the
 write connection while its statistics go stale within the next epoch, and one
-run after the catch-up replaces them. A fresh Mithril bootstrap restores
+run after the catch-up (trigger `resume`, never skipped) replaces them. A fresh Mithril bootstrap restores
 normal pragmas after rebuilding critical indexes, then uses this optimizer; if
 the backend does not support it or skips it, the full planner-statistics update
 runs instead. Resumed Mithril imports and other completed backfills retain the
@@ -378,7 +387,7 @@ the partial index for a spent-row range.
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs (`trigger` is
-`startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`, `skipped`
+`startup`, `epoch`, `resume` or `anchor`; `result` is `changed`, `unchanged`, `skipped`
 or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.

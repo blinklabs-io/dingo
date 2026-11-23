@@ -484,7 +484,7 @@ func rebindPostgres(query string) string {
 	return result.String()
 }
 
-// sqliteAnalysisLimit is the rows per index a periodic ANALYZE samples.
+// sqliteAnalysisLimit is the rows per index a bounded ANALYZE samples.
 const sqliteAnalysisLimit = 1000
 
 // sqliteBoundedAnalyze runs ANALYZE under analysis_limit, then restores the

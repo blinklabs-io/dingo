@@ -295,6 +295,10 @@ type Store struct {
 	scheduledWorkMu    sync.Mutex
 	bulkMode           bool
 	bulkRestorePending bool
+	// plannerStatsSizes is each table's highest rowid when the last
+	// planner-statistics pass completed, nil before any has. Protected by
+	// scheduledWorkMu.
+	plannerStatsSizes map[string]int64
 
 	closeOnce sync.Once
 	closeDone chan struct{}

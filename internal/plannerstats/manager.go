@@ -16,9 +16,10 @@
 // runs. A fresh SQLite metadata database has no sqlite_stat1, so the planner
 // picks indexes by shape alone and can scan most of a large table for a query
 // that should seek; this package runs the backend's incremental statistics
-// maintenance during startup, after each epoch rollover, and on a fixed
-// interval in between, because block application can grow tables well past the
-// cardinality the last run recorded long before the next rollover.
+// maintenance during startup and after each epoch rollover. There is no timer
+// between rollovers: a pass on a large SQLite store reads every index and
+// holds the only write connection, so it runs only when an event says the
+// data has moved on.
 package plannerstats
 
 import (
@@ -26,19 +27,11 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 )
-
-// DefaultRefreshInterval is how often the worker re-runs the incremental
-// maintenance between epoch rollovers. SQLite selects tables whose
-// statistics are absent or stale and samples their indexes with a temporary
-// analysis limit, so a table filled since startup need not wait until the
-// next epoch to have useful planner statistics.
-const DefaultRefreshInterval = time.Minute
 
 // shelleyProtocolMajor is the first protocol major version with an epoch
 // nonce; Byron used 0 and 1.
@@ -59,15 +52,13 @@ type Manager struct {
 	// covers every transition that arrived before it started.
 	pending chan struct{}
 
-	// newTick returns the periodic trigger channel and its stop function.
-	// Tests replace it to fire the trigger without waiting on a clock.
-	newTick func() (<-chan time.Time, func())
-
-	// deferMu guards deferrals, the outstanding Defer calls, and skipped,
-	// whether a trigger arrived while any was outstanding.
+	// deferMu guards deferrals, the outstanding Defer calls, skipped,
+	// whether a trigger arrived while any was outstanding, and resumed,
+	// whether the queued run follows a deferral.
 	deferMu   sync.Mutex
 	deferrals int
 	skipped   bool
+	resumed   bool
 
 	mu             sync.Mutex
 	cancel         context.CancelFunc
@@ -89,10 +80,6 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 		pending:  make(chan struct{}, 1),
-		newTick: func() (<-chan time.Time, func()) {
-			ticker := time.NewTicker(DefaultRefreshInterval)
-			return ticker.C, ticker.Stop
-		},
 	}
 }
 
@@ -112,7 +99,7 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // StartWithStartup starts the worker with a startup pass before it handles
-// epoch or periodic triggers. The pass runs on the worker, so this method does
+// epoch triggers. The pass runs on the worker, so this method does
 // not wait for planner maintenance to finish.
 func (m *Manager) StartWithStartup(ctx context.Context) error {
 	return m.start(ctx, true)
@@ -151,9 +138,7 @@ func (m *Manager) start(ctx context.Context, runStartup bool) error {
 		if runStartup {
 			_, _ = m.run(childCtx, types.PlannerStatsTriggerStartup)
 		}
-		tick, stopTick := m.newTick()
-		defer stopTick()
-		m.worker(childCtx, tick)
+		m.worker(childCtx)
 	})
 	return nil
 }
@@ -184,11 +169,11 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// Defer holds back the epoch and periodic runs until resume is called, for a
+// Defer holds back the epoch runs until resume is called, for a
 // write burst such as a Mithril stream catch-up: a run holds SQLite's only
 // write connection, and on a database growing that fast its statistics are
-// stale again within the next epoch. Every trigger that arrives while deferred collapses into one
-// run queued when the last resume is called; none is queued if nothing
+// stale again within the next epoch. Every trigger that arrives while
+// deferred collapses into one run queued when the last resume is called; none is queued if nothing
 // arrived. A run already in flight when Defer is called finishes. Nested
 // calls are counted, and calling one resume more than once has no further
 // effect. Defer on a nil Manager returns a no-op.
@@ -205,6 +190,7 @@ func (m *Manager) Defer() (resume func()) {
 		queue := m.deferrals == 0 && m.skipped
 		if queue {
 			m.skipped = false
+			m.resumed = true
 		}
 		m.deferMu.Unlock()
 		if queue {
@@ -223,6 +209,20 @@ func (m *Manager) deferred() bool {
 	}
 	m.skipped = true
 	return true
+}
+
+// nextTrigger names the run the worker is about to make. One that follows a
+// deferral is labeled so the store runs it unconditionally: the write burst
+// it follows replaced the statistics' basis, which the growth rule that
+// spares epoch runs does not measure.
+func (m *Manager) nextTrigger() string {
+	m.deferMu.Lock()
+	defer m.deferMu.Unlock()
+	if m.resumed {
+		m.resumed = false
+		return types.PlannerStatsTriggerResume
+	}
+	return types.PlannerStatsTriggerEpoch
 }
 
 func (m *Manager) signal() {
@@ -252,18 +252,14 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 	m.signal()
 }
 
-func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
+func (m *Manager) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick:
-			if !m.deferred() {
-				_, _ = m.run(ctx, types.PlannerStatsTriggerPeriodic)
-			}
 		case <-m.pending:
 			if !m.deferred() {
-				_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
+				_, _ = m.run(ctx, m.nextTrigger())
 			}
 		}
 	}

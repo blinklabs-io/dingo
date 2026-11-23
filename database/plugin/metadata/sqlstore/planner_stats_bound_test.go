@@ -64,7 +64,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 			for range 2 {
 				result, err := store.OptimizePlannerStatsContext(
 					ctx,
-					PlannerStatsTriggerPeriodic,
+					PlannerStatsTriggerStartup,
 				)
 				require.NoError(t, err)
 				require.True(t, result.Supported)
@@ -145,12 +145,12 @@ INSERT INTO planner_growth_probe SELECT id, id % 7 FROM seq`, from, to)
 	}
 
 	grow(1, 100)
-	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerStartup)
 	require.NoError(t, err)
 	require.Equal(t, 100, statRows())
 
 	grow(101, 400)
-	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerStartup)
 	require.NoError(t, err)
 	require.Equal(
 		t, 400, statRows(),
@@ -191,7 +191,7 @@ func TestOptimizePlannerStatsRestoresLimitOnAPooledWriteConnection(
 	}
 	for range 50 {
 		_, err := store.OptimizePlannerStatsContext(
-			ctx, PlannerStatsTriggerPeriodic,
+			ctx, PlannerStatsTriggerStartup,
 		)
 		require.NoError(t, err)
 	}

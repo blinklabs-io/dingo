@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -318,74 +319,13 @@ func asyncStop(m *Manager) <-chan error {
 	return ch
 }
 
-// The periodic trigger runs the updater with no epoch transition published,
-// so a table filled between rollovers is re-analyzed without waiting for one.
-func TestPeriodicTickTriggersRun(t *testing.T) {
-	t.Parallel()
-	u := newFakeUpdater()
-	close(u.release)
-	m := newTestManager(u, event.NewEventBus(nil, nil))
-	tick := make(chan time.Time)
-	m.newTick = func() (<-chan time.Time, func()) {
-		return tick, func() {}
-	}
-	require.NoError(t, m.Start(t.Context()))
-	defer func() { require.NoError(t, m.Stop()) }()
-
-	select {
-	case tick <- time.Time{}:
-	case <-time.After(testWait):
-		t.Fatal("timed out handing the periodic tick to the worker")
-	}
-	require.Equal(
-		t,
-		types.PlannerStatsTriggerPeriodic,
-		receive(t, u.entered, "run for the periodic tick"),
-	)
-}
-
-// A tick that arrives while a run is in flight waits for it: runs never
-// overlap, because the tick shares the worker with the epoch trigger.
-func TestPeriodicTickDoesNotOverlapEpochRun(t *testing.T) {
-	t.Parallel()
-	u := newFakeUpdater()
-	m := newTestManager(u, event.NewEventBus(nil, nil))
-	// Buffered like time.Ticker's channel, so the tick is pending for the
-	// whole window below rather than racing a sender goroutine.
-	tick := make(chan time.Time, 1)
-	m.newTick = func() (<-chan time.Time, func()) {
-		return tick, func() {}
-	}
-	require.NoError(t, m.Start(t.Context()))
-	defer func() { require.NoError(t, m.Stop()) }()
-	var once sync.Once
-	releaseOnce := func() { once.Do(func() { close(u.release) }) }
-	defer releaseOnce() // runs before Stop, so a failing test cannot hang it
-
-	m.handleEpochTransition(epochEvent([]byte{1}))
-	require.Equal(t, "epoch", receive(t, u.entered, "epoch run"))
-	tick <- time.Time{}
-	require.Never(t, func() bool { return u.calls.Load() > 1 },
-		200*time.Millisecond, 10*time.Millisecond,
-		"a tick must wait for the run in flight")
-	releaseOnce()
-	require.Equal(
-		t,
-		types.PlannerStatsTriggerPeriodic,
-		receive(t, u.entered, "periodic run after the epoch run"),
-	)
-	require.Equal(t, int64(1), u.maxSeen.Load(), "runs must never overlap")
-}
-
 // TestDeferHoldsRunsUntilResumeThenRunsOnce defers every trigger while a
 // catch-up holds the manager and collapses them into one run on resume.
 func TestDeferHoldsRunsUntilResumeThenRunsOnce(t *testing.T) {
 	t.Parallel()
 	u := newFakeUpdater()
 	close(u.release)
-	tick := make(chan time.Time)
 	m := newTestManager(u, event.NewEventBus(nil, nil))
-	SetTickSource(m, tick)
 	require.NoError(t, m.Start(t.Context()))
 	defer func() { require.NoError(t, m.Stop()) }()
 
@@ -393,23 +333,23 @@ func TestDeferHoldsRunsUntilResumeThenRunsOnce(t *testing.T) {
 	resumeNested := m.Defer()
 	for range 3 {
 		m.handleEpochTransition(epochEvent([]byte{1}))
-		tick <- time.Now()
 	}
-	// The worker has consumed every tick, so it has seen the triggers.
-	tick <- time.Now()
+	require.Never(t, func() bool { return u.calls.Load() != 0 },
+		200*time.Millisecond, 10*time.Millisecond)
 	require.Zero(t, u.calls.Load(), "a deferred trigger ran")
 
 	resumeNested()
-	// A tick the worker has received may still be in flight; sending another
-	// would race the final resume and could run as a periodic refresh. The
-	// window instead lets the worker skip it while one deferral is held.
 	require.Never(t, func() bool { return u.calls.Load() > 0 },
 		200*time.Millisecond, 10*time.Millisecond,
 		"ran before the last resume")
 
 	resume()
 	resume() // idempotent
-	require.Equal(t, "epoch", receive(t, u.entered, "the deferred run"))
+	require.Equal(
+		t, types.PlannerStatsTriggerResume,
+		receive(t, u.entered, "the deferred run"),
+		"the run after a deferral must not be subject to the growth rule",
+	)
 	require.Never(t, func() bool { return u.calls.Load() > 1 },
 		200*time.Millisecond, 10*time.Millisecond,
 		"deferred triggers must collapse to one run")
@@ -422,7 +362,6 @@ func TestDeferWithoutTriggerQueuesNothing(t *testing.T) {
 	u := newFakeUpdater()
 	close(u.release)
 	m := newTestManager(u, event.NewEventBus(nil, nil))
-	SetTickSource(m, make(chan time.Time))
 	require.NoError(t, m.Start(t.Context()))
 	defer func() { require.NoError(t, m.Stop()) }()
 
@@ -431,4 +370,65 @@ func TestDeferWithoutTriggerQueuesNothing(t *testing.T) {
 		200*time.Millisecond, 10*time.Millisecond)
 	var nilManager *Manager
 	nilManager.Defer()()
+}
+
+// countingUpdater records every trigger without ever blocking, so a run the
+// manager should not make shows up as a count rather than a stuck goroutine.
+type countingUpdater struct {
+	mu       sync.Mutex
+	triggers []string
+}
+
+func (c *countingUpdater) OptimizePlannerStatsContext(
+	_ context.Context,
+	trigger string,
+) (types.PlannerStatsResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.triggers = append(c.triggers, trigger)
+	return types.PlannerStatsResult{Supported: true}, nil
+}
+
+func (c *countingUpdater) seen() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.triggers...)
+}
+
+// No timer drives a run: with the clock free to advance, a started manager
+// runs only its startup pass and then waits for an epoch transition.
+func TestNoRunWithoutStartupOrEpochTrigger(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		u := &countingUpdater{}
+		bus := event.NewEventBus(nil, nil)
+		defer bus.Close()
+		m := NewManager(
+			u,
+			bus,
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+		)
+		require.NoError(t, m.StartWithStartup(t.Context()))
+		defer func() { require.NoError(t, m.Stop()) }()
+		synctest.Wait()
+		require.Equal(t, []string{types.PlannerStatsTriggerStartup}, u.seen())
+
+		time.Sleep(24 * time.Hour)
+		synctest.Wait()
+		require.Equal(
+			t, 1, len(u.seen()),
+			"no run may follow from the passage of time",
+		)
+
+		m.handleEpochTransition(epochEvent([]byte{1}))
+		synctest.Wait()
+		require.Equal(
+			t,
+			[]string{
+				types.PlannerStatsTriggerStartup,
+				types.PlannerStatsTriggerEpoch,
+			},
+			u.seen(),
+		)
+	})
 }

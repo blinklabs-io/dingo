@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -31,8 +32,25 @@ const (
 	PlannerStatsTriggerStartup = types.PlannerStatsTriggerStartup
 	// PlannerStatsTriggerEpoch labels a run made after an epoch rollover.
 	PlannerStatsTriggerEpoch = types.PlannerStatsTriggerEpoch
-	// PlannerStatsTriggerPeriodic labels a run made on the refresh interval.
-	PlannerStatsTriggerPeriodic = types.PlannerStatsTriggerPeriodic
+	// PlannerStatsTriggerResume labels the run made when a deferral of the
+	// epoch runs ends.
+	PlannerStatsTriggerResume = types.PlannerStatsTriggerResume
+
+	// plannerStatsGrowthNumerator and plannerStatsGrowthDenominator express
+	// the growth threshold, 25%, as a fraction, and plannerStatsMinGrowthRows
+	// is the least a table must grow by. A pass on a large SQLite store reads
+	// every page of every index and holds the only write connection, yet
+	// between epochs most tables barely change and the statistics barely
+	// move. An epoch pass therefore runs only once some table's highest rowid
+	// has grown by the fraction, and by the minimum, since the last completed
+	// pass. The measure is per table and not the file size: a large database
+	// whose transaction and certificate tables were empty when the last pass
+	// ran must be re-analyzed as they fill, though the file grows by little.
+	// The minimum stops a table that was empty from forcing a pass on its
+	// first few rows.
+	plannerStatsGrowthNumerator   = 1
+	plannerStatsGrowthDenominator = 4
+	plannerStatsMinGrowthRows     = 1000
 
 	// readConnMaxLifetime bounds how long a pooled read connection keeps the
 	// statistics it loaded when a refresh could not reach it, for example a
@@ -61,7 +79,7 @@ func newPlannerStatsMetrics(
 			prometheus.CounterOpts{
 				Name: sqlMetricNamePrefix + "planner_stats_runs_total",
 				Help: "Incremental planner-statistics runs by trigger " +
-					"(startup, epoch, periodic, anchor) and result " +
+					"(startup, epoch, resume, anchor) and result " +
 					"(changed, unchanged, skipped, error).",
 			}, []string{"trigger", "result"},
 		)),
@@ -86,7 +104,7 @@ func newPlannerStatsMetrics(
 	// has not happened yet reads zero instead of no data.
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
-		PlannerStatsTriggerPeriodic,
+		PlannerStatsTriggerResume, types.PlannerStatsTriggerAnchor,
 	} {
 		for _, result := range []string{
 			"changed", "unchanged", "skipped", "error",
@@ -135,7 +153,12 @@ func (m sqlitePlannerStatsMetrics) observe(
 //
 // The run holds one write connection for its duration and so pauses
 // writers; it never runs inside a transaction. It is skipped while a bulk
-// load owns the database.
+// load owns the database. An epoch run is also skipped until a table has grown
+// by plannerStatsGrowthNumerator/plannerStatsGrowthDenominator, and at least
+// plannerStatsMinGrowthRows, since the last completed run; every other
+// trigger always executes. The table sizes of the last run are kept in memory
+// only: a restart runs a startup pass anyway, so nothing needs to survive
+// one.
 func (s *Store) OptimizePlannerStatsContext(
 	ctx context.Context,
 	trigger string,
@@ -153,6 +176,18 @@ func (s *Store) OptimizePlannerStatsContext(
 	defer s.scheduledWorkMu.Unlock()
 	started := time.Now()
 	if s.bulkMode {
+		result.Supported = true
+		result.Skipped = true
+		s.plannerStats.observe(trigger, "skipped", time.Since(started))
+		return result, nil
+	}
+	sizes, err := s.sqliteTableSizes(ctx)
+	if err != nil {
+		return s.plannerStatsFailed(trigger, started, result, err)
+	}
+	if trigger == PlannerStatsTriggerEpoch &&
+		s.plannerStatsSizes != nil &&
+		!s.plannerStatsGrown(sizes) {
 		result.Supported = true
 		result.Skipped = true
 		s.plannerStats.observe(trigger, "skipped", time.Since(started))
@@ -184,6 +219,9 @@ func (s *Store) OptimizePlannerStatsContext(
 	if err != nil {
 		return s.plannerStatsFailed(trigger, started, result, err)
 	}
+	// The sizes read before the pass, not after: growth during the pass
+	// counts toward the next one.
+	s.plannerStatsSizes = sizes
 	result.Stat1Rows = rows
 	result.Changed = before != after
 	if result.Changed {
@@ -199,6 +237,80 @@ func (s *Store) OptimizePlannerStatsContext(
 	}
 	s.plannerStats.observe(trigger, outcome, result.Duration)
 	return result, nil
+}
+
+// sqliteTableSizes returns the highest rowid of every rowid table. Each is a
+// descent of one b-tree path, so reading all of them costs nothing next to a
+// pass, unlike a row count. It overstates a table that has had rows deleted
+// from below its top, which can only start a pass early, never withhold one.
+func (s *Store) sqliteTableSizes(
+	ctx context.Context,
+) (map[string]int64, error) {
+	tables, err := s.sqliteRowidTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64, len(tables))
+	for _, table := range tables {
+		var top int64
+		if err := s.writeDB.QueryRowContext(
+			ctx,
+			`SELECT COALESCE(MAX(rowid), 0) FROM "`+
+				strings.ReplaceAll(table, `"`, `""`)+`"`,
+		).Scan(&top); err != nil {
+			return nil, fmt.Errorf("read size of %s: %w", table, err)
+		}
+		sizes[table] = top
+	}
+	return sizes, nil
+}
+
+func (s *Store) sqliteRowidTables(ctx context.Context) ([]string, error) {
+	rows, err := s.writeDB.QueryContext(
+		ctx,
+		"SELECT name FROM sqlite_schema WHERE type = 'table' "+
+			"AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' "+
+			"AND sql NOT LIKE 'CREATE VIRTUAL%' "+
+			"AND sql NOT LIKE '%WITHOUT ROWID%'",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	return tables, nil
+}
+
+// plannerStatsGrown reports whether any table has outgrown the sizes
+// recorded by the last completed pass. A table whose size fell, after a
+// rollback or a vacuum that renumbers rowids, lowers its recorded size so
+// that growth is counted from the new floor. Callers hold scheduledWorkMu.
+func (s *Store) plannerStatsGrown(sizes map[string]int64) bool {
+	grown := false
+	for table, top := range sizes {
+		recorded := s.plannerStatsSizes[table]
+		if top < recorded {
+			s.plannerStatsSizes[table] = top
+			continue
+		}
+		growth := top - recorded
+		if growth >= plannerStatsMinGrowthRows &&
+			growth*plannerStatsGrowthDenominator >=
+				recorded*plannerStatsGrowthNumerator {
+			grown = true
+		}
+	}
+	return grown
 }
 
 // HasPlannerStats reports whether sqlite_stat1 holds any rows. Backends

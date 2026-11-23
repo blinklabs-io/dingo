@@ -2404,14 +2404,17 @@ When `Node.Run()` is called, components are initialized in this order:
     the pass again on the replacement database. The manager subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
-    trigger a run). Its worker also runs the pass every
-    `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
-    block application after the startup pass can be re-analyzed before the
-    next rollover. Each pass analyzes every table under a temporary
+    trigger a run). There is no periodic timer: on a large SQLite store each
+    pass reads every index and holds the single write connection. The store
+    skips an epoch pass until some table's highest rowid has grown by 25% and
+    by at least 1000 rows since the last completed pass. The measure is per
+    table, not the file size, so a large database whose `transaction` and
+    `certs` tables were empty at startup is analyzed as they fill, while one
+    whose tables barely moved is not. Startup, resume and anchor passes always
+    run. Each pass analyzes every table under a temporary
     `analysis_limit`, sampling each index rather than reading it whole. The
     single write connection is held during maintenance, so unrestricted
-    analysis here would stop block application for the duration of each scan. The tick shares the worker with
-    the epoch trigger, so runs never overlap.
+    analysis here would stop block application for the duration of each scan.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
@@ -8577,7 +8580,8 @@ chain per row, so each chunk costs `O(active rows × refs)` and the "batched"
 read becomes slower than the per-item loop it replaced as the account table
 grows. Outside Mithril sync and metadata backfill, SQLite statistics come from
 `internal/plannerstats.Manager`'s bounded `ANALYZE` at startup,
-after each epoch rollover and every minute (see DATABASE.md), so a
+and after each epoch rollover once the database has grown enough (see
+DATABASE.md), so a
 genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper.
 `GetStakeSnapshots`' pool-side primitive (`GetPoolStakeSnapshotsForPools`) does

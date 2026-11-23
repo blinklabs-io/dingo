@@ -1354,11 +1354,11 @@ type Config struct {
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
 
 	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
-	// maintenance (a bounded ANALYZE) before block processing starts, after
-	// each epoch rollover and once a minute. A database that never ran
-	// ANALYZE has no sqlite_stat1, and without it some queries scan most of a
-	// large table instead of seeking an index. Each run samples at most 1000
-	// rows per index, so it stays short on a large database.
+	// maintenance (a bounded ANALYZE) before block processing starts and
+	// after each epoch rollover once some table has grown enough since the
+	// last run. A database that never ran ANALYZE has no sqlite_stat1, and
+	// without it some queries scan most of a large table instead of seeking an
+	// index. Each run samples at most 1000 rows per index.
 	// Enabled by default; this is an escape hatch, not a tuning knob. Other
 	// metadata backends are unaffected.
 	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
