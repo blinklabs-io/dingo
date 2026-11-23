@@ -13477,9 +13477,11 @@ slot is not below its own, which `Chain.AddLocalBlock` then refuses
 `dingo_forge_selection_fallback_total` reports how slots whose selection was
 aborted ended, by `result`: `retried` when a later attempt in the same slot
 produced the adopted block, `empty` when the transaction-free fallback did,
-and `lost` when the slot produced no block and no other producer did. The first two are counted
+and `lost` when this node adopted no block for the slot. The first two are counted
 after local adoption rather than after the build, so a block that
-self-validation dropped or `AddBlock` rejected counts as `lost`.
+self-validation dropped or `AddBlock` rejected counts as `lost`. `lost` is
+decided by local adoption alone and takes no view of whether a peer produced a
+block for the slot.
 
 This vector covers aborted slots that reached a build, not every aborted slot.
 A slot whose transaction-free fallback meets a shared KES signer that has

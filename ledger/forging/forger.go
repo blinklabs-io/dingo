@@ -153,7 +153,7 @@ const (
 	// stable snapshot in time, so a transaction-free block was forged to
 	// keep the slot.
 	forgeSelectionResultEmpty = "empty"
-	// forgeSelectionResultLost: the slot produced no block at all.
+	// forgeSelectionResultLost: this node adopted no block for the slot.
 	forgeSelectionResultLost = "lost"
 )
 
