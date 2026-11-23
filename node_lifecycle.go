@@ -125,6 +125,10 @@ type namedStop struct {
 // manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
+	stops = append(stops, namedStop{
+		name: "legacy SQL UTxO row cleanup",
+		stop: n.stopUtxoMigrationCleanup,
+	})
 	// First: a Mithril run holds network ingest, pauses chain ingest and
 	// applies blocks to the ledger about to be closed.
 	if n.mithrilCoordinator != nil {
@@ -1501,6 +1505,9 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 			return fmt.Errorf("reinitialize %s: %w", step.name, err)
 		}
 	}
+	// The cleanup survives the restore/truncate operation and is stopped by
+	// the node's storage lifecycle before that storage can close.
+	n.startUtxoMigrationCleanup(n.ctx) //nolint:contextcheck
 	return nil
 }
 

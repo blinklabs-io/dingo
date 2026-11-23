@@ -37,6 +37,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/blinklabs-io/dingo/database/internal/badgermem"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -110,7 +111,13 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
-	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	// added holds, for each family, the index of rows below the export floor
+	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
+	// put a row below the floor, each of which invalidates it.
+	added         addedIndexes
+	rowsRewritten atomic.Uint64
+	// rangeRowsVisited counts the rows and index entries the range, prefix,
+	// and added-row readers stepped over.
 	rangeRowsVisited atomic.Uint64
 	// rewardIndexVisited counts the index entries credit pages examined.
 	rewardIndexVisited atomic.Uint64
@@ -135,6 +142,13 @@ func (s *Store) RefuseLoadsFor(drained nodesettings.FamilyMask) {
 	s.loadsRefused.Store(uint64(drained))
 }
 
+// LoadsRefusedFor reports whether family has lost its source rows. In-place
+// migrations use this to avoid querying a drained source before upgrading the
+// set's retained rows.
+func (s *Store) LoadsRefusedFor(family nodesettings.Family) bool {
+	return nodesettings.FamilyMask(s.loadsRefused.Load()).Has(family)
+}
+
 // Open opens or creates the store in dir.
 func Open(dir string, options ...Option) (*Store, error) {
 	s := &Store{}
@@ -148,7 +162,7 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if s.blockCacheSize > 0 {
 		opts = opts.WithBlockCacheSize(s.blockCacheSize)
 	}
-	db, err := badger.Open(opts)
+	db, _, err := badgermem.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
@@ -395,6 +409,7 @@ func (s *Store) bootstrap(
 	// The journal describes history the new contents do not share.
 	// The tip is cleared, so no floor is raised: the contents the floors
 	// describe are gone with the rows.
+	defer s.rewriteRows()()
 	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}
@@ -881,4 +896,75 @@ func (s *Store) Sample(n int, rng *rand.Rand) ([]Output, error) {
 
 func samePoint(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+// RemoveOutputs deletes the live outputs among refs whose CBOR removable
+// accepts and returns how many it deleted. An output removable rejects stays.
+// The count and the sums follow, in the same transaction as each delete.
+//
+// The removal is not a change of the chain, so it writes no journal record and
+// leaves the tip alone: a record would sit newest in the journal and the next
+// rollback, whatever its depth, would undo it first and make the outputs live
+// again. A journal record that already holds an output keeps its prior state,
+// which no rollback reaches for an output no block has touched. It refuses
+// while a rollback is pending, like a batch.
+func (s *Store) RemoveOutputs(
+	refs []Ref,
+	removable func(cbor []byte) bool,
+) (int, error) {
+	entries, _ := s.txnBudget()
+	// A delete, a sum write at most and the count are written per output.
+	chunk := int(max(entries/3, 1))
+	removed := 0
+	for start := 0; start < len(refs); start += chunk {
+		part := refs[start:min(start+chunk, len(refs))]
+		n := 0
+		err := s.update(func(txn *badger.Txn) error {
+			n = 0
+			if _, pending, err := readPendingRollback(txn); err != nil {
+				return err
+			} else if pending {
+				return ErrRollbackPending
+			}
+			count, err := readCount(txn)
+			if err != nil {
+				return err
+			}
+			sums := aggDeltas{}
+			for _, r := range part {
+				item, err := txn.Get(utxoKey(r))
+				if errors.Is(err, badger.ErrKeyNotFound) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				v, err := item.ValueCopy(nil)
+				if err != nil {
+					return err
+				}
+				if !removable(v) {
+					continue
+				}
+				if err := txn.Delete(utxoKey(r)); err != nil {
+					return err
+				}
+				s.addOutput(sums, v, -1)
+				count--
+				n++
+			}
+			if n == 0 {
+				return nil
+			}
+			if err := writeCount(txn, count); err != nil {
+				return err
+			}
+			return applyAggDeltas(txn, sums)
+		})
+		if err != nil {
+			return removed, fmt.Errorf("badgerutxo: remove outputs: %w", err)
+		}
+		removed += n
+	}
+	return removed, nil
 }

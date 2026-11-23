@@ -573,8 +573,6 @@ func runMithrilSyncWithRepair(
 				Percent:         p.Percent,
 				BlocksPerSecond: p.BytesPerSecond,
 			})
-		case mithril.PhaseGapBlocks:
-			metrics.recordGapBlocks(p.Count)
 		case mithril.PhaseComplete:
 			metrics.markComplete()
 		case mithril.PhaseLedgerImport:

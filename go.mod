@@ -17,8 +17,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.13
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/aws/smithy-go v1.28.9
-	github.com/blinklabs-io/bark v0.2.0
+	github.com/blinklabs-io/bark v0.4.0
 	github.com/blinklabs-io/bursa v0.25.0
+	github.com/blinklabs-io/go-scls v0.2.0
 	github.com/blinklabs-io/gouroboros v0.220.4
 	github.com/blinklabs-io/ouroboros-mock v0.21.2
 	github.com/blinklabs-io/plutigo v0.12.2
@@ -26,6 +27,7 @@ require (
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.22.0
 	github.com/dgraph-io/badger/v4 v4.9.6
+	github.com/dgraph-io/ristretto/v2 v2.2.0
 	github.com/fxamacker/cbor/v2 v2.10.0
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/go-sql-driver/mysql v1.10.1
@@ -125,7 +127,6 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
-	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.39.1-0.20260819172001-e6e3fd93e4be // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect

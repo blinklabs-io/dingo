@@ -32,9 +32,11 @@ import (
 	"connectrpc.com/grpcreflect"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
+	eventconnect "github.com/blinklabs-io/bark/proto/v1alpha1/event/eventv1alpha1connect"
 	lifecycleconnect "github.com/blinklabs-io/bark/proto/v1alpha1/lifecycle/lifecyclev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/internal/rpchealth"
@@ -189,6 +191,30 @@ type BarkConfig struct {
 	// an allowance. Zero, the default, is unlimited; a negative value is
 	// invalid.
 	ArchiveCallerLookupsPerSecond int
+	// EventBus, when set, mounts the EventService over the node's internal
+	// events. Leaving it nil keeps the service off.
+	EventBus *event.EventBus
+	// EventPublishEnabled additionally accepts Publish and PublishBatch.
+	// Publishing writes into the node's event stream, so it is its own
+	// opt-in; without it both calls are refused with PERMISSION_DENIED.
+	EventPublishEnabled bool
+	// EventNodeID identifies this node as Event.origin_node_id on events it
+	// creates, and lets Publish refuse an event that originated here.
+	EventNodeID string
+	// EventBufferSize is how many delivered events are kept for resuming
+	// and lagging subscribers. Zero selects DefaultEventBufferSize.
+	EventBufferSize int
+	// EventMaxSubscribers bounds concurrent event streams. Zero or unset
+	// means unlimited.
+	EventMaxSubscribers int
+	// EventMaxSubscribersPerClient bounds concurrent event streams from one
+	// caller address (IPv6 /64). Zero or unset
+	// means unlimited.
+	EventMaxSubscribersPerClient int
+	// EventEpochForSlot and EventEraNameForEpoch let event payloads carry
+	// ledger context. Either may be nil, which leaves that field zero.
+	EventEpochForSlot    func(slot uint64) (uint64, error)
+	EventEraNameForEpoch func(epoch uint64) (string, error)
 }
 
 // ErrDBUnavailable is returned by Acquire when there is currently no
@@ -376,6 +402,20 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 	}
 
+	var eventHub *eventHub
+	if b.config.EventBus != nil {
+		eventHub = newEventHub(b.config)
+		eventPath, eventHandler := eventconnect.NewEventServiceHandler(
+			&eventServiceHandler{
+				hub:            eventHub,
+				publishEnabled: b.config.EventPublishEnabled,
+			},
+			commonHandlerOptions,
+		)
+		mux.Handle(eventPath, eventHandler)
+		serviceNames = append(serviceNames, eventconnect.EventServiceName)
+	}
+
 	mux.Handle(
 		grpchealth.NewHandler(
 			rpchealth.UnaryChecker(
@@ -420,6 +460,12 @@ func (b *Bark) Start(ctx context.Context) error {
 	}
 	if err := b.startServer(server); err != nil {
 		return err
+	}
+	if eventHub != nil {
+		// Shutdown waits for open streams, so the event streams must be told
+		// to end before it starts.
+		server.RegisterOnShutdown(eventHub.close)
+		eventHub.start()
 	}
 	b.server = server
 

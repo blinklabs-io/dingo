@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -675,4 +676,59 @@ func TestCreateGenesisBlockStoresCanonicalRelayAddress(t *testing.T) {
 		"192.168.1.1",
 		pool.Registration[0].Relays[0].Ipv4.String(),
 	)
+}
+
+// TestBuildGenesisUtxoSetDropsZeroValueByronOutputs pins the Byron to Shelley
+// translation, which discards every output whose coin is zero: the Shelley
+// ledger state, and the state a Mithril snapshot imports, never holds them.
+func TestBuildGenesisUtxoSetDropsZeroValueByronOutputs(t *testing.T) {
+	t.Parallel()
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	zeroAddr, err := lcommon.NewByronAddressRedeem(
+		bytes.Repeat([]byte{0x5a}, 32),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	byronGenesis := nodeCfg.ByronGenesis()
+	if byronGenesis.NonAvvmBalances == nil {
+		byronGenesis.NonAvvmBalances = map[string]string{}
+	}
+	byronGenesis.NonAvvmBalances[zeroAddr.String()] = "0"
+
+	byronUtxos, err := byronGenesis.GenesisUtxos()
+	require.NoError(t, err)
+	var zeroRefs, fundedRefs int
+	for i := range byronUtxos {
+		if byronUtxos[i].Output.Amount().Sign() == 0 {
+			zeroRefs++
+		} else {
+			fundedRefs++
+		}
+	}
+	require.Equal(t, 1, zeroRefs, "fixture must yield one zero-value output")
+
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+	set, err := buildGenesisUtxoSet(nodeCfg, genesisHash, nil)
+	require.NoError(t, err)
+
+	for i := range set.utxos {
+		require.NotZero(
+			t,
+			set.utxos[i].Output.Amount().Sign(),
+			"zero-value genesis output %s#%d must be dropped",
+			set.utxos[i].Id.Id(),
+			set.utxos[i].Id.Index(),
+		)
+	}
+	shelleyUtxos, err := nodeCfg.ShelleyGenesis().GenesisUtxos()
+	require.NoError(t, err)
+	require.Len(t, set.utxos, fundedRefs+len(shelleyUtxos))
 }

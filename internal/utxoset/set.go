@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -582,6 +583,29 @@ func splitTipless(
 	return leading, batch[start:]
 }
 
+// RemoveZeroCoinOutputs removes the live outputs among refs whose coin is
+// zero and returns how many it removed. An output with coin, or one that does
+// not decode, stays. The removal is not a change of the chain: it leaves the
+// tip alone and writes no journal record, which would otherwise be undone
+// first by the next rollback of any depth. It is for outputs the ledger's
+// genesis never holds, found in a set built before it dropped them.
+func (s *Set) RemoveZeroCoinOutputs(refs []models.UtxoId) (int, error) {
+	out := make([]badgerutxo.Ref, len(refs))
+	for i, r := range refs {
+		out[i] = badgerutxo.NewRef(r.Hash, r.Idx)
+	}
+	return s.store.RemoveOutputs(out, isZeroCoinOutput)
+}
+
+func isZeroCoinOutput(cbor []byte) bool {
+	out, err := gledger.NewTransactionOutputFromCbor(cbor)
+	if err != nil || out == nil {
+		return false
+	}
+	amount := out.Amount()
+	return amount != nil && amount.Sign() == 0
+}
+
 // Get returns the CBOR of the live output txID#index.
 func (s *Set) Get(txID []byte, index uint32) ([]byte, bool, error) {
 	return s.store.Get(badgerutxo.NewRef(txID, index))
@@ -742,6 +766,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureDrepState(ctx, ldb); err != nil {

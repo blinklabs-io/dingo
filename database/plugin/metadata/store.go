@@ -2892,14 +2892,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (models.AccountSums, error)
 
-	// GetAssetByPolicyAndName returns a live asset row for the provided
-	// policy ID and asset name. Implementations return an empty model and
-	// no error when the asset is not found.
-	GetAssetByPolicyAndName(
+	// AssetHeld reports whether any retained holding of the asset exists,
+	// live or spent and not yet pruned. An asset whose holdings were all
+	// removed is not held, even though its identity is still recorded.
+	AssetHeld(
 		lcommon.Blake2b224,
 		[]byte, // assetName
 		types.Txn,
-	) (models.Asset, error)
+	) (bool, error)
 
 	// GetAssetQuantityByPolicyAndName returns the sum of live quantities for
 	// the provided policy ID and asset name across all matching UTxOs.
@@ -3786,8 +3786,8 @@ type ContextPlannerStatsUpdater interface {
 
 // IncrementalPlannerStatsUpdater is an optional interface for metadata stores
 // whose planner statistics can be maintained incrementally while the node
-// runs. trigger labels the run for metrics ("startup", "epoch" or
-// "periodic"). A store that does not implement it, or whose backend has no
+// runs. trigger labels the run for metrics ("startup", "epoch", "periodic"
+// or "anchor"). A store that does not implement it, or whose backend has no
 // incremental form, leaves statistics untouched.
 type IncrementalPlannerStatsUpdater interface {
 	OptimizePlannerStatsContext(

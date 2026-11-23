@@ -54,6 +54,12 @@ type AccountReader interface {
 	AccountsWithDrep() ([]models.StakeCredentialRef, error)
 }
 
+// AccountInactivityActivationReader reports whether a set-backed account
+// reader carries the CIP-0163 activation membership and floor.
+type AccountInactivityActivationReader interface {
+	AccountInactivityActivationLoaded() (bool, error)
+}
+
 // failAccountStaging stops the live UTxO set from following the ledger
 // when it cannot apply an account change the metadata store accepted: the
 // two disagree, and startup rebuilds or resumes the set.
@@ -767,6 +773,19 @@ func (ls *LedgerState) stageAccountExpirations(
 	expiration uint64,
 	slot uint64,
 ) {
+	ls.stageAccountExpirationsWithActivation(txn, refs, expiration, slot, nil)
+}
+
+// stageAccountExpirationsWithActivation stages expirations and, for the
+// one-time activation stamp, records the membership and floor on each account
+// that the set owns.
+func (ls *LedgerState) stageAccountExpirationsWithActivation(
+	txn ledgerdb.Txn,
+	refs []models.StakeCredentialRef,
+	expiration uint64,
+	slot uint64,
+	activationEpoch *uint64,
+) {
 	r := ls.accountReader(txn)
 	if r == nil && ls.familyDrained(nodesettings.FamilyAccounts) {
 		// The SQL write is skipped for a drained family, so an expiration
@@ -803,6 +822,10 @@ func (ls *LedgerState) stageAccountExpirations(
 		}
 		next := *a
 		next.ExpirationEpoch = expiration
+		if activationEpoch != nil {
+			next.InactivityActivation = true
+			next.InactivityActivationEpoch = *activationEpoch
+		}
 		ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			Accounts: []AccountChange{{Slot: slot, Account: next}},
 		})

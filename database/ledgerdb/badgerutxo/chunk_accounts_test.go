@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,6 +61,12 @@ func countAccounts(t *testing.T, s *badgerutxo.Store) int {
 // stages, applies in as many as it takes, and one rollback undoes them all.
 func TestApplyTakesMoreAccountPutsThanOneTransactionHolds(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine apply of 120k account puts at Badger's "+
+			"real transaction limit; the small-budget chunk tests "+
+			"keep the chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	start := point(0, 0)

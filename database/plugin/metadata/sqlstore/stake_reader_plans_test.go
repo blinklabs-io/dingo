@@ -42,28 +42,31 @@ func stakeReaders(store *Store) []stakeReader {
 	return []stakeReader{
 		{
 			name: "GetAccountSums withdrawals", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `SELECT amount FROM account_reward_delta
 WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 			args: []any{0, key},
 		},
 		{
 			name: "AddAccountRewardsByCredential applied lookup", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta WHERE withdrawal = FALSE AND tx_hash IN (?, ?)`,
-			args: []any{hash, hash},
+FROM account_reward_delta WHERE withdrawal = FALSE AND
+((credential_tag = ? AND staking_key = ? AND added_slot = ? AND tx_hash = ?) OR
+ (credential_tag = ? AND staking_key = ? AND added_slot = ? AND tx_hash = ?))`,
+			args: []any{0, key, 100, hash, 0, key, 100, hash},
 		},
 		{
 			name: "RewardCreditsAlreadyApplied", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta WHERE withdrawal = FALSE AND tx_hash IN (?)`,
-			args: []any{hash},
+FROM account_reward_delta WHERE withdrawal = FALSE AND
+(credential_tag = ? AND staking_key = ? AND added_slot = ? AND tx_hash = ?)`,
+			args: []any{0, key, 100, hash},
 		},
 		{
 			name: "withdrawal journal exists", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `SELECT EXISTS (SELECT 1 FROM account_reward_delta
 WHERE withdrawal = TRUE AND tx_hash = ? AND credential_tag = ? AND staking_key = ?)`,
 			args: []any{hash, 0, key},
@@ -78,7 +81,7 @@ ORDER BY credential_tag, staking_key, id`,
 		},
 		{
 			name: "MarkPostSnapshotAccountRewardCredit", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `UPDATE account_reward_delta SET post_snapshot = TRUE
 WHERE withdrawal = FALSE AND tx_hash = ? AND credential_tag = ?
   AND staking_key = ? AND added_slot = ?`,
@@ -93,20 +96,21 @@ FROM account_reward_delta WHERE added_slot > ? ORDER BY added_slot DESC, id DESC
 		},
 		{
 			name: "account credential rollback delete", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query: `DELETE FROM account_reward_delta WHERE added_slot > ?
 AND credential_tag = ? AND staking_key IN (?, ?)`,
 			args: []any{100, 0, key, key},
 		},
 		{
 			name: "withdrawal witness slots", table: "account_reward_delta",
+			wantIndex: "idx_account_reward_delta_added_slot",
 			query: `SELECT credential_tag, staking_key FROM account_reward_delta
 WHERE withdrawal = TRUE AND added_slot > ?`,
-			args: []any{100},
+			args: []any{1_000_000},
 		},
 		{
 			name: "withdrawalHistoryQuery", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
+			wantIndex: "idx_account_reward_delta_credential_slot_kind_source",
 			query:     withdrawalQuery,
 			args:      withdrawalArgs,
 		},
@@ -182,6 +186,7 @@ func explainPlan(
 // requires its table access to name an index rather than scan the table.
 func TestStakeBookkeepingReadersUseAnIndex(t *testing.T) {
 	t.Parallel()
+	skipPlanTestUnderRace(t)
 	store := newMigratedSQLiteStore(t)
 	w := newStakeWorkload(t, store, 300, 10)
 	w.register(50)

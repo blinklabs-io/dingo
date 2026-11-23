@@ -16,10 +16,19 @@ package badgerutxo
 
 import (
 	"errors"
+	"fmt"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
 )
+
+// DecodeLegacyAccountForTest decodes r through the account encoding that
+// predates CIP-0163 activation provenance.
+func DecodeLegacyAccountForTest(r AccountRow) (AccountRow, error) {
+	v := encodeAccount(r)
+	v = v[:len(v)-9]
+	return decodeAccount(credKey(r.Tag, r.Key), v)
+}
 
 // DeleteFormatForTest removes the format mark, as a store written before it
 // existed lacks it.
@@ -270,4 +279,94 @@ func (s *Store) DeleteExportFloorForTest() error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(exportFloorKey)
 	})
+}
+
+// PutLegacySnapshotRowForTest stores r as a store wrote it before capture
+// slots were kept: the value alone, with no index entry.
+func (s *Store) PutLegacySnapshotRowForTest(r SnapshotRow) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(snapshotKey(r), r.Value)
+	})
+}
+
+// PutUnindexedSnapshotRowForTest stores r as an interrupted backfill leaves
+// it: with its capture slot and no index entry.
+func (s *Store) PutUnindexedSnapshotRowForTest(r SnapshotRow) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(snapshotKey(r), encodeSnapshotValue(r.CapturedSlot, r.Value))
+	})
+}
+
+// ClearSnapshotSlotsMarkerForTest removes the marker that says every
+// snapshot row is indexed.
+func (s *Store) ClearSnapshotSlotsMarkerForTest() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(snapshotSlotsKey)
+	})
+}
+
+// SnapshotIndexMismatchForTest compares the capture index with the rows that
+// carry a capture slot and returns what differs: a row with no entry, or an
+// entry with no row or the wrong slot. It is empty when they agree.
+func (s *Store) SnapshotIndexMismatchForTest() ([]string, error) {
+	var out []string
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(snapshotSlotsKey)
+		marked := err == nil
+		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		want := map[string]bool{}
+		err = eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
+			idx, err := snapshotSlotKeyOf(k, v)
+			if idx != nil {
+				want[string(idx)] = true
+			} else if err == nil && marked {
+				out = append(out, fmt.Sprintf("indexed store has legacy row: %x", k))
+			}
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		err = eachPrefix(txn, []byte{SnapshotSlotTag}, func(k, _ []byte) error {
+			if !want[string(k)] {
+				out = append(out, fmt.Sprintf("entry without row: %x", k))
+			}
+			delete(want, string(k))
+			return nil
+		})
+		for k := range want {
+			out = append(out, fmt.Sprintf("row without entry: %x", k))
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddedIndexFloorForTest returns the floor the family's index of rows below
+// the floor was built at, and whether one is held.
+func (s *Store) AddedIndexFloorForTest(family byte) (uint64, bool) {
+	s.added.mu.Lock()
+	defer s.added.mu.Unlock()
+	idx := s.added.fam[family]
+	if idx == nil {
+		return 0, false
+	}
+	return idx.floor, true
+}
+
+// SetAfterRowsGenerationForTest sets fn to run when EachRowChangedIn has read
+// the rows' generation and not yet begun its transaction.
+func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
+	s.added.afterGen = fn
+}
+
+// SetBeforeAddedIndexForTest sets fn to run inside the transaction of a read
+// below the floor, before it looks up the family's index.
+func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
+	s.added.beforeIndex = fn
 }

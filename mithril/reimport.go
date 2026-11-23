@@ -174,6 +174,7 @@ func ReimportLedgerState(
 		)
 		if errors.Is(err, errNotOnLocalChain) ||
 			errors.Is(err, errBlocksNotStored) ||
+			errors.Is(err, ErrLedgerStateTooRecent) ||
 			errors.Is(err, ledgerstate.ErrNoUsableLedgerState) {
 			logger.Info(
 				"mithril: artifact has no usable ledger state for the local chain",
@@ -251,14 +252,12 @@ func reimportFromArtifact(
 		)
 	}
 	defer result.Cleanup(logger)
-	slot, hash, _, err := importLedgerState(
+	slot, hash, err := importLedgerState(
 		ctx, cfg.DB, logger, cfg.CardanoNodeConfig, result,
-		true, cfg.LocalTip.Slot, cfg.UtxoSet,
+		true, immutableBoundSlot(cfg.DB, cfg.LocalTip.Slot), cfg.UtxoSet,
 		func(ledgerstate.ImportProgress) {},
 		func(p *preparedLedgerStateImport) error {
-			point := ocommon.Point{
-				Slot: p.state.Tip.Slot, Hash: p.state.Tip.BlockHash,
-			}
+			point := p.point()
 			onChain, err := cfg.OnChain(ctx, point)
 			if err != nil {
 				return fmt.Errorf("check the ledger state's tip on the chain: %w", err)
@@ -394,12 +393,7 @@ func clearReimportMarks(db *database.Database) error {
 }
 
 func setMithrilLedgerAnchor(db *database.Database, point ocommon.Point) error {
-	if err := db.SetSyncState(
-		mithrilLedgerSlotSyncKey, strconv.FormatUint(point.Slot, 10), nil,
-	); err != nil {
-		return fmt.Errorf("recording the Mithril ledger slot: %w", err)
-	}
-	return db.SetSyncState(mithrilLedgerHashSyncKey, hex.EncodeToString(point.Hash), nil)
+	return db.SetImportedLedgerStateBoundary(point, nil)
 }
 
 // mithrilLedgerAnchor reads the stable ledger point a Mithril import recorded.

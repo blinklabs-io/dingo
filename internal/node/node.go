@@ -970,6 +970,14 @@ func buildDingoConfig(
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
+		dingo.WithBarkEventService(
+			cfg.BarkEventEnabled,
+			cfg.BarkEventPublishEnabled,
+			cfg.BarkEventBufferSize,
+			cfg.BarkEventMaxSubscribers,
+			cfg.BarkEventMaxSubscribersPerClient,
+		),
+		dingo.WithBarkEventNodeID(cfg.BarkEventNodeID),
 		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
 		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
@@ -993,6 +1001,7 @@ func buildDingoConfig(
 			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
 			Strict:                cfg.KoiosParity.Strict,
+			UnavailableRetryLimit: cfg.KoiosParity.UnavailableRetryLimit,
 			GraceHours:            cfg.KoiosParity.GraceHours,
 			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here

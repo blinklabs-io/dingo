@@ -60,6 +60,8 @@ func TestStreamLimiterEnforcesTotalAndPerClientCaps(t *testing.T) {
 }
 
 func TestConnect_StreamsRefusedAtAdmissionLimit(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
 		tune: func(cfg *UtxorpcConfig) {
@@ -129,6 +131,8 @@ func TestConnect_StreamsRefusedAtAdmissionLimit(t *testing.T) {
 }
 
 func TestConnect_WatchPredicateNodeBudget(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
 		tune:      func(cfg *UtxorpcConfig) { cfg.MaxPredicateNodes = 5 },
@@ -186,6 +190,8 @@ func TestConnect_WatchPredicateNodeBudget(t *testing.T) {
 }
 
 func TestConnect_WatchTxReplayBoundedByBlocks(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
 		tune:      func(cfg *UtxorpcConfig) { cfg.MaxReplayBlocks = 3 },

@@ -1942,48 +1942,13 @@ func (s *Store) addAccountRewardCreditBatch(
 		return nil
 	}
 
-	// IN lists on the leading columns of idx_account_reward_delta_w_tx_s_slot
-	// and idx_account_credential; a derived-table join here was planned as a
-	// scan of the joined table per batch.
-	hashes := make([]any, 0, len(pending))
-	seenHash := make(map[string]struct{}, len(pending))
+	candidates := make([]models.AccountRewardCredit, 0, len(pending))
 	for _, item := range pending {
-		if _, ok := seenHash[item.key.sourceHash]; ok {
-			continue
-		}
-		seenHash[item.key.sourceHash] = struct{}{}
-		hashes = append(hashes, item.credit.SourceHash)
+		candidates = append(candidates, item.credit)
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
-		hashes...,
-	)
+	applied, err := s.appliedRewardCreditKeys(ctx, db, candidates)
 	if err != nil {
 		return fmt.Errorf("look up applied reward credits: %w", err)
-	}
-	applied := make(map[rewardCreditJournalKey]struct{})
-	for rows.Next() {
-		var hash, key []byte
-		var tag, slot int64
-		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan applied reward credit: %w", err)
-		}
-		applied[rewardCreditJournalKey{
-			sourceHash:    string(hash),
-			credentialTag: uint8(tag), //nolint:gosec // stored from uint8
-			stakingKey:    string(key),
-			slot:          uint64(slot), //nolint:gosec // stored from uint64
-		}] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("iterate applied reward credits: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return err
 	}
 
 	type accountCredit struct {
@@ -2130,6 +2095,77 @@ ON CONFLICT (
 		}
 	}
 	return nil
+}
+
+// appliedRewardCreditKeys returns the exact journal keys already present.
+// The complete-key probes use the credential-leading unique index without a
+// second source-hash index, and are chunked for every supported dialect.
+func (s *Store) appliedRewardCreditKeys(
+	ctx context.Context,
+	db queryer,
+	credits []models.AccountRewardCredit,
+) (map[rewardCreditJournalKey]struct{}, error) {
+	applied := make(map[rewardCreditJournalKey]struct{})
+	if len(credits) == 0 {
+		return applied, nil
+	}
+	const argsPerCredit = 4
+	batchSize := s.dialect.ParameterLimit() / argsPerCredit
+	if batchSize == 0 {
+		return nil, fmt.Errorf(
+			"dialect parameter limit %d cannot fit reward credit lookup",
+			s.dialect.ParameterLimit(),
+		)
+	}
+	for start := 0; start < len(credits); start += batchSize {
+		end := min(start+batchSize, len(credits))
+		predicates := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*argsPerCredit)
+		for _, credit := range credits[start:end] {
+			hash := credit.SourceHash
+			if hash == nil {
+				hash = []byte{}
+			}
+			slot, err := checkedInt64(credit.Slot)
+			if err != nil {
+				return nil, err
+			}
+			predicates = append(predicates, `(credential_tag = ? AND
+staking_key = ? AND added_slot = ? AND tx_hash = ?)`)
+			args = append(
+				args, credit.CredentialTag, credit.StakingKey, slot, hash,
+			)
+		}
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT tx_hash, credential_tag, staking_key, added_slot
+FROM account_reward_delta
+WHERE withdrawal = FALSE AND (`+strings.Join(predicates, " OR ")+`)`), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var hash, key []byte
+			var tag, slot int64
+			if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			applied[rewardCreditJournalKey{
+				sourceHash:    string(hash),
+				credentialTag: uint8(tag), //nolint:gosec // stored from uint8
+				stakingKey:    string(key),
+				slot:          uint64(slot), //nolint:gosec // stored from uint64
+			}] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return applied, nil
 }
 
 const rewardCreditAccountUpdateQuery = `UPDATE account SET reward = ? WHERE id = ?`
@@ -2430,7 +2466,7 @@ func (s *Store) DeleteAccountRewardJournalForCredentialsAfterSlot(
 		return err
 	}
 	// Grouped by credential_tag and queried as a single-column staking_key
-	// IN (...), matching idx_account_reward_delta_credential
+	// IN (...), matching the credential-leading reward-delta unique index
 	// (credential_tag, staking_key) for the delta delete, the same grouping
 	// GetAccountsByCredential uses and for the same reason. The witness
 	// table's credential index (idx_account_withdrawal_witness_credential_slot)

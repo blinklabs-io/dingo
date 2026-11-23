@@ -86,7 +86,7 @@ func rewindTarget(
 	if err != nil {
 		return models.Block{}, 0, false, fmt.Errorf("get tip block: %w", err)
 	}
-	mithrilFloor, err = db.MithrilTrustBoundarySlotStrict(nil)
+	mithrilFloor, err = db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return models.Block{}, 0, false, fmt.Errorf(
 			"read the Mithril trust boundary: %w", err,

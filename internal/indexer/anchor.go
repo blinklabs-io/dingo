@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -65,7 +66,7 @@ type AnchorChain interface {
 func (s *DatabaseSource) Anchor(
 	ctx context.Context,
 ) (indexerdb.Tip, bool, error) {
-	slot, err := s.db.MithrilTrustBoundarySlotStrict(nil)
+	slot, err := s.db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return indexerdb.Tip{}, false, err
 	}
@@ -780,11 +781,13 @@ func (w *Writer) requireOrigin(
 // finishAnchor builds the dropped indexes, checks the rows against the
 // imported ledger state and applies that state's accounts.
 func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
+	start := time.Now()
 	if w.buildIndexes != nil {
 		if err := w.buildIndexes(ctx); err != nil {
 			return fmt.Errorf("build deferred indexes at the anchor: %w", err)
 		}
 	}
+	indexesBuilt := time.Now()
 	facts, hasFacts := w.facts.(AnchorFacts)
 	if hasFacts {
 		replayed, err := w.store.ReplayTransactions(nil)
@@ -805,6 +808,7 @@ func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
 			return err
 		}
 	}
+	verified := time.Now()
 	restorer, hasRestorer := w.idx.(AnchorRestorer)
 	txn := w.store.Database().Transaction(ctx, true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -829,6 +833,62 @@ func (w *Writer) finishAnchor(ctx context.Context, anchor indexerdb.Tip) error {
 	w.logger.Info(
 		"indexer reached the Mithril anchor",
 		"slot", anchor.Slot, "block", anchor.BlockNumber,
+		"build_indexes", indexesBuilt.Sub(start),
+		"verify", verified.Sub(indexesBuilt),
+		"copy_and_restore", time.Since(verified),
 	)
+	w.finalizePlannerStats(ctx)
 	return nil
+}
+
+// finalizePlannerStats refreshes the IndexerDB's planner statistics once the
+// anchor is reached. Statistics gathered while the backfill was still loading
+// describe a fraction of the final rows, so API queries would plan against
+// them until the next periodic refresh. A failure is logged, not returned:
+// statistics only steer the planner, and the anchor is already durable.
+func (w *Writer) finalizePlannerStats(ctx context.Context) {
+	db := w.store.Database()
+	if db == nil {
+		return
+	}
+	start := time.Now()
+	err := runFinalPlannerStats(ctx, db.Metadata())
+	if errors.Is(err, errNoPlannerStats) {
+		return
+	}
+	if err != nil {
+		w.logger.Warn("indexer final planner statistics failed", "error", err)
+		return
+	}
+	w.logger.Info(
+		"indexer final planner statistics complete",
+		"duration", time.Since(start),
+	)
+}
+
+var errNoPlannerStats = errors.New("metadata store keeps no planner statistics")
+
+// runFinalPlannerStats prefers the bounded incremental form, which samples
+// every index where a full pass would read the whole IndexerDB, and falls back
+// to the full refresh on a backend without one.
+func runFinalPlannerStats(
+	ctx context.Context,
+	store metadata.MetadataStore,
+) error {
+	if updater, ok := store.(metadata.IncrementalPlannerStatsUpdater); ok {
+		result, err := updater.OptimizePlannerStatsContext(
+			ctx, types.PlannerStatsTriggerAnchor,
+		)
+		if err != nil || result.Supported {
+			return err
+		}
+	}
+	switch updater := store.(type) {
+	case metadata.ContextPlannerStatsUpdater:
+		return updater.UpdatePlannerStatsContext(ctx)
+	case metadata.PlannerStatsUpdater:
+		return updater.UpdatePlannerStats()
+	default:
+		return errNoPlannerStats
+	}
 }

@@ -37,7 +37,6 @@ const (
 	mithrilSyncPhaseBootstrap     = "bootstrap"
 	mithrilSyncPhaseLedgerImport  = "ledger_import"
 	mithrilSyncPhaseImmutableCopy = "immutable_copy"
-	mithrilSyncPhaseGapBlocks     = "gap_blocks"
 	mithrilSyncPhasePostLedger    = "post_ledger_state"
 	mithrilSyncPhaseIndexRebuild  = "index_rebuild"
 	mithrilSyncPhaseComplete      = "complete"
@@ -131,8 +130,6 @@ type mithrilSyncMetrics struct {
 	immutableTipSlot      prometheus.Gauge
 	immutablePercent      prometheus.Gauge
 	immutableBlocksPerSec prometheus.Gauge
-
-	gapBlocks prometheus.Gauge
 
 	indexRebuildDuration prometheus.Gauge
 
@@ -243,10 +240,6 @@ func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
 			Name: "dingo_mithril_sync_immutable_blocks_per_second",
 			Help: "ImmutableDB block copy rate during Mithril sync.",
 		}),
-		gapBlocks: factory.NewGauge(prometheus.GaugeOpts{
-			Name: "dingo_mithril_sync_gap_blocks",
-			Help: "Volatile gap blocks fetched or reused during Mithril sync.",
-		}),
 		indexRebuildDuration: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "dingo_mithril_sync_index_rebuild_duration_seconds",
 			Help: "Duration spent rebuilding critical deferred metadata indexes during Mithril sync.",
@@ -355,13 +348,6 @@ func (m *mithrilSyncMetrics) recordImmutableProgress(
 	m.immutableTipSlot.Set(float64(p.TipSlot))
 	m.immutablePercent.Set(p.Percent)
 	m.immutableBlocksPerSec.Set(p.BlocksPerSecond)
-}
-
-func (m *mithrilSyncMetrics) recordGapBlocks(count int) {
-	if m == nil {
-		return
-	}
-	m.gapBlocks.Set(float64(count))
 }
 
 // recordIndexRebuildDuration records the elapsed time for deferred-index rebuild.

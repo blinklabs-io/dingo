@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -560,6 +561,7 @@ func requireAccountsMatch(
 	key := func(a *models.Account) string {
 		c := *a
 		c.ID, c.CertificateID, c.ImportDeposit = 0, 0, nil
+		c.InactivityActivation, c.InactivityActivationEpoch = false, 0
 		if len(c.Pool) == 0 {
 			c.Pool = nil
 		}
@@ -1775,6 +1777,58 @@ func TestLiveUtxoSetAccountExpirationsAgreeAfterRollback(t *testing.T) {
 		return nil
 	}))
 	require.NotZero(t, n)
+}
+
+// TestLiveUtxoSetRewardGuardKeepsActivationFloor requires a set-backed
+// ledger to preserve the activation membership used by the production reward
+// guard after the SQL account family is drained. A witness in the preceding
+// epoch expires before the reward snapshot, while the activation floor keeps
+// the account active through that snapshot.
+func TestLiveUtxoSetRewardGuardKeepsActivationFloor(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
+	store := dbadapter.New(scenario.DB)
+
+	var ref models.StakeCredentialRef
+	require.NoError(t, store.IterateAccounts(nil, func(a *models.Account) error {
+		if a.Active && a.CredentialTag == 0 && ref.Key == nil {
+			ref = models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
+		}
+		return nil
+	}))
+	require.NotNil(t, ref.Key)
+	scenario.WithdrawAtSlot(ref, scenario.RollbackSlot(), 0)
+	witnesses, err := store.AccountLastWitnessSlots(
+		t.Context(), []models.StakeCredentialRef{ref}, math.MaxInt64, nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, witnesses, ref.MapKey())
+	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	scenario.DrainFamilies(
+		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
+	)
+	activationEpoch, boundary := scenario.ActivateInactivityAtBoundary(1)
+	witness, found, err := set.LastWitnessSlot(ref, boundary)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Less(t, witness, boundary)
+	require.False(t, scenario.RewardAccountGuarded(
+		ref,
+		activationEpoch+1,
+		boundary,
+	), "the activation floor keeps the stamped account reward-eligible")
+	activated, err := set.Account(ref.Tag, ref.Key)
+	require.NoError(t, err)
+	require.True(t, activated.InactivityActivation)
+	require.Equal(t, activationEpoch, activated.InactivityActivationEpoch)
+	scenario.RollbackBeforeBoundary()
+	rolledBack, err := set.Account(ref.Tag, ref.Key)
+	require.NoError(t, err)
+	require.False(t, rolledBack.InactivityActivation)
+	require.Zero(t, rolledBack.InactivityActivationEpoch)
 }
 
 // TestSetReadsOfAPinnedSnapshotAreTheSetAsOfThePin requires live-set reads of

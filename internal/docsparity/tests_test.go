@@ -1975,6 +1975,36 @@ func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
 	}
 }
 
+func TestMakefileRaceTargetsDisableModerncCheckptr(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	content := readRepoFile(t, root, "Makefile")
+	const flag = "RACE_GCFLAGS=-gcflags=modernc.org/...=-d=checkptr=0"
+	if !strings.Contains(content, flag) {
+		t.Fatalf("Makefile does not define %q", flag)
+	}
+	workflow := readRepoFile(t, root, prPipeline)
+	if !strings.Contains(
+		workflow,
+		"-gcflags='modernc.org/...=-d=checkptr=0'",
+	) {
+		t.Fatalf("%s does not use the matching modernc gcflags", prPipeline)
+	}
+	for lineNumber, line := range strings.Split(content, "\n") {
+		if !strings.Contains(line, "go test") ||
+			!strings.Contains(line, "-race") ||
+			strings.Contains(line, "echo") {
+			continue
+		}
+		if !strings.Contains(line, "$(RACE_GCFLAGS)") {
+			t.Errorf(
+				"Makefile:%d: race test command does not use RACE_GCFLAGS",
+				lineNumber+1,
+			)
+		}
+	}
+}
+
 // TestDocumentedDefaultMakeMatchesMakefile checks every description of what a
 // bare `make` does names exactly the targets the default rule depends on. It
 // is the rule that catches documentation claiming the default target runs the
@@ -2972,11 +3002,15 @@ func TestPipelineRunsEachSuiteOnce(t *testing.T) {
 	}
 
 	// The whole-suite runs: one plain Linux run for pull-request feedback,
-	// one race run and one macOS run on the merged commit.
+	// one race run and one macOS run on the merged commit. A nested module is
+	// its own suite, because the root ./... stops at its go.mod, so its runs
+	// are keyed by the step's working-directory.
 	want := map[string]string{
-		"ubuntu-latest plain": "check",
-		"ubuntu-latest race":  "race",
-		"macos-latest plain":  "macos",
+		"ubuntu-latest plain":       "check",
+		"ubuntu-latest race":        "race",
+		"macos-latest plain":        "macos",
+		"ubuntu-latest plain (sdk)": "check",
+		"ubuntu-latest race (sdk)":  "race",
 	}
 	got := make(map[string][]string)
 	for name, rawJob := range pipelineJobs(t, root, prPipeline) {
@@ -2994,6 +3028,9 @@ func TestPipelineRunsEachSuiteOnce(t *testing.T) {
 					mode = "race"
 				}
 				key := runner + " " + mode
+				if dir, _ := step["working-directory"].(string); dir != "" {
+					key += " (" + dir + ")"
+				}
 				got[key] = append(got[key], name)
 			}
 		}

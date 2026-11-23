@@ -40,7 +40,7 @@ type barrierQueryer struct {
 
 func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	if o := q.accumulator.overlay; o != nil && o.retainHistory && !o.flushing &&
-		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset") ||
+		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || readsAssetTables(query) ||
 			(containsIdentifier(query, "account") && !deletesAccountRows(query))) {
 		if err := sqlreadonly.ValidateSQLite(query); err != nil {
 			if o.err == nil {
@@ -69,11 +69,18 @@ func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	}
 	retainedRead := q.accumulator.overlay != nil &&
 		q.accumulator.overlay.retainHistory &&
-		(containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset"))
+		(containsIdentifier(query, "utxo_address") || readsAssetTables(query))
 	if !readsOverlayTables(query) && !retainedRead {
 		return nil
 	}
 	return q.store.overlayBarrier(ctx, q.queryer, q.accumulator)
+}
+
+// readsAssetTables reports whether query names a table a retained overlay
+// queues rows for: holdings, or the identities they resolve against.
+func readsAssetTables(query string) bool {
+	return containsIdentifier(query, "asset_holding") ||
+		containsIdentifier(query, "asset_identity")
 }
 
 var errOverlayAccountDelete = errors.New(
