@@ -9381,7 +9381,13 @@ to every eligible peer, not only the selected one, so headers admitted from a
 stale peer would stay in the shared header queue after selection moved to honest
 peers and make their headers look like a persistent fork. A connection whose
 latest advertised tip is stale holds no ingress slot either, and its delivered
-history still counts for corroboration. `chainsync.State` keeps each
+history still counts for corroboration. In every selection mode,
+`ChainSelector.AdvertisedTipStale` also treats a tip as stale when its block
+number is more than k below the applied local tip: candidate eligibility rejects
+such a peer as unable to extend the local chain, so it must not hold an ingress
+slot while selectable peers wait as observers. That clause compares the
+advertised tip with the selector's local tip; it reads neither the tracked tip
+nor the wall clock. `chainsync.State` keeps each
 connection's latest advertised tip and judges it against the wall clock when a
 decision is made, through `Config.AdvertisedTipStale`: the roll-forward and
 roll-backward handlers demote a connection advertising a stale tip, and every
