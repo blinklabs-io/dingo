@@ -1166,8 +1166,7 @@ func setCheckpoint(_ context.Context, cfg ImportConfig, phase string) error {
 //
 // The snapshot total covers every block of the epoch up to the anchor, so it
 // replaces rather than adds to any rows local replay wrote for that epoch
-// before a catch-up import; the post-anchor sweep has already removed the
-// rest.
+// before a catch-up import.
 func seedImportedEpochDonations(
 	cfg ImportConfig,
 	slot uint64,
@@ -1572,14 +1571,8 @@ func importAccounts(
 			)
 		}
 
-		// CreatedSlot is deliberately left at 0. The account's real registration
-		// slot predates the snapshot and is not recoverable from it, and 0
-		// ("existed before any reachable rollback point") is the answer rollback
-		// needs: RestoreAccountStateAtSlot deletes an account only when
-		// created_slot is past the rollback slot, which is the only thing
-		// keeping these rows alive given the snapshot carries no certificate
-		// history to prove they were registered. Stamping the snapshot slot here
-		// would make every imported account deletable by a rollback to it.
+		// CreatedSlot is left at 0: the account's registration slot predates
+		// the snapshot and is not recoverable from it.
 		model := &models.Account{
 			StakingKey:    acct.StakingKey.Hash,
 			CredentialTag: credentialTag,

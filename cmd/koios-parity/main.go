@@ -22,7 +22,7 @@
 //
 // Three metadata backends are supported, matching Dingo's own
 // plugins.storage.metadata selection (see resolveDingoDB):
-//   - sqlite (default): opens {data-dir}/metadata.sqlite in read-only WAL mode
+//   - sqlite (default): opens {data-dir}/indexer/metadata.sqlite in read-only WAL mode
 //   - postgres: connects via --metadata-dsn or Dingo's resolved metadata DSN/config
 //   - mysql:    connects via --metadata-dsn or Dingo's resolved metadata DSN/config
 package main
@@ -56,7 +56,7 @@ const (
 var globalFlags struct {
 	cachePath       string
 	network         string
-	dingoData       string // Dingo node data directory (contains metadata.sqlite + cache subdir)
+	dingoData       string // Dingo node data directory (contains indexer/metadata.sqlite + cache subdir)
 	dingoConfigFile string // path to Dingo's own dingo.yaml, mirroring dingo's own --config flag
 }
 
@@ -71,7 +71,7 @@ Default action (no subcommand): fetch Koios data, compare against Dingo, print s
 
 Data sources:
   Reference: Koios public REST API (cached in cache.db via 'fetch')
-  Dingo:     Node's metadata.sqlite read directly (reward_pool_input, epoch_summary)
+  Dingo:     Node's indexer/metadata.sqlite read directly (reward_pool_input, epoch_summary)
 
 Metadata backend resolution (plugin, DSN, data directory) is loaded from
 Dingo's own configuration — the same dingo.yaml/env vars/CARDANO_DATABASE_PATH
@@ -102,7 +102,7 @@ Environment:
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.dingoData, "dingo-data", "",
-		"Dingo node data directory containing metadata.sqlite "+
+		"Dingo node data directory containing indexer/metadata.sqlite "+
 			"(default: resolved from Dingo's own config, then $DINGO_DATA_DIR, then .dingo)",
 	)
 	rootCmd.PersistentFlags().StringVar(

@@ -183,8 +183,7 @@ func (l *loadSink) Cancel() {
 // tombstoneFor returns the tombstone writer a bulk load hands its feed. A row
 // loaded from the metadata store has no journal entry, so without the
 // tombstone a rollback below the slot the metadata store drops it at would
-// keep it. The prefix must start with one of tags. A merge keeps the rows
-// under the prefix, so it records no tombstone.
+// keep it. The prefix must start with one of tags.
 func (l *loadSink) tombstoneFor(tags []byte) func(slot uint64, prefix []byte) error {
 	return func(slot uint64, prefix []byte) error {
 		if len(prefix) == 0 || !slices.Contains(tags, prefix[0]) {

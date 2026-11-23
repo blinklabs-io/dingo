@@ -351,9 +351,8 @@ var (
 	// exportFloorKey holds the lowest slot, as a big-endian uint64, from
 	// which the state journal names every account and DRep row by the slot
 	// its AddedSlot says: an entry sits at the slot of the change that set
-	// it. Rows a load or a merge wrote carry older slots than their entries,
-	// and a store from before the key had both, so a store that opens
-	// without it takes the tip plus one.
+	// it. Rows a load wrote carry older slots than their entries, so a store
+	// that opens without the key takes the tip plus one.
 	exportFloorKey = []byte("mexportfloor")
 	// rewardBlocksKey is set once the store holds the block counts and fees
 	// of every epoch reward calculation can still read, up to its tip, with

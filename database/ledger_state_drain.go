@@ -277,8 +277,8 @@ var ErrLedgerStateDrained = errors.New(
 )
 
 // RefuseLedgerStateRewrite returns an error wrapping ErrLedgerStateDrained
-// when any latch bit or drain marker is present. A Mithril import or
-// catch-up rewrites the SQL ledger state: a drained family's rows would
+// when any latch bit or drain marker is present. The API backfill
+// rewrites the SQL ledger state: a drained family's rows would
 // reappear beside a set that no longer matches them, and a marker cleared
 // mid-drain would let the gate run again over partly deleted rows.
 func (d *Database) RefuseLedgerStateRewrite(ctx context.Context) error {

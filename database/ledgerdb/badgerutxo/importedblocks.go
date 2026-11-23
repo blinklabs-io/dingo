@@ -126,10 +126,6 @@ func (s *Store) LoadImportedBlocks(
 	}
 	wb := s.newLoadSink()
 	defer wb.Cancel()
-	// A merge upserts: it keeps the rows of an epoch the snapshot does not
-	// carry, as the metadata store does, and a count the snapshot restates
-	// replaces the one the store held. Counts only grow within an epoch, so
-	// a pool the earlier snapshot held is in the later one.
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != ImportedBlocksTag {
 			return fmt.Errorf("badgerutxo: %x is not an imported block key", k)

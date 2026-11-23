@@ -7125,10 +7125,9 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 // and pp, the protocol parameters the marker describes. An empty value falls
 // back to comparing pp's PlutusV2 cost model directly against the known
 // synthetic default -- see loadSyntheticV2CostModel's doc comment for why.
-// Shared by loadSyntheticV2CostModel (startup, and reloading the in-memory
-// mirror after database.RecomputeSyntheticV2CostModelMarkerAfterTruncate
-// resets the durable marker during a rollback) and rollback itself (which
-// cannot safely call loadSyntheticV2CostModel directly there: this must be
+// Shared by loadSyntheticV2CostModel (startup) and rollback, which reads the
+// marker as the set's rollback left it (and cannot safely call
+// loadSyntheticV2CostModel directly there: this must be
 // computed from the rolled-back pparams value before it is applied to
 // ls.currentPParams under lock, matching every other piece of rollback's
 // reloaded state).
@@ -7237,9 +7236,9 @@ func (ls *LedgerState) persistSyntheticV2CostModel(
 // markRealV2CostModelObserved durably records that real (non-synthetic)
 // PlutusV2 cost-model data was confirmed written as of epoch, both the
 // boolean marker (persistSyntheticV2CostModel) and the epoch it happened at
-// (database.SetSyntheticV2CostModelClearedEpoch) -- the latter is what lets
-// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate tell whether a
-// later rollback crosses back before this confirmation and so must undo it.
+// (database.SyntheticV2CostModelClearedEpochSyncKey, set through the
+// LedgerDB) -- the latter is what lets a rollback tell whether it crosses
+// back before this confirmation and so must undo it.
 // Both writes share the caller's txn so they commit together with the
 // pparams write they describe.
 func (ls *LedgerState) markRealV2CostModelObserved(
@@ -7252,8 +7251,8 @@ func (ls *LedgerState) markRealV2CostModelObserved(
 	// First-confirmation-wins: only write the cleared-epoch marker if none
 	// is recorded yet. A chain can enact more than one real PlutusV2
 	// cost-model update over its life; overwriting the marker on every
-	// later one would make RecomputeSyntheticV2CostModelMarkerAfterTruncate
-	// reset the marker to synthetic on a rollback that crosses back past
+	// later one would make a rollback
+	// reset the marker to synthetic when it that crosses back past
 	// only the LATEST update but not an EARLIER one -- the earlier real
 	// value still survives on the truncated chain and must not be reported
 	// as synthetic. Keeping the earliest confirmed epoch is correct for
