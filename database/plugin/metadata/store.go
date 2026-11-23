@@ -1368,6 +1368,21 @@ type TransactionStore interface {
 		types.Txn,
 	) (int, error)
 
+	// ListMetadataLabelCounts returns the transaction metadata labels in use,
+	// each with the number of transactions carrying it, in numeric label
+	// order (highest first when descending). It skips offset labels and
+	// returns at most limit; a limit of zero or less applies no limit.
+	ListMetadataLabelCounts(
+		int, // limit
+		int, // offset
+		bool, // descending
+		types.Txn,
+	) ([]models.MetadataLabelCount, error)
+
+	// CountMetadataLabels returns the number of distinct transaction
+	// metadata labels in use.
+	CountMetadataLabels(types.Txn) (int, error)
+
 	// SetTransaction stores a transaction with its metadata.
 	SetTransaction(
 		lcommon.Transaction,

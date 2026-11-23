@@ -9919,6 +9919,24 @@ ORDER BY ml.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 100;
 ```
 
+### `ListMetadataLabelCounts`
+
+Metadata labels in use, with their transaction counts:
+
+```sql
+-- Postgres
+SELECT label, COUNT(*)
+FROM transaction_metadata_label
+GROUP BY label
+ORDER BY LENGTH(label), label
+LIMIT 100 OFFSET 0;
+```
+
+`label` is the decimal text of a `uint64` without leading zeros, so ordering by
+length and then text is numeric order on every backend, including labels above
+the signed 64-bit range that an integer cast would clamp. `CountMetadataLabels`
+counts `DISTINCT label` for the pagination total.
+
 ### Transaction metadata JSON representation
 
 API-mode ingestion stores each unique metadata label with its raw CBOR value.

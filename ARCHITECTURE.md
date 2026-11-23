@@ -17763,7 +17763,8 @@ cache when the LeiosDB lacks the manifest or bodies. It verifies the
 manifest and each body against the announced hash, ordered references,
 transaction hashes, and encoded sizes before exposing them. A missing or
 inconsistent certified body is an error rather than an empty transaction list.
-The root document is served only at the literal `/` path (`GET /{$}`).
+The root document is served only at the literal `/` and `/api/v0/` paths
+(`GET /{$}` and `GET /api/v0/{$}`); a bare `/api/v0` redirects to `/api/v0/`.
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
 `GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block
@@ -18377,6 +18378,18 @@ upstream wildcard patterns are recognized by the bounded catch-all operation
 list rather than registered as conflicting Go `ServeMux` patterns. The IPFS path
 parameter matches the remaining path segments, so an object inside an IPFS
 directory is recognized as the same operation.
+
+The operations still unsupported are the IPFS, account metrics and Nut.link
+groups. The root, health and clock operations are served under the `/api/v0`
+prefix as well as unprefixed; the bare prefix `/api/v0` redirects to the root
+operation `/api/v0/`. `GET /metadata/txs/labels` lists every metadata label in
+use with its transaction count in numeric label order, naming the labels in
+Blockfrost's CIP-10 list and reporting `cip10: null` for the rest.
+`GET /utils/addresses/xpub/{xpub}/{role}/{index}` derives addresses as
+Blockfrost does: role 2 yields the reward address of staking key `2/index`, and
+any other role yields the base address pairing key `role/index` with staking
+key `2/0`, on the node's network. Public derivation cannot reach a hardened
+index, so a role or index of 2^31 or more is rejected with HTTP 400.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
