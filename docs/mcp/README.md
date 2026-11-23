@@ -269,9 +269,9 @@ Cardano domains:
 ### 4. Lending, Borrowing & CDP
 | Question Style / Intent | Example Natural Language Query | Mapped Tool / Resource | Parameters | Under-the-Hood Behavior |
 | :--- | :--- | :--- | :--- | :--- |
-| **Collateral Liquidations**| *"Query all active UTxOs that have an attached datum hash for liquidations."* | `sqlite_query` | `{"query": "SELECT * FROM utxo WHERE datum_hash IS NOT NULL LIMIT 5"}` | Finds Plutus contract outputs with datum hashes awaiting off-chain bot liquidations. |
+| **Collateral Liquidations**| *"Query all active UTxOs that have an attached datum hash for liquidations."* | `sqlite_query` | `{"query": "SELECT * FROM utxo WHERE datum_id IS NOT NULL LIMIT 5"}` | Finds Plutus contract outputs with datum hashes awaiting off-chain bot liquidations. |
 | **Borrower Delegation** | *"Check indexed stake key delegation status before issuing a loan."* | `get_account` | `{"stake_address_or_credential": "stake_test1..."}` | Inspects the stored account row for delegation fields. It does not return reward withdrawal history. |
-| **Index Verification** | *"Explain query execution plan for liquidation scanning across datum hashes."* | `sqlite_explain` | `{"query": "SELECT * FROM utxo WHERE datum_hash IS NOT NULL LIMIT 20"}` | Verifies whether query planner utilizes index or full table scan for datum lookups. |
+| **Index Verification** | *"Explain query execution plan for liquidation scanning across datum hashes."* | `sqlite_explain` | `{"query": "SELECT * FROM utxo WHERE datum_id IS NOT NULL LIMIT 20"}` | Verifies whether query planner utilizes index or full table scan for datum lookups. |
 | **Stake Account Schema** | *"Inspect the indexed stake account columns."* | `sqlite_table_schema` | `{"table_name": "account"}` | Returns the account table definition, including credential, delegation, and reward fields. It is not a historical balance snapshot table. |
 | **Engine Footprint** | *"Inspect node architecture, storage mode, and memory profile for high-frequency trading."* | `get_node_info` | `{"topic": "architecture"}` | Returns architecture guide explaining Badger DB blob storage and SQLite indexer caching. |
 

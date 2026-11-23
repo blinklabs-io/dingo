@@ -456,7 +456,7 @@ func TestCredentialQueriesUseDictionaryIndexes(t *testing.T) {
 		"address history by stake credential": {
 			func() string {
 				query, _ := addressTransactionRangeQuery(0, hash, nil, nil)
-				return query + " ORDER BY at.slot DESC, at.tx_index DESC, at.payment_key_id DESC"
+				return query + addressTransactionOrder("desc")
 			}(), []any{0, hash},
 			[]string{"idx_addr_tx_stake_position"},
 		},

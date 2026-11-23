@@ -746,11 +746,7 @@ func (s *Store) GetAddressTransactionsByCredential(
 		from,
 		to,
 	)
-	if strings.EqualFold(order, "asc") {
-		query += " ORDER BY at.slot ASC, at.tx_index ASC, at.payment_key_id ASC"
-	} else {
-		query += " ORDER BY at.slot DESC, at.tx_index DESC, at.payment_key_id DESC"
-	}
+	query += addressTransactionOrder(order)
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
 		ctx,
@@ -823,6 +819,17 @@ func (s *Store) CountAddressTransactionsByCredential(
 	return count, nil
 }
 
+// addressTransactionOrder is the ORDER BY of an addressTransactionRangeQuery
+// page. Rows sharing a transaction are ordered by the payment key hash the
+// query projects, not by its dictionary id: ids follow first sight of a
+// credential, so ordering by id would not be the documented order.
+func addressTransactionOrder(order string) string {
+	if strings.EqualFold(order, "asc") {
+		return " ORDER BY at.slot ASC, at.tx_index ASC, payment_key ASC"
+	}
+	return " ORDER BY at.slot DESC, at.tx_index DESC, payment_key DESC"
+}
+
 func addressTransactionRangeQuery(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -830,7 +837,8 @@ func addressTransactionRangeQuery(
 	to *models.AddressTransactionPosition,
 ) (string, []any) {
 	query := `
-SELECT (SELECT pc.hash FROM credential AS pc WHERE pc.id = at.payment_key_id),
+SELECT (SELECT pc.hash FROM credential AS pc WHERE pc.id = at.payment_key_id)
+           AS payment_key,
        th.hash, at.slot, at.tx_index, tx.block_hash
 FROM address_transaction at
 JOIN "transaction" th ON th.id = at.transaction_id

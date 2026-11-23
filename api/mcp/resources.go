@@ -230,8 +230,8 @@ When forging blocks, Dingo utilizes standard Cardano operational certificates:
 - **Operational Certificate (` + "`OpCert`" + `)**: Binds the pool cold key to the current hot KES verification key and records the operational certificate sequence number (` + "`OpCertSequenceNumber`" + `).
 - **VRF Key & Leader Proof**: Validates that the pool was elected leader for the exact slot under Praos consensus.
 
-In Dingo's SQLite metadata store, whenever an operational certificate is observed or validated, it is tracked in:
-` + "`SELECT slot, sequence FROM pool_opcert_sequence WHERE pool_key_hash = ...;`" + `
+In Dingo's SQLite metadata store, whenever an operational certificate is observed or validated, it is tracked in ` + "`pool_opcert_sequence`" + `, which names the pool cold key by its id in ` + "`credential`" + `:
+` + "`SELECT o.slot, o.sequence FROM pool_opcert_sequence AS o JOIN credential AS c ON c.id = o.pool_key_id WHERE c.hash = ...;`" + `
 
 ---
 

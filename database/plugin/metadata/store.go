@@ -1323,7 +1323,7 @@ type TransactionStore interface {
 
 	// GetAddressTransactionsByCredential retrieves one page of (payment
 	// address, transaction) association rows for a stake credential
-	// tag/hash pair, ordered by (slot, tx_index, payment_key) and
+	// tag/hash pair, ordered by (slot, tx_index, payment key hash) and
 	// optionally bounded by an inclusive from/to (slot, tx_index) range
 	// (nil = unconstrained on that side). This is the direct SQL page: no
 	// caller-side fan-out or filtering is needed, so cost is bounded by

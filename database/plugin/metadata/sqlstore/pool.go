@@ -1573,8 +1573,8 @@ func (s *Store) LatestPoolOpCertCounters(
 
 // PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
 // a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
-// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
-// slot) index to deliver the pools in order, and the caller deduplicates the
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_id,
+// slot) primary key to deliver the pools in order, and the caller deduplicates the
 // few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
 // so a test can pin its plan.
 const PoolOpCertSequencesChangedAfterSQL = `
@@ -1607,7 +1607,7 @@ func scanDistinctPoolKeyHashes(rows *sql.Rows) ([][]byte, error) {
 }
 
 // PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
-// a slot, read through idx_pool_opcert_sequence_pool_slot.
+// a slot, read as a range of the (pool_key_id, slot) primary key.
 const PoolOpCertSequenceAtOrBeforeSQL = `
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
@@ -1624,7 +1624,7 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	if err != nil {
 		return nil, err
 	}
-	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// A slot filter cannot use the (pool_key_id, sequence) index the
 	// unbounded aggregate reads, and filtering the whole table by slot reads
 	// every row at or before it. Rows after a recent slot are few, so the
 	// unbounded result is corrected for just the pools that have one.
