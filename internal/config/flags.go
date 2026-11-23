@@ -947,7 +947,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BackfillBatchSize",
 		"backfill-batch-size",
-		"API-mode metadata backfill block batch size",
+		"accepted for configuration compatibility; has no effect",
 	),
 	boolFlag(
 		"BlockPipelineEnabled",

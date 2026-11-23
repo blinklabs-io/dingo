@@ -907,6 +907,13 @@
 # CLI: --immutable-db-path
 # immutableDbPath: ""
 
+# Accepted for configuration compatibility and has no effect: the IndexerDB
+# writer sizes its own batches.
+#
+# Can be overridden with the DINGO_BACKFILL_BATCH_SIZE environment variable
+# CLI: --backfill-batch-size
+# backfillBatchSize: 200
+
 # Validate historical blocks during ledger processing (default: true).
 # Set false only when intentionally syncing from a non-genesis intersection
 # whose source does not provide the complete historical state.

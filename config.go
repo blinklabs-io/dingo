@@ -3059,7 +3059,8 @@ func (c *Config) DatabaseQueueSize() int {
 	return c.cfg.DatabaseQueueSize
 }
 
-// BackfillBatchSize returns the batch size for database backfill operations.
+// BackfillBatchSize returns the configured backfillBatchSize. The setting has
+// no effect; it is kept so existing configurations keep loading.
 func (c *Config) BackfillBatchSize() int {
 	return c.cfg.BackfillBatchSize
 }
