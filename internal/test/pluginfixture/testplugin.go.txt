@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -52,6 +53,9 @@ func main() {
 	ignoreTerm := flag.Bool("ignore-term", false, "")
 	flag.Parse()
 	if *exitAtStart != 0 {
+		// Take the handshake first so the exit, not a refused write, is what
+		// the node observes.
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		fmt.Fprintln(os.Stderr, "testplugin: refusing to start")
 		os.Exit(*exitAtStart)
 	}

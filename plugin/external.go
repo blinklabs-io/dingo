@@ -357,6 +357,12 @@ func (i *externalInstance) Start(ctx context.Context) error {
 		return fmt.Errorf("encode plugin handshake: %w", err)
 	}
 	if _, err := stdin.Write(append(hs, '\n')); err != nil {
+		// A broken pipe means the plugin closed its input, usually because it
+		// is exiting; wait for that exit so the error reports its status and
+		// standard error rather than only the pipe.
+		wctx, cancel := context.WithTimeout(ctx, i.cfg.StartTimeout)
+		i.waitExit(wctx)
+		cancel()
 		return i.startError(fmt.Errorf("write plugin handshake: %w", err))
 	}
 
