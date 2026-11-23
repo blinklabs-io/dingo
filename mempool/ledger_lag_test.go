@@ -122,9 +122,54 @@ func (v *laggingLedgerValidator) ValidateTxWithOverlay(
 	return nil
 }
 
+// sessionLedgerValidator opens validation sessions on a
+// laggingLedgerValidator. A session sees the ledger as it is when the session
+// opens, and the ledger does not move while it is open.
+type sessionLedgerValidator struct {
+	*laggingLedgerValidator
+	// onOpen, when set, runs once as the next session opens: blocks it
+	// applies are part of that session's ledger.
+	onOpen func()
+}
+
+func (v *sessionLedgerValidator) WithTxValidationSession(
+	_ context.Context,
+	fn func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	v.mu.Lock()
+	hook := v.onOpen
+	v.onOpen = nil
+	v.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return fn(
+		v.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+	)
+}
+
+type ledgerLagOptions struct {
+	// sessions makes the validator open validation sessions.
+	sessions        bool
+	cleanupInterval time.Duration
+}
+
 type ledgerLagFixture struct {
-	m      *Mempool
-	v      *laggingLedgerValidator
+	m *Mempool
+	v *laggingLedgerValidator
+	// s is the session validator when the fixture opens sessions.
+	s      *sessionLedgerValidator
 	parent gledger.Transaction
 	// parentRaw, childRaw and siblingRaw are the CBOR of the parent and of
 	// two transactions spending its first and second outputs.
@@ -155,14 +200,33 @@ func newLedgerLagFixture(
 	currentSlot func() uint64,
 ) *ledgerLagFixture {
 	t.Helper()
+	return newLedgerLagFixtureWith(t, useDAG, currentSlot, ledgerLagOptions{})
+}
+
+func newLedgerLagFixtureWith(
+	t *testing.T,
+	useDAG bool,
+	currentSlot func() uint64,
+	opts ledgerLagOptions,
+) *ledgerLagFixture {
+	t.Helper()
 	v := newLaggingLedgerValidator(99)
+	var (
+		validator TxValidator = v
+		s         *sessionLedgerValidator
+	)
+	if opts.sessions {
+		s = &sessionLedgerValidator{laggingLedgerValidator: v}
+		validator = s
+	}
 	cfg := MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       v,
+		Validator:       validator,
 		MempoolCapacity: 1024 * 1024,
 		CurrentSlotFunc: currentSlot,
+		CleanupInterval: opts.cleanupInterval,
 	}
 	var (
 		m   *Mempool
@@ -186,6 +250,7 @@ func newLedgerLagFixture(
 	f := &ledgerLagFixture{
 		m:       m,
 		v:       v,
+		s:       s,
 		funding: indexTxInput{hash: [32]byte{0xf1}},
 	}
 	v.fund(f.funding)
@@ -462,4 +527,152 @@ func TestConfirmationDuringRevalidationKeepsSettledOutputs(t *testing.T) {
 		require.NoError(t, f.m.rebuildOverlay(ctx))
 		require.True(t, f.has(f.child.Hash().String()))
 	})
+}
+
+// spendParentOutput returns a transaction outside the pool that spends the
+// parent's output at index.
+func (f *ledgerLagFixture) spendParentOutput(
+	t *testing.T,
+	index uint32,
+) gledger.Transaction {
+	t.Helper()
+	var parentId [32]byte
+	copy(parentId[:], f.parent.Hash().Bytes())
+	_, tx := buildIndexTx(t, indexTxSpec{
+		inputs:  []indexTxInput{{hash: parentId, index: index}},
+		outputs: []lcommon.Address{indexTestAddress(t, 9)},
+	})
+	return tx
+}
+
+// ageSettled backdates every settled transaction past settledRetention.
+func (f *ledgerLagFixture) ageSettled() {
+	f.m.Lock()
+	defer f.m.Unlock()
+	for i := range f.m.overlay.settled {
+		f.m.overlay.settled[i].since = time.Now().Add(
+			-settledRetention - time.Second,
+		)
+	}
+}
+
+// The ledger can apply the confirming block, and a later block spending the
+// confirmed parent's output outside the pool, after a revalidation has read
+// the applied tip but before its validation session opens. The parent's
+// settled outputs must not shadow that spend in the session.
+func TestRevalidationDropsChildOfSettledOutputSpentBeforeSessionOpens(
+	t *testing.T,
+) {
+	t.Parallel()
+	forBothPools(t, func(t *testing.T, useDAG bool) {
+		f := newLedgerLagFixtureWith(
+			t, useDAG, nil, ledgerLagOptions{sessions: true},
+		)
+		ctx := context.Background()
+		f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+			Block: blockCarryingTxs(t, 100, f.parentRaw),
+		}))
+		require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+		require.True(t, f.has(f.child.Hash().String()))
+		require.Equal(t, 1, f.settledCount())
+
+		rival := f.spendParentOutput(t, 0)
+		f.s.mu.Lock()
+		f.s.onOpen = func() {
+			f.v.applyBlock(100, f.parent)
+			f.v.applyBlock(101, rival)
+		}
+		f.s.mu.Unlock()
+		require.NoError(t, f.m.rebuildOverlay(ctx))
+		require.False(
+			t, f.has(f.child.Hash().String()),
+			"a child spending an output the session's ledger has spent is "+
+				"dropped",
+		)
+		require.Zero(t, f.settledCount())
+	})
+}
+
+// Admission after the ledger has applied the confirming block, and a later
+// block spending the confirmed parent's output outside the pool, judges the
+// output by the ledger, not by the parent's settled outputs.
+func TestAdmissionRefusesSettledOutputTheLedgerSpent(t *testing.T) {
+	t.Parallel()
+	forBothPools(t, func(t *testing.T, useDAG bool) {
+		f := newLedgerLagFixture(t, useDAG, nil)
+		ctx := context.Background()
+		f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+			Block: blockCarryingTxs(t, 100, f.parentRaw),
+		}))
+		require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+		require.Equal(t, 1, f.settledCount())
+
+		f.v.applyBlock(100, f.parent)
+		f.v.applyBlock(101, f.spendParentOutput(t, 1))
+		require.Error(t, f.m.AddTransaction(
+			ctx, uint(conway.EraIdConway), f.siblingRaw,
+		))
+		require.False(t, f.has(f.sibling.Hash().String()))
+		require.Zero(t, f.settledCount())
+	})
+}
+
+// A settled parent released while a revalidation is in flight, here past
+// settledRetention with the ledger never applying its block, takes its
+// outputs out of the candidate pool too. The child validated against them
+// is judged again rather than published.
+func TestSettledReleaseDuringRevalidationRevalidatesDescendants(
+	t *testing.T,
+) {
+	t.Parallel()
+	forBothPools(t, func(t *testing.T, useDAG bool) {
+		f := newLedgerLagFixture(t, useDAG, nil)
+		ctx := context.Background()
+		f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+			Block: blockCarryingTxs(t, 100, f.parentRaw),
+		}))
+		require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+		require.True(t, f.has(f.child.Hash().String()))
+		require.Equal(t, 1, f.settledCount())
+
+		f.v.mu.Lock()
+		f.v.onValidate = func() {
+			f.ageSettled()
+			f.m.releaseSettled()
+		}
+		f.v.mu.Unlock()
+		require.NoError(t, f.m.rebuildOverlay(ctx))
+		require.Zero(t, f.settledCount())
+		require.False(
+			t, f.has(f.child.Hash().String()),
+			"a child of a parent released during revalidation is judged "+
+				"without the parent's outputs",
+		)
+	})
+}
+
+// The expiry ticker releasing a settled parent whose block the ledger never
+// applied revalidates the pool, so the parent's child does not wait for the
+// next chain update.
+func TestExpiredSettledReleaseRevalidatesPool(t *testing.T) {
+	t.Parallel()
+	f := newLedgerLagFixtureWith(
+		t, false, nil,
+		ledgerLagOptions{cleanupInterval: 10 * time.Millisecond},
+	)
+	ctx := context.Background()
+	f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+		Block: blockCarryingTxs(t, 100, f.parentRaw),
+	}))
+	require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+	require.True(t, f.has(f.child.Hash().String()))
+	f.ageSettled()
+
+	require.NoError(t, f.m.Start(ctx))
+	require.Eventually(t, func() bool {
+		return !f.has(f.child.Hash().String())
+	}, 5*time.Second, 10*time.Millisecond,
+		"the child of a released parent the ledger never applied is dropped",
+	)
+	require.Zero(t, f.settledCount())
 }
