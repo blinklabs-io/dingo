@@ -93,7 +93,11 @@ func (f *eventFixture) publishChurn(addr string) {
 		peergov.PeerChurnEventType,
 		event.NewEvent(
 			peergov.PeerChurnEventType,
-			peergov.PeerChurnEvent{Address: addr, OldState: "hot", NewState: "warm"},
+			peergov.PeerChurnEvent{
+				Address:  addr,
+				OldState: "hot",
+				NewState: "warm",
+			},
 		),
 	)
 }
@@ -283,13 +287,25 @@ func TestEventSlowSubscriberDoesNotStallBusOrOthers(t *testing.T) {
 }
 
 func TestEventHubDetachesLaggingReader(t *testing.T) {
-	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
+	f := newEventFixture(
+		t,
+		func(c *BarkConfig) { c.EventBufferSize = 4 },
+		false,
+	)
 	for range 10 {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
 	}
-	_, _, lagged, _ := f.hub.read(1, func(*eventv1alpha1.Event) bool { return true }, 10)
+	_, _, lagged, _ := f.hub.read(
+		1,
+		func(*eventv1alpha1.Event) bool { return true },
+		10,
+	)
 	require.True(t, lagged, "events 2-6 left the 4-slot ring")
-	evs, next, lagged, _ := f.hub.read(6, func(*eventv1alpha1.Event) bool { return true }, 10)
+	evs, next, lagged, _ := f.hub.read(
+		6,
+		func(*eventv1alpha1.Event) bool { return true },
+		10,
+	)
 	require.False(t, lagged)
 	require.Len(t, evs, 4)
 	require.Equal(t, uint64(10), next)
@@ -514,9 +530,12 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 	}
 	f.bus.Publish(
 		event.EpochTransitionEventType,
-		event.NewEvent(event.EpochTransitionEventType, event.EpochTransitionEvent{
-			PreviousEpoch: 1, NewEpoch: 2,
-		}),
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{
+				PreviousEpoch: 1, NewEpoch: 2,
+			},
+		),
 	)
 	ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
 		resp, err := stream.Receive()
@@ -594,7 +613,11 @@ func TestEventAckDeliversWithSingleEventBuffer(t *testing.T) {
 }
 
 func TestEventAckOutOfRangeWhenNotBuffered(t *testing.T) {
-	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
+	f := newEventFixture(
+		t,
+		func(c *BarkConfig) { c.EventBufferSize = 4 },
+		false,
+	)
 	for range 10 {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
 	}
@@ -635,7 +658,11 @@ func TestEventSubscriberLimits(t *testing.T) {
 	_ = openSubscribe(t, f)
 	second := startSubscribe(t, f)
 	require.False(t, second.Receive())
-	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(second.Err()))
+	require.Equal(
+		t,
+		connect.CodeResourceExhausted,
+		connect.CodeOf(second.Err()),
+	)
 
 	g := newEventFixture(t, func(c *BarkConfig) {
 		c.EventMaxSubscribersPerClient = 1
@@ -682,10 +709,23 @@ func TestEventPublishAndBatch(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := f.client.PublishBatch(context.Background(), connect.NewRequest(
 		&eventv1alpha1.PublishBatchRequest{Events: []*eventv1alpha1.Event{
-			{Id: "ok", EventType: eventtype.PeerChurn, OriginNodeId: "node-b", TypedData: payload},
+			{
+				Id:           "ok",
+				EventType:    eventtype.PeerChurn,
+				OriginNodeId: "node-b",
+				TypedData:    payload,
+			},
 			{Id: "bad", EventType: "nope.x"},
-			{Id: "self", EventType: eventtype.PeerChurn, OriginNodeId: "node-a"},
-			{Id: "wrongpayload", EventType: eventtype.MempoolAddTx, TypedData: payload},
+			{
+				Id:           "self",
+				EventType:    eventtype.PeerChurn,
+				OriginNodeId: "node-a",
+			},
+			{
+				Id:        "wrongpayload",
+				EventType: eventtype.MempoolAddTx,
+				TypedData: payload,
+			},
 			{EventType: eventtype.PeerChurn},
 			{Id: "noorigin", EventType: eventtype.PeerChurn},
 		}},
@@ -694,9 +734,11 @@ func TestEventPublishAndBatch(t *testing.T) {
 	res := resp.Msg.GetResults()
 	require.Len(t, res, 6)
 	require.Nil(t, res[0].GetFailure())
-	require.Equal(t,
+	require.Equal(
+		t,
 		eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
-		res[1].GetFailure().GetCode())
+		res[1].GetFailure().GetCode(),
+	)
 	for _, i := range []int{2, 3, 4, 5} {
 		require.Equal(t,
 			eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_INVALID_EVENT,
@@ -738,8 +780,12 @@ func TestEventListAndSchema(t *testing.T) {
 		schema.Msg.GetPayloadMessage())
 	require.NotEmpty(t, schema.Msg.GetPayloadDescriptors().GetFile())
 
-	_, err = f.client.GetEventSchema(context.Background(),
-		connect.NewRequest(&eventv1alpha1.GetEventSchemaRequest{EventType: "nope.x"}))
+	_, err = f.client.GetEventSchema(
+		context.Background(),
+		connect.NewRequest(
+			&eventv1alpha1.GetEventSchemaRequest{EventType: "nope.x"},
+		),
+	)
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
 
@@ -919,6 +965,8 @@ func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
-		t.Fatal("SubscribeWithAck did not return after its context was canceled")
+		t.Fatal(
+			"SubscribeWithAck did not return after its context was canceled",
+		)
 	}
 }

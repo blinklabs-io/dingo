@@ -611,8 +611,11 @@ func (s *eventServiceHandler) validatePublished(
 	info, ok := eventtype.Lookup(ev.GetEventType())
 	if !ok {
 		return &eventv1alpha1.PublishFailure{
-			Code:    eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
-			Message: fmt.Sprintf("event type %q is not registered", ev.GetEventType()),
+			Code: eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
+			Message: fmt.Sprintf(
+				"event type %q is not registered",
+				ev.GetEventType(),
+			),
 		}
 	}
 	if ev.GetOriginNodeId() == "" || ev.GetOriginNodeId() == s.hub.nodeID {
@@ -622,7 +625,8 @@ func (s *eventServiceHandler) validatePublished(
 		}
 	}
 	if td := ev.GetTypedData(); td != nil {
-		if !info.HasTypedPayload || td.MessageName() != protoreflect.FullName(info.PayloadMessage) {
+		if !info.HasTypedPayload ||
+			td.MessageName() != protoreflect.FullName(info.PayloadMessage) {
 			return &eventv1alpha1.PublishFailure{
 				Code:    eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_INVALID_EVENT,
 				Message: "typed_data does not match the event type's payload",
@@ -714,7 +718,10 @@ func (s *eventServiceHandler) GetEventSchema(
 	if !ok {
 		return nil, connect.NewError(
 			connect.CodeNotFound,
-			fmt.Errorf("event type %q is not registered", req.Msg.GetEventType()),
+			fmt.Errorf(
+				"event type %q is not registered",
+				req.Msg.GetEventType(),
+			),
 		)
 	}
 	resp := &eventv1alpha1.GetEventSchemaResponse{Info: infoToProto(info)}

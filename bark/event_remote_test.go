@@ -29,7 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	eventv1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/event"
+	eventconnect "github.com/blinklabs-io/bark/proto/v1alpha1/event/eventv1alpha1connect"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/stretchr/testify/require"
 )
@@ -160,6 +162,80 @@ type gateTransport struct {
 	calls   atomic.Int64
 }
 
+// restartableEventService keeps one listener while replacing the serving
+// event hub, matching a process restart on a stable address.
+type restartableEventService struct {
+	eventconnect.UnimplementedEventServiceHandler
+	current atomic.Pointer[eventServiceHandler]
+}
+
+type resumeCursor struct {
+	runID    string
+	sequence uint64
+}
+
+// terminalResumeService ends the first subscription after one acknowledged
+// event so RemoteEvents must carry its cursor into a new client call.
+type terminalResumeService struct {
+	eventconnect.UnimplementedEventServiceHandler
+	attempt atomic.Int64
+	resumed chan resumeCursor
+}
+
+func (s *terminalResumeService) SubscribeWithAck(
+	ctx context.Context,
+	stream *connect.BidiStream[
+		eventv1alpha1.SubscribeWithAckRequest,
+		eventv1alpha1.SubscribeWithAckResponse,
+	],
+) error {
+	req, err := stream.Receive()
+	if err != nil {
+		return err
+	}
+	start := req.GetStart()
+	if s.attempt.Add(1) == 1 {
+		if err := stream.Send(&eventv1alpha1.SubscribeWithAckResponse{
+			Ready: &eventv1alpha1.SubscribeWithAckReady{RunId: "run-1"},
+		}); err != nil {
+			return err
+		}
+		if err := stream.Send(&eventv1alpha1.SubscribeWithAckResponse{
+			Event: &eventv1alpha1.Event{
+				RunId: "run-1", Sequence: 1, EventType: "test.event",
+			},
+		}); err != nil {
+			return err
+		}
+		if _, err := stream.Receive(); err != nil {
+			return err
+		}
+		return connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("end first subscription"),
+		)
+	}
+	s.resumed <- resumeCursor{
+		runID: start.GetLastAckedRunId(), sequence: start.GetLastAckedSequence(),
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *restartableEventService) use(f *eventFixture) {
+	s.current.Store(&eventServiceHandler{hub: f.hub})
+}
+
+func (s *restartableEventService) SubscribeWithAck(
+	ctx context.Context,
+	stream *connect.BidiStream[
+		eventv1alpha1.SubscribeWithAckRequest,
+		eventv1alpha1.SubscribeWithAckResponse,
+	],
+) error {
+	return s.current.Load().SubscribeWithAck(ctx, stream)
+}
+
 func (g *gateTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	g.calls.Add(1)
 	if g.blocked.Load() {
@@ -199,6 +275,99 @@ func startRemote(
 	return remote
 }
 
+func TestRemoteEventsResumeBufferedEventsAfterSourceRestart(t *testing.T) {
+	t.Parallel()
+	oldRun := newEventFixture(t, nil, false)
+	newRun := newEventFixture(t, nil, false)
+	service := &restartableEventService{}
+	service.use(oldRun)
+	mux := http.NewServeMux()
+	path, handler := eventconnect.NewEventServiceHandler(service)
+	mux.Handle(path, handler)
+	front := httptest.NewUnstartedServer(mux)
+	front.EnableHTTP2 = true
+	front.StartTLS()
+	t.Cleanup(front.Close)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	collected := newRemoteCollector(bus)
+	startRemote(t, bus, front.Client(), RemoteEventSource{
+		Name: "a", URL: front.URL,
+	})
+	waitActive(t, oldRun, 1)
+
+	oldRun.publishChurn("old:1")
+	require.Eventually(t, func() bool { return collected.count() == 1 },
+		5*time.Second, 5*time.Millisecond)
+	newRun.publishChurn("new:1")
+	newRun.publishChurn("new:2")
+	require.Eventually(t, func() bool { return eventPosition(newRun.hub) == 2 },
+		5*time.Second, 5*time.Millisecond)
+
+	service.use(newRun)
+	oldRun.hub.close()
+	oldRun.srv.CloseClientConnections()
+	require.Eventually(t, func() bool { return collected.count() == 3 },
+		10*time.Second, 5*time.Millisecond)
+	require.Equal(t,
+		[]string{"old:1", "new:1", "new:2"},
+		collected.addresses(t),
+	)
+}
+
+func TestRemoteEventsKeepInitialPositionAcrossReconnect(t *testing.T) {
+	t.Parallel()
+	source := newEventFixture(t, nil, false)
+	gate := &gateTransport{next: source.srv.Client().Transport}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	collected := newRemoteCollector(bus)
+	startRemote(t, bus, &http.Client{Transport: gate}, RemoteEventSource{
+		Name: "a", URL: source.srv.URL,
+	})
+	waitActive(t, source, 1)
+
+	gate.blocked.Store(true)
+	source.srv.CloseClientConnections()
+	waitActive(t, source, 0)
+	source.publishChurn("a:1")
+	source.publishChurn("b:1")
+	require.Eventually(t, func() bool { return eventPosition(source.hub) == 2 },
+		5*time.Second, 5*time.Millisecond)
+	gate.blocked.Store(false)
+
+	require.Eventually(t, func() bool { return collected.count() == 2 },
+		10*time.Second, 5*time.Millisecond)
+	require.Equal(t, []string{"a:1", "b:1"}, collected.addresses(t))
+}
+
+func TestRemoteEventsCarryRunAcrossOuterRetry(t *testing.T) {
+	t.Parallel()
+	service := &terminalResumeService{resumed: make(chan resumeCursor, 1)}
+	mux := http.NewServeMux()
+	path, handler := eventconnect.NewEventServiceHandler(service)
+	mux.Handle(path, handler)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	startRemote(t, bus, srv.Client(), RemoteEventSource{
+		Name: "a", URL: srv.URL,
+	})
+
+	select {
+	case cursor := <-service.resumed:
+		require.Equal(t, "run-1", cursor.runID)
+		require.Equal(t, uint64(1), cursor.sequence)
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote source did not retry after the terminal response")
+	}
+}
+
 // When the followed node no longer buffers the position a source stopped at,
 // the source starts again from that node's current position: it does not
 // retry the lost position forever, and the events in between are gone.
@@ -227,7 +396,7 @@ func TestRemoteEventsRestartFromHeadWhenPositionIsGone(t *testing.T) {
 		nodeA.publishChurn(addr)
 	}
 	require.Eventually(t, func() bool {
-		return nodeA.hub.position() == 6
+		return eventPosition(nodeA.hub) == 6
 	}, 5*time.Second, 5*time.Millisecond)
 	gate.blocked.Store(false)
 
@@ -361,21 +530,30 @@ func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
 func TestRemoteEventsKeepRedirectsOnSourceOrigin(t *testing.T) {
 	t.Parallel()
 	var otherHits atomic.Int32
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		otherHits.Add(1)
-	}))
+	other := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			otherHits.Add(1)
+		}),
+	)
 	t.Cleanup(other.Close)
 	var sameHits atomic.Int32
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/same":
-			sameHits.Add(1)
-		case "/to-same":
-			http.Redirect(w, r, "/same", http.StatusTemporaryRedirect)
-		default:
-			http.Redirect(w, r, other.URL+"/internal", http.StatusTemporaryRedirect)
-		}
-	}))
+	source := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/same":
+				sameHits.Add(1)
+			case "/to-same":
+				http.Redirect(w, r, "/same", http.StatusTemporaryRedirect)
+			default:
+				http.Redirect(
+					w,
+					r,
+					other.URL+"/internal",
+					http.StatusTemporaryRedirect,
+				)
+			}
+		}),
+	)
 	t.Cleanup(source.Close)
 	r := &RemoteEvents{}
 	// The configured URL may carry credentials; they are not part of the

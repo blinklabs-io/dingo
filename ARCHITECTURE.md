@@ -21268,14 +21268,20 @@ node's `origin_node_id` is `barkEventNodeId`; unset, it is a random identifier
 drawn once per run, never the host name, because every subscriber sees it. The bus
 handlers only enqueue onto a bounded
 channel; one goroutine converts and appends to a ring buffer of
-`barkEventBufferSize` events that carries the delivery sequence. Subscribers
+`barkEventBufferSize` events that carries the delivery sequence and serving-run
+identifier. New acknowledged subscriptions receive a ready response that fixes
+their run and initial resume position before event delivery. A reconnect sends
+both values: a cursor from the current run resumes after its sequence, while a
+cursor from an earlier run resumes from the oldest event still buffered in the
+new run. Legacy clients that omit the run identifier retain sequence-only
+resume behavior. Subscribers
 read the ring at their own pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
 stops acknowledging a half-ring window of delivered events is closed after a
-timeout; events a filter rejects do not count toward that window. Resuming with
-`last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
-refused unless `barkEventPublishEnabled` is set, and an event with no
+timeout; events a filter rejects do not count toward that window. `Publish` and
+`PublishBatch` are refused unless `barkEventPublishEnabled` is set, and an event
+with no
 `origin_node_id` or this node's own is rejected; an accepted event goes to the
 node's remote subscribers and is not injected into the internal EventBus, which
 only accepts its own typed structs. Concurrent-stream limits
@@ -21292,18 +21298,16 @@ subscription against that node's EventService, filtered by the source's
 EventBus as `bark.remote_event` with a `RemoteEvent{Source, Event}` payload.
 The Event Service does not subscribe to that type, so a remote event is never
 sent back out to this node's own subscribers. The bark client reconnects with
-backoff and resumes after the last handled sequence, so once a source has
-handled an event, a dropped connection neither loses nor repeats an event
-locally while the remote node keeps running. Before the first handled event
-the position is zero, which the remote node reads as its current position, so
-a drop then skips what was published while disconnected. The position is in memory: after a
-restart, or after the remote node answers `OUT_OF_RANGE`, a source continues
-from the remote node's current position and the events in between are not
-replayed. The remote node's sequence also restarts with its process, and a
-new run that has already passed the old position accepts it, so that run's
-earlier events are skipped without an error. The bark client retries
-silently, so each source logs a warning when its node stops answering and an
-info line when it answers or delivers an event again, once per outage.
+backoff and resumes after the last handled run and sequence. Its ready response
+fixes the initial cursor before delivery, so a drop before the first event does
+not move the cursor forward. When the remote node restarts, the changed run
+identifier resumes from the oldest event still buffered by the new run. The
+cursor remains in memory: restarting this node starts from the remote node's
+current position. An `OUT_OF_RANGE` response also clears the cursor and starts
+from the current position because the missing events have left the remote
+buffer. The bark client retries silently, so each source logs a warning when
+its node stops answering and an info line when it answers or delivers an event
+again, once per outage.
 The remote node is not trusted: each message read from it is capped at 16 MiB
 (`remoteEventMaxMessageBytes`, after decompression), far above any event a
 Dingo node emits, and the default client follows a redirect only within the

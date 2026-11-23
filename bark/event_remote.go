@@ -84,15 +84,11 @@ type RemoteEventsConfig struct {
 
 // RemoteEvents follows the Event Service of other nodes and republishes what
 // it receives on the local EventBus as RemoteEvent. Each source reconnects
-// on its own and resumes after the last event it handled, so once a source
-// has handled an event, a dropped connection loses nothing and does not
-// repeat an event locally while the remote node keeps running.
-//
-// Position zero means the remote node's current position, so a source that
-// drops before its first handled event resumes there and skips what was
-// published while it was disconnected. The position is also lost when this
-// node restarts, and the remote node's sequence restarts with its process, so
-// events across either restart can be skipped without an error.
+// on its own and resumes after the last event it handled. The cursor includes
+// the remote serving run, so a remote restart resumes from the oldest event
+// still buffered by the new run. The initial position is fixed before event
+// delivery, so a reconnect before the first event does not move it forward.
+// This node's own restart still loses its in-memory cursor.
 type RemoteEvents struct {
 	cfg RemoteEventsConfig
 
@@ -259,6 +255,7 @@ func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 	if maxBackoff <= 0 {
 		maxBackoff = remoteMaxBackoff
 	}
+	var lastRun string
 	var last uint64
 	wait := initial
 	for ctx.Err() == nil {
@@ -266,6 +263,7 @@ func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 			SubscriberID:      r.cfg.NodeID + "/" + src.Name,
 			EventTypes:        src.EventTypes,
 			OriginNodeIDs:     src.OriginNodeIDs,
+			LastAckedRunID:    lastRun,
 			LastAckedSequence: last,
 			InitialBackoff:    initial,
 			MaxBackoff:        maxBackoff,
@@ -277,6 +275,7 @@ func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 					RemoteEvent{Source: src.Name, Event: ev},
 				),
 			)
+			lastRun = ev.GetRunId()
 			last = ev.GetSequence()
 			reach.reachable()
 			return nil
@@ -293,6 +292,7 @@ func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 					"restarting from its current position",
 				"last_sequence", last,
 			)
+			lastRun = ""
 			last = 0
 		} else {
 			log.Warn("remote event subscription ended", "error", err)
