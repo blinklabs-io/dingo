@@ -292,6 +292,12 @@ func (i *externalInstance) attachTokenUnary(
 	invoker grpc.UnaryInvoker,
 	opts ...grpc.CallOption,
 ) error {
+	// Negotiate goes without the token: its reply, an HMAC of the nonce under
+	// the token, is how the plugin proves it is the process the host launched
+	// before the host reveals the token to whatever listens on the socket.
+	if method == pluginrpc.Control_Negotiate_FullMethodName {
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
 	return invoker(i.withToken(ctx), method, req, reply, cc, opts...)
 }
 

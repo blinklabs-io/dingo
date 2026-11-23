@@ -18,20 +18,24 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/pluginfixture"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/plugin/pluginrpc"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 )
 
 const externalTestCapability Capability = pluginfixture.Capability
@@ -361,4 +365,78 @@ func h0(t *testing.T) string {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// recordingControl is a stand-in plugin that records the token metadata each
+// control call arrives with.
+type recordingControl struct {
+	pluginrpc.UnimplementedControlServer
+	mu     sync.Mutex
+	tokens map[string][]string
+}
+
+func (r *recordingControl) record(ctx context.Context, method string) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens[method] = md.Get(externalTokenHeader)
+}
+
+func (r *recordingControl) Negotiate(
+	ctx context.Context,
+	_ *pluginrpc.NegotiateRequest,
+) (*pluginrpc.NegotiateResponse, error) {
+	r.record(ctx, "negotiate")
+	return &pluginrpc.NegotiateResponse{}, nil
+}
+
+func (r *recordingControl) Ping(
+	ctx context.Context,
+	_ *pluginrpc.PingRequest,
+) (*pluginrpc.PingResponse, error) {
+	r.record(ctx, "ping")
+	return &pluginrpc.PingResponse{}, nil
+}
+
+func TestExternalNegotiateWithholdsToken(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("external plugins use Unix sockets")
+	}
+	dir := h0(t)
+	cfg := defaultExternalConfig()
+	cfg.Command = "unused"
+	cfg.RuntimeDir = dir
+	inst, err := newExternalInstance(
+		NewHost(),
+		Descriptor{Capability: externalTestCapability, Name: "recorder"},
+		cfg,
+		externalOptions{command: defaultCommand},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.cleanup() })
+
+	listener, err := net.Listen("unix", inst.socketPath)
+	require.NoError(t, err)
+	rec := &recordingControl{tokens: map[string][]string{}}
+	srv := grpc.NewServer()
+	pluginrpc.RegisterControlServer(srv, rec)
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(srv.Stop)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	_, err = inst.control.Negotiate(
+		ctx,
+		&pluginrpc.NegotiateRequest{Nonce: []byte("n")},
+		grpc.WaitForReady(true),
+	)
+	require.NoError(t, err)
+	_, err = inst.control.Ping(ctx, &pluginrpc.PingRequest{})
+	require.NoError(t, err)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	require.Empty(t, rec.tokens["negotiate"], "token sent before the proof")
+	require.Equal(t, []string{inst.token}, rec.tokens["ping"])
 }

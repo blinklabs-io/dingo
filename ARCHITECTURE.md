@@ -150,13 +150,16 @@ control protocol version, socket path, token. Standard input stays open; a
 plugin that sees it close exits, so a dead host leaves no orphan. The plugin
 (`sdk/plugin.Serve(manifest, impls...)`) serves its capability services and the
 `dingo.plugin.v0.Control` service on that Unix socket and rejects any call
-without the token. The socket path is kept under 100 bytes for the sun_path
-limit.
+other than `Negotiate` without the token. The socket path is kept under 100
+bytes for the sun_path limit.
 
 `Negotiate` carries the control protocol version, the requested capability and
 a nonce. The plugin answers with its protocol version, the capabilities it
 implements and an HMAC of the nonce keyed by the token, which the host
-verifies. Versions match exactly while the SDK is pre-1.0: a different
+verifies. `Negotiate` is the one call sent without the token, so the plugin
+proves it holds the token before the host reveals it to whatever listens on
+the socket; every later call, `Ping`, `Stop` and the capability services
+included, carries it. Versions match exactly while the SDK is pre-1.0: a different
 protocol version, or a capability with the same name at another version, is a
 startup error naming both. A process that exits before negotiating fails
 `Resolve` at once with its exit status and the tail of its standard error. A

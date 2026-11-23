@@ -30,6 +30,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -37,6 +39,7 @@ import (
 type servedPlugin struct {
 	stdin  *io.PipeWriter
 	client pluginrpc.ControlClient
+	conn   *grpc.ClientConn
 	done   chan error
 	token  string
 }
@@ -77,6 +80,7 @@ func startServed(t *testing.T, impls ...Implementation) *servedPlugin {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	sp.conn = conn
 	sp.client = pluginrpc.NewControlClient(conn)
 	return sp
 }
@@ -229,3 +233,71 @@ func TestServeRejectsBadInput(t *testing.T) {
 }
 
 func stringsReader(s string) io.Reader { return strings.NewReader(s) }
+
+func TestServeNegotiatesWithoutTokenButGuardsEveryOtherCall(t *testing.T) {
+	t.Parallel()
+	sp := startServed(t, Implementation{
+		Capability: "grpc.health/v1",
+		Service:    &healthpb.Health_ServiceDesc,
+		Impl:       health.NewServer(),
+	})
+
+	nonce := []byte("fedcba9876543210")
+	resp, err := sp.client.Negotiate(
+		sp.ctx(t, ""),
+		&pluginrpc.NegotiateRequest{Nonce: nonce},
+		grpc.WaitForReady(true),
+	)
+	if err != nil {
+		t.Fatalf("negotiate without token: %v", err)
+	}
+	mac := hmac.New(sha256.New, []byte(sp.token))
+	mac.Write(nonce)
+	if !hmac.Equal(resp.GetProof(), mac.Sum(nil)) {
+		t.Fatal("proof is not the HMAC of the nonce under the token")
+	}
+
+	healthClient := healthpb.NewHealthClient(sp.conn)
+	calls := map[string]func(context.Context) error{
+		"ping": func(ctx context.Context) error {
+			_, err := sp.client.Ping(ctx, &pluginrpc.PingRequest{})
+			return err
+		},
+		"stop": func(ctx context.Context) error {
+			_, err := sp.client.Stop(ctx, &pluginrpc.StopRequest{})
+			return err
+		},
+		"capability unary": func(ctx context.Context) error {
+			_, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{})
+			return err
+		},
+		"capability stream": func(ctx context.Context) error {
+			stream, err := healthClient.Watch(
+				ctx,
+				&healthpb.HealthCheckRequest{},
+			)
+			if err != nil {
+				return err
+			}
+			_, err = stream.Recv()
+			return err
+		},
+	}
+	for name, call := range calls {
+		if err := call(sp.ctx(t, "")); status.Code(
+			err,
+		) != codes.Unauthenticated {
+			t.Fatalf(
+				"%s without token: got %v, want Unauthenticated",
+				name,
+				err,
+			)
+		}
+	}
+	if _, err := healthClient.Check(
+		sp.ctx(t, sp.token),
+		&healthpb.HealthCheckRequest{},
+	); err != nil {
+		t.Fatalf("capability call with token: %v", err)
+	}
+}

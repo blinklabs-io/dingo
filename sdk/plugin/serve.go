@@ -18,8 +18,9 @@
 // The node launches the plugin executable and writes one JSON line to its
 // standard input: the control protocol version, the Unix socket path to serve
 // on, and a one-time token. Serve listens on that socket, answers the node's
-// Negotiate, Ping and Stop calls, and rejects any call that does not carry the
-// token. A plugin implements each capability as an ordinary gRPC service
+// Negotiate, Ping and Stop calls, and rejects any call other than Negotiate
+// that does not carry the token. Negotiate is answered without it, because its
+// reply proves to the node that the plugin holds the token. A plugin implements each capability as an ordinary gRPC service
 // defined by that capability's contract.
 //
 // Contract versions are matched exactly while the sdk is below 1.0: a plugin
@@ -54,7 +55,7 @@ import (
 const ProtocolVersion uint32 = 0
 
 // TokenHeader is the gRPC metadata key that carries the launch token on every
-// call to the plugin.
+// call to the plugin except Negotiate.
 const TokenHeader = "dingo-plugin-token"
 
 // maxHandshakeBytes bounds the handshake line so a misbehaving parent cannot
@@ -226,9 +227,14 @@ func (c *controlServer) authorized(ctx context.Context) error {
 func (c *controlServer) authUnary(
 	ctx context.Context,
 	req any,
-	_ *grpc.UnaryServerInfo,
+	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
 ) (any, error) {
+	// The node sends no token on Negotiate: the reply's HMAC is the plugin's
+	// proof that it holds the token, so the node does not reveal it first.
+	if info.FullMethod == pluginrpc.Control_Negotiate_FullMethodName {
+		return handler(ctx, req)
+	}
 	if err := c.authorized(ctx); err != nil {
 		return nil, err
 	}
