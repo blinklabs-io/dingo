@@ -1777,16 +1777,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// On startup failure or panic, stop the recycler and wait for it before
 	// unwinding later components that the recycler can still touch.
 	started = append(started, n.waitChainsyncStallRecycler)
-	// Resolve UTxO RPC when its declared storage feature is active and the
-	// configured port is non-zero.
+	// Resolve UTxO RPC when the selected provider is enabled by the storage
+	// plan and its configured port is non-zero.
 	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
 		plugin.CapabilityAPIUtxorpc,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to select UTxO RPC API plugin: %w", err)
 	}
-	if n.storageFeatureEnabled(plugin.StorageFeatureUtxorpc) &&
-		utxorpcPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIUtxorpc, utxorpcSelection, utxorpcPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
@@ -1922,8 +1923,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Blockfrost API plugin: %w", err)
 	}
-	if n.storageFeatureEnabled(plugin.StorageFeatureBlockfrost) &&
-		blockfrostPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIBlockfrost, blockfrostSelection, blockfrostPort,
+	) {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
 			n.mempool,
@@ -1962,7 +1964,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// apiPluginSelection names the capability in its errors.
 		return err
 	}
-	if n.storageFeatureEnabled(plugin.StorageFeatureKupo) && kupoPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIKupo, kupoSelection, kupoPort,
+	) {
 		adapter, err := kupo.NewNodeAdapter(
 			n.ledgerState, n.indexerStore,
 		)
@@ -1994,7 +1998,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Mesh API plugin: %w", err)
 	}
-	if n.storageFeatureEnabled(plugin.StorageFeatureMesh) && meshPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMesh, meshSelection, meshPort,
+	) {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -2042,7 +2048,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// apiPluginSelection names the capability in its errors.
 		return err
 	}
-	if n.storageFeatureEnabled(plugin.StorageFeatureMCP) && mcpPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMcp, mcpSelection, mcpPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
 			mcpSelection.Provider, mcpSelection.Config,

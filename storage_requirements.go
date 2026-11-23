@@ -72,6 +72,45 @@ func (n *Node) storageFeatureEnabled(feature plugin.StorageFeature) bool {
 	return slices.Contains(n.config.storageFeatures, feature)
 }
 
+// apiProviderEnabled reports whether the selected provider of an API
+// capability starts: the same decision enabledStorageConsumers feeds the
+// storage plan, so an external provider that declares a different feature
+// than the built-in one is still started.
+func (n *Node) apiProviderEnabled(
+	capability plugin.Capability,
+	selection plugin.Selection,
+	port uint,
+) bool {
+	descriptor, ok := n.pluginHost.ProviderDescriptor(
+		capability, selection.Provider,
+	)
+	if !ok {
+		return false
+	}
+	return apiProviderEnabledFor(
+		n.apiStorageMode(), capability, selection, descriptor, port,
+	)
+}
+
+func apiProviderEnabledFor(
+	mode StorageMode,
+	capability plugin.Capability,
+	selection plugin.Selection,
+	descriptor plugin.Descriptor,
+	port uint,
+) bool {
+	if port == 0 {
+		return false
+	}
+	// API-tier built-ins with non-zero defaults remain dormant in core mode.
+	// A changed port or provider is an enabled selection.
+	dormant := descriptor.Storage.Tier == plugin.StorageTierAPI &&
+		!mode.IsAPI() &&
+		selection.Provider == "builtin" &&
+		port == defaultAPIPort(capability)
+	return !dormant
+}
+
 func (n *Node) storagePlan() ([]plugin.StorageFeature, error) {
 	selectedTier := storageTierForMode(n.apiStorageMode())
 	consumers, err := n.enabledStorageConsumers()
@@ -157,15 +196,9 @@ func (n *Node) enabledStorageConsumers() ([]storageConsumer, error) {
 				capability.Name(), selection.Provider,
 			)
 		}
-		enabled := port > 0
-		if descriptor.Storage.Tier == plugin.StorageTierAPI &&
-			!n.apiStorageMode().IsAPI() &&
-			selection.Provider == "builtin" &&
-			port == defaultAPIPort(capability) {
-			// API-tier built-ins with non-zero defaults remain dormant in
-			// core mode. A changed port or provider is an enabled selection.
-			enabled = false
-		}
+		enabled := apiProviderEnabledFor(
+			n.apiStorageMode(), capability, selection, descriptor, port,
+		)
 		consumers = append(consumers, storageConsumer{
 			name:         capability.Name() + "/" + selection.Provider,
 			requirements: descriptor.Storage, enabled: enabled,

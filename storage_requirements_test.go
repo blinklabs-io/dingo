@@ -93,3 +93,62 @@ func TestAPIStorageTierEnablesEveryDeclaredFeature(t *testing.T) {
 		plugin.StorageFeatureUtxorpc,
 	}, n.config.storageFeatures)
 }
+
+func TestAPIProviderEnabledDoesNotRequireBuiltInFeature(t *testing.T) {
+	t.Parallel()
+
+	external := plugin.Descriptor{Storage: plugin.StorageRequirements{
+		Tier:     plugin.StorageTierCore,
+		Features: []plugin.StorageFeature{"custom-feature"},
+	}}
+	apiTier := plugin.Descriptor{Storage: plugin.StorageRequirements{
+		Tier:     plugin.StorageTierAPI,
+		Features: []plugin.StorageFeature{plugin.StorageFeatureBlockfrost},
+	}}
+	builtin := plugin.Selection{Provider: "builtin"}
+	custom := plugin.Selection{Provider: "custom"}
+	blockfrostPort := defaultAPIPort(plugin.CapabilityAPIBlockfrost)
+	utxorpcPort := defaultAPIPort(plugin.CapabilityAPIUtxorpc)
+
+	// A core-tier external provider declaring only its own feature starts.
+	require.True(t, apiProviderEnabledFor(
+		StorageModeCore, plugin.CapabilityAPIUtxorpc, custom, external,
+		utxorpcPort,
+	))
+	// Port zero disables any provider.
+	require.False(t, apiProviderEnabledFor(
+		StorageModeCore, plugin.CapabilityAPIUtxorpc, custom, external, 0,
+	))
+	// An API-tier built-in at its default port stays dormant in core mode.
+	require.False(t, apiProviderEnabledFor(
+		StorageModeCore, plugin.CapabilityAPIBlockfrost, builtin, apiTier,
+		blockfrostPort,
+	))
+	require.True(t, apiProviderEnabledFor(
+		StorageModeAPI, plugin.CapabilityAPIBlockfrost, builtin, apiTier,
+		blockfrostPort,
+	))
+}
+
+func TestAPIProviderEnabledFollowsStoragePlan(t *testing.T) {
+	t.Parallel()
+
+	n, err := New(storageRequirementsTestConfig(
+		WithStorageMode(StorageModeCore),
+	))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, n.Stop()) })
+
+	utxorpc, port, err := n.apiPluginSelection(plugin.CapabilityAPIUtxorpc)
+	require.NoError(t, err)
+	require.True(t, n.apiProviderEnabled(
+		plugin.CapabilityAPIUtxorpc, utxorpc, port,
+	))
+	blockfrost, port, err := n.apiPluginSelection(
+		plugin.CapabilityAPIBlockfrost,
+	)
+	require.NoError(t, err)
+	require.False(t, n.apiProviderEnabled(
+		plugin.CapabilityAPIBlockfrost, blockfrost, port,
+	))
+}
