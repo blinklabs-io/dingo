@@ -127,6 +127,10 @@ type CertifiedClosureSource interface {
 		hash []byte,
 		slot uint64,
 	) ([]byte, []cbor.RawMessage, error)
+	// UsesTransactionBacking reports whether the ledger's offsets for the
+	// endorser block target its transaction-list record rather than a
+	// standalone closure blob.
+	UsesTransactionBacking(hash []byte, slot uint64) (bool, error)
 }
 
 // ledgerClosureSource reads through the ledger state: the parent may be a
@@ -154,6 +158,13 @@ func (s ledgerClosureSource) EndorserBlockData(
 	)
 }
 
+func (s ledgerClosureSource) UsesTransactionBacking(
+	hash []byte,
+	slot uint64,
+) (bool, error) {
+	return s.ls.db.CanUseLeiosTransactionBacking(slot, hash)
+}
+
 // databaseClosureSource reads a closure from a database alone, as a consumer
 // that applies blocks the ledger already committed does.
 type databaseClosureSource struct{ db *database.Database }
@@ -177,6 +188,13 @@ func (s databaseClosureSource) EndorserBlockData(
 	slot uint64,
 ) ([]byte, []cbor.RawMessage, error) {
 	return readEndorserBlockData(s.db, hash, slot, nil)
+}
+
+func (s databaseClosureSource) UsesTransactionBacking(
+	hash []byte,
+	slot uint64,
+) (bool, error) {
+	return s.db.CanUseLeiosTransactionBacking(slot, hash)
 }
 
 func readEndorserBlockData(

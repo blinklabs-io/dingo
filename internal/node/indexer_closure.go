@@ -44,7 +44,7 @@ func (b *Backfill) closureSource() dledger.CertifiedClosureSource {
 // indexClosure writes the rows the ledger writes when it applies a certified
 // closure with its ranking block: the transactions its manifest lists, in
 // manifest order, except those already stored. Their offsets point into the
-// endorser-block blob the ledger stored; they are written here under the
+// endorser-block record the ledger stored, in the layout it chose; they are written here under the
 // IndexerDB's own keys.
 //
 // contextSlot is the slot the ledger applies the closure at when it is
@@ -82,10 +82,27 @@ func (b *Backfill) indexClosure(
 	if err != nil {
 		return err
 	}
-	offsets, err := dledger.EndorserBlockTransactionOffsets(
-		txs, bodies, closure.RawTransactions(), closure.EndorserBlockSlot,
-		closure.EndorserBlockHash,
+	// The ledger keeps a standalone closure blob for an occurrence that
+	// already had one, so offsets for it must follow that blob's layout
+	// rather than the transaction list's.
+	transactionBacking, err := b.closureSource().UsesTransactionBacking(
+		closure.EndorserBlockHash.Bytes(), closure.EndorserBlockSlot,
 	)
+	if err != nil {
+		return fmt.Errorf("inspect endorser block backing: %w", err)
+	}
+	var offsets *database.BlockIngestionResult
+	if transactionBacking {
+		offsets, err = dledger.EndorserBlockTransactionOffsets(
+			txs, bodies, closure.RawTransactions(), closure.EndorserBlockSlot,
+			closure.EndorserBlockHash,
+		)
+	} else {
+		offsets, err = dledger.EndorserBlockOffsets(
+			txs, bodies, closure.EndorserBlockSlot,
+			closure.EndorserBlockHash,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("compute endorser block offsets: %w", err)
 	}

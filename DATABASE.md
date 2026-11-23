@@ -7984,9 +7984,10 @@ flowchart LR
     UtxoKey["u + tx hash + output index<br/>UTxO CBOR or DOFF"]
     TxKey["t + tx hash<br/>DOFF or DTXP"]
     Offset["DOFF / DTXP<br/>slot + block hash + byte ranges"]
-    EbManifest["leios/: v|i + slot + EB hash + m<br/>raw EB manifest CBOR"]
-    EbTxs["leios/: v|i + slot + EB hash + t<br/>CBOR list of transaction bodies"]
-    EbBlob["leios/: v|i + slot + EB hash + c<br/>closure transaction CBOR blob"]
+    EbManifest["leios/: d + slot + EB hash + m<br/>raw EB manifest CBOR"]
+    EbTxs["leios/: d + slot + EB hash + t<br/>CBOR list of transactions"]
+    EbBacking["leios/: d + slot + EB hash + a<br/>marker: offsets use the t record"]
+    EbBlob["leios/: d + slot + EB hash + c<br/>legacy standalone closure blob"]
     BlobCommit["metadata_commit_timestamp"]
     SqlCommit["SQL commit_timestamp"]
 
@@ -7997,7 +7998,8 @@ flowchart LR
     TxKey --> Offset
     Offset --> BlockKey
     EbManifest -. "body hashes and sizes" .-> EbTxs
-    EbTxs -. "when apply path retains bodies" .-> EbBlob
+    EbTxs -. "ledger apply marks as backing" .-> EbBacking
+    Offset -. "or, for a legacy occurrence" .-> EbBlob
     SqlCommit --- BlobCommit
 ```
 
