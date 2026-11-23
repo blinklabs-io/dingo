@@ -99,11 +99,9 @@ func DelegatorInactivityActivationEpoch(
 // sweep, after the metadata layer has restored the remaining account
 // fields (e.g. via TruncateAfterSlot).
 //
-// Shared by ledger.LedgerState.rollback (bounded rollback during normal
-// sync, security-parameter-limited) and database/lifecycle.Truncate
-// (offline and live CIP-0135 disaster-recovery truncate, which may go far
-// deeper) so both apply the exact same CIP-0163 bookkeeping regardless of
-// which path performs the truncation.
+// database/lifecycle.Truncate calls it for a store whose accounts are still
+// in SQL. Once the LedgerDB set holds the accounts, a ledger rollback
+// restores expiration_epoch from the set's journal instead.
 func RecomputeAccountExpirationsAfterTruncate(
 	ctx context.Context,
 	d *Database,
