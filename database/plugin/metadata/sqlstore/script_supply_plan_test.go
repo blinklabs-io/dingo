@@ -23,10 +23,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The index replaced by the script-locked aggregate was the only
-// deleted_slot-leading index with payment_script in it; every other query that
-// the planner could send through it must still seek an index, with and without
-// planner statistics, and none may name the dropped index.
+// Migration 75 drops idx_utxo_deleted_payment_script, the last full
+// deleted_slot-leading index on SQLite. Every query the planner could send
+// through it must still seek an index, with and without planner statistics.
+// The only deleted_slot-leading index left, idx_utxo_deleted_staking_amount, is
+// partial on deleted_slot > 0, so the batched spend's deleted_slot = 0 arm
+// cannot use it and seeks idx_utxo_tx_id_output_idx.
 //
 // GetLiveUtxoLovelace and iterateLiveUtxos are left out: each reads every
 // live row, the first once at the Byron-to-Shelley boundary, and with
@@ -91,14 +93,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			}
 			for name, query := range queries {
 				plan := explainSQLPlan(t, store, query)
-				require.NotContains(
-					t,
-					plan,
-					"idx_utxo_deleted_payment_script",
-					name,
-				)
 				require.NotContains(t, plan, "SCAN utxo", "%s: %s", name, plan)
 			}
+			plan := explainSQLPlan(t, store, queries["batched spend"])
+			require.Contains(
+				t,
+				plan,
+				"SEARCH utxo USING INDEX idx_utxo_tx_id_output_idx",
+				plan,
+			)
 		})
 	}
 }

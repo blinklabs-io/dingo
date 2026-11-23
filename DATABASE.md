@@ -112,9 +112,14 @@ retain their native returning or upsert paths.
 
 SQLite keeps planner statistics current while the node runs. A node synced from
 genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
-indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
-plans as a scan of a `deleted_slot`-leading index instead of a seek on
-`idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
+indexes by shape alone. A full `deleted_slot`-leading index on `utxo` is the
+shape that misleads it: with one, the batched spend `UPDATE` in
+`consumeUtxosBatchQuery` plans as a scan of that index instead of a seek on
+`idx_utxo_tx_id_output_idx`. Migration 75 drops the last such index on SQLite;
+the surviving `idx_utxo_deleted_staking_amount` is partial on
+`deleted_slot > 0`, which the spend's `deleted_slot = 0` arm cannot use, so the
+spend seeks `idx_utxo_tx_id_output_idx` with or without statistics.
+`Store.OptimizePlannerStatsContext` runs a
 bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
 limit restored afterwards) on the write connection, outside any transaction, at startup,
 after each epoch rollover commits, and once a minute in between. `PRAGMA
@@ -9199,11 +9204,11 @@ read-transaction snapshot that attempts to upgrade after another writer
 commits; PostgreSQL and MySQL include `deleted_slot = 0` on the primary-key
 update so a concurrent spend cannot be overwritten.
 
-The update itself carries no `deleted_slot = 0` predicate. With one, SQLite
-plans it as a search of a `deleted_slot`-leading index on `deleted_slot`
-from two row IDs upwards whenever `sqlite_stat1` is absent, evaluating
-`id IN (...)` against every live row — the same whole-table pass the lookup
-change removes. Liveness is established by the lookup and checked again on
+The update itself carries no `deleted_slot = 0` predicate. With one and a full
+`deleted_slot`-leading index on `utxo`, SQLite plans it as a search of that
+index on `deleted_slot` from two row IDs upwards whenever `sqlite_stat1` is
+absent, evaluating `id IN (...)` against every live row — the same
+whole-table pass the lookup change removes. Liveness is established by the lookup and checked again on
 non-SQLite backends during the update:
 
 ```sql
@@ -9779,8 +9784,10 @@ pattern never needs exact-address filtering.
 address to narrow the live set, so both queries resolve the asset through
 `asset_identity` (`(policy_id, name)` unique key), read its holdings through
 `idx_asset_holding_asset_id`, and look the live UTxOs up by primary key; on SQLite
-the statement hides `idx_utxo_deleted_payment_script` from the planner so the
-holdings drive. Probing the holdings once per live UTxO instead costs the
+the statement writes its liveness term as `+utxo.deleted_slot = 0`, which no
+index can serve, so the holdings drive. On the current schema no index serves
+that term anyway: the only `deleted_slot`-leading index left,
+`idx_utxo_deleted_staking_amount`, is partial on `deleted_slot > 0`. Probing the holdings once per live UTxO instead costs the
 same however few UTxOs hold the policy. The cost of the asset-first form scales
 with the currently retained holdings under the policy; spent UTxO rows are
 removed during pruning. A policy with many retained holdings relative to its
