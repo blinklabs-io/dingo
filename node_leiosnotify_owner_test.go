@@ -99,7 +99,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database: db, ChainManager: chainManager, Logger: logger,
-		UtxoSet: livesettest.New(),
+		UtxoSet: livesettest.OpenLedgerDB(t, db),
 	})
 	require.NoError(t, err)
 	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{

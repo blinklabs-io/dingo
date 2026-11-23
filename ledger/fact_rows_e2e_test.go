@@ -21,14 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -147,66 +141,38 @@ func readAllFactRows(
 	return renderFactRows(all)
 }
 
-// With the epoch, summary, network state, donation and protocol parameter
-// families drained, the live UTxO set exports the rows the metadata store held
-// before the drain, by the same natural keys, over every slot range read.
+// The live UTxO set exports each served
+// fact table by its natural keys: every table holds rows over the whole slot
+// range, and a narrower range returns rows of the whole range only.
 func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
 	t.Parallel()
 	type window struct{ from, through uint64 }
 	windows := []window{{0, math.MaxInt64}, {0, 0}}
-	run := func(drain bool) map[string][]string {
-		out := map[string][]string{}
-		_, h := allGraduatedRun(
-			t, drain, func(h *p5Harness) func() []string {
-				store, ok := h.scenario.DB.Metadata().(metadata.FactRowStore)
-				require.True(t, ok)
-				read := func(
-					table metadata.FactTable, from, through uint64,
-					cursor int64, limit int,
-				) (metadata.FactRows, int64, error) {
-					if drain {
-						return h.scenario.ReadFactRows(
-							table, from, through, cursor, limit,
-						)
-					}
-					return store.ReadFactRows(
-						t.Context(), table, from, through, cursor, limit, nil,
-					)
-				}
-				// DRep registrations, activity, a dormant expiry bump, a reset
-				// and a clear of dangling delegations write the DRep history.
-				h.scenario.Governance(h.refs[0], 10)
-				cur := h.scenario.CurrentPoint().Slot
-				windows = append(windows, window{cur, cur + 1})
-				for _, name := range servedFactTables {
-					for _, w := range windows {
-						key := fmt.Sprintf("%s[%d,%d]", name, w.from, w.through)
-						out[key] = readAllFactRows(
-							t, read, name, w.from, w.through,
-						)
-					}
-				}
-				return func() []string { return nil }
-			},
-		)
-		if drain {
-			for _, name := range servedFactTables {
-				require.NotContains(t, h.scenario.UnservedFactTables(), name)
+	out := map[string][]string{}
+	_, h := allGraduatedRun(t, func(h *p5Harness) func() []string {
+		// DRep registrations, activity, a dormant expiry bump, a reset
+		// and a clear of dangling delegations write the DRep history.
+		h.scenario.Governance(h.refs[0], 10)
+		cur := h.scenario.CurrentPoint().Slot
+		windows = append(windows, window{cur, cur + 1})
+		for _, name := range servedFactTables {
+			for _, w := range windows {
+				key := fmt.Sprintf("%s[%d,%d]", name, w.from, w.through)
+				out[key] = readAllFactRows(
+					t, h.scenario.ReadFactRows, name, w.from, w.through,
+				)
 			}
 		}
-		return out
-	}
-	undrained := run(false)
-	drained := run(true)
-	held := map[string]bool{}
-	for key, want := range undrained {
-		require.Equal(t, want, drained[key], key)
-		if len(want) > 0 {
-			held[key[:strings.IndexByte(key, '[')]] = true
-		}
-	}
+		return func() []string { return nil }
+	})
 	for _, name := range servedFactTables {
-		require.True(t, held[name], "%s held rows in some window", name)
+		require.NotContains(t, h.scenario.UnservedFactTables(), name)
+		whole := out[fmt.Sprintf("%s[%d,%d]", name, 0, uint64(math.MaxInt64))]
+		require.NotEmpty(t, whole, "%s holds rows", name)
+		for _, w := range windows[1:] {
+			key := fmt.Sprintf("%s[%d,%d]", name, w.from, w.through)
+			require.Subset(t, whole, out[key], key)
+		}
 	}
 }
 
@@ -215,7 +181,7 @@ func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
 // answer.
 func TestDrainedSetServesEveryDrainedFactTable(t *testing.T) {
 	t.Parallel()
-	_, h := allGraduatedRun(t, true, func(*p5Harness) func() []string {
+	_, h := allGraduatedRun(t, func(*p5Harness) func() []string {
 		return func() []string { return nil }
 	})
 	require.Empty(t, h.scenario.UnservedFactTables())
@@ -230,42 +196,20 @@ func TestDrainedDRepHistoryFollowsARollback(t *testing.T) {
 		"drep_expiry_history", "drep_dormancy_history",
 		"drep_expiry_epoch_event", "account_drep_clear",
 	}
-	run := func(drain bool) map[string][]string {
-		out, _ := allGraduatedRun(t, drain, func(h *p5Harness) func() []string {
-			store, ok := h.scenario.DB.Metadata().(metadata.FactRowStore)
-			require.True(t, ok)
-			read := func(
-				table metadata.FactTable, from, through uint64,
-				cursor int64, limit int,
-			) (metadata.FactRows, int64, error) {
-				if drain {
-					return h.scenario.ReadFactRows(
-						table, from, through, cursor, limit,
-					)
+	drained, _ := allGraduatedRun(t, func(h *p5Harness) func() []string {
+		h.scenario.Governance(h.refs[0], 10)
+		return func() []string {
+			var lines []string
+			for _, name := range names {
+				for _, row := range readAllFactRows(
+					t, h.scenario.ReadFactRows, name, 0, math.MaxInt64,
+				) {
+					lines = append(lines, name+" "+row)
 				}
-				return store.ReadFactRows(
-					t.Context(), table, from, through, cursor, limit, nil,
-				)
 			}
-			h.scenario.Governance(h.refs[0], 10)
-			return func() []string {
-				var lines []string
-				for _, name := range names {
-					for _, row := range readAllFactRows(
-						t, read, name, 0, math.MaxInt64,
-					) {
-						lines = append(lines, name+" "+row)
-					}
-				}
-				return lines
-			}
-		})
-		return out
-	}
-	undrained := run(false)
-	drained := run(true)
-	require.Equal(t, undrained["applied"], drained["applied"])
-	require.Equal(t, undrained["rolled back"], drained["rolled back"])
+			return lines
+		}
+	})
 	grew := 0
 	for _, name := range names {
 		count := func(lines []string) int {
@@ -287,58 +231,6 @@ func TestDrainedDRepHistoryFollowsARollback(t *testing.T) {
 	)
 }
 
-// drainedHistoryLedgerDB is a LedgerDB whose DRep history and imported block
-// counts are drained, as a store's are once their families are drained after
-// the set loaded the rest.
-type drainedHistoryLedgerDB struct {
-	ledgerdb.LedgerDB
-}
-
-func (drainedHistoryLedgerDB) DRepHistoryRows(
-	ledgerdb.Txn,
-) (ledgerdb.DRepHistoryRows, error) {
-	return ledgerdb.DRepHistoryRows{}, database.ErrFamilyDrained
-}
-
-func (drainedHistoryLedgerDB) ImportedBlockRows(
-	ledgerdb.Txn,
-) (map[uint64]ledgerdb.ImportedBlockRows, error) {
-	return nil, database.ErrFamilyDrained
-}
-
-// A set that loaded after the metadata store drained the DRep history or the
-// imported block counts holds none of them, so a drained export of those
-// tables fails instead of answering with no rows.
-func TestDrainedSetRefusesFactTablesItLostBeforeLoadingThem(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, statedrain.NewTripGuard(),
-	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), drainedHistoryLedgerDB{dbadapter.New(s.DB)},
-	))
-	s.InstallDrainedSources()
-	s.DrainFamilies(
-		nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps).
-			With(nodesettings.FamilyRewardBlocksFees),
-	)
-	for _, name := range []string{
-		"drep_expiry_history", "drep_dormancy_history",
-		"drep_expiry_epoch_event", "account_drep_clear",
-		"imported_pool_block_count", "imported_epoch_block_total",
-	} {
-		_, _, err := s.ReadFactRows(
-			factTableByName(t, name), 0, math.MaxInt64, 0, 10,
-		)
-		require.ErrorIs(t, err, ledger.ErrFactTableUnserved, name)
-		require.ErrorContains(t, err, name)
-	}
-}
-
 // The set serves the tables that grow with the chain page by page from a key.
 // Read one row at a time, every page continues where the last stopped: the
 // pages are the table, each row once, as one large read returns it.
@@ -347,7 +239,7 @@ func TestSeekedFactPagesAreTheWholeTable(t *testing.T) {
 	tables := []string{
 		"account", "drep", "drep_expiry_history", "drep_dormancy_history",
 	}
-	allGraduatedRun(t, true, func(h *p5Harness) func() []string {
+	allGraduatedRun(t, func(h *p5Harness) func() []string {
 		for _, name := range tables {
 			idx := slices.IndexFunc(metadata.FactTables, func(ft metadata.FactTable) bool {
 				return ft.Name == name
@@ -401,7 +293,7 @@ func TestAccountAndDrepExportCostFollowsTheRowsChangedInRange(t *testing.T) {
 		require.GreaterOrEqual(t, i, 0, name)
 		return metadata.FactTables[i]
 	}
-	allGraduatedRun(t, true, func(h *p5Harness) func() []string {
+	allGraduatedRun(t, func(h *p5Harness) func() []string {
 		base := h.scenario.CurrentPoint().Slot + 10
 		cred := func(i int) []byte {
 			return []byte{0x90, byte(i >> 16), byte(i >> 8), byte(i), 1, 2, 3, 4}

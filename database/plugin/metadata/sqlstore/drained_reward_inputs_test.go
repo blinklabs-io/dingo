@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
@@ -58,48 +57,6 @@ func TestStakeInputReadersRefuseADrainedRewardInputsFamily(t *testing.T) {
 			require.ErrorIs(t, tc.read(store), nodesettings.ErrFamilyDrained)
 		})
 	}
-}
-
-// A drained reward-inputs family has no reward_snapshot rows to compare, so
-// the provenance gate leaves that table alone: it neither reads it nor reports
-// a stale row it still holds. A stale pool_stake_snapshot row, which the
-// family does not own, still trips the gate.
-func TestStaleSnapshotGateSkipsADrainedRewardSnapshotTable(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
-		Epoch: 4, SnapshotType: "mark", Authoritative: true,
-		CalculationVersion: models.RewardStakeCalculationVersion - 1,
-	}, nil))
-	stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-	require.NoError(t, err)
-	require.True(t, stale, "undrained: the stale row trips the gate")
-
-	store.SetDrainedFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardInputs),
-	)
-	stale, err = store.StaleConsensusStakeSnapshotsExist(nil)
-	require.NoError(t, err)
-	require.False(t, stale)
-	epochs, err := store.StaleConsensusStakeSnapshotEpochs(nil)
-	require.NoError(t, err)
-	require.Empty(t, epochs)
-
-	require.NoError(
-		t,
-		store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-			Epoch:              6,
-			SnapshotType:       models.PoolStakeSnapshotTypeMark,
-			PoolKeyHash:        bytes.Repeat([]byte{0x44}, 28),
-			CalculationVersion: models.RewardStakeCalculationVersion - 1,
-		}, nil),
-	)
-	stale, err = store.StaleConsensusStakeSnapshotsExist(nil)
-	require.NoError(t, err)
-	require.True(t, stale)
-	epochs, err = store.StaleConsensusStakeSnapshotEpochs(nil)
-	require.NoError(t, err)
-	require.Equal(t, []uint64{6}, epochs)
 }
 
 // The imported block counts are read only from the tables a drained

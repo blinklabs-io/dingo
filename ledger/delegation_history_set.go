@@ -62,7 +62,7 @@ func delegationEventBefore(a, b DelegationEvent) bool {
 }
 
 // delegationHistoryReader returns the set's delegation history reader once it
-// holds the history, or nil when reads stay on the metadata store.
+// holds the history, or nil when the set does not serve them.
 func (ls *LedgerState) delegationHistoryReader(
 	txn ledgerdb.Txn,
 ) DelegationHistoryReader {

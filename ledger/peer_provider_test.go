@@ -64,6 +64,7 @@ func newTestAdapter(
 ) *PoolRelayProvider {
 	t.Helper()
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	adapter, err := NewPoolRelayProvider(ls, db, eventBus)
 	require.NoError(t, err)
 	adapter.cacheTTL = cacheTTL
@@ -105,6 +106,7 @@ func TestPoolRelayProviderNewErrors(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	t.Run("nil ledgerState", func(t *testing.T) {
 		_, err := NewPoolRelayProvider(nil, db, nil)
@@ -326,6 +328,7 @@ func TestPoolRelayProviderNilEventBus(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	// Constructing with nil eventBus should not panic
 	adapter, err := NewPoolRelayProvider(ls, db, nil)
@@ -528,7 +531,7 @@ func seedStakedPools(
 			{Ipv4: &ipB, Port: 3002},
 		}},
 	} {
-		require.NoError(t, db.ImportPool(
+		require.NoError(t, fxImportPool(t, db,
 			t.Context(),
 			nil,
 			&models.Pool{
@@ -540,7 +543,7 @@ func seedStakedPools(
 			},
 		))
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		2, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -548,7 +551,7 @@ func seedStakedPools(
 		BlockNumber: 1,
 	}, nil))
 	stakeKey := bytes.Repeat([]byte{0xd5}, 28)
-	require.NoError(t, db.CreateAccount(t.Context(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: stakeKey, Pool: poolA, Active: true,
 	}))
 	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{

@@ -50,7 +50,7 @@ type ReimportConfig struct {
 	CardanoNodeConfig *cardano.CardanoNodeConfig
 	// UtxoSet receives the ledger state; the database drained families into
 	// it, so the import must be able to load them back.
-	UtxoSet ledgerstate.FamilyLoader
+	UtxoSet ledgerstate.CatchUpLoader
 	// Commit, when set, runs once the import has loaded UtxoSet and before the
 	// run is marked finished. It makes the loaded set the node's live set: the
 	// import loaded a copy of it, so a run that fails earlier leaves the live

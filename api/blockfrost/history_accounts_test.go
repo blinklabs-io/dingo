@@ -307,7 +307,7 @@ func TestNodeAdapterStakeHistoryRefusesIncompleteSnapshot(t *testing.T) {
 	address := fx.addAccount(t, 0x01)
 	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
 	// The ledger records a pending write in its own store.
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.ledgerState.LedgerDB()
 	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
 
 	require.NoError(t, meta.SetSyncState(

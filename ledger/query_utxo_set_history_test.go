@@ -180,26 +180,36 @@ func cloneQueryUtxos(src map[utxoref.Key][]byte) map[utxoref.Key][]byte {
 	return clone
 }
 
+// attachQueryLiveUtxoSet puts the outputs db's metadata rows hold live into
+// the ledger's LedgerDB set, committed at db's tip, and returns the set. A
+// ledger built without a set gets an in-memory one that serves outputs only.
 func attachQueryLiveUtxoSet(
 	t *testing.T,
 	ls *LedgerState,
 	db *database.Database,
-) *querySetHistory {
+) UtxoSetWriter {
 	t.Helper()
-	set := newQuerySetHistory()
+	if ls.config.UtxoSet == nil {
+		ls.config.UtxoSet = newQuerySetHistory()
+	}
+	set := ls.config.UtxoSet
+	var added []UtxoOutput
 	err := db.IterateLiveUtxos(t.Context(), nil, func(utxo *models.Utxo) error {
-		return set.ApplyUtxoChanges(nil, []UtxoEvent{{Added: []UtxoOutput{{
+		added = append(added, UtxoOutput{
 			Ref:  models.UtxoId{Hash: slices.Clone(utxo.TxId), Idx: utxo.OutputIdx},
 			Cbor: slices.Clone(utxo.Cbor),
-		}}}})
+		})
+		return nil
 	})
 	require.NoError(t, err)
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
-	require.NoError(t, set.ApplyUtxoChanges(&ocommon.Point{
+	point := ocommon.Point{
 		Slot: tip.Point.Slot, Hash: slices.Clone(tip.Point.Hash),
-	}, nil))
-	ls.config.UtxoSet = set
+	}
+	require.NoError(t, set.ApplyUtxoChanges(
+		&point, []UtxoEvent{{Point: point, Added: added}},
+	))
 	return set
 }
 
@@ -227,14 +237,19 @@ func attachQueryUtxoLifecycle(
 	attachQueryUtxoHistory(t, ls, events)
 }
 
+// attachQueryUtxoHistory commits events to the fixture's LedgerDB set in slot
+// order, one commit per slot, so the set's journal answers a read as of any
+// of them. A slot db holds a block for is committed at that block's point.
 func attachQueryUtxoHistory(
 	t *testing.T,
 	ls *LedgerState,
 	events map[uint64][]UtxoEvent,
-) *querySetHistory {
+) UtxoSetWriter {
 	t.Helper()
-	set := newQuerySetHistory()
-	ls.config.UtxoSet = set
+	if ls.config.UtxoSet == nil {
+		attachTestLiveSet(t, ls)
+	}
+	set := ls.config.UtxoSet
 	slots := make([]uint64, 0, len(events))
 	for slot := range events {
 		slots = append(slots, slot)
@@ -242,7 +257,17 @@ func attachQueryUtxoHistory(
 	slices.Sort(slots)
 	for _, slot := range slots {
 		point := ocommon.Point{Slot: slot}
-		require.NoError(t, set.ApplyUtxoChanges(&point, events[slot]))
+		if block, err := database.BlockBySlot(t.Context(), ls.db, slot); err == nil {
+			point.Hash = slices.Clone(block.Hash)
+		}
+		changes := slices.Clone(events[slot])
+		for i := range changes {
+			changes[i].Point = point
+		}
+		if len(changes) == 0 {
+			changes = []UtxoEvent{{Point: point}}
+		}
+		require.NoError(t, set.ApplyUtxoChanges(&point, changes))
 	}
 	return set
 }

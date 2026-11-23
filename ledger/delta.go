@@ -412,7 +412,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// by this block's transactions. This runs after every transaction's effects
 	// (including stake-key registrations that create account rows) have been
 	// written to the same DB transaction above, so a credential registered by
-	// this block already has a row for RenewAccountExpirations to update, and
+	// this block already has an account for the renewal to update, and
 	// the renewal commits or rolls back atomically with the block. It is a
 	// no-op when the delegator-inactivity gate is off. The renewal is idempotent
 	// and monotonic, so applying it per delta (once per block outside
@@ -429,15 +429,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			witnessTxs = append(witnessTxs, TransactionLevelsForApply(tr.Tx)...)
 		}
-		if err := ls.renewWitnessedAccountExpirations(
-			ctx,
+		ls.renewWitnessedAccountExpirations( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			txn,
 			currentEpoch,
 			d.Point.Slot,
 			witnessTxs,
-		); err != nil {
-			return fmt.Errorf("renew witnessed account expirations: %w", err)
-		}
+		)
 	}
 
 	if recordDonations {

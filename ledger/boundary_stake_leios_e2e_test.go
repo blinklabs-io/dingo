@@ -390,30 +390,3 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable,
 		"the closure witness is the store's pick before the ordinary one")
 }
-
-// A set loaded from the metadata store holds the closure withdrawals the set
-// that followed the ledger kept as it applied them.
-func TestClosureWithdrawalWitnessesLoadFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newLeiosBoundaryHarnessWith(t, "set",
-		ledger.CertifiedBoundaryOptions{GWithdraws: true})
-	s := h.slots
-	type slots struct{ applied, effective uint64 }
-	each := func(set *utxoset.Set) []slots {
-		var out []slots
-		require.NoError(t, set.EachWithdrawalWitness(s.G,
-			func(applied, effective uint64) error {
-				out = append(out, slots{applied, effective})
-				return nil
-			}))
-		return out
-	}
-	want := []slots{{s.GApplied, s.GEff}}
-	require.Equal(t, want, each(h.set), "the staged set")
-
-	loaded, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = loaded.Close() })
-	require.NoError(t, loaded.LoadLedgerState(t.Context(), h.store))
-	require.Equal(t, want, each(loaded), "the loaded set")
-}

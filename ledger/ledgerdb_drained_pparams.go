@@ -15,6 +15,10 @@
 package ledger
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -29,10 +33,6 @@ type SyncMarkerReader interface {
 	SyncMarker(name string) (string, bool, error)
 }
 
-func (s stagingLedgerDB) pparamsDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyPParamsUpdates)
-}
-
 // drainedPParamsSource serves the database's own protocol parameter reads,
 // and a rollback's, from the committed rows of the set once the
 // pparams-updates family is drained.
@@ -42,7 +42,7 @@ type drainedPParamsSource struct {
 
 func (d drainedPParamsSource) pparams() (PParamsReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamsReader)
-	if !ok {
+	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
@@ -50,7 +50,7 @@ func (d drainedPParamsSource) pparams() (PParamsReader, error) {
 
 func (d drainedPParamsSource) updates() (PParamUpdateReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamUpdateReader)
-	if !ok {
+	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
@@ -58,7 +58,7 @@ func (d drainedPParamsSource) updates() (PParamUpdateReader, error) {
 
 func (d drainedPParamsSource) markers() (SyncMarkerReader, error) {
 	r, ok := d.ls.readSet(nil).(SyncMarkerReader)
-	if !ok {
+	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
@@ -120,7 +120,7 @@ func (d drainedPParamsSource) SyncMarker(name string) (string, bool, error) {
 // proposals and sync markers for the reads it makes once the pparams-updates
 // family is drained.
 func (ls *LedgerState) installPParamsSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetPParamsSource(drainedPParamsSource{ls})
 	}
 }
@@ -134,7 +134,7 @@ func (ls *LedgerState) syncMarkerView(
 	name string,
 ) (string, error) {
 	r, ok := ls.readSet(txn).(SyncMarkerReader)
-	if !ok {
+	if !ok || ls.utxoSetFailed.Load() {
 		return "", drainedUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	loaded, err := r.SyncMarkersLoaded()
@@ -165,49 +165,55 @@ func (ls *LedgerState) syncMarkerView(
 	return value, nil
 }
 
-// GetSyncState reads a protocol parameter sync marker from the set once the
-// pparams-updates family is drained.
+// GetSyncState reads from the set the sync_state keys that name ledger
+// state: the protocol parameter sync markers, the reward precompute cursors,
+// the incomplete stake input snapshots, the pending ratification record and
+// the delegator inactivity activation.
 func (s stagingLedgerDB) GetSyncState(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, error) {
-	if database.IsPParamsSyncMarker(key) && s.pparamsDrained() {
+	if database.IsPParamsSyncMarker(key) {
 		return s.ls.syncMarkerView(txn, key)
 	}
 	if isRewardCursorKey(key) {
 		return s.getCursor(key, txn)
 	}
-	if key == rewardStakeInputsPendingKey && s.rewardInputsDrained() {
+	switch {
+	case key == rewardStakeInputsPendingKey:
 		return s.getPendingStakeInputs(txn)
+	case key == pendingRatificationSyncKey:
+		return s.ratifyPendingState(txn)
+	case isInactivityMarker(key):
+		return s.inactivityMarker(txn)
+	case !isChainSyncStateKey(key):
+		return "", fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 	}
 	return s.LedgerDB.GetSyncState(key, txn)
 }
 
-// SetSyncState stages a write of a protocol parameter sync marker for the
-// set, and skips the metadata store's write once the family is drained.
+// SetSyncState stages for the set a write of a sync_state key that names
+// ledger state.
 func (s stagingLedgerDB) SetSyncState(
 	key, value string,
 	txn ledgerdb.Txn,
 ) error {
 	if isRewardCursorKey(key) {
-		if !s.rewardOutputsDrained() {
-			if err := s.LedgerDB.SetSyncState(key, value, txn); err != nil {
-				return err
-			}
-		}
 		s.cursorWrite(key, value, txn)
 		return nil
 	}
-	if key == rewardStakeInputsPendingKey {
+	switch {
+	case key == rewardStakeInputsPendingKey:
 		return s.setPendingStakeInputs(value, txn)
-	}
-	if !database.IsPParamsSyncMarker(key) {
+	case key == pendingRatificationSyncKey:
+		s.setRatifyPending(value, txn)
+		return nil
+	case isInactivityMarker(key):
+		return errInactivityMarkerWrite
+	case isChainSyncStateKey(key):
 		return s.LedgerDB.SetSyncState(key, value, txn)
-	}
-	if !s.pparamsDrained() {
-		if err := s.LedgerDB.SetSyncState(key, value, txn); err != nil {
-			return err
-		}
+	case !database.IsPParamsSyncMarker(key):
+		return fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		SyncMarkers: []SyncMarkerChange{{Name: key, Value: value}},
@@ -215,26 +221,97 @@ func (s stagingLedgerDB) SetSyncState(
 	return nil
 }
 
-// DeleteSyncState stages the deletion of a protocol parameter sync marker
-// for the set, and skips the metadata store's delete once the family is
-// drained.
+// DeleteSyncState stages for the set the deletion of a sync_state key that
+// names ledger state.
 func (s stagingLedgerDB) DeleteSyncState(
 	key string,
 	txn ledgerdb.Txn,
 ) error {
-	if key == rewardStakeInputsPendingKey {
-		return s.deletePendingStakeInputs(txn)
+	if isRewardCursorKey(key) {
+		return s.deleteCursor(key, txn)
 	}
-	if !database.IsPParamsSyncMarker(key) {
+	switch {
+	case key == rewardStakeInputsPendingKey:
+		return s.setPendingStakeInputs("", txn)
+	case key == pendingRatificationSyncKey:
+		return s.deleteRatifyPending(txn)
+	case isInactivityMarker(key):
+		return errInactivityMarkerWrite
+	case isChainSyncStateKey(key):
 		return s.LedgerDB.DeleteSyncState(key, txn)
-	}
-	if !s.pparamsDrained() {
-		if err := s.LedgerDB.DeleteSyncState(key, txn); err != nil {
-			return err
-		}
+	case !database.IsPParamsSyncMarker(key):
+		return fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		SyncMarkers: []SyncMarkerChange{{Name: key, Delete: true}},
 	})
 	return nil
 }
+
+// GetSyncStateBounded reads a chain-store sync_state key, refusing a value
+// over maxBytes; no ledger-state key is read this way.
+func (s stagingLedgerDB) GetSyncStateBounded(
+	key string,
+	maxBytes int,
+	txn ledgerdb.Txn,
+) (string, error) {
+	if !isChainSyncStateKey(key) {
+		return "", fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
+	}
+	return s.LedgerDB.GetSyncStateBounded(key, maxBytes, txn)
+}
+
+// ListSyncStateKeysByPrefix lists the chain-store sync_state keys under
+// prefix. Only the deferred header validation markers are listed this way.
+func (s stagingLedgerDB) ListSyncStateKeysByPrefix(
+	prefix string,
+	txn ledgerdb.Txn,
+) ([]string, error) {
+	if prefix != deferredHeaderValidationSyncStatePrefix {
+		return nil, fmt.Errorf("%w: prefix %q", errSyncStateKeyUnowned, prefix)
+	}
+	return s.LedgerDB.ListSyncStateKeysByPrefix(prefix, txn)
+}
+
+// deleteCursor accepts the deletion of a reward precompute cursor that txn
+// has already removed with its epoch's outputs (DeleteRewardOutputsForEpoch
+// stages both); the set keeps no cursor apart from the outputs it describes.
+func (s stagingLedgerDB) deleteCursor(key string, txn ledgerdb.Txn) error {
+	raw, err := s.getCursor(key, txn)
+	if err != nil {
+		return err
+	}
+	if raw != "" {
+		return fmt.Errorf(
+			"%w: delete the reward outputs of the cursor's epoch with it",
+			errCursorDeleteAlone,
+		)
+	}
+	return nil
+}
+
+var errCursorDeleteAlone = errors.New(
+	"a reward precompute cursor is deleted only with its epoch's outputs",
+)
+
+// isChainSyncStateKey reports a sync_state key the ledger reads or writes
+// that names chain data rather than ledger state: the deferred header
+// validation markers and their eviction floor, the Mithril trust boundary
+// and the consumed-UTxO prune floor of the transaction index. These stay
+// in the SQL chain store with the blocks and the index they describe.
+func isChainSyncStateKey(key string) bool {
+	switch key {
+	case deferredHeaderValidationFloorSyncStateKey,
+		mithrilLedgerSlotSyncKey,
+		mithrilLedgerHashSyncKey,
+		database.ConsumedUtxoPruneFloorSyncKey:
+		return true
+	}
+	return strings.HasPrefix(key, deferredHeaderValidationSyncStatePrefix)
+}
+
+// errSyncStateKeyUnowned refuses a sync_state key that names neither ledger
+// state the LedgerDB set keeps nor chain data the SQL chain store holds.
+var errSyncStateKeyUnowned = errors.New(
+	"sync_state key is neither LedgerDB state nor chain data",
+)

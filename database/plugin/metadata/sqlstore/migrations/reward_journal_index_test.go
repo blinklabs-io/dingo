@@ -27,10 +27,23 @@ import (
 func TestRewardJournalCredentialIndexMigrationPreservesRows(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, path, 72)
+	migrations.SeedMigratedPrefix(t, path, 71)
 	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	// The seeded schema must predate the index swap, or the run below
+	// applies nothing and every later assertion holds without it.
+	for _, name := range []string{
+		"idx_account_reward_delta_w_tx_s_slot",
+		"idx_account_reward_delta_credential",
+	} {
+		_, ok := indexSQL(t, db, name)
+		require.True(t, ok, "%s must exist before the upgrade", name)
+	}
+	_, replaced := indexSQL(
+		t, db, "idx_account_reward_delta_credential_slot_kind_source",
+	)
+	require.False(t, replaced, "the upgrade must not be applied yet")
 
 	for i := range 3 {
 		_, err = db.Exec(`INSERT INTO account_reward_delta

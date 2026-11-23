@@ -16,153 +16,73 @@ package ledger
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
-type poolVrfLegacyStore struct {
-	metadata.MetadataStore
-	fullReads atomic.Uint64
+// newPoolVrfHeaderLedger is a ledger holding the registration and the stake
+// snapshot that make block's issuer eligible in epoch 5.
+func newPoolVrfHeaderLedger(
+	t *testing.T,
+	block *testBlockResult,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := newEligibilityTestLedgerOnDB(t, block.epochNonce, db)
+	key := block.block.IssuerVkey().Hash()
+	seedBlockPoolRegistration(t, db, block.block)
+	seedPoolStakeSnapshot(t, db, 4, key[:], 1_000_000_000)
+	return ls, db
 }
 
-func (s *poolVrfLegacyStore) GetPool(
-	key lcommon.PoolKeyHash, inactive bool, txn types.Txn,
-) (*models.Pool, error) {
-	s.fullReads.Add(1)
-	return s.MetadataStore.GetPool(key, inactive, txn)
-}
-
-type poolVrfProjectionStore struct {
-	*poolVrfLegacyStore
-	projectedReads        atomic.Uint64
-	malformedRegistration bool
-	malformedFallback     bool
-	fail                  bool
-}
-
-func (s *poolVrfProjectionStore) GetPoolVrfState(
-	key lcommon.PoolKeyHash, txn types.Txn,
-) (*models.Pool, error) {
-	s.projectedReads.Add(1)
-	if s.fail {
-		return nil, errInjectedStorage
-	}
-	pool, err := s.MetadataStore.(interface {
-		GetPoolVrfState(lcommon.PoolKeyHash, types.Txn) (*models.Pool, error)
-	}).GetPoolVrfState(key, txn)
-	if err != nil || pool == nil {
-		return pool, err
-	}
-	if s.malformedRegistration {
-		pool.Registration[0].VrfKeyHash = []byte{1}
-	}
-	if s.malformedFallback {
-		pool.Registration[0].VrfKeyHash = nil
-		pool.VrfKeyHash = []byte{1}
-	}
-	return pool, nil
-}
-
-func TestHeaderStateUsesPoolVrfProjectionWithLegacyFallback(t *testing.T) {
+func TestHeaderStateResolvesRegisteredPoolVrfKey(t *testing.T) {
 	t.Parallel()
-	for _, optimized := range []bool{true, false} {
-		name := "projection"
-		if !optimized {
-			name = "legacy provider"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			legacy := &poolVrfLegacyStore{}
-			projected := &poolVrfProjectionStore{poolVrfLegacyStore: legacy}
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(t, dbtest.Options{
-				Config: &database.Config{DataDir: t.TempDir()},
-			}, func(inner metadata.MetadataStore) metadata.MetadataStore {
-				legacy.MetadataStore = inner
-				if optimized {
-					return projected
-				}
-				return legacy
-			})
-			require.NoError(t, err)
-			block := createTestBlock(t, [32]byte{72}, 0, tamperNone)
-			ls := newEligibilityTestLedgerOnDB(t, block.epochNonce, db)
-			key := block.block.IssuerVkey().Hash()
-			seedBlockPoolRegistration(t, db, block.block)
-			seedPoolStakeSnapshot(t, db, 4, key[:], 1_000_000_000)
-			legacy.fullReads.Store(0)
-			projected.projectedReads.Store(0)
-			require.NoError(t, ls.verifyBlockHeaderState(block.block, 5, false))
-			if optimized {
-				require.Positive(
-					t,
-					projected.projectedReads.Load(),
-					"production header state must use the projection",
-				)
-				require.Zero(
-					t,
-					legacy.fullReads.Load(),
-					"VRF authorization must not hydrate a full pool",
-				)
-			} else {
-				require.Positive(t, legacy.fullReads.Load(), "old metadata providers must keep resolving current keys")
-			}
-			_, err = db.GetPoolVrfState(
-				context.Background(),
-				lcommon.PoolKeyHash{0xff},
-				nil,
-			)
-			require.ErrorIs(t, err, models.ErrPoolNotFound)
-		})
-	}
+	block := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, db := newPoolVrfHeaderLedger(t, block)
+	require.NoError(t, ls.verifyBlockHeaderState(block.block, 5, false))
+	_, err := seedDB(t, db).GetPoolVrfState(
+		context.Background(),
+		lcommon.PoolKeyHash{0xff},
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrPoolNotFound)
 }
 
-func TestPoolVrfProjectionFailuresRemainLocalStateErrors(t *testing.T) {
+func TestPoolVrfReadFailuresRemainLocalStateErrors(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{"registration hash", "fallback hash", "database failure"} {
+	for _, fault := range []string{"registration hash", "storage failure"} {
 		t.Run(fault, func(t *testing.T) {
 			t.Parallel()
-			store := &poolVrfProjectionStore{
-				poolVrfLegacyStore: &poolVrfLegacyStore{},
-			}
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(t, dbtest.Options{
-				Config: &database.Config{DataDir: t.TempDir()},
-			}, func(inner metadata.MetadataStore) metadata.MetadataStore {
-				store.MetadataStore = inner
-				return store
-			})
-			require.NoError(t, err)
 			block := createTestBlock(t, [32]byte{73}, 0, tamperNone)
-			ls := newEligibilityTestLedgerOnDB(t, block.epochNonce, db)
-			key := block.block.IssuerVkey().Hash()
-			seedBlockPoolRegistration(t, db, block.block)
-			seedPoolStakeSnapshot(t, db, 4, key[:], 1_000_000_000)
+			ls, _ := newPoolVrfHeaderLedger(t, block)
 			require.NoError(t, ls.verifyBlockHeaderState(block.block, 5, false))
-			store.projectedReads.Store(0)
+			key := block.block.IssuerVkey().Hash()
+			faults := fxFaultedLedger(t, ls, SetFaultsForTest{})
 			switch fault {
 			case "registration hash":
-				store.malformedRegistration = true
-			case "fallback hash":
-				store.malformedFallback = true
-			case "database failure":
-				store.fail = true
+				faults.ExtraPoolHistory = map[string][]PoolEvent{
+					string(key[:]): {{
+						Slot: 1,
+						Registration: &models.PoolRegistration{
+							PoolKeyHash: key[:],
+							VrfKeyHash:  []byte{1},
+							AddedSlot:   1,
+						},
+					}},
+				}
+			case "storage failure":
+				faults.Pool = errInjectedStorage
 			}
-			err = ls.verifyBlockHeaderState(block.block, 5, false)
+			err := ls.verifyBlockHeaderState(block.block, 5, false)
 			require.ErrorIs(t, err, errHeaderStateLookupFailed)
 			require.False(t, headerFailureBlamesPeer(err))
-			require.Positive(
-				t,
-				store.projectedReads.Load(),
-				"fault must reach the optimized production read",
-			)
-			if store.fail {
+			if faults.Pool != nil {
 				require.ErrorIs(t, err, errInjectedStorage)
 			}
 		})

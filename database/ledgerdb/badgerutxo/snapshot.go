@@ -202,9 +202,6 @@ func (s *Store) BootstrapIncomplete() (bool, error) {
 }
 
 func (s *Store) dropPrefix(prefixes ...[]byte) error {
-	if s.merging.Load() {
-		return s.dropWindowed(prefixes)
-	}
 	if drained := nodesettings.FamilyMask(s.loadsRefused.Load()); drained != 0 {
 		var held bool
 		err := s.view(func(txn *badger.Txn) error {
@@ -287,7 +284,7 @@ func rollsBackWithoutJournal(tag byte) bool {
 		RewardStakeInputTag, RewardPoolInputTag, RewardSnapshotTag,
 		RewardPotsTag, RewardDerivedTag, RewardCursorTag,
 		RewardOutputTag, RewardEpochTag, RewardRoundTag, RewardPostSnapTag,
-		ImportedBlocksTag:
+		ImportedBlocksTag, InactivityTag, RatifyPendingTag:
 		return true
 	}
 	return false

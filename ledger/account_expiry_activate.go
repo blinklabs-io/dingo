@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 
@@ -23,19 +22,16 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
 
-// database.DelegatorInactivityActivatedSyncKey is the durable sync_state
-// marker key guarding the one-time CIP-0163 activation stamp (defined in
-// the database package, not here, so both this write side and
-// database.RecomputeAccountExpirationsAfterTruncate's read/clear side
-// agree on the exact same key). Its value is the activation epoch A (the
-// epoch entered at the boundary activation ran on), stored as a decimal
-// string; a NON-EMPTY value means activation has already run. Once set,
-// activateDelegatorInactivityIfNeeded never re-stamps, even across
-// restarts (the marker is stored in the same metadata store as the
-// account rows and committed atomically with the stamp). The stored
-// epoch is the activation floor the rollback/truncate recompute clamps
-// to: activation stamps A + W without leaving a witness, so witness
-// history alone cannot reconstruct it.
+// The one-time CIP-0163 activation is recorded in the LedgerDB set as the
+// activation epoch A (the epoch entered at the boundary activation ran on)
+// and the credentials it stamped, journaled at that boundary's slot.
+// database.DelegatorInactivityActivatedSyncKey names the epoch, as a decimal
+// string, in reads through the LedgerDB; a non-empty value means activation
+// has already run, and activateDelegatorInactivityIfNeeded never re-stamps,
+// even across restarts. The stored epoch is the activation floor the reward
+// round clamps to, and the stamped credentials say whom it applies to:
+// activation stamps A + W without leaving a witness, so witness history
+// alone cannot reconstruct it.
 
 // activateDelegatorInactivityIfNeeded performs the one-time CIP-0163
 // activation stamp: on the first epoch boundary processed with the
@@ -43,7 +39,7 @@ import (
 // expiration_epoch to currentEpoch + DelegatorInactivity, including rows
 // already renewed by a pre-activation witness, giving every pre-existing
 // account a full inactivity window starting at this boundary. It is guarded by
-// a durable sync_state marker so it runs exactly once regardless of how many
+// the durable activation record so it runs exactly once regardless of how many
 // epoch boundaries are processed afterward or how many times the node
 // restarts. A no-op when the gate is off (no stamp, no marker write, so turning
 // the gate on later still triggers activation on the next boundary).
@@ -55,12 +51,12 @@ import (
 // currentEpoch+DelegatorInactivity convention used by
 // renewWitnessedAccountExpirations for ordinary per-block renewals.
 //
-// Must run inside the same database transaction as the epoch rollover
-// (txn) so the marker commits atomically with the stamp: a crash between the
-// two would otherwise either re-run the stamp or, worse, record activation
-// without ever having stamped anything. Passing the rollover's txn rules out
-// both partial states.
-func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
+// Must run inside the same transaction as the epoch rollover (txn) so the
+// record commits atomically with the stamp: a crash between the two would
+// otherwise either re-run the stamp or, worse, record activation without
+// ever having stamped anything. Passing the rollover's txn rules out both
+// partial states.
+func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	boundarySlot uint64,
@@ -79,28 +75,19 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 		return nil
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
-	stamped, err := ls.ledgerDB().StampAllActiveAccountExpirations(
-		ctx,
-		expiration,
-		txn,
-	)
-	if err != nil {
-		return err
-	}
 	// The set applies after commit, under the ledger lifecycle context.
 	//nolint:contextcheck
-	ls.stageAccountExpirationsWithActivation(
+	stamped := ls.stageAccountExpirationsWithActivation(
 		txn, nil, expiration, boundarySlot, &currentEpoch,
 	)
-	// Record the activation epoch A (not a bare flag) so the rollback recompute
-	// can clamp orphaned accounts back up to the activation floor A + W.
-	if err := ls.ledgerDB().SetSyncState(
-		database.DelegatorInactivityActivatedSyncKey,
-		strconv.FormatUint(currentEpoch, 10),
-		txn,
-	); err != nil {
-		return err
-	}
+	// Record the activation epoch A (not a bare flag): the stamped accounts
+	// carry it as their floor, and it marks the activation as having run.
+	ls.stageLedgerChanges(txn, LedgerChanges{
+		StateMarks: []StateMarkChange{{
+			Kind: StateMarkInactivity, Slot: boundarySlot,
+			Epoch: currentEpoch,
+		}},
+	})
 	// This one-time, consensus-affecting event starts the inactivity clock for
 	// every pre-existing active account; log it so operators can see when and
 	// how broadly CIP-0163 activation fired.
@@ -110,7 +97,7 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 			"component", "ledger",
 			"activation_epoch", currentEpoch,
 			"expiration_epoch", expiration,
-			"accounts_stamped", stamped,
+			"accounts_stamped", len(stamped),
 		)
 	}
 	return nil
@@ -120,8 +107,8 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 // marker and reports the activation epoch A, whether activation has occurred,
 // and any read/parse error. An empty marker means activation has not run yet
 // (activated == false, epoch 0). It is the read-back counterpart of the marker
-// write in activateDelegatorInactivityIfNeeded and is consumed by
-// recomputeAccountExpirationsAfterRollback.
+// write in activateDelegatorInactivityIfNeeded and is consumed by the reward
+// round's activation-floor clamp.
 func (ls *LedgerState) delegatorInactivityActivationEpoch(
 	txn ledgerdb.Txn,
 ) (epoch uint64, activated bool, err error) {

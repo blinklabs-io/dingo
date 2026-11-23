@@ -30,7 +30,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 )
@@ -379,7 +378,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 			reconstructedStakeInputs = rebuilt
 		}
 	}
-	_, params, performanceDecentralization, err := ls.rewardParameters(
+	_, params, err := ls.rewardParameters(
 		txn,
 		epochs.performance,
 		epochs.pots,
@@ -399,7 +398,6 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		txn,
 		epochs.performance,
 		poolInputs,
-		performanceDecentralization,
 	)
 	if err != nil {
 		return nil, false, err
@@ -624,20 +622,13 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 	return done, err
 }
 
-// beginPrecomputeChunkTxn opens the transaction a chunk runs in. A chunk
-// writes the reward-inputs and reward-outputs families; once both are drained
-// its writes only stage changes for the live UTxO set, so the transaction
-// takes no metadata write connection and block commits are not queued behind
-// it. Otherwise the chunk's rows are written to the metadata store and need a
-// write transaction.
+// beginPrecomputeChunkTxn opens the transaction a chunk runs in. A chunk's
+// writes only stage changes for the LedgerDB, so the transaction takes no
+// metadata write connection and block commits are not queued behind it.
 func (ls *LedgerState) beginPrecomputeChunkTxn(
 	ctx context.Context,
 ) ledgerdb.Txn {
-	if ls.familyDrained(nodesettings.FamilyRewardInputs) &&
-		ls.familyDrained(nodesettings.FamilyRewardOutputs) {
-		return ls.ledgerDB().BeginStaged(ctx)
-	}
-	return ls.ledgerDB().Begin(ctx, true)
+	return ls.ledgerDB().BeginStaged(ctx)
 }
 
 // stakeRewardPrecomputeChunksInTxn runs up to maxChunks chunks of Pass 2 for

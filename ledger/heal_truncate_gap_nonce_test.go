@@ -45,7 +45,7 @@ func newTruncateGapHealTestLedgerState(
 	tipNonce []byte,
 ) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		db: db,
 		currentTip: ochainsync.Tip{
 			Point: ocommon.Point{Slot: tipSlot, Hash: tipHash},
@@ -56,6 +56,8 @@ func newTruncateGapHealTestLedgerState(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
+	return ls
 }
 
 // TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint proves the
@@ -79,6 +81,7 @@ func TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	const checkpointSlot uint64 = 100
 
@@ -89,7 +92,7 @@ func TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint(t *testing.T) {
 
 	checkpointHash := bytes.Repeat([]byte{0x0c}, 32)
 	checkpointNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		checkpointHash,
 		checkpointSlot,
 		checkpointNonce,
@@ -139,7 +142,7 @@ func TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint(t *testing.T) {
 	require.NoError(t, ls.healTruncateGapBlockNonces(t.Context()))
 
 	for _, block := range blocks {
-		got, err := db.GetBlockNonce(
+		got, err := seedDB(t, db).GetBlockNonce(
 			ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()},
 			nil,
 		)
@@ -154,7 +157,7 @@ func TestHealTruncateGapBlockNonces_ReconstructsFromCheckpoint(t *testing.T) {
 		)
 	}
 
-	tipNonce, err := db.GetBlockNonce(
+	tipNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: tipSlot, Hash: tipHash},
 		nil,
 	)
@@ -181,6 +184,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -213,7 +217,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 	}, nil))
 
 	checkpointNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		checkpointBlock.Hash().Bytes(),
 		checkpointBlock.SlotNumber(),
 		checkpointNonce,
@@ -241,7 +245,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 
 	require.NoError(t, ls.healTruncateGapBlockNonces(t.Context()))
 
-	forkNonce, err := db.GetBlockNonce(
+	forkNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: 105, Hash: forkHash},
 		nil,
 	)
@@ -249,7 +253,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 	require.Nil(t, forkNonce, "fork blob must not be folded or given a row")
 
 	for _, block := range blocks[1:] {
-		got, err := db.GetBlockNonce(
+		got, err := seedDB(t, db).GetBlockNonce(
 			ocommon.Point{
 				Slot: block.SlotNumber(),
 				Hash: block.Hash().Bytes(),
@@ -261,7 +265,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 			"canonical block nonce must be the fold of canonical blocks only")
 	}
 
-	tipNonce, err := db.GetBlockNonce(
+	tipNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.Point{Slot: tipBlock.SlotNumber(), Hash: tipBlock.Hash().Bytes()},
 		nil,
 	)
@@ -279,6 +283,7 @@ func TestHealTruncateGapBlockNonces_NoOpWhenTipNonceValid(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	tipHash := bytes.Repeat([]byte{0x01}, 32)
 	tipNonce := bytes.Repeat([]byte{0x02}, 32)
@@ -299,6 +304,7 @@ func TestHealTruncateGapBlockNonces_NoOpForByronTip(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	byronHash := bytes.Repeat([]byte{0x0b}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -336,6 +342,7 @@ func TestHealTruncateGapBlockNonces_FailsWithoutCheckpoint(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	tipHash := bytes.Repeat([]byte{0x01}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -372,6 +379,7 @@ func TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -403,7 +411,7 @@ func TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly(
 		Number: 99,
 		Type:   conway.BlockTypeConway,
 	}, nil))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		forkCheckpointHash,
 		50,
 		bytes.Repeat([]byte{0xaa}, 32),

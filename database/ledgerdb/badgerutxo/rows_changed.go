@@ -23,8 +23,8 @@ import (
 )
 
 // ensureExportFloor gives a store opened without an export floor one at its
-// tip plus one: it may hold rows a load or merge wrote with no entry at their
-// AddedSlot, so only slots after the tip are known to be named by the journal.
+// tip plus one: it may hold rows written with no entry at their AddedSlot, so
+// only slots after the tip are known to be named by the journal.
 func (s *Store) ensureExportFloor() error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		if _, err := txn.Get(exportFloorKey); err == nil {
@@ -46,8 +46,8 @@ func (s *Store) ensureExportFloor() error {
 
 // changedFloor is the lowest slot from which the state journal names every
 // account and DRep row by its AddedSlot: pruning drops entries below the
-// journal floor, which a load raises to its tip, and a merge writes rows no
-// entry at their AddedSlot describes.
+// journal floor, which a load raises to its tip, and the export floor covers
+// rows written with no entry at their AddedSlot.
 func changedFloor(txn *badger.Txn) (uint64, error) {
 	// A load before any tip leaves no floor, but its rows have no entries.
 	floor := uint64(1)
@@ -71,8 +71,8 @@ func changedFloor(txn *badger.Txn) (uint64, error) {
 // A range wholly below the floor is served from the rows themselves: addedSlot
 // reads the AddedSlot out of a row's value, and the rows added in the range are
 // named by an index of the family, built on first use. It serves every range
-// below the floor it was built at, until a rollback, load, merge, restore or
-// reset could have put a row there. A nil addedSlot leaves such a range
+// below the floor it was built at, until a rollback, load, restore or reset
+// could have put a row there. A nil addedSlot leaves such a range
 // uncovered.
 //
 // It stops after fn returns ErrStopRows, or after stepping over maxVisit
