@@ -56,6 +56,9 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# The race detector remains enabled for modernc packages; only checkptr is
+# disabled because translated C performs pointer arithmetic on every access.
+RACE_GCFLAGS=-gcflags=modernc.org/...=-d=checkptr=0
 # nilaway and modernize accept -tags but ignore it ("no effect"); their package
 # loader reads build tags from GOFLAGS only, so pass them there or every
 # BUILD_TAGS-gated file goes unanalyzed.
@@ -180,14 +183,14 @@ $(PROTOC):
 # CI's gate (race) job in go-test.yml runs the same suite with a 60m
 # per-package -timeout. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
+	go test $(GO_TAG_FLAGS) -v -race $(RACE_GCFLAGS) -timeout 30m ./...
 	@for dir in $(NESTED_GO_MODULE_DIRS); do \
 		echo "go test -race ./... ($$dir)"; \
-		(cd $$dir && go test -v -race -timeout 30m ./...) || exit 1; \
+		(cd $$dir && go test -v -race $(RACE_GCFLAGS) -timeout 30m ./...) || exit 1; \
 	done
 
 test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
-	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
+	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race $(RACE_GCFLAGS) -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
 
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
