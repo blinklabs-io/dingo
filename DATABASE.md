@@ -8722,14 +8722,18 @@ written.
   markers. A marker therefore never exceeds the recorded tip and never names
   a chunk file that is not yet durable, and after a kill the tip may cover
   blocks the chain has not stored yet. Between a group's first rename and the
-  tip write for its last chunk the tip does not cover every moved file, so
+  blob sync after its last chunk the durable tip does not cover every moved
+  file, so
   before any file of the group moves the import durably records the group's
   first chunk in `<dataDir>/immutable/adopting.pending` (written, fsynced and
-  renamed into place with the directory fsynced) and removes it once the tip
-  covers the group's last chunk. The blob store is synced once per group,
-  after its last chunk commits. A chunk that fails inside a group moves the
-  later chunks' files back to the source directory, so the record is also
-  removed once the tip covers the failed chunk. While it exists
+  renamed into place with the directory fsynced). The blob store is synced
+  once per group, after its last chunk commits, and `im_state` is a
+  blob-store write that is not durable before that sync, so the record is
+  removed only after it. A chunk that fails inside a group moves the later
+  chunks' files back to the source directory; when the tip covers the failed
+  chunk the blob store is synced and the record removed. A move across file
+  systems fsyncs the copied file and its directory before it removes the
+  source. While it exists
   `ReconcileImmutable` leaves the directory alone and promotion and snapshots
   refuse it with `ErrImmutableAdoptionPending`, so a kill at any point of
   adopting a chunk, including before the first chunk has a tip, never cuts

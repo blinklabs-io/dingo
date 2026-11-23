@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -1091,4 +1092,120 @@ func TestAdoptImmutableChunksSpansGroups(t *testing.T) {
 	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
 	requireBlocksMatch(t, baseline, db, blocks)
 	requireOffsetsMatch(t, baseline, db, blocks)
+}
+
+// recordBlobSyncs swaps the blob-sync seam for one that notes, at each sync,
+// whether the adopt record is still on disk.
+func recordBlobSyncs(t *testing.T, db *database.Database) *[]string {
+	t.Helper()
+	prior := syncAdoptedBlobs
+	t.Cleanup(func() { syncAdoptedBlobs = prior })
+	var events []string
+	syncAdoptedBlobs = func(d *database.Database) error {
+		_, pending, err := db.ImmutableAdoptPending()
+		require.NoError(t, err)
+		events = append(events, fmt.Sprintf("sync pending=%t", pending))
+		return prior(d)
+	}
+	return &events
+}
+
+// Not t.Parallel: swaps the package-level syncAdoptedBlobs seam.
+//
+// The recorded tip that covers a group's files is a blob-store write, durable
+// only once the blob store syncs. The adopt record must outlive that sync, or a
+// crash between them leaves moved files past a lost tip with nothing to stop
+// reconciliation cutting them.
+func TestAdoptImmutableChunksKeepsRecordUntilBlobSync(t *testing.T) {
+	ctx := context.Background()
+	dir, digests := adoptSource(t, 2)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+	events := recordBlobSyncs(t, db)
+
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnChunkCommitted = func(uint64) error {
+			_, pending, err := db.ImmutableAdoptPending()
+			require.NoError(t, err)
+			*events = append(
+				*events,
+				fmt.Sprintf("committed pending=%t", pending),
+			)
+			return nil
+		}
+	})
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"sync pending=true", "committed pending=false"}, *events,
+		"the record is cleared after the group's blob sync")
+}
+
+// Not t.Parallel: swaps the package-level syncAdoptedBlobs seam.
+//
+// A chunk that stops after its tip was recorded, with no earlier chunk of its
+// group to finish, clears the adopt record only after a blob sync makes that
+// tip durable.
+func TestAdoptImmutableChunksStopAfterTipSyncsBeforeClear(t *testing.T) {
+	dir, digests := adoptSource(t, 2)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+	events := recordBlobSyncs(t, db)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnProgress = func(p LoadBlobsProgress) {
+			if p.BlocksCopied >= loadBlockBatchSize {
+				cancel()
+			}
+		}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []string{"sync pending=true"}, *events,
+		"the tip over chunk 0 is synced while the record still stands")
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending, "the durable tip covers every adopted file")
+}
+
+// Not t.Parallel: swaps the package-level renameFile and syncDir seams.
+//
+// A move across file systems copies, then removes the source. The copy and its
+// directory entry must be durable first, or a crash can persist the removal
+// and lose both.
+func TestMoveChunkFileAcrossFileSystemsSyncsBeforeRemove(t *testing.T) {
+	priorRename, priorSync := renameFile, syncDir
+	t.Cleanup(func() { renameFile, syncDir = priorRename, priorSync })
+	srcDir, dstDir := t.TempDir(), t.TempDir()
+	src := filepath.Join(srcDir, "00000.chunk")
+	dst := filepath.Join(dstDir, "00000.chunk")
+	data := []byte("chunk bytes")
+	require.NoError(t, os.WriteFile(src, data, 0o600))
+
+	renameFile = func(oldpath, newpath string) error {
+		if oldpath == src {
+			return &os.LinkError{
+				Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV,
+			}
+		}
+		return priorRename(oldpath, newpath)
+	}
+	var synced []string
+	syncDir = func(d string) error {
+		if d == dstDir {
+			_, err := os.Stat(src)
+			require.NoError(t, err, "the source outlives the destination sync")
+			got, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			require.Equal(t, data, got)
+		}
+		synced = append(synced, d)
+		return priorSync(d)
+	}
+
+	require.NoError(t, moveChunkFile(src, dst))
+	require.Equal(t, []string{dstDir}, synced)
+	_, err := os.Stat(src)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }

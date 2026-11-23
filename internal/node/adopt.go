@@ -196,9 +196,10 @@ func AdoptImmutableChunks(
 		group := pending[:min(len(pending), adoptGroupChunks)]
 		pending = pending[len(group):]
 		// Record the group before any file moves: from the first rename until
-		// the tip covers a chunk, reconciliation would read its files as
-		// bytes past the recorded tip and cut them. The record stays until
-		// the tip covers the whole group.
+		// a durable tip covers a chunk, reconciliation would read its files
+		// as bytes past the recorded tip and cut them. The tip is a blob-store
+		// write, durable only once the group's blob sync returns, so the
+		// record stays until then.
 		if err := db.BeginImmutableAdopt(group[0]); err != nil {
 			return nil, err
 		}
@@ -217,13 +218,12 @@ func AdoptImmutableChunks(
 				return nil, err
 			}
 		}
-		if err := fsyncdir.Sync(destDir); err != nil {
+		if err := syncDir(destDir); err != nil {
 			return nil, err
 		}
 		for i, num := range group {
-			last := i == len(group)-1
 			n, lastBlock, err := adoptGroupChunk(
-				ctx, db, c, dest, destDir, num, geom, callback, cfg, last,
+				ctx, db, c, dest, destDir, num, geom, callback, cfg,
 				func(copied int, slot uint64) {
 					reportLoadBlobsProgress(
 						cfg.OnProgress, blocksCopied+copied, slot,
@@ -241,9 +241,10 @@ func AdoptImmutableChunks(
 					return nil, errors.Join(err, rerr)
 				}
 				// The chunks before it committed; finish them as a group
-				// of their own so they are synced and released.
+				// of their own so they are synced and released. The record
+				// stays: the failed chunk's files may still sit past the tip.
 				if ferr := finishAdoptedGroup(
-					db, cfg, group[:i],
+					db, cfg, group[:i], false,
 				); ferr != nil {
 					return nil, errors.Join(err, ferr)
 				}
@@ -255,7 +256,7 @@ func AdoptImmutableChunks(
 				lastSlot = lastBlock.Slot
 			}
 		}
-		if err := finishAdoptedGroup(db, cfg, group); err != nil {
+		if err := finishAdoptedGroup(db, cfg, group, true); err != nil {
 			return nil, err
 		}
 		st, _ = db.ImmutableState()
@@ -321,7 +322,6 @@ func adoptChunk(
 	callback func(chain.RawBlock, *database.Txn) error,
 	beforeCommit func(chunk uint64) error,
 	progress func(copied int, slot uint64),
-	clearRecord bool,
 ) (int, *immutable.Block, error) {
 	// Slot ranges alone cannot tell a geometry with an epoch boundary slot
 	// from one without, and a primary index of the wrong shape would leave
@@ -426,15 +426,6 @@ func adoptChunk(
 			return 0, nil, err
 		}
 	}
-	// The recorded tip now covers the chunk, so reconciliation keeps its
-	// files. A chunk with no blocks records no tip and its files hold nothing
-	// for reconciliation to cut. In a group the record also covers the later
-	// chunks' files, so only the last chunk clears it.
-	if clearRecord {
-		if err := db.ClearImmutableAdopt(); err != nil {
-			return 0, nil, err
-		}
-	}
 	var added int
 	for len(raws) > 0 {
 		n := min(len(raws), loadBlockBatchSize)
@@ -512,14 +503,33 @@ func removeChunkFiles(dir string, num uint64) {
 	}
 }
 
+// Seams a test swaps to observe or force the order of durability steps.
+// A test that swaps one is not t.Parallel.
+var (
+	renameFile       = os.Rename
+	syncDir          = fsyncdir.Sync
+	syncAdoptedBlobs = func(db *database.Database) error {
+		blobStore := db.Blob()
+		if blobStore == nil {
+			return datatypes.ErrBlobStoreUnavailable
+		}
+		return blobStore.Sync()
+	}
+)
+
 // moveChunkFile renames src to dst, copying through a temporary name when the
-// two are on different file systems so dst never appears partly written.
+// two are on different file systems so dst never appears partly written. A
+// copy makes dst's data and its directory entry durable before src is
+// removed, so a crash at any point leaves at least one durable copy.
 func moveChunkFile(src, dst string) error {
-	err := os.Rename(src, dst)
+	err := renameFile(src, dst)
 	if err == nil || !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
 	if err := copyChunkFile(src, dst); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(dst)); err != nil {
 		return err
 	}
 	return os.Remove(src)
@@ -571,8 +581,8 @@ func copyChunkFile(src, dst string) error {
 var adoptGroupChunks = 64
 
 // adoptGroupChunk verifies and publishes one chunk of a group, then adopts
-// it. Only the group's last chunk clears the adopt record: until then later
-// chunks' files sit past the recorded tip.
+// it. It leaves the adopt record in place: the tip it records is not durable
+// until finishAdoptedGroup syncs the blob store.
 func adoptGroupChunk(
 	ctx context.Context,
 	db *database.Database,
@@ -583,7 +593,6 @@ func adoptGroupChunk(
 	geom immutable.Geometry,
 	callback func(chain.RawBlock, *database.Txn) error,
 	cfg AdoptChunksConfig,
-	clearRecord bool,
 	progress func(copied int, slot uint64),
 ) (int, *immutable.Block, error) {
 	if db.ImmutableChunksPublished() {
@@ -600,7 +609,7 @@ func adoptGroupChunk(
 	}
 	n, last, err := adoptChunk(
 		ctx, db, c, dest, destDir, num, geom, callback,
-		cfg.BeforeCommit, progress, clearRecord,
+		cfg.BeforeCommit, progress,
 	)
 	if err != nil {
 		return 0, nil, fmt.Errorf("adopting chunk %d: %w", num, err)
@@ -613,8 +622,8 @@ func adoptGroupChunk(
 // recorded tip is read afresh: adoptChunk moves it over the chunk before the
 // first marker commits, and from then on, as for a chunk an earlier run
 // stopped inside, committed markers can name the chunk's local and published
-// files, so both stay. No file then sits past the tip, so the adopt record
-// is cleared, as a chunk adopted alone clears it once its tip is recorded.
+// files, so both stay. No file then sits past the tip, so once the blob
+// store is synced, making that tip durable, the adopt record is cleared.
 func discardAdoptedChunk(
 	db *database.Database,
 	destDir string,
@@ -624,6 +633,9 @@ func discardAdoptedChunk(
 ) error {
 	cur, _ := db.ImmutableState()
 	if cur.HasTip && num <= cur.TipSlot/geom.ChunkSlots {
+		if serr := syncAdoptedBlobs(db); serr != nil {
+			return errors.Join(err, serr)
+		}
 		if cerr := db.ClearImmutableAdopt(); cerr != nil {
 			return errors.Join(err, cerr)
 		}
@@ -696,10 +708,10 @@ func moveChunksBack(
 			}
 		}
 	}
-	if err := fsyncdir.Sync(destDir); err != nil {
+	if err := syncDir(destDir); err != nil {
 		return err
 	}
-	return fsyncdir.Sync(srcDir)
+	return syncDir(srcDir)
 }
 
 // syncChunkFileData syncs a chunk's three files but not their directory.
@@ -723,22 +735,26 @@ func syncChunkFileData(dir string, num uint64) error {
 }
 
 // finishAdoptedGroup makes committed chunks durable in the blob store, then
-// releases their local copies, removes their sources and reports them.
+// releases their local copies, removes their sources and reports them. With
+// clearRecord it also removes the adopt record, which is safe only after the
+// sync: the recorded tip that covers the group's files is a blob-store write.
 func finishAdoptedGroup(
 	db *database.Database,
 	cfg AdoptChunksConfig,
 	group []uint64,
+	clearRecord bool,
 ) error {
 	if len(group) == 0 {
 		return nil
 	}
-	blobStore := db.Blob()
-	if blobStore == nil {
-		return datatypes.ErrBlobStoreUnavailable
-	}
 	lastNum := group[len(group)-1]
-	if err := blobStore.Sync(); err != nil {
+	if err := syncAdoptedBlobs(db); err != nil {
 		return fmt.Errorf("syncing blob store after chunk %d: %w", lastNum, err)
+	}
+	if clearRecord {
+		if err := db.ClearImmutableAdopt(); err != nil {
+			return err
+		}
 	}
 	for _, num := range group {
 		if err := db.ReleaseImmutableChunk(num); err != nil {

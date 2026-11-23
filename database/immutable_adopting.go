@@ -44,8 +44,8 @@ var ErrImmutableAdoptionPending = errors.New(
 // the first file moves. From then until ClearImmutableAdopt, reconciliation
 // leaves the directory alone: a stop after the files moved but before
 // AdoptImmutableTip covers them would otherwise read them as bytes beyond the
-// recorded tip and cut them, after the source copy is already gone. Repeating the call is safe. The caller
-// holds LockImmutable.
+// recorded tip and cut them, after the source copy is already gone.
+// Repeating the call is safe. The caller holds LockImmutable.
 func (d *Database) BeginImmutableAdopt(chunk uint64) error {
 	rt := d.immutable
 	if rt == nil {
@@ -82,8 +82,9 @@ func (d *Database) BeginImmutableAdopt(chunk uint64) error {
 	return nil
 }
 
-// ClearImmutableAdopt removes the record BeginImmutableAdopt wrote, once the
-// recorded tip covers every moved file of the group or the files are gone. It is a no-op
+// ClearImmutableAdopt removes the record BeginImmutableAdopt wrote, once a
+// durable recorded tip covers every moved file of the group (the blob store
+// has synced after AdoptImmutableTip) or the files are gone. It is a no-op
 // when none exists. The caller holds LockImmutable.
 func (d *Database) ClearImmutableAdopt() error {
 	rt := d.immutable
@@ -94,7 +95,8 @@ func (d *Database) ClearImmutableAdopt() error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clear immutable adopt: %w", err)
 	}
-	if err := fsyncdir.Sync(rt.dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := fsyncdir.Sync(rt.dir); err != nil &&
+		!errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clear immutable adopt: %w", err)
 	}
 	return nil
