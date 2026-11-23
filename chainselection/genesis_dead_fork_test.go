@@ -573,3 +573,33 @@ func TestAdvertisedTipStaleFollowsStaleTipRule(t *testing.T) {
 	})
 	require.False(t, praos.AdvertisedTipStale(genesisTip(1, "old", 1)))
 }
+
+func TestAdvertisedTipStaleWhenFarBehindLocalTipInPraos(t *testing.T) {
+	t.Parallel()
+	const k = 20
+	newPraos := func() *ChainSelector {
+		return NewChainSelector(ChainSelectorConfig{
+			SecurityParam: k,
+			WallClockSlot: func() (uint64, bool) {
+				return deadForkHonestTipSlot, true
+			},
+			DisableEventSubscriptions: true,
+		})
+	}
+	cs := newPraos()
+	// No local tip yet: nothing to be behind.
+	require.False(t, cs.AdvertisedTipStale(genesisTip(1, "far", 1)))
+
+	cs.SetLocalTip(genesisTip(deadForkHonestTipSlot, "local", 1000))
+	// More than k blocks below the local tip: selection can never pick it.
+	require.True(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot-500, "far", 1000-k-1,
+	)))
+	// Exactly k below is still selectable, as is any tip at or above local.
+	require.False(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot-500, "edge", 1000-k,
+	)))
+	require.False(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot, "ahead", 1001,
+	)))
+}

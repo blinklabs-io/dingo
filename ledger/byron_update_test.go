@@ -539,12 +539,12 @@ func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
 			Cbor:        block.Cbor(),
 		}}),
 	)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 21_600, nil,
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
-		UtxoSet:            NewMemLiveSetForTest(),
+		UtxoSet:            OpenLiveSetForTest(t, db),
 		ChainManager:       cm,
 		CardanoNodeConfig:  nodeConfig,
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),

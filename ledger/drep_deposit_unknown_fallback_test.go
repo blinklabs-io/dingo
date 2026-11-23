@@ -31,7 +31,7 @@ func TestDrepDeregistrationRejectsWrongRefundWhenUnrecorded(t *testing.T) {
 
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe2)
-	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+	drepSeedRegistered(t, db, cred, nil, 100, true)
 
 	pp := drepRefundTestPparams()
 	for _, refund := range []uint64{0, drepRefundTestPparamDeposit + 1} {
@@ -61,7 +61,7 @@ func TestDrepDeregistrationPrefersRecordedDepositOverFallback(t *testing.T) {
 		uint64(drepRefundTestRecordedDeposit),
 		"the recorded deposit must differ from the parameter to discriminate",
 	)
-	seedImportedDrep(t, db, cred, drepRefundTestRecordedDeposit, 100, true)
+	drepSeedRegistered(t, db, cred, new(uint64(drepRefundTestRecordedDeposit)), 100, true)
 
 	pp := drepRefundTestPparams()
 	require.NoError(t, conway.UtxoValidateCertificateDeposits(

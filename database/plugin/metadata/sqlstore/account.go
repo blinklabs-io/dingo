@@ -646,6 +646,9 @@ func (s *Store) AccountInactivityActivationMembership(
 	refs []models.StakeCredentialRef,
 	txn types.Txn,
 ) (map[string]struct{}, error) {
+	if err := s.refuseDrained("account_inactivity_activation"); err != nil {
+		return nil, err
+	}
 	ret := make(map[string]struct{})
 	if len(refs) == 0 {
 		return ret, nil

@@ -151,9 +151,7 @@ func (n *Node) buildIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
-	// The ledger answers fact reads from the live UTxO set for a family it has
-	// drained, and from the consensus metadata store otherwise.
-	var factRows metadata.FactRowReader
+	var factRows metadata.LedgerFacts
 	if n.ledgerState != nil && consensus == n.db {
 		factRows = n.ledgerState
 	}

@@ -201,7 +201,7 @@ func TestValidateTxCommitteeVotersSeeSameTransactionCertificates(
 				if !test.shared {
 					// coldA holds the voting hot key on its own; coldB
 					// authorizes an unrelated hot key.
-					seedCommitteeCredentialAuthorization(
+					committeeSeedAuthorization(
 						t,
 						db,
 						f.coldA,
@@ -209,12 +209,12 @@ func TestValidateTxCommitteeVotersSeeSameTransactionCertificates(
 						1,
 						1,
 					)
-					seedCommitteeCredentialAuthorization(
+					committeeSeedAuthorization(
 						t, db, f.coldB, committeeTestCredential(0x35), 2, 1,
 					)
 				} else {
-					seedCommitteeCredentialAuthorization(t, db, f.coldA, f.hot, 1, 1)
-					seedCommitteeCredentialAuthorization(t, db, f.coldB, f.hot, 2, 1)
+					committeeSeedAuthorization(t, db, f.coldA, f.hot, 1, 1)
+					committeeSeedAuthorization(t, db, f.coldB, f.hot, 2, 1)
 				}
 				voter, voterKey := test.voter(f)
 				err := committeeVotingValidate(
@@ -275,7 +275,7 @@ func TestValidateTxDRepAndPoolVotersSeeSameTransactionCertificates(
 				lv, db := committeeTestView(t, pparams)
 				seatCommitteeMembers(t, db, committeeTestCredential(0x43))
 				drep, drepKey := committeeTestVotingKey(0x44)
-				seedImportedDrep(t, db, drep, 0, 1, true)
+				drepSeedRegistered(t, db, drep, new(uint64(0)), 1, true)
 				registration, err := lv.DRepRegistration(drep)
 				require.NoError(t, err)
 				require.NotNil(t, registration)
@@ -353,7 +353,7 @@ func TestValidateTxDijkstraTopLevelVoterSeesSubTransactionCertificates(
 			oldHot := committeeTestCredential(0x52)
 			newHot := committeeTestCredential(0x53)
 			seatCommitteeMembers(t, db, cold)
-			seedCommitteeCredentialAuthorization(t, db, cold, oldHot, 1, 1)
+			committeeSeedAuthorization(t, db, cold, oldHot, 1, 1)
 			cert := authorizeHotCertificate(cold, newHot)
 			voter := newHot
 			if resign {
@@ -411,7 +411,7 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			lv, db := committeeTestView(t, pparams)
 			require.NoError(
 				t,
-				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+				seedDB(t, db).SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 			)
 			seatedCold := committeeTestCredential(0x61)
 			voterCold := seatedCold
@@ -420,14 +420,14 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			}
 			voterHot, voterKey := committeeTestVotingKey(0x63)
 			seatCommitteeMembers(t, db, seatedCold)
-			seedCommitteeCredentialAuthorization(t, db, voterCold, voterHot, 1, 1)
+			committeeSeedAuthorization(t, db, voterCold, voterHot, 1, 1)
 			actionID := storeCommitteeVotingTarget(
 				t, db, 0x64, lcommon.GovActionTypeInfo,
 			)
 			// Validation derives the action's expiry from its proposed epoch.
 			require.NoError(
 				t,
-				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+				seedDB(t, db).SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 			)
 
 			// Each Dijkstra UTxO level needs its own spend and witnesses for

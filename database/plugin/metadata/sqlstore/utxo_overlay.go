@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // The batch UTxO overlay stages one trusted block-apply transaction's UTxO
@@ -1398,33 +1397,6 @@ func (s *Store) flushOverlay(
 		)
 	}
 	return nil
-}
-
-// setTransactionOverlayUtxos is setTransactionWithAccumulator's UTxO step
-// with an overlay attached: the produced outputs are staged and the consumed
-// inputs resolved in memory, and no utxo statement runs.
-func (s *Store) setTransactionOverlayUtxos(
-	ctx context.Context,
-	db queryer,
-	o *utxoOverlay,
-	transaction lcommon.Transaction,
-	point ocommon.Point,
-	transactionID int64,
-	producedModels []models.Utxo,
-	uniqueConsumed []models.UtxoId,
-) (produced, consumed, skipped []stakeCredentialDelta, err error) {
-	if o.err != nil {
-		return nil, nil, nil, o.err
-	}
-	produced, err = o.create(producedModels)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	consumed, skipped, err = o.consume(
-		ctx, db, uniqueConsumed, point.Slot, transaction.Hash().Bytes(),
-		transactionID,
-	)
-	return produced, consumed, skipped, err
 }
 
 // stakeRowState is one credential's reward_live_stake row as the replay

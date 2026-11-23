@@ -349,8 +349,15 @@ func newDatabaseWithOptions(
 		return nil, err
 	}
 	databaseHosts.Store(db, host)
+	closing := db
 	tb.Cleanup(func() {
-		if closeErr := CloseDatabase(db); closeErr != nil {
+		// testing keeps a finished test's cleanup closures reachable until
+		// its parent returns, which for a top-level parallel test is the
+		// end of the run; dropping the reference lets the closed database
+		// be collected.
+		target := closing
+		closing = nil
+		if closeErr := CloseDatabase(target); closeErr != nil {
 			tb.Errorf("close test database runtime: %v", closeErr)
 		}
 	})

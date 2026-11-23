@@ -25,11 +25,9 @@
 // # Rollback and state restoration
 //
 // When the primary chain rolls back to an earlier point, LedgerState
-// replays state restoration against the metadata store. State
-// restoration logic is implemented by the selected metadata backend
-// (RestoreAccountStateAtSlot, RestorePoolStateAtSlot,
-// RestoreDrepStateAtSlot, DeleteCertificatesAfterSlot). This package
-// orchestrates the calls in the correct order and emits
+// runs TruncateAfterSlot in the rollback transaction, for the chain data and
+// any family the metadata store still holds, and rolls the LedgerDB set
+// back through its journal once that transaction commits. It emits
 // TransactionEvent with Rollback=true for each undone transaction so
 // downstream consumers can undo their own derived state.
 //

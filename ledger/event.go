@@ -15,6 +15,9 @@
 package ledger
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -22,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -231,4 +235,57 @@ type ConnectionRecycleRequestedEvent struct {
 type RewardFactsEvent struct {
 	SnapshotEpoch uint64
 	CapturedSlot  uint64
+}
+
+// SyncStateEventType carries a SyncStateEvent. The node publishes it, from the
+// ledger's tip and the chain selector's Genesis mode, when the node moves
+// between catching up to the chain tip and following it.
+const SyncStateEventType event.EventType = "ledger.sync_state"
+
+// SyncState is whether the node has caught up to the chain tip.
+type SyncState uint8
+
+const (
+	// SyncStateSyncing means the node is still catching up to the chain tip.
+	SyncStateSyncing SyncState = iota + 1
+	// SyncStateCaughtUp means the node follows the chain tip.
+	SyncStateCaughtUp
+)
+
+// SyncStateEvent reports a change of SyncState.
+type SyncStateEvent struct {
+	Previous SyncState
+	Current  SyncState
+	// TipSlot is the slot of the ledger tip when the state changed.
+	TipSlot uint64
+	// SlotsBehind is how far the ledger tip is behind the wall-clock slot.
+	SlotsBehind uint64
+}
+
+// ProtocolParamsEventType carries a ProtocolParamsEvent. The node publishes it
+// after an epoch transition that changed the protocol parameters in force.
+const ProtocolParamsEventType event.EventType = "ledger.protocol_params"
+
+// ProtocolParamsEvent reports the protocol parameters in force from Epoch.
+type ProtocolParamsEvent struct {
+	Epoch  uint64
+	Params lcommon.ProtocolParameters
+}
+
+// ProtocolParamsJSON renders params as JSON in their era's own shape, so every
+// parameter of that era is present. The utxorpc form is not used: it drops
+// parameters some eras have, such as Shelley's MinUtxoValue, Decentralization
+// and ExtraEntropy.
+func ProtocolParamsJSON(params lcommon.ProtocolParameters) (out []byte, err error) {
+	if params == nil {
+		return nil, errors.New("no protocol parameters")
+	}
+	// A rational whose value was never set makes encoding/json panic rather
+	// than return an error.
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("encode protocol parameters: %v", r)
+		}
+	}()
+	return json.Marshal(params)
 }

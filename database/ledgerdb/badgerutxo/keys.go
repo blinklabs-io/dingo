@@ -187,6 +187,20 @@ const (
 	// clears, each by the slot it was recorded at:
 	// T <slot:8 BE> <kind:1> ...
 	DRepHistoryTag = 'T'
+	// GovernanceBoundaryTag keys the governance state of each Conway epoch
+	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
+	// and the encoded snapshot. Each row is journaled at its boundary slot.
+	GovernanceBoundaryTag = '#'
+	// InactivityTag keys the one-time CIP-0163 delegator inactivity
+	// activation: 0 <kind:1> ..., kind 0 the epoch it ran at and kind 1 a
+	// credential it stamped.
+	InactivityTag = '0'
+	// RatifyPendingTag keys the record of a boundary whose ratification
+	// decision is not written yet, the only row under it.
+	RatifyPendingTag = '1'
+	// RewardLikelihoodTag keys the non-myopic pool-ranking state a reward
+	// update installs: 2 <kind:1> <epoch:8 BE> [<pool:28>].
+	RewardLikelihoodTag = '2'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -249,6 +263,11 @@ var (
 	syncMarkersKey        = []byte("mpmarkok")
 	syntheticV2Key        = []byte("mpmarkv")
 	syntheticV2ClearedKey = []byte("mpmarke")
+	// inactivityKey is set once the store holds the delegator inactivity
+	// activation, and ratifyPendingKey once it holds the pending
+	// ratification record, up to its tip.
+	inactivityKey    = []byte("minactivity")
+	ratifyPendingKey = []byte("mratifypend")
 	// networkStateKey is set once the store holds every network state and
 	// donation row up to its tip.
 	networkStateKey = []byte("mnet")
@@ -322,10 +341,12 @@ var (
 	// s is exact only when s+1 is at least the floor. Pruning and every
 	// row load raise it before they drop journal entries.
 	journalFloorKey = []byte("mjfloor")
-	// mergeKey is set by a catch-up bootstrap and cleared once the families'
-	// snapshot rows are merged into the set, so a start that finds it knows
-	// the set is not yet the complete copy of the ledger state.
-	mergeKey = []byte("mmerge")
+	// importKey marks a ledger-state import in progress. Its value is the
+	// snapshot point followed by one byte, set once the snapshot's outputs
+	// are all in the set. It is written before the import changes a row and
+	// removed by EndImport, so a set that holds it is never a complete ledger
+	// state.
+	importKey = []byte("mimport")
 	// loadFloorKey holds the tip slot plus one at the last load of a row
 	// family a rollback undoes through the state journal, from rows with no
 	// entries before it. A rollback below it, other than to the tip, would
@@ -334,9 +355,8 @@ var (
 	// exportFloorKey holds the lowest slot, as a big-endian uint64, from
 	// which the state journal names every account and DRep row by the slot
 	// its AddedSlot says: an entry sits at the slot of the change that set
-	// it. Rows a load or a merge wrote carry older slots than their entries,
-	// and a store from before the key had both, so a store that opens
-	// without it takes the tip plus one.
+	// it. Rows a load wrote carry older slots than their entries, so a store
+	// that opens without the key takes the tip plus one.
 	exportFloorKey = []byte("mexportfloor")
 	// rewardBlocksKey is set once the store holds the block counts and fees
 	// of every epoch reward calculation can still read, up to its tip, with

@@ -20,31 +20,30 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // RewardInputRepairStore is the metadata boundary needed to reconcile one basis.
-type RewardInputRepairStore interface {
-	GetSyncState(string, types.Txn) (string, error)
-	SetSyncState(string, string, types.Txn) error
-	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
-	GetEpoch(uint64, types.Txn) (*models.Epoch, error)
+type RewardInputRepairStore[T any] interface {
+	GetSyncState(string, T) (string, error)
+	SetSyncState(string, string, T) error
+	GetRewardSnapshot(uint64, string, T) (*models.RewardSnapshot, error)
+	GetEpoch(uint64, T) (*models.Epoch, error)
 	GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash,
 		uint64,
 		uint64,
 		uint64,
-		types.Txn,
+		T,
 	) ([]models.PoolRegistration, error)
-	GetRewardPoolInputs(uint64, types.Txn) ([]*models.RewardPoolInput, error)
-	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
-	HasAppliedRewardCreditRound(uint64, types.Txn) (bool, error)
-	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
-	DeleteSyncState(string, types.Txn) error
-	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+	GetRewardPoolInputs(uint64, T) ([]*models.RewardPoolInput, error)
+	GetRewardStakeInputs(uint64, T) ([]*models.RewardStakeInput, error)
+	HasAppliedRewardCreditRound(uint64, T) (bool, error)
+	DeleteRewardOutputsForEpoch(uint64, T) error
+	DeleteSyncState(string, T) error
+	SaveRewardStakeInputs([]*models.RewardStakeInput, T) error
 }
 
 // RewardInputRepairReport describes a canonical snapshot comparison before any write.
@@ -58,9 +57,9 @@ type RewardInputRepairReport struct {
 // RepairRewardStakeInputs completes one authoritative basis from an imported
 // snapshot. The caller must hold an offline database lock and own the transaction.
 // Every retained pool total must reconcile before existing rows may be upserted.
-func RepairRewardStakeInputs(
-	store RewardInputRepairStore,
-	txn types.Txn,
+func RepairRewardStakeInputs[T any](
+	store RewardInputRepairStore[T],
+	txn T,
 	state *RawLedgerState,
 	epoch uint64,
 	apply bool,
@@ -112,14 +111,14 @@ func RepairRewardStakeInputs(
 	return repairRewardStakeInputBundle(store, txn, bundle, retained, apply)
 }
 
-func repairRewardStakeInputBundle(
-	store RewardInputRepairStore,
-	txn types.Txn,
+func repairRewardStakeInputBundle[T any](
+	store RewardInputRepairStore[T],
+	txn T,
 	bundle *rewardInputBundle,
 	retained *models.RewardSnapshot,
 	apply bool,
 ) (*RewardInputRepairReport, error) {
-	if apply && txn == nil {
+	if apply && any(txn) == nil {
 		return nil, errors.New("repair requires an explicit transaction")
 	}
 	epoch := bundle.epoch
@@ -259,9 +258,9 @@ func repairRewardStakeInputBundle(
 	return report, nil
 }
 
-func authoritativeRewardInputPoolParams(
-	store RewardInputRepairStore,
-	txn types.Txn,
+func authoritativeRewardInputPoolParams[T any](
+	store RewardInputRepairStore[T],
+	txn T,
 	selected *ParsedSnapShot,
 	retained *models.RewardSnapshot,
 ) (map[string]*ParsedPool, error) {

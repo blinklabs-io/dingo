@@ -207,7 +207,7 @@ func TestMidEpochEraSwitchRollsBack(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint(8), ver.Major)
 		requireMidEpochEraTip(t, ls, before)
-		conwayRow, err := ls.db.GetPParams(
+		conwayRow, err := seedDB(t, ls.db).GetPParams(
 			ls.currentEpoch.EpochId,
 			eras.ConwayEraDesc.Id,
 			eras.ConwayEraDesc.DecodePParamsFunc,

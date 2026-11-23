@@ -159,17 +159,6 @@ func (ls *LedgerState) setNoncesInSlotRange(
 	return v.sorted(), nil
 }
 
-// nonceStore returns the metadata store for a nonce read the set does not
-// answer. Only a set that holds outputs alone leaves its nonces there; one
-// that keeps the ledger-state families and cannot serve them is an error, as
-// its LedgerDB reads the nonces back through the ledger.
-func (ls *LedgerState) nonceStore() (ledgerdb.LedgerDB, error) {
-	if ls.keepsEpochState() || ls.familyDrained(nodesettings.FamilyNonces) {
-		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
-	}
-	return ls.ledgerDB(), nil
-}
-
 // blockNonce reads the nonce of the block at point from the store the read
 // mode selects.
 func (ls *LedgerState) blockNonce(
@@ -178,11 +167,7 @@ func (ls *LedgerState) blockNonce(
 ) ([]byte, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return nil, err
-		}
-		return store.GetBlockNonce(point, txn)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
 	}
 	ns, setErr := ls.setNoncesInSlotRange(r, txn, point.Slot, point.Slot+1)
 	if setErr != nil {
@@ -205,11 +190,7 @@ func (ls *LedgerState) blockNoncesInSlotRange(
 ) ([]models.BlockNonce, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return nil, err
-		}
-		return store.GetBlockNoncesInSlotRange(start, end, txn)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
 	}
 	return ls.setNoncesInSlotRange(r, txn, start, end)
 }
@@ -221,11 +202,9 @@ func (ls *LedgerState) latestBlockNonce(
 ) (models.BlockNonce, bool, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return models.BlockNonce{}, false, err
-		}
-		return store.GetLatestBlockNonce(txn)
+		return models.BlockNonce{}, false, ls.setFamilyUnserved(
+			nodesettings.FamilyNonces,
+		)
 	}
 	return ls.setLatestNonce(r, txn)
 }

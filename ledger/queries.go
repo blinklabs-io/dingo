@@ -1372,10 +1372,12 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // registration and delegation rows, and delegations carry no per-point
 // history to read back.
 //
+// ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery rank pools
+// from the retained per-pool likelihood history and last boundary's reward
+// state. They answer at the acquired point when that history is complete and
+// fail with ErrQueryNotAnswered when it is not.
+//
 // Not answered, so the call fails with ErrQueryNotAnswered:
-// ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
-// rank pools by a performance estimate derived from a per-pool likelihood
-// history and the last boundary's reward pot, neither of which is tracked;
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which return
 // the whole epoch state in the ledger's encoding. Also not answered, with an
 // unsupported-query error: ShelleyStakePoolStateQuery on every network but

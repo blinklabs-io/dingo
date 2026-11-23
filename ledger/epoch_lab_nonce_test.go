@@ -49,6 +49,7 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	OpenLiveSetForTest(t, db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -93,12 +94,12 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 				}, txn); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
 				)
 			}),
@@ -125,6 +126,7 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
@@ -246,6 +248,7 @@ func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 
 	carried := bytes.Repeat([]byte{0x03}, 32)
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	lab, err := ls.epochLabNonce(
 		context.Background(),
 		nil,
@@ -324,6 +327,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 		db:    db,
 		chain: canonicalChain,
 	}
+	attachTestLiveSet(t, ls)
 	lab, err := ls.epochLabNonce(context.Background(), nil, 0, 40, nil)
 	require.NoError(t, err)
 	// Must be the canonical boundary block's PrevHash (from the canonical chain),
@@ -366,6 +370,7 @@ func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
 	}, nil))
 
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	lab, err := ls.epochLabNonce(
 		context.Background(),
 		nil,

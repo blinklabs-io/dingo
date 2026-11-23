@@ -166,29 +166,34 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
-	cfg.UtxoSet = livesettest.New()
+	// The node's own set, loaded at the origin as a node's first start loads
+	// it, so its journal still reaches back to the first block.
+	tip, err := n.db.GetTip(nil)
+	require.NoError(t, err)
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{}, nil))
+	set := livesettest.OpenLedgerDBAt(t, cfg.Database, n.config.cfg.DatabasePath)
+	cfg.UtxoSet = set
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
 	require.NoError(t, seedLedger.Close())
-	epochs, err := n.db.GetEpochs(nil)
+	epochs, err := set.Epochs()
 	require.NoError(t, err)
 	require.Len(t, epochs, 1)
 	first := epochs[0]
+	later := make([]models.Epoch, 0, lastEpoch)
 	for id := uint64(1); id <= lastEpoch; id++ {
-		require.NoError(t, n.db.SetEpoch(
-			first.StartSlot+id*uint64(first.LengthInSlots),
-			id,
-			first.Nonce,
-			first.EvolvingNonce,
-			first.CandidateNonce,
-			first.LastEpochBlockNonce,
-			first.EraId,
-			first.SlotLength,
-			first.LengthInSlots,
-			nil,
-		))
+		e := first
+		e.ID = 0
+		e.EpochId = id
+		e.StartSlot = first.StartSlot + id*uint64(first.LengthInSlots)
+		later = append(later, e)
 	}
+	require.NoError(t, set.ApplyLedgerChanges(
+		nil, ledger.LedgerChanges{Epochs: later},
+	))
+	require.NoError(t, livesettest.CloseLedgerDB(cfg.Database))
+	require.NoError(t, n.db.SetTip(tip, nil))
 }
 
 // newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis

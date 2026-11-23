@@ -329,6 +329,24 @@ func (s *Store) LoadRewardBlocks(
 	})
 }
 
+// ReplaceRewardBlocks replaces the reward block rows with the ones feed
+// supplies, as a ledger-state import computes them. Unlike a load it runs
+// over a family the metadata store no longer holds: the rows come from the
+// snapshot, not from that store.
+func (s *Store) ReplaceRewardBlocks(
+	feed func(put func(k, v []byte) error) error,
+) error {
+	if err := s.writeFamily(
+		s.dropPrefixAlways,
+		RewardBlocksTag, rewardBlocksKey, "reward blocks", feed,
+	); err != nil {
+		return err
+	}
+	return s.update(func(txn *badger.Txn) error {
+		return txn.Delete(legacyRewardBlocksKey)
+	})
+}
+
 // RewardBlocksLoaded reports whether the store holds the reward block rows
 // up to its tip.
 func (s *Store) RewardBlocksLoaded() (bool, error) {

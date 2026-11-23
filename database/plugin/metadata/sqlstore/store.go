@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"regexp"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -166,6 +168,10 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	// spendMu guards spends, the outputs this store inserted that a later
+	// spend can address by row id (see spendCache).
+	spendMu                 sync.Mutex
+	spends                  spendCache
 	sqlitePath              string
 	scratchDir              string
 	sqliteOverlayInsertRows int
@@ -482,8 +488,10 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	// Like Reset, a restore replaces the on-disk/remote schema and data out
 	// from under any statement prepared before it ran; invalidate the cache
 	// regardless of outcome so a later call always re-prepares against
-	// whatever RestoreFrom actually left behind.
+	// whatever RestoreFrom actually left behind. The restored rows carry
+	// their own ids, so no remembered spend id still names its output.
 	s.closePreparedStatements()
+	s.forgetSpendCache()
 	return err
 }
 
@@ -520,6 +528,8 @@ func (s *Store) Reset(ctx context.Context) error {
 	// whether reset succeeded or failed partway, rather than assume a
 	// partial failure left every cached statement's table intact.
 	s.closePreparedStatements()
+	// The recreated tables restart their id sequences.
+	s.forgetSpendCache()
 	return err
 }
 
@@ -1371,6 +1381,9 @@ type sqlTxn struct {
 	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
 	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
 	overlayAccumulator *transactionBatchAccumulator
+	// spends holds the spend-cache entries of outputs this transaction
+	// inserted; Commit publishes them once the commit succeeds.
+	spends map[string]spendCacheEntry
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1387,10 +1400,13 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	err := t.tx.Commit()
+	err := t.commitTx()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
+	} else if t.owner != nil {
+		t.owner.publishSpendEntries(t.spends)
 	}
+	t.spends = nil
 	for accumulator := range t.batchBefore {
 		accumulator.resetStatement()
 	}
@@ -1398,6 +1414,15 @@ func (t *sqlTxn) Commit() error {
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
 	return err
+}
+
+// commitTx commits the SQL transaction inside its trace region, ended by
+// defer so a panicking commit cannot leave it open.
+func (t *sqlTxn) commitTx() error {
+	if t.ctx != nil {
+		defer rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit).End()
+	}
+	return t.tx.Commit()
 }
 
 func (t *sqlTxn) Rollback() error {
@@ -1412,6 +1437,7 @@ func (t *sqlTxn) Rollback() error {
 	t.finished = true
 	defer t.releaseConnection()
 	t.restoreBatches(t.batchBefore)
+	t.spends = nil
 	t.batchBefore = nil
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
@@ -1482,6 +1508,8 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
+		// Ids inserted after the savepoint are freed for reuse.
+		t.spends = nil
 		t.restoreBatches(t.batchSavepoints[name])
 		for i, savepointName := range slices.Backward(t.savepointOrder) {
 			if savepointName == name {

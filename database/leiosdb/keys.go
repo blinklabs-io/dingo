@@ -25,11 +25,14 @@ import (
 const (
 	partVolatile  = 'v'
 	partImmutable = 'i'
+	partData      = 'd'
 	partPending   = 'q'
 
 	kindManifest = 'm'
 	kindTxs      = 't'
 	kindClosure  = 'c'
+	kindBacking  = 'a'
+	kindVolatile = 'v'
 	kindPin      = 'p'
 )
 

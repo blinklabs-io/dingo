@@ -1518,7 +1518,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -1603,7 +1603,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -2405,7 +2405,7 @@ func newStartupCleanupProducerNodeWithGenesisStart(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      chainManager,
 		EventBus:          eventBus,
 		CardanoNodeConfig: cardanoCfg,
@@ -2728,7 +2728,8 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 	require.True(t, needed)
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: openTestUtxoSet(t),
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
@@ -4474,9 +4475,11 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
 	require.NoError(t, err)
 	require.True(t, needed)
+	set := openTestUtxoSet(t)
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: set,
 		config: Config{
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -4504,19 +4507,24 @@ func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_stake_snapshot
-    (epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-     delegator_count, captured_slot, calculation_version)
-VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
-		650, make([]byte, 28), models.RewardStakeCalculationVersion-1,
-	)
-	require.NoError(t, err)
+	set := openTestUtxoSet(t)
+	tip := ocommon.NewPoint(100, make([]byte, 32))
+	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:              650,
+				SnapshotType:       models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:        make([]byte, 28),
+				CapturedSlot:       100,
+				CalculationVersion: models.RewardStakeCalculationVersion - 1,
+			},
+		}},
+	}))
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: set,
 		config: Config{
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -4611,6 +4619,39 @@ func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
 	)
 	assert.True(t, cfg.AdvertisedTipStale(staleTip), "older than the window")
 	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
+}
+
+func TestChainsyncConfigDemotesPraosPeerFarBehindLocalTip(t *testing.T) {
+	t.Parallel()
+
+	const securityParam = uint64(20)
+	n := &Node{config: NewConfig()}
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			SecurityParam:             securityParam,
+			DisableEventSubscriptions: true,
+		},
+	)
+	n.chainSelector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(1000, []byte("local")),
+		BlockNumber: 1000,
+	})
+	state := chainsync.NewStateWithConfig(nil, nil, n.chainsyncConfig())
+	connId := newNodeTestConnId(3105)
+	require.True(t, state.AddClientConnId(connId))
+	require.True(t, state.RecordClientAdvertisedTip(connId, ochainsync.Tip{
+		Point:       ocommon.NewPoint(979, []byte("lagging")),
+		BlockNumber: 979,
+	}))
+
+	assert.Equal(
+		t,
+		[]ouroboros.ConnectionId{connId},
+		state.DemoteStaleAdvertisingClients(),
+	)
+	observabilityOnly, tracked := state.ClientObservabilityOnly(connId)
+	require.True(t, tracked)
+	assert.True(t, observabilityOnly)
 }
 
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.

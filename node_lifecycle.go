@@ -2503,10 +2503,19 @@ func (n *Node) Truncate(
 		}
 		defer closeSet() //nolint:errcheck // the set is closed after its rollback committed
 
+		// Test seam: the truncated state before sync resumes, which on a
+		// live network refetches the removed blocks within milliseconds.
+		truncated := func(removed uint64, err error) (uint64, error) {
+			if err == nil && n.afterTruncate != nil {
+				n.afterTruncate(tmpDB)
+			}
+			return removed, err
+		}
+
 		if pending, pendingErr := lifecycle.GetPendingTruncate(tmpDB); pendingErr != nil {
 			return 0, pendingErr
 		} else if pending != nil {
-			return lifecycle.Truncate(
+			return truncated(lifecycle.Truncate(
 				ctx,
 				tmpDB,
 				models.Block{},
@@ -2514,7 +2523,7 @@ func (n *Node) Truncate(
 				n.config.delegatorInactivityEnabled,
 				n.config.delegatorInactivity,
 				setOpts...,
-			)
+			))
 		}
 
 		block, err := dblifecycle.ResolveTarget(ctx, tmpDB, target)
@@ -2537,7 +2546,7 @@ func (n *Node) Truncate(
 				return 0, err
 			}
 		}
-		return lifecycle.Truncate(
+		return truncated(lifecycle.Truncate(
 			ctx,
 			tmpDB,
 			block,
@@ -2545,7 +2554,7 @@ func (n *Node) Truncate(
 			n.config.delegatorInactivityEnabled,
 			n.config.delegatorInactivity,
 			setOpts...,
-		)
+		))
 	}()
 	// tmpDB's database.New registered its own Prometheus collectors under
 	// the same names reinitializeAndResume's database.New is about to use;

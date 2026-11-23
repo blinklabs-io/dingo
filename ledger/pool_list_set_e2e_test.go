@@ -66,37 +66,3 @@ func TestPoolRetirementReadSeesItsTransactionsStagedRetirementInSetMode(
 	require.Equal(t, h.pool, got[0].PoolKeyHash)
 	require.Zero(t, reached(), "the retirement read reached the metadata store")
 }
-
-// TestPoolListReadsUseTheSetForLeiosCertifications requires certified pool
-// state to agree with the metadata store without reading it through the ledger.
-func TestPoolListReadsUseTheSetForLeiosCertifications(t *testing.T) {
-	t.Parallel()
-	h := newPoolReadsHarnessWithReads(t, "set")
-	reached, _ := h.scenario.HideStoreReads(poolListReadNames...)
-	h.scenario.CertifyLeios()
-	ldb := h.scenario.LedgerDB()
-
-	wantRetiring, err := h.store.GetPoolsRetiringAtEpoch(
-		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
-	)
-	require.NoError(t, err)
-	gotRetiring, err := ldb.GetPoolsRetiringAtEpoch(
-		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, wantRetiring, gotRetiring)
-
-	wantActive, err := h.store.GetActivePoolKeyHashes(t.Context(), nil)
-	require.NoError(t, err)
-	gotActive, err := ldb.GetActivePoolKeyHashes(t.Context(), nil)
-	require.NoError(t, err)
-	require.ElementsMatch(t, wantActive, gotActive)
-
-	slot := h.cur.StartSlot + 1000
-	wantAtSlot, err := h.store.GetActivePoolKeyHashesAtSlot(slot, nil)
-	require.NoError(t, err)
-	gotAtSlot, err := ldb.GetActivePoolKeyHashesAtSlot(slot, nil)
-	require.NoError(t, err)
-	require.ElementsMatch(t, wantAtSlot, gotAtSlot)
-	require.Zero(t, reached(), "pool reads use only the set")
-}

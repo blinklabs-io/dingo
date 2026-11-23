@@ -60,6 +60,7 @@ func newPeerForkAncestorStateFixture(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	OpenLiveSetForTest(t, db)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
@@ -70,7 +71,7 @@ func newPeerForkAncestorStateFixture(
 		cfg, epochNonce, anchor.block,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash, anchorPoint.Slot, anchorNonce, false, nil,
 	))
 	epoch := models.Epoch{
@@ -99,7 +100,6 @@ func newPeerForkAncestorStateFixture(
 		},
 	}
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
-	ls.publishSnapshotsLocked()
 
 	// Three chained headers; the last is the candidate and is never an
 	// "ancestor" of itself.
@@ -121,6 +121,8 @@ func newPeerForkAncestorStateFixture(
 		blocks = append(blocks, b.block)
 		prev = b.block.Hash().Bytes()
 	}
+	attachTestLiveSet(t, ls)
+	ls.publishSnapshotsLocked()
 	byHash := map[string]gledger.Block{}
 	for _, b := range blocks {
 		byHash[string(b.Hash().Bytes())] = b
