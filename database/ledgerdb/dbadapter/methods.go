@@ -2509,6 +2509,14 @@ func (a Adapter) GetTransactionByHash(
 	return a.db.GetTransactionByHash(ctx, hash, dbTxn(txn))
 }
 
+func (a Adapter) GetTransactionSlotByHash(
+	ctx context.Context,
+	hash []byte,
+	txn ledgerdb.Txn,
+) (uint64, bool, error) {
+	return a.db.GetTransactionSlotByHash(ctx, hash, dbTxn(txn))
+}
+
 func (a Adapter) GetTransactionsByHashes(
 	ctx context.Context,
 	hashes [][]byte,

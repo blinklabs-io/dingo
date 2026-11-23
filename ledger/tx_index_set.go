@@ -237,6 +237,27 @@ func (s stagingLedgerDB) GetTransactionByHash(
 	return &tx, nil
 }
 
+// GetTransactionSlotByHash returns the slot at which the ledger applied the
+// transaction with hash. The index holds applied transactions only.
+func (s stagingLedgerDB) GetTransactionSlotByHash(
+	_ context.Context,
+	hash []byte,
+	txn ledgerdb.Txn,
+) (uint64, bool, error) {
+	if len(hash) == 0 {
+		return 0, false, nil
+	}
+	view, err := s.ls.txIndexView(txn, [][]byte{hash})
+	if err != nil {
+		return 0, false, err
+	}
+	e, ok := view[string(hash)]
+	if !ok {
+		return 0, false, nil
+	}
+	return e.Slot, true, nil
+}
+
 // GetTransactionsByHashes is GetTransactionByHash for several hashes, in the
 // order given, each applied transaction once.
 func (s stagingLedgerDB) GetTransactionsByHashes(
