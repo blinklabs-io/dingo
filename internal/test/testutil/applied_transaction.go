@@ -250,11 +250,18 @@ func ExecTransactionInsert(
 		case "hash":
 			hashToken, hashArgs = token, tokenArgs
 		case "block_hash":
-			// The statement names a block by hash; the row holds its id.
-			if token != "?" || len(tokenArgs) != 1 {
+			// The statement names a block by hash; the row holds its id,
+			// which only a bound hash can be resolved to. A literal hash
+			// copied into block_id would be a blob no read resolves.
+			if strings.EqualFold(token, "NULL") {
 				appliedCols = append(appliedCols, "block_id")
-				appliedVals = append(appliedVals, token)
+				appliedVals = append(appliedVals, "NULL")
 				continue
+			}
+			if token != "?" || len(tokenArgs) != 1 {
+				return nil, fmt.Errorf(
+					"block_hash value %q is not a bound parameter", token,
+				)
 			}
 			hash, _ := tokenArgs[0].([]byte)
 			blockID, err := blockIdentityID(db, hash)
