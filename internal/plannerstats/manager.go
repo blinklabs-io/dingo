@@ -17,9 +17,8 @@
 // picks indexes by shape alone and can scan most of a large table for a query
 // that should seek; this package runs the backend's incremental statistics
 // maintenance during startup and after each epoch rollover. There is no timer
-// between rollovers: a pass on a large SQLite store reads every index and
-// holds the only write connection, so it runs only when an event says the
-// data has moved on.
+// between rollovers: a pass re-analyzes every table and holds the only write
+// connection, so it runs only when an event says the data has moved on.
 package plannerstats
 
 import (
@@ -200,7 +199,8 @@ func (m *Manager) Defer() (resume func()) {
 }
 
 // deferred reports whether runs are deferred, recording the skipped trigger
-// when they are.
+// when they are. Both the event handler and the worker call it, so a trigger
+// accepted before a deferral ends is recorded whichever reaches it first.
 func (m *Manager) deferred() bool {
 	m.deferMu.Lock()
 	defer m.deferMu.Unlock()
@@ -247,6 +247,12 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 	// Byron rollovers carry none either and must not be mistaken for it.
 	if epochEvent.EpochNonce == nil &&
 		epochEvent.ProtocolVersion >= shelleyProtocolMajor {
+		return
+	}
+	// Recorded here as well as in the worker: a deferral that ends before the
+	// worker takes the signal would otherwise see no skipped trigger, and the
+	// run would go out as an epoch pass the growth rule can skip.
+	if m.deferred() {
 		return
 	}
 	m.signal()

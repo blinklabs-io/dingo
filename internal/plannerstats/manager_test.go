@@ -432,3 +432,35 @@ func TestNoRunWithoutStartupOrEpochTrigger(t *testing.T) {
 		)
 	})
 }
+
+// TestDeferredTriggerQueuedBeforeWorkerSeesItRunsAsResume delivers an epoch
+// trigger during a deferral while the worker is busy, so the deferral ends
+// before the worker takes the trigger. The run that follows must still be the
+// unconditional resume pass, not an epoch pass the growth rule can skip.
+func TestDeferredTriggerQueuedBeforeWorkerSeesItRunsAsResume(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	require.NoError(t, m.StartWithStartup(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(u.release) }) }
+	defer releaseOnce()
+
+	require.Equal(
+		t, types.PlannerStatsTriggerStartup,
+		receive(t, u.entered, "startup run"),
+	)
+	resume := m.Defer()
+	m.handleEpochTransition(epochEvent([]byte{1}))
+	resume()
+	releaseOnce()
+	require.Equal(
+		t, types.PlannerStatsTriggerResume,
+		receive(t, u.entered, "the run after the deferral"),
+		"a trigger accepted during a deferral must yield the resume pass",
+	)
+	require.Never(t, func() bool { return u.calls.Load() > 2 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"the deferred trigger must collapse into the one resume run")
+}
