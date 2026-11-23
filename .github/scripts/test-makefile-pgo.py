@@ -36,7 +36,12 @@ class MakefilePGOTest(unittest.TestCase):
         for name, lines in go_build_lines(ROOT).items():
             with self.subTest(binary=name):
                 self.assertEqual(len(lines), 1, lines)
-                self.assertIn(flag, lines[0].split())
+                # go build keeps the last -pgo it is given, so a second one
+                # would silently override the profile.
+                self.assertEqual(
+                    [t for t in lines[0].split() if t.startswith("-pgo")],
+                    [flag],
+                )
 
     def test_absent_profile_passes_no_pgo_flag(self):
         # A tree without cmd/dingo/default.pgo must still build, so the
