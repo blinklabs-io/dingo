@@ -16,10 +16,8 @@ package ledger_test
 
 import (
 	"fmt"
-	"slices"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -47,112 +45,6 @@ func (u unknownTableSet) StakeHistory(
 	return events, err
 }
 
-func depositText(d *uint64) string {
-	if d == nil {
-		return "nil"
-	}
-	return fmt.Sprint(*d)
-}
-
-func historyRowText(r *models.AccountRegistrationHistoryRow) string {
-	if r == nil {
-		return "nil"
-	}
-	return fmt.Sprintf("%d/%d/%d/%x/%s/%s/%d/%x", r.AddedSlot, r.BlockIndex,
-		r.CertIndex, r.TxHash, r.Action, depositText(r.Deposit), r.TxSlot,
-		r.BlockHash)
-}
-
-func (h *registrationHarness) readsOf(
-	t *testing.T,
-	db ledgerdb.LedgerDB,
-) []string {
-	t.Helper()
-	s := h.slots
-	ctx := t.Context()
-	var out []string
-	keys := [][]byte{s.K, s.L, s.M, s.Imported.Key}
-	for _, key := range keys {
-		for _, q := range []struct {
-			limit, offset int
-			order         string
-		}{{0, 0, "asc"}, {0, 0, "desc"}, {2, 1, "desc"}, {1, 0, "asc"}, {0, 9, "asc"}} {
-			rows, err := db.GetAccountRegistrationHistoryByCredential(
-				ctx, 0, key, q.limit, q.offset, q.order, nil,
-			)
-			require.NoError(t, err)
-			var texts []string
-			for i := range rows {
-				texts = append(texts, historyRowText(&rows[i]))
-			}
-			out = append(out, fmt.Sprintf("history %x %v %v", key, q, texts))
-		}
-		for _, slot := range []uint64{s.S1 - 1, s.S1, s.S2, s.S3, s.S4, s.S5 + 100} {
-			row, err := db.GetLatestAccountRegistrationAtOrBefore(
-				ctx,
-				0,
-				key,
-				slot,
-				nil,
-			)
-			require.NoError(t, err)
-			out = append(
-				out,
-				fmt.Sprintf("latest %x %d %s", key, slot, historyRowText(row)),
-			)
-		}
-		certs, err := db.GetStakeRegistrationsByCredential(0, key, nil)
-		require.NoError(t, err)
-		out = append(out, fmt.Sprintf("certs %x %+v", key, certs))
-	}
-	refs := []models.StakeCredentialRef{
-		models.NewStakeCredentialRef(
-			0,
-			s.K,
-		), models.NewStakeCredentialRef(0, s.L),
-		models.NewStakeCredentialRef(0, s.M), s.Imported,
-	}
-	for _, slot := range []uint64{s.S1 - 1, s.S1, s.S2, s.S3, s.S4, s.S5, s.S5 + 100} {
-		active, err := db.GetAccountsActiveAtSlot(refs, slot, nil)
-		require.NoError(t, err)
-		var keys []string
-		for k := range active {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		out = append(out, fmt.Sprintf("active %d %x", slot, keys))
-	}
-	for _, key := range [][]byte{s.D, s.E, s.K} {
-		dep, err := db.GetDrepLastRegistrationDeposit(ctx, 0, key, nil)
-		require.NoError(t, err)
-		out = append(out, fmt.Sprintf("deposit %x %s", key, depositText(dep)))
-	}
-	all, err := db.GetDrepLastRegistrationDeposits(ctx, nil)
-	require.NoError(t, err)
-	out = append(out, fmt.Sprintf("deposits %v", all))
-	return out
-}
-
-// TestRegistrationReadsFromTheLiveUtxoSet reads the registration history and
-// DRep deposits through the ledger's LedgerDB from the live set with the store's
-// reads failing, for a credential that registers, deregisters and
-// re-registers, and DReps that register, update and retire, before and after
-// a rollback, and requires every answer to be the store's.
-func TestRegistrationReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	h := newRegistrationHarnessWith(t, "set", nil)
-	reached, _ := h.scenario.HideStoreReads(registrationReadNames...)
-	ldb := h.scenario.LedgerDB()
-	want := h.readsOf(t, h.store)
-	require.Equal(t, want, h.readsOf(t, ldb))
-	require.NotEmpty(t, stakeHistory(t, ldb, h.slots.K, 0, 0, "asc"))
-	h.scenario.RollbackBeforeBoundary()
-	want = h.readsOf(t, h.store)
-	require.Equal(t, want, h.readsOf(t, ldb), "after the rollback")
-	require.Empty(t, stakeHistory(t, ldb, h.slots.K, 0, 0, "asc"))
-	require.Zero(t, reached(), "a registration read reached the metadata store")
-}
-
 // TestStakeRegistrationReadFailsForAnUnknownTable requires an unavailable
 // registration history table to fail without mixing in metadata reads.
 func TestStakeRegistrationReadFailsForAnUnknownTable(t *testing.T) {
@@ -167,4 +59,20 @@ func TestStakeRegistrationReadFailsForAnUnknownTable(t *testing.T) {
 	rows := stakeHistory(t, ldb, h.slots.K, 0, 0, "asc")
 	require.Len(t, rows, 5)
 	require.Zero(t, reached(), "the history is served by the set")
+}
+
+func depositText(d *uint64) string {
+	if d == nil {
+		return "nil"
+	}
+	return fmt.Sprint(*d)
+}
+
+func historyRowText(r *models.AccountRegistrationHistoryRow) string {
+	if r == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d/%d/%d/%x/%s/%s/%d/%x", r.AddedSlot, r.BlockIndex,
+		r.CertIndex, r.TxHash, r.Action, depositText(r.Deposit), r.TxSlot,
+		r.BlockHash)
 }

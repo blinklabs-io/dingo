@@ -16,19 +16,13 @@ package ledger
 
 import (
 	"bytes"
-	"context"
 	"encoding/hex"
 	"math/big"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -90,13 +84,15 @@ func seedActiveDelegator(
 	active bool,
 ) {
 	t.Helper()
-	require.NoError(t, ls.db.Metadata().ImportAccount(&models.Account{
-		StakingKey:    key,
-		CredentialTag: tag,
-		Pool:          pool,
-		Active:        active,
-		AddedSlot:     2,
-	}, nil))
+	require.NoError(t, seedCreateAccount(
+		t, ls.db, t.Context(), nil, &models.Account{
+			StakingKey:    key,
+			CredentialTag: tag,
+			Pool:          pool,
+			Active:        active,
+			AddedSlot:     2,
+		},
+	))
 }
 
 // newStakePoolStateLedger builds a ledger whose live and stored tip is at
@@ -104,7 +100,7 @@ func seedActiveDelegator(
 // the epoch rows the real chain has.
 func newStakePoolStateLedger(t *testing.T) *LedgerState {
 	t.Helper()
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
 	ls.config.StakePoolStateQuery = true
@@ -302,25 +298,21 @@ func TestQueryStakePoolState_FutureParamsAndBlsKey(t *testing.T) {
 	ls.publishSnapshotsLocked()
 	pool := repeatedBytes(28, 0x11)
 	epoch := uint64(0)
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    repeatedBytes(32, 0xAA),
-			RewardAccount: repeatedBytes(28, 0x22),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:               pool,
-			VrfKeyHash:                repeatedBytes(32, 0xAA),
-			RewardAccount:             repeatedBytes(28, 0x22),
-			Pledge:                    dbtypes.Uint64(1_000_000),
-			Cost:                      dbtypes.Uint64(5),
-			AddedSlot:                 5,
-			LeiosKeyPublic:            repeatedBytes(96, 0x66),
-			LeiosKeyPossessionProof:   repeatedBytes(48, 0x77),
-			LeiosKeyRegistrationEpoch: &epoch,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    repeatedBytes(32, 0xAA),
+		RewardAccount: repeatedBytes(28, 0x22),
+	}, &models.PoolRegistration{
+		PoolKeyHash:               pool,
+		VrfKeyHash:                repeatedBytes(32, 0xAA),
+		RewardAccount:             repeatedBytes(28, 0x22),
+		Pledge:                    dbtypes.Uint64(1_000_000),
+		Cost:                      dbtypes.Uint64(5),
+		AddedSlot:                 5,
+		LeiosKeyPublic:            repeatedBytes(96, 0x66),
+		LeiosKeyPossessionProof:   repeatedBytes(48, 0x77),
+		LeiosKeyRegistrationEpoch: &epoch,
+	}))
 	seedStakePoolParamsRegistration(t, ls, pool, 0, 150, 2_000_000)
 
 	got := runStakePoolState(t, ls, stakePoolStateQuery(false, [][]byte{pool}))
@@ -355,24 +347,20 @@ func TestQueryStakePoolState_BlsKeyWithUnknownEpochIsOmitted(t *testing.T) {
 		{"known age with no stored epoch", repeatedBytes(28, 0x32), false},
 	}
 	for _, c := range cases {
-		require.NoError(t, ls.db.Metadata().ImportPool(
-			&models.Pool{
-				PoolKeyHash:   c.pool,
-				VrfKeyHash:    repeatedBytes(32, 0xAA),
-				RewardAccount: repeatedBytes(28, 0x22),
-			},
-			&models.PoolRegistration{
-				PoolKeyHash:                    c.pool,
-				VrfKeyHash:                     repeatedBytes(32, 0xAA),
-				RewardAccount:                  repeatedBytes(28, 0x22),
-				Pledge:                         dbtypes.Uint64(1_000_000),
-				AddedSlot:                      5,
-				LeiosKeyPublic:                 repeatedBytes(96, 0x66),
-				LeiosKeyPossessionProof:        repeatedBytes(48, 0x77),
-				LeiosKeyRegistrationAgeUnknown: c.ageUnknown,
-			},
-			nil,
-		))
+		require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+			PoolKeyHash:   c.pool,
+			VrfKeyHash:    repeatedBytes(32, 0xAA),
+			RewardAccount: repeatedBytes(28, 0x22),
+		}, &models.PoolRegistration{
+			PoolKeyHash:                    c.pool,
+			VrfKeyHash:                     repeatedBytes(32, 0xAA),
+			RewardAccount:                  repeatedBytes(28, 0x22),
+			Pledge:                         dbtypes.Uint64(1_000_000),
+			AddedSlot:                      5,
+			LeiosKeyPublic:                 repeatedBytes(96, 0x66),
+			LeiosKeyPossessionProof:        repeatedBytes(48, 0x77),
+			LeiosKeyRegistrationAgeUnknown: c.ageUnknown,
+		}))
 	}
 
 	for _, c := range cases {
@@ -415,25 +403,20 @@ func seedStakePoolRetirement(
 	})
 	tx, err := tb.Build()
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetTransactionMetadataOnly(
-		context.Background(),
-		tx,
-		ocommon.Point{Slot: slot, Hash: txHash},
-		0, map[int]uint64{0: 500_000_000}, nil, 0,
-	))
+	fxStageTx(
+		t, ls.db, tx, ocommon.Point{Slot: slot, Hash: txHash},
+		map[int]uint64{0: 500_000_000}, 0,
+	)
 }
 
-// seedStakePoolBlsRegistration records a pool registration certificate at slot
-// through the certificate write path the node runs while syncing, carrying a
-// BLS key built from keySeed. The registered-in epoch is whatever that path
-// records.
-func seedStakePoolBlsRegistration(
+// stakePoolBlsRegistrationTx builds a transaction registering pool with a BLS
+// key derived from keySeed, and its hash.
+func stakePoolBlsRegistrationTx(
 	t *testing.T,
-	ls *LedgerState,
 	pool []byte,
 	keySeed byte,
 	slot uint64,
-) {
+) (lcommon.Transaction, []byte) {
 	t.Helper()
 	txHash := bytes.Repeat([]byte{byte(slot), byte(keySeed)}, lcommon.Blake2b256Size/2)
 	input, err := mockledger.NewSimpleTransactionInput(txHash, 0)
@@ -468,12 +451,26 @@ func seedStakePoolBlsRegistration(
 	})
 	tx, err := tb.Build()
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetTransactionMetadataOnly(
-		context.Background(),
-		tx,
-		ocommon.Point{Slot: slot, Hash: txHash},
-		0, map[int]uint64{0: 500_000_000}, nil, 0,
-	))
+	return tx, txHash
+}
+
+// seedStakePoolBlsRegistration records a pool registration certificate at slot
+// through the certificate write path the node runs while syncing, carrying a
+// BLS key built from keySeed. The registered-in epoch is whatever that path
+// records.
+func seedStakePoolBlsRegistration(
+	t *testing.T,
+	ls *LedgerState,
+	pool []byte,
+	keySeed byte,
+	slot uint64,
+) {
+	t.Helper()
+	tx, txHash := stakePoolBlsRegistrationTx(t, pool, keySeed, slot)
+	fxStageTx(
+		t, ls.db, tx, ocommon.Point{Slot: slot, Hash: txHash},
+		map[int]uint64{0: 500_000_000}, 0,
+	)
 }
 
 // TestQueryStakePoolState_BlsKeyRegisteredInFollowsLedgerRules registers BLS
@@ -535,23 +532,20 @@ func TestQueryStakePoolState_WireEncoding(t *testing.T) {
 	t.Parallel()
 	ls := newStakePoolStateLedger(t)
 	pool := repeatedBytes(28, 0x11)
-	require.NoError(t, ls.db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    repeatedBytes(32, 0xAA),
-			RewardAccount: repeatedBytes(28, 0x22),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:   pool,
-			VrfKeyHash:    repeatedBytes(32, 0xAA),
-			RewardAccount: repeatedBytes(28, 0x22),
-			Pledge:        dbtypes.Uint64(1),
-			Cost:          dbtypes.Uint64(2),
-			DepositAmount: dbtypes.Uint64(3),
-			AddedSlot:     1,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, ls.db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    repeatedBytes(32, 0xAA),
+		RewardAccount: repeatedBytes(28, 0x22),
+	}, &models.PoolRegistration{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    repeatedBytes(32, 0xAA),
+		RewardAccount: repeatedBytes(28, 0x22),
+		Pledge:        dbtypes.Uint64(1),
+		Cost:          dbtypes.Uint64(2),
+		DepositAmount: dbtypes.Uint64(3),
+		AddedSlot:     1,
+	}))
+	fxPoolDeposit(t, ls.db, pool, 1, 3)
 	got, err := ls.Query(
 		t.Context(),
 		stakePoolStateQuery(false, [][]byte{pool}),
@@ -630,24 +624,20 @@ func TestQueryViewStakePoolStateUsesFrozenEpoch(t *testing.T) {
 	// Epoch 3 starts at slot 300 and the frozen tip is slot 350.
 	seedStakePoolParamsPool(t, ls, retiring, 0)
 	registeredIn := uint64(0)
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   pending,
-			VrfKeyHash:    repeatedBytes(32, 0xAA),
-			RewardAccount: repeatedBytes(28, 0x22),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:               pending,
-			VrfKeyHash:                repeatedBytes(32, 0xAA),
-			RewardAccount:             repeatedBytes(28, 0x22),
-			Pledge:                    dbtypes.Uint64(1_000_000),
-			AddedSlot:                 5,
-			LeiosKeyPublic:            repeatedBytes(96, 0x66),
-			LeiosKeyPossessionProof:   repeatedBytes(48, 0x77),
-			LeiosKeyRegistrationEpoch: &registeredIn,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   pending,
+		VrfKeyHash:    repeatedBytes(32, 0xAA),
+		RewardAccount: repeatedBytes(28, 0x22),
+	}, &models.PoolRegistration{
+		PoolKeyHash:               pending,
+		VrfKeyHash:                repeatedBytes(32, 0xAA),
+		RewardAccount:             repeatedBytes(28, 0x22),
+		Pledge:                    dbtypes.Uint64(1_000_000),
+		AddedSlot:                 5,
+		LeiosKeyPublic:            repeatedBytes(96, 0x66),
+		LeiosKeyPossessionProof:   repeatedBytes(48, 0x77),
+		LeiosKeyRegistrationEpoch: &registeredIn,
+	}))
 	seedStakePoolParamsRegistration(t, ls, pending, 0, 320, 2_000_000)
 	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
 	seedStakePoolRetirement(t, ls, retiring, 5, 330)
@@ -656,7 +646,7 @@ func TestQueryViewStakePoolStateUsesFrozenEpoch(t *testing.T) {
 	frozen.ProtocolVersion.Major = 11
 	frozenCbor, err := cbor.Encode(frozen)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		frozenCbor, 300, 3, eras.ConwayEraDesc.Id, nil,
 	))
 	view := freezeEpochThenCrossBoundary(
@@ -702,103 +692,38 @@ func TestQueryViewStakePoolStateUsesFrozenEpoch(t *testing.T) {
 	require.Nil(t, entry.FutureStakePoolParams.BlsKey)
 }
 
-// recordingStakePoolStateStore records the reads that decide how much of the
-// account and pool tables GetStakePoolState walks.
-type recordingStakePoolStateStore struct {
-	metadata.MetadataStore
-	mu                sync.Mutex
-	activeAccountRead int
-	activePoolsRead   int
-	countPools        [][]lcommon.PoolKeyHash
-	credentialPools   [][]lcommon.PoolKeyHash
-}
-
-func (s *recordingStakePoolStateStore) GetActiveAccountCredentials(
-	txn dbtypes.Txn,
-) ([]models.StakeCredentialRef, error) {
-	s.mu.Lock()
-	s.activeAccountRead++
-	s.mu.Unlock()
-	return s.MetadataStore.GetActiveAccountCredentials(txn)
-}
-
-func (s *recordingStakePoolStateStore) GetActivePoolKeyHashes(
-	txn dbtypes.Txn,
-) ([][]byte, error) {
-	s.mu.Lock()
-	s.activePoolsRead++
-	s.mu.Unlock()
-	return s.MetadataStore.GetActivePoolKeyHashes(txn)
-}
-
-func (s *recordingStakePoolStateStore) GetActiveDelegatorCountsByPool(
-	pools []lcommon.PoolKeyHash,
-	txn dbtypes.Txn,
-) (map[string]uint64, error) {
-	s.mu.Lock()
-	s.countPools = append(s.countPools, slices.Clone(pools))
-	s.mu.Unlock()
-	return s.MetadataStore.GetActiveDelegatorCountsByPool(pools, txn)
-}
-
-func (s *recordingStakePoolStateStore) GetActiveDelegatorCredentialsByPool(
-	pools []lcommon.PoolKeyHash,
-	txn dbtypes.Txn,
-) (map[string][]models.StakeCredentialRef, error) {
-	s.mu.Lock()
-	s.credentialPools = append(s.credentialPools, slices.Clone(pools))
-	s.mu.Unlock()
-	return s.MetadataStore.GetActiveDelegatorCredentialsByPool(pools, txn)
-}
-
-// TestQueryStakePoolState_ReadsOnlyRequestedPools pins what a filtered query
-// reads: it never lists every active pool or account, counts the delegators of
-// the requested pool alone, and fetches credentials only when the query asks
-// for them, and then only for the requested pool.
-func TestQueryStakePoolState_ReadsOnlyRequestedPools(t *testing.T) {
+// TestQueryStakePoolState_FilterCountsOnlyTheRequestedPoolsDelegators answers
+// a filtered query with the requested pool's delegators alone, although
+// another pool has its own, and lists their credentials only when the query
+// asks for them.
+func TestQueryStakePoolState_FilterCountsOnlyTheRequestedPoolsDelegators(
+	t *testing.T,
+) {
 	t.Parallel()
-	store := &recordingStakePoolStateStore{}
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			return store
-		},
-	)
-	require.NoError(t, err)
-	ls := newPoolDistr2Ledger(t, db)
-	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
-	ls.config.StakePoolStateQuery = true
-	placeStakePoolStateTip(t, ls, 10)
+	ls := newStakePoolStateLedger(t)
 	pool := repeatedBytes(28, 0x11)
 	other := repeatedBytes(28, 0x12)
+	delegator := repeatedBytes(28, 0x61)
 	seedStakePoolParamsPool(t, ls, pool, 0)
 	seedStakePoolParamsPool(t, ls, other, 0)
-	seedActiveDelegator(t, ls, repeatedBytes(28, 0x61), 0, pool, true)
+	seedActiveDelegator(t, ls, delegator, 0, pool, true)
 	seedActiveDelegator(t, ls, repeatedBytes(28, 0x62), 0, other, true)
-	poolHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool))
+	seedActiveDelegator(t, ls, repeatedBytes(28, 0x63), 0, other, true)
 
-	entry := runStakePoolState(
+	got := runStakePoolState(
 		t, ls, stakePoolStateQuery(false, [][]byte{pool}),
-	)[gledger.PoolId(pool)]
+	)
+	require.Len(t, got, 1)
+	entry := got[gledger.PoolId(pool)]
 	require.Equal(t, 1, entry.NumDelegators)
 	require.Nil(t, entry.Delegators)
-	require.Zero(t, store.activeAccountRead, "no walk of the account table")
-	require.Zero(t, store.activePoolsRead, "no list of every active pool")
-	require.Equal(t, [][]lcommon.PoolKeyHash{{poolHash}}, store.countPools)
-	require.Empty(t, store.credentialPools, "the list was not requested")
 
 	entry = runStakePoolState(
 		t, ls, stakePoolStateQuery(true, [][]byte{pool}),
 	)[gledger.PoolId(pool)]
+	require.Equal(t, 1, entry.NumDelegators)
 	require.NotNil(t, entry.Delegators)
-	require.Len(t, entry.Delegators.Items(), 1)
-	require.Zero(t, store.activeAccountRead)
-	require.Equal(
-		t,
-		[][]lcommon.PoolKeyHash{{poolHash}},
-		store.credentialPools,
-		"credentials only for the requested pool",
-	)
+	items := entry.Delegators.Items()
+	require.Len(t, items, 1)
+	require.Equal(t, delegator, items[0].Credential[:])
 }

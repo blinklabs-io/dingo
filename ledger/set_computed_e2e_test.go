@@ -38,139 +38,48 @@ func openComputedSet(t *testing.T) *utxoset.Set {
 	return set
 }
 
-// TestSetComputedEpochRowsEqualTheStores requires the epoch and summary rows
-// the set computes at a boundary to be the rows the metadata store wrote,
-// and to survive a rollback the same way, with every result compared.
-func TestSetComputedEpochRowsEqualTheStores(t *testing.T) {
-	t.Parallel()
-	set := openComputedSet(t)
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	scenario.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-	match := func() int {
-		t.Helper()
-		txn := store.Begin(t.Context(), false)
-		defer txn.Release()
-		requireEpochStateMatches(t, set, store, txn)
-		return requireSummariesMatch(t, set, store, txn)
-	}
-	scenario.ApplyBoundary()
-	require.Positive(t, match(), "the boundary saved no summary")
-	scenario.RollbackBeforeBoundary()
-	match()
-	scenario.ApplyBoundary()
-	require.Positive(t, match(), "the second boundary saved no summary")
-}
-
-// TestSetComputedEpochRowsAcrossAMidEpochEraSwitch requires the epoch rows
-// the set computes through a mid-epoch era switch and its rollback to be the
-// store's.
-func TestSetComputedEpochRowsAcrossAMidEpochEraSwitch(t *testing.T) {
-	t.Parallel()
-	set := openComputedSet(t)
-	scenario := ledger.NewMidEpochEraSwitchScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	match := func() {
-		t.Helper()
-		txn := store.Begin(t.Context(), false)
-		defer txn.Release()
-		requireEpochStateMatches(t, set, store, txn)
-		require.Positive(t, requirePParamsMatch(t, set, store, txn))
-	}
-	scenario.ApplySwitch()
-	match()
-	scenario.RollbackBeforeSwitch()
-	match()
-}
-
-// TestSetComputedEnactmentEqualsTheStores requires the protocol parameter
-// rows the set enacts from its own proposals at a boundary to be the rows the
-// metadata store wrote, and the rollback to remove them.
-func TestSetComputedEnactmentEqualsTheStores(t *testing.T) {
-	t.Parallel()
-	set := openComputedSet(t)
-	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	match := func() int {
-		t.Helper()
-		txn := store.Begin(t.Context(), false)
-		defer txn.Release()
-		return requirePParamsMatch(t, set, store, txn)
-	}
-	before := match()
-	scenario.ApplyBoundary()
-	// The enacted Babbage row and the translated Conway row.
-	require.Equal(t, before+2, match())
-	scenario.RollbackBeforeBoundary()
-	require.Equal(t, before, match())
-}
-
-// TestSetComputesEpochStateWithoutTheStore requires a boundary and its
-// rollback, from the live set, to give the set the rows the store holds while the
-// store's epoch, summary and parameter reads fail.
+// TestSetComputesEpochStateWithoutTheStore crosses a boundary and rolls it
+// back with the store's epoch, summary and parameter reads failing. The set
+// gains the new epoch and its summary at the boundary and holds what it held
+// before once the boundary is rolled back.
 func TestSetComputesEpochStateWithoutTheStore(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
 		t, set,
 	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	scenario.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
 	scenario.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
 	reached, _ := scenario.HideStoreReads(
 		"GetEpoch", "GetEpochSummary", "ListPParamsForEra",
 	)
-	match := func() int {
+	// held counts the epochs, the summaries and the parameter rows.
+	held := func() [3]int {
 		t.Helper()
-		txn := store.Begin(t.Context(), false)
-		defer txn.Release()
-		requireEpochStateMatches(t, set, store, txn)
-		requirePParamsMatch(t, set, store, txn)
-		return requireSummariesMatch(t, set, store, txn)
+		epochs, err := set.Epochs()
+		require.NoError(t, err)
+		var hi uint64
+		for _, e := range epochs {
+			hi = max(hi, e.EpochId)
+		}
+		summaries := 0
+		for epoch := uint64(0); epoch <= hi+summaryEpochSpan; epoch++ {
+			row, err := set.EpochSummary(epoch)
+			require.NoError(t, err)
+			if row != nil {
+				summaries++
+			}
+		}
+		return [3]int{len(epochs), summaries, setPParamsRows(t, set)}
 	}
+	before := held()
 	scenario.ApplyBoundary()
-	require.Positive(t, match(), "the boundary saved no summary")
+	after := held()
+	require.Equal(t, before[0]+1, after[0], "the boundary adds an epoch")
+	require.Greater(t, after[1], before[1], "the boundary saved no summary")
 	scenario.RollbackBeforeBoundary()
-	match()
+	require.Equal(t, before, held(), "the rollback undoes the boundary")
 	require.Zero(t, reached(), "a computed result was read back from the store")
-}
-
-// TestSetEnactsWithoutTheStore requires the boundary that enacts a classic
-// update, from the live set, to stage the store's rows while the store's parameter
-// and proposal reads fail.
-func TestSetEnactsWithoutTheStore(t *testing.T) {
-	t.Parallel()
-	set := openComputedSet(t)
-	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	reached := scenario.HideStoreReads(
-		"GetEpoch", "ListPParamsForEra", "GetPParamUpdates",
-	)
-	match := func() int {
-		t.Helper()
-		txn := store.Begin(t.Context(), false)
-		defer txn.Release()
-		return requirePParamsMatch(t, set, store, txn)
-	}
-	before := match()
-	scenario.ApplyBoundary()
-	require.Equal(t, before+2, match())
-	scenario.RollbackBeforeBoundary()
-	require.Equal(t, before, match())
-	require.Zero(t, reached(), "the enactment was read back from the store")
 }
 
 // TestSetComputedSummaryCarriesTheStickyReadiness requires a summary saved

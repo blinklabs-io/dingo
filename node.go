@@ -119,7 +119,8 @@ type Node struct {
 	indexerWriter          IndexerWriter
 	indexerWakeSub         event.EventSubscriberId
 	indexerFactsSub        event.EventSubscriberId
-	afterIndexerRollback   func() error // test hook; see Truncate
+	afterIndexerRollback   func() error             // test hook; see Truncate
+	afterTruncate          func(*database.Database) // test hook; see Truncate
 	ledgerState            *ledger.LedgerState
 	snapshotMgr            *snapshot.Manager
 	utxoSet                *utxoset.Set
@@ -1355,7 +1356,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// authoritative epoch-boundary capture hooks before n.ledgerState.Start
 	// below, whose slot-clock/block-processing goroutines are what can
 	// first fire an epoch rollover: an epoch boundary reached before these
-	// hooks exist would fall back to the event-driven capture only, and — if
+	// hooks exist would capture no mark snapshot, and — if
 	// the Koios parity observer is also enabled — race the observer's own
 	// event.EpochTransitionEvent subscription into validating an epoch whose
 	// reward rows the snapshot manager never got a chance to commit via
@@ -1585,6 +1586,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	n.subscribeCaughtUpMarkerEvents()
+	n.subscribeLedgerStateEvents()
 	n.subscribeEquivocationDetector()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -2878,27 +2880,15 @@ func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 	return nil
 }
 
-// staleDrainedSnapshotEpochs lists the epochs whose mark snapshot the live
-// UTxO set holds from another accounting version. Once reward-inputs is
-// drained the set is the only copy of those headers, so the check cannot
-// proceed without it.
-func (n *Node) staleDrainedSnapshotEpochs() ([]uint64, error) {
+// staleStakeSnapshotEpochs lists the epochs whose consensus stake snapshots
+// LedgerDB holds from another accounting version.
+func (n *Node) staleStakeSnapshotEpochs() ([]uint64, error) {
 	if n.utxoSet == nil {
-		return nil, errors.New(
-			"the reward-inputs family is drained and the live UTxO set " +
-				"is not open",
-		)
+		return nil, errors.New("the live UTxO set is not open")
 	}
-	return n.utxoSet.StaleRewardSnapshotEpochs(
+	return n.utxoSet.StaleStakeSnapshotEpochs(
 		models.RewardStakeCalculationVersion,
 	)
-}
-
-// mergeEpochs returns the sorted union of two ascending epoch lists.
-func mergeEpochs(a, b []uint64) []uint64 {
-	out := append(slices.Clone(a), b...)
-	slices.Sort(out)
-	return slices.Compact(out)
 }
 
 // backfillRewardLiveStake repairs databases created before the live reward
@@ -2921,10 +2911,10 @@ func mergeEpochs(a, b []uint64) []uint64 {
 // Both probes are read-only and run on the read-only metadata connection; the
 // writer is opened only for an actual rebuild. See ARCHITECTURE.md.
 //
-// The flag deliberately does not reach StaleConsensusStakeSnapshotsExist.
-// That is a different kind of check: a pair of indexed EXISTS probes whose
-// cost does not scale with the UTxO set, guarding against snapshots produced
-// by an older accounting version. It fails closed because such a database
+// The flag deliberately does not reach the stake snapshot provenance check.
+// That is a different kind of check: a read of the few snapshot epochs
+// LedgerDB retains, whose cost does not scale with the UTxO set, guarding
+// against snapshots produced by an older accounting version. It fails closed because such a database
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
@@ -2943,11 +2933,7 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 	// writer, which is opened separately below. Holding the writer open across
 	// the probes would contend with block processing on SQLite and, when the
 	// scan is skipped, would defeat the startup-cost purpose of the flag.
-	var (
-		needed         bool
-		staleSnapshots bool
-		staleEpochs    []uint64
-	)
+	var needed bool
 	if err := n.db.MetadataTxn(ctx, false).Do(func(txn *database.Txn) error {
 		if n.config.skipRewardLiveStakeBackfillCheck {
 			n.config.logger.Warn(
@@ -2963,41 +2949,13 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 				return fmt.Errorf("check reward live stake backfill: %w", err)
 			}
 		}
-		var err error
-		staleSnapshots, err = n.db.Metadata().
-			StaleConsensusStakeSnapshotsExist(
-				txn.Metadata(),
-			)
-		if err != nil {
-			return fmt.Errorf("check stake snapshot provenance: %w", err)
-		}
-		if staleSnapshots {
-			// Diagnostics only: naming the affected epochs in the error below
-			// does not change the fail-closed decision above.
-			staleEpochs, err = n.db.Metadata().
-				StaleConsensusStakeSnapshotEpochs(
-					txn.Metadata(),
-				)
-			if err != nil {
-				return fmt.Errorf(
-					"list stale stake snapshot epochs: %w",
-					err,
-				)
-			}
-		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to probe reward live stake state: %w", err)
 	}
-	if n.db.FamilyDrained(nodesettings.FamilyRewardInputs) {
-		setEpochs, err := n.staleDrainedSnapshotEpochs()
-		if err != nil {
-			return fmt.Errorf("check stake snapshot provenance: %w", err)
-		}
-		if len(setEpochs) > 0 {
-			staleSnapshots = true
-			staleEpochs = mergeEpochs(staleEpochs, setEpochs)
-		}
+	staleEpochs, err := n.staleStakeSnapshotEpochs()
+	if err != nil {
+		return fmt.Errorf("check stake snapshot provenance: %w", err)
 	}
 	// Both call sites run before ledger processing can advance the chain, so
 	// nothing can write reward_live_stake between the probe above and the
@@ -3023,7 +2981,7 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 			return fmt.Errorf("failed to rebuild reward live stake: %w", err)
 		}
 	}
-	if staleSnapshots {
+	if len(staleEpochs) > 0 {
 		return fmt.Errorf(
 			"consensus stake snapshots for epoch(s) %v were produced by an "+
 				"older accounting version and cannot be safely reconstructed "+

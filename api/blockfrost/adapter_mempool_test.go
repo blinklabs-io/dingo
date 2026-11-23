@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -319,7 +318,7 @@ func TestNodeAdapterMempoolAddressTransactionsReadsOnlyTheIndex(
 // the ledger's live UTxO set.
 func seedMempoolInput(
 	t *testing.T,
-	utxoSet *livesettest.Mem,
+	utxoSet ledger.UtxoSetWriter,
 	txID []byte,
 	owner lcommon.Address,
 ) {

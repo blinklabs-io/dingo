@@ -427,3 +427,31 @@ func TestUtxoDigesterFieldsDistinguishOutputs(t *testing.T) {
 		seen[d] = name
 	}
 }
+
+// TestUtxoDigesterAddCanonicalHashesBytesAsGiven checks that AddCanonical
+// digests exactly what Add does once the output is canonicalized, and does
+// not canonicalize again.
+func TestUtxoDigesterAddCanonicalHashesBytesAsGiven(t *testing.T) {
+	t.Parallel()
+	addr := make([]byte, 29)
+	addr[0] = 0x60
+	legacy := mustCbor(t, []any{addr, uint64(5000000)})
+	canonical := metadata.CanonicalOutputCbor(legacy)
+	require.NotEqual(t, legacy, canonical)
+
+	add := func(canonicalize bool, out []byte) metadata.UtxoSetDigest {
+		d := metadata.NewUtxoDigester()
+		if canonicalize {
+			d.Add([]byte{1}, 0, "5", nil, nil, nil, true, out)
+		} else {
+			d.AddCanonical([]byte{1}, 0, "5", nil, nil, nil, true, out)
+		}
+		return d.Sum()
+	}
+	require.Equal(t, add(true, legacy), add(false, canonical))
+	require.NotEqual(t, add(true, legacy), add(false, legacy))
+	require.Equal(
+		t, canonical, metadata.CanonicalOutputCbor(canonical),
+		"canonical form is a fixed point",
+	)
+}

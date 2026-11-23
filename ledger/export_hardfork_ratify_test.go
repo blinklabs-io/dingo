@@ -17,32 +17,20 @@ package ledger
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
 )
 
 // HardForkRatifyOverSetForTest runs the hard fork fixture's ratifying
-// boundary with governance read from set, and returns the fixture's proposal
-// as the ledger's LedgerDB reads it afterwards. load fills set from the
-// fixture's metadata store, so the proposal the boundary tallies is one the
-// set encoded and decoded. The proposal has no parent and no hard fork has
-// been enacted.
-func HardForkRatifyOverSetForTest(
-	t *testing.T,
-	set UtxoSetWriter,
-	load func(store ledgerdb.LedgerDB),
-) *models.GovernanceProposal {
+// boundary and returns the fixture's proposal as the ledger's LedgerDB reads
+// it afterwards. The fixture's ledger state is in its LedgerDB set, so the
+// proposal the boundary tallies is one the set encoded and decoded. The
+// proposal has no parent and no hard fork has been enacted.
+func HardForkRatifyOverSetForTest(t *testing.T) *models.GovernanceProposal {
 	t.Helper()
 	f := newHardForkRatifyFixture(t)
 	require.Nil(t, f.proposal.ParentTxHash)
 	require.Nil(t, f.proposal.ParentActionIdx)
-	load(dbadapter.New(f.db))
-	f.ls.config.UtxoSet = set
-	f.ls.installNonceSource()
-	f.ls.installEpochSource()
-	f.ls.installPoolSource()
 	_, err := f.ls.governanceServing(nil)
 	require.NoError(t, err, "the set does not serve governance reads")
 

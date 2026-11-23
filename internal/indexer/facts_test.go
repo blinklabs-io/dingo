@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -55,13 +56,12 @@ func TestMetadataFactsReplaceByNaturalKeyNotRowID(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	// The same epoch under different row ids and an older boundary slot in
 	// the destination, as left by an earlier copy of a row the ledger has
 	// since rewritten. The destination also holds a row of its own.
-	_, err = srcRaw.Exec(`INSERT INTO epoch_summary
+	_, err := srcRaw.Exec(`INSERT INTO epoch_summary
 		(id, epoch, total_active_stake, total_pool_count, total_delegators, boundary_slot, snapshot_ready)
 		VALUES (900, 5, '700', 3, 4, 120, 1), (901, 6, '800', 3, 4, 200, 1)`)
 	require.NoError(t, err)
@@ -120,11 +120,10 @@ func TestMetadataFactsCreditsRewardsOncePerJournalEntry(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	key := []byte("stake-credential-hash-0123456789")
-	_, err = dstRaw.Exec(`INSERT INTO account
+	_, err := dstRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, added_slot, created_slot, reward, active)
 		VALUES (?, 0, 10, 10, '40', 1)`, key)
 	require.NoError(t, err)
@@ -162,8 +161,7 @@ func TestMetadataFactsPatchLeavesBlockDerivedColumns(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	held, absent := []byte(
 		"held-credential-0123456789abcdef",
@@ -171,7 +169,7 @@ func TestMetadataFactsPatchLeavesBlockDerivedColumns(t *testing.T) {
 		"absent-credential-0123456789abcd",
 	)
 	pool := []byte("pool-key-hash-0123456789")
-	_, err = srcRaw.Exec(`INSERT INTO account
+	_, err := srcRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, pool, added_slot, created_slot, reward, active, expiration_epoch)
 		VALUES (?, 0, ?, 120, 10, '999', 0, 7), (?, 0, ?, 130, 10, '5', 1, 0)`,
 		held, pool, absent, pool)
@@ -238,14 +236,13 @@ func TestMetadataFactsPatchKeepsLiveStakeAttributionInStep(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	delegated, cleared, absent := []byte("delegated-credential-0123456789a"),
 		[]byte("cleared-credential-0123456789abc"),
 		[]byte("absent-credential-0123456789abcd")
 	pool := []byte("pool-key-hash-0123456789")
-	_, err = srcRaw.Exec(`INSERT INTO account
+	_, err := srcRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, pool, added_slot, created_slot, reward, active, expiration_epoch)
 		VALUES (?, 0, ?, 120, 10, '0', 1, 0), (?, 0, NULL, 150, 10, '0', 1, 0)`,
 		delegated, pool, cleared)
@@ -295,9 +292,8 @@ func TestMetadataFactsRollbackRemovesFactsAfterPoint(t *testing.T) {
 	t.Parallel()
 	src, _ := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
-	_, err = dstRaw.Exec(`INSERT INTO reward_ada_pots
+	f := newStoreFacts(t, src, dst)
+	_, err := dstRaw.Exec(`INSERT INTO reward_ada_pots
 		(epoch, treasury, reserves, fees, rewards, captured_slot)
 		VALUES (3, '1', '1', '1', '1', 100), (4, '1', '1', '1', '1', 200)`)
 	require.NoError(t, err)
@@ -320,29 +316,25 @@ func pointAt(slot uint64) ocommon.Point { return ocommon.Point{Slot: slot} }
 
 func TestCopyAnchorStateRefusesAJournalThatExceedsTheBalance(t *testing.T) {
 	t.Parallel()
-	src, srcRaw := newFactsDB(t)
+	src, _ := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
 
 	key := []byte("stake-credential-hash-0123456789")
-	_, err = srcRaw.Exec(`INSERT INTO account
-		(staking_key, credential_tag, added_slot, created_slot, reward, active)
-		VALUES (?, 0, 150, 10, '20', 1)`, key)
-	require.NoError(t, err)
-	_, err = srcRaw.Exec(`INSERT INTO account_import_baseline
-		(credential_tag, staking_key, drep_type, active, added_slot)
-		VALUES (0, ?, 0, 1, 100)`, key)
-	require.NoError(t, err)
-	_, err = dstRaw.Exec(`INSERT INTO account
+	_, err := dstRaw.Exec(`INSERT INTO account
 		(staking_key, credential_tag, added_slot, created_slot, reward, active)
 		VALUES (?, 0, 10, 10, '0', 1)`, key)
 	require.NoError(t, err)
 	// A credit of 30 past the anchor cannot have been paid into a balance of
 	// 20: the journal and the account disagree.
-	_, err = srcRaw.Exec(`INSERT INTO account_reward_delta
-		(staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal, post_snapshot)
-		VALUES (?, 0, ?, '30', 120, 0, 0)`, key, []byte("credit"))
+	f, err := NewMetadataFacts(movingLedger{
+		storeLedger: newStoreLedger(t, src),
+		moving: &movingAnchorState{
+			key: key, balance: 20,
+			journal: []metadata.RewardJournalEntry{
+				{StakingKey: key, Amount: 30},
+			},
+		},
+	}, dst)
 	require.NoError(t, err)
 
 	txn := dst.Transaction(context.Background(), true)
@@ -368,19 +360,15 @@ func TestCopyAnchorStateRefusesAJournalThatExceedsTheBalance(t *testing.T) {
 
 func TestCopyAnchorStateRefusesARewardBeyondInt64(t *testing.T) {
 	t.Parallel()
-	src, srcRaw := newFactsDB(t)
+	src, _ := newFactsDB(t)
 	dst, _ := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
-
-	key := []byte("stake-credential-hash-0123456789")
-	_, err = srcRaw.Exec(`INSERT INTO account
-		(staking_key, credential_tag, added_slot, created_slot, reward, active)
-		VALUES (?, 0, 150, 10, '9223372036854775808', 1)`, key)
-	require.NoError(t, err)
-	_, err = srcRaw.Exec(`INSERT INTO account_import_baseline
-		(credential_tag, staking_key, drep_type, active, added_slot)
-		VALUES (0, ?, 0, 1, 100)`, key)
+	f, err := NewMetadataFacts(movingLedger{
+		storeLedger: newStoreLedger(t, src),
+		moving: &movingAnchorState{
+			key:     []byte("stake-credential-hash-0123456789"),
+			balance: 1 << 63,
+		},
+	}, dst)
 	require.NoError(t, err)
 
 	txn := dst.Transaction(context.Background(), true)
@@ -396,8 +384,7 @@ func TestMetadataFactsPatchProposalOutcomesAsOfTheRange(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	hash := []byte("proposal-tx-hash-0123456789abcdef")
 	insert := `INSERT INTO governance_proposal
@@ -405,7 +392,7 @@ func TestMetadataFactsPatchProposalOutcomesAsOfTheRange(t *testing.T) {
 		 deposit, added_slot, ratified_epoch, ratified_slot,
 		 enacted_epoch, enacted_slot)
 		VALUES (?, 0, 0, 1, 9, 0, 50, ?, ?, ?, ?)`
-	_, err = srcRaw.Exec(insert, hash, 3, 120, 4, 180)
+	_, err := srcRaw.Exec(insert, hash, 3, 120, 4, 180)
 	require.NoError(t, err)
 	_, err = dstRaw.Exec(insert, hash, nil, nil, nil, nil)
 	require.NoError(t, err)
@@ -456,11 +443,10 @@ func TestMetadataFactsPatchDrepExpiryAsOfTheRange(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	cred := []byte("drep-credential-0123456789abcdef")
-	_, err = srcRaw.Exec(`INSERT INTO drep
+	_, err := srcRaw.Exec(`INSERT INTO drep
 		(credential_tag, credential, added_slot, last_activity_epoch, expiry_epoch, active)
 		VALUES (0, ?, 120, 30, 50, 1)`, cred)
 	require.NoError(t, err)
@@ -505,8 +491,7 @@ func TestMetadataFactsCopyProposalDropsByProposalKey(t *testing.T) {
 	t.Parallel()
 	src, srcRaw := newFactsDB(t)
 	dst, dstRaw := newFactsDB(t)
-	f, err := NewMetadataFacts(src, dst)
-	require.NoError(t, err)
+	f := newStoreFacts(t, src, dst)
 
 	held := []byte("held-proposal-tx-hash-0123456789a")
 	missing := []byte("missing-proposal-tx-hash-01234567")
@@ -516,7 +501,7 @@ func TestMetadataFactsCopyProposalDropsByProposalKey(t *testing.T) {
 		VALUES (?, ?, 0, 0, 1, 9, 0, 50)`
 	// Different row ids in the two stores, and a proposal the destination
 	// never received.
-	_, err = srcRaw.Exec(insert, 11, held)
+	_, err := srcRaw.Exec(insert, 11, held)
 	require.NoError(t, err)
 	_, err = srcRaw.Exec(insert, 12, missing)
 	require.NoError(t, err)

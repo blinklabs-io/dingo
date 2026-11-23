@@ -19,13 +19,14 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
-	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,43 +58,8 @@ func newPoolreapTestLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	return ls, db, raw
-}
-
-// seedRetiringPool inserts a pool with a registration (reward account +
-// deposit) and a retirement at retireEpoch, so GetPoolsRetiringAtEpoch will
-// return it at that epoch boundary.
-func seedRetiringPool(
-	t *testing.T,
-	raw *sql.DB,
-	keyHash, rewardAccount []byte,
-	deposit, regSlot, retireEpoch, retireSlot uint64,
-) {
-	t.Helper()
-	result, err := raw.Exec(`
-INSERT INTO pool (pool_key_hash, reward_account) VALUES (?, ?)`,
-		keyHash, rewardAccount,
-	)
-	require.NoError(t, err)
-	poolID, err := result.LastInsertId()
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_registration (
-    pool_id, pool_key_hash, reward_account, deposit_amount, added_slot
-) VALUES (?, ?, ?, ?, ?)`,
-		poolID,
-		keyHash,
-		rewardAccount,
-		strconv.FormatUint(deposit, 10),
-		regSlot,
-	)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
-VALUES (?, ?, ?, ?)`,
-		poolID, keyHash, retireEpoch, retireSlot,
-	)
-	require.NoError(t, err)
 }
 
 func runApplyPoolRetirements(
@@ -109,13 +75,63 @@ func runApplyPoolRetirements(
 	}))
 }
 
+// reapAccount reads the account of a key-hash credential, active or not.
+func reapAccount(
+	t *testing.T,
+	db *database.Database,
+	stakingKey []byte,
+) *models.Account {
+	t.Helper()
+	account, err := seedDB(t, db).GetAccountByCredential(
+		context.Background(), 0, stakingKey, true, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	return account
+}
+
+// touchReapAccount commits the account unchanged as the block at point, so a
+// rollback below point has a later write of the account to undo.
+func touchReapAccount(
+	t *testing.T,
+	db *database.Database,
+	stakingKey []byte,
+	point ocommon.Point,
+) {
+	t.Helper()
+	account := reapAccount(t, db, stakingKey)
+	account.AddedSlot = point.Slot
+	fxCommitAt(t, db, point, LedgerChanges{Accounts: []AccountChange{{
+		Slot: point.Slot, Account: *account,
+	}}})
+}
+
+// fxReapBlock applies the reap of the boundary into newEpoch as the block at
+// boundarySlot, so the set journals it and a rollback below the boundary
+// undoes it.
+func fxReapBlock(
+	t *testing.T,
+	ls *LedgerState,
+	newEpoch, boundarySlot uint64,
+) {
+	t.Helper()
+	fxBlock(
+		t, ls, fxPoint(boundarySlot),
+		func(_ ledgerdb.LedgerDB, txn ledgerdb.Txn) error {
+			return ls.applyPoolRetirements(
+				context.Background(), txn, newEpoch, boundarySlot,
+			)
+		},
+	)
+}
+
 // TestApplyPoolRetirements_CreditsRegisteredRewardAccount: a pool retiring at
 // the new epoch with a registered, active reward account has its deposit
 // refunded to that account; the treasury is untouched.
 func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
@@ -123,9 +139,8 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 		boundarySlot = uint64(1_000)
 	)
 	rewardAccount := reapCred28(0x11)
-	seedRetiringPool(
-		t,
-		gdb,
+	fxRetiringPool(
+		t, db,
 		reapCred28(0xAA),
 		rewardAccount,
 		deposit,
@@ -135,17 +150,17 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Reward:     types.Uint64(0),
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -157,7 +172,7 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 	assert.Equal(t, deposit, uint64(account.Reward),
 		"deposit refunded to the registered reward account")
 
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(1_000), uint64(state.Treasury),
@@ -172,16 +187,15 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		newEpoch     = uint64(5)
 		boundarySlot = uint64(1_000)
 	)
 	// Pool with no reward account at all.
-	seedRetiringPool(
-		t,
-		gdb,
+	fxRetiringPool(
+		t, db,
 		reapCred28(0xBB),
 		reapCred28(0x22),
 		500,
@@ -193,9 +207,8 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 	// test creates it active and then flips the column through the same update
 	// path a deregistration uses.
 	inactive := reapCred28(0x33)
-	seedRetiringPool(
-		t,
-		gdb,
+	fxRetiringPool(
+		t, db,
 		reapCred28(0xCC),
 		inactive,
 		700,
@@ -205,22 +218,18 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: inactive,
 			Reward:     types.Uint64(0),
 			Active:     true,
 		}),
 	)
-	_, err := gdb.Exec(
-		"UPDATE account SET active = FALSE WHERE staking_key = ?",
-		inactive,
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	fxSetAccountActive(t, db, 0, inactive, false)
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(2_200), uint64(state.Treasury),
@@ -231,7 +240,7 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 		"treasury update written at the boundary slot")
 
 	// The inactive account was not credited.
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		inactive,
@@ -249,24 +258,25 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	rewardAccount := reapCred28(0x11)
 	// Retires at epoch 6, but we process the boundary into epoch 5.
-	seedRetiringPool(t, gdb, reapCred28(0xAA), rewardAccount, 500, 100, 6, 200)
+	fxRetiringPool(
+		t, db, reapCred28(0xAA), rewardAccount, 500, 100, 6, 200)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Reward:     types.Uint64(0),
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, 5, 1_000)
+	fxReapBlock(t, ls, 5, 1_000)
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -277,7 +287,7 @@ func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"pool retiring at a later epoch is not refunded yet")
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1_000), uint64(state.Treasury))
 }
@@ -289,7 +299,7 @@ func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		newEpoch     = uint64(5)
@@ -297,9 +307,8 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 		preBoundary  = uint64(500)
 	)
 	registered := reapCred28(0x11)
-	seedRetiringPool(
-		t,
-		gdb,
+	fxRetiringPool(
+		t, db,
 		reapCred28(0xAA),
 		registered,
 		500,
@@ -307,9 +316,8 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 		newEpoch,
 		200,
 	)
-	seedRetiringPool(
-		t,
-		gdb,
+	fxRetiringPool(
+		t, db,
 		reapCred28(0xBB),
 		reapCred28(0x22),
 		300,
@@ -319,17 +327,18 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: registered,
 			Reward:     types.Uint64(0),
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
+	fxTip(t, ls, fxPoint(preBoundary))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		registered,
@@ -339,26 +348,16 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(500), uint64(account.Reward),
 		"registered pool deposit refunded")
-	state, err := db.Metadata().GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_300), uint64(state.Treasury),
 		"unregistered pool deposit (300) added to treasury")
 
-	// Roll back past the boundary: reward credit and treasury row are dropped.
-	require.NoError(
-		t,
-		db.DeleteAccountRewardsAfterSlot(
-			context.Background(),
-			preBoundary,
-			nil,
-		),
-	)
-	require.NoError(
-		t,
-		db.DeleteNetworkStateAfterSlot(context.Background(), preBoundary, nil),
-	)
+	// Roll back past the boundary: the set undoes the reward credit and the
+	// treasury update.
+	fxRollback(t, ls, fxPoint(preBoundary))
 
-	account, err = db.GetAccountByCredential(
+	account, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		registered,
@@ -368,15 +367,15 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"reward credit reverted on rollback")
-	state, err = db.Metadata().GetNetworkState(nil)
+	state, err = seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1_000), uint64(state.Treasury),
 		"treasury restored to pre-boundary value")
 	assert.Equal(t, uint64(50), state.Slot)
 
 	// Re-applying the boundary reproduces the same effects (determinism).
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
-	account, err = db.GetAccountByCredential(
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
+	account, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		registered,
@@ -386,7 +385,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(500), uint64(account.Reward),
 		"re-applied refund is deterministic")
-	state, err = db.Metadata().GetNetworkState(nil)
+	state, err = seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1_300), uint64(state.Treasury))
 }
@@ -404,7 +403,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
@@ -413,18 +412,18 @@ func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
 	)
 	reaped := reapCred28(0xAA)
 	surviving := reapCred28(0xBB)
-	seedRetiringPool(
-		t, gdb, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
+	fxRetiringPool(
+		t, db, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
 	)
-	seedRetiringPool(
-		t, gdb, surviving, reapCred28(0x12), deposit, 100, newEpoch+1, 200,
+	fxRetiringPool(
+		t, db, surviving, reapCred28(0x12), deposit, 100, newEpoch+1, 200,
 	)
 
 	delegator := reapCred28(0x21)
 	other := reapCred28(0x22)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: delegator,
 			Pool:       reaped,
 			AddedSlot:  300,
@@ -433,18 +432,18 @@ func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: other,
 			Pool:       surviving,
 			AddedSlot:  300,
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	reapedDelegator, err := db.GetAccountByCredential(
+	reapedDelegator, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		delegator,
@@ -456,7 +455,7 @@ func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
 	assert.Empty(t, reapedDelegator.Pool,
 		"delegation to the reaped pool must not survive the boundary")
 
-	untouched, err := db.GetAccountByCredential(
+	untouched, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		other,
@@ -480,7 +479,7 @@ func TestApplyPoolRetirements_ClearsLiveStakeAttributionForReapedPool(
 ) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
@@ -489,11 +488,11 @@ func TestApplyPoolRetirements_ClearsLiveStakeAttributionForReapedPool(
 	)
 	reaped := reapCred28(0xAA)
 	surviving := reapCred28(0xBB)
-	seedRetiringPool(
-		t, gdb, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
+	fxRetiringPool(
+		t, db, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
 	)
-	seedRetiringPool(
-		t, gdb, surviving, reapCred28(0x12), deposit, 100, newEpoch+1, 200,
+	fxRetiringPool(
+		t, db, surviving, reapCred28(0x12), deposit, 100, newEpoch+1, 200,
 	)
 
 	delegator := reapCred28(0x21)
@@ -504,30 +503,22 @@ func TestApplyPoolRetirements_ClearsLiveStakeAttributionForReapedPool(
 	}{{delegator, reaped}, {other, surviving}} {
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: seed.key,
 				Pool:       seed.pool,
 				AddedSlot:  300,
 				Active:     true,
 			}),
 		)
-		// CreateAccount already seeds the aggregate row; give it the stake
-		// and pool attribution a delegated account would carry.
-		_, err := gdb.Exec(`
-UPDATE reward_live_stake
-SET pool_key_hash = ?, utxo_stake = '7', total_stake = '7',
-    registered = TRUE, pool_delegation_slot = 300, updated_slot = 300,
-    calculation_version = ?
-WHERE credential_tag = 0 AND staking_key = ?`,
-			seed.pool, models.RewardStakeCalculationVersion, seed.key,
-		)
-		require.NoError(t, err)
+		txID := make([]byte, 32)
+		copy(txID, seed.key)
+		seedTestStakedOutput(t, ls, txID, 0, seed.key, 7)
 	}
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	inputs, err := db.Metadata().GetLiveStakeInputsForPools(
+	inputs, err := seedDB(t, db).GetLiveStakeInputsForPools(
 		[][]byte{reaped, surviving}, 0, nil,
 	)
 	require.NoError(t, err)
@@ -550,7 +541,7 @@ WHERE credential_tag = 0 AND staking_key = ?`,
 func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
@@ -558,24 +549,24 @@ func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 		boundarySlot = uint64(1_000)
 	)
 	reaped := reapCred28(0xAA)
-	seedRetiringPool(
-		t, gdb, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
+	fxRetiringPool(
+		t, db, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
 	)
 	delegator := reapCred28(0x21)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: delegator,
 			Pool:       reaped,
 			AddedSlot:  300,
 			Active:     true,
 		}),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		delegator,
@@ -588,79 +579,58 @@ func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 		"the clear is a boundary write and must be reachable by rollback")
 }
 
-// TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback covers the
-// rollback half of the reap. RestoreAccountStateAtSlot re-derives account.pool
-// from the latest delegation certificate at or before the rollback slot, and a
-// reap writes no certificate — so an account touched again after the reap and
-// then rolled back to a point still past it had its delegation to the reaped
-// pool restored, putting the stake the reap removed straight back into the pool
-// distribution.
+// TestRollbackAfterPoolReapKeepsDelegationCleared covers the rollback half of
+// the reap. A reap writes no certificate, so nothing but the reap itself says
+// the delegation is gone: an account written again after the reap and then
+// rolled back to a point still past it must stay undelegated, or the stake
+// the reap removed returns to the pool distribution.
 //
 // A rollback to before the reap is the opposite case and must restore the
-// delegation, which the certificate derivation already does; that is covered by
-// TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap below.
-func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(
-	t *testing.T,
-) {
+// delegation; that is TestRollbackBeforePoolReapRestoresDelegation below.
+func TestRollbackAfterPoolReapKeepsDelegationCleared(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
 		newEpoch     = uint64(5)
 		boundarySlot = uint64(1_000)
-		// The account is modified again after the reap, and the rollback
-		// target sits between the reap and that modification.
+		// The account is written again after the reap, and the rollback
+		// target sits between the reap and that write.
 		laterSlot    = uint64(1_500)
 		rollbackSlot = uint64(1_200)
 	)
 	reaped := reapCred28(0xAA)
-	seedRetiringPool(
-		t, gdb, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
+	fxRetiringPool(
+		t, db, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
 	)
-	seedReapTestEpoch(t, gdb, newEpoch, boundarySlot)
-
 	delegator := reapCred28(0x21)
-	seedDelegatedAccount(t, db, gdb, delegator, reaped, 300)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	seedDelegatedAccount(t, db, delegator, reaped, 300)
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
+	fxTip(t, ls, fxPoint(rollbackSlot))
+	touchReapAccount(t, db, delegator, fxPoint(laterSlot))
 
-	// Something touches the account after the reap, so the rollback revisits
-	// it. Only the modification slot matters here.
-	_, err := gdb.Exec(
-		`UPDATE account SET added_slot = ? WHERE staking_key = ?`,
-		laterSlot, delegator,
-	)
-	require.NoError(t, err)
+	fxRollback(t, ls, fxPoint(rollbackSlot))
 
-	require.NoError(t, db.Metadata().RestoreAccountStateAtSlot(
-		rollbackSlot, nil,
-	))
-
-	account, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		delegator,
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, account)
-	assert.Empty(t, account.Pool,
+	assert.Empty(t, reapAccount(t, db, delegator).Pool,
 		"a rollback landing after the reap must not restore the delegation")
+	active, err := seedDB(t, db).GetActivePoolKeyHashes(
+		context.Background(), nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, active, "the pool stays reaped")
 }
 
-// TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap is the other
-// direction: rolling back past the boundary undoes the reap along with every
-// other write it made, so the delegation certificate is authoritative again.
-func TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap(
-	t *testing.T,
-) {
+// TestRollbackBeforePoolReapRestoresDelegation is the other direction:
+// rolling back past the boundary undoes the reap along with every other write
+// it made, so the pool is registered and the delegation stands again.
+func TestRollbackBeforePoolReapRestoresDelegation(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
 		deposit      = uint64(500)
@@ -669,63 +639,52 @@ func TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap(
 		rollbackSlot = uint64(900)
 	)
 	reaped := reapCred28(0xAA)
-	seedRetiringPool(
-		t, gdb, reaped, reapCred28(0x11), deposit, 100, newEpoch, 200,
+	rewardAccount := reapCred28(0x11)
+	fxRetiringPool(
+		t, db, reaped, rewardAccount, deposit, 100, newEpoch, 200,
 	)
-	seedReapTestEpoch(t, gdb, newEpoch, boundarySlot)
-
+	require.NoError(
+		t,
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+			StakingKey: rewardAccount,
+			Active:     true,
+		}),
+	)
 	delegator := reapCred28(0x21)
-	seedDelegatedAccount(t, db, gdb, delegator, reaped, 300)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	seedDelegatedAccount(t, db, delegator, reaped, 300)
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
+	fxTip(t, ls, fxPoint(rollbackSlot))
 
-	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
-	require.NoError(t, db.Metadata().RestoreAccountStateAtSlot(
-		rollbackSlot, nil,
-	))
+	fxReapBlock(t, ls, newEpoch, boundarySlot)
+	require.Empty(t, reapAccount(t, db, delegator).Pool)
+	require.Equal(t, deposit, uint64(reapAccount(t, db, rewardAccount).Reward))
 
-	account, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		delegator,
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, account)
-	assert.Equal(t, reaped, account.Pool,
+	fxRollback(t, ls, fxPoint(rollbackSlot))
+
+	assert.Equal(t, reaped, reapAccount(t, db, delegator).Pool,
 		"rolling back past the reap restores the delegation it removed")
-}
-
-// seedReapTestEpoch gives the retirement epoch a row, so the reap boundary can
-// be resolved from the certificate's epoch the way the ledger resolves it.
-func seedReapTestEpoch(
-	t *testing.T,
-	raw *sql.DB,
-	epoch, startSlot uint64,
-) {
-	t.Helper()
-	_, err := raw.Exec(`
-INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots)
-VALUES (?, ?, 6, 1000, 500)`,
-		epoch, startSlot,
+	assert.Zero(t, uint64(reapAccount(t, db, rewardAccount).Reward),
+		"the deposit refund is undone with the reap")
+	retiring, err := seedDB(t, db).GetPoolsRetiringAtEpoch(
+		context.Background(), newEpoch, boundarySlot, nil,
 	)
 	require.NoError(t, err)
+	require.Len(t, retiring, 1, "the pool is registered and retiring again")
+	assert.Equal(t, reaped, retiring[0].PoolKeyHash)
 }
 
-// seedDelegatedAccount creates an account delegated to pool with a matching
-// registration and stake_delegation certificate, so a rollback can re-derive
-// its state from certificate history the way a replayed account's would be.
+// seedDelegatedAccount creates an active account delegated to pool since
+// certSlot.
 func seedDelegatedAccount(
 	t *testing.T,
 	db *database.Database,
-	raw *sql.DB,
 	stakingKey, pool []byte,
 	certSlot uint64,
 ) {
 	t.Helper()
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:  stakingKey,
 			Pool:        pool,
 			AddedSlot:   certSlot,
@@ -733,104 +692,55 @@ func seedDelegatedAccount(
 			Active:      true,
 		}),
 	)
-	_, err := raw.Exec(`
-INSERT INTO registration (staking_key, credential_tag, added_slot)
-VALUES (?, 0, 1)`,
-		stakingKey,
-	)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO stake_delegation (
-    staking_key, credential_tag, pool_key_hash, added_slot
-) VALUES (?, 0, ?, ?)`,
-		stakingKey, pool, certSlot,
-	)
-	require.NoError(t, err)
 }
 
-// TestRestoreAccountStateHonoursSupersedingRetirement covers a pool whose
-// retirement certificate was replaced by a later one for a further-out epoch.
+// TestPoolReapHonoursSupersedingRetirement covers a pool whose retirement
+// certificate was replaced by a later one for a further-out epoch.
 // cardano-ledger keeps only the latest retirement, so the earlier epoch's
-// boundary reaps nothing — GetPoolsRetiringAtEpoch encodes exactly that by
-// selecting the latest retirement per pool and requiring its epoch to match the
-// boundary. The rollback derivation has to agree, or it clears a delegation the
-// forward path never cleared.
-func TestRestoreAccountStateHonoursSupersedingRetirement(t *testing.T) {
+// boundary reaps nothing, and a rollback across later writes of a delegator
+// leaves its delegation in place.
+func TestPoolReapHonoursSupersedingRetirement(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newPoolreapTestLedger(t)
+	ls, db, _ := newPoolreapTestLedger(t)
 
 	const (
-		deposit        = uint64(500)
-		firstEpoch     = uint64(5)
-		firstBoundary  = uint64(1_000)
-		secondEpoch    = uint64(9)
-		secondBoundary = uint64(5_000)
-		rollbackSlot   = uint64(1_200)
+		deposit       = uint64(500)
+		firstEpoch    = uint64(5)
+		firstBoundary = uint64(1_000)
+		secondEpoch   = uint64(9)
+		rollbackSlot  = uint64(1_200)
 	)
 	pool := reapCred28(0xAA)
-	seedRetiringPool(
-		t, gdb, pool, reapCred28(0x11), deposit, 100, firstEpoch, 200,
+	fxRetiringPool(
+		t, db, pool, reapCred28(0x11), deposit, 100, firstEpoch, 200,
 	)
 	// A later certificate moves the retirement out to a further epoch.
-	poolID := poolIDForKeyHash(t, gdb, pool)
-	_, err := gdb.Exec(`
-INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
-VALUES (?, ?, ?, ?)`,
-		poolID, pool, secondEpoch, 300,
-	)
-	require.NoError(t, err)
-	seedReapTestEpoch(t, gdb, firstEpoch, firstBoundary)
-	seedReapTestEpoch(t, gdb, secondEpoch, secondBoundary)
+	seedStakePoolRetirement(t, ls, pool, secondEpoch, 300)
 
 	delegator := reapCred28(0x21)
-	seedDelegatedAccount(t, db, gdb, delegator, pool, 400)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	seedDelegatedAccount(t, db, delegator, pool, 400)
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 50, nil))
 
-	// The forward path agrees the first boundary reaps nothing.
-	runApplyPoolRetirements(t, ls, db, firstEpoch, firstBoundary)
-	account, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		delegator,
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, account)
-	require.Equal(t, pool, account.Pool,
+	// The first boundary reaps nothing.
+	fxReapBlock(t, ls, firstEpoch, firstBoundary)
+	require.Equal(t, pool, reapAccount(t, db, delegator).Pool,
 		"a superseded retirement must not reap the pool")
-
-	// Force the rollback to revisit the account, then confirm the derivation
-	// reaches the same conclusion.
-	_, err = gdb.Exec(
-		`UPDATE account SET added_slot = ? WHERE staking_key = ?`,
-		rollbackSlot+500, delegator,
-	)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
-	require.NoError(t, db.Metadata().RestoreAccountStateAtSlot(
-		rollbackSlot, nil,
-	))
+	require.Equal(t, uint64(1_000), uint64(state.Treasury),
+		"no deposit is refunded at the superseded epoch")
 
-	account, err = db.GetAccountByCredential(
-		context.Background(),
-		0,
-		delegator,
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, account)
-	assert.Equal(t, pool, account.Pool,
+	fxTip(t, ls, fxPoint(rollbackSlot))
+	touchReapAccount(t, db, delegator, fxPoint(rollbackSlot+500))
+	fxRollback(t, ls, fxPoint(rollbackSlot))
+
+	assert.Equal(t, pool, reapAccount(t, db, delegator).Pool,
 		"the rollback must not clear a delegation the reap never cleared")
-}
-
-// poolIDForKeyHash returns the pool row id seedRetiringPool created.
-func poolIDForKeyHash(t *testing.T, raw *sql.DB, keyHash []byte) int64 {
-	t.Helper()
-	var id int64
-	require.NoError(t, raw.QueryRow(
-		`SELECT id FROM pool WHERE pool_key_hash = ?`, keyHash,
-	).Scan(&id))
-	return id
+	retiring, err := seedDB(t, db).GetPoolsRetiringAtEpoch(
+		context.Background(), secondEpoch, 5_000, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, retiring, 1)
+	assert.Equal(t, pool, retiring[0].PoolKeyHash)
 }

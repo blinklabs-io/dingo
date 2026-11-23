@@ -69,7 +69,7 @@ func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})

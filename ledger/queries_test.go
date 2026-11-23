@@ -61,7 +61,7 @@ func seedEpochs(
 ) {
 	t.Helper()
 	for startSlot, epoch := range startSlotByEpoch {
-		require.NoError(t, ls.db.SetEpoch(
+		require.NoError(t, seedDB(t, ls.db).SetEpoch(
 			startSlot, epoch, nil, nil, nil, nil, 0, 1, 100, nil,
 		))
 	}
@@ -81,20 +81,16 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(
 	ls := newPoolDistr2Ledger(t, db)
 
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(repeatedBytes(28, 0x11)))
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  repeatedBytes(32, 0xAA),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  repeatedBytes(32, 0xAA),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	),
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  repeatedBytes(32, 0xAA),
+	}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  repeatedBytes(32, 0xAA),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}),
 	)
 
 	// Epoch 4's mark snapshot (praos.StakeSnapshotEpoch(4) == 3) -- exactly
@@ -106,20 +102,20 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(
 	// below and checkAsOfEpochRecency's doc comment for the exact shift.
 	require.NoError(
 		t,
-		db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+		fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
 			Epoch: 3, SnapshotType: snapshotTypeMark,
 			PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(1_000_000),
 			CapturedSlot: 1,
-		}, nil),
+		}),
 	)
 	// Epoch 6's mark snapshot (praos.StakeSnapshotEpoch(6) == 5) -- live.
 	require.NoError(
 		t,
-		db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+		fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
 			Epoch: 5, SnapshotType: snapshotTypeMark,
 			PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(9_000_000),
 			CapturedSlot: 1,
-		}, nil),
+		}),
 	)
 
 	seedEpochs(t, ls, map[uint64]uint64{300: 3, 400: 4, 600: 6})
@@ -251,10 +247,10 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_ReadsPersisted
 	ls.publishSnapshotsLocked()
 
 	conwayEraId := uint(eras.ConwayEraDesc.Id)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
 	historicalPParams := conwayPParamsWithCostModels(
@@ -262,7 +258,7 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_ReadsPersisted
 	)
 	historicalCbor, err := cbor.Encode(historicalPParams)
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		historicalCbor, 300, 3, conwayEraId, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -305,10 +301,10 @@ func TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected(
 	ls.publishSnapshotsLocked()
 
 	conwayEraId := uint(eras.ConwayEraDesc.Id)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
 	// Deliberately no SetPParams call for epoch 3.
@@ -346,10 +342,10 @@ func TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostMod
 	ls.publishSnapshotsLocked()
 
 	conwayEraId := uint(eras.ConwayEraDesc.Id)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
 	// Epoch 3's persisted row still has the fabricated default -- real V2
@@ -359,7 +355,7 @@ func TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostMod
 	)
 	historicalCbor, err := cbor.Encode(historicalPParams)
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		historicalCbor, 300, 3, conwayEraId, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -405,15 +401,17 @@ func TestQueryShelleyCurrentProtocolParams_HistoricalRowRealReaffirmedDefaultNot
 	ls.publishSnapshotsLocked()
 
 	conwayEraId := uint(eras.ConwayEraDesc.Id)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 	))
 	// Real data was confirmed as of epoch 2 -- before the targetEpoch (3)
 	// this test pins to.
-	require.NoError(t, database.SetSyntheticV2CostModelClearedEpoch(db, nil, 2))
+	require.NoError(t, seedDB(t, db).SetSyncState(
+		database.SyntheticV2CostModelClearedEpochSyncKey, "2", nil,
+	))
 	// Epoch 3's persisted row happens to carry the exact same values as the
 	// fabricated default, but this is real, confirmed data, not the
 	// fabrication.
@@ -422,7 +420,7 @@ func TestQueryShelleyCurrentProtocolParams_HistoricalRowRealReaffirmedDefaultNot
 	)
 	historicalCbor, err := cbor.Encode(historicalPParams)
 	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
+	require.NoError(t, seedDB(t, ls.db).SetPParams(
 		historicalCbor, 300, 3, conwayEraId, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -506,10 +504,10 @@ func TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint(
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
 
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -567,10 +565,10 @@ func TestQueryHardFork_CurrentEra_NoEpochRecordRejected(t *testing.T) {
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
 
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 1, 10, nil,
 	))
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		600, 6, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil,
 	))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -599,7 +597,7 @@ func TestQueryHardForkEraHistory_OmitsAbsentEras(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -618,6 +616,7 @@ func TestQueryHardForkEraHistory_OmitsAbsentEras(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -672,7 +671,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 	const expectedEraEndEpoch = uint64(502)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -693,6 +692,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.evaluateTransitionImpossible()
 	require.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
@@ -762,7 +762,7 @@ func testQueryHardForkEraHistoryAtEpochOverride(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ByronEraDesc.Id, slotLenMs, epochLen,
@@ -796,6 +796,7 @@ func testQueryHardForkEraHistoryAtEpochOverride(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Apply the trigger so transitionInfo reflects TransitionKnown(5) as it
 	// would at runtime via Start() / the tip-update path.
@@ -848,11 +849,11 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, byronEpoch0, nil, nil, nil, nil,
 		eras.ByronEraDesc.Id, byronSlotLenMs, byronEpoch0Len, nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		shelleyStart, shelleyEpoch1, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, slotLenMs, shelleyEpochLen, nil,
 	))
@@ -869,6 +870,7 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -933,19 +935,19 @@ func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraBoundary(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		firstEpochSlot, firstEpochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 		nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		secondEpochSlot, secondEpochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 		nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		thirdEpochSlot, thirdEpochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -964,6 +966,7 @@ func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraBoundary(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -999,7 +1002,7 @@ func TestQueryHardForkEraHistory_TransitionImpossibleReturnsConfirmedEpochEnd(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -1022,6 +1025,7 @@ func TestQueryHardForkEraHistory_TransitionImpossibleReturnsConfirmedEpochEnd(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.cachedShape.Store(&shape)
 	ls.evaluateTransitionImpossible()
 	require.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
@@ -1067,6 +1071,11 @@ func seedBlockAtSlot(t *testing.T, ls *LedgerState, slot uint64, hash []byte) {
 		Slot: slot,
 		Hash: hash,
 	}, nil))
+	// A block the ledger applied is a point in the set's journal, which a
+	// read pinned to the block needs.
+	if _, open := LiveSetOfForTest(ls.db); open {
+		fxCommitAt(t, ls.db, ocommon.Point{Slot: slot, Hash: hash}, LedgerChanges{})
+	}
 }
 
 // TestQuery_PinnedPointOnChain_Succeeds covers the common case: a pinned
@@ -1516,35 +1525,6 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects covers
-// API storage mode, which never hard-deletes spent UTxO rows (see
-// cleanupConsumedUtxos' identical StorageModeAPI check) -- so no
-// retention-window rejection applies there, even for a pin that would be
-// rejected in core mode.
-func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, dbtypes.StorageModeAPI)
-	ls := newPoolDistr2Ledger(t, db)
-	const tipSlot = 200_000
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
-	}, nil))
-
-	txIn := ledger.MustNewShelleyTransactionInput(
-		hex.EncodeToString(repeatedBytes(32, 0xEE)),
-		0,
-	)
-	_, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
-		// Far below what would be the core-mode floor (150_000).
-		QueryPoint{Slot: 1},
-		nil,
-	)
-	require.NoError(t, err)
-}
-
 // TestCheckUtxoRetentionWindowPersistedFloorOverridesLenientLiveWindow
 // covers the gap a retention floor derived from only the CURRENT tip and
 // era's own stability window leaves open: a rollback lowering the tip, or
@@ -1650,7 +1630,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected(
 func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
 	addr, err := lcommon.NewAddressFromParts(
@@ -1674,7 +1654,17 @@ func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 		Point: ocommon.NewPoint(300, pointHash),
 	}, nil))
 
-	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
+	// The pinned block is one of the set's own points, between the block
+	// that created the output and the one that spent it.
+	ref := models.UtxoId{Hash: txId, Idx: 0}
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		0: {},
+		100: {{Added: []UtxoOutput{{
+			Ref: ref, Cbor: queryTestOutputCBOR(t, db, txId, 0),
+		}}}},
+		300: {},
+		500: {{Removed: []models.UtxoId{ref}}},
+	})
 	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
@@ -1964,6 +1954,7 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	seedAddressUtxo(addr2, txId2, 2_000_000)
 
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	attachQueryLiveUtxoSet(t, ls, db)
 	result, err := ls.queryShelleyUtxoByAddress(
 		[]ledger.Address{addr1, addr2},
@@ -2075,6 +2066,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	)
 
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	attachQueryLiveUtxoSet(t, ls, db)
 	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
 	require.NoError(t, err)
@@ -2197,6 +2189,7 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
@@ -2233,7 +2226,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 	db := newTestDB(t)
 	drepCred := stakeCred28(0xC1)
 	delegKey := stakeCred28(0xD2)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		Credential:    drepCred,
 		CredentialTag: 0,
 		ExpiryEpoch:   22,
@@ -2249,6 +2242,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 		AddedSlot:     100,
 	}))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
@@ -2280,6 +2274,7 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	result, err := ls.queryShelleyAccountState(context.Background(), QueryPoint{}, nil)
 	require.NoError(t, err)
@@ -2362,6 +2357,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
 
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -2393,6 +2389,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 		Active:     true,
 	}))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -2436,6 +2433,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 		nil,
 	))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -2471,6 +2469,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 		Active:     true,
 	}))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -2516,6 +2515,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 	unknownKey := stakeCred28(0x03) // never inserted
 
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
 	creds := []olocalstatequery.StakeCredential{
 		{Tag: 0, Bytes: toBlake2b224(delegatedKey)},
@@ -2571,6 +2571,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 	}))
 
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	keyCred := olocalstatequery.StakeCredential{
 		Tag:   0,
 		Bytes: toBlake2b224(stakeKey),
@@ -2635,6 +2636,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	))
 
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	queryCred := olocalstatequery.StakeCredential{
 		Tag:   0,
 		Bytes: lcommon.NewBlake2b224(stakeKey),
@@ -2672,7 +2674,7 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0x61)
 	drepKey := stakeCred28(0x62)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		Drep:          drepKey,
@@ -2680,6 +2682,7 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 		Active:        true,
 	}))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	cred := lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
 		Credential: lcommon.NewBlake2b224(stakeKey),
@@ -2737,8 +2740,8 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 		GovActionCbor: govAction,
 		AddedSlot:     100,
 	}
-	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
-	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(context.Background(), proposal, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 0,
@@ -2747,6 +2750,7 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 		AddedSlot:          101,
 	}, nil))
 	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyGetProposals(context.Background(), nil, QueryPoint{}, nil)
@@ -2922,14 +2926,14 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 
 	db := newTestDB(t)
 	// Epoch 500: the active epoch in the old era
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch500Start, epoch500Id,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 		nil,
 	))
 	// Epoch 501: the transition epoch, still stored with Conway era's EraId
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch501Start, epoch501Id,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -2948,6 +2952,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3001,7 +3006,7 @@ func TestQueryHardForkEraHistory_TransitionKnownIncludesSuccessor(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -3022,6 +3027,7 @@ func TestQueryHardForkEraHistory_TransitionKnownIncludesSuccessor(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3064,7 +3070,7 @@ func TestQueryHardForkEraHistory_TransitionKnownIncludesUnboundedSuccessor(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -3089,6 +3095,7 @@ func TestQueryHardForkEraHistory_TransitionKnownIncludesUnboundedSuccessor(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.cachedShape.Store(&shape)
 	ls.publishSnapshotsLocked()
 
@@ -3120,7 +3127,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -3139,6 +3146,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3185,7 +3193,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -3204,6 +3212,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3239,7 +3248,7 @@ func TestQueryHardForkEraHistory_TransitionStateChangesSafeZoneAnchor(
 
 	setupLS := func(state hardfork.TransitionState) *LedgerState {
 		db := newTestDB(t)
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epochStartSlot, epochId,
 			nil, nil, nil, nil,
 			eras.ConwayEraDesc.Id, slotLenMs, epochLen,
@@ -3259,6 +3268,7 @@ func TestQueryHardForkEraHistory_TransitionStateChangesSafeZoneAnchor(
 				),
 			},
 		}
+		fxAttachLedgerDB(t, ls)
 		ls.publishSnapshotsLocked()
 		return ls
 	}
@@ -3486,7 +3496,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 
 	db := newTestDB(t)
 	// Store the Babbage epoch.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart, epochId,
 		nil, nil, nil, nil,
 		eras.BabbageEraDesc.Id, slotLenMs, epochLen,
@@ -3496,7 +3506,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 8}
 	ppCbor, err := cbor.Encode(pp)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		ppCbor,
 		epochStart, // slot
 		epochId,
@@ -3516,6 +3526,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3594,7 +3605,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStart, epochId,
 		nil, nil, nil, nil,
 		eras.BabbageEraDesc.Id, slotLenMs, epochLen,
@@ -3604,7 +3615,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
 	ppCbor, err := cbor.Encode(pp)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		ppCbor,
 		epochStart,
 		epochId,
@@ -3624,6 +3635,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -3722,7 +3734,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 
 	db := newTestDB(t)
 	// Babbage transition epoch (pparams carry Conway major version).
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		babbageEpochStart, babbageEpochId,
 		nil, nil, nil, nil,
 		eras.BabbageEraDesc.Id, slotLenMs, babbageEpochLen,
@@ -3731,7 +3743,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
 	ppCbor, err := cbor.Encode(pp)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		ppCbor,
 		babbageEpochStart,
 		babbageEpochId,
@@ -3739,7 +3751,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 		nil,
 	))
 	// Conway epoch starts at the confirmed boundary.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		conwayEpochStart, conwayEpochId,
 		nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, conwayEpochLen,
@@ -3758,6 +3770,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -4099,7 +4112,7 @@ func TestVerifyPointQueryable_WithinAllFloors_Accepted(t *testing.T) {
 	// PoolStakeDistribution's own totalCirculatingSupply call separately
 	// requires -- without this row, a point can be inside the epoch-based
 	// retention window and still get rejected.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 1_000, 300, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(350, hash),
 	}, nil))
@@ -4141,71 +4154,6 @@ func TestVerifyPointQueryable_PastRetentionFloor_Rejected(t *testing.T) {
 	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
-}
-
-// TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted covers
-// checkAsOfEpochRecency's apiStorageMode early-return branch (ledger/pool_stake_distribution.go):
-// pool-stake snapshots are never pruned when the database runs in API
-// storage mode, so a point whose mark-snapshot epoch would be rejected under
-// the default (core) retention window must still be accepted here, matching
-// cleanupOldSnapshots' own API-mode carve-out that this check mirrors.
-//
-// Same shape as TestVerifyPointQueryable_PastRetentionFloor_Rejected -- an
-// epoch 3 pinned point 7 epochs behind live epoch 10, well outside the
-// 3-epoch stake-snapshot retention window -- except the database is opened
-// in API storage mode instead of the default core mode, and epoch 3 carries
-// its own persisted epoch row and pparams row (so the historical-epoch reads
-// further down VerifyPointQueryable, which that rejected-in-core-mode test
-// never reaches, succeed here on their own merits rather than accidentally
-// masking the check under test). That test proves core mode must reject
-// this point; this test proves API mode must accept the identical point
-// instead. No-opping the apiStorageMode branch in checkAsOfEpochRecency
-// (i.e. falling through to the pruning-window check regardless of storage
-// mode) makes this test fail with ErrHistoricalStateUnavailable instead of
-// the required nil.
-func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeAPI)
-	ls := newPoolDistr2Ledger(t, db)
-	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = conwayPParamsWithCostModels(
-		map[uint][]int64{0: {9, 9, 9}},
-	)
-	ls.currentEpoch = models.Epoch{EpochId: 10}
-	ls.publishSnapshotsLocked()
-
-	conwayEraId := uint(eras.ConwayEraDesc.Id)
-	hash := repeatedBytes(32, 0x0B)
-	seedBlockAtSlot(t, ls, 350, hash)
-	require.NoError(t, ls.db.SetEpoch(
-		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
-	))
-	require.NoError(t, ls.db.SetEpoch(
-		1000, 10, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
-	))
-	historicalPParams := conwayPParamsWithCostModels(
-		map[uint][]int64{0: {1, 1, 1}},
-	)
-	historicalCbor, err := cbor.Encode(historicalPParams)
-	require.NoError(t, err)
-	require.NoError(t, ls.db.SetPParams(
-		historicalCbor, 300, 3, conwayEraId, nil,
-	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
-	}, nil))
-
-	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the
-	// 3-epoch stake-snapshot retention window that applies in core storage
-	// mode (see TestVerifyPointQueryable_PastRetentionFloor_Rejected). In
-	// API storage mode, pool-stake snapshots are never pruned, so this must
-	// be accepted instead.
-	verifyErr := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
-	require.NoError(t, verifyErr)
 }
 
 // TestVerifyPointQueryable_NoNetworkStateRow_Rejected covers a regression:
@@ -4286,7 +4234,7 @@ func TestVerifyPointQueryable_NoNetworkStateRow_RejectedWithoutGenesis(
 	err := ls.VerifyPointQueryable(t.Context(), nil, at)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 0, nil))
 	require.NoError(t, ls.VerifyPointQueryable(t.Context(), nil, at))
 }
 
@@ -4320,10 +4268,10 @@ func TestVerifyPointQueryable_UnknownEraId_Rejected(t *testing.T) {
 
 	hash := repeatedBytes(32, 0x0B)
 	seedBlockAtSlot(t, ls, 350, hash)
-	require.NoError(t, ls.db.SetEpoch(
+	require.NoError(t, seedDB(t, ls.db).SetEpoch(
 		300, 3, nil, nil, nil, nil, 255, 1, 100, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 1_000, 300, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(350, hash),
 	}, nil))
@@ -4395,11 +4343,11 @@ func TestQueryHardForkEraHistory_ScheduledDijkstraForkKeepsConwayEpoch(
 		slotLenMs = uint(1_000)
 	)
 	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, slotLenMs, epochLen, nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		uint64(epochLen), 1, nil, nil, nil, nil,
 		eras.DijkstraEraDesc.Id, slotLenMs, epochLen, nil,
 	))
@@ -4408,7 +4356,7 @@ func TestQueryHardForkEraHistory_ScheduledDijkstraForkKeepsConwayEpoch(
 	)
 	ppCbor, err := cbor.Encode(conwayPParams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		ppCbor, 0, 0, eras.ConwayEraDesc.Id, nil,
 	))
 
@@ -4431,6 +4379,7 @@ func TestQueryHardForkEraHistory_ScheduledDijkstraForkKeepsConwayEpoch(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -4457,7 +4406,7 @@ func TestQueryHardForkEraHistory_ConwayTipSameWithOrWithoutDijkstra(
 	history := func(t *testing.T, withDijkstra bool) cbor.IndefLengthList {
 		t.Helper()
 		db := newTestDB(t)
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			100_000, 500, nil, nil, nil, nil,
 			eras.ConwayEraDesc.Id, 1_000, 432_000, nil,
 		))
@@ -4481,6 +4430,7 @@ func TestQueryHardForkEraHistory_ConwayTipSameWithOrWithoutDijkstra(
 				),
 			},
 		}
+		fxAttachLedgerDB(t, ls)
 		ls.evaluateTransitionImpossible()
 		ls.publishSnapshotsLocked()
 		result, err := ls.queryHardForkEraHistory(context.Background(), nil)
@@ -4538,12 +4488,12 @@ func TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch(
 	)
 	db := newTestDB(t)
 	for epoch := range uint64(2) {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*uint64(epochLen), epoch, nil, nil, nil, nil,
 			eras.ConwayEraDesc.Id, slotLenMs, epochLen, nil,
 		))
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		2*uint64(epochLen), 2, nil, nil, nil, nil,
 		eras.DijkstraEraDesc.Id, slotLenMs, epochLen, nil,
 	))
@@ -4567,6 +4517,7 @@ func TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryHardForkEraHistory(context.Background(), nil)

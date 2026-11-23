@@ -794,9 +794,9 @@ func TestCountPoolBlocksInSlotRangeExcludesMithrilImportedCounters(
 }
 
 // TestGetPoolBlockIssuersInSlotRangeExcludesMithrilImportedCounters covers the
-// ordered-row path the decentralization-aware reward count uses
-// (ledger.rewardBlockCountsExcludingOverlaySlots), which reads the same table
-// directly and so needs the same discrimination.
+// ordered-row path the set's reward block counts load from
+// (ledger.RewardBlocksFromStore), which reads the same table directly and so
+// needs the same discrimination.
 func TestGetPoolBlockIssuersInSlotRangeExcludesMithrilImportedCounters(
 	t *testing.T,
 ) {

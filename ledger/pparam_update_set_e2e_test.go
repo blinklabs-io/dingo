@@ -16,11 +16,10 @@ package ledger_test
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -31,46 +30,55 @@ var pparamUpdateReadNames = []string{
 	"ForecastPParamUpdates",
 }
 
-// pparamUpdateOutcome runs the proposal scenario in reads mode and returns
-// what the forecasts and proposal reads answered. With the live set the store's
-// proposal reads fail, and the count of reads that reached it is returned.
-func pparamUpdateOutcome(
-	t *testing.T,
-	reads string,
-) (out []string, reached int64) {
-	t.Helper()
+// TestPParamUpdateReadsFollowProposalsABoundaryAndARollback reads the
+// forecast and the stored proposals through the ledger's LedgerDB with the
+// metadata store's proposal reads failing, through proposals of both kinds of
+// transaction, an invalid transaction's, a boundary and a rollback. Valid
+// proposals become visible, the boundary keeps them, and the rollback removes
+// exactly the ones stored after its target.
+func TestPParamUpdateReadsFollowProposalsABoundaryAndARollback(t *testing.T) {
+	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(t, set)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(scenario.DB),
-	))
-	count := func() int64 { return 0 }
-	if reads == "set" {
-		count = scenario.HideStoreReads(pparamUpdateReadNames...)
-	}
-	read := func(stage string, epoch uint64) {
+	reached := scenario.HideStoreReads(pparamUpdateReadNames...)
+	// read returns the forecast for epoch and the proposals stored for it
+	// and the epoch before, one line each.
+	read := func(stage string, epoch uint64) (string, []string) {
 		t.Helper()
 		pp, err := scenario.ForecastRendered(epoch)
 		require.NoError(t, err, stage)
-		out = append(out, fmt.Sprintf("%s forecast %d %s", stage, epoch, pp))
+		// A read answers its epoch and the one before, so the two reads
+		// overlap.
+		seen := map[string]struct{}{}
 		for _, e := range []uint64{epoch - 1, epoch} {
 			rows, err := scenario.Updates(e)
 			require.NoError(t, err, stage)
-			// Per genesis key, newest first; the order between keys is
-			// not the store's to promise.
-			var lines []string
 			for _, u := range rows {
-				lines = append(lines, fmt.Sprintf("%x %d %d %x",
-					u.GenesisHash, u.AddedSlot, u.Epoch, u.Cbor))
+				seen[fmt.Sprintf("%d %x %d %x",
+					u.AddedSlot, u.GenesisHash, u.Epoch, u.Cbor)] = struct{}{}
 			}
-			slices.Sort(lines)
-			out = append(out, fmt.Sprintf("%s updates %d %v", stage, e, lines))
 		}
+		lines := slices.Sorted(maps.Keys(seen))
+		return pp, lines
 	}
-	read("seeded", 1)
 	at := scenario.RollbackTarget.Slot
+	storedAfter := func(lines []string, slot uint64) int {
+		n := 0
+		for _, l := range lines {
+			var added uint64
+			_, err := fmt.Sscanf(l, "%d", &added)
+			require.NoError(t, err)
+			if added > slot {
+				n++
+			}
+		}
+		return n
+	}
+	_, seeded := read("seeded", 2)
+	require.Zero(t, storedAfter(seeded, at-1),
+		"the scenario seeds no proposal at or after the rollback target")
 	for _, p := range []ledger.UpdateProposal{
 		{Slot: at, Epoch: 1, Index: 0, Keys: []byte{1, 2, 3}, MaxTxSize: 20_000},
 		{Slot: at + 1, Epoch: 1, Index: 0, Keys: []byte{1, 2}, MaxTxSize: 21_000},
@@ -80,50 +88,24 @@ func pparamUpdateOutcome(
 	} {
 		scenario.Propose(p)
 	}
-	read("proposed", 2)
+	proposedForecast, proposed := read("proposed", 2)
+	// Seven valid proposals, one per genesis key of each valid transaction.
+	require.Len(t, proposed, len(seeded)+7,
+		"an invalid transaction's proposals are not stored")
 	require.NoError(t, scenario.ForecastInsideTxn(ledger.UpdateProposal{
 		Slot: at + 4, Epoch: 1, Keys: []byte{9}, MaxTxSize: 25_000,
 	}, 2))
 	require.NoError(t, scenario.EnactInsideTxn(1))
 	scenario.ApplyBoundary()
-	read("boundary", 2)
+	_, boundary := read("boundary", 2)
+	require.Equal(t, proposed, boundary, "the boundary keeps every proposal")
 	scenario.RollbackBeforeBoundary()
-	read("rollback", 2)
-	return out, count()
-}
-
-// TestPParamUpdateReadsFromTheLiveUtxoSet requires the forecast and the
-// proposal read to give, from the live set with the store's reads failing, the
-// answers they give with metadata reads available, through proposals of both kinds of
-// transaction, an invalid transaction's, a boundary and a rollback.
-func TestPParamUpdateReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	visible, _ := pparamUpdateOutcome(t, "metadata-visible")
-	setMode, reached := pparamUpdateOutcome(t, "set")
-	require.Equal(t, visible, setMode)
-	require.Zero(t, reached, "a proposal read reached the metadata store")
-}
-
-// TestPParamUpdateReadsUseTheSetAfterAnUntrackedStoreWrite requires an
-// update written outside the ledger to stay out of the set's answer.
-func TestPParamUpdateReadsUseTheSetAfterAnUntrackedStoreWrite(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set,
-	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(scenario.DB),
-	))
-	at := scenario.RollbackTarget.Slot
-	scenario.ProposeAroundTheLedger(ledger.UpdateProposal{
-		Slot: at + 1, Epoch: 1, Keys: []byte{7}, MaxTxSize: 26_000,
-	})
-	rows, err := scenario.Updates(1)
-	require.NoError(t, err)
-	require.False(t, slices.ContainsFunc(rows, func(u models.PParamUpdate) bool {
-		return u.GenesisHash[0] == 7
-	}), "an untracked store proposal is absent from the set")
+	rolledForecast, rolled := read("rollback", 2)
+	require.Len(t, rolled, len(seeded)+3,
+		"the rollback keeps the proposals stored at its target")
+	require.Zero(t, storedAfter(rolled, at),
+		"the rollback removes the proposals stored after its target")
+	require.NotEqual(t, proposedForecast, rolledForecast,
+		"the forecast follows the proposals the rollback removed")
+	require.Zero(t, reached(), "a proposal read reached the metadata store")
 }

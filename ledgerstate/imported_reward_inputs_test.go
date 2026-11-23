@@ -97,10 +97,11 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		resolve,
 		nil,
@@ -119,7 +120,7 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 	for _, epoch := range []uint64{
 		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		poolInputs, err := ldb.GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, poolInputs,
 			"epoch %d seeded no pool inputs", epoch)
@@ -128,7 +129,7 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 				"epoch %d was seeded with another epoch's parameters",
 				epoch)
 		}
-		failure, err := db.Metadata().GetRewardSeedFailure(epoch, "mark", nil)
+		failure, err := ldb.GetRewardSeedFailure(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.Empty(
 			t,
@@ -155,11 +156,12 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 	require.NoError(t, err)
 
 	wantErr := errors.New("metadata store unavailable")
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	defer txn.Release()
 	err = seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) { return nil, wantErr },
 		nil,
@@ -204,11 +206,12 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	ctx := context.Background()
 	noProgress := func(ImportProgress) {}
 	slot := state.Tip.Slot
 
-	_, _, err = importCertState(ctx, cfg, slot, noProgress)
+	_, err = importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 
 	// The pool has to be one the snapshots actually delegate to, or the
@@ -237,13 +240,11 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 			"registration, so this test cannot distinguish the sources")
 
 	const registrationCost = 111_000_000
-	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, db.Metadata().ImportPool(
-		importTestPoolModel(target),
+	require.NoError(t, ledgerDBFor(t, db).ImportPool(
 		importTestPoolRegistration(target, goStart-1, registrationCost),
-		txn.Metadata(),
+		false,
+		nil,
 	))
-	require.NoError(t, txn.Commit())
 
 	snapshotPool, ok := snapshots.Mark.PoolParams[targetKey]
 	if !ok || snapshotPool == nil {
@@ -259,7 +260,7 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	for _, epoch := range []uint64{
 		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		poolInputs, err := ledgerDBFor(t, db).GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		var found bool
 		for _, pool := range poolInputs {
@@ -334,10 +335,11 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
 	require.NoError(t, err)
 
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		func(epoch uint64) (map[string]*ParsedPool, error) {
 			return nil, fmt.Errorf(
@@ -354,7 +356,7 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 	for _, epoch := range []uint64{
 		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		seeded, err := ldb.GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, seeded,
 			"epoch %d is fully described by its snapshot, so an unplaceable "+
@@ -391,10 +393,11 @@ func TestSeedImportedRewardInputsFailsEpochsWithNoParamsWindow(t *testing.T) {
 	}
 
 	unplaceable := state.Epoch - 2
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		func(epoch uint64) (map[string]*ParsedPool, error) {
 			if epoch == unplaceable {
@@ -412,11 +415,11 @@ func TestSeedImportedRewardInputsFailsEpochsWithNoParamsWindow(t *testing.T) {
 	require.ErrorIs(t, seedErr, errImportedRewardBasisUnusable)
 	require.NoError(t, txn.Rollback())
 
-	skipped, err := db.Metadata().GetRewardSnapshot(unplaceable, "mark", nil)
+	skipped, err := ldb.GetRewardSnapshot(unplaceable, "mark", nil)
 	require.NoError(t, err)
 	require.Nil(t, skipped,
 		"a failed import must not commit an incomplete reward basis")
-	failure, err := db.Metadata().GetRewardSeedFailure(unplaceable, "mark", nil)
+	failure, err := ldb.GetRewardSeedFailure(unplaceable, "mark", nil)
 	require.NoError(t, err)
 	require.Empty(t, failure,
 		"failed import transaction must not persist seed failure rows")
@@ -424,7 +427,7 @@ func TestSeedImportedRewardInputsFailsEpochsWithNoParamsWindow(t *testing.T) {
 	// The unusable basis rejects the import transaction, so none of its
 	// partially derived reward rounds may commit.
 	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
-		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		seeded, err := ldb.GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.Nil(t, seeded,
 			"epoch %d must remain unseeded after import failure", epoch)
@@ -455,10 +458,11 @@ func TestSeedImportedRewardInputsSeedsEmptyBundle(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		&ParsedSnapShots{
 			Mark: ParsedSnapShot{},
 			Set:  ParsedSnapShot{},
@@ -472,13 +476,13 @@ func TestSeedImportedRewardInputsSeedsEmptyBundle(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	snapshot, err := db.Metadata().GetRewardSnapshot(2, "mark", nil)
+	snapshot, err := ldb.GetRewardSnapshot(2, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
-	pools, err := db.Metadata().GetRewardPoolInputs(2, nil)
+	pools, err := ldb.GetRewardPoolInputs(2, nil)
 	require.NoError(t, err)
 	require.Empty(t, pools)
-	reason, err := db.Metadata().GetRewardSeedFailure(2, "mark", nil)
+	reason, err := ldb.GetRewardSeedFailure(2, "mark", nil)
 	require.NoError(t, err)
 	require.Empty(t, reason)
 }
@@ -553,10 +557,11 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		hex.EncodeToString(poolC.PoolKeyHash): compactC,
 	}
 
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) {
 			return registered, nil
@@ -588,7 +593,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		for _, stake := range expected.pools {
 			totalStake += stake
 		}
-		snapshot, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		snapshot, err := ldb.GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, snapshot,
 			"epoch %d must not be dropped because another snapshot refers "+
@@ -597,7 +602,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		require.Equal(t, totalStake, uint64(snapshot.TotalActiveStake))
 		require.Equal(t, uint64(len(expected.pools)), snapshot.TotalDelegators)
 
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		poolInputs, err := ldb.GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		require.Len(t, poolInputs, len(expected.pools))
 		for _, input := range poolInputs {
@@ -607,7 +612,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 			require.Equal(t, uint64(1), input.DelegatorCount)
 		}
 
-		stakeInputs, err := db.Metadata().GetRewardStakeInputs(epoch, nil)
+		stakeInputs, err := ldb.GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err)
 		require.Len(t, stakeInputs, len(expected.pools))
 		for _, input := range stakeInputs {
@@ -1027,13 +1032,14 @@ func TestSeedImportedNonMyopicStateUsesSnapshotHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, state.NonMyopicData)
 
+	cfg := importTargetForTest(t, ImportConfig{Database: db, State: state})
 	require.NoError(t, seedImportedNonMyopicState(
-		ImportConfig{Database: db, State: state},
+		cfg,
 		state.Epoch,
 		state.Tip.Slot,
 		nil,
 	))
-	stored, err := db.Metadata().GetRewardLikelihoodStateAtSlot(
+	stored, err := cfg.LedgerDB.GetRewardLikelihoodStateAtSlot(
 		state.Tip.Slot,
 		nil,
 	)
@@ -1041,7 +1047,7 @@ func TestSeedImportedNonMyopicStateUsesSnapshotHistory(t *testing.T) {
 	require.NotNil(t, stored)
 	require.True(t, stored.Complete)
 	require.Equal(t, state.Epoch, stored.Epoch)
-	pools, err := db.Metadata().GetRewardPoolLikelihoods(stored.Epoch, nil)
+	pools, err := cfg.LedgerDB.GetRewardPoolLikelihoods(stored.Epoch, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, pools)
 	for _, pool := range pools {
@@ -1100,10 +1106,11 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
+		ldb,
+		txn,
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) { return params, nil },
 		nil,
@@ -1118,7 +1125,7 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	for _, epoch := range []uint64{
 		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		snapshot, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		snapshot, err := ldb.GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, snapshot,
 			"epoch %d has no reward snapshot, so its reward round would be "+
@@ -1126,13 +1133,13 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 		require.Positive(t, snapshot.TotalPoolCount)
 		require.Positive(t, uint64(snapshot.TotalActiveStake))
 
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		poolInputs, err := ldb.GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		require.Len(t, poolInputs, int(snapshot.TotalPoolCount),
 			"epoch %d pool inputs must match the snapshot's pool count",
 			epoch)
 
-		stakeInputs, err := db.Metadata().GetRewardStakeInputs(epoch, nil)
+		stakeInputs, err := ldb.GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, stakeInputs,
 			"epoch %d has no per-credential stake inputs", epoch)
@@ -1170,20 +1177,21 @@ func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 	require.NoError(t, err, "stake snapshots must parse completely")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
-		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
+		ldb, txn, snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
 	)
 	require.NoError(t, seedErr)
 	require.NoError(t, txn.Commit())
 
-	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	snapshot, err := ldb.GetRewardSnapshot(state.Epoch, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot,
 		"the snapshot carries its own pool parameters, so this epoch must "+
 			"be seeded without any registration lookup at all")
-	poolInputs, err := db.Metadata().GetRewardPoolInputs(state.Epoch, nil)
+	poolInputs, err := ldb.GetRewardPoolInputs(state.Epoch, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, poolInputs)
 	for _, pool := range poolInputs {
@@ -1211,15 +1219,16 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 	stripPoolParamsToVrfOnly(snapshots)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(context.Background(), true)
+	ldb := importTargetForTest(t, ImportConfig{Database: db}).LedgerDB
+	txn := ldb.Begin(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
-		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
+		ldb, txn, snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
 	)
 	require.ErrorIs(t, seedErr, errImportedRewardBasisUnusable)
 	require.NoError(t, txn.Rollback())
 
-	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	snapshot, err := ldb.GetRewardSnapshot(state.Epoch, "mark", nil)
 	require.NoError(t, err)
 	require.Nil(t, snapshot,
 		"an unusable basis must be dropped, not written: the ledger reads "+

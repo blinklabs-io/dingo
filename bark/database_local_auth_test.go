@@ -165,6 +165,8 @@ func (f *localAuthFixture) awaitCompleted(t *testing.T) {
 func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 
@@ -180,6 +182,8 @@ func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 
@@ -192,6 +196,8 @@ func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 }
 
 func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, f *localAuthFixture)
@@ -236,6 +242,8 @@ func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
 }
 
 func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
+	t.Parallel()
+
 	f := newLocalAuthFixture(t)
 	// The cloud copy is made unusable so a lookup would surface in the log
 	// or the result.
@@ -250,6 +258,8 @@ func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
 }
 
 func TestUnkeyedLocalProbeUnchangedWithoutTrustKey(t *testing.T) {
+	t.Parallel()
+
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 	h := newTestDatabaseServiceHandler(
@@ -302,6 +312,8 @@ func oversizeManifest(t *testing.T, dir string) {
 // than the tag: a writer to the snapshot directory can fail any of them, so
 // none may make the authenticated cloud mirror of the same ID unavailable.
 func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name   string
 		damage func(t *testing.T, dir string)
@@ -363,6 +375,8 @@ func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
 // Without a usable cloud mirror a keyed local failure keeps the code the
 // local failure alone would produce.
 func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
+	t.Parallel()
+
 	t.Run("corrupted", func(t *testing.T) {
 		f := newLocalAuthFixture(t)
 		require.NoError(t, os.RemoveAll(f.cloudDir))
@@ -388,6 +402,8 @@ func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
 // A configured trust key that cannot be loaded fails the request before any
 // snapshot is read, rather than probing the local copy unkeyed.
 func TestUnloadableTrustKeyFailsResolutionClosed(t *testing.T) {
+	t.Parallel()
+
 	f := newLocalAuthFixture(t)
 	h := newTestDatabaseServiceHandlerWithConfig(
 		t, nil, filepath.Join(t.TempDir(), "target"),

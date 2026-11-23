@@ -299,6 +299,58 @@ func decodeRewardPots(k, v []byte) (*models.RewardAdaPots, error) {
 	return out, c.err()
 }
 
+func encodeRewardLikelihoodState(st *models.RewardLikelihoodState) []byte {
+	v := []byte{flag(st.Complete, 1)}
+	for _, n := range []uint64{
+		uint64(st.RewardPot), st.CapturedSlot, st.BoundarySlot,
+	} {
+		v = appendU64(v, n)
+	}
+	return v
+}
+
+func decodeRewardLikelihoodState(
+	k, v []byte,
+) (*models.RewardLikelihoodState, error) {
+	epoch, pool, err := badgerutxo.DecodeRewardLikelihoodKey(k)
+	if err != nil {
+		return nil, err
+	}
+	if pool != nil {
+		return nil, errRewardInputRow
+	}
+	c := rewardCursor{b: v}
+	f := c.u8()
+	out := &models.RewardLikelihoodState{Epoch: epoch, Complete: f&1 != 0}
+	out.RewardPot = types.Uint64(c.u64())
+	out.CapturedSlot = c.u64()
+	out.BoundarySlot = c.u64()
+	return out, c.err()
+}
+
+func encodeRewardPoolLikelihood(p *models.RewardPoolLikelihood) []byte {
+	v := appendU64(nil, math.Float64bits(p.PerformanceEstimate))
+	return append(v, p.LogWeights...)
+}
+
+func decodeRewardPoolLikelihood(
+	k, v []byte,
+) (*models.RewardPoolLikelihood, error) {
+	epoch, pool, err := badgerutxo.DecodeRewardLikelihoodKey(k)
+	if err != nil {
+		return nil, err
+	}
+	if pool == nil || len(v) < 8 {
+		return nil, errRewardInputRow
+	}
+	return &models.RewardPoolLikelihood{
+		Epoch:               epoch,
+		PoolKeyHash:         slices.Clone(pool),
+		PerformanceEstimate: math.Float64frombits(binary.BigEndian.Uint64(v)),
+		LogWeights:          slices.Clone(v[8:]),
+	}, nil
+}
+
 func encodeRewardFailure(slot uint64, reason string) []byte {
 	return append(appendU64(nil, slot), reason...)
 }
@@ -456,10 +508,40 @@ func (b *rewardInputRows) apply(c ledger.RewardInputChange) error {
 		return b.stakes(c)
 	case ledger.RewardInputPending:
 		return b.pending(c.Pending)
+	case ledger.RewardInputLikelihood:
+		return b.likelihood(c.Likelihood, c.LikelihoodPools)
 	case ledger.RewardInputPrune:
 		return b.prune(c.PruneBelow)
 	default:
 		return fmt.Errorf("utxoset: unknown reward input change %d", c.Kind)
+	}
+	return nil
+}
+
+// likelihood writes state and replaces the pool rows of its epoch, every
+// row journaled at the state's boundary slot.
+func (b *rewardInputRows) likelihood(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+) error {
+	slot := state.BoundarySlot
+	keys, err := b.keys(badgerutxo.RewardLikelihoodPoolPrefix(state.Epoch))
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		b.del(slot, k)
+	}
+	b.put(
+		slot, badgerutxo.RewardLikelihoodStateKey(state.Epoch),
+		encodeRewardLikelihoodState(state),
+	)
+	for _, p := range pools {
+		k, err := badgerutxo.RewardLikelihoodPoolKey(state.Epoch, p.PoolKeyHash)
+		if err != nil {
+			return err
+		}
+		b.put(slot, k, encodeRewardPoolLikelihood(p))
 	}
 	return nil
 }
@@ -666,7 +748,7 @@ func (s *Set) ensureRewardInputs(
 
 // loadPendingStakeInputs carries the pending stake-input record into the set,
 // so an epoch whose stake rows were only partly written stays marked
-// incomplete after the sync_state key is drained.
+// incomplete in the set.
 func (s *Set) loadPendingStakeInputs(
 	ldb ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
@@ -859,6 +941,47 @@ func (s *Set) RewardPots(
 	return decodeRewardPots(k, v)
 }
 
+// RewardLikelihoodStates returns every likelihood state the set holds,
+// oldest epoch first.
+func (s *Set) RewardLikelihoodStates(
+	asOf *uint64,
+) ([]*models.RewardLikelihoodState, error) {
+	var out []*models.RewardLikelihoodState
+	err := s.rewardRows(
+		badgerutxo.RewardLikelihoodStatePrefix(), asOf,
+		func(k, v []byte) error {
+			st, err := decodeRewardLikelihoodState(k, v)
+			if err != nil {
+				return err
+			}
+			out = append(out, st)
+			return nil
+		},
+	)
+	return out, err
+}
+
+// RewardPoolLikelihoodRows returns the pool likelihoods of epoch's state,
+// ordered by pool.
+func (s *Set) RewardPoolLikelihoodRows(
+	epoch uint64,
+	asOf *uint64,
+) ([]*models.RewardPoolLikelihood, error) {
+	var out []*models.RewardPoolLikelihood
+	err := s.rewardRows(
+		badgerutxo.RewardLikelihoodPoolPrefix(epoch), asOf,
+		func(k, v []byte) error {
+			p, err := decodeRewardPoolLikelihood(k, v)
+			if err != nil {
+				return err
+			}
+			out = append(out, p)
+			return nil
+		},
+	)
+	return out, err
+}
+
 // RewardSnapshotRow returns the snapshot header, nil when the set holds none.
 func (s *Set) RewardSnapshotRow(
 	epoch uint64, typ string, asOf *uint64,
@@ -1026,9 +1149,10 @@ func (s *Set) RewardInputEpochs() (snapshots, pots []uint64, err error) {
 	return snapshots, pots, err
 }
 
-// StaleRewardSnapshotEpochs lists, oldest first, the epochs whose mark
-// snapshot header carries a calculation version other than version.
-func (s *Set) StaleRewardSnapshotEpochs(version uint) ([]uint64, error) {
+// StaleStakeSnapshotEpochs lists, oldest first, the epochs holding a mark
+// reward snapshot header, or a mark, set or go pool stake snapshot row, whose
+// calculation version is not version.
+func (s *Set) StaleStakeSnapshotEpochs(version uint) ([]uint64, error) {
 	snapshots, _, err := s.RewardInputEpochs()
 	if err != nil {
 		return nil, err
@@ -1043,7 +1167,24 @@ func (s *Set) StaleRewardSnapshotEpochs(version uint) ([]uint64, error) {
 			stale = append(stale, epoch)
 		}
 	}
-	return stale, nil
+	err = s.store.EachSnapshot(func(r badgerutxo.SnapshotRow) error {
+		if r.Type == models.PoolStakeSnapshotTypeActive {
+			return nil
+		}
+		sn, err := decodeSnapshot(r)
+		if err != nil {
+			return err
+		}
+		if sn.CalculationVersion != version {
+			stale = append(stale, r.Epoch)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(stale)
+	return slices.Compact(stale), nil
 }
 
 var _ ledger.RewardInputsReader = (*Set)(nil)
