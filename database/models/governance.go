@@ -121,6 +121,75 @@ type GovernanceVoteRef struct {
 	Vote        GovernanceVote
 }
 
+// GovernanceActionRef identifies one governance action without depending on
+// the metadata store's surrogate proposal ID.
+type GovernanceActionRef struct {
+	TxHash      []byte `json:"tx_hash"`
+	ActionIndex uint32 `json:"action_index"`
+}
+
+// DRepStakeDistributionEntry is one member of the DRep stake distribution
+// frozen at an epoch boundary. DRepType uses the account delegation values:
+// 0/1 are credential-backed DReps and 2/3 are AlwaysAbstain and
+// AlwaysNoConfidence. Credential is empty for the predefined DReps.
+type DRepStakeDistributionEntry struct {
+	Credential    []byte `json:"credential,omitempty"`
+	Stake         uint64 `json:"stake"`
+	DRepType      uint8  `json:"drep_type"`
+	CredentialTag uint8  `json:"credential_tag,omitempty"`
+}
+
+// GovernanceCommitteeMember is one member of the committee in the
+// post-ENACT state consumed by RATIFY.
+type GovernanceCommitteeMember struct {
+	ColdCredentialTag uint8  `json:"cold_credential_tag"`
+	ColdCredential    []byte `json:"cold_credential"`
+	ExpiresEpoch      uint64 `json:"expires_epoch"`
+}
+
+// GovernanceConstitution is the constitution content in the post-ENACT state.
+// Database row identity and lifecycle slots are not part of the ledger state.
+type GovernanceConstitution struct {
+	AnchorURL  string `json:"anchor_url"`
+	AnchorHash []byte `json:"anchor_hash"`
+	PolicyHash []byte `json:"policy_hash,omitempty"`
+}
+
+// ErrGovernanceBoundarySnapshotNotRetained reports that the epoch containing
+// the requested slot is a Conway-or-later epoch whose boundary snapshot is not
+// stored and could not be rebuilt at start-up: the live UTxO set's journal, the
+// Mithril trust boundary or the consumed-output prune floor leaves the state
+// before that boundary unrecoverable. Callers must report the state as
+// unavailable rather than substitute another epoch's snapshot or live voting
+// state.
+var ErrGovernanceBoundarySnapshotNotRetained = errors.New(
+	"governance boundary snapshot not retained for epoch",
+)
+
+// GovernanceBoundarySnapshot retains the proposal-independent pulser input
+// and RATIFY outcome produced at a Conway-or-later epoch boundary. Epoch is
+// the epoch the boundary opens and BoundarySlot is that epoch's first slot, so
+// the snapshot describes the state every slot of Epoch is validated against. The base
+// enact state is the state after ENACT and before RATIFY stages the ordered
+// Ratified actions; consumers apply those action bodies in order to obtain the
+// completed RatifyState enact state.
+type GovernanceBoundarySnapshot struct {
+	Epoch                uint64                       `json:"epoch"`
+	BoundarySlot         uint64                       `json:"boundary_slot"`
+	DRepDistribution     []DRepStakeDistributionEntry `json:"drep_distribution"`
+	Committee            []GovernanceCommitteeMember  `json:"committee"`
+	CommitteeQuorum      string                       `json:"committee_quorum"`
+	Constitution         *GovernanceConstitution      `json:"constitution,omitempty"`
+	PurposeRoots         []*GovernanceActionRef       `json:"purpose_roots"`
+	Ratified             []GovernanceActionRef        `json:"ratified"`
+	Expired              []GovernanceActionRef        `json:"expired"`
+	PostEnactmentPParams []byte                       `json:"post_enactment_pparams"`
+	FuturePParams        []byte                       `json:"future_pparams,omitempty"`
+	RatificationTreasury uint64                       `json:"ratification_treasury"`
+	Delayed              bool                         `json:"delayed"`
+	ImportedRatifyState  []byte                       `json:"imported_ratify_state,omitempty"`
+}
+
 // ResignCommitteeCold represents a resignation certificate for a
 // Constitutional Committee cold credential.
 type ResignCommitteeCold struct {

@@ -187,6 +187,10 @@ const (
 	// clears, each by the slot it was recorded at:
 	// T <slot:8 BE> <kind:1> ...
 	DRepHistoryTag = 'T'
+	// GovernanceBoundaryTag keys the governance state of each Conway epoch
+	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
+	// and the encoded snapshot. Each row is journaled at its boundary slot.
+	GovernanceBoundaryTag = '#'
 	// InactivityTag keys the one-time CIP-0163 delegator inactivity
 	// activation: 0 <kind:1> ..., kind 0 the epoch it ran at and kind 1 a
 	// credential it stamped.

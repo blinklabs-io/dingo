@@ -134,3 +134,31 @@ func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "does not resolve as the current root")
 }
+
+// boundaryLoader keeps the boundary snapshots an import writes, standing in
+// for a live UTxO set; the set's own rows are covered in internal/utxoset.
+type boundaryLoader struct {
+	UtxoSetLoader
+	rows map[uint64]models.GovernanceBoundarySnapshot
+}
+
+func (b *boundaryLoader) LoadGovernanceBoundarySnapshot(
+	s *models.GovernanceBoundarySnapshot,
+) error {
+	if b.rows == nil {
+		b.rows = map[uint64]models.GovernanceBoundarySnapshot{}
+	}
+	b.rows[s.Epoch] = *s
+	return nil
+}
+
+func (b *boundaryLoader) GovernanceBoundarySnapshotAt(
+	epoch uint64,
+	_ *uint64,
+) (*models.GovernanceBoundarySnapshot, bool, error) {
+	row, ok := b.rows[epoch]
+	if !ok {
+		return nil, false, nil
+	}
+	return &row, true, nil
+}

@@ -6508,9 +6508,12 @@ resolution, which uses the ledger's own genesis-blob path.
 Retention follows the reference node. Each endorser block is first volatile.
 When the immutable point (`LedgerState.ImmutablePoint`, `k` blocks behind the
 applied tip) advances, `LedgerState.AdvanceLeiosPins` walks the primary chain
-and pins into the LeiosDB's immutable partition every endorser block certified
-by a ranking block that has become immutable; certification is derived from the
-chain, not from a stored marker. The retention GC (`runLeiosPersistenceGC`) is
+and pins every endorser block certified by a ranking block that has become
+immutable; certification is derived from the chain, not from a stored marker.
+Payloads remain under stable data keys while pinning atomically replaces their
+small volatile marker with a pin record, so no manifest, transaction list or
+offset backing is copied. Older volatile/immutable payload keys remain readable
+and use their original copy-on-pin behavior. The retention GC (`runLeiosPersistenceGC`) is
 event-driven rather than timed: a primary-chain event wakes it, it runs the pin
 walk, and it then collects unpinned volatile records strictly below the smaller
 of the immutable slot and the pin watermark. A pinned endorser block is kept
@@ -6528,9 +6531,10 @@ the endorser block's manifest and transactions to the LeiosDB before it commits,
 from the same lookup it applies. The pin walk rolls pins back only when the
 pin watermark's ranking block has left the primary chain, never merely because
 the immutable point moved down with an ordinary rollback, and a rollback moves
-the records back to the volatile partition instead of deleting them. A snapshot
+the volatile marker back instead of deleting the payload; legacy records move
+back to their volatile partition. A snapshot
 includes the LeiosDB (`leios.bak`) and a restore reloads it, since certified
-closures exist nowhere else. The snapshot selects the LeiosDB after it holds
+offset backing exists nowhere else. The snapshot selects the LeiosDB after it holds
 the commit barrier, because the store opens on first use, and fails when an
 existing LeiosDB cannot be opened rather than omitting it. A persisted
 endorser block signals the collector as well as primary-chain events do.
@@ -6552,9 +6556,13 @@ quiesce, after connection shutdown. If that shutdown cannot be confirmed, the
 operation requires a supervised restart instead of replacing storage while
 traffic can still write. A pause whose wait is not confirmed returns
 `ErrLeiosPersistDrainUnconfirmed`. Because endorser transactions are not part
-of any chain block — so they have no CBOR offsets — their CBOR is persisted as a
-standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets
-(mirroring the genesis path), and `SetTransaction`/delta apply is reused so they
+of any chain block — so they have no chain-block CBOR offsets — their encoded
+transaction-list record is also the backing keyed by the endorser block's
+`(slot, hash)`. DOFF ranges identify exact body and output bytes already inside
+each raw transaction, avoiding a second standalone copy of those bytes.
+An occurrence with historical standalone backing keeps that backing mode on
+replay so its existing DOFF ranges retain their byte layout.
+`SetTransaction`/delta apply is reused so they
 behave uniformly with all other transactions; their ledger effects are recorded
 under the *ranking* block's point so a rollback removes them. A certified
 closure that fails to decode, build or apply leaves its CertRB uncommitted, and
@@ -6641,8 +6649,8 @@ from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
 Leios historical-serving records follow the reference node's retention: a
-certified endorser block is pinned into the LeiosDB's immutable partition and
-kept permanently, and an unpinned one is collected once the immutable point
+certified endorser block receives a durable pin record and is kept permanently,
+and an unpinned one is collected once the immutable point
 passes its slot. A positive `leiosPersistenceRetentionSlots` (or
 `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) can only extend retention: it keeps
 unpinned records back to the highest persisted Leios EB slot minus that window,
@@ -24046,6 +24054,40 @@ POOLREAP precedes SNAP.
    set; Blockfrost DRep power and the hard-fork stability check call
    `WaitEpochBoundaryJob` before reading proposal deposits and active
    proposals.
+
+   RATIFY hands each Conway boundary's governance snapshot (the DRep
+   distribution the pulser froze and the RATIFY outcome) to
+   `governance.EpochInput.SaveBoundarySnapshot`. The ledger stages it as
+   `LedgerChanges.GovernanceBoundaries` in the commit that applies the
+   decision, the boundary's own or the deferred job's, and the live UTxO set
+   keeps it as a `#` row keyed by the opened epoch and journaled at the
+   boundary slot, so rollback needs no separate delete. Journal pruning keeps
+   the newest row below the floor and drops older ones; a ledger-state import
+   writes its own boundary row through `ledgerstate.GovernanceBoundaryLoader`.
+   `LedgerState.GovernanceBoundarySnapshotAtSlot` serves an acquired point.
+   No metadata or IndexerDB table holds these rows.
+
+   At start-up, after the rollback intent and any pending RATIFY record are
+   recovered and before block processing resumes,
+   `rebuildGovernanceBoundarySnapshots` writes the governance boundary snapshot
+   of every Conway-or-later epoch the live UTxO set has none for, newest first. Each boundary is
+   replayed in a write transaction that is always rolled back: it is truncated
+   to the last block below the boundary by the code a live rollback uses
+   (`truncateLedgerStateInTxn`, which stages the live UTxO set's rollback as an
+   overlay and returns, rather than fails the set on, a journal that does not
+   reach the target), then `processEpochRolloverWithOptions` runs with a
+   `boundaryReplay`: validation-only, but RATIFY decides and applies at once
+   against the committed `mark` rows read before the truncation. The
+   `boundaryReplay` keeps the snapshot RATIFY hands to
+   `governance.EpochInput.SaveBoundarySnapshot`, the transaction is rolled
+   back, and the snapshot is written to the live UTxO set's `#` row family at
+   its boundary slot. A live boundary passes the same callback, which stages
+   the row in the batch of the commit that applies RATIFY. A boundary the
+   journal does not reach or hold, the Mithril trust boundary or the
+   consumed-output prune floor cannot reach, or whose reward basis retention
+   has pruned, stops the pass,
+   leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and every older
+   epoch. A ledger with no readable set skips the pass.
 
    A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
    leaves its mark snapshot to the same job. At the SNAP point the boundary

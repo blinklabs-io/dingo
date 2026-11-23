@@ -231,6 +231,62 @@ func TestBuildEndorserBlockBlobIndexesDijkstraBatchLevels(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, tx.Hash(), body.Id())
+
+	backing, backingOffsets, err := buildEndorserBlockTransactionBacking(
+		[]lcommon.Transaction{tx},
+		[][]byte{[]byte(elems[0])},
+		[]cbor.RawMessage{txCbor},
+		42,
+		[32]byte(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	require.NoError(t, err)
+	for idx, level := range levels {
+		var hash [32]byte
+		copy(hash[:], level.Hash().Bytes())
+		offset := backingOffsets.TxOffsets[hash]
+		end := offset.ByteOffset + offset.ByteLength
+		require.Equal(
+			t, want[idx], backing[offset.ByteOffset:end],
+			"backing level %d body range", idx,
+		)
+	}
+}
+
+func TestBuildEndorserBlockTransactionBackingUsesRawListBytes(t *testing.T) {
+	t.Parallel()
+	raw, body, tx := leiosApplyTestTx(t, 1)
+	rawTxs := []cbor.RawMessage{raw}
+	backing, offsets, err := buildEndorserBlockTransactionBacking(
+		[]lcommon.Transaction{tx},
+		[][]byte{body},
+		rawTxs,
+		42,
+		[32]byte(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	require.NoError(t, err)
+	wantBacking, err := cbor.Encode(rawTxs)
+	require.NoError(t, err)
+	require.Equal(t, wantBacking, backing)
+
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	txOffset := offsets.TxOffsets[txHash]
+	require.Equal(
+		t,
+		body,
+		backing[txOffset.ByteOffset:txOffset.ByteOffset+txOffset.ByteLength],
+	)
+	for _, produced := range tx.Produced() {
+		offset := offsets.UtxoOffsets[database.UtxoRef{
+			TxId:      txHash,
+			OutputIdx: produced.Id.Index(),
+		}]
+		require.Equal(
+			t,
+			produced.Output.Cbor(),
+			backing[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+		)
+	}
 }
 
 // leiosApplyTestApplyEndorserBlock applies one endorser block in its own
@@ -686,34 +742,28 @@ func requireLeiosApplyTestTxCount(
 	require.Equal(t, want, got)
 }
 
-func requireLeiosApplyTestEndorserBlob(
+func requireLeiosApplyTestEndorserBacking(
 	t *testing.T,
 	db *database.Database,
 	slot uint64,
 	hash []byte,
-	want []byte,
+	rawTxs []cbor.RawMessage,
 ) {
 	t.Helper()
 	store, err := db.LeiosDB()
 	require.NoError(t, err)
 	got, err := store.GetClosure(leiosdb.Ref{Slot: slot, Hash: hash})
 	require.NoError(t, err)
+	want, err := cbor.Encode(rawTxs)
+	require.NoError(t, err)
 	require.Equal(t, want, got)
-}
-
-func leiosApplyTestBlob(body []byte, tx lcommon.Transaction) []byte {
-	blob := append([]byte(nil), body...)
-	for _, utxo := range tx.Produced() {
-		blob = append(blob, utxo.Output.Cbor()...)
-	}
-	return blob
 }
 
 func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x01)
+	rawTx, _, tx := leiosApplyTestTx(t, 0x01)
 
 	const ebSlot = uint64(200)
 	ebHash := leiosApplyTestEbHash(0x22)
@@ -735,7 +785,9 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 
 	require.Equal(t, 1, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 1)
-	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
+	requireLeiosApplyTestEndorserBacking(
+		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx},
+	)
 	// The transaction is recorded under the ranking block's point.
 	var got int64
 	require.NoError(t, gdb.QueryRow(
@@ -745,12 +797,46 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	require.Equal(t, int64(1), got)
 }
 
+func TestApplyEndorserBlockPreservesStandaloneBacking(t *testing.T) {
+	t.Parallel()
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x18)
+	const ebSlot = uint64(218)
+	ebHash := leiosApplyTestEbHash(0x28)
+	var hash [lcommon.Blake2b256Size]byte
+	copy(hash[:], ebHash)
+	standalone, _, err := buildEndorserBlockBlob(
+		[]lcommon.Transaction{tx}, [][]byte{bodyCbor}, ebSlot, hash,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.PutLeiosClosure(ebSlot, ebHash, standalone))
+
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, _, err := ls.applyEndorserBlock(
+			context.Background(),
+			txn,
+			leiosApplyTestRankingPoint(0x38),
+			1,
+			ebSlot,
+			ebHash,
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	got, err := store.GetClosure(leiosdb.Ref{Slot: ebSlot, Hash: ebHash})
+	require.NoError(t, err)
+	require.Equal(t, standalone, got)
+}
+
 func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x02)
-	rawTx2, body2, tx2 := leiosApplyTestTx(t, 0x03)
+	rawTx1, _, _ := leiosApplyTestTx(t, 0x02)
+	rawTx2, _, _ := leiosApplyTestTx(t, 0x03)
 
 	const ebSlot = uint64(300)
 	ebHash := leiosApplyTestEbHash(0x44)
@@ -772,16 +858,16 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 
 	require.Equal(t, 2, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 2)
-	// The blob contains each body followed by its produced output CBOR.
-	want := append(leiosApplyTestBlob(body1, tx1), leiosApplyTestBlob(body2, tx2)...)
-	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
+	requireLeiosApplyTestEndorserBacking(
+		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx1, rawTx2},
+	)
 }
 
 func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x04)
+	rawTx1, _, _ := leiosApplyTestTx(t, 0x04)
 	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
 
 	appliedFirst := -1
@@ -830,17 +916,14 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	require.Equal(t, 0, appliedSameTxnDuplicate)
 	require.Equal(t, 1, appliedSecondUnique)
 	requireLeiosApplyTestTxCount(t, gdb, 2)
-	// The blob is served whole, so it keeps the repeated transaction; only
+	// The backing is served whole, so it keeps the repeated transaction; only
 	// its ledger effects are recorded once.
-	requireLeiosApplyTestEndorserBlob(
+	requireLeiosApplyTestEndorserBacking(
 		t,
 		db,
 		500,
 		leiosApplyTestEbHash(0x82),
-		append(
-			leiosApplyTestBlob(body1, tx1),
-			leiosApplyTestBlob(body1, tx1)...,
-		),
+		[]cbor.RawMessage{rawTx1, rawTx1},
 	)
 
 	appliedCommittedDuplicate := -1
@@ -871,7 +954,7 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
+	rawTx, _, tx := leiosApplyTestTx(t, 0x06)
 
 	const ebSlot = uint64(400)
 	ebHash := leiosApplyTestEbHash(0x66)
@@ -901,7 +984,9 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 		tx.Hash().Bytes(),
 	).Scan(&gotTx.Slot))
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
-	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
+	requireLeiosApplyTestEndorserBacking(
+		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx},
+	)
 }
 
 // leiosApplyTestTxWithOutput builds a Dijkstra endorser transaction that
@@ -1040,7 +1125,7 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x07)
+	rawTx, _, tx := leiosApplyTestTx(t, 0x07)
 	firstPoint := leiosApplyTestRankingPoint(0x91)
 	replayPoint := leiosApplyTestRankingPoint(0x93)
 
@@ -1080,19 +1165,19 @@ SELECT a.slot, a.block_index FROM applied_transaction a JOIN "transaction" t ON 
 	).Scan(&gotTx.Slot, &gotTx.BlockIndex))
 	require.Equal(t, firstPoint.Slot, gotTx.Slot)
 	require.Equal(t, uint32(0), gotTx.BlockIndex)
-	requireLeiosApplyTestEndorserBlob(
+	requireLeiosApplyTestEndorserBacking(
 		t,
 		db,
 		600,
 		leiosApplyTestEbHash(0x92),
-		append(leiosApplyTestBlob(bodyCbor, tx), leiosApplyTestBlob(bodyCbor, tx)...),
+		[]cbor.RawMessage{rawTx, rawTx},
 	)
-	requireLeiosApplyTestEndorserBlob(
+	requireLeiosApplyTestEndorserBacking(
 		t,
 		db,
 		601,
 		leiosApplyTestEbHash(0x94),
-		leiosApplyTestBlob(bodyCbor, tx),
+		[]cbor.RawMessage{rawTx},
 	)
 }
 
