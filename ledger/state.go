@@ -16533,22 +16533,6 @@ func (ls *LedgerState) ScanUtxosByAddress(
 		ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
 }
 
-// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
-// bounding candidate work and retained CBOR.
-func (ls *LedgerState) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return ls.indexerDB().UtxosByAddressBoundedPage(
-		ctx,
-		q,
-		maxCandidates,
-		maxBytes,
-	)
-}
-
 // UtxoBalanceByAddressAtSlot aggregates a historical address balance without
 // materializing its UTxO set.
 func (ls *LedgerState) UtxoBalanceByAddressAtSlot(

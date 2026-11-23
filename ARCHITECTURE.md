@@ -4036,9 +4036,24 @@ it over the IndexerDB in API mode and over the ledger in core mode
 (`utxorpc.NewLedgerQueryDatabase`). The API-mode service answers
 `Unavailable` while the IndexerDB is not ready and reports its tip. The
 core-mode service is immediately ready, reports the ledger tip and reads
-live outputs by reference from the ledger's UTxO set; the ledger store holds
-no UTxO, datum or transaction rows, so an address search, a datum read and a
-transaction read answer `FailedPrecondition` (`ErrQueryNeedsAPIStorage`).
+live outputs from the ledger's UTxO set, which the ledger store's empty `utxo`
+table cannot serve: `ReadUtxos` by reference, `SearchUtxos` by address through
+`LedgerState.UtxosByAddressBoundedPage`, and `ReadData` for inline datums
+through `LedgerState.InlineDatums`. An address read walks the set's output
+index (see DATABASE.md, "Live UTxO set"), so its work follows the outputs the
+address holds, and it takes the same `maxCandidates` and `maxBytes` bounds and
+resumable cursor as the IndexerDB page. It reads the set with the changes of
+committed transactions not yet applied over it, so a spent output is never
+returned. Results are ordered by transaction ID and output index rather than by
+the creating block, which the set does not record, so cursors carry a zero slot
+and block index. A search with no address pattern walks the set in that order
+under the same bounds, so an asset-only search over a core node pages through
+the whole set. An inline datum is found by hash while a live output carries it;
+a datum known only from a transaction witness set or an output's datum hash is
+history the set does not keep and answers `NotFound`. A transaction read
+answers `FailedPrecondition` (`ErrQueryNeedsAPIStorage`). The core-tier MCP
+server reads address pages from the same ledger method
+(`Node.mcpAddressLookup`), as its consensus database holds no UTxO rows.
 Sync, watch, submit and evaluation stay on the ledger.
 
 A reader never mixes the two stores in one transaction or takes an API row

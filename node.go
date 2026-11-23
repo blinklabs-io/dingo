@@ -2061,6 +2061,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
 				Ready:              n.apiReadiness(),
+				AddressLookup:      n.mcpAddressLookup(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,

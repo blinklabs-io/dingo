@@ -373,6 +373,25 @@ func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
 	)
 }
 
+// mcpAddressLookup is the address lookup the MCP server reads UTxOs with: the
+// live UTxO set on a core node, whose consensus database holds no UTxO rows,
+// and nil, the IndexerDB's own lookup, on an API node.
+func (n *Node) mcpAddressLookup() func(
+	context.Context, *models.UtxoWithOrderingQuery, int,
+) (models.UtxoAddressPage, error) {
+	if n.indexerDB != nil || n.ledgerState == nil {
+		return nil
+	}
+	ls := n.ledgerState
+	return func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+	) (models.UtxoAddressPage, error) {
+		return ls.UtxosByAddressBoundedPage(ctx, q, maxCandidates, 0)
+	}
+}
+
 // checkServerAdopted refuses a PostgreSQL or MySQL API store a release
 // without the split layout wrote and startup has not adopted. The dingo
 // command adopts it before any store opens; Run alone does not.

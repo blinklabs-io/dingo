@@ -2825,7 +2825,23 @@ Validation reads the set alone. Every key
 tag and marker is declared once, in `database/ledgerdb/badgerutxo/keys.go`;
 `TestKeyFamiliesDoNotOverlap` fails when two families share a first byte or a
 key is a prefix of another, and the bytes are persisted in existing stores, so
-they never change. A read inside an open write transaction sees that transaction's staged
+they never change. The set keeps an output index under the marker namespace
+(`mai <body> <txid:32> <index:4 BE>`, no value): a payment credential body
+(`p` + 28 bytes; the whole address `a` + bytes for an address with no payment
+credential), a stake credential body (`s` + 28 bytes) and an inline datum hash
+body (`d` + 32 bytes), each derived from the output's CBOR by
+`ledger.UtxoIndexBodies`. Every write of an output row writes or deletes its
+index rows in the same Badger transaction (apply, remove, rollback replay and
+bootstrap), so the index follows the journal and a bootstrap drops it with the
+outputs. A reader loads the output an index row names and never trusts the row
+alone. A set from before the index is indexed when it opens, before the ledger
+follows the chain: transactions of 500 outputs each write their rows and the
+last output indexed (`mxaiafter`), a stopped build resumes after it, and
+`mxaidone` marks the index complete; a resync is never required. Address reads
+use it to find the outputs of one address, stake credential or datum, and the
+UTxO RPC QueryService and MCP serve address reads of a core node from it.
+
+A read inside an open write transaction sees that transaction's staged
 changes over the set's committed state, as a SQLite read sees the
 transaction's own writes, so a multi-block commit can validate a block
 against the blocks before it.

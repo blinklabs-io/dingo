@@ -15,11 +15,13 @@
 package mcp
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -52,6 +54,12 @@ type ProviderDependencies struct {
 	// Ready gates data routes on a split layout until the IndexerDB is
 	// ready. Nil serves everything.
 	Ready apiready.Check
+	// AddressLookup reads the UTxOs of an exact address page by page. Nil
+	// reads them from Database; a node whose Database holds no UTxO rows
+	// supplies the lookup over its live UTxO set.
+	AddressLookup func(
+		context.Context, *models.UtxoWithOrderingQuery, int,
+	) (models.UtxoAddressPage, error)
 }
 
 // defaultQueryTimeout bounds each SQLite-backed request when the configured

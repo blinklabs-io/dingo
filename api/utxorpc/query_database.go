@@ -153,22 +153,30 @@ func (s *queryServiceServer) queryTip() (ochainsync.Tip, error) {
 
 var errIndexerNotReady = errors.New("indexer is not ready for this endpoint")
 
-// QueryLedger is the ledger state a core-tier QueryService reads: live outputs
-// by reference from the ledger's UTxO set, and the ledger tip.
+// QueryLedger is the ledger state a core-tier QueryService reads: the live
+// outputs of the ledger's UTxO set by reference, by address and by inline
+// datum, and the ledger tip.
 type QueryLedger interface {
 	UtxosByRefsBounded(
 		ctx context.Context,
 		refs []models.UtxoId,
 		maxBytes int64,
 	) ([]models.Utxo, error)
+	UtxosByAddressBoundedPage(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
+	InlineDatums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	Tip() ochainsync.Tip
 }
 
 // ErrQueryNeedsAPIStorage refuses a query a core-tier node cannot answer: it
-// keeps only the live UTxO set, with no address index and no datum or
-// transaction history, which the IndexerDB of api storage mode holds.
+// keeps only the live UTxO set, with no transaction history, which the
+// IndexerDB of api storage mode holds.
 var ErrQueryNeedsAPIStorage = errors.New(
-	"this query needs api storage mode: a core node keeps no address index, datum or transaction history",
+	"this query needs api storage mode: a core node keeps no transaction history",
 )
 
 // ledgerQueryDatabase serves a core-tier node's QueryService from the ledger.
@@ -177,9 +185,11 @@ type ledgerQueryDatabase struct {
 }
 
 // NewLedgerQueryDatabase returns the QueryDatabase of a node without an
-// IndexerDB: reads by reference and the tip come from ledger, which is always
-// ready; address searches, datums and transactions are refused with
-// ErrQueryNeedsAPIStorage.
+// IndexerDB: reads of outputs by reference or address, of inline datums and
+// of the tip come from ledger's live UTxO set, and the ledger is always
+// ready. Outputs are ordered by reference, not by creation, and datums that
+// only a transaction witness set carried are not found. Transactions are
+// refused with ErrQueryNeedsAPIStorage.
 func NewLedgerQueryDatabase(ledger QueryLedger) QueryDatabase {
 	return &ledgerQueryDatabase{ledger: ledger}
 }
@@ -192,10 +202,10 @@ func needsAPIStorage() error {
 }
 
 func (q *ledgerQueryDatabase) Datums(
-	context.Context,
-	[][]byte,
+	ctx context.Context,
+	hashes [][]byte,
 ) ([]*models.Datum, error) {
-	return nil, needsAPIStorage()
+	return q.ledger.InlineDatums(ctx, hashes)
 }
 
 func (q *ledgerQueryDatabase) TransactionByHash(
@@ -214,12 +224,14 @@ func (q *ledgerQueryDatabase) UtxosByRefsBounded(
 }
 
 func (q *ledgerQueryDatabase) UtxosByAddressBoundedPage(
-	context.Context,
-	*models.UtxoWithOrderingQuery,
-	int,
-	int64,
+	ctx context.Context,
+	query *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
 ) (models.UtxoAddressPage, error) {
-	return models.UtxoAddressPage{}, needsAPIStorage()
+	return q.ledger.UtxosByAddressBoundedPage(
+		ctx, query, maxCandidates, maxBytes,
+	)
 }
 
 func (q *ledgerQueryDatabase) Tip() (ochainsync.Tip, error) {

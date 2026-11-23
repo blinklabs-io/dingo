@@ -684,12 +684,18 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 				}
 				if cur.live {
 					s.addOutput(sums, cur.cbor, -1)
+					if err := s.deleteIndex(txn, op.ref, cur.cbor); err != nil {
+						return err
+					}
 				}
 				if op.present {
 					s.addOutput(sums, op.cbor, 1)
 				}
 				if op.present {
 					if err := txn.Set(k, op.cbor); err != nil {
+						return err
+					}
+					if err := s.setIndex(txn, op.ref, op.cbor); err != nil {
 						return err
 					}
 				} else if cur.live {

@@ -374,3 +374,16 @@ func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
 func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
 	s.added.beforeIndex = fn
 }
+
+// StopIndexBuildAfterForTest makes the output index build of a store opened
+// with it stop with err once n batches are written.
+func StopIndexBuildAfterForTest(n int, err error) Option {
+	return func(s *Store) {
+		s.afterIndexBatch = func(done int) error {
+			if done >= n {
+				return err
+			}
+			return nil
+		}
+	}
+}

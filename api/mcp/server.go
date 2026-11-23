@@ -145,7 +145,10 @@ func NewMCPServer(
 	}, opts)
 
 	var addressLookup utxoAddressLookup
-	if deps.Database != nil {
+	switch {
+	case deps.AddressLookup != nil:
+		addressLookup = deps.AddressLookup
+	case deps.Database != nil:
 		addressLookup = deps.Database.UtxosByAddressPage
 	}
 

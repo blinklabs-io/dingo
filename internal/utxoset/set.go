@@ -273,6 +273,7 @@ func Open(cfg Config) (*Set, error) {
 	store, err := badgerutxo.Open(
 		cfg.Dir,
 		badgerutxo.WithAggregator(ledger.UtxoStakeOf),
+		badgerutxo.WithIndexer(ledger.UtxoIndexBodies),
 		badgerutxo.WithMemTableSize(memTable),
 		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
 	)
@@ -1480,4 +1481,46 @@ func (a asOfView) Close() { a.v.Close() }
 // EachSum implements ledger.UtxoSetSums.
 func (s *Set) EachSum(fn func(key []byte, lovelace uint64) error) error {
 	return s.store.EachSum(fn)
+}
+
+// AddressIndexed implements ledger.UtxoSetIndex.
+func (s *Set) AddressIndexed() (bool, error) {
+	return s.store.AddressIndexed()
+}
+
+func refOf(after *models.UtxoId) *badgerutxo.Ref {
+	if after == nil {
+		return nil
+	}
+	r := badgerutxo.NewRef(after.Hash, after.Idx)
+	return &r
+}
+
+// EachIndexedUtxo implements ledger.UtxoSetIndex.
+func (s *Set) EachIndexedUtxo(
+	bodies [][]byte,
+	after *models.UtxoId,
+	fn func(txID []byte, index uint32, cbor []byte) (bool, error),
+) error {
+	return s.store.EachIndexed(
+		bodies, refOf(after),
+		func(o badgerutxo.Output) (bool, error) {
+			id := refID(o.Ref)
+			return fn(id.Hash, id.Idx, o.Cbor)
+		},
+	)
+}
+
+// EachUtxoAfter implements ledger.UtxoSetIndex.
+func (s *Set) EachUtxoAfter(
+	after *models.UtxoId,
+	fn func(txID []byte, index uint32, cbor []byte) (bool, error),
+) error {
+	return s.store.EachAfter(
+		refOf(after),
+		func(o badgerutxo.Output) (bool, error) {
+			id := refID(o.Ref)
+			return fn(id.Hash, id.Idx, o.Cbor)
+		},
+	)
 }

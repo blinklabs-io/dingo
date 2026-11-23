@@ -28,10 +28,12 @@ import (
 // and its running-sum update; the byte cost adds the key, the journal
 // operation and the prior value a removed output records.
 const (
-	outputEntries = 2
+	outputEntries = 4
 	keyBytes      = refLen + 1
 	sumBytes      = 64
-	journalBytes  = refLen + 5
+	// indexBytes covers the index rows of one output, which carry no value.
+	indexBytes   = 2 * (refLen + 40)
+	journalBytes = refLen + 5
 	// removedBytes stands for the prior value a removed output keeps in the
 	// journal, which is not known until the removal is applied.
 	removedBytes = 512
@@ -93,13 +95,13 @@ func pointUnits(changes []Change) []pointUnit {
 			for _, o := range c.Added {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + len(o.Cbor) + sumBytes + journalBytes,
+					keyBytes + len(o.Cbor) + sumBytes + journalBytes + indexBytes,
 				)
 			}
 			for range c.Removed {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + sumBytes + journalBytes + removedBytes,
+					keyBytes + sumBytes + journalBytes + removedBytes + indexBytes,
 				)
 			}
 		}
