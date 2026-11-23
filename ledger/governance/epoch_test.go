@@ -69,12 +69,13 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		_, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           dbadapter.New(db),
-			Txn:          txn,
-			PrevEpoch:    4,
-			NewEpoch:     5,
-			BoundarySlot: 500,
-			PParams:      conwayPParamsFixture(10),
+			DB:                   dbadapter.New(db),
+			Txn:                  txn,
+			SaveBoundarySnapshot: boundarySnapshotSink(db),
+			PrevEpoch:            4,
+			NewEpoch:             5,
+			BoundarySlot:         500,
+			PParams:              conwayPParamsFixture(10),
 			UpdateFn: func(
 				pparams lcommon.ProtocolParameters,
 				_ any,
@@ -91,13 +92,7 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
-	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		t.Context(),
-		500,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, snapshot)
+	snapshot := savedBoundarySnapshot(t, db, 5)
 	require.Equal(t, uint64(5), snapshot.Epoch)
 	require.Equal(t, uint64(500), snapshot.BoundarySlot)
 	require.Len(t, snapshot.DRepDistribution, 3)
@@ -144,11 +139,7 @@ func TestProcessEpochNativeBoundarySnapshotRetainsRatifyOutcome(t *testing.T) {
 	seedTestRunEpoch(t, db, stabilityTestEpoch, 50*ada)
 
 	boundarySlot := stabilityTestEpoch * 100
-	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		t.Context(), boundarySlot, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, snapshot)
+	snapshot := savedBoundarySnapshot(t, db, stabilityTestEpoch)
 	require.Equal(t, stabilityTestEpoch, snapshot.Epoch)
 	require.Equal(t, boundarySlot, snapshot.BoundarySlot)
 	require.Equal(t, []models.GovernanceCommitteeMember{{
@@ -184,10 +175,7 @@ func TestProcessEpochNativeBoundarySnapshotRetainsRatifyOutcome(t *testing.T) {
 	// Replaying the boundary finds the expiration already stored and must
 	// keep it in the replaced row.
 	seedTestRunEpoch(t, db, stabilityTestEpoch, 50*ada)
-	replayed, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		t.Context(), boundarySlot, nil,
-	)
-	require.NoError(t, err)
+	replayed := savedBoundarySnapshot(t, db, stabilityTestEpoch)
 	require.Equal(t, snapshot.Expired, replayed.Expired)
 }
 
@@ -204,11 +192,7 @@ func TestProcessEpochNativeBoundarySnapshotRecordsDelayingRatification(
 
 	seedTestRunEpoch(t, db, stabilityTestEpoch, 0)
 
-	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		t.Context(), stabilityTestEpoch*100, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, snapshot)
+	snapshot := savedBoundarySnapshot(t, db, stabilityTestEpoch)
 	require.Equal(t, []models.GovernanceActionRef{{
 		TxHash: hardFork.TxHash, ActionIndex: hardFork.ActionIndex,
 	}}, snapshot.Ratified)
@@ -1410,14 +1394,16 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 		{
 			name: "Dijkstra",
 			pparams: func() lcommon.ProtocolParameters {
-				return testutil.CompleteRats(&gdijkstra.DijkstraProtocolParameters{
-					ConwayProtocolParameters: conway.ConwayProtocolParameters{
-						ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-							Major: gdijkstra.MinProtocolVersionDijkstra,
+				return testutil.CompleteRats(
+					&gdijkstra.DijkstraProtocolParameters{
+						ConwayProtocolParameters: conway.ConwayProtocolParameters{
+							ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+								Major: gdijkstra.MinProtocolVersionDijkstra,
+							},
 						},
+						MaxRefScriptSizePerBlock: 1_000,
 					},
-					MaxRefScriptSizePerBlock: 1_000,
-				})
+				)
 			},
 		},
 	}
@@ -2491,20 +2477,23 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
 				if test.wantEnactment {
 					nextTxn := db.MetadataTxn(context.Background(), true)
-					nextOut, nextErr := ProcessEpoch(context.Background(), &EpochInput{
-						DB:           dbadapter.New(db),
-						Txn:          nextTxn,
-						PrevEpoch:    currentEpoch,
-						NewEpoch:     currentEpoch + 1,
-						BoundarySlot: 600,
-						PParams:      out.UpdatedPParams,
-						UpdateFn: func(
-							pparams lcommon.ProtocolParameters,
-							_ any,
-						) (lcommon.ProtocolParameters, error) {
-							return pparams, nil
+					nextOut, nextErr := ProcessEpoch(
+						context.Background(),
+						&EpochInput{
+							DB:           dbadapter.New(db),
+							Txn:          nextTxn,
+							PrevEpoch:    currentEpoch,
+							NewEpoch:     currentEpoch + 1,
+							BoundarySlot: 600,
+							PParams:      out.UpdatedPParams,
+							UpdateFn: func(
+								pparams lcommon.ProtocolParameters,
+								_ any,
+							) (lcommon.ProtocolParameters, error) {
+								return pparams, nil
+							},
 						},
-					})
+					)
 					require.NoError(t, nextErr)
 					require.NoError(t, nextTxn.Commit())
 					nextTxn.Release()

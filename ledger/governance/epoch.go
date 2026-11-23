@@ -136,6 +136,15 @@ type EpochInput struct {
 	// the treasury before it seeds the next RATIFY state; this boundary's
 	// ENACT does not.
 	PendingTreasuryDonations uint64
+	// SaveBoundarySnapshot, when set, receives the boundary's governance
+	// snapshot once RATIFY has run, in the transaction that applies the
+	// decision. A deferred RATIFY calls it from the transaction that applies
+	// the deferred decision, after the boundary has committed.
+	SaveBoundarySnapshot func(
+		context.Context,
+		*models.GovernanceBoundarySnapshot,
+		ledgerdb.Txn,
+	) error
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -1201,7 +1210,7 @@ func applyRatification(
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
 	}
-	if decision.BoundarySnapshot != nil {
+	if decision.BoundarySnapshot != nil && in.SaveBoundarySnapshot != nil {
 		// A replayed boundary decides no new expirations because its
 		// proposals are already marked, and the save replaces the row, so the
 		// expirations stored at this boundary are the ones to retain.
@@ -1210,7 +1219,7 @@ func applyRatification(
 			decision.Expired,
 			replayedExpired,
 		)
-		if err := in.DB.SaveGovernanceBoundarySnapshot(
+		if err := in.SaveBoundarySnapshot(
 			ctx,
 			&snapshot,
 			in.Txn,

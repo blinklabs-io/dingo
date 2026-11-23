@@ -404,6 +404,10 @@ func (s *Set) ApplyLedgerChanges(
 	if err != nil {
 		return fmt.Errorf("utxoset: %w", err)
 	}
+	boundaryRows, err := governanceBoundaryRows(lc)
+	if err != nil {
+		return err
+	}
 	// A store transaction holds a bounded number of writes, so a large
 	// reward write goes in after the commit's first chunk of it.
 	var moreRewards []badgerutxo.RowPut
@@ -458,6 +462,7 @@ func (s *Set) ApplyLedgerChanges(
 			delegations,
 			inputRows,
 			derivedRows,
+			boundaryRows,
 		),
 	})
 	if err != nil {
@@ -621,11 +626,17 @@ func (s *Set) RollbackPreview(point ocommon.Point) (ledger.UtxoEvent, error) {
 	return rollbackEvent(point, res), nil
 }
 
-// PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker.
+// PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker. A point the
+// journal does not reach is also ledger.ErrUtxoAsOfUnavailable, which a
+// replay of a past boundary takes for a boundary it cannot restore.
 func (s *Set) PreviewUtxoSetRollback(
 	point ocommon.Point,
 ) (ledger.UtxoEvent, error) {
-	return s.RollbackPreview(point)
+	evt, err := s.RollbackPreview(point)
+	if errors.Is(err, badgerutxo.ErrRollbackBeyondJournal) {
+		return evt, fmt.Errorf("%w: %w", ledger.ErrUtxoAsOfUnavailable, err)
+	}
+	return evt, err
 }
 
 // Rollback rolls the set back to point from its journal and returns the net

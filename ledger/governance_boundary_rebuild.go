@@ -7,7 +7,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -22,17 +21,18 @@ var errGovernanceBoundaryUnreachable = errors.New(
 )
 
 // rebuildGovernanceBoundarySnapshots stores the boundary snapshot of every
-// Conway-or-later epoch that has none, newest first, by replaying that
-// boundary's rollover in a transaction that is thrown away. A database that
-// upgraded mid-window has blocks and ledger state for those boundaries but no
-// row.
+// Conway-or-later epoch the live UTxO set has none for, newest first, by
+// replaying that boundary's rollover in a transaction that is thrown away. A
+// set that began keeping boundary snapshots mid-window has blocks and ledger
+// state for those boundaries but no row.
 //
 // Each replay truncates the transaction to the last block below the boundary
 // exactly as a ledger rollback does, runs the boundary's rollover with RATIFY
-// forced on against the committed mark distribution, and reads back the row
-// the shared governance code saved. The transaction is then rolled back, so the
-// live ledger, tip and UTxO set are untouched, and the row is saved in a fresh
-// transaction. A boundary already holding a row is skipped, which makes the
+// forced on against the committed mark distribution, and takes the snapshot
+// the shared governance code produced. The transaction is then rolled back, so
+// the live ledger, tip and UTxO set are untouched, and the row is written to
+// the set at its boundary slot. A ledger whose set keeps no ledger state skips
+// the pass. A boundary already holding a row is skipped, which makes the
 // pass idempotent and resumable after a crash between boundaries.
 //
 // A boundary the stores cannot restore ends the pass: the live UTxO set's
@@ -44,6 +44,9 @@ var errGovernanceBoundaryUnreachable = errors.New(
 func (ls *LedgerState) rebuildGovernanceBoundarySnapshots(
 	ctx context.Context,
 ) error {
+	if ls.governanceBoundaryReader() == nil {
+		return nil
+	}
 	epochs, err := ls.ledgerDB().GetEpochs(nil)
 	if err != nil {
 		return fmt.Errorf("list epochs: %w", err)
@@ -66,7 +69,7 @@ func (ls *LedgerState) rebuildGovernanceBoundarySnapshots(
 			// The boundary's own job writes this row.
 			continue
 		}
-		has, err := ls.hasGovernanceBoundarySnapshot(ctx, epoch, nil)
+		has, err := ls.hasGovernanceBoundarySnapshot(epoch)
 		if err != nil {
 			return err
 		}
@@ -95,23 +98,20 @@ func (ls *LedgerState) rebuildGovernanceBoundarySnapshots(
 }
 
 func (ls *LedgerState) hasGovernanceBoundarySnapshot(
-	ctx context.Context,
 	epoch models.Epoch,
-	txn *database.Txn,
 ) (bool, error) {
-	snapshot, err := ls.db.GetGovernanceBoundarySnapshotAtSlot(
-		ctx, epoch.StartSlot, txn,
-	)
-	if errors.Is(err, models.ErrGovernanceBoundarySnapshotNotRetained) {
+	r := ls.governanceBoundaryReader()
+	if r == nil {
 		return false, nil
 	}
+	snapshot, ok, err := r.GovernanceBoundarySnapshotAt(epoch.EpochId, nil)
 	if err != nil {
 		return false, fmt.Errorf(
 			"read governance boundary snapshot of epoch %d: %w",
 			epoch.EpochId, err,
 		)
 	}
-	return snapshot != nil && snapshot.Epoch == epoch.EpochId, nil
+	return ok && snapshot.Epoch == epoch.EpochId, nil
 }
 
 func (ls *LedgerState) rebuildGovernanceBoundarySnapshot(
@@ -197,11 +197,12 @@ func (ls *LedgerState) rebuildGovernanceBoundarySnapshotAt(
 		return nil
 	}
 	// Another writer may have stored the row while the replay ran.
-	has, err := ls.hasGovernanceBoundarySnapshot(ctx, epoch, nil)
+	has, err := ls.hasGovernanceBoundarySnapshot(epoch)
 	if err != nil || has {
 		return err
 	}
-	return ls.db.SaveGovernanceBoundarySnapshot(ctx, snapshot, nil)
+	// The set write is synchronous and takes no context.
+	return ls.saveGovernanceBoundarySnapshot(snapshot, nil) //nolint:contextcheck
 }
 
 // replayGovernanceBoundary runs the boundary of epoch in a transaction
@@ -293,6 +294,7 @@ func (ls *LedgerState) replayGovernanceBoundaryInTxn(
 	if !ok || workingEra == nil {
 		return nil, fmt.Errorf("unknown era ID %d", workingEraID)
 	}
+	replay := &boundaryReplay{spoState: spo}
 	if _, err := ls.processEpochRolloverWithOptions(
 		ctx,
 		txn,
@@ -303,7 +305,7 @@ func (ls *LedgerState) replayGovernanceBoundaryInTxn(
 		plutusV2,
 		hardForkMajors,
 		true,
-		&boundaryReplay{spoState: spo},
+		replay,
 	); err != nil {
 		if errors.Is(err, errRequiredStakeRewardBasisUnavailable) ||
 			errors.Is(err, errRewardStakeInputsUnrecoverable) {
@@ -315,18 +317,9 @@ func (ls *LedgerState) replayGovernanceBoundaryInTxn(
 		}
 		return nil, err
 	}
-	snapshot, err := ls.db.GetGovernanceBoundarySnapshotAtSlot(
-		ctx, epoch.StartSlot, dbadapter.Unwrap(txn),
-	)
-	if errors.Is(err, models.ErrGovernanceBoundarySnapshotNotRetained) {
-		// The boundary ran no governance rules, so no row belongs to it.
+	// A boundary that ran no governance rules produced no snapshot.
+	if replay.snapshot == nil || replay.snapshot.Epoch != epoch.EpochId {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	if snapshot == nil || snapshot.Epoch != epoch.EpochId {
-		return nil, nil
-	}
-	return snapshot, nil
+	return replay.snapshot, nil
 }

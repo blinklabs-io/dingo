@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -65,9 +66,42 @@ func (f *treasuryRolloverFixture) boundaryRow(
 	epoch models.Epoch,
 ) (*models.GovernanceBoundarySnapshot, error) {
 	t.Helper()
-	return f.db.GetGovernanceBoundarySnapshotAtSlot(
-		context.Background(), epoch.StartSlot, nil,
-	)
+	return f.ls.GovernanceBoundarySnapshotAtSlot(epoch.StartSlot)
+}
+
+// memBoundarySnapshots keeps the boundary snapshots of a fixture whose
+// ledger has no live UTxO set keeping ledger state.
+type memBoundarySnapshots struct {
+	mu   sync.Mutex
+	rows map[uint64]models.GovernanceBoundarySnapshot
+}
+
+func (m *memBoundarySnapshots) GovernanceBoundarySnapshotAt(
+	epoch uint64,
+	_ *uint64,
+) (*models.GovernanceBoundarySnapshot, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[epoch]
+	if !ok {
+		return nil, false, nil
+	}
+	return &row, true, nil
+}
+
+func (m *memBoundarySnapshots) save(s *models.GovernanceBoundarySnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rows == nil {
+		m.rows = map[uint64]models.GovernanceBoundarySnapshot{}
+	}
+	m.rows[s.Epoch] = *s
+}
+
+func (m *memBoundarySnapshots) clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rows = nil
 }
 
 // rebuildScenario is two live boundaries that ratify and then enact a
@@ -116,6 +150,8 @@ func newRebuildScenarioWith(
 	t.Helper()
 	const ada = uint64(1_000_000)
 	f := newTreasuryRolloverFixture(t, 100*ada)
+	rows := &memBoundarySnapshots{}
+	f.ls.boundarySnapshotSeam = rows
 	if opts.protocolMajor != 0 {
 		f.currentPParams.ProtocolVersion.Major = opts.protocolMajor
 	}
@@ -198,9 +234,7 @@ func newRebuildScenarioWith(
 	}
 	require.NotEmpty(t, sc.rows[0].Ratified, "the first boundary ratifies")
 	require.NotEmpty(t, sc.rows[0].DRepDistribution)
-	require.NoError(t, f.db.DeleteGovernanceBoundarySnapshotsAfterSlot(
-		context.Background(), 0, nil,
-	))
+	rows.clear()
 	for _, epoch := range sc.epochs {
 		_, err := f.boundaryRow(t, epoch)
 		require.ErrorIs(

@@ -782,34 +782,6 @@ func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 	require.Empty(t, tip.Point.Hash)
 }
 
-func TestTruncateAfterSlotDeletesGovernanceBoundarySnapshots(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	block0 := testIndexedBlock(0, 1, 0x41)
-	block0.Number = 0
-	block0.Type = babbage.BlockTypeBabbage
-	require.NoError(t, db.BlockCreate(block0, nil))
-	require.NoError(t, db.SetBlockNonce(
-		block0.Hash, block0.Slot, bytes.Repeat([]byte{0xe1}, 32), true, nil,
-	))
-	require.NoError(t, db.SaveGovernanceBoundarySnapshot(
-		t.Context(),
-		&models.GovernanceBoundarySnapshot{Epoch: 1, BoundarySlot: 100},
-		nil,
-	))
-
-	_, _, err := db.TruncateAfterSlot(
-		t.Context(), ocommon.NewPointOrigin(), 0, nil,
-	)
-	require.NoError(t, err)
-	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		t.Context(), 100, nil,
-	)
-	require.NoError(t, err)
-	require.Nil(t, snapshot)
-}
-
 // TestRolledBackUtxoIsNotLiveThroughHotCborCache pins that liveness comes from
 // the metadata row, not from a hot UTxO CBOR cache hit. The hot tier is keyed
 // by txid+index and is never invalidated, so after a rollback the rolled-back

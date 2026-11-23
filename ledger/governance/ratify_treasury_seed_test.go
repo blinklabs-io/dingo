@@ -15,11 +15,13 @@
 package governance
 
 import (
+	"context"
+	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -56,6 +58,7 @@ func seedTestRunEpoch(
 		PParams:                  chainTestPParams(),
 		UpdateFn:                 eras.PParamsUpdateConway,
 		PendingTreasuryDonations: donations,
+		SaveBoundarySnapshot:     boundarySnapshotSink(db),
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
@@ -307,4 +310,35 @@ func TestProcessEpochRatifyTreasuryCompetingWithdrawals(t *testing.T) {
 	))
 	assert.Nil(t, chainTestReload(t, db, first).RatifiedEpoch)
 	check()
+}
+
+// savedBoundarySnapshots holds, per test database, the boundary snapshots
+// ProcessEpoch handed to its caller, by epoch.
+var savedBoundarySnapshots sync.Map
+
+func boundarySnapshotSink(
+	db *database.Database,
+) func(context.Context, *models.GovernanceBoundarySnapshot, ledgerdb.Txn) error {
+	return func(
+		_ context.Context,
+		s *models.GovernanceBoundarySnapshot,
+		_ ledgerdb.Txn,
+	) error {
+		rows, _ := savedBoundarySnapshots.LoadOrStore(db, &sync.Map{})
+		rows.(*sync.Map).Store(s.Epoch, *s)
+		return nil
+	}
+}
+
+func savedBoundarySnapshot(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+) models.GovernanceBoundarySnapshot {
+	t.Helper()
+	rows, ok := savedBoundarySnapshots.Load(db)
+	require.True(t, ok, "no boundary snapshot was saved")
+	row, ok := rows.(*sync.Map).Load(epoch)
+	require.True(t, ok, "no boundary snapshot was saved for epoch %d", epoch)
+	return row.(models.GovernanceBoundarySnapshot)
 }

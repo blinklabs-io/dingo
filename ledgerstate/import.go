@@ -793,14 +793,6 @@ func ImportLedgerState(
 		); err != nil {
 			return fmt.Errorf("deleting post-anchor governance votes: %w", err)
 		}
-		if err := cfg.Database.DeleteGovernanceBoundarySnapshotsAfterSlot(
-			ctx, slot, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"deleting post-anchor governance boundary snapshots: %w",
-				err,
-			)
-		}
 		if err := cfg.Database.DeleteGovernanceProposalsAfterSlot(
 			ctx, slot, txn,
 		); err != nil {
@@ -4651,31 +4643,51 @@ func resumeCompletedGovState(ctx context.Context, cfg ImportConfig) error {
 	if govState == nil {
 		return nil
 	}
+	loader, ok := cfg.UtxoSet.(GovernanceBoundaryLoader)
+	if !ok {
+		return nil
+	}
 	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
-	existing, err := cfg.Database.GetGovernanceBoundarySnapshotAtSlot(
-		ctx,
-		boundarySlot,
-		nil,
+	existing, found, err := loader.GovernanceBoundarySnapshotAt(
+		cfg.State.Epoch, nil,
 	)
-	// An epoch with no retained row is the case this resume exists to fill.
-	if err != nil &&
-		!errors.Is(err, models.ErrGovernanceBoundarySnapshotNotRetained) {
+	if err != nil {
 		return fmt.Errorf("read imported governance boundary snapshot: %w", err)
 	}
-	if err == nil && existing != nil &&
-		existing.Epoch == cfg.State.Epoch &&
-		existing.BoundarySlot == boundarySlot {
+	if found && existing.BoundarySlot == boundarySlot {
 		return nil
 	}
 	return importGovernanceBoundarySnapshot(ctx, cfg, govState, boundarySlot)
 }
 
+// GovernanceBoundaryLoader is a live UTxO set that keeps the Conway epoch
+// boundary snapshots. An import writes the snapshot's own boundary into it
+// directly, since no metadata table holds them for a later load.
+type GovernanceBoundaryLoader interface {
+	// LoadGovernanceBoundarySnapshot replaces the boundary row of
+	// snapshot.Epoch.
+	LoadGovernanceBoundarySnapshot(*models.GovernanceBoundarySnapshot) error
+	// GovernanceBoundarySnapshotAt returns the boundary snapshot of epoch as
+	// a rollback to *at would leave it, or as it is now when at is nil.
+	GovernanceBoundarySnapshotAt(
+		epoch uint64,
+		at *uint64,
+	) (*models.GovernanceBoundarySnapshot, bool, error)
+}
+
+// importGovernanceBoundarySnapshot writes the boundary snapshot the imported
+// DRep pulser holds into the live UTxO set. A set that keeps no ledger-state
+// families keeps no boundary snapshots either.
 func importGovernanceBoundarySnapshot(
-	ctx context.Context,
+	_ context.Context,
 	cfg ImportConfig,
 	parsed *ParsedGovState,
 	boundarySlot uint64,
 ) error {
+	loader, ok := cfg.UtxoSet.(GovernanceBoundaryLoader)
+	if !ok {
+		return nil
+	}
 	govFields, err := decodeRawArray(cfg.State.GovStateData)
 	if err != nil {
 		return fmt.Errorf("decode imported governance boundary state: %w", err)
@@ -4777,11 +4789,7 @@ func importGovernanceBoundarySnapshot(
 			ActionIndex: action.ActionIndex,
 		})
 	}
-	if err := cfg.Database.SaveGovernanceBoundarySnapshot(
-		ctx,
-		snapshot,
-		nil,
-	); err != nil {
+	if err := loader.LoadGovernanceBoundarySnapshot(snapshot); err != nil {
 		return fmt.Errorf("save imported governance boundary snapshot: %w", err)
 	}
 	return nil

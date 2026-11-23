@@ -35,7 +35,7 @@ import (
 // snapshot has not been written yet. The boundary transaction writes it;
 // whichever of the background job or the next boundary writes them deletes it
 // in the same transaction.
-const pendingRatificationSyncKey = models.RatificationPendingKey
+const pendingRatificationSyncKey = "dingo:governance:ratify-pending"
 
 type pendingRatificationRecord struct {
 	Epoch        uint64 `json:"epoch"`

@@ -9966,6 +9966,29 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 // distribution a retained snapshot holds for the boundary's epoch.
 type boundaryReplay struct {
 	spoState *governance.SPOVotingState
+	// snapshot is the boundary snapshot the replay's RATIFY produced, kept
+	// here because nothing the replay stages outlives its transaction.
+	snapshot *models.GovernanceBoundarySnapshot
+}
+
+// saveBoundarySnapshot hands the boundary snapshot RATIFY produced to the
+// live UTxO set, or to replay when the rollover is a boundary replay.
+func (ls *LedgerState) saveBoundarySnapshot(
+	replay *boundaryReplay,
+) func(context.Context, *models.GovernanceBoundarySnapshot, ledgerdb.Txn) error {
+	return func(
+		_ context.Context,
+		snapshot *models.GovernanceBoundarySnapshot,
+		txn ledgerdb.Txn,
+	) error {
+		if replay != nil {
+			replay.snapshot = snapshot
+			return nil
+		}
+		// The row reaches the set after the commit, under the ledger
+		// lifecycle, which takes no context.
+		return ls.saveGovernanceBoundarySnapshot(snapshot, txn) //nolint:contextcheck
+	}
 }
 
 // processEpochRolloverWithOptions is the epoch rollover. validationOnly marks
@@ -10537,6 +10560,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 				BoundarySPOStateDeferred: snapDeferred || validationOnly ||
 					currentEra.Id >= eras.DijkstraEraDesc.Id,
 				PendingTreasuryDonations: pendingDonations,
+				SaveBoundarySnapshot:     ls.saveBoundarySnapshot(replay),
 			})
 			return err
 		},

@@ -239,11 +239,6 @@ const StakeRewardSourcePrefix = "dingo:stake-reward:"
 const RewardStakeInputsPendingKey = StakeRewardSourcePrefix +
 	"stake-inputs-pending"
 
-// RatificationPendingKey is the sync_state key recording a boundary whose
-// RATIFY decision, and with it the governance boundary snapshot row, the
-// ledger has not written yet.
-const RatificationPendingKey = "dingo:governance:ratify-pending"
-
 // RewardPrecomputeCursorPrefix prefixes the sync_state keys holding the
 // reward precompute cursor of each snapshot epoch.
 const RewardPrecomputeCursorPrefix = StakeRewardSourcePrefix +

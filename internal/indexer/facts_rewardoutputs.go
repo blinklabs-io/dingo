@@ -156,7 +156,7 @@ func (f *MetadataFacts) RefreshFacts(
 	through uint64,
 ) error {
 	f.through = through
-	if err := f.copyDeferredBoundaryRows(ctx, dst); err != nil {
+	if err := f.copyDeferredStakeInputs(ctx, dst); err != nil {
 		return err
 	}
 	rounds, err := f.finishedRewardRounds()

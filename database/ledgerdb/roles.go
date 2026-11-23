@@ -1272,33 +1272,6 @@ type SnapshotStore interface {
 // GovernanceStore holds proposals, votes, DReps, the constitutional committee
 // and the constitution.
 type GovernanceStore interface {
-	// SaveGovernanceBoundarySnapshot replaces the retained Conway boundary
-	// snapshot for its epoch.
-	SaveGovernanceBoundarySnapshot(
-		ctx context.Context,
-		snapshot *models.GovernanceBoundarySnapshot,
-		txn Txn,
-	) error
-	// GetGovernanceBoundarySnapshotAtSlot returns the boundary snapshot of
-	// the epoch containing slot. It returns a nil snapshot only when no
-	// boundary applies (a pre-Conway epoch), and an error wrapping
-	// models.ErrGovernanceBoundarySnapshotNotRetained when the epoch is
-	// Conway or later but its boundary is not stored and could not be rebuilt
-	// at start-up. Callers must surface that
-	// error and must not use an older epoch's snapshot or live voting state.
-	GetGovernanceBoundarySnapshotAtSlot(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) (*models.GovernanceBoundarySnapshot, error)
-	// DeleteGovernanceBoundarySnapshotsAfterSlot removes boundaries newer
-	// than slot.
-	DeleteGovernanceBoundarySnapshotsAfterSlot(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) error
-
 	// BumpDormantDRepExpiries extends active DRep expiries at an empty Conway
 	// governance boundary. Replaying the same boundary slot is idempotent.
 	BumpDormantDRepExpiries(

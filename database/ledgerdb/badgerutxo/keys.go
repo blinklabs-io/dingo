@@ -187,6 +187,10 @@ const (
 	// clears, each by the slot it was recorded at:
 	// T <slot:8 BE> <kind:1> ...
 	DRepHistoryTag = 'T'
+	// GovernanceBoundaryTag keys the governance state of each Conway epoch
+	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
+	// and the encoded snapshot. Each row is journaled at its boundary slot.
+	GovernanceBoundaryTag = '#'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.

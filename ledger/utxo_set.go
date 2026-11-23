@@ -142,6 +142,9 @@ type LedgerChanges struct {
 	// Witnesses are the slots the commit's certificates and withdrawals
 	// witnessed credentials at, in order.
 	Witnesses []WitnessChange
+	// GovernanceBoundaries are the Conway epoch boundary snapshots the
+	// commit wrote, each journaled at its boundary slot.
+	GovernanceBoundaries []models.GovernanceBoundarySnapshot
 }
 
 // SyncMarkerChange sets the protocol parameter sync marker Name, one of the
@@ -349,6 +352,8 @@ type utxoSetBatch struct {
 	// witness slots txn wrote, for a set that keeps accounts.
 	importBaselines []ImportBaselineChange
 	witnesses       []WitnessChange
+	// governanceBoundaries are the boundary snapshots txn wrote.
+	governanceBoundaries []models.GovernanceBoundarySnapshot
 	// overlay is each changed output's last staged state, and stake each
 	// stake sum's staged change, for reads in the same transaction.
 	overlay map[utxoref.Key]utxoSetOverlayEntry
@@ -377,7 +382,7 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.proposals) > 0 || len(b.votes) > 0 ||
 		len(b.pparamUpdates) > 0 || len(b.syncMarkers) > 0 ||
 		len(b.importBaselines) > 0 ||
-		len(b.witnesses) > 0
+		len(b.witnesses) > 0 || len(b.governanceBoundaries) > 0
 }
 
 // failUtxoSet stops the live UTxO set following the ledger, records the
@@ -742,6 +747,8 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			SyncMarkers:         batch.syncMarkers,
 			ImportBaselines:     batch.importBaselines,
 			Witnesses:           batch.witnesses,
+
+			GovernanceBoundaries: batch.governanceBoundaries,
 		})
 	} else {
 		err = w.ApplyUtxoChanges(batch.tip, batch.changes)

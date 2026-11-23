@@ -308,12 +308,6 @@ var FactTables = []FactTable{
 		Paged:       true,
 	},
 	{
-		Name:        "governance_boundary_snapshot",
-		SlotColumns: []string{"boundary_slot"},
-		Key:         []string{"epoch"},
-		Paged:       true,
-	},
-	{
 		Name: "pool_stake_snapshot", SlotColumns: []string{"captured_slot"},
 		Key:   []string{"epoch", "snapshot_type", "pool_key_hash"},
 		Paged: true,

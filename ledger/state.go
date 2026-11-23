@@ -2190,6 +2190,10 @@ type LedgerState struct {
 		uint64,
 		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error)
+	// boundarySnapshotSeam holds the boundary snapshots in place of the live
+	// UTxO set for the rebuild tests, whose ledger keeps its state in the
+	// metadata store. Production leaves it nil.
+	boundarySnapshotSeam governanceBoundarySeam
 	// lastIntersectAnchorFallbackWarn throttles
 	// warnIntersectAnchorFallback. Unix nanoseconds; 0 means never warned.
 	lastIntersectAnchorFallbackWarn atomic.Int64

@@ -54,3 +54,23 @@ func HardForkRatifyOverSetForTest(
 	require.NotNil(t, got)
 	return got
 }
+
+// GovernanceBoundaryOverSetForTest runs the hard fork fixture's ratifying
+// boundary over set, as HardForkRatifyOverSetForTest does, and returns the
+// ledger, the first slot of the epoch the boundary opens and the proposal it
+// ratifies.
+func GovernanceBoundaryOverSetForTest(
+	t *testing.T,
+	set UtxoSetWriter,
+	load func(store ledgerdb.LedgerDB),
+) (*LedgerState, uint64, *models.GovernanceProposal) {
+	t.Helper()
+	f := newHardForkRatifyFixture(t)
+	load(dbadapter.New(f.db))
+	f.ls.config.UtxoSet = set
+	f.ls.installNonceSource()
+	f.ls.installEpochSource()
+	f.ls.installPoolSource()
+	result := f.rollover(t, f.ls.currentEpoch, f.pparams)
+	return f.ls, result.NewCurrentEpoch.StartSlot, f.proposal
+}

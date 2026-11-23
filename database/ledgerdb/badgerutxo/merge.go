@@ -131,6 +131,7 @@ var (
 		{RewardCursorTag},
 		{ImportedBlocksTag},
 		{DRepHistoryTag},
+		{GovernanceBoundaryTag},
 	}
 )
 

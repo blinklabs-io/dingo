@@ -93,41 +93,42 @@ func (f *MetadataFacts) pendingStakeInputEpochs() (map[uint64]struct{}, error) {
 	return out, nil
 }
 
-func (f *MetadataFacts) loadDeferred(
+func (f *MetadataFacts) loadDeferredStakeInputs(
 	dst *database.Txn,
-	key string,
 ) ([]pendingStakeInput, error) {
-	raw, err := f.dst.Metadata().GetSyncState(key, dst.Metadata())
+	raw, err := f.dst.Metadata().GetSyncState(
+		DeferredStakeInputsKey, dst.Metadata(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("indexer: read deferred snapshots: %w", err)
+		return nil, fmt.Errorf("indexer: read deferred stake inputs: %w", err)
 	}
 	return decodePendingStakeInputs(raw)
 }
 
-func (f *MetadataFacts) saveDeferred(
+func (f *MetadataFacts) saveDeferredStakeInputs(
 	dst *database.Txn,
-	key string,
 	entries []pendingStakeInput,
 ) error {
 	raw, err := json.Marshal(pendingStakeInputs{Entries: entries})
 	if err != nil {
 		return err
 	}
-	return f.dst.Metadata().SetSyncState(key, string(raw), dst.Metadata())
+	return f.dst.Metadata().SetSyncState(
+		DeferredStakeInputsKey, string(raw), dst.Metadata(),
+	)
 }
 
 // dropPendingEpochs removes from rows those of an epoch in skip and returns
-// the epoch and slot, read from slotColumn, of each removed snapshot.
+// the epoch and slot of each removed snapshot.
 func dropPendingEpochs(
 	rows *metadata.FactRows,
 	skip map[uint64]struct{},
-	slotColumn string,
 ) ([]pendingStakeInput, error) {
 	epochCol := slices.Index(rows.Columns, "epoch")
-	slotCol := slices.Index(rows.Columns, slotColumn)
+	slotCol := slices.Index(rows.Columns, "captured_slot")
 	if epochCol < 0 || slotCol < 0 {
-		return nil, fmt.Errorf(
-			"indexer: snapshot rows lack epoch or %s", slotColumn,
+		return nil, errors.New(
+			"indexer: stake input rows lack epoch or captured_slot",
 		)
 	}
 	kept := rows.Rows[:0]
@@ -153,24 +154,21 @@ func dropPendingEpochs(
 	return deferred, nil
 }
 
-// deferSnapshots records, under key, snapshots whose rows were not copied.
-func (f *MetadataFacts) deferSnapshots(
+// deferStakeInputs records snapshots whose rows were not copied.
+func (f *MetadataFacts) deferStakeInputs(
 	dst *database.Txn,
-	key string,
 	deferred []pendingStakeInput,
 ) error {
 	if len(deferred) == 0 {
 		return nil
 	}
-	entries, err := f.loadDeferred(dst, key)
+	entries, err := f.loadDeferredStakeInputs(dst)
 	if err != nil {
 		return err
 	}
 	changed := false
 	for _, d := range deferred {
-		if !slices.ContainsFunc(entries, func(e pendingStakeInput) bool {
-			return e.Epoch == d.Epoch
-		}) {
+		if !slices.Contains(entries, d) {
 			entries = append(entries, d)
 			changed = true
 		}
@@ -178,7 +176,7 @@ func (f *MetadataFacts) deferSnapshots(
 	if !changed {
 		return nil
 	}
-	return f.saveDeferred(dst, key, entries)
+	return f.saveDeferredStakeInputs(dst, entries)
 }
 
 // copyDeferredStakeInputs copies the stake inputs of each deferred snapshot
@@ -187,7 +185,7 @@ func (f *MetadataFacts) copyDeferredStakeInputs(
 	ctx context.Context,
 	dst *database.Txn,
 ) error {
-	entries, err := f.loadDeferred(dst, DeferredStakeInputsKey)
+	entries, err := f.loadDeferredStakeInputs(dst)
 	if err != nil || len(entries) == 0 {
 		return err
 	}
@@ -208,7 +206,7 @@ func (f *MetadataFacts) copyDeferredStakeInputs(
 	if len(kept) == len(entries) {
 		return nil
 	}
-	return f.saveDeferred(dst, DeferredStakeInputsKey, kept)
+	return f.saveDeferredStakeInputs(dst, kept)
 }
 
 func (f *MetadataFacts) copyStakeInputEpoch(
@@ -282,15 +280,7 @@ func (f *MetadataFacts) dropDeferredStakeInputsAfter(
 	dst *database.Txn,
 	slot uint64,
 ) error {
-	return f.dropDeferredAfter(dst, DeferredStakeInputsKey, slot)
-}
-
-func (f *MetadataFacts) dropDeferredAfter(
-	dst *database.Txn,
-	key string,
-	slot uint64,
-) error {
-	entries, err := f.loadDeferred(dst, key)
+	entries, err := f.loadDeferredStakeInputs(dst)
 	if err != nil || len(entries) == 0 {
 		return err
 	}
@@ -301,5 +291,5 @@ func (f *MetadataFacts) dropDeferredAfter(
 	if len(kept) == len(entries) {
 		return nil
 	}
-	return f.saveDeferred(dst, key, kept)
+	return f.saveDeferredStakeInputs(dst, kept)
 }

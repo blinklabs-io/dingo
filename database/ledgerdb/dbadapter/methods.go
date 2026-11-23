@@ -1734,30 +1734,6 @@ func (a Adapter) GetDRepDelegatorsAtSlot(
 	return a.db.GetDRepDelegatorsAtSlot(ctx, dreps, slot, dbTxn(txn))
 }
 
-func (a Adapter) SaveGovernanceBoundarySnapshot(
-	ctx context.Context,
-	snapshot *models.GovernanceBoundarySnapshot,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.SaveGovernanceBoundarySnapshot(ctx, snapshot, dbTxn(txn))
-}
-
-func (a Adapter) GetGovernanceBoundarySnapshotAtSlot(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) (*models.GovernanceBoundarySnapshot, error) {
-	return a.db.GetGovernanceBoundarySnapshotAtSlot(ctx, slot, dbTxn(txn))
-}
-
-func (a Adapter) DeleteGovernanceBoundarySnapshotsAfterSlot(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.DeleteGovernanceBoundarySnapshotsAfterSlot(ctx, slot, dbTxn(txn))
-}
-
 func (a Adapter) GetDRepVotingPower(
 	ctx context.Context,
 	credentialTag uint8,

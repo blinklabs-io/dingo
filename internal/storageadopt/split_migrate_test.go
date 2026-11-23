@@ -116,10 +116,6 @@ func seedAPIStore(
 	require.NoError(t, db.Metadata().SetSyncState(
 		models.RewardStakeInputsPendingKey, migratePendingInputs, nil,
 	))
-	require.NoError(t, db.Metadata().SetSyncState(
-		models.RatificationPendingKey,
-		`{"epoch":7,"boundary_slot":700,"id":3,"snapshot":true}`, nil,
-	))
 	require.NoError(t, rt.Close(t.Context()))
 	return cfg, last
 }
@@ -200,12 +196,6 @@ func requireSplitStores(
 	require.NoError(t, err)
 	require.Equal(t, migratePendingInputs, deferred,
 		"snapshots the ledger was still writing stay pending for the writer")
-	deferredGovernance, err := idx.Metadata().GetSyncState(
-		indexer.DeferredGovernanceSnapshotsKey, nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, migratePendingInputs, deferredGovernance,
-		"a governance snapshot the ledger had not written stays pending")
 }
 
 // A transaction and an output that no block of the chain produced, such as a

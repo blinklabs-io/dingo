@@ -1255,6 +1255,8 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 	)
 
 	cfg := govImportConfigForTest(db, govStateData)
+	loader := &boundaryLoader{}
+	cfg.UtxoSet = loader
 	require.NoError(t, importGovState(
 		context.Background(),
 		cfg,
@@ -1266,14 +1268,16 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 	require.Len(t, members, 1)
 	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
 	assert.Equal(t, hash, members[0].ColdCredHash)
-	snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-		context.Background(),
-		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
-		nil,
+	snapshot, ok, err := loader.GovernanceBoundarySnapshotAt(
+		cfg.State.Epoch, nil,
 	)
 	require.NoError(t, err)
-	require.NotNil(t, snapshot)
-	assert.Equal(t, cfg.State.Epoch, snapshot.Epoch)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+		snapshot.BoundarySlot,
+	)
 	assert.NotEmpty(t, snapshot.ImportedRatifyState)
 }
 

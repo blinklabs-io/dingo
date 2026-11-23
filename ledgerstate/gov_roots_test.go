@@ -189,6 +189,34 @@ func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
 	require.ErrorContains(t, err, "GovRelation has 3 elements")
 }
 
+// boundaryLoader keeps the boundary snapshots an import writes, standing in
+// for a live UTxO set; the set's own rows are covered in internal/utxoset.
+type boundaryLoader struct {
+	UtxoSetLoader
+	rows map[uint64]models.GovernanceBoundarySnapshot
+}
+
+func (b *boundaryLoader) LoadGovernanceBoundarySnapshot(
+	s *models.GovernanceBoundarySnapshot,
+) error {
+	if b.rows == nil {
+		b.rows = map[uint64]models.GovernanceBoundarySnapshot{}
+	}
+	b.rows[s.Epoch] = *s
+	return nil
+}
+
+func (b *boundaryLoader) GovernanceBoundarySnapshotAt(
+	epoch uint64,
+	_ *uint64,
+) (*models.GovernanceBoundarySnapshot, bool, error) {
+	row, ok := b.rows[epoch]
+	if !ok {
+		return nil, false, nil
+	}
+	return &row, true, nil
+}
+
 // A checkpoint written before the boundary snapshot existed skips
 // importGovState, so the resume must write the snapshot itself and leave an
 // existing one alone.
@@ -200,12 +228,17 @@ func TestResumeCompletedGovStateBackfillsBoundarySnapshot(t *testing.T) {
 	cfg := govImportConfigForTest(db, govStateWithRoots(
 		t, [4]*ParsedGovActionId{}, false,
 	))
+	loader := &boundaryLoader{}
+	cfg.UtxoSet = loader
 	boundarySlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
 	load := func() *models.GovernanceBoundarySnapshot {
-		snapshot, err := db.GetGovernanceBoundarySnapshotAtSlot(
-			context.Background(), boundarySlot, nil,
+		snapshot, ok, err := loader.GovernanceBoundarySnapshotAt(
+			cfg.State.Epoch, nil,
 		)
 		require.NoError(t, err)
+		if !ok {
+			return nil
+		}
 		return snapshot
 	}
 	require.Nil(t, load())
@@ -218,9 +251,7 @@ func TestResumeCompletedGovStateBackfillsBoundarySnapshot(t *testing.T) {
 	require.NotEmpty(t, snapshot.ImportedRatifyState)
 
 	snapshot.RatificationTreasury = 77
-	require.NoError(t, db.SaveGovernanceBoundarySnapshot(
-		context.Background(), snapshot, nil,
-	))
+	require.NoError(t, loader.LoadGovernanceBoundarySnapshot(snapshot))
 	require.NoError(t, resumeCompletedGovState(context.Background(), cfg))
 	require.EqualValues(t, 77, load().RatificationTreasury)
 }
