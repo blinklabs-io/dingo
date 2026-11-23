@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/database"
@@ -26,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/spf13/cobra"
 )
 
@@ -69,11 +72,12 @@ func newDatabaseService(
 func databaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "database",
-		Short: "Database snapshot, restore, and truncate maintenance commands",
+		Short: "Database snapshot, restore, truncate, and SCLS export maintenance commands",
 	}
 	cmd.AddCommand(databaseSnapshotCommand())
 	cmd.AddCommand(databaseRestoreCommand())
 	cmd.AddCommand(databaseTruncateCommand())
+	cmd.AddCommand(databaseExportSCLSCommand())
 	return cmd
 }
 
@@ -229,4 +233,92 @@ path, not a shallower local target.`,
 	cmd.Flags().
 		Uint64Var(&blockNumber, "block-number", 0, "truncate target block number")
 	return cmd
+}
+
+func databaseExportSCLSCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "export-scls",
+		Short: "Export the live UTxO set as an SCLS (CIP-0165) parity file",
+		Long: `Export the UTxO set under the configured data directory as an SCLS file
+(CIP-0165) at --output, which must not exist. The data directory must not be
+open in a running node.
+
+The export reads one snapshot of the live UTxO set at its tip and persists
+no checkpoint, so nothing is retained once the command ends. The file is
+staged as <output>.partial, verified in full, and hard-linked into place,
+which never replaces a file created at --output meanwhile; a failure or an
+interrupt removes the staged file. The output directory must be on a file
+system that supports hard links. A staged file left by a killed export is
+refused, not overwritten; remove it once no export is running.
+
+Only a Conway state is exported, and only the utxo/v0 namespace. The file
+declares itself a parity export in its manifest (profile=parity,
+bootstrap=false): it is not a bootstrap artifact and a node cannot be
+restarted from it.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := config.FromContext(cmd.Context())
+			if cfg == nil {
+				return errors.New("no config found in context")
+			}
+			if output == "" {
+				return errors.New("--output is required")
+			}
+			if _, err := commonRun(cmd.Context(), cfg); err != nil {
+				return err
+			}
+			res, err := exportSCLS(cmd, cfg.DatabasePath, output)
+			if err != nil {
+				return fmt.Errorf("export-scls: %w", err)
+			}
+			fmt.Printf(
+				"SCLS parity export written to %s\n"+
+					"era=%s slot=%d block=%s namespaces=%s entries=%d root=%x\n",
+				output,
+				strings.ToLower(ledgerstate.EraName(res.Era)),
+				res.Slot,
+				hex.EncodeToString(res.BlockHash),
+				strings.Join(res.Namespaces, ","),
+				res.Entries,
+				res.Root[:],
+			)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(
+		&output,
+		"output",
+		"",
+		"SCLS file to create (must not already exist)",
+	)
+	return cmd
+}
+
+// exportSCLS opens the set under dataDir, exports one snapshot of it and
+// releases both on every path out.
+func exportSCLS(
+	cmd *cobra.Command,
+	dataDir, output string,
+) (ledgerstate.SCLSExportResult, error) {
+	store, err := dblifecycle.OpenUtxoSet(dataDir)
+	if err != nil {
+		return ledgerstate.SCLSExportResult{}, err
+	}
+	if store == nil {
+		return ledgerstate.SCLSExportResult{}, fmt.Errorf(
+			"no live UTxO set under %s", dataDir,
+		)
+	}
+	defer store.Close()
+	src, err := ledgerstate.NewSCLSSource(store)
+	if err != nil {
+		return ledgerstate.SCLSExportResult{}, err
+	}
+	defer src.Close()
+	return ledgerstate.ExportSCLS(cmd.Context(), ledgerstate.SCLSExportConfig{
+		Source: src,
+		Output: output,
+		Tool:   "dingo " + version.GetVersionString(),
+	})
 }

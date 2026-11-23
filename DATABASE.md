@@ -4708,6 +4708,57 @@ ledger to stage the change. It calls `SyncConfig.InvalidateUtxoSetGovernance`
 afterwards, which removes the set's `mgov2` marker (`Store.InvalidateGovernance`)
 so the next startup reloads the proposals and votes from the store.
 
+#### Exporting the set as an SCLS file
+
+`dingo database export-scls --output <file>` writes the UTxO set as an SCLS
+(CIP-0165) file. It is offline: it opens the set under the data directory,
+which fails while a node holds it, and never reads a running node's state.
+
+The checkpoint is one Badger read transaction (`Store.CheckpointableSnapshot`),
+so the tip, the era and every output come from the same version of the set.
+That snapshot refuses what `Set.WriteCheckpoint` refuses (a failure mark, a
+pending merge or rollback, an unfinished bootstrap). The export persists no
+checkpoint, so none is retained or cleaned up: the transaction ends with the
+command, and the only file left is the output.
+
+Outputs stream from the set in key order (`u <txid:32> <index:4 BE>`, which is
+the `utxo/v0` key order) one at a time into the go-scls writer, which holds one
+chunk, and the Merkle state is logarithmic, so memory does not grow with the
+set. An output index above 65535 does not fit the 34-byte `utxo/v0` key and
+fails the export. The set keeps each output as a transaction wrote it, or as
+the MemPack import's map, and a Byron output in its Byron encoding with the
+address structure inline. The export first translates a Byron output to the
+Shelley form later eras hold, its address as a byte string, then re-encodes
+each output the way cardano-ledger serializes a Conway UTxO entry, which is
+what a reference export holds: the
+2-element array (3 with a datum hash) when there is no inline datum or script
+reference, otherwise a map with ascending keys; an asset-free value as a bare
+coin; multiasset maps in bytewise key order, indefinite-length above 23
+entries; inline datum and native script bytes unchanged; a Shelley-family
+address with bytes after its payload cropped and an out-of-range pointer
+zeroed, as the ledger's pre-Babbage decode does, and a Byron address
+unchanged. Both the stored and the re-encoded forms go through the go-scls
+typed `utxo/v0` payload codec, and a payload the codec rejects fails the
+export.
+
+The file is staged as `<output>.partial` (created exclusively; an existing
+output or staged file is refused) with mode 0666 less the umask, since it holds
+public ledger state rather than a node's private checkpoint. It is finalized,
+fsynced, verified in full (`scls.VerifyFull`) with its root compared to the
+writer's, then published by a hard link to the output, the staged name removed
+and the directory synced.
+The link fails rather than replace a file created at the output while the
+export ran, which a rename would clobber, so the output directory must be on a
+file system with hard links. A failure or an interrupt removes the staged
+file. A process killed outright cannot, and the next export refuses the
+leftover `<output>.partial`, naming it, rather than delete a file another
+export may be writing; the operator removes it. Only a Conway tip is exported.
+
+The manifest summary carries the tool (`dingo <version>`), the creation time
+and the comment `profile=parity era=conway namespaces=utxo/v0 bootstrap=false`:
+the file declares its era and namespace coverage and that it is a parity
+export. It is not a bootstrap artifact; no Dingo path restarts a node from it.
+
 ### Ledger state as of a slot
 
 The `k` journal and the rows it covers answer a read as of a past slot as a
