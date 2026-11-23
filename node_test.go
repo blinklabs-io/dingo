@@ -2088,7 +2088,13 @@ func TestNodeRunEndsWhenExternalPluginFails(t *testing.T) {
 		)
 		return nil
 	}
-	registerAPIProbe(t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe)
+	registerAPIProbe(
+		t,
+		n.pluginHost,
+		plugin.CapabilityAPIBlockfrost,
+		"probe",
+		probe,
+	)
 	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 18081)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)

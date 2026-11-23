@@ -216,60 +216,70 @@ func TestExternalPlugin(t *testing.T) {
 		h.requireRuntimeDirEmpty(t)
 	})
 
-	t.Run("crash at runtime stops the host in reverse start order", func(t *testing.T) {
-		t.Parallel()
-		h := newExternalHarness(t, binary)
-		const other Capability = "example.other/v0"
-		require.NoError(t, h.host.Declare(other))
-		var externalGoneAtOtherStop atomic.Bool
-		otherStopped := make(chan struct{})
-		require.NoError(t, Register(
-			h.host,
-			Descriptor{Capability: other, Name: "inproc"},
-			nil,
-			func(context.Context, struct{}, struct{}) (struct{}, Instance, error) {
-				return struct{}{}, Lifecycle{StopFunc: func(context.Context) error {
-					externalGoneAtOtherStop.Store(h.exited(t))
-					close(otherStopped)
-					return nil
-				}}, nil
-			},
-		))
-		failures := make(chan Failure, 1)
-		h.host.SetFailureHandler(func(f Failure) {
-			failures <- f
-			_ = h.host.Stop(context.Background())
-		})
-		require.NoError(t, ResolveProvider(
-			t.Context(), h.host, other, "inproc", nil, struct{}{},
-		))
-		// A long interval leaves the exit watch as the only way to notice.
-		client, err := h.resolve(t, nil, map[string]any{
-			"keepaliveInterval": "1h",
-		})
-		require.NoError(t, err)
+	t.Run(
+		"crash at runtime stops the host in reverse start order",
+		func(t *testing.T) {
+			t.Parallel()
+			h := newExternalHarness(t, binary)
+			const other Capability = "example.other/v0"
+			require.NoError(t, h.host.Declare(other))
+			var externalGoneAtOtherStop atomic.Bool
+			otherStopped := make(chan struct{})
+			require.NoError(t, Register(
+				h.host,
+				Descriptor{Capability: other, Name: "inproc"},
+				nil,
+				func(context.Context, struct{}, struct{}) (struct{}, Instance, error) {
+					return struct{}{}, Lifecycle{
+						StopFunc: func(context.Context) error {
+							externalGoneAtOtherStop.Store(h.exited(t))
+							close(otherStopped)
+							return nil
+						},
+					}, nil
+				},
+			))
+			failures := make(chan Failure, 1)
+			h.host.SetFailureHandler(func(f Failure) {
+				failures <- f
+				_ = h.host.Stop(context.Background())
+			})
+			require.NoError(t, ResolveProvider(
+				t.Context(), h.host, other, "inproc", nil, struct{}{},
+			))
+			// A long interval leaves the exit watch as the only way to notice.
+			client, err := h.resolve(t, nil, map[string]any{
+				"keepaliveInterval": "1h",
+			})
+			require.NoError(t, err)
 
-		// The process exits as it answers; the call may fail either way.
-		_, _ = client.Check(
-			t.Context(),
-			&healthpb.HealthCheckRequest{Service: "crash"},
-		)
+			// The process exits as it answers; the call may fail either way.
+			_, _ = client.Check(
+				t.Context(),
+				&healthpb.HealthCheckRequest{Service: "crash"},
+			)
 
-		f := requireFailure(t, failures)
-		require.Equal(t, externalTestCapability, f.Capability)
-		require.Equal(t, "testplugin", f.Provider)
-		require.ErrorContains(t, f.Err, "exit status 7")
-		testutil.RequireReceive(t, otherStopped, 20*time.Second, "in-process stop")
-		require.True(
-			t,
-			externalGoneAtOtherStop.Load(),
-			"in-process provider stopped before the external plugin",
-		)
-		logged := h.logs.String()
-		require.Contains(t, logged, "plugin failed")
-		require.Contains(t, logged, "plugin=testplugin")
-		require.Contains(t, logged, "exit status 7")
-	})
+			f := requireFailure(t, failures)
+			require.Equal(t, externalTestCapability, f.Capability)
+			require.Equal(t, "testplugin", f.Provider)
+			require.ErrorContains(t, f.Err, "exit status 7")
+			testutil.RequireReceive(
+				t,
+				otherStopped,
+				20*time.Second,
+				"in-process stop",
+			)
+			require.True(
+				t,
+				externalGoneAtOtherStop.Load(),
+				"in-process provider stopped before the external plugin",
+			)
+			logged := h.logs.String()
+			require.Contains(t, logged, "plugin failed")
+			require.Contains(t, logged, "plugin=testplugin")
+			require.Contains(t, logged, "exit status 7")
+		},
+	)
 
 	t.Run("keepalive failure", func(t *testing.T) {
 		t.Parallel()

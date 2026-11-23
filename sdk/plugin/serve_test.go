@@ -144,7 +144,11 @@ func TestServeNegotiatesAndAuthenticates(t *testing.T) {
 	for _, token := range []string{"", "wrong"} {
 		_, err := sp.client.Ping(sp.ctx(t, token), &pluginrpc.PingRequest{})
 		if status.Code(err) != codes.Unauthenticated {
-			t.Fatalf("ping with token %q: got %v, want Unauthenticated", token, err)
+			t.Fatalf(
+				"ping with token %q: got %v, want Unauthenticated",
+				token,
+				err,
+			)
 		}
 	}
 	if _, err := sp.client.Ping(

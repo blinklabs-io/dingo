@@ -124,7 +124,8 @@ func WithCommand(fn CommandFunc) ExternalOption {
 }
 
 func defaultCommand(cfg ExternalConfig) (*exec.Cmd, error) {
-	cmd := exec.Command(cfg.Command, cfg.Args...) //nolint:gosec // operator-configured executable
+	//nolint:gosec // operator-configured executable
+	cmd := exec.Command(cfg.Command, cfg.Args...)
 	cmd.Env = make([]string, 0, len(cfg.Env))
 	for _, k := range slices.Sorted(maps.Keys(cfg.Env)) {
 		cmd.Env = append(cmd.Env, k+"="+cfg.Env[k])
@@ -473,7 +474,9 @@ func (i *externalInstance) watch(ctx context.Context) {
 			if err != nil && ctx.Err() == nil {
 				select {
 				case <-i.exited:
-					i.fail(fmt.Errorf("plugin process exited: %w", i.exitError()))
+					i.fail(
+						fmt.Errorf("plugin process exited: %w", i.exitError()),
+					)
 				default:
 					i.fail(fmt.Errorf("plugin keepalive failed: %w", err))
 				}
@@ -547,7 +550,10 @@ func (i *externalInstance) terminate(ctx context.Context) error {
 	if !i.waitExit(killCtx) {
 		return fmt.Errorf("plugin %s did not exit after SIGKILL", i.name())
 	}
-	return fmt.Errorf("plugin %s ignored Stop and SIGTERM and was killed", i.name())
+	return fmt.Errorf(
+		"plugin %s ignored Stop and SIGTERM and was killed",
+		i.name(),
+	)
 }
 
 func (i *externalInstance) waitExit(ctx context.Context) bool {
