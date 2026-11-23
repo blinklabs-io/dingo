@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
@@ -31,7 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-	"log/slog"
 )
 
 const externalTestCapability Capability = pluginfixture.Capability
@@ -159,6 +159,23 @@ func TestExternalPlugin(t *testing.T) {
 		require.True(t, h.exited(t))
 		require.True(t, h.cmd.Load().ProcessState.Success())
 		h.requireRuntimeDirEmpty(t)
+	})
+
+	t.Run("orderly stop is not a failure", func(t *testing.T) {
+		t.Parallel()
+		h := newExternalHarness(t, binary)
+		failures := failureHandler(h.host)
+		_, err := h.resolve(t, nil, map[string]any{
+			"keepaliveInterval": "10ms",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, h.host.Stop(stopContext(t)))
+		require.True(t, h.exited(t))
+		testutil.RequireNoReceive(
+			t, failures, 500*time.Millisecond, "failure on orderly stop",
+		)
+		require.NotContains(t, h.logs.String(), "plugin failed")
 	})
 
 	t.Run("contract version mismatch", func(t *testing.T) {

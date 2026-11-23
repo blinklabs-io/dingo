@@ -169,14 +169,16 @@ its own goroutine. `Node.New` installs a handler that records the failure as the
 node's fatal error and cancels the node, the path every fatal component failure
 takes: `Run` returns an error naming the plugin and its cause, and the ordinary
 shutdown stops the host's providers in reverse start order. The handler never
-calls `Host.Stop` itself, so shutdown owns the only stop. Stopping a plugin sends `Control.Stop`, then SIGTERM, then
-SIGKILL, each phase bounded by `stopTimeout` and the stop context; Stop
-reports an error when a plugin needed a signal.
+calls `Host.Stop` itself, so shutdown owns the only stop. Stopping a plugin
+first ends the keepalive and exit watch, so an orderly stop is never reported
+as a failure, then sends `Control.Stop`, SIGTERM and SIGKILL, each phase
+bounded by `stopTimeout` and the stop context; Stop reports an error when a
+plugin needed a signal.
 
 The control protocol is `sdk/plugin/proto/plugin.proto`. `make proto` generates
 it into `sdk/plugin/internal/pluginrpc` and into `plugin/pluginrpc`, because
 the node module does not import the SDK module. External plugins need Unix
-sockets and signals; the package tests skip on Windows. The thin launcher is
+sockets and signals; their tests skip on Windows. The thin launcher is
 used instead of hashicorp/go-plugin (MPL-2.0) because the handshake, token
 check and process control are small, the SDK module stays free of a copyleft
 dependency, and the launch step remains a single seam.
