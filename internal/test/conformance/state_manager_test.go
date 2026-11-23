@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -798,7 +799,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 		AddedSlot:  0,
 	}))
 
-	pp := &conway.ConwayProtocolParameters{}
+	pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
 	m.protocolParams = pp
 	m.currentEpoch = 0
 	boundarySlot := conformanceSlotsPerEpoch

@@ -798,6 +798,9 @@ func (s *Store) PruneJournal(slot uint64) error {
 	if err := s.pruneRewardRecords(slot); err != nil {
 		return err
 	}
+	if err := s.pruneGovernanceBoundaries(slot); err != nil {
+		return err
+	}
 	return s.pruneClosureUtxoEffects(slot)
 }
 

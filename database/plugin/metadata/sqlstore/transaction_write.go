@@ -1177,6 +1177,8 @@ func (s *Store) setTransactionWithAccumulator(
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			phase := startPhases(ctx, "dingo.sqlstore.tx.prepare")
+			defer phase.end()
 			if historicalBackfill && txn != nil &&
 				batchedAccumulator != nil &&
 				batchedAccumulator.backfillBatchLimits != nil {
@@ -1212,6 +1214,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.identity")
 			if overlay != nil && !overlay.retainHistory {
 				transactionID, err = overlay.stageTransaction(
 					hash,
@@ -1311,6 +1314,7 @@ func (s *Store) setTransactionWithAccumulator(
 					return err
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.produced")
 			collateralReturn := transaction.CollateralReturn()
 			producedModels := make(
 				[]models.Utxo,
@@ -1337,14 +1341,25 @@ func (s *Store) setTransactionWithAccumulator(
 				producedModels = append(producedModels, model)
 			}
 			if overlay != nil {
+				if overlay.err != nil {
+					return overlay.err
+				}
+				// The overlay stages outputs and resolves inputs in memory;
+				// no utxo statement runs.
 				var produced, consumed, skipped []stakeCredentialDelta
-				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
-					ctx, db, overlay, transaction, point, transactionID,
-					producedModels, uniqueConsumedInputs(transaction),
+				produced, err = overlay.create(producedModels)
+				if err != nil {
+					return err
+				}
+				phase.next(ctx, "dingo.sqlstore.tx.spend")
+				consumed, skipped, err = overlay.consume(
+					ctx, db, uniqueConsumedInputs(transaction), point.Slot,
+					transaction.Hash().Bytes(), transactionID,
 				)
 				if err != nil {
 					return err
 				}
+				phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 				if historicalBackfill {
 					batchedStakeDeltas = mergeStakeCredentialDeltas(
 						consumed, produced,
@@ -1362,6 +1377,7 @@ func (s *Store) setTransactionWithAccumulator(
 						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
 						producedModels[i].ID = uint(output.id)
 					}
+					phase.next(ctx, "dingo.sqlstore.tx.api_details")
 					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
 						return err
 					}
@@ -1381,10 +1397,12 @@ func (s *Store) setTransactionWithAccumulator(
 				if err != nil {
 					return err
 				}
+				phase.next(ctx, "dingo.sqlstore.tx.spend")
 				consumed, err := s.liveConsumedStakeDeltas(txn, transaction)
 				if err != nil {
 					return err
 				}
+				phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 				deltas := mergeStakeCredentialDeltas(
 					refsToStakeCredentialDeltas(certificateRefs),
 					consumed,
@@ -1446,6 +1464,7 @@ func (s *Store) setTransactionWithAccumulator(
 					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.api_details")
 			if err := s.applyTransactionAPIDetails(
 				ctx,
 				db,
@@ -1481,6 +1500,7 @@ func (s *Store) setTransactionWithAccumulator(
 			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
+			phase.next(ctx, "dingo.sqlstore.tx.spend")
 			var spentRefs []models.UtxoId
 			if s.dialect.Name() != "sqlite" {
 				spentRefs = make(
@@ -1625,6 +1645,7 @@ func (s *Store) setTransactionWithAccumulator(
 					)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 			if historicalBackfill {
 				if s.dialect.Name() != "sqlite" {
 					// Appended: deltas of outputs spent by row id are already in.

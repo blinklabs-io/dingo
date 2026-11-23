@@ -56,8 +56,9 @@ func newTestStore(t *testing.T) *Store {
 	)
 	require.NoError(t, err)
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.Start(context.Background()))
@@ -562,7 +563,11 @@ func TestStoreReadinessGatesTransactions(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	store, err := New(Config{WriteDB: db, Dialect: SQLiteDialect()})
+	store, err := New(Config{
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
+	})
 	require.NoError(t, err)
 	transaction := store.Transaction(t.Context())
 	require.ErrorContains(t, transaction.Commit(), "not ready")
@@ -618,8 +623,9 @@ func TestStoreMaintenanceLifecycle(t *testing.T) {
 	started := make(chan struct{})
 	var calls atomic.Uint32
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 		Maintenance: func(ctx context.Context) error {
 			if calls.Add(1) == 1 {
 				close(started)
@@ -657,8 +663,9 @@ func TestStoreCheckpointLifecycle(t *testing.T) {
 	started := make(chan struct{})
 	var calls atomic.Uint32
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 		Checkpoint: func(ctx context.Context) error {
 			if calls.Add(1) == 1 {
 				close(started)
@@ -693,8 +700,9 @@ func TestStoreVacuumTickerIsIndependentFromMaintenance(t *testing.T) {
 	var maintenanceCalls atomic.Uint32
 	var vacuumCalls atomic.Uint32
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 		Maintenance: func(context.Context) error {
 			maintenanceCalls.Add(1)
 			return nil
@@ -736,8 +744,9 @@ func TestStoreCloseContextCanWaitAfterVacuumTimeout(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 		Vacuum: func(ctx context.Context) error {
 			close(started)
 			<-ctx.Done()
@@ -787,8 +796,9 @@ func TestStoreCheckpointTickerIndependentOfVacuum(t *testing.T) {
 	var vacuumCalls atomic.Uint32
 	var checkpointCalls atomic.Uint32
 	store, err := New(Config{
-		WriteDB: db,
-		Dialect: SQLiteDialect(),
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
 		Vacuum: func(ctx context.Context) error {
 			if vacuumCalls.Add(1) == 1 {
 				close(vacuumStarted)
@@ -866,7 +876,11 @@ func TestStoreStartsForPostgresDialect(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	store, err := New(Config{WriteDB: db, Dialect: PostgresDialect()})
+	store, err := New(Config{
+		WriteDB:           db,
+		Dialect:           PostgresDialect(),
+		LazyHotStatements: true,
+	})
 	require.NoError(t, err)
 	err = store.Start(context.Background())
 	require.NoError(t, err)

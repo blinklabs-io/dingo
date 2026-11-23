@@ -145,6 +145,9 @@ type LedgerChanges struct {
 	// Witnesses are the slots the commit's certificates and withdrawals
 	// witnessed credentials at, in order.
 	Witnesses []WitnessChange
+	// GovernanceBoundaries are the Conway epoch boundary snapshots the
+	// commit wrote, each journaled at its boundary slot.
+	GovernanceBoundaries []models.GovernanceBoundarySnapshot
 }
 
 // SyncMarkerChange sets the protocol parameter sync marker Name, one of the
@@ -359,6 +362,8 @@ type utxoSetBatch struct {
 	// witness slots txn wrote, for a set that keeps accounts.
 	importBaselines []ImportBaselineChange
 	witnesses       []WitnessChange
+	// governanceBoundaries are the boundary snapshots txn wrote.
+	governanceBoundaries []models.GovernanceBoundarySnapshot
 	// overlay is each changed output's last staged state, and stake each
 	// stake sum's staged change, for reads in the same transaction.
 	overlay map[utxoref.Key]utxoSetOverlayEntry
@@ -388,7 +393,7 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.pparamUpdates) > 0 || len(b.syncMarkers) > 0 ||
 		len(b.stateMarks) > 0 ||
 		len(b.importBaselines) > 0 ||
-		len(b.witnesses) > 0
+		len(b.witnesses) > 0 || len(b.governanceBoundaries) > 0
 }
 
 // failUtxoSet stops the live UTxO set following the ledger, records the
@@ -757,6 +762,8 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			StateMarks:          batch.stateMarks,
 			ImportBaselines:     batch.importBaselines,
 			Witnesses:           batch.witnesses,
+
+			GovernanceBoundaries: batch.governanceBoundaries,
 		})
 	} else {
 		err = w.ApplyUtxoChanges(batch.tip, batch.changes)
@@ -1164,7 +1171,8 @@ func (ls *LedgerState) utxoSetBatchFor(meta types.Txn) *utxoSetBatch {
 }
 
 // stageUtxoSetRollback makes txn's batch roll the live UTxO set back to point
-// from its journal once txn commits, and record point as its tip.
+// from its journal once txn commits, and record point as its tip. A preview
+// the journal cannot serve stops the set following the ledger.
 func (ls *LedgerState) stageUtxoSetRollback(
 	txn ledgerdb.Txn,
 	point ocommon.Point,
@@ -1173,6 +1181,26 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		ls.applyUtxoSet(&utxoSetBatch{rollbackTo: &point, tip: &point})
 		return
 	}
+	if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil {
+		if ls.recordValidationFailure(txn, err) {
+			return
+		}
+		ls.failUtxoSet(
+			point.Slot,
+			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
+			err,
+		)
+	}
+}
+
+// stageUtxoSetRollbackChecked is stageUtxoSetRollback for a write
+// transaction, returning the error of a preview the journal cannot serve
+// instead of failing the set. A caller that returns the error must roll txn
+// back so the staged batch is dropped.
+func (ls *LedgerState) stageUtxoSetRollbackChecked(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
 	// The batch's tip is applied after the rollback, so its journal record
 	// lands after the records the rollback undoes.
 	ls.stageUtxoSet(txn, &point)
@@ -1188,22 +1216,13 @@ func (ls *LedgerState) stageUtxoSetRollback(
 	rb, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
 	r, readable := ls.config.UtxoSet.(UtxoSetReader)
 	if b == nil || !ok || !readable {
-		return
+		return nil
 	}
 	preview, err := rb.PreviewUtxoSetRollback(point)
 	if err == nil {
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
-	if err != nil {
-		if ls.recordValidationFailure(txn, err) {
-			return
-		}
-		ls.failUtxoSet(
-			point.Slot,
-			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
-			err,
-		)
-	}
+	return err
 }
 
 // stageUtxoSetRollbackForValidation prepares a rollback overlay that is

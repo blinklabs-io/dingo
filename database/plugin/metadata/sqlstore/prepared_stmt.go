@@ -292,9 +292,10 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 // against the caller's connection. Pool statements enter the shared cache;
 // transaction statements stay in that transaction's cache. Neither needs a
 // second connection while a transaction holds the first.
-// A failed pool prepare is not returned: like the eager pass it is logged and
-// remembered, so the query takes the uncached path, which reports any real SQL
-// error to the caller, and the statement is not re-prepared on every call.
+// A failed pool prepare is remembered, so the query takes the uncached path,
+// which reports the SQL error to the caller, and the statement is not
+// re-prepared on every call. Lazy preparation is for deliberately incomplete
+// test schemas, so it does not duplicate that caller-visible error in logs.
 // Reset, RestoreFrom and Close forget the failures and stop further lazy
 // preparation, matching the eager cache, which they empty without refilling.
 
@@ -400,7 +401,13 @@ func (s *Store) execBatch(
 					s.sqlOperations.WithLabelValues(op).Inc()
 				}
 				start := time.Now()
-				_, err := stmt.ExecContext(ctx, args...)
+				_, err := inStatementRegion(
+					ctx,
+					query,
+					func() (sql.Result, error) {
+						return stmt.ExecContext(ctx, args...)
+					},
+				)
 				if s.sqlQueryDuration != nil {
 					s.sqlQueryDuration.WithLabelValues(op, name).
 						Observe(time.Since(start).Seconds())
@@ -448,13 +455,6 @@ func (s *Store) prepareLazily(
 			s.stmtFailed[query] = struct{}{}
 		}
 		s.stmtMu.Unlock()
-		if ctx.Err() == nil {
-			s.logger.Warn(
-				"sqlstore: skipping prepared-statement cache entry",
-				"dialect", s.dialect.Name(),
-				"error", err,
-			)
-		}
 		return false
 	}
 	if s.stmtsInvalidated || s.closed.Load() {
@@ -812,7 +812,7 @@ func (s *Store) queryRowCached(
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		row := stmt.QueryRowContext(ctx, args...)
+		row := queryRowInStatementRegion(ctx, query, stmt, args...)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -846,7 +846,13 @@ func (s *Store) execCached(
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		result, err := stmt.ExecContext(ctx, args...)
+		result, err := inStatementRegion(
+			ctx,
+			query,
+			func() (sql.Result, error) {
+				return stmt.ExecContext(ctx, args...)
+			},
+		)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -927,7 +933,9 @@ func (s *Store) queryRowsCached(
 		}
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		rows, err := stmt.QueryContext(ctx, args...)
+		rows, err := inStatementRegion(ctx, query, func() (*sql.Rows, error) {
+			return stmt.QueryContext(ctx, args...)
+		})
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).

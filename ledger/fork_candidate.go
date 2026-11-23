@@ -722,6 +722,7 @@ func (ls *LedgerState) tickForkCandidateEpoch(
 		realV2Written,
 		transitionMajors,
 		true,
+		nil,
 	)
 	if err != nil {
 		return currentEpoch, currentEra, currentPParams, prevPParams,

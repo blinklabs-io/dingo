@@ -340,10 +340,14 @@ no transaction row is dropped; a row whose `transaction_id` and `tx_id` hash
 disagree keeps the linked producer and is logged), copies the input edges a
 fixed number per batch, so an output named by many transactions cannot make a
 batch unbounded, checks the row counts,
-swaps the new tables in for the old ones in one transaction and builds the
-secondary indexes before it completes. It is resumable from its cursor at every
-batch. PostgreSQL and MySQL keep `transaction` in place and drop its columns
-after the copy. A database that ran the unmerged `utxo-spender-tx-ids`,
+swaps the new tables in for the old ones and builds the secondary indexes before
+it completes. SQLite and PostgreSQL make the swap in the runner transaction.
+MySQL uses one atomic `RENAME TABLE` statement for both `utxo` tables, retains
+the old table until the foreign keys and `transaction` columns are complete,
+and resumes from either side of that rename after an interruption. It is
+resumable from its cursor at every batch. PostgreSQL and MySQL keep
+`transaction` in place and drop its columns after the copy. A database that ran
+the unmerged `utxo-spender-tx-ids`,
 `utxo-input-edge-tx-ids` or `utxo-producer-output-index` migrations has no
 upgrade path and is resynced.
 
@@ -2970,6 +2974,7 @@ UTxO changes. Their tags and markers are declared in
 | `U` + epoch + kind 0x61 + credential tag + key length + key + pool length + pool + type length + reward type | one account reward output of a snapshot epoch, credited or not: a flag byte (spendable, guarded), amount, captured slot and boundary slot (8 bytes each). The credential comes first so one credential's outputs of an epoch share a prefix |
 | `Z` + epoch | the epoch's reward precompute cursor, the JSON `sync_state` carries |
 | `mroutputs` | set once the `U` and `Z` rows of every epoch reward calculation can still read are loaded |
+| `#` + epoch (8 bytes, big-endian) | the governance snapshot of the Conway boundary that opens that epoch: the boundary slot (8 bytes, big-endian), then `models.GovernanceBoundarySnapshot` as JSON. See [Governance boundary snapshots](#governance-boundary-snapshots) |
 | `mrbseq` | a big-endian `uint64` every rollback increments in the transaction that makes it; it differs from a value read earlier exactly when a rollback has run in between (a rollback that undoes several batches increments it several times) |
 | `mrbpend` | the point a rollback in more than one transaction is restoring, set before its first transaction that leaves the set between two states it held and cleared by its last. A store that starts with it finishes the rollback (`Store.ResumeRollback`, which `Set.Reconcile` calls before it rewinds a failure mark), and `ApplyLedgerBatch` refuses with `ErrRollbackPending` until then |
 | `mimport` | a ledger-state import in progress: the snapshot point, then a byte that is `1` once the snapshot's outputs are all in the set. It is written before the import changes a row and removed by the import's last write (`Store.EndImport`); a store that holds it refuses to be reconciled (`ErrImportPending`) or checkpointed |
@@ -3521,6 +3526,59 @@ per era with `ListPParamsForEra` and ordered by row ID, donations with
 `MetadataStore.ListNetworkDonations`, and network states are walked down
 with `GetNetworkStateAsOfSlot`. A bootstrap drops them and clears the
 markers.
+
+#### Governance boundary snapshots
+
+Each Conway-or-later epoch boundary keeps one `#` row, keyed by the epoch it
+opens, holding what Conway's `DRepPulser.hs` freezes there and what RATIFY
+decides from it: the complete DRep stake distribution (reward balances, live
+UTxO stake and active proposal deposits, grouped by delegated DRep, with
+AlwaysAbstain and AlwaysNoConfidence; delegator inactivity removes no
+registered DRep from it), the post-ENACT committee, quorum, constitution,
+purpose roots and encoded protocol parameters, then the ordered ratified and
+expired action references, the remaining treasury and the delayed flag. The
+proposal action bodies complete the staged enact state. A ledger-state
+import writes the imported pulser's distribution, encoded RatifyState and
+protocol parameters instead. Only the set holds these rows; the metadata
+store and the IndexerDB have no copy, and no API reads them.
+
+The row is written in the batch of the commit that applies RATIFY, which for
+a deferred RATIFY is a commit after the boundary, and is journaled at the
+boundary slot either way, so a rollback below the boundary removes it through
+the state journal and a rollback that keeps the boundary keeps it.
+Reprocessing a boundary replaces the row in the same batch as the proposal
+lifecycle changes, and keeps the expirations already stored for the
+boundary. `LedgerState.GovernanceBoundarySnapshotAtSlot` serves a local state
+query acquired at a slot: it reads the row of the epoch holding the slot as
+of that slot (`RowAt`), returns nil for a pre-Conway epoch, and returns
+`models.ErrGovernanceBoundarySnapshotNotRetained` for a Conway-or-later epoch
+without a row, never another epoch's row or live voting state.
+
+Journal pruning keeps, among the rows whose boundary lies below the prune
+slot, only the newest: it holds the epoch the journal floor is in, which every
+slot still inside the rollback window reads. A full bootstrap drops the rows
+with the rest of the set; a catch-up keeps them, after rolling the set back to
+the snapshot's point when it is ahead, which removes the rows above it. Either
+import then writes the snapshot's own boundary row with no journal entry,
+since no rollback crosses the imported point, and an import resumed from a
+checkpoint that passed the governance phase writes it when it is missing.
+
+A set that began keeping these rows after some boundaries of the rollback
+window passed is filled at start-up, newest first: after any interrupted
+rollback or pending RATIFY is recovered and before block processing resumes,
+`LedgerState.rebuildGovernanceBoundarySnapshots` replays each missing
+boundary's rollover in a write transaction truncated to the last block below
+it, with the live UTxO set's rollback staged as an overlay and RATIFY forced
+on against the committed `mark` pool-stake rows of the opened epoch, takes the
+snapshot RATIFY produced, rolls the transaction back and writes the row at
+its boundary slot. Nothing the replay stages survives. A boundary that
+already has a row is skipped, so the pass is idempotent and resumes after a
+crash; the boundary named by `dingo:governance:ratify-pending` is left to its
+own job. A boundary the stores cannot restore ends the pass, leaving it and
+every older epoch without a row: the set's journal no longer reaches or
+does not hold the block below it, that block is below the Mithril trust boundary, the
+consumed-output sweep removed what the restore needs, the committed `mark`
+snapshot is missing, or retention pruned the reward basis its rollover reads.
 
 ### Live UTxO set as the only copy
 
@@ -7856,9 +7914,10 @@ flowchart LR
     UtxoKey["u + tx hash + output index<br/>UTxO CBOR or DOFF"]
     TxKey["t + tx hash<br/>DOFF or DTXP"]
     Offset["DOFF / DTXP<br/>slot + block hash + byte ranges"]
-    EbManifest["leios/: v|i + slot + EB hash + m<br/>raw EB manifest CBOR"]
-    EbTxs["leios/: v|i + slot + EB hash + t<br/>CBOR list of transaction bodies"]
-    EbBlob["leios/: v|i + slot + EB hash + c<br/>closure transaction CBOR blob"]
+    EbManifest["leios/: d + slot + EB hash + m<br/>raw EB manifest CBOR"]
+    EbTxs["leios/: d + slot + EB hash + t<br/>CBOR list of transactions"]
+    EbBacking["leios/: d + slot + EB hash + a<br/>marker: offsets use the t record"]
+    EbBlob["leios/: d + slot + EB hash + c<br/>legacy standalone closure blob"]
     BlobCommit["metadata_commit_timestamp"]
     SqlCommit["SQL commit_timestamp"]
 
@@ -7869,15 +7928,15 @@ flowchart LR
     TxKey --> Offset
     Offset --> BlockKey
     EbManifest -. "body hashes and sizes" .-> EbTxs
-    EbTxs -. "when apply path retains bodies" .-> EbBlob
+    EbTxs -. "ledger apply marks as backing" .-> EbBacking
+    Offset -. "or, for a legacy occurrence" .-> EbBlob
     SqlCommit --- BlobCommit
 ```
 
 Endorser blocks do not live in this store. The LeiosDB (below) holds their
-manifest, transaction list and certified closure, and the shared store holds
+manifest and transaction list, with either the transaction list itself or a
+legacy standalone closure as certified-offset backing. The shared store holds
 only the legacy `em`/`et`/`ec` keys of a database that has not yet migrated.
-The diagram shows the manifest, transaction list and closure as separate
-records because neither representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -7914,11 +7973,13 @@ contiguous key range:
 
 | Key | Value |
 |---|---|
-| `v` + slot (8) + EB hash + `m` | Volatile partition: the raw endorser-block manifest CBOR |
-| `v` + slot (8) + EB hash + `t` | Volatile partition: CBOR `[]cbor.RawMessage`, the complete transaction list (each element the Dijkstra `block_transaction` CBOR with the wire's tag-24 wrapper removed); absent for an incomplete endorser block |
-| `v` + slot (8) + EB hash + `c` | Volatile partition: the certified closure CBOR that transaction `DOFF` offsets resolve into |
-| `i` + slot (8) + EB hash + `m`, `t`, `c` | Immutable partition: the same three records of a pinned endorser block |
+| `d` + slot (8) + EB hash + `m` | Stable data partition: the raw endorser-block manifest CBOR |
+| `d` + slot (8) + EB hash + `t` | Stable data partition: CBOR `[]cbor.RawMessage`, the complete transaction list (each element the Dijkstra `block_transaction` CBOR with the wire's tag-24 wrapper removed); absent for an incomplete endorser block |
+| `d` + slot (8) + EB hash + `a` | Presence marker: certified transaction `DOFF` offsets use the `t` record as their exact-byte backing |
+| `d` + slot (8) + EB hash + `c` | Legacy standalone certified-closure backing written through the compatibility API |
+| `v` + slot (8) + EB hash + `v` | Volatile-retention marker for current data |
 | `i` + slot (8) + EB hash + `p` | The pin record: the slot and hash of the ranking block that certifies the endorser block. Its presence is what `IsPinned` reads. |
+| `v` or `i` + slot (8) + EB hash + `m`, `t`, or `c` | Payload layout written by older versions; readers, pinning, rollback and collection retain compatibility |
 | `q` + slot (8) + EB hash | Index of pins still missing their manifest or transaction list; the value is the certifier |
 | `wp` | Pin watermark: slot and hash of the newest ranking block whose certification has been pinned |
 | `wg` | Collection watermark: the slot below which unpinned volatile records are, or are being, collected |
@@ -7932,27 +7993,31 @@ two occurrences, stored and collected independently.
 **Writes.** `Database.SetLeiosEB` (a fetched or forged endorser block, written
 before the fetch reports success or the block is offered onward, and a
 certifying ranking block's apply) writes the manifest and, when the list is
-complete, the transaction list. An unpinned occurrence goes to the volatile
-partition and a pinned one to the immutable partition, which is how a
-content-pending pin is repaired. `PutVolatile` refuses an unpinned occurrence
+complete, the transaction list under stable `d` keys. An unpinned occurrence
+also has a small `v...v` marker; a pinned occurrence does not, which is how a
+content-pending pin is repaired without copying the payload. `PutVolatile`
+refuses an unpinned occurrence
 below the collection watermark with `leiosdb.ErrBehindImmutableTip`: such a
 block was never certified or lost its fork, and storing it would only leave a
-record for the next collection. The closure is written by
-`Database.PutLeiosClosure` and is never refused, because it belongs to a block
-certification has already accepted. `PutVolatile`, `PutClosure`, the pin
+record for the next collection. Ledger apply calls
+`Database.PutLeiosTransactionBacking`, which verifies that the encoded
+transaction list already stored under `t` is byte-identical and adds the `a`
+marker rather than writing those bytes again. The compatibility
+`Database.PutLeiosClosure` path stores a standalone `c` record. Neither is
+refused, because the backing belongs to a certification already accepted.
+`PutVolatile`, either backing write, the pin
 record's commit and `SetMigrationState` flush the store (`BlobStore.Sync`)
 before returning, because a commit in another store depends on each: the
-closure before the offsets that point into it, and the copied records before
+backing before the offsets that point into it, and the copied records before
 the migration deletes its sources. `Pin` flushes once after its last commit,
 not per copied record. Collection, demotion and watermark writes are not
 flushed; the store orders its own commits, and an interrupted one is repeated.
 
-**Reads.** `GetLeiosEBManifest` and `GetLeiosEBTxs` read the immutable
-partition, then the volatile one, but only an occurrence with a pin record
-reads the immutable partition: `Pin` copies its records in separate commits
-and writes the pin record last, so an interrupted pin leaves a partial
-immutable copy that stays invisible while the volatile copy is the complete
-one. They return `ErrBlobKeyNotFound` for an
+**Reads.** `GetLeiosEBManifest` and `GetLeiosEBTxs` read the stable data
+partition first, followed by the compatible legacy partition. An occurrence
+with a pin record may read legacy immutable records; without a pin, a partial
+immutable copy from an interrupted old-version pin remains invisible. They
+return `ErrBlobKeyNotFound` for an
 occurrence the store does not hold. Until the migration below finishes, a miss
 also falls back to the shared store's legacy records. The offset resolver
 (`TieredCborCache`) reads a closure from the shared blob store first, so
@@ -7964,16 +8029,17 @@ producing transaction's metadata row, since a closure has no block index of its
 own. That fallback opens only a store that is already open
 or already on disk, so a node that never handled an endorser block does not
 create `<dataDir>/leios/` by missing a block read; a closed `Database` never
-reopens it. `MaxLeiosEBSlot` is a reverse seek on both partitions.
+reopens it. `MaxLeiosEBSlot` is a reverse seek over current and legacy payload
+partitions.
 
 **Certification is derived from the chain.** No `ec` marker is written. When
 the immutable point advances, `LedgerState.AdvanceLeiosPins`
 (`ledger/leios_pin.go`) walks the primary chain from the pin watermark to the
 immutable point. For each ranking block that carries a certificate it resolves
-the endorser block its parent announced and pins it: the manifest,
-transaction list and closure move to the immutable partition and the pin
-record and the certifier are written in one transaction, after which the
-watermark advances. A pin whose content is not in the store is recorded
+the endorser block its parent announced and pins it: current payload keys stay
+in place while the pin record is written and the volatile marker is removed in
+one transaction. Legacy payloads are first copied to their immutable layout.
+Afterward the watermark advances. A pin whose content is not in the store is recorded
 content-pending (`q` index, the
 `dingo_ledger_leios_pins_content_pending_total` counter) and never blocks the
 walk. Later passes repair a pending pin from the in-memory endorser-block
@@ -8011,8 +8077,10 @@ fails; a failed walk is logged as an error and counted in
 `dingo_leios_pin_walk_failures_total`. The watermark is persisted before the first delete, so an interrupted
 collection is finished by the next one even with a lower bound. An endorser
 block that was certified only on a losing fork is never pinned and is collected
-like any other unpinned one. The collector never touches the immutable
-partition, and certified endorser blocks are kept permanently.
+like any other unpinned one. For current data the collector scans only the
+small volatile markers and deletes each marker with its `d` payload; legacy
+volatile payload keys are deleted directly. It never deletes a pinned payload,
+and certified endorser blocks are kept permanently.
 
 **Refusal.** leios-fetch answers an unpinned occurrence below the larger of the
 collection watermark and the smaller of the live immutable slot and the pin
@@ -8061,8 +8129,9 @@ shared store are not touched.
 
 **Truncate.** `database.TruncateAfterSlot` rolls the pins back after its
 transaction commits: pins whose certifier lies above the target are removed
-and their manifest, transactions and closure move back to the volatile
-partition rather than being deleted, because the chain can still reference the
+and current payloads regain their volatile marker. Legacy manifest,
+transaction and closure records move back to their volatile partition. The
+payload is not deleted, because the chain can still reference the
 closure and a surviving certification pins the block again. The pin watermark moves to the target and the collection watermark to at most
 the target's slot, so the re-applied chain can store and pin again. A crash
 between the commit and the pin rollback leaves pins above the chain, which the
@@ -8070,7 +8139,7 @@ next pin walk finds the pin watermark's ranking block off the chain and rolls
 the pins back to the immutable point. A pin with an unknown
 certifier (written by the migration from a marker) is kept.
 
-**Snapshot and restore.** The closures live only in the LeiosDB, so
+**Snapshot and restore.** Certified offset backing lives only in the LeiosDB, so
 `lifecycle.Snapshot` backs it up beside the blob and metadata stores whenever
 the database has one open, into `leios.bak`, with `leiosBytes` and
 `leiosSha256` in the manifest (both omitted for a node with no LeiosDB, whose
@@ -8284,24 +8353,28 @@ main block outright, as bark's archive-fetch path does, would make
 Byron-era history permanently unretrievable from an S3/GCS-backed node
 instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
-Leios also needs a closure blob for ledger application. An EB is not itself
+Leios also needs exact-byte backing for ledger application. An EB is not itself
 part of the ranking-block chain. When a Dijkstra ranking block certifies one
-(`ledger/leios_apply.go`), `Database.PutLeiosClosure` writes its transactions as
-a standalone CBOR blob in the LeiosDB (`c` record, above) if the EB has a
-non-empty body list, writing the original list even when every transaction is a
-duplicate. This is the blob that transaction `DOFF` offsets resolve through cold
-extraction, separate from the manifest and transaction-list records.
+(`ledger/leios_apply.go`), it encodes the original transaction list once in the
+LeiosDB `t` record, even when every transaction is a duplicate. The `a` marker
+selects that same record as the blob that transaction `DOFF` offsets resolve
+through cold extraction. Each body and output range is located in the original
+raw transaction bytes, so resolution returns the exact bytes received rather
+than a semantically re-encoded copy. An occurrence that already has standalone
+backing in either the LeiosDB or the shared legacy store keeps that layout on
+replay; new offsets therefore cannot reinterpret historical byte ranges against
+the transaction-list encoding.
 Closures written before the LeiosDB existed are synthetic `bp` blobs with
 `ID=0` and no `bi`/`bh` index entries, so chain iteration does not treat them as
 real blocks, and `BlockBeforeSlotTxn` skips `ID=0`. They stay readable: offset
 resolution reads the shared store first.
 
-The closure commits in the LeiosDB, outside the shared block-processing
+The transaction-list backing commits in the LeiosDB, outside the shared block-processing
 transaction, which can cover up to 50 blocks. Keeping large EB blobs out of that
 transaction avoids Badger's per-transaction size limit (`ErrTxnTooBig`) during
 dense backlogs. The write is idempotent, and transaction ledger effects remain
-associated with the ranking block for rollback. `PutLeiosClosure` warms the
-block LRU with the committed blob, and the LeiosDB is a separate store, so a
+associated with the ranking block for rollback. The backing write warms the
+block LRU with the committed transaction list, and the LeiosDB is a separate store, so a
 read through a stale shared-transaction snapshot cannot miss it.
 
 The endorser transactions' own `t` and `u` offset entries are bounded the same
@@ -8313,9 +8386,9 @@ block. `applyEndorserBlock` therefore applies the transactions' metadata with
 afterwards calls `Database.PersistTransactionOffsets`. That commits the entries
 for the applied transactions in blob-only transactions of their own, each sized
 from the store's `blob.TxnBudget` and committed before it fills; a store with no
-budget receives them in the shared transaction. The order is: the endorser blob
+budget receives them in the shared transaction. The order is: the endorser backing
 commits, then the offset batches, then the metadata with the shared
-transaction's commit. Offsets therefore never name a blob that is not
+transaction's commit. Offsets therefore never name backing that is not
 committed. A crash or error between batches, or a rejected or rolled-back
 block, leaves committed `t`/`u` entries whose transactions have no metadata
 rows. Metadata is the source of truth, so those entries are unreachable, and a
