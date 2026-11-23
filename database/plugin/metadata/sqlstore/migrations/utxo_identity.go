@@ -203,7 +203,8 @@ func utxoTransactionIdentityBackfill(dialect string) Backfill {
 }
 
 type identityBackfill struct {
-	dialect string
+	dialect          string
+	afterMySQLRename func() error
 }
 
 // identityTable is the table that holds the identity rows while the
@@ -744,32 +745,91 @@ func (b identityBackfill) swapMySQL(
 	ctx context.Context,
 	batch Batch,
 ) error {
-	var nextAutoIncrement sql.NullInt64
-	if err := batch.Tx.QueryRowContext(ctx, `
-SELECT auto_increment FROM information_schema.tables
-WHERE table_schema = DATABASE() AND table_name = 'utxo'`,
-	).Scan(&nextAutoIncrement); err != nil {
-		return fmt.Errorf("read utxo auto_increment: %w", err)
+	const legacyTable = "utxo_identity_legacy"
+	utxoExists, err := b.mysqlTableExists(ctx, batch, "utxo")
+	if err != nil {
+		return err
 	}
-	for _, fk := range utxoChildForeignKeys {
-		exists, err := b.mysqlConstraintExists(ctx, batch, fk.table, fk.name)
-		if err != nil {
-			return err
-		}
-		if exists {
-			if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
-				"` DROP FOREIGN KEY `"+fk.name+"`"); err != nil {
+	identityExists, err := b.mysqlTableExists(ctx, batch, "utxo_identity")
+	if err != nil {
+		return err
+	}
+	legacyExists, err := b.mysqlTableExists(ctx, batch, legacyTable)
+	if err != nil {
+		return err
+	}
+
+	var autoIncrementTable string
+	switch {
+	case utxoExists && identityExists && !legacyExists:
+		autoIncrementTable = "utxo"
+		for _, fk := range utxoChildForeignKeys {
+			exists, err := b.mysqlConstraintExists(
+				ctx, batch, fk.table, fk.name,
+			)
+			if err != nil {
 				return err
 			}
+			if exists {
+				if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
+					"` DROP FOREIGN KEY `"+fk.name+"`"); err != nil {
+					return err
+				}
+			}
 		}
+	case !utxoExists && identityExists && !legacyExists:
+		// An earlier release dropped utxo before it renamed the replacement.
+		// The replacement is complete, so preserve it and finish the swap.
+		autoIncrementTable = "utxo_identity"
+	case utxoExists && !identityExists && legacyExists:
+		autoIncrementTable = legacyTable
+	case utxoExists && !identityExists && !legacyExists:
+		// The swap and cleanup committed but the cursor did not.
+		autoIncrementTable = "utxo"
+	default:
+		return fmt.Errorf(
+			"unexpected MySQL utxo swap state: utxo=%t utxo_identity=%t %s=%t",
+			utxoExists, identityExists, legacyTable, legacyExists,
+		)
+	}
+
+	nextAutoIncrement, err := b.mysqlAutoIncrement(
+		ctx, batch, autoIncrementTable,
+	)
+	if err != nil {
+		return err
 	}
 	if err := b.exec(ctx, batch,
 		"DROP TABLE IF EXISTS `utxo_reference_input`",
 		"DROP TABLE IF EXISTS `utxo_collateral_input`",
-		"DROP TABLE `utxo`",
-		"RENAME TABLE `utxo_identity` TO `utxo`",
 	); err != nil {
 		return err
+	}
+	renamed := false
+	switch {
+	case utxoExists && identityExists:
+		// MySQL commits DDL statements implicitly. Renaming both tables in one
+		// statement is the swap's atomic boundary, and retaining the old table
+		// makes every later step restartable.
+		if err := b.exec(ctx, batch,
+			"RENAME TABLE `utxo` TO `"+legacyTable+"`, "+
+				"`utxo_identity` TO `utxo`",
+		); err != nil {
+			return err
+		}
+		renamed = true
+	case !utxoExists && identityExists:
+		if err := b.exec(ctx, batch,
+			"RENAME TABLE `utxo_identity` TO `utxo`",
+		); err != nil {
+			return err
+		}
+		renamed = true
+	}
+	if renamed && b.afterMySQLRename != nil {
+		if err := b.afterMySQLRename(); err != nil {
+			return err
+		}
 	}
 	if nextAutoIncrement.Valid {
 		if err := b.exec(ctx, batch, fmt.Sprintf(
@@ -780,10 +840,16 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'`,
 		}
 	}
 	for _, fk := range utxoChildForeignKeys {
-		if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
-			"` ADD CONSTRAINT `"+fk.name+"` FOREIGN KEY (`"+fk.column+
-			"`) REFERENCES `utxo`(`id`) ON DELETE CASCADE"); err != nil {
+		exists, err := b.mysqlConstraintExists(ctx, batch, fk.table, fk.name)
+		if err != nil {
 			return err
+		}
+		if !exists {
+			if err := b.exec(ctx, batch, "ALTER TABLE `"+fk.table+
+				"` ADD CONSTRAINT `"+fk.name+"` FOREIGN KEY (`"+fk.column+
+				"`) REFERENCES `utxo`(`id`) ON DELETE CASCADE"); err != nil {
+				return err
+			}
 		}
 	}
 	// One statement drops the moved columns: each separate ALTER would
@@ -801,8 +867,39 @@ WHERE table_schema = DATABASE() AND table_name = 'transaction'
 			clauses = append(clauses, "DROP COLUMN `"+column+"`")
 		}
 	}
-	return b.exec(ctx, batch,
-		"ALTER TABLE `transaction` "+strings.Join(clauses, ", "))
+	if err := b.exec(ctx, batch,
+		"ALTER TABLE `transaction` "+strings.Join(clauses, ", ")); err != nil {
+		return err
+	}
+	return b.exec(ctx, batch, "DROP TABLE IF EXISTS `"+legacyTable+"`")
+}
+
+func (b identityBackfill) mysqlTableExists(
+	ctx context.Context,
+	batch Batch,
+	table string,
+) (bool, error) {
+	var n int
+	if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = ?`, table).Scan(&n); err != nil {
+		return false, fmt.Errorf("check table %s: %w", table, err)
+	}
+	return n > 0, nil
+}
+
+func (b identityBackfill) mysqlAutoIncrement(
+	ctx context.Context,
+	batch Batch,
+	table string,
+) (sql.NullInt64, error) {
+	var value sql.NullInt64
+	if err := batch.Tx.QueryRowContext(ctx, `
+SELECT auto_increment FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_name = ?`, table).Scan(&value); err != nil {
+		return value, fmt.Errorf("read %s auto_increment: %w", table, err)
+	}
+	return value, nil
 }
 
 func (b identityBackfill) mysqlConstraintExists(
@@ -821,7 +918,8 @@ WHERE table_schema = DATABASE() AND table_name = ?
 }
 
 // buildIndex creates the position'th secondary index. Each index is its own
-// transaction so the write-ahead log is checkpointed between builds.
+// transaction so a WAL checkpoint can backfill one build before the next
+// starts; the checkpointer can only copy committed frames.
 func (b identityBackfill) buildIndex(
 	ctx context.Context,
 	batch Batch,

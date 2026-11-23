@@ -485,6 +485,72 @@ func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	assert.Equal(t, capacity, selection.Config["capacity"])
 }
 
+func TestNewConfigBlockPipelineDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts []ConfigOptionFunc
+		want bool
+	}{
+		{name: "core", want: true},
+		{
+			name: "api",
+			opts: []ConfigOptionFunc{WithStorageMode(StorageModeAPI)},
+		},
+		{
+			name: "musashi name",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+			},
+		},
+		{
+			name: "musashi magic",
+			opts: []ConfigOptionFunc{
+				WithNetworkMagic(ouroboros.NetworkCardanoMusashi.NetworkMagic),
+			},
+		},
+		{
+			name: "explicit core disable",
+			opts: []ConfigOptionFunc{WithBlockPipelineEnabled(false)},
+		},
+		{
+			name: "explicit api enable",
+			opts: []ConfigOptionFunc{
+				WithStorageMode(StorageModeAPI),
+				WithBlockPipelineEnabled(true),
+			},
+			want: true,
+		},
+		{
+			name: "explicit enable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithRunMode("dev"),
+				WithBlockPipelineEnabled(true),
+			},
+			want: true,
+		},
+		{
+			name: "explicit disable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithBlockPipelineEnabled(false),
+				WithRunMode("dev"),
+			},
+		},
+		{
+			name: "dev derives api default",
+			opts: []ConfigOptionFunc{WithRunMode("dev")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := NewConfig(tt.opts...)
+			assert.Equal(t, tt.want, cfg.BlockPipelineEnabled())
+		})
+	}
+}
+
 func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 	t.Parallel()
 

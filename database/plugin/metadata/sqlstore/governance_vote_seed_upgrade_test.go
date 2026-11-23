@@ -50,10 +50,11 @@ func TestGovernanceVotesPageMarksV22SeededHistory(t *testing.T) {
 		)
 		require.NoError(t, err)
 		store, err := New(Config{
-			WriteDB:         db,
-			Dialect:         SQLiteDialect(),
-			Migrations:      versions,
-			MigrationLocker: locker,
+			WriteDB:           db,
+			Dialect:           SQLiteDialect(),
+			Migrations:        versions,
+			MigrationLocker:   locker,
+			LazyHotStatements: true,
 		})
 		require.NoError(t, err)
 		require.NoError(t, store.Start(ctx))

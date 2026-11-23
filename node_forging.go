@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -1088,55 +1087,38 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 	if a.ledgerState == nil {
 		return nil, errors.New("ledger state unavailable")
 	}
-	db := a.ledgerState.Database()
-	if db == nil {
-		return nil, errors.New("database unavailable")
-	}
-	txn := db.MetadataTxn(context.Background(), false)
-	if txn == nil {
-		return nil, errors.New("metadata transaction unavailable")
+	view, release, err := a.ledgerState.NewPinnedView(context.Background())
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
-		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+		if releaseErr := release(); releaseErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf(
-					"release stake distribution transaction: %w",
-					rollbackErr,
+					"release stake distribution view: %w",
+					releaseErr,
 				),
 			)
 		}
 	}()
-	return a.ledgerState.NewView(dbadapter.Txn(txn)).GetStakeDistribution(epoch)
+	return view.GetStakeDistribution(epoch)
 }
 
 // GetPoolAndTotalActiveStake reads the sigma numerator and denominator for
-// one pool inside a single metadata transaction.
-//
-// Two defects are fixed here, and both are load-bearing for consensus:
+// one pool from one pinned view of the ledger state.
 //
 // Denominator -- the denominator comes from LedgerView.GetTotalActiveStake,
-// a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
-// same store accessor ledger/verify_header.go resolves the denominator
-// through when it checks an incoming header's leader eligibility.
-// Verification calls that store method directly rather than through a
-// LedgerView, with the snapshotType it resolved for the header under check;
-// the shared thing is the store accessor, not the call path. The previous
-// implementation returned
-// ledger.StakeDistribution.TotalStake, which LedgerView.GetStakeDistribution
-// accumulates by summing the mark rows itself, while verification reads
-// epoch_summary.total_active_stake. Those two agree only "by construction"
-// -- one rotation transaction writes both from one calculation
-// (ledger/pool_stake_distribution.go documents the exact conditions) -- so
-// the equality is a property of the writer, not of the readers, and nothing
-// stops the two paths from drifting. A node whose forge denominator differs
-// from its verify denominator can forge a block it would itself reject, or
-// decline a slot it is genuinely eligible for. Resolving both through one
-// accessor removes the second derivation entirely.
+// the LedgerDB accessor ledger/verify_header.go resolves the denominator
+// through when it checks an incoming header's leader eligibility. Summing
+// the mark rows instead agrees with it only because one rotation writes both
+// from one calculation, which is a property of the writer; a node whose forge
+// denominator differs from its verify denominator can forge a block it would
+// itself reject, or decline a slot it is genuinely eligible for.
 //
-// Atomicity -- both values are read through one db.MetadataTxn and one
-// LedgerView. Opening a transaction per value let a snapshot re-capture land
-// between them, yielding a sigma whose halves come from different writes.
+// Atomicity -- both values are read through one pinned LedgerView. Unpinned
+// reads let a snapshot re-capture land between them, yielding a sigma whose
+// halves come from different writes.
 func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 	epoch uint64,
 	poolKeyHash []byte,
@@ -1144,26 +1126,21 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 	if a.ledgerState == nil {
 		return 0, 0, errors.New("ledger state unavailable")
 	}
-	db := a.ledgerState.Database()
-	if db == nil {
-		return 0, 0, errors.New("database unavailable")
-	}
-	txn := db.MetadataTxn(context.Background(), false)
-	if txn == nil {
-		return 0, 0, errors.New("metadata transaction unavailable")
+	view, release, err := a.ledgerState.NewPinnedView(context.Background())
+	if err != nil {
+		return 0, 0, err
 	}
 	defer func() {
-		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+		if releaseErr := release(); releaseErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf(
-					"release stake distribution transaction: %w",
-					rollbackErr,
+					"release stake distribution view: %w",
+					releaseErr,
 				),
 			)
 		}
 	}()
-	view := a.ledgerState.NewView(dbadapter.Txn(txn))
 	poolKey := hex.EncodeToString(poolKeyHash)
 	poolStake, err = view.GetPoolStake(epoch, poolKeyHash)
 	if err != nil {
@@ -1174,9 +1151,9 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			err,
 		)
 	}
-	// Test-only synchronization seam. The transaction has already observed
-	// the numerator, so a concurrent recapture can commit before the
-	// denominator query without changing this transaction's snapshot.
+	// Test-only synchronization seam. The view is pinned, so a concurrent
+	// recapture can commit before the denominator read without changing what
+	// the view sees.
 	if a.afterPoolStakeReadFn != nil {
 		a.afterPoolStakeReadFn()
 	}

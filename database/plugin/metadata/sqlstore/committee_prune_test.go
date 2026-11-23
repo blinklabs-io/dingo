@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -616,35 +617,42 @@ INSERT INTO auth_committee_hot (
 		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
 	}, nil))
 
-	blockerTx, err := store.writeDB.Begin()
-	require.NoError(t, err)
+	// Hold the sweep inside its first delete batch, which owns the single
+	// writer connection, so the second writer queues behind a known holder.
+	// The queued writer is then the only waiter when the batch commits and
+	// releases the connection, so being served next does not depend on how
+	// the pool orders competing waiters.
+	firstBatch := make(chan struct{})
+	releaseBatch := make(chan struct{})
+	var firstBatchOnce, releaseBatchOnce sync.Once
+	release := func() { releaseBatchOnce.Do(func() { close(releaseBatch) }) }
+	store.committeeAuthPruneLocked = func() {
+		firstBatchOnce.Do(func() {
+			close(firstBatch)
+			<-releaseBatch
+		})
+	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(
 		context.Background(), 5*time.Minute,
 	)
-
 	maintenanceDone := make(chan error, 1)
 	maintenanceResultReceived := false
 	defer func() {
+		release()
 		cancelMaintenance()
-		_ = blockerTx.Rollback()
 		if !maintenanceResultReceived {
 			<-maintenanceDone
 		}
 	}()
-	waitCount := store.writeDB.Stats().WaitCount
 	go func() {
 		maintenanceDone <- store.pruneCommitteeHotAuthorizationsMaintenance(
 			maintenanceCtx,
 		)
 	}()
-	require.Eventually(t, func() bool {
-		return store.writeDB.Stats().WaitCount > waitCount
-	}, 5*time.Second, 10*time.Millisecond)
-
-	writerCtx, cancelWriter := context.WithTimeout(
-		context.Background(), 5*time.Second,
+	testutil.RequireReceive(
+		t, firstBatch, 5*time.Second, "maintenance to enter its first batch",
 	)
-	defer cancelWriter()
+
 	writerWaitCount := store.writeDB.Stats().WaitCount
 	type beginResult struct {
 		tx  *sql.Tx
@@ -652,20 +660,36 @@ INSERT INTO auth_committee_hot (
 	}
 	writerDone := make(chan beginResult, 1)
 	go func() {
-		tx, err := store.writeDB.BeginTx(writerCtx, nil)
+		tx, err := store.writeDB.BeginTx(maintenanceCtx, nil)
 		writerDone <- beginResult{tx: tx, err: err}
 	}()
 	require.Eventually(t, func() bool {
 		return store.writeDB.Stats().WaitCount > writerWaitCount
 	}, 5*time.Second, 10*time.Millisecond)
-	require.NoError(t, blockerTx.Rollback())
-	select {
-	case result := <-writerDone:
-		require.NoError(t, result.err)
-		require.NoError(t, result.tx.Rollback())
-	case <-writerCtx.Done():
-		t.Fatal("maintenance sweep held the SQLite writer between delete batches")
+	release()
+	result := <-writerDone
+	require.NoError(t, result.err)
+	// The writer was the only waiter when the first batch committed, so it
+	// is served before any second batch can run. A sweep that kept the writer
+	// across batches would have pruned more than one batch by then. Read the
+	// count from committed state while the writer keeps the connection.
+	var remaining int
+	queryErr := store.readDB.QueryRow(
+		`SELECT COUNT(*) FROM auth_committee_hot`,
+	).Scan(&remaining)
+	if queryErr != nil {
+		_ = result.tx.Rollback()
+		require.NoError(t, queryErr)
 	}
+	if pruned := before - remaining; pruned > committeeAuthPruneBatch {
+		_ = result.tx.Rollback()
+		t.Fatalf(
+			"maintenance sweep held the SQLite writer between delete batches (%d rows pruned when the writer was served, batch is %d)",
+			pruned,
+			committeeAuthPruneBatch,
+		)
+	}
+	require.NoError(t, result.tx.Rollback())
 	maintenanceErr := <-maintenanceDone
 	maintenanceResultReceived = true
 	require.NoError(t, maintenanceErr)

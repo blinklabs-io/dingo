@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -115,15 +116,41 @@ func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
 	require.Equal(t, uint64(43), includingSpent.DeletedSlot)
 }
 
-// TestPrepareHotStatementsIsBestEffortWithoutMigrations proves a Store
-// constructed without its full migration registry (as many unrelated
-// sqlstore unit tests do, via newTestStore, to exercise transaction/
-// savepoint/close mechanics against a bare connection with no utxo table)
-// still starts successfully: prepareHotStatements logs and skips a failing
-// entry instead of failing Start.
+// TestPrepareHotStatementsIsBestEffortWithoutMigrations proves an eager Store
+// constructed without its full migration registry (no utxo table) still
+// starts successfully: prepareHotStatements logs a warning and skips each
+// failing entry instead of failing Start. newTestStore is lazy and never
+// reaches that pass, so this test builds its own eager store.
 func TestPrepareHotStatementsIsBestEffortWithoutMigrations(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t)
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:eager_skip_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	var logs bytes.Buffer
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Logger: slog.New(slog.NewTextHandler(
+			&logs,
+			&slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	require.Contains(
+		t,
+		logs.String(),
+		"sqlstore: skipping prepared-statement cache entry",
+		"expected eager Start to warn about each skipped entry",
+	)
 
 	_, ok := store.lookupCachedStmt(sumCredentialUtxoStakeQuery)
 	require.False(
@@ -138,7 +165,7 @@ func TestPrepareHotStatementsIsBestEffortWithoutMigrations(t *testing.T) {
 	// utxo table here, so assert only that the miss path is taken (a
 	// query error, rather than a cache-related failure).
 	ctx := context.Background()
-	_, err := store.sumCredentialUtxoStake(
+	_, err = store.sumCredentialUtxoStake(
 		ctx,
 		store.writeDB,
 		models.NewStakeCredentialRef(0, credentialKeyForIndex(0)),
@@ -574,14 +601,21 @@ func TestCacheableConsumeUtxosForDialect(t *testing.T) {
 func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 	t.Parallel()
 	sqliteStore := newMigratedSQLiteStore(t)
+	var logs bytes.Buffer
 
 	mysqlStore := &Store{
 		writeDB: sqliteStore.writeDB,
 		dialect: MySQLDialect(),
-		logger:  slog.Default(),
+		// The SQLite backing database intentionally exercises only MySQL cache
+		// membership, so its expected parser mismatches are not test output.
+		logger: slog.New(slog.NewTextHandler(
+			&logs,
+			&slog.HandlerOptions{Level: slog.LevelError},
+		)),
 	}
 	t.Cleanup(mysqlStore.closePreparedStatements)
 	mysqlStore.prepareHotStatements(context.Background())
+	require.Empty(t, logs.String())
 
 	_, ok := mysqlStore.lookupCachedStmt(insertUtxoQuery)
 	require.False(t, ok, "expected insertUtxoQuery to be uncached on MySQL")

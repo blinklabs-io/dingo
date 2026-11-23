@@ -101,7 +101,7 @@ func TestDijkstraBatchCertificatesApplyInBatchOrder(t *testing.T) {
 					certs:   tc.top,
 				}, false)
 				require.NoError(t, run(h, t, tx))
-				account, err := h.db.GetAccountByCredential(
+				account, err := h.ls.ledgerDB().GetAccountByCredential(
 					context.Background(),
 					0,
 					stakeKey,

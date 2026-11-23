@@ -176,7 +176,7 @@ func TestReimportLedgerStateImportsTheNewestStateOnTheLocalChain(t *testing.T) {
 	mask, err := f.db.DrainedFamilies(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, latch, mask, "the latch must be kept")
-	_, pending, err := f.db.DrainedImportPending(t.Context())
+	_, pending, err := f.set.ImportPending()
 	require.NoError(t, err)
 	require.False(t, pending)
 	for _, key := range []string{"sync_status", database.LedgerReimportSyncKey} {

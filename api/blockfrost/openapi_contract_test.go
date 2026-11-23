@@ -24,6 +24,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -128,14 +129,17 @@ func (o openAPIOperation) validSamplePath(t *testing.T) string {
 		"gov_action_id":  string(govAction),
 		"hash":           strings.Repeat("ab", 32),
 		"hash_or_number": "1",
+		"index":          "0",
 		"label":          "1",
 		"number":         "1",
 		"policy_id":      policy,
 		"pool_id":        "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+		"role":           "0",
 		"script_hash":    policy,
 		"slot_number":    "1",
 		"stake_address":  "stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v",
 		"tx_hash":        strings.Repeat("ab", 32),
+		"xpub":           strings.Repeat("ab", 64),
 	}
 	return openAPIPathParameter.ReplaceAllStringFunc(
 		o.path,
@@ -310,10 +314,9 @@ func TestPinnedOpenAPIQueryBounds(t *testing.T) {
 			}
 			t.Run(operation.key()+" "+name, func(t *testing.T) {
 				baseline := httptest.NewRecorder()
-				handler.ServeHTTP(baseline, httptest.NewRequest(
-					operation.method,
+				handler.ServeHTTP(baseline, queryContractRequest(
+					operation,
 					operation.validSamplePath(t),
-					nil,
 				))
 				require.NotEqual(
 					t,
@@ -322,14 +325,65 @@ func TestPinnedOpenAPIQueryBounds(t *testing.T) {
 					"sample path is rejected before query validation",
 				)
 				recorder := httptest.NewRecorder()
-				request := httptest.NewRequest(
-					operation.method,
+				request := queryContractRequest(
+					operation,
 					operation.validSamplePath(t)+"?"+name+"="+invalid,
-					nil,
 				)
 				handler.ServeHTTP(recorder, request)
 				require.Equal(t, http.StatusBadRequest, recorder.Code)
+				requireOperationResponseConforms(
+					t,
+					doc,
+					operation,
+					recorder,
+				)
 			})
+		}
+	}
+}
+
+func TestPinnedOpenAPIValidQueryValues(t *testing.T) {
+	doc := loadPinnedBlockfrostOpenAPI(t)
+	patterns := registeredBlockfrostOperations(t)
+	mux := operationMux(t, patterns)
+	handler := newTestBlockfrost(openAPIContractMockNode()).handler()
+
+	for _, operation := range doc.operations() {
+		if !muxMatchesOperation(mux, operation) {
+			continue
+		}
+		parameters, _ := operation.value["parameters"].([]any)
+		for _, rawParameter := range parameters {
+			parameter, _ := rawParameter.(map[string]any)
+			if parameter["in"] != "query" {
+				continue
+			}
+			name, _ := parameter["name"].(string)
+			schema, _ := parameter["schema"].(map[string]any)
+			for _, value := range validQueryValues(schema) {
+				t.Run(operation.key()+" "+name+"="+value, func(t *testing.T) {
+					query := url.Values{name: []string{value}}
+					recorder := httptest.NewRecorder()
+					request := queryContractRequest(
+						operation,
+						operation.validSamplePath(t)+"?"+query.Encode(),
+					)
+					handler.ServeHTTP(recorder, request)
+					require.True(
+						t,
+						recorder.Code >= 200 && recorder.Code < 300,
+						"valid query returned status %d: %s",
+						recorder.Code,
+						recorder.Body.String(),
+					)
+					requireOperationResponseConforms(
+						t,
+						doc,
+						operation,
+						recorder,
+					)
+				})
+			}
 		}
 	}
 }
@@ -371,36 +425,51 @@ func TestPinnedOpenAPIResponseContracts(t *testing.T) {
 				)
 			}
 
-			response := operationResponse(t, doc, operation, recorder.Code)
-			content, _ := response["content"].(map[string]any)
-			if len(content) == 0 || recorder.Body.Len() == 0 {
-				return
-			}
-			contentType, _, err := mime.ParseMediaType(
-				recorder.Header().Get("Content-Type"),
-			)
-			require.NoError(t, err)
-			schemaContent, ok := content[contentType].(map[string]any)
-			require.True(
+			requireOperationResponseConforms(
 				t,
-				ok,
-				"response media type %q is absent from pinned OpenAPI",
-				contentType,
-			)
-			schema, _ := schemaContent["schema"].(map[string]any)
-			if contentType != "application/json" || len(schema) == 0 {
-				return
-			}
-			var value any
-			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &value))
-			require.NoError(
-				t,
-				validateOpenAPIValue(doc.raw, schema, value, "$"),
-				"response body: %s",
-				recorder.Body.String(),
+				doc,
+				operation,
+				recorder,
 			)
 		})
 	}
+}
+
+func requireOperationResponseConforms(
+	t *testing.T,
+	doc openAPIDocument,
+	operation openAPIOperation,
+	recorder *httptest.ResponseRecorder,
+) {
+	t.Helper()
+	response := operationResponse(t, doc, operation, recorder.Code)
+	content, _ := response["content"].(map[string]any)
+	if len(content) == 0 || recorder.Body.Len() == 0 {
+		return
+	}
+	contentType, _, err := mime.ParseMediaType(
+		recorder.Header().Get("Content-Type"),
+	)
+	require.NoError(t, err)
+	schemaContent, ok := content[contentType].(map[string]any)
+	require.True(
+		t,
+		ok,
+		"response media type %q is absent from pinned OpenAPI",
+		contentType,
+	)
+	schema, _ := schemaContent["schema"].(map[string]any)
+	if contentType != "application/json" || len(schema) == 0 {
+		return
+	}
+	var value any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &value))
+	require.NoError(
+		t,
+		validateOpenAPIValue(doc.raw, schema, value, "$"),
+		"response body: %s",
+		recorder.Body.String(),
+	)
 }
 
 func openAPIContractMockNode() *mockNode {
@@ -450,6 +519,29 @@ func operationRequestContentType(operation openAPIOperation) string {
 		return contentTypes[0]
 	}
 	return "application/json"
+}
+
+func queryContractRequest(
+	operation openAPIOperation,
+	target string,
+) *http.Request {
+	contentType := operationRequestContentType(operation)
+	body := ""
+	if _, hasBody := operation.value["requestBody"]; hasBody {
+		switch contentType {
+		case "application/json":
+			body = `{"cbor":"00"}`
+		default:
+			body = "00"
+		}
+	}
+	request := httptest.NewRequest(
+		operation.method,
+		target,
+		strings.NewReader(body),
+	)
+	request.Header.Set("Content-Type", contentType)
+	return request
 }
 
 func operationResponse(
@@ -689,7 +781,52 @@ func invalidQueryValue(schema map[string]any) (string, bool) {
 	if maximum, ok := numberValue(schema["maximum"]); ok {
 		return strconv.FormatInt(int64(maximum)+1, 10), true
 	}
+	switch schema["type"] {
+	case "integer", "number":
+		return "not-a-number", true
+	case "boolean":
+		return "not-a-boolean", true
+	}
 	return "", false
+}
+
+func validQueryValues(schema map[string]any) []string {
+	values := make([]string, 0)
+	seen := make(map[string]struct{})
+	appendValue := func(value string) {
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	if enum, ok := schema["enum"].([]any); ok {
+		for _, value := range enum {
+			if text, ok := value.(string); ok {
+				appendValue(text)
+			}
+		}
+		return values
+	}
+	switch schema["type"] {
+	case "integer":
+		if minimum, ok := numberValue(schema["minimum"]); ok {
+			appendValue(strconv.FormatInt(int64(minimum), 10))
+		}
+		if maximum, ok := numberValue(schema["maximum"]); ok {
+			appendValue(strconv.FormatInt(int64(maximum), 10))
+		}
+	case "number":
+		if value, ok := numberValue(schema["default"]); ok {
+			appendValue(strconv.FormatFloat(value, 'f', -1, 64))
+		}
+	case "boolean":
+		appendValue("true")
+		appendValue("false")
+	case "string":
+		appendValue("1")
+	}
+	return values
 }
 
 func numberValue(value any) (float64, bool) {

@@ -349,6 +349,7 @@ type Config struct {
 	forgeEBSelectionReserve                                                             time.Duration
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
+	blockPipelineEnabledSet                                                             bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
@@ -985,6 +986,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Apply options
 	for _, opt := range opts {
 		opt(&c)
+	}
+	if !c.blockPipelineEnabledSet {
+		c.cfg.BlockPipelineEnabled = internalconfig.BlockPipelineEnabledByDefault(
+			c.cfg,
+		)
 	}
 	c.syncCompatFields()
 	return c
@@ -2254,11 +2260,13 @@ func (c *Config) PlannerStatsRefreshEnabled() bool {
 }
 
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
-// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
-// by default. See LedgerStateConfig.BlockPipelineEnabled.
+// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting;
+// enabled by default in core mode except on Musashi. See
+// LedgerStateConfig.BlockPipelineEnabled.
 func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlockPipelineEnabled = enabled
+		c.cfg.SetBlockPipelineEnabled(enabled)
+		c.blockPipelineEnabledSet = true
 	}
 }
 
@@ -2742,13 +2750,12 @@ type IndexerWriter interface {
 
 // IndexerWriterDeps are what the node hands an IndexerWriterFactory.
 type IndexerWriterDeps struct {
-	// Consensus is the ledger's database, read for blocks, the tip and the
-	// ledger facts. Indexer is the IndexerDB's own database.
+	// Consensus is the ledger's database, read for blocks and the tip.
+	// Indexer is the IndexerDB's own database.
 	Consensus, Indexer *database.Database
-	// FactRows, when set, supplies the ledger-fact rows the writer copies,
-	// for a ledger that keeps them outside the consensus metadata store. It
-	// defaults to that store.
-	FactRows     metadata.FactRowReader
+	// FactRows supplies the ledger facts the writer copies. A writer that
+	// only rolls the IndexerDB back needs none.
+	FactRows     metadata.LedgerFacts
 	NodeConfig   *cardano.CardanoNodeConfig
 	Logger       *slog.Logger
 	PromRegistry prometheus.Registerer

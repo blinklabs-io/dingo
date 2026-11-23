@@ -919,13 +919,14 @@
 # validateHistorical: true
 
 # Decode blocks in the chainsync replay loop with a small parallel worker
-# pool instead of one at a time (default: false). Not consensus-affecting --
-# only changes how CBOR decode work is scheduled, not validation or apply
-# behavior. See ARCHITECTURE.md ("Block Processing Pipeline").
+# pool instead of one at a time (default: true in core mode, false in API mode
+# and on Musashi). Not consensus-affecting -- only changes how CBOR decode work
+# is scheduled, not validation or apply behavior. See ARCHITECTURE.md ("Block
+# Processing Pipeline").
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
-# blockPipelineEnabled: false
+# blockPipelineEnabled: true
 
 # Also validate VRF/KES and OpCert crypto during block-pipeline replay with a
 # parallel worker pool (default: false). Requires blockPipelineEnabled.
@@ -1548,11 +1549,11 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
-# SQLite only: keep planner statistics current with PRAGMA optimize, run
-# before block processing starts and after each epoch rollover. A database
-# synced from genesis otherwise never has statistics and some queries scan most
-# of a large table. The first run on a large database can take minutes; later
-# runs are near-free. Escape hatch only.
+# SQLite only: keep planner statistics current with a bounded ANALYZE, run
+# before block processing starts, after each epoch rollover and once a minute.
+# A database synced from genesis otherwise never has statistics and some
+# queries scan most of a large table. Each run samples at most 1000 rows per
+# index, so it stays short on a large database. Escape hatch only.
 # Default: true
 # CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
 # plannerStatsRefreshEnabled: true

@@ -98,7 +98,7 @@ func (ls *LedgerState) rewardDerivedReader(
 }
 
 // rewardDerivedServing returns the reader when the derived reward reads are
-// answered from the set, nil when they stay on the metadata store.
+// answered from the set, nil when the set does not serve them.
 func (ls *LedgerState) rewardDerivedServing(
 	txn ledgerdb.Txn,
 ) RewardDerivedReader {

@@ -21,10 +21,8 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
@@ -62,32 +60,7 @@ type copiedRewardOutputs struct {
 }
 
 func (f *MetadataFacts) ledgerRewardCursors() (map[uint64]string, error) {
-	if ro, ok := f.srcRows.(readOnlyFactRows); ok {
-		if r, ok := ro.FactRowReader.(metadata.RewardPrecomputeCursorReader); ok {
-			return r.RewardPrecomputeCursors()
-		}
-	}
-	keys, err := f.src.ListSyncStateKeysByPrefix(
-		models.RewardPrecomputeCursorPrefix, nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("indexer: list reward cursors: %w", err)
-	}
-	out := make(map[uint64]string, len(keys))
-	for _, k := range keys {
-		epoch, err := strconv.ParseUint(
-			strings.TrimPrefix(k, models.RewardPrecomputeCursorPrefix), 10, 64,
-		)
-		if err != nil {
-			continue
-		}
-		raw, err := f.src.Metadata().GetSyncState(k, nil)
-		if err != nil {
-			return nil, fmt.Errorf("indexer: read reward cursor: %w", err)
-		}
-		out[epoch] = raw
-	}
-	return out, nil
+	return f.ledger.RewardPrecomputeCursors()
 }
 
 // finishedRewardRounds returns the rounds whose outputs the ledger has
@@ -250,7 +223,7 @@ func (f *MetadataFacts) creditedRewardEpochs(
 	if err != nil {
 		return nil, err
 	}
-	rows, _, err := f.srcRows.ReadFactRows(
+	rows, _, err := f.ledger.ReadFactRows(
 		ctx, table, from, through, 0, factPageRows, nil,
 	)
 	if err != nil {

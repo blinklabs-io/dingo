@@ -20,6 +20,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,6 +56,31 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	val2, err := dst.Get(readTxn, []byte("key2"))
 	require.NoError(t, err)
 	require.Equal(t, []byte("value2"), val2)
+}
+
+// TestOpenAfterInterruptedShutdown checks the on-disk store opens with its
+// contents intact when a kill left an empty memtable file, which badger alone
+// refuses to open.
+func TestOpenAfterInterruptedShutdown(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := New(WithDataDir(dir))
+	require.NoError(t, err)
+	txn := db.NewTransaction(true)
+	require.NoError(t, db.Set(txn, []byte("key1"), []byte("value1")))
+	require.NoError(t, txn.Commit())
+	blobDir := filepath.Join(dir, db.storeSubdir())
+	require.NoError(t, db.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(blobDir, "00099.mem"), nil, 0o600))
+
+	db, err = New(WithDataDir(dir))
+	require.NoError(t, err)
+	defer db.Close()
+	readTxn := db.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+	val, err := db.Get(readTxn, []byte("key1"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("value1"), val)
 }
 
 // TestRestoreRejectsNonEmptyStore guards a real gap: db.Load only inserts

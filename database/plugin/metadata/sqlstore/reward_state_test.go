@@ -16,8 +16,6 @@ package sqlstore
 
 import (
 	"bytes"
-	"encoding/binary"
-	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -25,75 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
-
-func TestRewardLikelihoodStateFollowsAcquiredSlotAndRollback(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	weights := make([]byte, 400)
-	for i := range 100 {
-		binary.BigEndian.PutUint32(weights[i*4:], math.Float32bits(float32(i)))
-	}
-	for _, item := range []struct {
-		epoch uint64
-		slot  uint64
-		pot   uint64
-		pool  byte
-	}{
-		{epoch: 10, slot: 100, pot: 1_000, pool: 0x10},
-		{epoch: 11, slot: 200, pot: 2_000, pool: 0x11},
-	} {
-		state := &models.RewardLikelihoodState{
-			Epoch: item.epoch, RewardPot: types.Uint64(item.pot),
-			CapturedSlot: item.slot - 1, BoundarySlot: item.slot, Complete: true,
-		}
-		pool := &models.RewardPoolLikelihood{
-			Epoch: item.epoch, PoolKeyHash: bytes.Repeat([]byte{item.pool}, 28),
-			LogWeights: weights, PerformanceEstimate: 0.75,
-		}
-		require.NoError(t, store.SaveRewardLikelihoodState(state, []*models.RewardPoolLikelihood{pool}, nil))
-		require.NotZero(t, state.ID)
-		require.NotZero(t, pool.ID)
-	}
-
-	state, err := store.GetRewardLikelihoodStateAtSlot(150, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(10), state.Epoch)
-	require.Equal(t, types.Uint64(1_000), state.RewardPot)
-	require.True(t, state.Complete)
-	pools, err := store.GetRewardPoolLikelihoods(state.Epoch, nil)
-	require.NoError(t, err)
-	require.Len(t, pools, 1)
-	require.Equal(t, bytes.Repeat([]byte{0x10}, 28), pools[0].PoolKeyHash)
-
-	require.NoError(t, store.DeleteRewardStateAfterSlot(150, nil))
-	state, err = store.GetRewardLikelihoodStateAtSlot(250, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(10), state.Epoch)
-	pools, err = store.GetRewardPoolLikelihoods(11, nil)
-	require.NoError(t, err)
-	require.Empty(t, pools)
-
-	state = &models.RewardLikelihoodState{
-		Epoch: 12, RewardPot: 3_000,
-		CapturedSlot: 299, BoundarySlot: 300, Complete: true,
-	}
-	pool := &models.RewardPoolLikelihood{
-		Epoch: 12, PoolKeyHash: bytes.Repeat([]byte{0x12}, 28),
-		LogWeights: weights, PerformanceEstimate: 0.8,
-	}
-	require.NoError(t, store.SaveRewardLikelihoodState(state, []*models.RewardPoolLikelihood{pool}, nil))
-	require.NoError(t, store.DeleteRewardStateAfterSlotSkipping(
-		250,
-		types.RewardStateSkips{Outputs: true},
-		nil,
-	))
-	state, err = store.GetRewardLikelihoodStateAtSlot(350, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(10), state.Epoch)
-	pools, err = store.GetRewardPoolLikelihoods(12, nil)
-	require.NoError(t, err)
-	require.Empty(t, pools)
-}
 
 func TestRewardAccountOutputsExcludeUncreditedRows(t *testing.T) {
 	t.Parallel()

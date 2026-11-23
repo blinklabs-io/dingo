@@ -286,7 +286,7 @@ func newHoldResyncFixture(t *testing.T) *holdResyncFixture {
 	// listens to, as the node wires them.
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		EventBus:     bus,
 		Logger:       logger,

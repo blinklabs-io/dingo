@@ -172,6 +172,8 @@ func stakePoolDistributionRequest(
 // and the VRF key that share is claimed for -- has to survive the mapping, so
 // each is asserted rather than just the pool count.
 func TestReadState_ReportsStakePoolDistribution(t *testing.T) {
+	t.Parallel()
+
 	pkhA := testPoolKeyHash(0xAA)
 	pkhB := testPoolKeyHash(0xBB)
 	vrfA := testVrfKeyHash(0x01)
@@ -313,6 +315,8 @@ func TestReadState_HasServerDeadline(t *testing.T) {
 // distinction between a nil filter and an empty non-nil one, so passing the
 // request's empty slice straight through would silently ask for no pools.
 func TestReadState_EmptyPoolFilterMeansEveryPool(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{
 		dist: &ledger.PoolStakeDistribution{},
 	}
@@ -331,6 +335,8 @@ func TestReadState_EmptyPoolFilterMeansEveryPool(t *testing.T) {
 
 // TestReadState_PoolFilterIsForwarded covers the bounded form of the request.
 func TestReadState_PoolFilterIsForwarded(t *testing.T) {
+	t.Parallel()
+
 	pkhA := testPoolKeyHash(0xAA)
 	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
 	srv := newReadStateServer(t, stub)
@@ -349,6 +355,8 @@ func TestReadState_PoolFilterIsForwarded(t *testing.T) {
 // pool key hash. Truncating or zero-padding it would silently query a different
 // pool than the caller named.
 func TestReadState_RejectsMalformedPoolKeyHash(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
 	srv := newReadStateServer(t, stub)
 
@@ -364,6 +372,8 @@ func TestReadState_RejectsMalformedPoolKeyHash(t *testing.T) {
 // TestReadState_RejectsMissingQuery covers a request that names no query at
 // all, which cannot be answered but is not an unimplemented feature either.
 func TestReadState_RejectsMissingQuery(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		req  *betaquery.ReadStateRequest
@@ -419,6 +429,8 @@ func TestReadState_RejectsMissingQuery(t *testing.T) {
 // distribution nor an error. That is a ledger bug, but this handler serves a
 // network listener, so it has to report it rather than dereference it.
 func TestReadState_NilDistributionIsInternal(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{}
 	srv := newReadStateServer(t, stub)
 
@@ -435,6 +447,8 @@ func TestReadState_NilDistributionIsInternal(t *testing.T) {
 // absent message as its default, so this asks for every pool rather than being
 // malformed.
 func TestReadState_NilStakePoolDistributionMessageMeansEveryPool(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
 	srv := newReadStateServer(t, stub)
 
@@ -465,6 +479,8 @@ func TestReadState_NilStakePoolDistributionMessageMeansEveryPool(t *testing.T) {
 // snapshot. The stub's live tip is deliberately set far ahead of the read tip
 // so the two cannot be confused.
 func TestReadState_LedgerTipComesFromTheDistributionRead(t *testing.T) {
+	t.Parallel()
+
 	readTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(1000, []byte{0x0A}),
 		BlockNumber: 42,
@@ -510,6 +526,8 @@ func TestReadState_LedgerTipComesFromTheDistributionRead(t *testing.T) {
 // handlers check per request, so this has to be a status rather than a panic in
 // a network listener.
 func TestReadState_MissingLedgerStateIsUnavailable(t *testing.T) {
+	t.Parallel()
+
 	srv := newReadStateServer(t, nil)
 
 	_, err := srv.ReadState(
@@ -525,6 +543,8 @@ func TestReadState_MissingLedgerStateIsUnavailable(t *testing.T) {
 // drives, so an unbounded one lets one request choose how much work the node
 // does; the other UTxO RPC key lists are capped the same way.
 func TestReadState_RejectsOversizedPoolFilter(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -558,6 +578,8 @@ func TestReadState_RejectsOversizedPoolFilter(t *testing.T) {
 // TestReadState_LedgerErrorIsInternal covers the ledger read failing. The
 // caller's request was well formed, so this is not InvalidArgument.
 func TestReadState_LedgerErrorIsInternal(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{distErr: errors.New("boom")}
 	srv := newReadStateServer(t, stub)
 
@@ -619,6 +641,8 @@ func TestReadStateMapsLedgerPoolLimitToResourceExhausted(t *testing.T) {
 // read alongside the stake rows already holds it; nothing has to go back to
 // storage to recover it.
 func TestReadState_TipHeightSurvivesAnUnreadableBlock(t *testing.T) {
+	t.Parallel()
+
 	stub := &readStateLedgerStub{
 		blockErr: errors.New("no such block"),
 		dist: &ledger.PoolStakeDistribution{
@@ -655,6 +679,8 @@ func TestReadState_TipHeightSurvivesAnUnreadableBlock(t *testing.T) {
 // denominator, which bounds the error at one part in a billion -- far below the
 // resolution any stake decision is made at.
 func TestStakeFractionToBetaRational(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name    string
 		in      *big.Rat
@@ -715,6 +741,8 @@ func TestStakeFractionToBetaRational(t *testing.T) {
 // and reporting it as a zero share would be indistinguishable from a real pool
 // with no stake.
 func TestStakeFractionToBetaRational_RejectsUnusable(t *testing.T) {
+	t.Parallel()
+
 	_, err := stakeFractionToBetaRational(nil)
 	require.Error(t, err)
 

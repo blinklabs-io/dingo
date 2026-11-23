@@ -1,0 +1,150 @@
+name: benchmark-gate
+
+# Fails a pull request that makes the default node stack measurably slower.
+#
+# The base revision and the pull request's merged result are built and run in
+# this one job, on one runner, interleaved round by round (bench-gate.sh), then
+# compared with benchstat. Both sides see the same machine and the same drift,
+# so no stored baseline is needed and a slow runner slows both equally. A
+# benchmark fails the gate only when benchstat reports the change significant
+# (p < 0.05) and the slowdown exceeds benchci.GateRegressionThresholdPercent.
+# The threshold, the benchmark set and the noise handling are documented in
+# docs/benchmarks.md.
+#
+# Not a required check: the path filter below means it does not report on a
+# documentation-only pull request, and a required check that never reports
+# would block it.
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/benchmark-gate.yml'
+      - '.github/scripts/bench-gate.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # A pipe falls back to the next proxy on any error, a comma only on 404/410.
+  GOPROXY: 'https://proxy.golang.org|direct'
+  BENCH_ROUNDS: '8'
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    # Backstop for a wedged runner; a normal run is well under half of this.
+    timeout-minutes: 40
+    steps:
+      # head is the pull request's test merge commit. Its first parent is the
+      # base it was merged onto; the event payload's base.sha can lag behind
+      # it, which would charge commits already on main to this pull request.
+      - name: checkout-head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          path: head
+          fetch-depth: 2
+          persist-credentials: false
+      - name: resolve-base
+        id: base
+        run: |
+          set -euo pipefail
+          if ! sha=$(git -C head rev-parse --verify HEAD^2 >/dev/null && git -C head rev-parse HEAD^1); then
+            echo "head is not a merge commit; cannot find the base it was merged onto" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+      - name: checkout-base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          path: base
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
+        with:
+          go-version-file: head/go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-bench-${{ hashFiles('head/go.mod', 'head/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-bench-
+            ${{ runner.os }}-go-build-
+
+      # The gate's own script and comparator come from the base revision, so
+      # a change to them takes effect only after it merges. A base that
+      # predates the gate (the pull request that adds it) falls back to head.
+      # This is not a security boundary: the head's benchmarks run in this
+      # job with the same access to the result files.
+      - name: select-trusted-tooling
+        id: tooling
+        run: |
+          if [[ -x base/.github/scripts/bench-gate.sh \
+            && -f base/internal/benchci/cmd/benchgate/main.go ]]; then
+            echo "dir=base" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=head" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: run-benchmarks
+        env:
+          TOOLING: ${{ steps.tooling.outputs.dir }}
+        run: |
+          bash "$TOOLING/.github/scripts/bench-gate.sh" \
+            base head "$RUNNER_TEMP/bench" "$BENCH_ROUNDS"
+
+      - name: compare
+        env:
+          TOOLING: ${{ steps.tooling.outputs.dir }}
+        run: |
+          set +e
+          (cd "$TOOLING" && go run ./internal/benchci/cmd/benchgate \
+            "$RUNNER_TEMP/bench/base.txt" "$RUNNER_TEMP/bench/head.txt" \
+            "$RUNNER_TEMP/bench/report.md")
+          status=$?
+          set -e
+          {
+            echo "## Benchmark gate"
+            echo
+            if [[ -f "$RUNNER_TEMP/bench/report.md" ]]; then
+              cat "$RUNNER_TEMP/bench/report.md"
+            else
+              echo "No comparison was produced; see the step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: upload-results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 https://github.com/actions/upload-artifact/releases/tag/v7.0.2
+        with:
+          name: benchmark-gate
+          path: |
+            ${{ runner.temp }}/bench/base.txt
+            ${{ runner.temp }}/bench/head.txt
+            ${{ runner.temp }}/bench/report.md
+          if-no-files-found: ignore
+
+      # Reporting slot for storage plugins that live outside this repository.
+      # It never gates: continue-on-error keeps a failure here from failing the
+      # job. It runs nothing today; an external plugin's benchmark command
+      # replaces the echo and appends its result to the step summary.
+      - name: external-storage-smoke
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "## External storage plugin smoke (report only)"
+            echo
+            echo "Not configured: no external storage plugin is built into this run."
+          } >> "$GITHUB_STEP_SUMMARY"

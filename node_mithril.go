@@ -173,7 +173,7 @@ type MithrilCatchUpParams struct {
 type LedgerReimportParams struct {
 	DB *database.Database
 	// UtxoSet receives the imported ledger state.
-	UtxoSet ledgerstate.FamilyLoader
+	UtxoSet ledgerstate.CatchUpLoader
 	// Commit makes UtxoSet, a copy of the live set, the live set once the
 	// import is complete. Nil when UtxoSet is the live set.
 	Commit func(ctx context.Context, point ocommon.Point) error

@@ -20,9 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // reconcileKeys is the set of live ledger keys present in an imported snapshot.
@@ -39,9 +37,6 @@ type reconcileKeys struct {
 	poolsComplete               bool
 	drepsComplete               bool
 	governanceProposalsComplete bool
-	// drained is the set of families whose SQL rows were deleted before the
-	// import: none of their rows can be stale.
-	drained nodesettings.FamilyMask
 }
 
 func newReconcileKeys() *reconcileKeys {
@@ -93,7 +88,7 @@ func (k *reconcileKeys) markGovernanceProposalsComplete() {
 // together under one write transaction so the reconcile is atomic.
 func reconcileStaleLedgerState(
 	ctx context.Context,
-	db *database.Database,
+	store ImportLedgerDB,
 	keys *reconcileKeys,
 	tipSlot uint64,
 	tipEpoch uint64,
@@ -102,7 +97,6 @@ func reconcileStaleLedgerState(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	store := db.Metadata()
 
 	// Phase 1: collect the live rows that are absent from the snapshot.
 	var (
@@ -112,13 +106,6 @@ func reconcileStaleLedgerState(
 		staleProposals []*models.GovernanceProposal
 	)
 
-	skipDrained := func(entity string) {
-		logger.Info(
-			"skipping "+entity+" reconcile: its SQL rows were drained, so "+
-				"none can be stale",
-			"component", "ledgerstate",
-		)
-	}
 	skipIncomplete := func(entity string) {
 		logger.Warn(
 			"skipping "+entity+" reconcile: the snapshot import did not "+
@@ -127,13 +114,11 @@ func reconcileStaleLedgerState(
 		)
 	}
 
-	rtxn := db.MetadataTxn(ctx, false)
-	if keys.drained.Has(nodesettings.FamilyAccounts) {
-		skipDrained("account")
-	} else if !keys.accountsComplete {
+	rtxn := store.Begin(ctx, false)
+	if !keys.accountsComplete {
 		skipIncomplete("account")
 	} else {
-		accts, err := store.GetActiveAccountCredentials(rtxn.Metadata())
+		accts, err := store.GetActiveAccountCredentials(rtxn)
 		if err != nil {
 			rtxn.Release()
 			return fmt.Errorf("listing active accounts: %w", err)
@@ -152,12 +137,10 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if keys.drained.Has(nodesettings.FamilyDReps) {
-		skipDrained("DRep")
-	} else if !keys.drepsComplete {
+	if !keys.drepsComplete {
 		skipIncomplete("DRep")
 	} else {
-		dreps, err := store.GetActiveDreps(rtxn.Metadata())
+		dreps, err := store.GetActiveDreps(ctx, rtxn)
 		if err != nil {
 			rtxn.Release()
 			return fmt.Errorf("listing active DReps: %w", err)
@@ -177,12 +160,10 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if keys.drained.Has(nodesettings.FamilyPoolsHistory) {
-		skipDrained("pool")
-	} else if !keys.poolsComplete {
+	if !keys.poolsComplete {
 		skipIncomplete("pool")
 	} else {
-		pools, err := store.GetActivePoolKeyHashes(rtxn.Metadata())
+		pools, err := store.GetActivePoolKeyHashes(ctx, rtxn)
 		if err != nil {
 			rtxn.Release()
 			return fmt.Errorf("listing active pools: %w", err)
@@ -198,12 +179,10 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if keys.drained.Has(nodesettings.FamilyGovernance) {
-		skipDrained("governance proposal")
-	} else if !keys.governanceProposalsComplete {
+	if !keys.governanceProposalsComplete {
 		skipIncomplete("governance proposal")
 	} else {
-		proposals, err := db.GetGovernanceProposalSet(ctx, rtxn)
+		proposals, err := store.GetGovernanceProposalSet(ctx, rtxn)
 		if err != nil {
 			rtxn.Release()
 			return fmt.Errorf("listing governance proposal set: %w", err)
@@ -227,7 +206,7 @@ func reconcileStaleLedgerState(
 			err,
 		)
 	}
-	wtxn := db.MetadataTxn(ctx, true)
+	wtxn := store.Begin(ctx, true)
 	defer wtxn.Release()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
@@ -236,7 +215,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.DeactivateAccounts(
-		wtxn.Metadata(), staleAccts, tipSlot,
+		staleAccts, tipSlot, wtxn,
 	); err != nil {
 		return fmt.Errorf(
 			"deactivating %d stale accounts: %w",
@@ -251,7 +230,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.DeactivateDreps(
-		wtxn.Metadata(), staleDreps, tipSlot,
+		staleDreps, tipSlot, wtxn,
 	); err != nil {
 		return fmt.Errorf(
 			"deactivating %d stale DReps: %w",
@@ -266,7 +245,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.RetirePools(
-		wtxn.Metadata(), stalePools, tipEpoch, tipSlot,
+		stalePools, tipEpoch, tipSlot, wtxn,
 	); err != nil {
 		return fmt.Errorf("retiring %d stale pools: %w", len(stalePools), err)
 	}
@@ -280,8 +259,9 @@ func reconcileStaleLedgerState(
 		deletedSlot := tipSlot
 		proposal.DeletedSlot = &deletedSlot
 		if err := store.SetGovernanceProposal(
+			ctx,
 			proposal,
-			wtxn.Metadata(),
+			wtxn,
 		); err != nil {
 			return fmt.Errorf(
 				"retiring stale governance proposal %x#%d: %w",

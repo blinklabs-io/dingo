@@ -38,44 +38,6 @@ func shortHash(fill byte) []byte {
 	return hash
 }
 
-func TestQueryStakeSnapshotsRejectsWrongLengthPoolKeyHash(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	poolKeyHash := shortHash(0xA1)
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
-		[]*models.PoolStakeSnapshot{{
-			Epoch:          2,
-			SnapshotType:   "mark",
-			PoolKeyHash:    poolKeyHash,
-			TotalStake:     types.Uint64(1_000_000),
-			DelegatorCount: 1,
-			CapturedSlot:   200,
-		}},
-		nil,
-	))
-	ls := &LedgerState{db: db}
-	ls.consensus.Store(
-		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
-	)
-
-	// An empty pool filter takes the unrestricted path, which builds its
-	// result keys from the stored pool key hashes.
-	result, err := ls.queryShelleyStakeSnapshots(
-		context.Background(),
-		&olocalstatequery.ShelleyStakeSnapshotsQuery{},
-		QueryPoint{},
-		nil,
-	)
-	require.Error(
-		t,
-		err,
-		"a %d-byte pool key hash must not be padded into a result key",
-		len(poolKeyHash),
-	)
-	require.Nil(t, result)
-	require.Contains(t, err.Error(), "blake2b-224")
-}
-
 func TestQueryDRepStateRejectsWrongLengthCredential(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -100,6 +62,7 @@ func TestQueryDRepStateRejectsWrongLengthCredential(t *testing.T) {
 		nil,
 	))
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
@@ -122,6 +85,7 @@ func TestQueryDRepStateAcceptsExactLengthCredential(t *testing.T) {
 	cred := drepRefundTestCredential(0xc1)
 	seedImportedDrep(t, db, cred, 400_000_000, 100, true)
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
@@ -167,6 +131,7 @@ func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
 		nil,
 	))
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
@@ -223,6 +188,7 @@ func TestGovernanceProposalStateRejectsWrongLengthAnchorHash(t *testing.T) {
 		GovActionCbor: []byte{0x80},
 	}
 	ls := &LedgerState{db: newTestDB(t)}
+	attachTestLiveSet(t, ls)
 	state, err := ls.governanceProposalState(context.Background(), proposal, lcommon.GovActionId{}, QueryPoint{}, nil)
 	require.Error(t, err)
 	require.Equal(t, olocalstatequery.GovActionState{}, state)

@@ -17,12 +17,11 @@ package ledger
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/stretchr/testify/require"
 )
@@ -33,25 +32,6 @@ import (
 var errRollbackEpochReloadInjected = errors.New(
 	"injected GetEpochs failure after rollback commit",
 )
-
-// getEpochsFailingMetadataStore fails GetEpochs while leaving every other
-// metadata operation -- including the rollback truncation itself -- working,
-// so the injected failure lands exactly where rollbackWithBlocks reloads
-// epochCache/currentEra/currentPParams, after the metadata transaction that
-// performs the truncation has already committed.
-type getEpochsFailingMetadataStore struct {
-	metadata.MetadataStore
-	err error
-}
-
-func (s getEpochsFailingMetadataStore) GetEpochs(
-	txn dbtypes.Txn,
-) ([]models.Epoch, error) {
-	if txn != nil {
-		return s.MetadataStore.GetEpochs(txn)
-	}
-	return nil, s.err
-}
 
 // TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins the
 // fail-fast case for epoch reload after commit: rollbackWithBlocks's
@@ -71,21 +51,10 @@ func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	base := ls.db
-	failing, err := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: getEpochsFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           errRollbackEpochReloadInjected,
-			},
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	faults := fxFaultedLedger(t, ls, SetFaultsForTest{})
+	faults.AfterRollback = func() {
+		faults.Epochs = errRollbackEpochReloadInjected
+	}
 
 	fatalCalled := false
 	var fatalErr error
@@ -176,21 +145,8 @@ func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	floorErr := errors.New("injected durable tip floor failure")
-	base := ls.db
-	failing, err := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: floorLookupFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           floorErr,
-			},
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	faults := fxFaultedLedger(t, ls, SetFaultsForTest{})
+	faults.AfterRollback = func() { faults.LatestBlockNonce = floorErr }
 
 	var fatalErrs []error
 	ls.config.FatalErrorFunc = func(err error) {
@@ -217,62 +173,6 @@ func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
 	require.Equal(t, fixture.ancestorTip.Point, ls.currentTip.Point)
 }
 
-// epochsOverrideMetadataStore returns a fixed epoch list from the
-// transaction-less GetEpochs read rollbackWithBlocks performs after its
-// metadata transaction commits, so a test can steer that reload into a
-// specific era without writing epoch rows the truncation would delete.
-type epochsOverrideMetadataStore struct {
-	metadata.MetadataStore
-	epochs []models.Epoch
-}
-
-func (s epochsOverrideMetadataStore) GetEpochs(
-	txn dbtypes.Txn,
-) ([]models.Epoch, error) {
-	if txn != nil {
-		return s.MetadataStore.GetEpochs(txn)
-	}
-	return append([]models.Epoch(nil), s.epochs...), nil
-}
-
-// pparamsReadFailingMetadataStore fails transaction-less protocol-parameter
-// reads for one era, which only the post-commit computePParams reload
-// performs.
-type pparamsReadFailingMetadataStore struct {
-	metadata.MetadataStore
-	eraId uint
-	err   error
-}
-
-func (s pparamsReadFailingMetadataStore) GetPParams(
-	epoch uint64,
-	eraId uint,
-	txn dbtypes.Txn,
-) ([]models.PParams, error) {
-	if txn == nil && eraId == s.eraId {
-		return nil, s.err
-	}
-	return s.MetadataStore.GetPParams(epoch, eraId, txn)
-}
-
-// syncStateReadFailingMetadataStore fails the transaction-less read of one
-// sync-state key, leaving the in-transaction marker recompute working.
-type syncStateReadFailingMetadataStore struct {
-	metadata.MetadataStore
-	key string
-	err error
-}
-
-func (s syncStateReadFailingMetadataStore) GetSyncState(
-	key string,
-	txn dbtypes.Txn,
-) (string, error) {
-	if txn == nil && key == s.key {
-		return "", s.err
-	}
-	return s.MetadataStore.GetSyncState(key, txn)
-}
-
 // TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure covers every
 // post-commit reload failure rollbackWithBlocks reports, one injection each,
 // including a failure the durable tip-floor check runs into as well.
@@ -297,74 +197,57 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 	errReload := errors.New("injected post-commit reload failure")
 	errFloor := errors.New("injected durable tip floor failure")
 
+	shelleyEra := eras.ShelleyEraDesc.Id
+	epochsAre := func(epochs ...models.Epoch) func([]models.Epoch) []models.Epoch {
+		return func([]models.Epoch) []models.Epoch {
+			return slices.Clone(epochs)
+		}
+	}
 	tests := []struct {
 		name     string
-		wrap     func(metadata.MetadataStore) metadata.MetadataStore
+		faults   SetFaultsForTest
 		wantIs   []error
 		wantText string
 	}{
 		{
 			name: "unknown era ID",
-			wrap: func(m metadata.MetadataStore) metadata.MetadataStore {
-				return epochsOverrideMetadataStore{
-					MetadataStore: m,
-					epochs:        []models.Epoch{{EraId: 250}},
-				}
+			faults: SetFaultsForTest{
+				TamperEpochs: epochsAre(models.Epoch{EraId: 250}),
 			},
 			wantText: "unknown era ID 250 after rollback",
 		},
 		{
 			name: "current era protocol parameters",
-			wrap: func(m metadata.MetadataStore) metadata.MetadataStore {
-				return pparamsReadFailingMetadataStore{
-					MetadataStore: epochsOverrideMetadataStore{
-						MetadataStore: m,
-						epochs:        []models.Epoch{shelleyEpoch},
-					},
-					eraId: eras.ShelleyEraDesc.Id,
-					err:   errReload,
-				}
+			faults: SetFaultsForTest{
+				TamperEpochs: epochsAre(shelleyEpoch),
+				PParams:      errReload,
+				PParamsEra:   &shelleyEra,
 			},
 			wantIs: []error{errReload},
 		},
 		{
 			name: "previous era protocol parameters",
-			wrap: func(m metadata.MetadataStore) metadata.MetadataStore {
-				return pparamsReadFailingMetadataStore{
-					MetadataStore: epochsOverrideMetadataStore{
-						MetadataStore: m,
-						epochs: []models.Epoch{
-							shelleyEpoch,
-							allegraEpoch,
-						},
-					},
-					eraId: eras.ShelleyEraDesc.Id,
-					err:   errReload,
-				}
+			faults: SetFaultsForTest{
+				TamperEpochs: epochsAre(shelleyEpoch, allegraEpoch),
+				PParams:      errReload,
+				PParamsEra:   &shelleyEra,
 			},
 			wantIs: []error{errReload},
 		},
 		{
 			name: "synthetic PlutusV2 cost model marker",
-			wrap: func(m metadata.MetadataStore) metadata.MetadataStore {
-				return syncStateReadFailingMetadataStore{
-					MetadataStore: m,
-					key:           database.SyntheticV2CostModelSyncKey,
-					err:           errReload,
-				}
+			faults: SetFaultsForTest{
+				SyncMarker: map[string]error{
+					database.SyntheticV2CostModelSyncKey: errReload,
+				},
 			},
 			wantIs: []error{errReload},
 		},
 		{
 			name: "epochs and durable tip floor",
-			wrap: func(m metadata.MetadataStore) metadata.MetadataStore {
-				return floorLookupFailingMetadataStore{
-					MetadataStore: getEpochsFailingMetadataStore{
-						MetadataStore: m,
-						err:           errReload,
-					},
-					err: errFloor,
-				}
+			faults: SetFaultsForTest{
+				Epochs:           errReload,
+				LatestBlockNonce: errFloor,
 			},
 			wantIs: []error{errReload, errFloor},
 		},
@@ -376,18 +259,13 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 
 			fixture := newChainsyncRollbackFixture(t)
 			ls := fixture.ls
-			base := ls.db
-			wrapped, err := database.New(
-				context.Background(),
-				base.Config(),
-				database.Stores{
-					Blob:     base.Blob(),
-					Metadata: tc.wrap(base.Metadata()),
-				},
-			)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, wrapped.Close()) })
-			ls.db = wrapped
+			// The reads fail only once the rollback has committed.
+			faults := fxFaultedLedger(t, ls, SetFaultsForTest{})
+			faults.AfterRollback = func() {
+				armed := tc.faults
+				armed.AfterRollback = faults.AfterRollback
+				*faults = armed
+			}
 
 			var fatalErrs []error
 			ls.config.FatalErrorFunc = func(err error) {
@@ -434,12 +312,12 @@ func TestRollbackRewindsLedgerEpochLabel(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	for _, epochID := range []uint64{0, 1} {
-		require.NoError(t, ls.db.SetEpoch(
+		require.NoError(t, seedDB(t, ls.db).SetEpoch(
 			epochID*15, epochID, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1000, 15, nil,
 		))
 	}
-	epochs, err := ls.db.GetEpochs(nil)
+	epochs, err := seedDB(t, ls.db).GetEpochs(nil)
 	require.NoError(t, err)
 	require.Len(t, epochs, 2)
 	ls.epochCache = epochs

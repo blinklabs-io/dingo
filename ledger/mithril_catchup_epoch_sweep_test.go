@@ -51,7 +51,6 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.metrics.init(prometheus.NewRegistry())
-	seedEligiblePreviewGoRewardBasis(t, db)
 
 	const (
 		anchorEpoch   = uint64(1397)
@@ -85,7 +84,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	// epoch-only sweep could not survive.
 	importAndRollOver := func() *EpochRolloverResult {
 		t.Helper()
-		require.NoError(t, importLedgerStateForTest(
+		require.NoError(t, fxImportLedgerState(
 			t, ls,
 			ledgerstate.ImportConfig{
 				Database: db,
@@ -113,7 +112,10 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 				},
 			},
 		))
-		require.NoError(t, db.Metadata().SaveRewardAdaPots(
+		// The import replaces the set, so the reward basis the node
+		// captured goes in after it.
+		seedEligiblePreviewGoRewardBasis(t, db)
+		require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
 			&models.RewardAdaPots{
 				Epoch:        anchorEpoch,
 				Reserves:     100_000_000,
@@ -122,7 +124,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 			nil,
 		))
 
-		epochs, err := db.GetEpochs(nil)
+		epochs, err := seedDB(t, db).GetEpochs(nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, epochs)
 		last := epochs[len(epochs)-1]
@@ -164,7 +166,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 
 	effectiveBalance := func(credentialTag uint8, stakingKey []byte) uint64 {
 		t.Helper()
-		account, err := db.GetAccountByCredential(
+		account, err := seedDB(t, db).GetAccountByCredential(
 			context.Background(),
 			credentialTag, stakingKey, true, nil,
 		)
@@ -178,7 +180,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 
 	creditedRoundCount := func(epoch uint64) int {
 		t.Helper()
-		rounds, err := db.Metadata().GetPendingRewardCreditRounds(nil)
+		rounds, err := seedDB(t, db).GetPendingRewardCreditRounds(nil)
 		require.NoError(t, err)
 		count := 0
 		for _, round := range rounds {
@@ -196,7 +198,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	// be reached by the real pipeline.
 	importAndRollOver()
 
-	poolOutputsRound0, err := db.Metadata().GetRewardPoolOutputs(
+	poolOutputsRound0, err := seedDB(t, db).GetRewardPoolOutputs(
 		snapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -228,7 +230,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 		"round 1 must leave exactly one credited round for the snapshot "+
 			"epoch, not accumulate a second one")
 
-	poolOutputsRound1, err := db.Metadata().GetRewardPoolOutputs(
+	poolOutputsRound1, err := seedDB(t, db).GetRewardPoolOutputs(
 		snapshotEpoch, nil,
 	)
 	require.NoError(t, err)
