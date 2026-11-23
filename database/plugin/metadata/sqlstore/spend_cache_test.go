@@ -584,3 +584,65 @@ WHERE u.deleted_slot = 0 AND p.hash = ?`, renamedID,
 	).Scan(&live))
 	require.Zero(t, live, "committed outputs must be spent by row id")
 }
+
+// TestSpendCachedOutputsDebitScriptLockedSupply proves a spend by row id takes
+// script-locked outputs out of the running aggregate like a spend by
+// reference. The producer's hash is renamed, so only the row-id path can find
+// the outputs.
+func TestSpendCachedOutputsDebitScriptLockedSupply(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	producerID := bytes.Repeat([]byte{0xc1}, 32)
+	spenderID := bytes.Repeat([]byte{0xc2}, 32)
+	outputs := make([]lcommon.TransactionOutput, 2)
+	for i := range outputs {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeScriptKey,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{byte(0x40 + i)}, 28),
+			bytes.Repeat([]byte{byte(0x50 + i)}, 28),
+		)
+		require.NoError(t, err)
+		out, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(addr.String()).
+			WithLovelace(uint64(3_000_000 + i)).
+			Build()
+		require.NoError(t, err)
+		outputs[i] = out
+	}
+	funding, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0xff}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	producer, err := mockledger.NewTransactionBuilder().
+		WithId(producerID).
+		WithInputs(funding).
+		WithOutputs(outputs...).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+	require.NoError(t, store.SetTransaction(
+		producer, spendCachePoint(10, producerID), 0, nil, false, nil, 0,
+	))
+	supply, err := store.GetScriptLockedSupply(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(6_000_001), supply)
+
+	_, err = store.writeDB.Exec(
+		`UPDATE "transaction" SET hash = ? WHERE hash = ?`,
+		bytes.Repeat([]byte{0xef}, 32), producerID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetTransaction(
+		spendCacheSpender(t, spenderID,
+			models.UtxoId{Hash: producerID, Idx: 0},
+			models.UtxoId{Hash: producerID, Idx: 1},
+		),
+		spendCachePoint(20, spenderID), 0, nil, false, nil, 0,
+	))
+	require.Zero(t, fullScanScriptLockedSupply(t, store))
+	supply, err = store.GetScriptLockedSupply(nil)
+	require.NoError(t, err)
+	require.Zero(t, supply, "a spend by row id must debit the aggregate")
+}

@@ -112,9 +112,10 @@ retain their native returning or upsert paths.
 
 A spend of an output the same `Store` inserted addresses the row by primary key
 (`consumeUtxosByIDQuery`) instead of resolving the producer by transaction hash.
-`insertUtxoModelsChecked`'s ids, with the columns a spend's stake delta needs,
-are kept in the in-memory `spendCache`, which is used only when the store keeps
-utxo rows (no live UTxO source) and the dialect accepts `RETURNING` (not MySQL).
+`insertUtxoModelsChecked`'s ids, with the columns a spend's stake and
+script-locked supply deltas need, are kept in the in-memory `spendCache`, which
+is used only when the store keeps utxo rows (no live UTxO source) and the
+dialect accepts `RETURNING` (not MySQL).
 The cache is a hint: the update matches only a live row, and an input it did not
 update takes the by-reference path. SQLite `AUTOINCREMENT` and PostgreSQL
 sequences never reuse a committed row's id, but a rolled-back SQLite insert

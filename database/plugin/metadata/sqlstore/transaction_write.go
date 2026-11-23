@@ -1535,9 +1535,19 @@ func (s *Store) setTransactionWithAccumulator(
 				// reference below.
 				var cachedUpdated map[string]struct{}
 				if cached := s.takeCachedSpends(txn, batch); len(cached) > 0 {
-					var deltas []stakeCredentialDelta
-					cachedUpdated, deltas, err = s.spendCachedRows(
+					var (
+						deltas []stakeCredentialDelta
+						locked int64
+					)
+					cachedUpdated, deltas, locked, err = s.spendCachedRows(
 						ctx, db, cached, point.Slot, transactionID,
+					)
+					if err != nil {
+						return err
+					}
+					consumedScriptLocked, err = checkedSupplyStep(
+						consumedScriptLocked,
+						locked,
 					)
 					if err != nil {
 						return err
