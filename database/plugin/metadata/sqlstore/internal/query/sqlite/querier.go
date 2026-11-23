@@ -98,7 +98,6 @@ type Querier interface {
 	GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error)
 	GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]BlockNonce, error)
 	GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRangeStatsParams) (GetBlockSlotRangeStatsRow, error)
-	GetCommitTimestamp(ctx context.Context) (sql.NullInt64, error)
 	GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, error)
 	GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]CommitteeMember, error)
 	GetCommitteeQuorum(ctx context.Context) (sql.NullString, error)
@@ -133,7 +132,6 @@ type Querier interface {
 	GetEpochs(ctx context.Context) ([]GetEpochsRow, error)
 	GetEpochsByEra(ctx context.Context, eraID sql.NullInt64) ([]GetEpochsByEraRow, error)
 	GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64) ([]Drep, error)
-	GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error)
 	GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error)
 	GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error)
 	GetLastBlockNonceInRange(ctx context.Context, arg GetLastBlockNonceInRangeParams) ([]byte, error)
@@ -208,14 +206,12 @@ type Querier interface {
 	SaveRewardStakeInput(ctx context.Context, arg SaveRewardStakeInputParams) (int64, error)
 	SetBackfillCheckpoint(ctx context.Context, arg SetBackfillCheckpointParams) (int64, error)
 	SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) error
-	SetCommitTimestamp(ctx context.Context, timestamp sql.NullInt64) error
 	SetCommitteeMember(ctx context.Context, arg SetCommitteeMemberParams) (int64, error)
 	SetCommitteeQuorum(ctx context.Context, arg SetCommitteeQuorumParams) error
 	SetConstitution(ctx context.Context, arg SetConstitutionParams) (int64, error)
 	SetDatum(ctx context.Context, arg SetDatumParams) error
 	SetDrep(ctx context.Context, arg SetDrepParams) error
 	SetEpoch(ctx context.Context, arg SetEpochParams) error
-	SetImportCheckpoint(ctx context.Context, arg SetImportCheckpointParams) error
 	SetNetworkState(ctx context.Context, arg SetNetworkStateParams) error
 	SetOffchainMetadataFetchResult(ctx context.Context, arg SetOffchainMetadataFetchResultParams) error
 	SetPParamUpdate(ctx context.Context, arg SetPParamUpdateParams) error

@@ -37,7 +37,7 @@ func TestRepairRewardStakeInputBundle(t *testing.T) {
 			map[bool]string{false: "dry-run", true: "apply"}[apply],
 			func(t *testing.T) {
 				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 				require.NoError(t, err)
 				bundle := deriveRewardInputs(
 					twoPoolSnapshot(),
@@ -122,7 +122,7 @@ func TestRepairRewardStakeInputBundle(t *testing.T) {
 
 func TestRepairRewardStakeInputBundleRejectsPoolMismatch(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 10, 99, 100)
 	bundle.snapshot.Authoritative = true
@@ -156,7 +156,7 @@ func TestImportedAuthoritativeBasisCompleteness(t *testing.T) {
 			map[bool]string{false: "complete preserved", true: "pending reseeded"}[pending],
 			func(t *testing.T) {
 				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 				require.NoError(t, err)
 				require.NoError(
 					t,
@@ -229,7 +229,7 @@ func TestImportedAuthoritativeBasisCompleteness(t *testing.T) {
 
 func TestRepairRewardStakeInputBundleCorrectsExistingOwner(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 10, 99, 100)
 	bundle.snapshot.Authoritative = true
@@ -301,7 +301,7 @@ func TestRewardInputRepairUsesFrozenPoolFallback(t *testing.T) {
 
 func TestRepairRewardStakeInputsPreservesRetainedEconomics(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 10, 99, 100)
 	bundle.snapshot.Authoritative = true
@@ -366,7 +366,7 @@ func TestAuthoritativeRewardRepairUsesOriginalCaptureWindow(t *testing.T) {
 			map[bool]string{false: "Conway", true: "Dijkstra"}[dijkstra],
 			func(t *testing.T) {
 				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 				require.NoError(t, err)
 				require.NoError(
 					t,
@@ -471,7 +471,7 @@ func (s pendingStateStore) GetSyncState(string, ledgerdb.Txn) (string, error) {
 
 func TestRewardInputRepairRequiresExplicitTransaction(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 10, 99, 100)
 	bundle.snapshot.Authoritative = true
@@ -504,7 +504,7 @@ func TestRepairClearsOnlyCompletedPendingEpoch(t *testing.T) {
 			map[bool]string{false: "missing rows", true: "rows already complete"}[complete],
 			func(t *testing.T) {
 				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 				require.NoError(t, err)
 				meta := db.Metadata()
 				bundle := deriveRewardInputs(

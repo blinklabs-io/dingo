@@ -171,16 +171,7 @@ func newDijkstraCollateralReturnFixture(
 			OutputAmount:  seed.amount,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:      seed.id,
-				OutputIdx: 0,
-				AddedSlot: 0,
-			}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), seed.id, 0, outputCbor)
-		}))
+		fxSeedOutput(t, db, seed.id, 0, 0, outputCbor)
 	}
 
 	params := dijkstraTestProtocolParameters()
@@ -376,7 +367,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 			require.NoError(t, fx.db.SetTip(fx.startTip, nil))
 			initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 			for _, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
+				utxo, err := fx.ls.UtxoByRef(inputId, 0)
 				require.NoError(t, err)
 				initialUtxos = append(initialUtxos, utxo)
 			}
@@ -394,7 +385,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 				return tip
 			}())
 			for index, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
+				utxo, err := fx.ls.UtxoByRef(inputId, 0)
 				require.NoError(t, err)
 				require.Equal(t, initialUtxos[index], utxo)
 			}
@@ -410,7 +401,7 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 	)
 	initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 	for _, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
+		utxo, err := fx.ls.UtxoByRef(inputId, 0)
 		require.NoError(t, err)
 		initialUtxos = append(initialUtxos, utxo)
 	}
@@ -435,7 +426,7 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		return tip
 	}())
 	for index, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
+		utxo, err := fx.ls.UtxoByRef(inputId, 0)
 		require.NoError(t, err)
 		require.Equal(t, initialUtxos[index], utxo)
 	}

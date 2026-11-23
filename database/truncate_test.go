@@ -37,9 +37,15 @@ import (
 // per-transaction entry budget these tests are about.
 func newOnDiskTestDB(t *testing.T) *Database {
 	t.Helper()
+	return newOnDiskTestDBAs(t, "")
+}
+
+// newOnDiskTestDBAs is newOnDiskTestDB opened under role.
+func newOnDiskTestDBAs(t *testing.T, role string) *Database {
+	t.Helper()
 	db, err := newTestDatabaseWithBlobConfig(
 		t,
-		&Config{DataDir: t.TempDir()},
+		&Config{DataDir: t.TempDir(), Role: role},
 		false,
 		"",
 		map[string]any{
@@ -170,7 +176,7 @@ func countUtxoBlobs(t *testing.T, db *Database, utxos []models.Utxo) int {
 func TestTruncateAfterSlotCommitsWithOverBudgetBlobDeletes(t *testing.T) {
 	t.Parallel()
 
-	db := newOnDiskTestDB(t)
+	db := newOnDiskTestDBAs(t, RoleReleased)
 
 	const rollbackSlot = uint64(1_500)
 	targetBlock := testIndexedBlock(rollbackSlot, 1, 0x15)
@@ -187,7 +193,7 @@ func TestTruncateAfterSlotCommitsWithOverBudgetBlobDeletes(t *testing.T) {
 	point := ocommon.Point{Slot: rollbackSlot, Hash: targetBlock.Hash}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
-		_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, txn)
+		_, _, err := db.RevertStoredLedgerAfterSlot(context.Background(), point, 0, txn)
 		return err
 	}), "rollback commit must survive a blob-delete set larger than the "+
 		"blob store's per-transaction budget")
@@ -254,7 +260,7 @@ func TestDeleteTxBlobsLeavesRoomForCommit(t *testing.T) {
 // is measured. Without this the only symptom of a multi-second truncation is
 // the ledger going silent, which is what made a ~90s chain freeze invisible.
 func TestTruncateAfterSlotObservesDuration(t *testing.T) {
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	reg := prometheus.NewRegistry()
 	require.NoError(t, RegisterTruncateMetrics(reg))
@@ -266,7 +272,7 @@ func TestTruncateAfterSlotObservesDuration(t *testing.T) {
 	targetBlock := testIndexedBlock(1500, 1, 0x15)
 	require.NoError(t, db.BlockCreate(targetBlock, nil))
 	point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
-	_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, nil)
+	_, _, err := db.RevertStoredLedgerAfterSlot(context.Background(), point, 0, nil)
 	require.NoError(t, err)
 
 	require.Equal(
@@ -295,7 +301,7 @@ func TestTruncateAfterSlotRecordsFailureSeparately(t *testing.T) {
 		Slot: 4242,
 		Hash: bytes.Repeat([]byte{0x99}, 32),
 	}
-	_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, nil)
+	_, _, err := db.RevertStoredLedgerAfterSlot(context.Background(), point, 0, nil)
 	require.Error(t, err)
 
 	assert.Equal(
@@ -382,7 +388,7 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	// Epoch checkpoint block: the first block persisted in its epoch,
 	// whose block_nonce row survives the 3-epoch retention pruning
@@ -422,7 +428,7 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 	// Sanity check: before pruning, TruncateAfterSlot correctly returns
 	// the target block's own nonce.
 	point := ocommon.Point{Slot: targetBlock.Slot, Hash: targetBlock.Hash}
-	_, nonceBeforePruning, err := db.TruncateAfterSlot(
+	_, nonceBeforePruning, err := db.RevertStoredLedgerAfterSlot(
 		context.Background(),
 		point,
 		0,
@@ -466,7 +472,7 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 	// a checkpoint survives to reconstruct from: LedgerState's startup heal
 	// is responsible for actually computing and persisting the correct
 	// nonce before anything folds forward from it.
-	_, nonceAfterPruning, err := db.TruncateAfterSlot(
+	_, nonceAfterPruning, err := db.RevertStoredLedgerAfterSlot(
 		context.Background(),
 		point,
 		0,
@@ -492,7 +498,7 @@ func TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	// Truncate target with its own (non-checkpoint) nonce row, but no
 	// checkpoint row anywhere before it.
@@ -522,7 +528,7 @@ func TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint(
 		"sanity check: the target's own block_nonce row must actually "+
 			"be gone")
 
-	_, nonceAfterPruning, err := db.TruncateAfterSlot(
+	_, nonceAfterPruning, err := db.RevertStoredLedgerAfterSlot(
 		context.Background(),
 		point,
 		0,
@@ -550,7 +556,7 @@ func TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint(
 func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	targetBlock := testIndexedBlock(1500, 1, 0x15)
 	require.NoError(t, db.BlockCreate(targetBlock, nil))
@@ -612,7 +618,7 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	require.Equal(t, uint64(999), uint64(poolBefore.Pledge))
 
 	point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
-	_, _, err = db.TruncateAfterSlot(context.Background(), point, 0, nil)
+	_, _, err = db.RevertStoredLedgerAfterSlot(context.Background(), point, 0, nil)
 	require.NoError(t, err)
 
 	poolAfter, err := db.GetPool(
@@ -645,7 +651,7 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 		{
 			name: "TruncateAfterSlot",
 			rollback: func(db *Database, point ocommon.Point) error {
-				_, _, err := db.TruncateAfterSlot(
+				_, _, err := db.RevertStoredLedgerAfterSlot(
 					context.Background(),
 					point,
 					0,
@@ -682,7 +688,7 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 			// One database per rollback kind: the cases run in order, each
 			// overwriting the cursor, and the absent case goes first
 			// because a cursor cannot be unset.
-			db := newTestDB(t)
+			db := newReleasedTestDB(t)
 			targetBlock := testIndexedBlock(1500, 1, 0x15)
 			require.NoError(t, db.BlockCreate(targetBlock, nil))
 			point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
@@ -690,11 +696,11 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 				if tc.cursor != "" {
 					require.NoError(
 						t,
-						db.SetSyncState(HistoryExpiryCursorSyncKey, tc.cursor, nil),
+						db.SetChainState(HistoryExpiryCursorKey, tc.cursor, nil),
 					)
 				}
 				require.NoError(t, rb.rollback(db, point))
-				got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
+				got, err := db.GetChainState(HistoryExpiryCursorKey, nil)
 				require.NoError(t, err)
 				require.Equal(t, tc.want, got, tc.name)
 			}
@@ -710,7 +716,7 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 func TestTruncateAfterSlotLoadsNonceForSlotZeroBlock(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	block0 := testIndexedBlock(0, 1, 0x20)
 	block0.Number = 0
@@ -727,7 +733,7 @@ func TestTruncateAfterSlotLoadsNonceForSlotZeroBlock(t *testing.T) {
 		block1.Hash, block1.Slot, bytes.Repeat([]byte{0xd1}, 32), false, nil,
 	))
 
-	tip, nonce, err := db.TruncateAfterSlot(
+	tip, nonce, err := db.RevertStoredLedgerAfterSlot(
 		context.Background(),
 		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
 	)
@@ -744,14 +750,14 @@ func TestTruncateAfterSlotLoadsNonceForSlotZeroBlock(t *testing.T) {
 func TestTruncateAfterSlotByronSlotZeroBlockHasNoNonce(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	block0 := testIndexedBlock(0, 1, 0x30)
 	block0.Number = 0
 	block0.Type = byron.BlockTypeByronEbb
 	require.NoError(t, db.BlockCreate(block0, nil))
 
-	tip, nonce, err := db.TruncateAfterSlot(
+	tip, nonce, err := db.RevertStoredLedgerAfterSlot(
 		context.Background(),
 		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
 	)
@@ -765,7 +771,7 @@ func TestTruncateAfterSlotByronSlotZeroBlockHasNoNonce(t *testing.T) {
 func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newReleasedTestDB(t)
 
 	block0 := testIndexedBlock(0, 1, 0x40)
 	block0.Number = 0
@@ -775,7 +781,7 @@ func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 		block0.Hash, block0.Slot, bytes.Repeat([]byte{0xe0}, 32), true, nil,
 	))
 
-	tip, nonce, err := db.TruncateAfterSlot(context.Background(), ocommon.NewPointOrigin(), 0, nil)
+	tip, nonce, err := db.RevertStoredLedgerAfterSlot(context.Background(), ocommon.NewPointOrigin(), 0, nil)
 	require.NoError(t, err)
 	require.Empty(t, nonce)
 	require.Zero(t, tip.BlockNumber)
@@ -790,7 +796,7 @@ func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 func TestRolledBackUtxoIsNotLiveThroughHotCborCache(t *testing.T) {
 	t.Parallel()
 
-	db := newOnDiskTestDB(t)
+	db := newOnDiskTestDBAs(t, RoleReleased)
 
 	const rollbackSlot = uint64(1_500)
 	targetBlock := testIndexedBlock(rollbackSlot, 1, 0x15)
@@ -817,7 +823,7 @@ func TestRolledBackUtxoIsNotLiveThroughHotCborCache(t *testing.T) {
 	point := ocommon.Point{Slot: rollbackSlot, Hash: targetBlock.Hash}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
-		_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, txn)
+		_, _, err := db.RevertStoredLedgerAfterSlot(context.Background(), point, 0, txn)
 		return err
 	}))
 

@@ -203,7 +203,9 @@ func TestSnapshotStagesMetadataBesideSnapshot(t *testing.T) {
 		}
 		return original(file)
 	}
-	buildTrustSnapshot(t, dir)
+	_, err := newReleasedInternalSnapshotSource(t, t.TempDir(), "").
+		snapshot(context.Background(), dir)
+	require.NoError(t, err)
 	require.Len(t, staged, 1, "metadata backup was not staged beside the snapshot")
 	entries, err := os.ReadDir(base)
 	require.NoError(t, err)

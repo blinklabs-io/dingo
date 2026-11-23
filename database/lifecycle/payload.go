@@ -44,15 +44,26 @@ func (m Manifest) hasLeiosPayload() bool {
 	return m.LeiosBytes != 0 || m.LeiosSHA256 != ""
 }
 
+// hasMetadataPayload reports whether m declares a metadata backup. Every
+// v0.94.2 snapshot does, with its size; a snapshot of the ledger's database,
+// which keeps no metadata store, declares neither size nor digest.
+func (m Manifest) hasMetadataPayload() bool {
+	return m.MetadataBytes != 0 || m.MetadataSHA256 != ""
+}
+
 // payloadFiles returns the backup files m declares directly. A snapshot holds
-// these beside its manifest: the live UTxO set's only when it declares one,
-// and the LeiosDB's only for a node that has one. A snapshot with promoted
-// blocks also holds the chunk files its immutable index declares; see
-// Manifest.immutablePayloadFiles.
+// these beside its manifest: the metadata store's only when it declares one,
+// the live UTxO set's only when it declares one, and the LeiosDB's only for a
+// node that has one. A snapshot with promoted blocks also holds the chunk
+// files its immutable index declares; see Manifest.immutablePayloadFiles.
 func (m Manifest) payloadFiles() []payloadFile {
 	files := []payloadFile{
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
-		{MetadataBackupFileName, m.MetadataBytes, m.MetadataSHA256},
+	}
+	if m.hasMetadataPayload() {
+		files = append(files, payloadFile{
+			MetadataBackupFileName, m.MetadataBytes, m.MetadataSHA256,
+		})
 	}
 	if m.IndexerSHA256 != "" {
 		files = append(files, payloadFile{IndexerMetadataBackupFileName, m.IndexerBytes, m.IndexerSHA256})

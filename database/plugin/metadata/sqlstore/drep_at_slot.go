@@ -402,7 +402,6 @@ FROM account WHERE added_slot > ?`
 		state, err := deriveAccountStateAtSlot(
 			ctx,
 			db,
-			s.poolsDrained(),
 			account.tag,
 			account.key,
 			account.createdSlot,

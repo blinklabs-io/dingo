@@ -43,7 +43,7 @@ type rewardInputsExport struct {
 func (ls *LedgerState) rewardInputsExport() (rewardInputsExport, error) {
 	r := ls.rewardInputsReader(nil)
 	if r == nil {
-		return rewardInputsExport{}, drainedUnserved(
+		return rewardInputsExport{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardInputs,
 		)
 	}
@@ -161,7 +161,7 @@ func (ls *LedgerState) rewardSeedFailureFactRows(
 ) (metadata.FactRows, error) {
 	r := ls.rewardInputsReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardInputs,
 		)
 	}
@@ -319,7 +319,7 @@ func (ls *LedgerState) rewardDerivedExport() (
 ) {
 	r := ls.rewardDerivedReader(nil)
 	if r == nil {
-		return nil, nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	epochs, err := r.RewardDerivedEpochs()
 	if err != nil {
@@ -439,7 +439,7 @@ func (ls *LedgerState) rewardCreditRoundFactRows(
 ) (metadata.FactRows, error) {
 	r := ls.rewardOutputReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardOutputs,
 		)
 	}

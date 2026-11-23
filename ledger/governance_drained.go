@@ -35,7 +35,7 @@ func (ls *LedgerState) drainedGovernanceReader(
 ) (GovernanceReader, error) {
 	r := ls.governanceReader(txn)
 	if _, mode := ls.utxoSetReader(); r == nil || !mode {
-		return nil, drainedUnserved(nodesettings.FamilyGovernance)
+		return nil, ledgerStateUnserved(nodesettings.FamilyGovernance)
 	}
 	if !ls.governanceSetLoaded.Load() {
 		loaded, err := r.GovernanceLoaded()
@@ -43,7 +43,7 @@ func (ls *LedgerState) drainedGovernanceReader(
 			return nil, err
 		}
 		if !loaded {
-			return nil, drainedUnserved(nodesettings.FamilyGovernance)
+			return nil, ledgerStateUnserved(nodesettings.FamilyGovernance)
 		}
 		ls.governanceSetLoaded.Store(true)
 	}
@@ -75,7 +75,7 @@ func (ls *LedgerState) nextGovernanceIDs(
 	return proposal, vote, nil
 }
 
-// setDrainedProposal is SetGovernanceProposal for a drained family: the set
+// setDrainedProposal is SetGovernanceProposal staged for the set: the set
 // is the only copy, so it gives a new proposal its row ID.
 func (s stagingLedgerDB) setDrainedProposal(
 	proposal *models.GovernanceProposal,
@@ -118,8 +118,8 @@ func (s stagingLedgerDB) setDrainedProposal(
 	return nil
 }
 
-// clearDrainedRatification is ClearGovernanceProposalRatification for a
-// drained family.
+// clearDrainedRatification is ClearGovernanceProposalRatification staged for
+// the set.
 func (s stagingLedgerDB) clearDrainedRatification(
 	txHash []byte,
 	actionIndex uint32,
@@ -155,7 +155,7 @@ func (s stagingLedgerDB) clearDrainedRatification(
 	return nil
 }
 
-// setDrainedVote is SetGovernanceVote for a drained family. A voter's first
+// setDrainedVote is SetGovernanceVote staged for the set. A voter's first
 // vote on a proposal takes a new row ID; a replacement keeps the row's.
 func (s stagingLedgerDB) setDrainedVote(
 	vote *models.GovernanceVote,

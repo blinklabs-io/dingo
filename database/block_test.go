@@ -1148,7 +1148,9 @@ func TestBlockByHashDoesNotAcquireMetadataRead(t *testing.T) {
 	for _, kind := range []string{"known", "missing"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
-			base := newTestDB(t)
+			// BlockByHash serves the API, which reads an IndexerDB, the
+			// only database with a metadata store to wait behind.
+			base := openTestDBWithStorageMode(t, "")
 			gate := &blockHashMetadataGate{
 				MetadataStore: base.Metadata(),
 				requested:     make(chan struct{}, 1),

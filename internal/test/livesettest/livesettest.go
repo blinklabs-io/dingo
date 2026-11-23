@@ -19,13 +19,13 @@ package livesettest
 import (
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/stretchr/testify/require"
 )
@@ -55,26 +55,48 @@ func Open(tb testing.TB) *utxoset.Set {
 // builds over one database shares its set, as ledgers of one node do.
 var ledgerDBs sync.Map
 
+type ledgerDB struct {
+	set *utxoset.Set
+	// dir is the data directory the set was opened under, or empty for a set
+	// the caller opened.
+	dir string
+}
+
 // OpenLedgerDB opens the LedgerDB set of db the way the node does at startup:
 // whatever ledger state db holds in SQL moves into the set and is deleted
-// from SQL, so the set is the only copy before a ledger is built on it. A second call for the same database returns the
-// same set. The set closes when tb ends.
+// from SQL, so the set is the only copy before a ledger is built on it. A
+// second call for the same database returns the same set. The set closes
+// when tb ends.
 func OpenLedgerDB(tb testing.TB, db *database.Database) *utxoset.Set {
 	tb.Helper()
+	if open, ok := ledgerDBs.Load(db); ok {
+		return open.(ledgerDB).set
+	}
 	return OpenLedgerDBAt(tb, db, tb.TempDir())
 }
 
 // OpenLedgerDBAt is OpenLedgerDB for a set kept under dataDir, where a
-// fixture restarted over that directory finds it again.
+// fixture restarted over that directory finds it again. A set already open
+// for db must be the one under dataDir: a fixture that seeded db before
+// naming the directory would otherwise build its ledger, and restart, on a
+// set that holds none of what it seeded.
 func OpenLedgerDBAt(
 	tb testing.TB,
 	db *database.Database,
 	dataDir string,
 ) *utxoset.Set {
 	tb.Helper()
-	if set, ok := ledgerDBs.Load(db); ok {
-		return set.(*utxoset.Set)
+	if open, ok := ledgerDBs.Load(db); ok {
+		require.Equal(
+			tb, dataDir, open.(ledgerDB).dir,
+			"the database's LedgerDB set is open under another directory",
+		)
+		return open.(ledgerDB).set
 	}
+	// A set already under dataDir is a restarted node's, which took the
+	// database's SQL ledger state over when it first opened.
+	_, statErr := os.Stat(utxoset.DirFor(dataDir))
+	reopened := statErr == nil
 	set, err := utxoset.Open(utxoset.Config{
 		Dir:           utxoset.DirFor(dataDir),
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -83,16 +105,17 @@ func OpenLedgerDBAt(
 		MemTableSize:  8 << 20,
 	})
 	require.NoError(tb, err)
-	adopt(tb, db, set, dataDir)
+	adopt(tb, db, set, dataDir, dataDir, !reopened)
 	return set
 }
 
 // AdoptLedgerDB makes set, which the caller opened and closes, the LedgerDB
 // set of db: it takes over db's ledger state as OpenLedgerDB's own does, and
-// later OpenLedgerDB calls for db return it.
+// later OpenLedgerDB calls for db return it. db must have no set open yet,
+// or what was seeded into that one would not reach set.
 func AdoptLedgerDB(tb testing.TB, db *database.Database, set *utxoset.Set) {
 	tb.Helper()
-	adopt(tb, db, set, tb.TempDir())
+	adopt(tb, db, set, tb.TempDir(), "", true)
 }
 
 func adopt(
@@ -100,51 +123,57 @@ func adopt(
 	db *database.Database,
 	set *utxoset.Set,
 	dataDir string,
+	dir string,
+	takeOver bool,
 ) {
 	tb.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ledgerDBs.Store(db, set)
-	closingDB, closingSet := db, set
+	entry := ledgerDB{set: set, dir: dir}
+	if _, loaded := ledgerDBs.LoadOrStore(db, entry); loaded {
+		require.FailNow(tb, "the database already has a LedgerDB set open")
+	}
+	// testing keeps a finished test's cleanups reachable until the run ends;
+	// dropping the references lets the closed set and database be collected.
+	closingDB, closing := db, entry
 	tb.Cleanup(func() {
-		ledgerDBs.Delete(closingDB)
-		_ = closingSet.Close()
-		closingDB, closingSet = nil, nil
+		key, open := closingDB, closing
+		closingDB, closing = nil, ledgerDB{}
+		ledgerDBs.CompareAndDelete(key, open)
+		_ = open.set.Close()
 	})
-	var moved nodesettings.FamilyMask
-	require.NoError(tb, nodestorage.Reconcile{
-		DB:      db,
-		Set:     set,
-		DataDir: dataDir,
-		Logger:  logger,
-		Publish: func(m nodesettings.FamilyMask) {
-			moved |= m
-			set.SetDrainedFamilies(m)
-		},
-	}.Run(tb.Context()))
-	for _, e := range statedrain.Graduated(nodestorage.DrainSource{Set: set}) {
-		require.True(
-			tb, moved.Has(e.Family),
-			"family %s still has its SQL rows", e.Family,
+	// A database without a metadata store has no SQL ledger state to hand
+	// over.
+	if takeOver && db.Metadata() != nil {
+		require.NoError(tb, nodestorage.MigrateUtxoRows(
+			tb.Context(), db, set, dataDir, logger,
+		))
+		require.NoError(
+			tb, set.ReconcileReleased(tb.Context(), dbadapter.New(db)),
 		)
 	}
+	require.NoError(tb, nodestorage.Reconcile{
+		DB:     db,
+		Set:    set,
+		Logger: logger,
+	}.Run(tb.Context()))
 }
 
 // LedgerDBOf returns the set OpenLedgerDB or AdoptLedgerDB gave db, if one is
 // open.
 func LedgerDBOf(db *database.Database) (*utxoset.Set, bool) {
-	set, ok := ledgerDBs.Load(db)
+	open, ok := ledgerDBs.Load(db)
 	if !ok {
 		return nil, false
 	}
-	return set.(*utxoset.Set), true
+	return open.(ledgerDB).set, true
 }
 
 // CloseLedgerDB closes the set OpenLedgerDB opened for db, so a fixture can
 // reopen it over the same directory as a restarted node does.
 func CloseLedgerDB(db *database.Database) error {
-	set, ok := ledgerDBs.LoadAndDelete(db)
+	open, ok := ledgerDBs.LoadAndDelete(db)
 	if !ok {
 		return nil
 	}
-	return set.(*utxoset.Set).Close()
+	return open.(ledgerDB).set.Close()
 }

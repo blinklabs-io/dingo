@@ -1545,56 +1545,6 @@ DELETE FROM network_donation WHERE epoch = ?`), sqlEpoch); err != nil {
 	return nil
 }
 
-func (s *Store) GetImportCheckpoint(
-	importKey string,
-	txn types.Txn,
-) (*models.ImportCheckpoint, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, fmt.Errorf("get import checkpoint: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	row, err := queries.GetImportCheckpoint(
-		ctx,
-		importKey,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get import checkpoint: %w", err)
-	}
-	return &models.ImportCheckpoint{
-		ID:        uint(row.ID),
-		ImportKey: row.ImportKey,
-		Phase:     row.Phase,
-	}, nil
-}
-
-func (s *Store) SetImportCheckpoint(
-	checkpoint *models.ImportCheckpoint,
-	txn types.Txn,
-) error {
-	if checkpoint == nil {
-		return errors.New("set import checkpoint: checkpoint is nil")
-	}
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("set import checkpoint: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	if err := queries.SetImportCheckpoint(
-		ctx,
-		sqlitequery.SetImportCheckpointParams{
-			ImportKey: checkpoint.ImportKey,
-			Phase:     checkpoint.Phase,
-		},
-	); err != nil {
-		return fmt.Errorf("set import checkpoint: %w", err)
-	}
-	return nil
-}
-
 func epochFromValues(
 	id int64,
 	epochID, startSlot sql.NullInt64,

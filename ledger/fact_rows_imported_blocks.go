@@ -43,11 +43,11 @@ func (ls *LedgerState) importedBlocksFor(
 // importedBlocks lists the imported block counts the set retains, by epoch.
 func (ls *LedgerState) importedBlocks() (map[uint64]ImportedBlockEpoch, error) {
 	if ls.rewardBlocksReader(nil) == nil {
-		return nil, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
 	r, ok := ls.readSet(nil).(ImportedBlocksReader)
 	if !ok {
-		return nil, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
 	if l, ok := r.(interface{ ImportedBlocksLost() (bool, error) }); ok {
 		lost, err := l.ImportedBlocksLost()

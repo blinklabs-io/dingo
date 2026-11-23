@@ -257,7 +257,7 @@ func TestSetLeiosEBLeavesSharedBlobStoreUntouched(t *testing.T) {
 func TestTruncateAfterSlotRollsBackLeiosPins(t *testing.T) {
 	t.Parallel()
 
-	d := newTestDB(t)
+	d := newReleasedTestDB(t)
 	const rollbackSlot = uint64(1_500)
 	target := testIndexedBlock(rollbackSlot, 1, 0x15)
 	require.NoError(t, d.BlockCreate(target, nil))
@@ -283,7 +283,7 @@ func TestTruncateAfterSlotRollsBackLeiosPins(t *testing.T) {
 	_, err = store.GarbageCollect(t.Context(), 1_505)
 	require.NoError(t, err)
 
-	_, _, err = d.TruncateAfterSlot(
+	_, _, err = d.RevertStoredLedgerAfterSlot(
 		t.Context(),
 		ocommon.Point{Slot: rollbackSlot, Hash: target.Hash},
 		0,

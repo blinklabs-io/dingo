@@ -27,6 +27,9 @@ func (d *Database) GetBlockNonce(
 	point ocommon.Point,
 	txn *Txn,
 ) ([]byte, error) {
+	if err := d.requireStore("GetBlockNonce"); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		return d.metadata.GetBlockNonce(point, nil)
 	}
@@ -39,6 +42,9 @@ func (d *Database) GetBlockNoncesInSlotRange(
 	endSlot uint64,
 	txn *Txn,
 ) ([]models.BlockNonce, error) {
+	if err := d.requireStore("GetBlockNoncesInSlotRange"); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		return d.metadata.GetBlockNoncesInSlotRange(
 			startSlot,
@@ -60,6 +66,9 @@ func (d *Database) GetLastBlockNonceInRange(
 	endSlot uint64,
 	txn *Txn,
 ) ([]byte, error) {
+	if err := d.requireStore("GetLastBlockNonceInRange"); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		return d.metadata.GetLastBlockNonceInRange(
 			startSlot,
@@ -80,6 +89,9 @@ func (d *Database) GetLastBlockNonceInRange(
 func (d *Database) GetLatestBlockNonce(
 	txn *Txn,
 ) (models.BlockNonce, bool, error) {
+	if err := d.requireStore("GetLatestBlockNonce"); err != nil {
+		return models.BlockNonce{}, false, err
+	}
 	if txn == nil {
 		return d.metadata.GetLatestBlockNonce(nil)
 	}
@@ -91,6 +103,9 @@ func (d *Database) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteBlockNoncesBeforeSlot"); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.metadata.DeleteBlockNoncesBeforeSlot(slotNumber, nil)
 	}
@@ -102,6 +117,9 @@ func (d *Database) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slotNumber uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteBlockNoncesBeforeSlotWithoutCheckpoints"); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 			slotNumber,
@@ -121,6 +139,9 @@ func (d *Database) DeleteBlockNoncesAfterPoint(
 	point ocommon.Point,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteBlockNoncesAfterPoint"); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.metadata.DeleteBlockNoncesAfterPoint(point, nil)
 	}
@@ -158,6 +179,9 @@ func (d *Database) SetBlockNonce(
 	isCheckpoint bool,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("SetBlockNonce"); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.metadata.SetBlockNonce(
 			blockHash,
@@ -218,6 +242,9 @@ func (d *Database) SetBlockNonces(
 	var metaTxn types.Txn
 	if txn != nil {
 		metaTxn = txn.Metadata()
+	}
+	if err := d.requireStore("SetBlockNonces"); err != nil {
+		return err
 	}
 	if batchStore, ok := d.metadata.(metadata.BlockNonceBatchStore); ok {
 		return batchStore.SetBlockNonces(nonces, metaTxn)

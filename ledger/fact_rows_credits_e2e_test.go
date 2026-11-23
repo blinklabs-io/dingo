@@ -41,7 +41,7 @@ func creditRows(rows metadata.FactRows) metadata.FactRows {
 func TestDrainedSetExportsTheRewardCreditJournal(t *testing.T) {
 	t.Parallel()
 	var h0 *p5Harness
-	out, _ := allGraduatedRun(t, func(h *p5Harness) func() []string {
+	out, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
 		h0 = h
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
@@ -85,7 +85,7 @@ func TestDrainedRewardCreditJournalResumesAfterALateCreditAtAnOldSlot(
 	t *testing.T,
 ) {
 	t.Parallel()
-	allGraduatedRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *p5Harness) func() []string {
 		ref := h.refs[0]
 		credit := func(slot uint64, source byte) {
 			ldb := h.scenario.LedgerDB()

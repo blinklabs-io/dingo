@@ -17,8 +17,8 @@ package utxoset_test
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/stretchr/testify/require"
 )
@@ -32,9 +32,9 @@ func TestLoadedPendingRatificationRollsBackAtItsBoundary(t *testing.T) {
 	const record = `{"epoch":7,"boundary_slot":6,"id":3}`
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	require.NoError(t, db.Metadata().SetSyncState(
-		statedrain.PendingRatificationSyncKey, record, nil,
+		database.PendingRatificationSyncKey, record, nil,
 	))
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
 
@@ -64,9 +64,9 @@ func TestPendingRatificationAboveTheTipIsNotLoaded(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 4)
-	db := ledgerAt(t, slotPoint(4))
+	db := releasedAt(t, slotPoint(4))
 	require.NoError(t, db.Metadata().SetSyncState(
-		statedrain.PendingRatificationSyncKey,
+		database.PendingRatificationSyncKey,
 		`{"epoch":7,"boundary_slot":6,"id":3}`, nil,
 	))
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))

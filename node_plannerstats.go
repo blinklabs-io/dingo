@@ -16,7 +16,6 @@ package dingo
 
 import (
 	"context"
-	"errors"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -25,7 +24,7 @@ import (
 
 // newPlannerStatsManager builds the planner-statistics manager for db's
 // metadata store, or returns nil when refresh is disabled or the store keeps
-// no planner statistics.
+// no planner statistics. Only the IndexerDB keeps a metadata store.
 func (n *Node) newPlannerStatsManager(db *database.Database) *plannerstats.Manager {
 	if !n.config.PlannerStatsRefreshEnabled() || db == nil {
 		return nil
@@ -35,41 +34,6 @@ func (n *Node) newPlannerStatsManager(db *database.Database) *plannerstats.Manag
 		return nil
 	}
 	return plannerstats.NewManager(updater, n.eventBus, n.config.logger)
-}
-
-// runPlannerStatsStartup runs the startup pass before any block is
-// processed. A failure is logged and does not stop the node: the node still
-// works, only with the planner statistics it had.
-func (n *Node) runPlannerStatsStartup(ctx context.Context) {
-	n.plannerStatsMgr = n.newPlannerStatsManager(n.db)
-	if n.plannerStatsMgr == nil {
-		return
-	}
-	n.config.logger.Info(
-		"optimizing planner statistics (a first run on a large database can take minutes)",
-		"component",
-		"plannerstats",
-	)
-	if _, err := n.plannerStatsMgr.RunStartup(ctx); err != nil &&
-		!errors.Is(err, context.Canceled) {
-		n.config.logger.Warn(
-			"planner statistics startup run failed",
-			"component", "plannerstats",
-			"error", err,
-		)
-	}
-}
-
-// startPlannerStatsManager subscribes the manager to epoch rollovers,
-// creating it first when the database handle was replaced.
-func (n *Node) startPlannerStatsManager(ctx context.Context) error {
-	if n.plannerStatsMgr == nil {
-		n.plannerStatsMgr = n.newPlannerStatsManager(n.db)
-	}
-	if n.plannerStatsMgr == nil {
-		return nil
-	}
-	return n.plannerStatsMgr.Start(ctx)
 }
 
 // startIndexerPlannerStatsManager starts the IndexerDB's manager with a

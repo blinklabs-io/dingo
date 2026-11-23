@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -144,23 +143,17 @@ func NewMCPServer(
 		Version: "0.1.0",
 	}, opts)
 
+	// The address index is the IndexerDB's: a ledger's database has no
+	// metadata store to page from, and get_utxos then reads the live UTxO set.
 	var addressLookup utxoAddressLookup
-	if deps.Database != nil {
+	if deps.Database != nil && deps.Database.Metadata() != nil {
 		addressLookup = deps.Database.UtxosByAddressPage
 	}
 
 	// Register tools, resources & prompts
 	limits := newReadLimits()
-	limits.drained = func() nodesettings.FamilyMask {
-		var mask nodesettings.FamilyMask
-		if deps.LedgerState != nil {
-			mask |= deps.LedgerState.DrainedFamilies()
-		}
-		if deps.Database != nil {
-			mask |= deps.Database.DrainedMask()
-		}
-		return mask
-	}
+	limits.ledgerStateOutsideSQL = deps.LedgerState != nil ||
+		(deps.Database != nil && deps.Database.Metadata() == nil)
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(
 		server,

@@ -269,14 +269,6 @@ func TestLedgerViewUtxoByIdDoesNotMemoizeNotFound(t *testing.T) {
 				_, err := lv.UtxoById(input)
 				require.Error(t, err, "ref must not exist yet")
 
-				require.NoError(
-					t,
-					db.CreateUtxo(context.Background(), txn, &models.Utxo{
-						TxId:      txId,
-						OutputIdx: 0,
-						AddedSlot: 1,
-					}),
-				)
 				encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 					OutputAddress: address,
 					OutputAmount:  5_000_000,
@@ -338,17 +330,12 @@ func newIntraBlockDoubleSpendFixture(
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId: fundingTxId, OutputIdx: 0, AddedSlot: 1,
-	}))
 	fundingOutputCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: address,
 		OutputAmount:  10_000_000,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
-		return db.Blob().SetUtxo(txn.Blob(), fundingTxId, 0, fundingOutputCbor)
-	}))
+	fxSeedOutput(t, db, fundingTxId, 0, 1, fundingOutputCbor)
 
 	output1, err := omockledger.NewSimpleTransactionOutput(
 		address.String(),

@@ -307,7 +307,7 @@ func seedLedgerStateRows(
 // SQLite path prints for the same database.
 func TestLedgerStateToolsReadThroughLedgerDB(t *testing.T) {
 	t.Parallel()
-	nodeDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	nodeDB, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, nodeDB)
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestLedgerStateToolsReadThroughLedgerDB(t *testing.T) {
 // path does, through the LedgerDB.
 func TestLedgerStateToolsReportAbsentRows(t *testing.T) {
 	t.Parallel()
-	nodeDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	nodeDB, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, nodeDB)
 	require.NoError(t, err)

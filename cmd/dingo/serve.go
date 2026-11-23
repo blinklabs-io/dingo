@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/nodemithril"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -62,15 +63,6 @@ func serveRun(
 		cmd.Context(), cfg, logger,
 	); err != nil {
 		return err
-	}
-
-	// A Mithril sync interrupted between dropping the deferred indexes and
-	// rebuilding them leaves them missing; repair before exposing the node so
-	// secondary-index-backed queries return correct cardinalities.
-	if err := repairDeferredIndexes(
-		cmd.Context(), cfg, logger,
-	); err != nil {
-		return fmt.Errorf("deferred-index repair failed: %w", err)
 	}
 
 	// Run node. The node runs Mithril catch-up itself under mithril.enabled;
@@ -111,24 +103,8 @@ func checkSyncState(
 		return runtimeErr
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		// A commit-timestamp mismatch is recoverable downstream in
-		// node.Run. We only need to read sync_status here, which
-		// works on the partially-initialised db handle returned with
-		// the error.
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
-			return fmt.Errorf("opening database: %w", recoveryErr)
-		}
-		logger.Warn(
-			"sync state check observed commit timestamp mismatch; "+
-				"deferring recovery to node startup",
-			"metadata_timestamp", cte.MetadataTimestamp,
-			"blob_timestamp", cte.BlobTimestamp,
-		)
-	}
 
-	val, err := db.GetSyncState("sync_status", nil)
+	val, err := db.GetChainState(database.SyncStatusKey, nil)
 	if err != nil {
 		return fmt.Errorf("checking sync state: %w", err)
 	}
@@ -192,12 +168,13 @@ func checkSyncState(
 
 // repairPendingMithrilRewardState reconciles a legacy bootstrapped database
 // against a certified artifact before node startup. Mithril's catch-up path
-// verifies the existing chain intersection before writing and reconciles the
-// ledger rows in place. A local chain tail beyond the artifact is kept for
-// ordinary ledger replay after the selected state passes the stable-anchor
-// check. If no artifact reaches that anchor, the durable repair marker remains
-// and this function keeps the node offline instead of serving inconsistent
-// rewards.
+// verifies the existing chain intersection before writing, rolls the LedgerDB
+// set back to the artifact's ledger state through the set's journal and
+// imports that state over it. A local chain tail beyond the artifact is kept
+// for ordinary ledger replay after the selected state passes the stable-anchor
+// check. If no artifact reaches that anchor, or the set's journal does not
+// reach the artifact's state, the durable repair marker remains and this
+// function keeps the node offline instead of serving inconsistent rewards.
 func repairPendingMithrilRewardState(
 	ctx context.Context,
 	cfg *config.Config,
@@ -242,7 +219,7 @@ func repairPendingMithrilRewardState(
 		return errors.New(
 			"mithril reward-state repair did not reconcile the existing database; " +
 				"the database is preserved and node startup is blocked until a " +
-				"certified snapshot reaches its existing stable ledger point",
+				"certified snapshot's ledger state can be imported over it",
 		)
 	}
 	return nil
@@ -292,7 +269,7 @@ func retryMithrilRewardStateRepair(
 			return err
 		}
 		logger.Warn(
-			"latest certified snapshot does not reach the existing stable ledger point; "+
+			"latest certified snapshot's ledger state cannot be imported yet; "+
 				"preserving the database and retrying in-place repair",
 			"component", "node",
 			"retry_after", mithrilRewardRepairRetryInterval,
@@ -327,11 +304,6 @@ func mithrilRewardRepairPending(
 		return false, err
 	}
 	defer runtime.Close(context.WithoutCancel(ctx))
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
-			return false, fmt.Errorf("opening database: %w", recoveryErr)
-		}
-	}
 	return mithril.RewardStateRepairPending(db)
 }
 
@@ -359,13 +331,6 @@ func checkMithrilInactivityCompat(
 		return runtimeErr
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		// A commit-timestamp mismatch is recovered downstream in node.Run;
-		// the marker read works on the partially-initialised handle.
-		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
-			return fmt.Errorf("opening database: %w", recoveryErr)
-		}
-	}
 
 	bootstrapped, err := mithril.WasBootstrapped(db)
 	if err != nil {
@@ -375,32 +340,6 @@ func checkMithrilInactivityCompat(
 		return errMithrilInactivityIncompatible()
 	}
 	return nil
-}
-
-// repairDeferredIndexes rebuilds any deferred metadata indexes left
-// outstanding by a prior interrupted bulk-load run.
-func repairDeferredIndexes(
-	ctx context.Context,
-	cfg *config.Config,
-	logger *slog.Logger,
-) error {
-	runtime, err := openConfiguredDatabase(
-		ctx, cfg, logger, cfg.DatabaseWorkers,
-	)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	db, runtimeErr := runtimeDatabase(runtime)
-	if runtimeErr != nil {
-		return runtimeErr
-	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
-			return fmt.Errorf("opening database: %w", recoveryErr)
-		}
-	}
-	return node.RepairDeferredIndexes(ctx, db, logger)
 }
 
 // effectiveStorageMode returns the storage mode of the consensus store, which
@@ -426,26 +365,28 @@ func openConfiguredDatabase(
 		return nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
 	storageMode := string(effectiveStorageMode(cfg))
+	dbConfig := &database.Config{
+		DataDir: cfg.DatabasePath, Logger: logger,
+		StorageMode:    storageMode,
+		Network:        cfg.Network,
+		NetworkMagic:   cfg.NetworkMagic,
+		StartEra:       string(cfg.StartEra),
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, cfg.CardanoConfig, cfg.Network,
+		),
+	}
 	return internalplugins.OpenDatabase(
 		ctx,
-		&database.Config{
-			DataDir: cfg.DatabasePath, Logger: logger,
-			StorageMode:    storageMode,
-			Network:        cfg.Network,
-			NetworkMagic:   cfg.NetworkMagic,
-			StartEra:       string(cfg.StartEra),
-			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
-			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
-			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
-				nil, cfg.CardanoConfig, cfg.Network,
-			),
-		},
+		dbConfig,
 		internalplugins.ConfiguredStorageSelections(cfg),
 		internalplugins.StorageDependencies{
 			GenesisStakingEmpty: genesisStakingEmpty,
 			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
+			MigrateReleased: nodestorage.MigrateReleased(cfg, dbConfig, nil, logger),
 		},
 	)
 }

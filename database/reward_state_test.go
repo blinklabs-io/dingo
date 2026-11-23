@@ -107,7 +107,7 @@ func TestRebuildRewardLiveStakeFromRunningTotalsUsesBatchFinalizer(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: "", Role: RoleIndexer})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	store := &batchRewardLiveStakeMetadataStore{

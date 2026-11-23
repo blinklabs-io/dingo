@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -81,7 +80,7 @@ func anchorStateLines(
 func TestDrainedSetServesTheImportedAnchorStateTheStoreServes(t *testing.T) {
 	t.Parallel()
 	var lines []string
-	out, _ := allGraduatedRun(t, func(h *p5Harness) func() []string {
+	out, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
 		lines = anchorStateLines(t, h.scenario.AnchorState)
@@ -128,7 +127,7 @@ func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, statedrain.NewTripGuard(),
+		t, set, nil,
 	)
 	s.InstallDrainedSources()
 	s.WrapSet(func(ledger.UtxoSetWriter) ledger.UtxoSetWriter {
@@ -136,10 +135,10 @@ func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
 	})
 
 	err = s.AnchorState.AnchorStateReady(t.Context())
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	require.ErrorContains(t, err, "delegations they record")
 	_, _, err = s.AnchorState.AnchorImportedAccounts(t.Context(), 0, nil, 10)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
 // A pinned view of the anchor state reads the ledger at the point it was
@@ -148,7 +147,7 @@ func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
 // anchor. The live source moves with the credit.
 func TestAnchorStateViewReadsOnePointWhileTheLedgerMoves(t *testing.T) {
 	t.Parallel()
-	allGraduatedRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *p5Harness) func() []string {
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
 		before := anchorStateLines(t, h.scenario.AnchorState)

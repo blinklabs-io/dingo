@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -99,17 +100,30 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// newLedgerSnapshotSource opens a ledger database holding block 1 and a live
+// UTxO set at block 1, the stores a ledger database's snapshot carries.
+func newLedgerSnapshotSource(
+	t *testing.T,
+) (*database.Database, *badgerutxo.Store) {
+	t.Helper()
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	store := openUtxoSetStore(t, t.TempDir())
+	applyBlocks(t, store, 1, 1)
+	return db, store
+}
+
 // Snapshot only reads the source database, so every case that takes one shares
-// a database holding block 1.
+// a database holding block 1 and its live UTxO set.
 func TestSnapshot(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db, set := newLedgerSnapshotSource(t)
 	snapshot := func(dir string, opts ...lifecycle.ManifestOption) (lifecycle.Manifest, error) {
 		return lifecycle.Snapshot(
 			context.Background(), db, dir, lifecycle.TriggerManual,
-			"test-version", "badger", "sqlite", opts...,
+			"test-version", "badger", "sqlite",
+			append(opts, lifecycle.WithUtxoSetBackup(set))...,
 		)
 	}
 
@@ -120,13 +134,16 @@ func TestSnapshot(t *testing.T) {
 		require.Equal(t, "badger", m.BlobPlugin)
 		require.Equal(t, "sqlite", m.MetadataPlugin)
 		require.NotZero(t, m.BlobBytes)
-		require.NotZero(t, m.MetadataBytes)
+		require.NotZero(t, m.UtxoSetBytes)
+		require.Zero(t, m.MetadataBytes)
+		require.Empty(t, m.MetadataSHA256)
 
 		got, err := lifecycle.ReadManifest(dir)
 		require.NoError(t, err)
 		require.Equal(t, m.CommitTimestamp, got.CommitTimestamp)
 		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.UtxoSetBackupFileName))
+		require.NoFileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
 	})
 
 	t.Run("records payload digests", func(t *testing.T) {
@@ -136,10 +153,10 @@ func TestSnapshot(t *testing.T) {
 		require.NoError(t, err)
 		blob, err := os.ReadFile(filepath.Join(dir, lifecycle.BlobBackupFileName))
 		require.NoError(t, err)
-		metadata, err := os.ReadFile(filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		set, err := os.ReadFile(filepath.Join(dir, lifecycle.UtxoSetBackupFileName))
 		require.NoError(t, err)
 		require.Equal(t, sha256Hex(blob), m.BlobSHA256)
-		require.Equal(t, sha256Hex(metadata), m.MetadataSHA256)
+		require.Equal(t, sha256Hex(set), m.UtxoSetSHA256)
 		require.NoError(t, m.Authenticate(lifecycle.WithManifestKey(key)))
 	})
 
@@ -161,7 +178,7 @@ func TestSnapshot(t *testing.T) {
 		)
 		for _, name := range []string{
 			lifecycle.BlobBackupFileName,
-			lifecycle.MetadataBackupFileName,
+			lifecycle.UtxoSetBackupFileName,
 			lifecycle.ManifestFileName,
 		} {
 			info, err := os.Stat(filepath.Join(dir, name))
@@ -228,13 +245,13 @@ func TestSnapshot(t *testing.T) {
 			"exactly one concurrent Snapshot call to the same dir must succeed",
 		)
 		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.UtxoSetBackupFileName))
 		m, err := lifecycle.ReadManifest(dir)
 		require.NoError(
 			t, err,
 			"the winner's manifest must be intact, not deleted by a losing caller",
 		)
 		require.NotZero(t, m.BlobBytes)
-		require.NotZero(t, m.MetadataBytes)
+		require.NotZero(t, m.UtxoSetBytes)
 	})
 }

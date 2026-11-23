@@ -21,7 +21,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -38,16 +37,12 @@ var rewardDerivedReadNames = []string{
 func newRewardOutputsRun(
 	t *testing.T,
 	reads string,
-	guard *statedrain.TripGuard,
+	g metadata.StatementGuard,
 ) *rewardBlocksRun {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	var g metadata.StatementGuard
-	if guard != nil {
-		g = guard
-	}
 	scenario := ledger.NewRewardBlocksScenarioForTest(
 		t, set, reads, g, ledger.RewardBlocksOptions{Round: true},
 	)
@@ -189,9 +184,6 @@ func TestRewardOutputsRecheckIsSkippedWithoutARollback(t *testing.T) {
 func TestRewardOutputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, false)
-	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyRewardOutputs,
-	))
 	r.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardOutputs),
 	)

@@ -8529,7 +8529,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
 	require.NoError(
 		t,
-		fixture.ls.ledgerDB().SetSyncState("mithril_ledger_slot", "20", nil),
+		fixture.ls.db.SetChainState("mithril_ledger_slot", "20", nil),
 	)
 	timer := time.NewTimer(time.Hour)
 	t.Cleanup(func() { timer.Stop() })
@@ -8571,7 +8571,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 
 	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
-	storedBoundary, err := fixture.ls.ledgerDB().GetSyncState(
+	storedBoundary, err := fixture.ls.db.GetChainState(
 		"mithril_ledger_slot",
 		nil,
 	)
@@ -11849,6 +11849,11 @@ func newChainsyncRollbackFixtureAt(
 	if seed != nil {
 		seed()
 	}
+	// The seeded state is the set's at the ancestor, so its journal holds
+	// the point a rollback returns to.
+	require.NoError(t, OpenLiveSetForTest(t, db).ApplyUtxoChanges(
+		&ancestorTip.Point, nil,
+	))
 
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
@@ -18917,9 +18922,7 @@ func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
 		12: &cbor.Rat{Rat: big.NewRat(0, 1)},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0x01}, updateCbor, 50, epoch.EpochId, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0x01}, updateCbor, 50, epoch.EpochId))
 
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
 	params := &alonzo.AlonzoProtocolParameters{
@@ -18990,99 +18993,6 @@ func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
 	require.NoError(t, err)
 	require.Nil(t, storedAtSourceEpoch,
 		"the translated parameters must not be backdated to the ended epoch")
-}
-
-// TestCreateGenesisBlockFileBackedNoFKError drives the real genesis sync path
-// (createGenesisBlock -> database.SetGenesisTransaction -> UtxoLedgerToModel ->
-// metadata SetGenesisTransaction) on a file-backed SQLite store, where
-// foreign_keys=ON is enforced.
-//
-// Genesis UTxOs are unspent/unreferenced, so the utxo columns spent_at_tx_id /
-// collateral_return_for_tx_id (FKs to transaction(id)) must be
-// stored as SQL NULL. If they are bound as an empty blob, the FK fails with
-// "FOREIGN KEY constraint failed (787)". This is the failure reported for
-// BURSA_SYNC=genesis on preview/devnet.
-//
-// It also re-runs createGenesisBlock to confirm idempotency.
-func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
-	t.Parallel()
-
-	networks := []struct {
-		name       string
-		configPath string
-	}{
-		{name: "preview", configPath: "preview/config.json"},
-		{name: "devnet", configPath: "devnet/config.json"},
-	}
-
-	for _, nw := range networks {
-		t.Run(nw.name, func(t *testing.T) {
-			// File-backed store: enables foreign_keys(1) + WAL, the
-			// production configuration that matches the reported failure.
-			db, err := dbtest.NewDatabase(t, &database.Config{
-				DataDir: t.TempDir(),
-			})
-			require.NoError(t, err)
-
-			nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-				nw.configPath,
-				nw.name,
-				cardano.EmbeddedConfigFS,
-			)
-			require.NoError(t, err)
-
-			ls := &LedgerState{
-				db: db,
-				config: LedgerStateConfig{
-					Database:          db,
-					CardanoNodeConfig: nodeCfg,
-					Logger: slog.New(
-						slog.NewTextHandler(io.Discard, nil),
-					),
-				},
-			}
-			attachTestLiveSet(t, ls)
-
-			// First run: must not hit the FK 787 error.
-			require.NoError(
-				t,
-				ls.createGenesisBlock(context.Background()),
-				"createGenesisBlock should not fail with FK constraint",
-			)
-
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
-
-			// At least one genesis UTxO should have been created so the
-			// assertions below are meaningful.
-			var utxoCount int64
-			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*) FROM utxo",
-			).Scan(&utxoCount))
-			require.Greater(t, utxoCount, int64(0), "genesis UTxOs created")
-
-			// The hash FK columns must be stored as NULL, never empty blobs.
-			var nonNull int64
-			require.NoError(t, raw.QueryRow(`
-SELECT COUNT(*) FROM utxo
-WHERE spent_at_tx_id IS NOT NULL
-   OR collateral_return_for_tx_id IS NOT NULL`,
-			).Scan(&nonNull))
-			require.Equal(
-				t,
-				int64(0),
-				nonNull,
-				"genesis UTxOs must store NULL transaction FKs, not zero ids",
-			)
-
-			// Second run: idempotent, still no error.
-			require.NoError(
-				t,
-				ls.createGenesisBlock(context.Background()),
-				"re-running createGenesisBlock must remain idempotent",
-			)
-		})
-	}
 }
 
 // The Musashi Conway genesis declares three genesis committee members, all
@@ -19157,7 +19067,7 @@ func TestCreateGenesisBlockPreservesImportedCommittee(t *testing.T) {
 		anchorSlot,
 		bytes.Repeat([]byte{0xa5}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19239,7 +19149,7 @@ func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMembers(
 		anchorSlot,
 		bytes.Repeat([]byte{0xa8}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19340,7 +19250,7 @@ func TestCreateGenesisBlockUnseatsGenesisMembersSeededOverConwayImport(
 		anchorSlot,
 		bytes.Repeat([]byte{0xab}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19428,7 +19338,7 @@ func TestCreateGenesisBlockKeepsSlotZeroImportInFirstEpoch(t *testing.T) {
 		anchorSlot,
 		bytes.Repeat([]byte{0xac}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19479,7 +19389,7 @@ func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMemberVotes(
 		anchorSlot,
 		bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19539,7 +19449,7 @@ func TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport(t *testing.T) {
 		anchorSlot,
 		bytes.Repeat([]byte{0xa6}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19578,7 +19488,7 @@ func TestCreateGenesisBlockSeedsCommitteeWhenSyncedPastPreConwayImport(
 		tipSlot,
 		bytes.Repeat([]byte{0xa9}, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19756,7 +19666,7 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport(t *testing.T) {
 	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
 	require.Contains(t, members, rawKey)
 	members[rawKey] = -11
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
@@ -19952,8 +19862,7 @@ func TestCreateGenesisBlockConstitutionSeededOnRestart(t *testing.T) {
 // set holds.
 func constitutionRowCount(t *testing.T, db *database.Database) int {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	state, err := ls.committeeServed(nil)
 	require.NoError(t, err)
 	return len(state.Constitutions)
@@ -20195,10 +20104,10 @@ func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
 			"structurally, even though its UTxOs are not inserted as live",
 	)
 
-	exists, err := db.UtxoExists(context.Background(), sampleTxId, sampleOutputIdx, nil)
-	require.NoError(t, err)
-	require.False(
-		t, exists,
+	live, err := ls.UtxoByRef(sampleTxId, sampleOutputIdx)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound)
+	require.Nil(
+		t, live,
 		"a genesis UTxO must not be (re-)inserted as a live row after a "+
 			"Mithril bootstrap -- the imported ledger snapshot is the only "+
 			"authority on whether it is still live or was already spent "+
@@ -20208,9 +20117,9 @@ func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
 	// Re-running (as a real startup would on every restart) must remain
 	// idempotent and continue to skip insertion.
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
-	exists, err = db.UtxoExists(context.Background(), sampleTxId, sampleOutputIdx, nil)
-	require.NoError(t, err)
-	require.False(t, exists)
+	live, err = ls.UtxoByRef(sampleTxId, sampleOutputIdx)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound)
+	require.Nil(t, live)
 }
 
 func (f *treasuryRolloverFixture) rewardAddress(
@@ -20943,15 +20852,15 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 	assert.Zero(t, sum, "rolled-back donation rows are gone")
 }
 
-// TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor keeps the loop
+// TestRollbackIsAppliableRejectsBelowUtxoSetJournal keeps the loop
 // detector's crossability predicate in step with the rollback it predicts.
 // Reporting a target below the prune floor as crossable would make the detector
 // insist on applying a rollback rollbackChainAndStateDeferred refuses.
-func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
+func TestRollbackIsAppliableRejectsBelowUtxoSetJournal(t *testing.T) {
 	t.Parallel()
 
 	f := newDeepPrunedUtxoFixture(t, 0)
-	f.ls.cleanupConsumedUtxos(context.Background())
+	f.pruneJournal(t)
 
 	require.True(
 		t,
@@ -20989,13 +20898,9 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
-	// A floor above the rollback target, as a sweep at a higher tip would
-	// have left behind.
-	require.NoError(t, fixture.ls.ledgerDB().SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(fixture.currentTip.Point.Slot, 10),
-		nil,
-	))
+	// A journal that no longer reaches the rollback target, as the set
+	// leaves behind once the tip is a stability window past it.
+	fxEmptyJournal(t, fixture.ls)
 
 	fatalCalls := 0
 	fixture.ls.config.FatalErrorFunc = func(error) { fatalCalls++ }
@@ -21420,10 +21325,7 @@ func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
 	require.NotNil(t, inMemory.RemoteAddr, "repopulate dropped the source")
 	assert.Equal(t, connId.RemoteAddr.String(), inMemory.RemoteAddr.String())
 
-	required, source, err := restarted.deferredHeaderValidationRequired(
-		point,
-		nil,
-	)
+	required, source, err := restarted.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	require.True(t, required)
 	require.NotNil(t, source.RemoteAddr, "restored marker lost its source")
@@ -21498,58 +21400,22 @@ func TestDeferredMarkerRestoreKeepsSource(t *testing.T) {
 	)
 }
 
-// A marker written by an earlier release carries no source and still restores.
+// A marker written without a source still restores.
 func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
-	require.NoError(t, seedDB(t, db).SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		nil,
+	require.NoError(t, db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	))
 	require.NoError(t, ls.repopulateDeferredHeaderValidation())
 
-	required, source, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, source, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	assert.True(t, required)
 	assert.Equal(t, ouroboros.ConnectionId{}, source)
-}
-
-// The legacy sync_state format is an exact bare marker. Unknown values fail
-// closed instead of being interpreted as an unsupported attribution format.
-func TestDeferredHeaderMalformedLegacyMarkerFailsClosed(t *testing.T) {
-	t.Parallel()
-
-	for _, value := range []string{"true@10.0.0.1:3001", "truejunk"} {
-		t.Run(value, func(t *testing.T) {
-			t.Parallel()
-			tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
-			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-			point := ocommon.NewPoint(
-				tb.block.SlotNumber(),
-				tb.block.Hash().Bytes(),
-			)
-			require.NoError(t, seedDB(t, db).SetSyncState(
-				deferredHeaderValidationSyncStateKey(point),
-				value,
-				nil,
-			))
-
-			err := ls.repopulateDeferredHeaderValidation()
-			require.ErrorContains(t, err, "invalid legacy value")
-			assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
-			required, source, err := ls.deferredHeaderValidationRequired(
-				point,
-				nil,
-			)
-			require.ErrorContains(t, err, "invalid legacy value")
-			assert.False(t, required)
-			assert.Equal(t, ouroboros.ConnectionId{}, source)
-		})
-	}
 }
 
 func TestDeferredHeaderValidationPrefersLiveSource(t *testing.T) {
@@ -21565,7 +21431,7 @@ func TestDeferredHeaderValidationPrefersLiveSource(t *testing.T) {
 		[]byte("true@127.0.0.1:3002"),
 	))
 
-	required, source, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, source, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	assert.True(t, required)
 	require.NotNil(t, source.RemoteAddr)
@@ -21622,10 +21488,7 @@ func TestDeferredHeaderAttributedMarkerReadFromDatabase(t *testing.T) {
 				),
 			))
 
-			required, source, err := ls.deferredHeaderValidationRequired(
-				point,
-				nil,
-			)
+			required, source, err := ls.deferredHeaderValidationRequired(point)
 			require.NoError(t, err)
 			assert.True(t, required, "attributed marker not recognized")
 			require.NotNil(t, source.RemoteAddr, "marker source not read")

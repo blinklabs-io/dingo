@@ -74,14 +74,6 @@ type LifecycleStore interface {
 
 // SettingsStore owns singleton metadata about database and node state.
 type SettingsStore interface {
-	// GetCommitTimestamp retrieves the last commit timestamp from the database.
-	GetCommitTimestamp(context.Context) (int64, error)
-
-	// SetCommitTimestamp sets the last commit timestamp in the database.
-	// Parameter order is (timestamp, txn) to match other store methods where
-	// the transaction is the final parameter.
-	SetCommitTimestamp(int64, types.Txn) error
-
 	// GetNodeSettings returns the persisted immutable node settings, or
 	// nil if the database has never been initialised.
 	GetNodeSettings(ctx context.Context) (*types.NodeSettings, error)
@@ -814,16 +806,6 @@ type UtxoStore interface {
 	// strictly after atSlot. Refs with no matching row under that
 	// predicate are simply absent from the result, the same as
 	// GetUtxosByRefs.
-	//
-	// Unlike GetUtxosByRefs, "no matching row" is ambiguous once atSlot is
-	// old enough: it means either "genuinely never live at atSlot" or "was
-	// live at atSlot but its spend record has since been hard-deleted by
-	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
-	// This method has no way to tell the two apart -- callers pinning a
-	// historical point (ledger.Query, node-parity) must
-	// reject a point older than their own retention floor themselves
-	// before calling this, rather than trust a possibly-incomplete result
-	// here.
 	GetUtxosByRefsAsOf(
 		refs []models.UtxoId,
 		atSlot uint64,
@@ -990,13 +972,6 @@ type UtxoStore interface {
 	) ([]models.Utxo, error)
 	SetUtxoAddress(uint, []byte, types.Txn) error
 
-	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
-	GetUtxosDeletedBeforeSlot(
-		uint64,
-		int,
-		types.Txn,
-	) ([]models.Utxo, error)
-
 	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot
 	// and records the hash of the transaction that consumed it.
 	SetUtxoDeletedAtSlot(
@@ -1073,6 +1048,14 @@ type UtxoStore interface {
 	IterateStakeDelegationEvents(
 		txn types.Txn,
 		fn func(models.StakeDelegationEventRow) error,
+	) error
+
+	// IterateAppliedTransactions invokes fn for each applied transaction, in
+	// unspecified order. It is the source of the one-time move of the
+	// transaction index into the LedgerDB.
+	IterateAppliedTransactions(
+		txn types.Txn,
+		fn func(models.AppliedTransaction) error,
 	) error
 
 	// IterateLeiosClosureUtxoEffects invokes fn for each staked output a Leios
@@ -2076,21 +2059,6 @@ type MetadataStore interface {
 		limit int,
 		txn types.Txn,
 	) ([]models.MidnightDeregistration, error)
-
-	// GetImportCheckpoint retrieves the checkpoint for a given
-	// import key (e.g., "{digest}:{slot}"). Returns nil if no
-	// checkpoint exists.
-	GetImportCheckpoint(
-		importKey string,
-		txn types.Txn,
-	) (*models.ImportCheckpoint, error)
-
-	// SetImportCheckpoint creates or updates a checkpoint for
-	// the given import key with the completed phase.
-	SetImportCheckpoint(
-		checkpoint *models.ImportCheckpoint,
-		txn types.Txn,
-	) error
 
 	// EnsureOffchainMetadataPointers creates pending cache rows for
 	// on-chain pool metadata and governance anchor URL/hash pointers.
@@ -3716,16 +3684,6 @@ type BatchUtxoOverlay interface {
 	) (bool, error)
 }
 
-// CatchUpPragmaTuner is an optional interface for metadata stores that can
-// speed up a long write burst on a database that keeps serving, such as a
-// node-managed Mithril stream catch-up. SetCatchUpPragmas changes only
-// settings that cannot lose a committed write on a crash or power loss;
-// RestoreNormalPragmas restores the normal settings.
-type CatchUpPragmaTuner interface {
-	SetCatchUpPragmas() error
-	RestoreNormalPragmas() error
-}
-
 // PlannerStatsUpdater is an optional interface for metadata stores that can
 // collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
 // refreshes statistics through deferred-index maintenance instead.
@@ -3750,64 +3708,12 @@ type IncrementalPlannerStatsUpdater interface {
 	) (types.PlannerStatsResult, error)
 }
 
-// PlannerStatsPresenceChecker is an optional interface for metadata stores
-// that can report whether planner statistics have ever been collected. A
-// backend without a stored statistics catalog reports false.
-type PlannerStatsPresenceChecker interface {
-	HasPlannerStats(ctx context.Context) (bool, error)
-}
-
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
 
-// DrainedFamilyAware is the optional capability a metadata store offers to
-// stop writing, rolling back and pruning the tables of drained ledger-state
-// families. The database pushes the latch to it each time it reads or widens
-// the latch.
-type DrainedFamilyAware interface {
-	SetDrainedFamilies(mask nodesettings.FamilyMask)
-}
-
-// LedgerStateRowDrainer is the optional capability a metadata store offers to
-// drop a table's rows in resumable chunks once the live UTxO set holds the
-// state they carried. A store without it cannot drain.
-type LedgerStateRowDrainer interface {
-	// DeleteRowsChunk deletes up to limit rows of table in ascending order
-	// of keyColumn, a unique column, and returns how many it deleted. A
-	// result below limit means the table is empty.
-	DeleteRowsChunk(
-		ctx context.Context,
-		table string,
-		keyColumn string,
-		limit int,
-	) (int64, error)
-}
-
-// RewardStateRollbackSkipper is the optional capability a metadata store
-// offers to roll back reward state while leaving the tables of drained
-// families untouched. A store without it cannot roll back after a drain.
-type RewardStateRollbackSkipper interface {
-	// DeleteRewardStateAfterSlotSkippingBlockCounts is
-	// MetadataStore.DeleteRewardStateAfterSlot without the delete of the
-	// imported pool block counts and epoch block totals.
-	DeleteRewardStateAfterSlotSkippingBlockCounts(
-		slot uint64,
-		txn types.Txn,
-	) error
-	// DeleteRewardStateAfterSlotSkipping is
-	// MetadataStore.DeleteRewardStateAfterSlot without the deletes skips
-	// names.
-	DeleteRewardStateAfterSlotSkipping(
-		slot uint64,
-		skips types.RewardStateSkips,
-		txn types.Txn,
-	) error
-}
-
 // RewardOutputPruner is the optional capability a metadata store offers to
-// prune reward account outputs while leaving the stake inputs of a drained
-// family untouched.
+// prune reward account outputs while leaving the stake inputs untouched.
 type RewardOutputPruner interface {
 	// DeleteRewardAccountOutputsBeforeEpoch is the reward account output half
 	// of MetadataStore.DeleteRewardStateBeforeEpoch.

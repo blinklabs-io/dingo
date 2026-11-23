@@ -138,24 +138,12 @@ func seedLiveStakeFixtureWithPledge(
 		stakingKey,
 	)
 	require.NoError(t, err)
-	addressBytes, err := address.Bytes()
-	require.NoError(t, err)
 	encoded, err := cbor.Encode(&babbage.BabbageTransactionOutput{
 		OutputAddress: address,
 		OutputAmount:  mary.MaryTransactionOutputValue{Amount: stake},
 	})
 	require.NoError(t, err)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		StakingKey: stakingKey,
-		Address:    addressBytes,
-		Amount:     dbtypes.Uint64(stake),
-		AddedSlot:  slot,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded))
-	require.NoError(t, txn.Commit())
+	fxSeedOutput(t, db, txId, 0, slot, encoded)
 	return pkh
 }
 

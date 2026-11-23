@@ -391,13 +391,12 @@ func TestCloudManifestHelpersAuthenticateDestinationResults(t *testing.T) {
 func TestSnapshotToCloud(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db, set := newLedgerSnapshotSource(t)
 	snapshotToCloud := func(dir, dest string, opts ...lifecycle.ManifestOption) (lifecycle.Manifest, error) {
 		return lifecycle.SnapshotToCloud(
 			context.Background(), testDestinationRegistry, db, dir,
 			lifecycle.TriggerManual, "test-version", "badger", "sqlite",
-			dest, "", "", opts...,
+			dest, "", "", append(opts, lifecycle.WithUtxoSetBackup(set))...,
 		)
 	}
 
@@ -406,8 +405,9 @@ func TestSnapshotToCloud(t *testing.T) {
 		m, err := snapshotToCloud(dir, "")
 		require.NoError(t, err)
 		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.UtxoSetBackupFileName))
 		require.NotZero(t, m.BlobBytes)
+		require.NotZero(t, m.UtxoSetBytes)
 	})
 
 	t.Run("cloud upload requires a trust key", func(t *testing.T) {
@@ -439,7 +439,7 @@ func TestSnapshotToCloud(t *testing.T) {
 		require.NoError(t, err)
 		for _, name := range []string{
 			lifecycle.BlobBackupFileName,
-			lifecycle.MetadataBackupFileName,
+			lifecycle.UtxoSetBackupFileName,
 			lifecycle.ManifestFileName,
 		} {
 			require.FileExists(t, filepath.Join(dir, name))

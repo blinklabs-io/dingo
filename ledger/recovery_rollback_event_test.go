@@ -213,7 +213,7 @@ func TestReplayRecoveryPublishesAppliedTransactionUndoEvents(t *testing.T) {
 	producerTxHash := testHashBytes("recovery-rollback-producer")
 	seedReplayRecoveryTransaction(
 		t,
-		f.ls.db,
+		f.ls,
 		producerTxHash,
 		f.blocks[1].Hash,
 		f.blocks[1].Slot,
@@ -265,7 +265,7 @@ func TestReplayRecoveryPublishesUndoWhenPrimaryChainNeedsNoRewind(
 	producerTxHash := testHashBytes("recovery-held-primary-producer")
 	seedReplayRecoveryTransaction(
 		t,
-		f.ls.db,
+		f.ls,
 		producerTxHash,
 		f.blocks[1].Hash,
 		f.blocks[1].Slot,
@@ -320,8 +320,7 @@ func TestPartialCommitRecoveryPublishesAppliedTransactionUndoEvents(
 
 	metadataErr := errors.New("metadata commit failed")
 	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
+		MetadataErr: metadataErr,
 	})
 	require.ErrorIs(t, err, metadataErr)
 	require.NotErrorIs(t, err, dbtypes.ErrPartialCommit)
@@ -346,8 +345,7 @@ func TestPartialCommitRecoveryTruncationFailurePublishesNoUndoEvents(
 	}
 	metadataErr := errors.New("metadata commit failed")
 	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
+		MetadataErr: metadataErr,
 	})
 	require.ErrorIs(t, err, injected)
 	require.ErrorIs(t, err, metadataErr)
@@ -377,8 +375,7 @@ func TestPartialCommitRecoveryWithoutAppliedRollbackPublishesNoUndoEvents(
 	f := newRecoveryRollbackEventFixture(t)
 	metadataErr := errors.New("metadata commit failed")
 	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
+		MetadataErr: metadataErr,
 	})
 	require.ErrorIs(t, err, metadataErr)
 	require.NotErrorIs(t, err, dbtypes.ErrPartialCommit)

@@ -400,7 +400,7 @@ func registerExtendedCardanoTools(
 					proposalStatusName(statusFilter),
 				)
 			} else {
-				if err := limits.refuseDrainedFamilies(
+				if err := limits.refuseLedgerStateFamilies(
 					nodesettings.FamilyGovernance,
 				); err != nil {
 					return nil, nil, err
@@ -449,7 +449,7 @@ func registerExtendedCardanoTools(
 				ctxTimeout, stateDB, proposalStatusName(statusFilter), limit,
 			)
 		} else {
-			if err := limits.refuseDrainedFamilies(
+			if err := limits.refuseLedgerStateFamilies(
 				nodesettings.FamilyGovernance,
 			); err != nil {
 				return nil, nil, err

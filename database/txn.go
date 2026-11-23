@@ -23,7 +23,6 @@ import (
 	rtrace "runtime/trace"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -34,16 +33,11 @@ import (
 // PartialCommitError is returned when blob commits but metadata fails.
 // This indicates the database is in an inconsistent state requiring recovery.
 type PartialCommitError struct {
-	MetadataErr     error // The underlying metadata commit error
-	CommitTimestamp int64 // Timestamp written to the blob store
+	MetadataErr error // The underlying metadata commit error
 }
 
 func (e PartialCommitError) Error() string {
-	return fmt.Sprintf(
-		"partial commit at timestamp %d: metadata failed: %v",
-		e.CommitTimestamp,
-		e.MetadataErr,
-	)
+	return fmt.Sprintf("partial commit: metadata failed: %v", e.MetadataErr)
 }
 
 func (e PartialCommitError) Unwrap() error {
@@ -62,7 +56,11 @@ type Txn struct {
 	// traceCtx joins the commit's runtime/trace region to the trace task the
 	// transaction began under; it is never used for cancellation. Nil on
 	// transactions built without a context, which record no commit region.
-	traceCtx     context.Context
+	traceCtx context.Context
+	// staged marks a NewStagedTxn transaction: what it commits is staged by
+	// its callers for another store, so having no store of its own to commit
+	// is not a failure.
+	staged       bool
 	blobTxn      types.Txn
 	metadataTxn  types.Txn
 	writeContext *txnContext
@@ -89,8 +87,17 @@ type Txn struct {
 	finished       bool
 	committed      atomic.Bool
 	readWrite      bool
-	afterCommit    []func()
-	dispatching    bool
+	// tip is the ledger tip this transaction set, tipValue its stored form;
+	// see Database.SetTip. tipMu guards them and tipRevert.
+	tipMu     sync.Mutex
+	tip       ochainsync.Tip
+	tipValue  string
+	tipStaged bool
+	// tipRevert is set by a metadata revert (Database.TruncateAfterSlot)
+	// for the tip it stages; its commit removes the pending-revert mark.
+	tipRevert   bool
+	afterCommit []func()
+	dispatching bool
 	// separatelyCommittedBlocks lets blob reads bypass this transaction's stale
 	// snapshot; it is guarded by lock.
 	separatelyCommittedBlocks map[blockKey]struct{}
@@ -221,43 +228,24 @@ func (t *Txn) holdBlockInventory() error {
 }
 
 // acquireCommitBarrier holds the shared (read) side of db.commitBarrier
-// for the lifetime of a read-write Txn that opens a metadata write
-// transaction, from construction through Commit/Rollback/Release. It
-// must be taken before the underlying transaction is opened below, not
-// just around the eventual commit: the metadata plugin's write
-// connection pool is sized to exactly one connection (see
-// sqlite.database.go), so an already-BEGUN but not-yet-committed
-// transaction holds that one connection regardless of whether Commit()
-// has been called yet. Database.PauseCommits (used by
-// database/lifecycle.Snapshot around its blob+metadata backup calls)
-// takes the exclusive side; if this barrier were only held during Commit,
-// PauseCommits could acquire its lock while such a transaction sits
-// BEGUN-but-uncommitted, and Snapshot's metadata backup (VACUUM INTO,
-// which needs that same one connection) would then deadlock against it —
-// the writer can't reach Commit's RLock to finish, and Snapshot can't
-// release its Lock until the backup call returns.
+// for the lifetime of a coordinated read-write Txn, from construction
+// through Commit/Rollback/Release, so Database.PauseCommits (taken by
+// database/lifecycle.Snapshot around its backups) waits for every such
+// transaction to finish and starts none until it resumes; on a database
+// with no metadata store the hold is all that keeps a snapshot's tip and
+// its blob backup at the same commit. It is taken before the underlying transactions are opened, not just around the
+// commit: a metadata store's write connection pool is one connection (see
+// sqlite.database.go), and a BEGUN transaction holding it would deadlock
+// against the metadata backup (VACUUM INTO) waiting for that connection.
 //
-// hasMetadataWrite must be false for a blob-only Txn (NewBlobOnlyTxn):
-// unlike sqlite's metadata store, badger natively supports concurrent
-// read-write transactions, so a blob-only Txn never contends for the
-// single connection PauseCommits protects, and its own commit never
-// writes the commit timestamp PauseCommits keeps consistent (see
-// Txn.Commit — that update only runs when both blobTxn and metadataTxn
-// are set). Acquiring the barrier here anyway would be needless *and*
-// actively dangerous: several callers (e.g. deleteUtxoBlobs,
-// deleteTxBlobs) open batched blob-only Txns while already holding an
-// outer read-write Txn open on the same goroutine. Go's sync.RWMutex
-// isn't reentrant — once a PauseCommits caller's Lock() is queued, a
-// second RLock() from the same goroutine that already holds the first
-// blocks too, and the outer Txn can never reach Commit/Rollback to
-// release the first RLock. Skipping the barrier for blob-only Txns
-// avoids that self-deadlock entirely rather than trying to detect it.
-func acquireCommitBarrier(
-	ctx context.Context,
-	t *Txn,
-	hasMetadataWrite bool,
-) error {
-	if t.readWrite && hasMetadataWrite && t.db != nil {
+// A blob-only Txn (NewBlobOnlyTxn) never takes it. Several callers (e.g.
+// deleteUtxoBlobs, deleteTxBlobs) open batched blob-only Txns while already
+// holding an outer read-write Txn on the same goroutine, and Go's
+// sync.RWMutex isn't reentrant: once a PauseCommits caller's Lock() is
+// queued, a second RLock() from the goroutine that holds the first blocks
+// too, and the outer Txn can never release.
+func acquireCommitBarrier(ctx context.Context, t *Txn) error {
+	if t.readWrite && t.db != nil {
 		if err := t.db.commitBarrier.RLockContext(ctx); err != nil {
 			return fmt.Errorf("acquire commit barrier: %w", err)
 		}
@@ -364,7 +352,7 @@ func newDatabaseTxnContext(
 	blockMutation blockMutationMode,
 ) (*Txn, error) {
 	t := &Txn{db: db, readWrite: readWrite, traceCtx: ctx}
-	if err := acquireCommitBarrier(acquireCtx, t, db.Metadata() != nil); err != nil {
+	if err := acquireCommitBarrier(acquireCtx, t); err != nil {
 		_ = t.Rollback()
 		return nil, err
 	}
@@ -498,17 +486,29 @@ func NewReadSnapshotWithAnchorContext(
 		if t.metadataTxn == nil {
 			return nil, tip, errors.Join(types.ErrNilTxn, t.Rollback())
 		}
-		var err error
-		tip, err = ms.GetTip(t.metadataTxn)
-		if err != nil {
-			return nil, tip, fmt.Errorf(
-				"anchor metadata read snapshot: %w",
-				errors.Join(err, t.Rollback()),
-			)
+		if db.isIndexer() {
+			var err error
+			tip, err = ms.GetTip(t.metadataTxn)
+			if err != nil {
+				return nil, tip, fmt.Errorf(
+					"anchor metadata read snapshot: %w",
+					errors.Join(err, t.Rollback()),
+				)
+			}
 		}
 	}
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(false)
+	}
+	if !db.isIndexer() && t.blobTxn != nil {
+		var err error
+		tip, err = db.GetTip(t)
+		if err != nil {
+			return nil, tip, fmt.Errorf(
+				"anchor read snapshot: %w",
+				errors.Join(err, t.Rollback()),
+			)
+		}
 	}
 	if anchor != nil {
 		if err := anchor(t); err != nil {
@@ -589,11 +589,7 @@ func NewMetadataOnlyTxn(
 ) *Txn {
 	ctx = nonNilContext(ctx)
 	t := &Txn{db: db, readWrite: readWrite}
-	if err := acquireCommitBarrier(
-		context.WithoutCancel(ctx),
-		t,
-		db.Metadata() != nil,
-	); err != nil {
+	if err := acquireCommitBarrier(context.WithoutCancel(ctx), t); err != nil {
 		panic("uncancelled commit-barrier context returned an error")
 	}
 	// A metadata-only transaction opens no blob transaction, but it still
@@ -626,12 +622,8 @@ func NewMetadataOnlyTxn(
 // fails, because the underlying transaction is read-only.
 func NewStagedTxn(ctx context.Context, db *Database) *Txn {
 	ctx = nonNilContext(ctx)
-	t := &Txn{db: db, readWrite: true}
-	if err := acquireCommitBarrier(
-		context.WithoutCancel(ctx),
-		t,
-		db.Metadata() != nil,
-	); err != nil {
+	t := &Txn{db: db, readWrite: true, staged: true}
+	if err := acquireCommitBarrier(context.WithoutCancel(ctx), t); err != nil {
 		panic("uncancelled commit-barrier context returned an error")
 	}
 	pinBlobStoreForTxn(t, db)
@@ -1242,7 +1234,7 @@ func (t *Txn) Commit() error {
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
-	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
+	if t.readWrite && !t.staged && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finishLocked()
 		return types.ErrNoStoreAvailable
 	}
@@ -1255,40 +1247,24 @@ func (t *Txn) Commit() error {
 			return errors.Join(err, t.rollback())
 		}
 	}
-	// Update the commit timestamp in both DBs if using both. Skipped
-	// entirely when sharedBlob (mirrors the guard below): t.blobTxn is
-	// borrowed from another Txn (see withMetadataForRecovery) that still
-	// owns committing or rolling it back, so writing a timestamp into it
-	// here -- left staged but never actually committed by this call --
-	// would either sit uncommitted until the owner's own Commit runs, or
-	// be overwritten by the owner's own timestamp; neither is this Txn's
-	// to decide (not reachable by any caller today,
-	// since the only current sharedBlob wrapper is only ever
-	// Released/Rolled back, never committed).
 	// A read snapshot opening its metadata view before this commit and its
-	// blob view after it would pair two commit boundaries, so the timestamp
-	// update and both store commits run under commitPhase's shared side.
+	// blob view after it would pair two commit boundaries, so both store
+	// commits run under commitPhase's shared side.
 	if t.barrierHeld {
 		t.db.holdCommitPhase()
 		commitPhaseHeld = true
 	}
-	var commitTimestamp int64
-	if t.blobTxn != nil && t.metadataTxn != nil &&
-		!t.sharedBlob && !t.sharedMetadata &&
-		!t.db.isIndexer() {
-		commitTimestamp = time.Now().UnixMilli()
-		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
-			// Rollback both transactions on timestamp update failure
-			_ = t.blobTxn.Rollback()
-			_ = t.metadataTxn.Rollback()
-			t.finishLocked()
-			return fmt.Errorf("failed to update commit timestamp: %w", err)
-		}
+	tipWritten, err := t.writeRetreatingTip()
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("write tip before commit: %w", err), t.rollback(),
+		)
 	}
 	// Commit blob transaction first (so if this fails, metadata never
 	// commits). Guarded by !t.sharedBlob for the same ownership reason as
-	// above and as rollback's own identical guard: committing a borrowed
-	// blobTxn here would commit its owner's transaction out from under it.
+	// rollback's identical guard: t.blobTxn is borrowed from another Txn
+	// (see withMetadataForRecovery), and committing it here would commit its
+	// owner's transaction out from under it.
 	if t.blobTxn != nil && !t.sharedBlob {
 		if err := t.commitBlob(); err != nil {
 			// Blob commit failed - rollback metadata only. Skipped when
@@ -1320,24 +1296,15 @@ func (t *Txn) Commit() error {
 			if syncErr := blobStore.Sync(); syncErr != nil {
 				_ = t.metadataTxn.Rollback()
 				t.finishLocked()
-				// The blob transaction is committed and carries the new commit
-				// timestamp while metadata does not, which is the same
-				// inconsistency a failed metadata commit leaves behind. Report
-				// it as a partial commit so the caller runs the existing
-				// recovery that trims the blob store back to the metadata tip,
-				// rather than leaving an un-reconciled timestamp mismatch for
-				// the next startup to trip over.
+				// The blob transaction is committed while metadata is not,
+				// which is the inconsistency a failed metadata commit
+				// leaves behind, so it is reported the same way.
 				err := fmt.Errorf("blob sync failed: %w", syncErr)
 				t.db.logger.Error(
 					"partial commit: blob committed, blob sync failed",
 					"error", syncErr,
-					"commit_timestamp", commitTimestamp,
 				)
-				ret := PartialCommitError{
-					MetadataErr:     err,
-					CommitTimestamp: commitTimestamp,
-				}
-				return ret
+				return PartialCommitError{MetadataErr: err}
 			}
 		}
 	}
@@ -1356,17 +1323,34 @@ func (t *Txn) Commit() error {
 				t.db.logger.Error(
 					"partial commit: blob committed, metadata failed",
 					"error", err,
-					"commit_timestamp", commitTimestamp,
 				)
 				// Return PartialCommitError so callers can detect with
 				// errors.Is(err, types.ErrPartialCommit) and trigger recovery
-				ret := PartialCommitError{
-					MetadataErr:     err,
-					CommitTimestamp: commitTimestamp,
-				}
-				return ret
+				return PartialCommitError{MetadataErr: err}
 			}
 			return fmt.Errorf("metadata commit failed: %w", err)
+		}
+	}
+	// An advancing tip follows the metadata commit it describes and
+	// precedes every after-commit side effect, the LedgerDB update among
+	// them, so a stop here leaves both the tip and the LedgerDB at the
+	// earlier block.
+	if _, staged := t.stagedTip(); staged && !tipWritten &&
+		t.metadataTxn != nil && !t.sharedMetadata {
+		if err := t.writeStagedTip(false); err != nil {
+			t.finishLocked()
+			return fmt.Errorf("write tip after commit: %w", err)
+		}
+	}
+	// The metadata rows above the tip are gone, so nothing is left to
+	// repeat. A failure leaves the mark for the next start to act on.
+	if (tipWritten || t.revertsTip()) &&
+		t.metadataTxn != nil && !t.sharedMetadata {
+		if err := t.clearTipRevertPending(); err != nil {
+			t.db.logger.Warn(
+				"failed to clear the pending tip revert mark",
+				"error", err,
+			)
 		}
 	}
 	t.committed.Store(true)

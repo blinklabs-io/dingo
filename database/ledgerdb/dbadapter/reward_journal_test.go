@@ -20,17 +20,15 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 // The adapter lists the reward journal in the order it was written, with each
-// amount, slot and flag as the store holds them, and refuses once the accounts
-// family is drained.
+// amount, slot and flag as the store holds them.
 func TestAdapterListsTheRewardJournalInWriteOrder(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -53,9 +51,4 @@ func TestAdapterListsTheRewardJournalInWriteOrder(t *testing.T) {
 		{StakingKey: []byte{2}, CredentialTag: 1, TxHash: []byte{0xa2}, Amount: 10, Slot: 10, Withdrawal: true},
 		{StakingKey: []byte{1}, TxHash: []byte{0xa3}, Amount: 6, Slot: 20, PostSnapshot: true},
 	}, got)
-
-	require.NoError(t, db.RecordDrainedFamily(t.Context(), nodesettings.FamilyDReps))
-	require.NoError(t, db.RecordDrainedFamily(t.Context(), nodesettings.FamilyAccounts))
-	err = adapter.EachRewardJournalRow(nil, func(ledgerdb.RewardJournalRow) error { return nil })
-	require.ErrorIs(t, err, database.ErrFamilyDrained)
 }

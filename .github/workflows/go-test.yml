@@ -209,11 +209,9 @@ jobs:
         if: steps.detect.outputs.run-ci == 'true'
         run: node --test .github/scripts/test-cancel-obsolete-merge-groups.cjs
       - name: go-test
-        # No services and no -race: the Postgres and MySQL variants in
-        # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and
-        # friends and t.Skip when unset, so this replays vectors against SQLite
-        # only. gate (services) and gate (race) cover the rest on the merged
-        # commit.
+        # No services and no -race: the service-backed tests gate on
+        # POSTGRES_PASSWORD / MYSQL_DSN and friends and t.Skip when unset.
+        # gate (services) and gate (race) cover the rest on the merged commit.
         if: steps.detect.outputs.run-ci == 'true'
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
       # The root ./... stops at sdk/go.mod.
@@ -264,13 +262,9 @@ jobs:
   # release-only arrangement is what abandoned v0.70.3, when a genuine
   # race-detector failure in ./ledger surfaced with the tag already pushed.
   #
-  # It runs without the service containers on purpose. The Postgres and MySQL
-  # variants in internal/test/conformance gate on POSTGRES_PASSWORD /
-  # POSTGRES_DSN and MYSQL_ROOT_PASSWORD / MYSQL_DSN and t.Skip when unset, so
-  # with no job env here that suite replays its vectors against SQLite only.
-  # gate (services) covers those backends; replaying them under race
-  # instrumentation would dominate this job -- conformance alone took 917s
-  # uninstrumented with the services attached, against 86s SQLite-only.
+  # It runs without the service containers on purpose: the service-backed
+  # tests gate on POSTGRES_PASSWORD / POSTGRES_DSN and MYSQL_ROOT_PASSWORD /
+  # MYSQL_DSN and t.Skip when unset, and gate (services) covers them.
   #
   # Tests that only run single-goroutine computation or assert SQLite query
   # plans call testutil.SkipUnderRace; check runs them un-instrumented.
@@ -572,11 +566,7 @@ jobs:
         #
         # -timeout is a hang diagnostic rather than a budget: it panics with a
         # goroutine dump naming the stuck test, which this job's
-        # timeout-minutes cannot do. internal/test/conformance on real
-        # Postgres and MySQL is the long pole: it took 707-1238s across ten
-        # consecutive runs and reached 1800s once, still issuing TRUNCATE
-        # statements rather than deadlocked, so 60m leaves room for runner
-        # speed without failing pull requests for it.
+        # timeout-minutes cannot do.
         run: |
           set -euo pipefail
           pattern='POSTGRES_PASSWORD|POSTGRES_DSN|MYSQL_ROOT_PASSWORD|MYSQL_DSN|DINGO_TEST_S3_BUCKET|DINGO_TEST_S3_ENDPOINT|AWS_ENDPOINT'

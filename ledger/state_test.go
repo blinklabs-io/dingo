@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -402,12 +403,12 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	newMinFeeA := uint(99)
 	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
+	require.NoError(t, fxSeedPParamUpdate(
+		t, db,
 		[]byte{0x01, 0x02, 0x03},
 		updateCbor,
 		currentEpoch.StartSlot+1,
 		currentEpoch.EpochId, // submission epoch (enacted for EpochId+1)
-		nil,
 	))
 
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
@@ -567,6 +568,9 @@ func dijkstraRetentionRestartLedgerState(
 		Logger:  logger,
 	})
 	require.NoError(t, err)
+	// The set lives under the data directory, where the restart below finds
+	// what was seeded into it.
+	_, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
 
 	epoch := models.Epoch{
 		EpochId:       5,
@@ -596,6 +600,7 @@ func dijkstraRetentionRestartLedgerState(
 		epoch.EraId,
 		nil,
 	))
+	require.NoError(t, closeSet())
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	reopened, err := dbtest.NewDatabase(t, &database.Config{
@@ -606,6 +611,7 @@ func dijkstraRetentionRestartLedgerState(
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(reopened))
 	})
+	OpenLiveSetAtForTest(t, reopened, dataDir)
 	ls := &LedgerState{
 		db:           reopened,
 		currentEra:   eras.DijkstraEraDesc,
@@ -3843,12 +3849,12 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 
 	db := newTestDB(t)
 	boundaryHash := bytes.Repeat([]byte{0x42}, 32)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		"42",
 		nil,
 	))
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerHashSyncKey,
 		fmt.Sprintf("%x", boundaryHash),
 		nil,
@@ -3900,7 +3906,7 @@ func TestLoadMithrilTrustBoundaryMalformedSlotReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		"x",
 		nil,
@@ -3927,7 +3933,7 @@ func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, seedDB(t, db).SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey,
 		"42",
 		nil,
@@ -3939,10 +3945,9 @@ func TestLoadMithrilTrustBoundaryReadErrorReturnsError(t *testing.T) {
 		},
 	}
 	fxAttachLedgerDB(t, ls)
-	// Close the metadata store so the subsequent GetSyncState read fails
-	// deterministically, mirroring the pattern used in
-	// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates.
-	require.NoError(t, db.Metadata().Close())
+	// The boundary is block-store chain state: close the block store so the
+	// read fails deterministically.
+	require.NoError(t, db.Blob().Close())
 
 	err := ls.loadMithrilTrustBoundary()
 
@@ -3960,7 +3965,7 @@ func TestLoadMithrilTrustBoundaryEmptyRecordedSlotReturnsError(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "", nil))
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -3983,7 +3988,7 @@ func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "x", nil))
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4071,7 +4076,7 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	ls := &LedgerState{
 		db:    db,
@@ -4676,7 +4681,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	ls := &LedgerState{
 		db:    db,
@@ -5616,7 +5621,9 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	require.ErrorAs(t, err, &validationErr)
 	require.Contains(t, err.Error(), "fee")
 
-	stored, err := db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(
+		context.Background(), tx.Hash().Bytes(), nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
 }
@@ -6516,15 +6523,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				}
 				encoded, err := cbor.Encode(output)
 				require.NoError(t, err)
-				require.NoError(
-					t,
-					db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-						if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{TxId: txID, OutputIdx: 0, AddedSlot: 0}); err != nil {
-							return err
-						}
-						return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
-					}),
-				)
+				fxSeedOutput(t, db, txID, 0, 0, encoded)
 				block.TransactionBodies = append(
 					block.TransactionBodies,
 					conway.ConwayTransactionBody{
@@ -6729,216 +6728,6 @@ func TestLedgerProcessBlockAllowsSyntheticByronBlocksWithPlaceholderCbor(
 	require.NoError(t, err)
 }
 
-// shrinkCleanupConsumedUtxosInterval makes the periodic cleanup timer fire on
-// a test timescale. The package var is restored on cleanup, so these tests
-// must not run in parallel with each other.
-func shrinkCleanupConsumedUtxosInterval(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := cleanupConsumedUtxosInterval
-	cleanupConsumedUtxosInterval = d
-	t.Cleanup(func() { cleanupConsumedUtxosInterval = prev })
-}
-
-// newCleanupTimerFireSignal returns a hook that reports each timer fire on the
-// returned channel. The send is non-blocking so an unread fire never stalls
-// the timer callback itself.
-func newCleanupTimerFireSignal() (func(), <-chan struct{}) {
-	fires := make(chan struct{}, 64)
-	return func() {
-		select {
-		case fires <- struct{}{}:
-		default:
-		}
-	}, fires
-}
-
-// drainCleanupTimerFires discards every fire already buffered. Close has
-// stopped and drained the timer by the time this is called, so all of them
-// happened before it returned; only a fire arriving afterwards is a defect.
-// Draining fully -- rather than discarding a single fire -- is what keeps the
-// absence assertion from depending on how many intervals elapsed while the
-// test was between receives.
-func drainCleanupTimerFires(fires <-chan struct{}) {
-	for {
-		select {
-		case <-fires:
-		default:
-			return
-		}
-	}
-}
-
-// TestCleanupConsumedUtxos_TimerStopsOnClose covers a
-// shutdown leak: the cleanup timer callback re-arms itself via
-// scheduleCleanupConsumedUtxos, so a Close that does not stop it leaves a
-// self-perpetuating timer running against a database its owner closes
-// immediately after Close returns (LedgerState does not own the database --
-// see the note at the end of Close).
-// Not t.Parallel: shrinkCleanupConsumedUtxosInterval swaps the package-level
-// cleanupConsumedUtxosInterval, which every concurrent LedgerState in this
-// package would observe.
-func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
-	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-
-	hook, fires := newCleanupTimerFireSignal()
-	ls.cleanupConsumedUtxosTimerFiredHook = hook
-
-	ls.scheduleCleanupConsumedUtxos(context.Background())
-	// Two fires prove the callback re-armed itself at least once, so the
-	// absence check below is measuring a stopped timer rather than one that
-	// simply never started.
-	testutil.RequireReceive(
-		t, fires, testutil.AsyncWait,
-		"cleanup timer must fire while the ledger state is open",
-	)
-	testutil.RequireReceive(
-		t, fires, testutil.AsyncWait,
-		"cleanup timer must re-arm itself while the ledger state is open",
-	)
-
-	require.NoError(t, ls.Close())
-
-	drainCleanupTimerFires(fires)
-
-	// 200ms is ~40 shrunken intervals. The assertion is that a stopped timer
-	// fires zero times, not that a running one fires within a deadline, so
-	// runner load cannot turn this into a flake.
-	testutil.RequireNoReceive(
-		t, fires, 200*time.Millisecond,
-		"cleanup timer must not fire after Close returns",
-	)
-}
-
-// TestCleanupConsumedUtxos_CloseWaitsForActiveCallback covers the drain half
-// of the acceptance criteria. Stopping a time.Timer does not wait for an
-// AfterFunc callback that has already started, so Close must join the
-// in-flight run; otherwise it returns while cleanup is still issuing database
-// work, and the owner closes the database out from under it.
-func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
-	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
-	// The run hook, not the timer-fired hook: this must block inside the
-	// region that has already registered with the drain, which is what Close
-	// is required to wait for.
-	ls.cleanupConsumedUtxosRunHook = func() {
-		once.Do(func() {
-			close(entered)
-			<-release
-		})
-	}
-
-	ls.scheduleCleanupConsumedUtxos(context.Background())
-	testutil.RequireReceive(
-		t, entered, testutil.AsyncWait,
-		"cleanup timer callback must start before Close is called",
-	)
-
-	closeReturned := make(chan error, 1)
-	go func() { closeReturned <- ls.Close() }()
-
-	testutil.RequireNoReceive(
-		t, closeReturned, 200*time.Millisecond,
-		"Close must not return while a cleanup callback is in flight",
-	)
-
-	close(release)
-	err := testutil.RequireReceive(
-		t, closeReturned, testutil.AsyncWait,
-		"Close must return once the in-flight cleanup callback finishes",
-	)
-	require.NoError(t, err)
-}
-
-// TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose covers the second
-// acceptance criterion for the path that has no timer at all: the epoch
-// transition fires cleanup as a bare `go ls.cleanupConsumedUtxos()`
-// (state.go), which can lose the race with shutdown. Stopping the timer alone
-// does not constrain that goroutine.
-//
-// TestCleanupConsumedUtxos_CoreModePrunes is the positive control: the same
-// seeded row and tip are deleted by the same call on an open ledger state, so
-// a passing result here cannot come from cleanup being inert.
-func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	txId := bytes.Repeat([]byte{0xC5}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		tipSlot     uint64 = 100_000 // > 50_000 default stability window
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	require.NoError(t, ls.Close())
-
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	assert.NotNil(
-		t, post,
-		"cleanup must not begin database work after Close returns",
-	)
-}
-
-// TestCleanupConsumedUtxos_RepeatedCloseIsSafe covers the repeated-close half
-// of the third acceptance criterion. A drain built on sync.WaitGroup is easy
-// to get wrong on the second call, and Close is genuinely called twice on the
-// live restore/truncate path.
-func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
-	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-
-	hook, fires := newCleanupTimerFireSignal()
-	ls.cleanupConsumedUtxosTimerFiredHook = hook
-
-	ls.scheduleCleanupConsumedUtxos(context.Background())
-	testutil.RequireReceive(
-		t, fires, testutil.AsyncWait,
-		"cleanup timer must fire while the ledger state is open",
-	)
-
-	require.NoError(t, ls.Close())
-	require.NoError(t, ls.Close(), "repeated Close must remain a no-op")
-
-	drainCleanupTimerFires(fires)
-	testutil.RequireNoReceive(
-		t, fires, 200*time.Millisecond,
-		"cleanup timer must stay stopped across repeated Close calls",
-	)
-}
-
-// TestCleanupConsumedUtxos_ScheduleAfterCloseDoesNotArm covers the re-arm
-// window directly: the timer callback calls scheduleCleanupConsumedUtxos
-// after running cleanup, so a callback that was already in flight when Close
-// stopped the timer would otherwise install a fresh one behind Close's back.
-func TestCleanupConsumedUtxos_ScheduleAfterCloseDoesNotArm(t *testing.T) {
-	shrinkCleanupConsumedUtxosInterval(t, 5*time.Millisecond)
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-
-	hook, fires := newCleanupTimerFireSignal()
-	ls.cleanupConsumedUtxosTimerFiredHook = hook
-
-	require.NoError(t, ls.Close())
-	ls.scheduleCleanupConsumedUtxos(context.Background())
-
-	testutil.RequireNoReceive(
-		t, fires, 200*time.Millisecond,
-		"scheduling cleanup after Close must not arm a timer",
-	)
-}
-
 // newTestDBForCleanup builds an in-memory Database in the requested storage
 // mode. An empty mode defaults to core (per Database.New).
 func newTestDBForCleanup(t *testing.T, mode string) *database.Database {
@@ -6949,345 +6738,6 @@ func newTestDBForCleanup(t *testing.T, mode string) *database.Database {
 	})
 	require.NoError(t, err)
 	return db
-}
-
-// seedSpentUtxoForCleanup writes a single spent UTxO row directly. The
-// row is "consumed at deletedSlot but still well within the periodic
-// cleanup eligibility window" — matching what a normal block application
-// would produce after the consumed input was soft-marked.
-func seedSpentUtxoForCleanup(
-	t *testing.T,
-	db *database.Database,
-	txId []byte,
-	outputIdx uint32,
-	addedSlot, deletedSlot uint64,
-) {
-	t.Helper()
-	address := []byte(nil)
-	if db.StorageMode() == types.StorageModeAPI {
-		address = []byte("test-address")
-	}
-	mdTxn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId:        txId,
-			OutputIdx:   outputIdx,
-			Address:     address,
-			AddedSlot:   addedSlot,
-			DeletedSlot: deletedSlot,
-			Amount:      types.Uint64(1),
-		})
-	}))
-}
-
-// newLedgerStateForCleanup wires the minimum surface area
-// cleanupConsumedUtxos needs: db, currentTip, currentEra, and a logger.
-// CardanoNodeConfig is intentionally left nil so
-// calculateStabilityWindowForEra returns the default
-// (blockfetchBatchSlotThresholdDefault = 50000); the tip slot is then
-// chosen well past that window so consumed-UTxO cleanup is eligible to
-// run in core mode. The upstream tip is initialized to the local tip so the
-// test represents a node that is near the network tip.
-func newLedgerStateForCleanup(
-	t *testing.T,
-	db *database.Database,
-	tipSlot uint64,
-) *LedgerState {
-	t.Helper()
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, nil),
-		},
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	ls.syncUpstreamTipSlot.Store(tipSlot)
-	// The sweep reads the retention marks of the LedgerDB set.
-	attachTestLiveSet(t, ls)
-	return ls
-}
-
-// TestCleanupConsumedUtxos_CoreModePrunes asserts the pre-existing
-// invariant that core mode hard-deletes consumed UTxO rows once the
-// stability window has passed. Without this baseline, the API-mode
-// retention test below could pass by accident if the cleanup loop were
-// silently dead for both modes.
-func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	txId := bytes.Repeat([]byte{0xA1}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		tipSlot     uint64 = 100_000 // > 50_000 default stability window
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	pre, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, pre, "seed must succeed before cleanup")
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	assert.Nil(
-		t, post,
-		"core mode must hard-delete consumed UTxO rows after stability "+
-			"window",
-	)
-}
-
-// TestCleanupConsumedUtxos_PersistsPruneFloor covers the durable marker
-// checkUtxoRetentionWindow relies on (ledger/queries.go): every run that
-// actually prunes must durably record the floor it used, so a later pin
-// check can reject against it even if the tip subsequently moves in a way
-// that would otherwise make a freshly-computed floor look more lenient
-// ( review -- see persistConsumedUtxoPruneFloor's doc
-// comment for the rollback and era-transition cases this closes).
-func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	const tipSlot = 100_000 // > 50_000 default stability window
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-
-	before, err := ls.readConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	assert.Zero(t, before, "no floor before cleanup has ever run")
-
-	ls.cleanupConsumedUtxos(context.Background())
-
-	after, err := ls.readConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	assert.Equal(
-		t, uint64(50_000), after,
-		"must persist tipSlot minus the default stability window",
-	)
-}
-
-func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		ls.cleanupConsumedUtxos(context.Background())
-		close(done)
-	}()
-	testutil.RequireReceive(
-		t,
-		done,
-		testutil.AsyncWait,
-		"consumed UTxO cleanup must not acquire chainsyncMutex",
-	)
-}
-
-// TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails covers the
-// ordering invariant persistConsumedUtxoPruneFloor's doc comment depends on:
-// a failure to durably record the floor must abort this run before any row
-// is actually hard-deleted, not just be logged and ignored. Otherwise real
-// rows could be pruned with no durable record that floor was ever used,
-// letting a later pinned query at or above that floor see no persisted
-// floor to reject against and silently answer "absent" for a ref that was
-// actually there. The test drops the
-// sync_state table (via a raw connection to the same file) so SetSyncState
-// fails while the utxo table -- and so UtxosDeleteConsumed -- stays fully
-// functional, isolating the failure to exactly the call this test cares
-// about.
-func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     t.TempDir(),
-		StorageMode: types.StorageModeCore,
-	})
-	require.NoError(t, err)
-
-	txId := bytes.Repeat([]byte{0xD2}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		tipSlot     uint64 = 100_000 // > 50_000 default stability window
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec("DROP TABLE sync_state")
-	require.NoError(t, err)
-
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	assert.NotNil(
-		t, post,
-		"cleanup must not delete rows when persisting the prune floor "+
-			"fails, since that would prune without any durable record "+
-			"that pruning happened",
-	)
-}
-
-func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
-	t.Parallel()
-
-	const batchLimit = 3
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	mdTxn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		for idx := 0; idx <= batchLimit; idx++ {
-			txID := bytes.Repeat([]byte{0}, 32)
-			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
-			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:        txID,
-				OutputIdx:   0,
-				AddedSlot:   1_000,
-				DeletedSlot: 5_000,
-				Amount:      types.Uint64(1),
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
-
-	ls := newLedgerStateForCleanup(t, db, 100_000)
-	ls.cleanupBatchSizeOverride = batchLimit
-	ls.cleanupConsumedUtxos(context.Background())
-
-	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
-		50_000,
-		batchLimit+1,
-		nil,
-	)
-	require.NoError(t, err)
-	assert.Len(t, remaining, 1, "one eligible row must remain for a later run")
-
-	ls.cleanupConsumedUtxos(context.Background())
-	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
-		50_000,
-		batchLimit+1,
-		nil,
-	)
-	require.NoError(t, err)
-	assert.Empty(t, remaining, "the next run must resume the bounded cleanup")
-}
-
-func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	txId := bytes.Repeat([]byte{0xA3}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		tipSlot     uint64 = 100_000
-		upstreamTip uint64 = 200_000
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	ls.syncUpstreamTipSlot.Store(upstreamTip)
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	assert.NotNil(t, post, "cleanup must defer while the ledger is catching up")
-}
-
-// TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip covers the
-// distinction the catch-up deferral has to make: an upstream tip of 0 means
-// unknown, not "infinitely far behind". A node that has never connected to a
-// peer -- or that lost its last active connection, which zeroes the value in
-// chainsync.go -- would otherwise defer cleanup for as long as it stays
-// peerless, growing the utxo table without bound in core mode, and silently:
-// no error, no crash. Cleanup ran off the local tip alone before the deferral
-// existed, so that is the behavior an unknown upstream tip falls back to.
-func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeCore)
-	txId := bytes.Repeat([]byte{0xB4}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		// Far past the 50_000 default stability window, so the only
-		// reason to retain the row would be the deferral itself.
-		tipSlot uint64 = 10_000_000
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	pre, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, pre, "seed must succeed before cleanup")
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	// No peer has ever reported a tip.
-	ls.syncUpstreamTipSlot.Store(0)
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	assert.Nil(
-		t, post,
-		"an unknown upstream tip must not defer cleanup: the local tip "+
-			"is already far past the stability window",
-	)
-}
-
-// TestCleanupConsumedUtxos_APIModeRetains covers API
-// storage mode: the periodic cleanup must leave
-// spent UTxO metadata rows in place so historical transaction queries
-// can resolve input / collateral / reference-input associations via
-// spent_at_tx_id and the utxo_collateral_edge and utxo_reference_edge tables.
-func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDBForCleanup(t, types.StorageModeAPI)
-	txId := bytes.Repeat([]byte{0xA2}, 32)
-	const (
-		addedSlot   uint64 = 1_000
-		deletedSlot uint64 = 5_000
-		tipSlot     uint64 = 100_000
-	)
-	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
-
-	ls := newLedgerStateForCleanup(t, db, tipSlot)
-	ls.cleanupConsumedUtxos(context.Background())
-
-	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(
-		t, post,
-		"API mode must retain spent UTxO row past the cleanup threshold "+
-			"so historical transaction queries can still resolve input / "+
-			"collateral / reference-input associations",
-	)
-	assert.Equal(
-		t, deletedSlot, post.DeletedSlot,
-		"retained row must keep deleted_slot as the spent-state encoding",
-	)
-
-	// Live-UTxO queries must still filter the retained row out: it has
-	// a non-zero deleted_slot so it is no longer part of the active set.
-	live, err := db.Metadata().GetUtxo(txId, 0, nil)
-	require.NoError(t, err)
-	assert.Nil(t, live,
-		"live UTxO view must continue to exclude spent rows in API mode")
 }
 
 // TestDrepRegistrationReportsAbsenceWithoutAPublishedSnapshot covers the other
@@ -8548,13 +7998,12 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 		AddedSlot:    1,
 	}}, nil))
 	require.NoError(t, seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, coldCredential, hotCredential, 1, 1)
-	require.NoError(t, err)
+	committeeSeedAuthorization(
+		t, db,
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(coldCredential)},
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(hotCredential)},
+		1, 1,
+	)
 
 	action := &lcommon.HardForkInitiationGovAction{Type: 1}
 	action.ProtocolVersion.Major = 10
@@ -9423,7 +8872,7 @@ func newRollbackWindowFixture(t *testing.T) *rollbackWindowFixture {
 		Point:       makeTestPoint(tipBlock),
 		BlockNumber: tipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	ls := &LedgerState{
 		db:    db,
@@ -10421,12 +9870,12 @@ func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 		12: cbor.Rat{Rat: big.NewRat(1, 2)},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
+	require.NoError(t, fxSeedPParamUpdate(
+		t, db,
 		[]byte{0xaa}, // genesis key delegate hash
 		updateCbor,
 		50, // slot within epoch 0 (the submission epoch)
 		0,  // submission epoch (enacted for epoch 1 at the 0->1 boundary)
-		nil,
 	))
 
 	// Concrete Shelley pparams as if mid-epoch-0, fully federated (d = 1).
@@ -10643,8 +10092,7 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 // shrinkGatherCoalesceRetryInterval overrides the package-level
 // gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam for the
 // duration of the calling test and restores it on cleanup, so these tests
-// must not run in parallel with each other (see cleanup_consumed_utxos's
-// shrinkCleanupConsumedUtxosInterval for the same pattern).
+// must not run in parallel with each other.
 func shrinkGatherCoalesceRetryInterval(
 	t *testing.T,
 	interval time.Duration,
@@ -12274,25 +11722,15 @@ func newSameSlotCompetitorFixtureOpts(
 	}
 	require.NoError(t, db.SetTip(appliedTip, nil))
 	ls.currentTip = appliedTip
-	fxJournalChain(t, ls)
+	// One output produced at or below the ancestor and consumed by the
+	// applied block at the contested slot, as applying that block leaves the
+	// set: spent, with the spend journaled under the competitor's point.
+	spentTxId := testHashBytes("3678-utxo-producer")
+	fxAddOutput(t, ls, spentTxId)
+	fxTip(t, ls, ocommon.NewPoint(sameSlotAncestorSlot, ancestorHash))
+	fxSpendAt(t, ls, appliedTip.Point, spentTxId)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
-
-	// One UTxO produced at the ancestor slot and consumed by the applied
-	// block at the contested slot, exactly as a normal block application
-	// leaves it: the row survives, soft-deleted with deleted_slot set to the
-	// consuming block's slot.
-	spentTxId := testHashBytes("3678-utxo-producer")
-	mdTxn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId:        spentTxId,
-			OutputIdx:   0,
-			AddedSlot:   sameSlotAncestorSlot,
-			DeletedSlot: sameSlotContestedSlot,
-			Amount:      types.Uint64(1_000_000),
-		})
-	}))
 
 	return &sameSlotCompetitorFixture{
 		ls:            ls,
@@ -12304,43 +11742,12 @@ func newSameSlotCompetitorFixtureOpts(
 	}
 }
 
-// inputInLiveSet reports whether the consumed UTxO is present in the live UTxO
-// set, using the same database.UtxoByRef lookup that LedgerView.UtxoById
-// delegates to. That lookup applies the deleted_slot filter, so it is the
-// predicate that decides Conway bad-inputs and, through it, the consumed term
-// of value conservation.
-//
-// Presence is judged on ErrUtxoNotFound rather than on a nil error: a row
-// seeded directly into metadata carries no blob CBOR (models.Utxo.Cbor is not
-// persisted by CreateUtxo), so the decode step of UtxoById cannot succeed for a
-// synthetic UTxO. Only ErrUtxoCborUnavailable, alongside a nil error, is read
-// as the row being in the live set. Any other error -- including a genuine
-// decode failure -- is a lookup failure rather than an answer about live-set
-// membership, and is returned so the test fails loudly instead of counting as
-// present.
+// inputInLiveSet reports whether the consumed output is live, by the lookup
+// that decides Conway bad-inputs and, through it, the consumed term of value
+// conservation.
 func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	t.Helper()
-
-	var live bool
-	txn := f.db.Transaction(context.Background(), false)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, err := f.db.UtxoByRef(context.Background(), f.spentTxId, 0, txn)
-		switch {
-		case err == nil,
-			errors.Is(err, database.ErrUtxoCborUnavailable):
-			live = true
-			return nil
-		case errors.Is(err, database.ErrUtxoNotFound):
-			live = false
-			return nil
-		default:
-			// Any other error is a real lookup failure, not an answer about
-			// live-set membership. Return it so the test fails instead of
-			// reading it as "present".
-			return err
-		}
-	}))
-	return live
+	return fxOutputLive(t, f.ls, f.spentTxId)
 }
 
 // TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers.
@@ -12460,38 +11867,31 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(mainTip, nil))
 	ls.currentTip = mainTip
+	// The main block spends an output produced below it and produces one at
+	// the EBB's slot.
+	inputTx := testHashBytes("byron-ebb-input")
+	outputTx := testHashBytes("byron-ebb-output")
+	fxAddOutput(t, ls, inputTx)
 	fxTip(t, ls, ocommon.NewPoint(ancestorSlot, ancestorHash))
 	fxTip(t, ls, ebbPoint)
-	fxTip(t, ls, mainTip.Point)
+	fxCommitAt(t, db, mainTip.Point, LedgerChanges{Utxo: []UtxoEvent{{
+		Point: mainTip.Point,
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: outputTx, Idx: 0},
+			Cbor: boundaryOutputCbor(t, 1_000_000),
+		}},
+		Removed: []models.UtxoId{{Hash: inputTx, Idx: 0}},
+	}}})
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	inputTx := testHashBytes("byron-ebb-input")
-	outputTx := testHashBytes("byron-ebb-output")
-	require.NoError(
-		t,
-		db.MetadataTxn(context.Background(), true).
-			Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId: inputTx, OutputIdx: 0, AddedSlot: ancestorSlot,
-					DeletedSlot: ebbSlot, Amount: types.Uint64(1_000_000),
-				}); err != nil {
-					return err
-				}
-				return db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId: outputTx, OutputIdx: 0, AddedSlot: ebbSlot,
-					Amount: types.Uint64(1_000_000),
-				})
-			}),
-	)
-	fixture := &sameSlotCompetitorFixture{db: db, spentTxId: inputTx}
+	fixture := &sameSlotCompetitorFixture{ls: ls, db: db, spentTxId: inputTx}
 	require.False(t, fixture.inputInLiveSet(t))
 
 	require.NoError(t, ls.rollback(context.Background(), ebbPoint))
 	require.True(t, fixture.inputInLiveSet(t),
 		"the main block's spent input must be live after rollback")
-	_, err = db.UtxoByRef(context.Background(), outputTx, 0, nil)
-	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+	require.False(t, fxOutputLive(t, ls, outputTx),
 		"the main block's same-slot output must be removed")
 	require.Equal(
 		t,
@@ -12822,14 +12222,18 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	// Only a v0.94.2 database keeps the markers in its metadata store, which
+	// is the store this recompute maintains; a LedgerDB set reverts its own.
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	store := dbadapter.New(db)
 	// differs from eras.DefaultPlutusV2CostModel
 	realNonDefaultV2 := []int64{1, 2, 3}
 
 	// A persisted epoch table is needed for EpochBySlot to resolve the
 	// rollback slot below (epochs 0-9, 100 slots each).
 	for i := range uint64(10) {
-		require.NoError(t, seedDB(t, db).SetEpoch(
+		require.NoError(t, store.SetEpoch(
 			i*100, i, nil, nil, nil, nil, 1, 1000, 100, nil,
 		))
 	}
@@ -12840,7 +12244,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 	require.NoError(t, database.SetSyntheticV2CostModelClearedEpoch(db, nil, 5))
 	require.NoError(
 		t,
-		seedDB(t, db).SetSyncState(database.SyntheticV2CostModelSyncKey, "false", nil),
+		store.SetSyncState(database.SyntheticV2CostModelSyncKey, "false", nil),
 	)
 
 	// Roll back to before epoch 5.
@@ -12850,7 +12254,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 	)
 
 	// The boolean marker must be absent, not forced to "true".
-	value, err := seedDB(t, db).GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
+	value, err := store.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, value)
 
@@ -13075,13 +12479,9 @@ func seedRatifiableBootstrapHardForkInitiation(
 		AddedSlot:  1,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       repeatByte(32, 0x01),
-		OutputIdx:  0,
-		StakingKey: stakeCred,
-		AddedSlot:  1,
-		Amount:     types.Uint64(1_000),
-	}))
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, db), repeatByte(32, 0x01), 0, stakeCred, 1_000,
+	)
 	require.NoError(t, seedDB(t, db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeDRep,
@@ -13373,11 +12773,11 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch)
 }
 
-// Slot grid for the prune-floor fixture. The Shelley genesis used here
-// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots. The
-// consumed-UTxO sweep prunes up to the lower of tip-W and the slot of the block
-// k deep; the fixture places that block at pruneFixtureFloorSlot, so everything
-// with deleted_slot <= pruneFixtureFloorSlot is pruned.
+// Slot grid for the journal-floor fixture. The Shelley genesis used here
+// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots. The live
+// UTxO set prunes its journal W behind its tip; the fixture places the block
+// at tip-W at pruneFixtureFloorSlot, which pruneJournal leaves as the oldest
+// point a rollback reaches.
 //
 // The at-tip rewind schedule then steps the ledger tip 140000 -> 114080 ->
 // 88160. Attempt 2 asks for W/2 below the tip (127040) and findRewindPoint
@@ -13392,7 +12792,6 @@ const (
 	pruneFixtureDeepRewindSlot  = 88_160
 	pruneFixtureConsumerSlot    = 110_000
 	pruneFixtureFloorSlot       = 114_080
-	pruneFixtureRetainedSlot    = 120_000
 	pruneFixtureTipSlot         = 140_000
 	// pruneFixtureDepthFillers puts the floor block exactly k=432 blocks
 	// behind the tip: 431 fillers, the tip, and the floor block itself.
@@ -13402,12 +12801,13 @@ const (
 type prunedUtxoFixture struct {
 	ls *LedgerState
 	db *database.Database
-	// prunedTxId is consumed at pruneFixtureConsumerSlot, at or below the
-	// prune floor, so its row is hard-deleted by the consumed-UTxO sweep.
+	// prunedTxId is consumed at pruneFixtureConsumerSlot, below the journal
+	// floor, so no rollback the journal reaches restores it.
 	prunedTxId []byte
-	// retainedTxId is consumed above the prune floor, so its row survives the
-	// sweep and rollback can still restore it. It is the control that keeps a
-	// failure of the pruned probe from being read as a dead fixture.
+	// retainedTxId is consumed by the tip block, above the journal floor, so
+	// a rollback can
+	// still restore it. It is the control that keeps a failure of the pruned
+	// probe from being read as a dead fixture.
 	retainedTxId []byte
 }
 
@@ -13416,9 +12816,8 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return newPrunedUtxoFixtureWithFillers(t, mithrilLedgerSlot, 0, false)
 }
 
-// newDeepPrunedUtxoFixture is the prune-floor fixture for tests that run the
-// consumed-UTxO sweep: it adds the filler blocks that make the chain k blocks
-// deep so the sweep prunes at pruneFixtureFloorSlot.
+// newDeepPrunedUtxoFixture is the journal-floor fixture with the filler
+// blocks that make the chain k blocks deep above pruneFixtureFloorSlot.
 func newDeepPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
 	t.Helper()
 	return newPrunedUtxoFixtureWithFillers(
@@ -13429,13 +12828,12 @@ func newDeepPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtx
 	)
 }
 
-// newPrunedUtxoFixtureWithFillers builds the prune-floor fixture with filler
-// blocks so the chain is at least k (=432) blocks deep, which the sweep needs
-// before it will delete anything. With the default placement the fillers sit
-// between the floor block and the tip, so the block exactly k deep is the
-// floor block and the sweep floor stays at pruneFixtureFloorSlot. With
-// sparseTail the fillers instead sit one slot apart just above the consumer
-// block, which leaves the block k deep far below tip-3k/f.
+// newPrunedUtxoFixtureWithFillers builds the journal-floor fixture with
+// filler blocks so the chain is at least k (=432) blocks deep. With the
+// default placement the fillers sit between the floor block and the tip, so
+// the block exactly k deep is the floor block. With sparseTail the fillers
+// instead sit one slot apart just above the consumer block, which leaves the
+// block k deep far below tip-3k/f.
 func newPrunedUtxoFixtureWithFillers(
 	t *testing.T,
 	mithrilLedgerSlot uint64,
@@ -13548,61 +12946,58 @@ func newPrunedUtxoFixtureWithFillers(
 	}
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.currentTip = tip
-	fxJournalChain(t, ls)
-	ls.currentEra = eras.ConwayEraDesc
-	ls.mithrilLedgerSlot = mithrilLedgerSlot
-	ls.chainsyncState = SyncingChainsyncState
-	ls.publishSnapshotsLocked()
-	ls.syncUpstreamTipSlot.Store(pruneFixtureTipSlot)
-
 	f := &prunedUtxoFixture{
 		ls:           ls,
 		db:           db,
 		prunedTxId:   testHashBytes("3766-utxo-pruned"),
 		retainedTxId: testHashBytes("3766-utxo-retained"),
 	}
-	seed := func(txId []byte, addedSlot, deletedSlot uint64) {
-		mdTxn := db.MetadataTxn(context.Background(), true)
-		require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-			return db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:        txId,
-				OutputIdx:   0,
-				AddedSlot:   addedSlot,
-				DeletedSlot: deletedSlot,
-				Amount:      types.Uint64(1_000_000),
-				Address:     append([]byte{0x60}, bytes.Repeat([]byte{0x01}, 28)...),
-			})
-		}))
+	// Journal every block as applying it does: the producer block produces
+	// both outputs, the consumer block spends the pruned one and the tip
+	// block the retained one.
+	for _, b := range blocks {
+		point := ocommon.NewPoint(b.slot, b.hash)
+		var event UtxoEvent
+		switch b.slot {
+		case pruneFixtureProducerSlot:
+			for _, txId := range [][]byte{f.prunedTxId, f.retainedTxId} {
+				event.Added = append(event.Added, UtxoOutput{
+					Ref:  models.UtxoId{Hash: txId, Idx: 0},
+					Cbor: boundaryOutputCbor(t, 1_000_000),
+				})
+			}
+		case pruneFixtureConsumerSlot:
+			event.Removed = []models.UtxoId{{Hash: f.prunedTxId, Idx: 0}}
+		case pruneFixtureTipSlot:
+			event.Removed = []models.UtxoId{{Hash: f.retainedTxId, Idx: 0}}
+		default:
+			fxTip(t, ls, point)
+			continue
+		}
+		event.Point = point
+		fxCommitAt(t, db, point, LedgerChanges{Utxo: []UtxoEvent{event}})
 	}
-	seed(f.prunedTxId, pruneFixtureProducerSlot, pruneFixtureConsumerSlot)
-	seed(f.retainedTxId, pruneFixtureProducerSlot, pruneFixtureRetainedSlot)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.mithrilLedgerSlot = mithrilLedgerSlot
+	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
+	ls.syncUpstreamTipSlot.Store(pruneFixtureTipSlot)
+
 	return f
 }
 
-// inLiveSet mirrors the probe used by the rollback tests: it asks
-// the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
-// exercises the deleted_slot filter that decides Conway bad-inputs and, through
-// it, the consumed term of value conservation. A row seeded straight into
-// metadata carries no blob CBOR, so ErrUtxoCborUnavailable counts as present;
-// any error other than ErrUtxoNotFound is a lookup failure and fails the test.
+// pruneJournal leaves the floor block as the oldest point the set's journal
+// reaches, as the set does once the tip is a stability window past it.
+func (f *prunedUtxoFixture) pruneJournal(t *testing.T) {
+	t.Helper()
+	fxPruneJournal(t, f.ls, pruneFixtureFloorSlot)
+}
+
+// inLiveSet reports whether txId#0 is live, by the lookup validation
+// resolves inputs with.
 func (f *prunedUtxoFixture) inLiveSet(t *testing.T, txId []byte) bool {
 	t.Helper()
-	var live bool
-	txn := f.db.Transaction(context.Background(), false)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, err := f.db.UtxoByRef(context.Background(), txId, 0, txn)
-		switch {
-		case err == nil, errors.Is(err, database.ErrUtxoCborUnavailable):
-			live = true
-			return nil
-		case errors.Is(err, database.ErrUtxoNotFound):
-			live = false
-			return nil
-		default:
-			return err
-		}
-	}))
-	return live
+	return fxOutputLive(t, f.ls, txId)
 }
 
 // driveAtTipRecovery runs the production at-tip recovery entry point the
@@ -13641,7 +13036,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 		deletedSlot uint64
 	}{
 		{"pruned", f.prunedTxId, pruneFixtureProducerSlot, pruneFixtureConsumerSlot},
-		{"retained", f.retainedTxId, pruneFixtureProducerSlot, pruneFixtureRetainedSlot},
+		{"retained", f.retainedTxId, pruneFixtureProducerSlot, pruneFixtureTipSlot},
 	} {
 		live := f.inLiveSet(t, probe.txId)
 		switch {
@@ -13668,25 +13063,16 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 	}
 }
 
-// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers.
-//
-// cleanupConsumedUtxos hard-deletes consumed UTxO rows whose deleted_slot is at
-// or below tip-stabilityWindow. database.TruncateAfterSlot restores consumed
-// UTxOs with an UPDATE (deleted_slot > slot), so a rollback below that prune
-// floor cannot restore anything the sweep already removed -- and used to report
-// the ledger repaired anyway. The at-tip recovery rewind schedule reaches such
-// a target because each escalating attempt rewinds a further stability window
-// below the *current* tip while the prune floor stays fixed at the highest tip
-// the node reached.
-//
-// Blocks the node applied cleanly then become unapplyable: their inputs resolve
-// to nothing, which Conway reports as bad inputs and, because value
-// conservation sums consumed over only the inputs that resolve, as value not
-// conserved with consumed 0 in the same pass.
+// The live UTxO set prunes its journal a stability window behind its tip, and
+// rolls back from that journal alone, so a rollback below the journal's floor
+// cannot restore the outputs consumed above the target. The at-tip recovery
+// rewind schedule reaches such a target because each escalating attempt
+// rewinds a further stability window below the *current* tip while the floor
+// stays where the highest tip the node reached left it.
 //
 // The recovery schedule here walks 140000 -> 114080 -> 88160, and 88160 is
-// below the 114080 sweep floor.
-func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
+// below the 114080 journal floor.
+func TestAtTipRecoveryRewindBelowUtxoSetJournal(t *testing.T) {
 	t.Parallel()
 
 	f := newDeepPrunedUtxoFixture(t, 0)
@@ -13698,33 +13084,19 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 		"fixture slot grid assumes a 3k/f stability window",
 	)
 
-	// Production consumed-UTxO sweep at the highest tip the node reached.
-	f.ls.cleanupConsumedUtxos(context.Background())
-	require.False(
-		t,
-		f.inLiveSet(t, f.prunedTxId),
-		"output consumed at or below the prune floor must be hard-deleted by the sweep",
-	)
-	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		uint64(pruneFixtureFloorSlot),
-		floor,
-		"the sweep must record how deep it removed spent rows",
-	)
+	f.pruneJournal(t)
 
 	f.driveAtTipRecovery(t, 3)
 
 	// The live UTxO set must agree with the point recovery settled on.
 	f.assertLiveSetConsistentAtTip(t)
 	// ...which it can only do if the tip was never rewound below the point
-	// from which the consumed-UTxO sweep can still restore state.
+	// the set's journal reaches.
 	require.GreaterOrEqual(
 		t,
 		f.ls.currentTip.Point.Slot,
 		uint64(pruneFixtureFloorSlot),
-		"recovery rewound the ledger below the consumed UTxO prune floor",
+		"recovery rewound the ledger below the live UTxO set journal",
 	)
 	require.Positive(
 		t,
@@ -13733,16 +13105,16 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 	)
 }
 
-// TestRollbackBelowConsumedUtxoPruneFloorIsRefused pins the backstop every
+// TestRollbackBelowUtxoSetJournalIsRefused pins the backstop every
 // rewind path funnels through. Callers other than at-tip recovery -- a peer
 // rollback, the durable-tip-floor repair, replay recovery -- reach
 // LedgerState.rollback directly, and it must refuse before mutating anything
 // rather than move the tip and report a repair it cannot perform.
-func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
+func TestRollbackBelowUtxoSetJournalIsRefused(t *testing.T) {
 	t.Parallel()
 
 	f := newDeepPrunedUtxoFixture(t, 0)
-	f.ls.cleanupConsumedUtxos(context.Background())
+	f.pruneJournal(t)
 	tipBefore := f.ls.currentTip
 
 	err := f.ls.rollback(context.Background(),
@@ -13751,7 +13123,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 			testHashBytes("3766-deep"),
 		),
 	)
-	require.ErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
+	require.ErrorIs(t, err, ErrRollbackBelowUtxoJournal)
 	require.Equal(
 		t,
 		tipBefore.Point,
@@ -13782,66 +13154,6 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	)
 }
 
-// TestConsumedUtxoPruneFloorIsReadFromTheDatabase pins where the floor comes
-// from. It is deliberately not mirrored in memory: a mirror is only refreshed
-// after the sweep's transaction commits, so between commit and refresh it
-// reports a lower floor than the database holds, and a rollback admitted on
-// that stale value is exactly the divergence the floor exists to refuse.
-func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
-	t.Parallel()
-
-	f := newDeepPrunedUtxoFixture(t, 0)
-
-	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Zero(t, floor, "nothing has been swept yet")
-
-	f.ls.cleanupConsumedUtxos(context.Background())
-
-	floor, err = f.db.ConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(pruneFixtureFloorSlot), floor)
-
-	// A floor written by another writer -- a prior run, or the sweep's own
-	// transaction before any in-process cache could observe it -- is honored
-	// immediately, with no reload step.
-	require.NoError(t, seedDB(t, f.db).SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(pruneFixtureRetainedSlot, 10),
-		nil,
-	))
-	below, seen, err := f.ls.rollbackBelowConsumedUtxoPruneFloor(
-		ocommon.NewPoint(pruneFixtureFloorSlot, nil),
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(pruneFixtureRetainedSlot), seen)
-	require.True(
-		t,
-		below,
-		"the check must read the persisted floor, not a cached copy",
-	)
-
-	// A malformed value fails closed rather than reading as "nothing swept".
-	require.NoError(t, seedDB(t, f.db).SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey, "not-a-slot", nil,
-	))
-	_, _, err = f.ls.rollbackBelowConsumedUtxoPruneFloor(
-		ocommon.NewPoint(pruneFixtureFloorSlot, nil),
-	)
-	require.Error(t, err)
-	require.ErrorIs(
-		t,
-		f.ls.rollback(context.Background(),
-			ocommon.NewPoint(
-				pruneFixtureDeepRewindSlot,
-				testHashBytes("3766-deep"),
-			),
-		),
-		strconv.ErrSyntax,
-		"an unreadable floor must refuse the rollback",
-	)
-}
-
 // TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
 // hazard between the same-slot competitor redirect and the prune
 // floor. rollbackChainAndStateDeferred truncates the primary chain and only then
@@ -13854,7 +13166,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	t.Parallel()
 
 	f := newDeepPrunedUtxoFixture(t, 0)
-	f.ls.cleanupConsumedUtxos(context.Background())
+	f.pruneJournal(t)
 
 	// Put the applied ledger tip on a same-slot competitor at the floor, with
 	// a recorded nonce so the redirect treats it as genuinely applied.
@@ -13894,7 +13206,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	require.ErrorIs(
 		t,
 		f.ls.rollbackChainAndStateDeferred(context.Background(), target, nil),
-		ErrRollbackBelowUtxoPruneFloor,
+		ErrRollbackBelowUtxoJournal,
 	)
 	require.Equal(
 		t,
@@ -13908,84 +13220,6 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 		f.ls.currentTip.Point,
 		"the ledger tip must not move for a refused rollback",
 	)
-}
-
-// TestUtxoPruningDeferredForCatchup pins both of utxoPruningDeferredForCatchup's
-// defer conditions, plus the two cases that must NOT defer: it is the one
-// change here that widens what Acquire accepts, so a mirror that drifts
-// from cleanupConsumedUtxos' own two defer conditions fails open rather
-// than closed. checkUtxoRetentionWindow calls this to decide whether to
-// accept a point below the ordinary stability-window floor, so a false
-// positive here (deferring when it shouldn't) would let Acquire accept a
-// point cleanupConsumedUtxos might have already pruned.
-func TestUtxoPruningDeferredForCatchup(t *testing.T) {
-	t.Parallel()
-
-	t.Run("no upstream tracked at all: not deferred", func(t *testing.T) {
-		t.Parallel()
-		ls := &LedgerState{}
-		require.False(t, ls.utxoPruningDeferredForCatchup(1000, 50))
-	})
-
-	t.Run("active upstream, target not yet known: deferred", func(t *testing.T) {
-		t.Parallel()
-		connA := testChainsyncConnId(6101, 3291)
-		ls := &LedgerState{
-			config: LedgerStateConfig{
-				GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-					return &connA
-				},
-			},
-		}
-		// UpstreamSyncStatus is (0, true) here: a live active connection
-		// with no admitted target yet -- "still syncing," per that
-		// function's own doc comment.
-		require.True(t, ls.utxoPruningDeferredForCatchup(1000, 50))
-	})
-
-	t.Run("active upstream, known target, far behind: deferred", func(t *testing.T) {
-		t.Parallel()
-		connA := testChainsyncConnId(6102, 3292)
-		ls := &LedgerState{
-			config: LedgerStateConfig{
-				GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-					return &connA
-				},
-			},
-		}
-		ls.publishActiveUpstream(connA)
-		ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-			ConnectionId:      connA,
-			SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(1000, nil)},
-			SyncTargetTrusted: true,
-		})
-		require.Equal(t, uint64(1000), ls.UpstreamTipSlot())
-		// tipSlot 100 is 900 slots behind upstream's 1000, well outside a
-		// 50-slot stability window.
-		require.True(t, ls.utxoPruningDeferredForCatchup(100, 50))
-	})
-
-	t.Run("active upstream, known target, caught up: not deferred", func(t *testing.T) {
-		t.Parallel()
-		connA := testChainsyncConnId(6103, 3293)
-		ls := &LedgerState{
-			config: LedgerStateConfig{
-				GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-					return &connA
-				},
-			},
-		}
-		ls.publishActiveUpstream(connA)
-		ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-			ConnectionId:      connA,
-			SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(1000, nil)},
-			SyncTargetTrusted: true,
-		})
-		require.Equal(t, uint64(1000), ls.UpstreamTipSlot())
-		// tipSlot 980 is within a 50-slot stability window of upstream's
-		// 1000 -- caught up, pruning must proceed normally.
-		require.False(t, ls.utxoPruningDeferredForCatchup(980, 50))
-	})
 }
 
 func TestValidationReferenceSlotPrefersCurrentSlotWhenAhead(t *testing.T) {
@@ -14144,43 +13378,6 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 		1,
 		"chain-selection header validation must not advance the shared epoch cache",
 	)
-}
-
-// TestVerifyPointQueryable_UtxoFloorOnly_Rejected covers a gap the other
-// TestVerifyPointQueryable* cases leave open: deleting the
-// checkUtxoRetentionWindow call, or the queryShelleyCurrentProtocolParams
-// call, from VerifyPointQueryable leaves every existing
-// TestVerifyPointQueryable* case green --
-// PastRetentionFloor_Rejected is rejected by the stake floor either way, and
-// no fixture has a UTxO-floor rejection as its only failure. Identical to
-// TestVerifyPointQueryable_WithinAllFloors_Accepted (on chain, within the
-// stake/era windows, no CardanoNodeConfig so the network_state floor never
-// runs) except for a durably persisted consumed-UTxO prune floor (400) above
-// the pinned slot (350) -- only checkUtxoRetentionWindow can reject this
-// point.
-func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = conwayPParamsWithCostModels(
-		map[uint][]int64{0: {1, 1, 1}},
-	)
-	ls.currentEpoch = models.Epoch{EpochId: 3}
-	ls.publishSnapshotsLocked()
-
-	hash := repeatedBytes(32, 0x0B)
-	seedBlockAtSlot(t, ls, 350, hash)
-	seedEpochs(t, ls, map[uint64]uint64{300: 3})
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(350, hash),
-	}, nil))
-	require.NoError(t, ls.persistConsumedUtxoPruneFloor(400, nil))
-
-	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
 func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {

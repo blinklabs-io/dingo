@@ -22,8 +22,8 @@ import (
 )
 
 // The ledger's sync_state keys name either ledger state, which only the
-// LedgerDB set keeps, or chain data the SQL chain store still holds. A key
-// that is neither must be refused rather than written to SQL, where no
+// LedgerDB set keeps, or chain data the block store holds. A key
+// that is neither must be refused rather than written to a store where no
 // ledger read would find it and no rollback would undo it.
 func TestLedgerSyncStateKeyOutsideTheChainStoreIsRefused(t *testing.T) {
 	t.Parallel()
@@ -39,22 +39,16 @@ func TestLedgerSyncStateKeyOutsideTheChainStoreIsRefused(t *testing.T) {
 	require.ErrorIs(t, err, errSyncStateKeyUnowned)
 	require.ErrorIs(t, ldb.DeleteSyncState(unknown, nil), errSyncStateKeyUnowned)
 	stored, err := db.GetSyncState(unknown, nil)
-	require.NoError(t, err)
-	require.Empty(t, stored, "the refused key reached the SQL store")
+	require.ErrorIs(t, err, database.ErrNoMetadataStore)
+	require.Empty(t, stored, "the refused key reached a store")
 
-	// A chain-store key still passes through to SQL.
-	require.NoError(t, ldb.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey, "7", nil,
-	))
-	stored, err = db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, "7", stored)
-	require.NoError(t, ldb.SetSyncState(
-		deferredHeaderValidationSyncStatePrefix+"1.ab", "1", nil,
-	))
-	got, err := ldb.GetSyncState(
-		deferredHeaderValidationSyncStatePrefix+"1.ab", nil,
+	// The deferred header floor is the block store's, so its sync_state
+	// name is refused like any other key the ledger does not keep there.
+	require.ErrorIs(
+		t,
+		ldb.SetSyncState(database.DeferredHeaderFloorKey, "1", nil),
+		errSyncStateKeyUnowned,
 	)
-	require.NoError(t, err)
-	require.Equal(t, "1", got)
+	_, err = ldb.ListSyncStateKeysByPrefix("deferred_header_validation:", nil)
+	require.ErrorIs(t, err, errSyncStateKeyUnowned)
 }

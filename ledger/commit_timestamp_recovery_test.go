@@ -34,11 +34,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// commitTimestampRecoveryFixture leaves an on-disk database the way an unclean
-// stop between a blob commit and its metadata commit does: five chain blocks in
-// the blob store, a metadata tip at the third, and a blob commit timestamp the
-// metadata store never received. It returns the blocks and the reopened
-// database, whose open reported the timestamp mismatch.
+// commitTimestampRecoveryFixture leaves an on-disk database the way a commit
+// that failed after its blob transaction does: five chain blocks in the blob
+// store and a ledger tip at the third. It returns the blocks and the reopened
+// database.
 func commitTimestampRecoveryFixture(
 	t *testing.T,
 ) ([]chain.RawBlock, *database.Database) {
@@ -75,25 +74,22 @@ func commitTimestampRecoveryFixtureAtTip(
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
 	ledgerTip := rawBlockTip(raw[tipIndex])
+	// The ledger's set records the tip with the database, and outlives the
+	// reopen in the data directory as a node's does.
+	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
+	w, ok := set.(LedgerChangesWriter)
+	require.True(t, ok, "the fixture's set must keep ledger state")
+	require.NoError(t, w.ApplyLedgerChanges(&ledgerTip.Point, LedgerChanges{}))
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return db.SetTip(ledgerTip, txn)
 	}))
-	blobTxn := db.Blob().NewTransaction(true)
-	defer blobTxn.Rollback() //nolint:errcheck
-	require.NoError(t, db.Blob().SetCommitTimestamp(1, blobTxn))
-	require.NoError(t, blobTxn.Commit())
+	require.NoError(t, closeSet())
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	reopened, err := dbtest.NewDatabase(t, cfg)
-	require.NotNil(t, reopened)
-	_, isTimestampErr := errors.AsType[database.CommitTimestampError](err)
-	require.True(
-		t,
-		isTimestampErr,
-		"reopen must report the commit timestamp mismatch, got %v",
-		err,
-	)
+	require.NoError(t, err)
+	OpenLiveSetAtForTest(t, reopened, dataDir)
 	return raw, reopened
 }
 

@@ -86,12 +86,12 @@ func TestInactivityActivationRollsBackWithItsBoundary(t *testing.T) {
 
 // A store written by a release that kept ledger state in SQL holds the
 // activation epoch in sync_state and the stamped credentials in
-// account_inactivity_activation. Startup moves both into the set before it
-// deletes them, so the set answers as a node that ran the activation itself.
+// account_inactivity_activation. The migration copies both into the set, so
+// the set answers as a node that ran the activation itself.
 func TestMigratedInactivityActivationKeepsItsMembers(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	meta := db.Metadata()
 	stamped := renewTestCred(0x64)
@@ -130,7 +130,7 @@ func TestMigratedInactivityActivationKeepsItsMembers(t *testing.T) {
 		database.DelegatorInactivityActivatedSyncKey, nil,
 	)
 	require.NoError(t, err)
-	require.Empty(t, marker, "startup must delete the SQL marker")
+	require.Equal(t, "5", marker, "the migration leaves its source as it is")
 	epoch, activated, err := ls.delegatorInactivityActivationEpoch(nil)
 	require.NoError(t, err)
 	require.True(t, activated)

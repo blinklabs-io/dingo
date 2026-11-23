@@ -28,7 +28,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -128,7 +127,7 @@ func TestQueryViewContendedAnchorReturnsPending(t *testing.T) {
 	), errQueryViewSetPending)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	writer := db.MetadataTxn(ctx, true)
+	writer := db.Transaction(ctx, true)
 	t.Cleanup(writer.Release)
 	require.NoError(t, writer.Commit())
 }
@@ -215,7 +214,7 @@ func TestQueryViewPinsLiveUtxoReads(t *testing.T) {
 	t.Parallel()
 	ls, db := newDiskTestLedger(t)
 	id := seedBabbageUtxo(t, db, 0x71, 0, queryViewTestAddress(t), 2_000_000)
-	row, err := db.UtxoByRef(t.Context(), id, 0, nil)
+	row, err := ls.UtxoByRef(id, 0)
 	require.NoError(t, err)
 	var releases atomic.Int64
 	set := &querySnapshotSet{
@@ -231,10 +230,6 @@ func TestQueryViewPinsLiveUtxoReads(t *testing.T) {
 	require.NoError(
 		t,
 		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-			if err := db.MarkUtxosDeletedAtSlot(t.Context(), txn,
-				[]dbtypes.UtxoKey{{TxId: id, OutputIdx: 0}}, 500); err != nil {
-				return err
-			}
 			txn.AfterCommit(
 				func() { delete(set.committedUtxoSet, string(id)+string(rune(0))) },
 			)
@@ -297,7 +292,7 @@ func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
 	t.Parallel()
 	ls, db := newDiskTestLedger(t)
 	id := seedBabbageUtxo(t, db, 0x72, 0, queryViewTestAddress(t), 2_000_000)
-	row, err := db.UtxoByRef(t.Context(), id, 0, nil)
+	row, err := ls.UtxoByRef(id, 0)
 	require.NoError(t, err)
 	var releases atomic.Int64
 	set := &querySnapshotSet{
@@ -314,8 +309,6 @@ func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
 	resumeCommit := func() { resumeOnce.Do(func() { close(resume) }) }
 	t.Cleanup(resumeCommit)
 	txn.AfterCommit(func() { close(entered); <-resume })
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(t.Context(), txn,
-		[]dbtypes.UtxoKey{{TxId: id}}, 500))
 	ls.stageUtxoSet(txn, nil, UtxoEvent{Removed: []models.UtxoId{{Hash: id}}})
 	committed := make(chan error, 1)
 	go func() { committed <- txn.Commit() }()

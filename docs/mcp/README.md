@@ -704,15 +704,15 @@ The Dingo MCP server provides 21 specialized tools:
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |
-| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials) |
-| `get_account` | Query the stored stake-account row, including indexed delegation, reward, and DRep fields | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
+| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential. With an IndexerDB it reads the indexed `utxo` rows; without one it reads the ledger's live UTxO set, pages by `offset` only, and says that cursor pages and the stored row columns need an IndexerDB | `address_or_credential` (string, required), `limit`, `cursor` (full addresses, IndexerDB only; nonzero `offset` rejected), `offset` (payment credentials, and every query without an IndexerDB) |
+| `get_account` | Query the stake account from the ledger state: delegation, reward balance, DRep and active fields. Its IndexerDB row references (`id`, `certificate_id`) come from the IndexerDB, and are marked as needing one on a node without it | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
 | `get_epoch_summary` | Summary stats and boundary nonces for an epoch | `epoch` (int, optional) |
 | `resolve_datum_or_script` | Look up and decode Plutus CIP-32 datum or script metadata from hash | `hash` (string, required - 56 or 64 hex chars) |
 | `evaluate_tx` | Simulate Plutus execution units (CPU steps, memory) & fee before submission | `cbor` (string, required - hex or base64) |
 | `get_utxos_by_asset` | Kupo-style pattern matching querying unspent UTxOs holding a specific policy or asset | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex), `limit`, `offset` (at most 10,000) |
 | `get_asset_info` | Detailed Cardano native asset metadata, Token Registry info, on-chain supply, count of holding UTxOs, and CIP-25 NFT metadata | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex) |
 | `get_governance_state` | Conway CIP-1694 governance state (constitution, committee quorum, members, DReps) | `drep_credential` (optional Bech32 `drep1...` or 56-hex) |
-| `get_pool_performance` | Historical SPO reward performance, blocks, delegated stake and pledge (lovelace), and apparent performance | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |
+| `get_pool_performance` | SPO reward performance per epoch, blocks, delegated stake and pledge (lovelace), and apparent performance. The IndexerDB holds every epoch; without one the tool reads the epochs the ledger state keeps and says that older ones need an IndexerDB | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |
 | `get_protocol_parameters` | Active ledger protocol parameters (fees, min UTxO, max ExUnits, Plutus prices, governance deposits) | *none* |
 | `get_mempool_info` | Live mempool metrics (pending tx count, byte volume, saturation percentage) or tx status | `tx_hash` (optional 64-character hex), `limit` (optional, default 10, at most 50) |
 | `decode_address` | Cryptographically parse Bech32 or raw hex address into network ID and payment/stake credentials | `address` (string, required) |

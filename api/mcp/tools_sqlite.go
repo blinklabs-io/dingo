@@ -87,7 +87,7 @@ func registerSQLiteTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available or not configured in read-only mode",
+						Text: "Error: SQLite database is not available or not configured in read-only mode; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -103,7 +103,7 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.refuseDrainedTables(input.Query); err != nil {
+		if err := limits.refuseLedgerStateTables(input.Query); err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -252,7 +252,7 @@ func registerSQLiteTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -269,7 +269,7 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.refuseDrainedTables(input.Query); err != nil {
+		if err := limits.refuseLedgerStateTables(input.Query); err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -351,7 +351,7 @@ func registerSQLiteTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil

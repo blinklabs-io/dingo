@@ -191,16 +191,7 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 				id := bytes.Repeat([]byte{byte(i + 1)}, 32)
 				encoded, err := cbor.Encode(additionalReferenceOutput(t, size))
 				require.NoError(t, err)
-				require.NoError(
-					t,
-					db.Transaction(context.Background(), true).
-						Do(func(txn *database.Txn) error {
-							if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{TxId: id}); err != nil {
-								return err
-							}
-							return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-						}),
-				)
+				fxSeedOutput(t, db, id, 0, 0, encoded)
 				block.BlockBody.Transactions = append(
 					block.BlockBody.Transactions,
 					dijkstra.DijkstraTransaction{
@@ -553,16 +544,7 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			id := bytes.Repeat([]byte{byte(i + 1)}, 32)
 			encoded, err := cbor.Encode(additionalReferenceOutput(t, 10))
 			require.NoError(t, err)
-			require.NoError(
-				t,
-				db.Transaction(t.Context(), true).
-					Do(func(txn *database.Txn) error {
-						if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: id}); err != nil {
-							return err
-						}
-						return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-					}),
-			)
+			fxSeedOutput(t, db, id, 0, 0, encoded)
 			inputs = append(
 				inputs,
 				shelley.MustNewShelleyTransactionInput(

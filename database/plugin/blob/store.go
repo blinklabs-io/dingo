@@ -22,7 +22,7 @@ import (
 )
 
 // BlobStore defines the interface for a blob storage provider.
-// All transactional methods (Get, Set, Delete, NewIterator, SetCommitTimestamp)
+// All transactional methods (Get, Set, Delete, NewIterator)
 // require a non-nil types.Txn created by NewTransaction(). Passing nil will
 // result in types.ErrNilTxn.
 //
@@ -45,12 +45,6 @@ type BlobStore interface {
 		txn types.Txn,
 		opts types.BlobIteratorOptions,
 	) types.BlobIterator
-
-	// Commit timestamp management
-	GetCommitTimestamp() (int64, error)
-	// SetCommitTimestamp stores the last commit timestamp; parameter order is
-	// (timestamp, txn) to keep the transaction as the final parameter.
-	SetCommitTimestamp(int64, types.Txn) error
 
 	// Block operations
 	SetBlock(
@@ -158,8 +152,8 @@ type TxnBudget interface {
 	// RemainingTxnEntries reports how many further mutations, each costing
 	// entryBytes of key plus value, txn will still accept. Staging all of
 	// them fills the transaction, so a caller with anything left to write
-	// into it afterwards -- and every combined transaction has the commit
-	// timestamp -- keeps headroom of its own.
+	// into it afterwards -- and a combined transaction's commit writes its
+	// tip -- keeps headroom of its own.
 	//
 	// The bool is false when the store cannot answer for this transaction
 	// -- a nil, finished, or foreign handle -- which callers read the same

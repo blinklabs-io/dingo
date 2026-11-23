@@ -176,14 +176,14 @@ func (ls *LedgerState) rebuildGovernanceBoundarySnapshotAt(
 			errGovernanceBoundaryUnreachable, point.Slot, mithrilSlot,
 		)
 	}
-	below, floor, err := ls.rollbackBelowConsumedUtxoPruneFloor(point)
+	below, err := ls.rollbackBelowUtxoSetJournal(point)
 	if err != nil {
 		return err
 	}
 	if below {
 		return fmt.Errorf(
-			"%w: slot %d is below the consumed UTxO prune floor %d",
-			errGovernanceBoundaryUnreachable, point.Slot, floor,
+			"%w: slot %d is below the live UTxO set's journal",
+			errGovernanceBoundaryUnreachable, point.Slot,
 		)
 	}
 

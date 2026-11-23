@@ -112,6 +112,8 @@ type LedgerChanges struct {
 	// PostSnapshotCredits are the credits a boundary applied after its SNAP
 	// point, in order.
 	PostSnapshotCredits []PostSnapshotCredit
+	// TxIndex are the transactions the commit applied, in order.
+	TxIndex []TxIndexEntry
 	// OpCerts are the commit's op-cert counter changes, in order.
 	OpCerts []OpCertChange
 	// RewardBlocks are the commit's changes to the per-epoch block counts
@@ -278,6 +280,11 @@ type BlockNonceReader interface {
 // returns the net change as a rollback UtxoEvent.
 type UtxoSetRollbacker interface {
 	RollbackUtxoSet(point ocommon.Point) (UtxoEvent, error)
+	// JournalReaches reports whether the set's history reaches back to
+	// point: false when RollbackUtxoSet(point) would be refused because
+	// point is older than the history kept. A point off the set's lineage,
+	// or ahead of its tip, is not one the history is too short for.
+	JournalReaches(point ocommon.Point) (bool, error)
 	// PreviewUtxoSetRollback returns the change RollbackUtxoSet(point)
 	// would make, without making it.
 	PreviewUtxoSetRollback(point ocommon.Point) (UtxoEvent, error)
@@ -349,6 +356,10 @@ type utxoSetBatch struct {
 	pparamUpdates []PParamUpdateChange
 	syncMarkers   []SyncMarkerChange
 	stateMarks    []StateMarkChange
+	// txIndex are the transactions txn applied, in order, and txIndexAt the
+	// position of each hash's last entry in it.
+	txIndex   []TxIndexEntry
+	txIndexAt map[string]int
 	// importBaselines and witnesses are the account import baselines and
 	// witness slots txn wrote, for a set that keeps accounts.
 	importBaselines []ImportBaselineChange
@@ -382,7 +393,7 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.committee) > 0 ||
 		len(b.proposals) > 0 || len(b.votes) > 0 ||
 		len(b.pparamUpdates) > 0 || len(b.syncMarkers) > 0 ||
-		len(b.stateMarks) > 0 ||
+		len(b.stateMarks) > 0 || len(b.txIndex) > 0 ||
 		len(b.importBaselines) > 0 ||
 		len(b.witnesses) > 0 || len(b.governanceBoundaries) > 0
 }
@@ -739,6 +750,7 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			RewardRounds:        batch.rewardRounds,
 			PostSnapshotCredits: batch.postSnapshot,
 			OpCerts:             batch.opCerts,
+			TxIndex:             batch.txIndex,
 			RewardBlocks:        batch.rewardBlocks,
 			RewardInputs:        batch.rewardInputs,
 			RewardDerived:       batch.rewardDerived,
@@ -794,8 +806,7 @@ func ResumeCheckOnly(ctx context.Context) bool {
 //
 // It reports false, changing nothing, when point is not an applied block on
 // the primary chain below the ledger tip, or when the rollback would cross the
-// Mithril trust boundary or the consumed-UTxO prune floor; the caller then
-// rebuilds the set instead. Call it before the ledger starts.
+// Mithril trust boundary; the caller then rebuilds the set instead. Call it before the ledger starts.
 func (ls *LedgerState) ResumeUtxoSetFrom(
 	ctx context.Context,
 	point ocommon.Point,
@@ -824,13 +835,6 @@ func (ls *LedgerState) ResumeUtxoSetFrom(
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
-		return false, nil
-	}
-	below, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(point)
-	if err != nil {
-		return false, fmt.Errorf("determine consumed UTxO prune floor: %w", err)
-	}
-	if below {
 		return false, nil
 	}
 	if ResumeCheckOnly(ctx) {
@@ -1312,6 +1316,22 @@ type UtxoSetIterator interface {
 // iterateLiveUtxos calls fn for every live output as txn sees the live UTxO
 // set, with txn's staged changes over it. Rows passed to fn carry only the
 // reference and the output CBOR.
+// IterateLiveUtxos calls fn for each output of the live UTxO set as of the
+// ledger's tip, stopping at the first error fn returns or when ctx ends. A row
+// holds the output's reference and CBOR only, and its buffers are reused
+// between calls.
+func (ls *LedgerState) IterateLiveUtxos(
+	ctx context.Context,
+	fn func(*models.Utxo) error,
+) error {
+	return ls.iterateLiveUtxos(nil, func(u *models.Utxo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fn(u)
+	})
+}
+
 func (ls *LedgerState) iterateLiveUtxos(
 	txn ledgerdb.Txn,
 	fn func(*models.Utxo) error,

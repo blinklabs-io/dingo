@@ -15,14 +15,12 @@
 package ledger_test
 
 import (
-	"bytes"
 	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -201,26 +199,4 @@ func TestPoolHistoryRollsBackAcrossAReRegistration(t *testing.T) {
 	require.False(t, found)
 	_, found = vrfAt(t, h.scenario.LedgerDB(), s.Retired, s.Boundary, false)
 	require.True(t, found)
-}
-
-// TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration pins the set
-// result when a registration exists only in metadata.
-func TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
-	t.Parallel()
-	h := newPoolHistoryHarness(t)
-	pool := bytes.Repeat([]byte{0x7e}, 28)
-	vrf := bytes.Repeat([]byte{0x7f}, 32)
-	require.NoError(t, h.scenario.DB.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pool, VrfKeyHash: vrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pool, VrfKeyHash: vrf, AddedSlot: 5,
-			Pledge: types.Uint64(1), Cost: types.Uint64(1),
-		},
-		nil,
-	))
-	reached, _ := h.scenario.HideStoreReads("GetPoolVrfKeyHashAtSlot")
-	got, found := vrfAt(t, h.scenario.LedgerDB(), pool, 10, false)
-	require.False(t, found)
-	require.Nil(t, got)
-	require.Zero(t, reached(), "pool history read reached the metadata store")
 }

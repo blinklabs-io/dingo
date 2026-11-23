@@ -271,8 +271,9 @@ func newDatabaseWithOptions(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
+	ledgerRole := config.Role == ""
 	metadataConfig := opts.Metadata.Config
-	if metadataConfig == nil &&
+	if !ledgerRole && metadataConfig == nil &&
 		metadataName == "sqlite" &&
 		!opts.InMemoryMetadata {
 		// Seed a copy of the process's migrated template so the provider's
@@ -304,22 +305,26 @@ func newDatabaseWithOptions(
 			}
 		}
 	}
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, metadataName, metadataConfig,
-		metadata.ProviderDependencies{
-			DataDir: config.DataDir, StorageMode: config.StorageMode,
-			MaxConnections: opts.MaxConnections,
-			Logger:         config.Logger, PromRegistry: config.PromRegistry,
-			StatementGuard: opts.StatementGuard,
-		},
-	)
-	if err != nil {
-		_ = host.Stop(context.Background())
-		return nil, err
-	}
-	if wrap != nil {
-		metadataStore = wrap(metadataStore)
+	// The ledger's database keeps no metadata store.
+	var metadataStore metadata.MetadataStore
+	if !ledgerRole {
+		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
+			context.Background(), host,
+			plugin.CapabilityStorageMetadata, metadataName, metadataConfig,
+			metadata.ProviderDependencies{
+				DataDir: config.DataDir, StorageMode: config.StorageMode,
+				MaxConnections: opts.MaxConnections,
+				Logger:         config.Logger, PromRegistry: config.PromRegistry,
+				StatementGuard: opts.StatementGuard,
+			},
+		)
+		if err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
+		if wrap != nil {
+			metadataStore = wrap(metadataStore)
+		}
 	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		context.Background(), host,

@@ -25,14 +25,16 @@ import (
 )
 
 // deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
-// hashes are preserved for replay. It drops derived metadata above slot and
-// restores UTxOs spent by removed blocks.
+// hashes are preserved for replay. The ledger state those blocks were applied
+// to is the live UTxO set's, which the import replaces, so nothing else is
+// removed with them.
 //
-// Every cut is the raw slot: the rows of the removed blocks sit at slots
-// where the rows a ledger-state import wrote can sit too (imported UTxOs at
-// the state slot, reconcile tombstones at the state slot, a hydrated
-// producer's slot), and no slot rule separates the two. A caller must
-// therefore run it with slot at or above the state slot.
+// The blocks are deleted outright rather than kept for a rollback
+// notification (database.BlockRetireTxn). The import replaces the ledger
+// state these blocks were applied to, so no subscriber is owed their undo,
+// and its completion removes any pending rollback record
+// (Database.ClearImportedChainState). A record read before then tolerates a
+// body that is gone.
 func deleteBlobBlocksAboveSlotExcept(
 	ctx context.Context,
 	db *database.Database,
@@ -88,45 +90,6 @@ func deleteBlobBlocksAboveSlotExcept(
 					p.Slot, err,
 				)
 			}
-		}
-		// Drop the metadata indexed for the removed blocks, or the chain
-		// that replaces them would inherit their UTxO consumption, duplicate
-		// transaction records and orphan governance proposals and votes.
-		if err := db.UtxosDeleteRolledback(ctx, slot, txn); err != nil {
-			return fmt.Errorf(
-				"delete rolled-back UTxOs above slot %d: %w",
-				slot, err,
-			)
-		}
-		if err := db.TransactionsDeleteRolledback(ctx, slot, txn); err != nil {
-			return fmt.Errorf(
-				"delete rolled-back transactions above slot %d: %w",
-				slot, err,
-			)
-		}
-		if err := db.UtxosUnspend(ctx, slot, txn); err != nil {
-			return fmt.Errorf(
-				"restore UTxOs spent above slot %d: %w",
-				slot, err,
-			)
-		}
-		if err := db.DeleteGovernanceVotesAfterSlot(
-			ctx,
-			slot, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete rolled-back governance votes above slot %d: %w",
-				slot, err,
-			)
-		}
-		if err := db.DeleteGovernanceProposalsAfterSlot(
-			ctx,
-			slot, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete rolled-back governance proposals above slot %d: %w",
-				slot, err,
-			)
 		}
 		return nil
 	})

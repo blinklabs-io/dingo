@@ -33,8 +33,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
-// ErrFactTableUnserved reports a fact table whose family is drained from the
-// metadata store and whose rows the live UTxO set cannot yet export. It is
+// ErrFactTableUnserved reports a fact table the metadata store no longer
+// holds and whose rows the live UTxO set cannot yet export. It is
 // returned instead of an empty answer, since the metadata store holds no rows
 // for the table.
 var ErrFactTableUnserved = errors.New(
@@ -457,7 +457,7 @@ func (ls *LedgerState) epochFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.epochStateReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilyEpochs)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilyEpochs)
 	}
 	view, err := ls.epochStateView(r, nil)
 	if err != nil {
@@ -495,7 +495,7 @@ func (ls *LedgerState) epochSummaryFactRows(
 	er, sr, _ := ls.epochSummaryReader(nil)
 	lister, ok := sr.(EpochSummaryLister)
 	if er == nil || sr == nil || !ok {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilySummaries)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilySummaries)
 	}
 	ls.utxoSetApplyMu.RLock()
 	view, err := ls.summaryListViewLocked(er, lister, nil)
@@ -534,7 +534,7 @@ func (ls *LedgerState) networkStateFactRows(
 	r, _ := ls.networkStateReader(nil)
 	lister, ok := r.(networkStateLister)
 	if r == nil || !ok {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyNetworkDonations,
 		)
 	}
@@ -567,7 +567,7 @@ func (ls *LedgerState) networkDonationFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.networkStateReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyNetworkDonations,
 		)
 	}
@@ -598,7 +598,7 @@ func (ls *LedgerState) pparamsFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.pparamsReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyPParamsUpdates,
 		)
 	}

@@ -24,47 +24,30 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/require"
 )
 
-// graduatedTables maps every family of statedrain.Graduated to its tables.
-func graduatedTables() map[nodesettings.Family][]string {
-	out := map[nodesettings.Family][]string{}
-	for _, e := range statedrain.Graduated(drainTestSource{}) {
-		for _, table := range e.Tables {
-			out[e.Family] = append(out[e.Family], table.Name)
-		}
-	}
-	return out
-}
-
-// drainEveryGraduatedFamily drains the whole of statedrain.Graduated in its
-// own order with the statement guard armed.
-func drainEveryGraduatedFamily(t *testing.T, h *p5Harness) {
+// serveLedgerOnly makes the harness's set the ledger's only copy of its
+// state, as a node's startup does.
+func serveLedgerOnly(t *testing.T, h *p5Harness) {
 	t.Helper()
-	src := drainTestSource{set: h.set, db: h.scenario.DB}
-	h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-		Set:   src, Guard: h.guard,
-	}, statedrain.Graduated(src))
+	h.set.ServeLedgerOnly()
 }
 
-// allGraduatedRun builds the harness over a metadata store that holds its
-// ledger state, the reward input facts included, as an earlier release left
-// it, and a set that takes all of it over.
+// releasedFactsRun builds the harness over a set that takes over the reward
+// input facts a v0.94.2 database left in its metadata store, with the rest of
+// the harness's state written to the set.
 // It then writes nonces, network state, summaries, op-cert counters and the
 // committee, runs drive, rolls back across the boundary, and renders what the
 // ledger answers after each step. The ledger holds a Leios certificate
 // validator, as a node always does.
-func allGraduatedRun(
+func releasedFactsRun(
 	t *testing.T,
 	drive func(h *p5Harness) func() []string,
 ) (map[string][]string, *p5Harness) {
@@ -72,23 +55,22 @@ func allGraduatedRun(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	guard := statedrain.NewTripGuard()
-	h := &p5Harness{set: set, guard: guard}
+	h := &p5Harness{set: set}
 	h.scenario = ledger.NewSeededBoundaryEpochStateScenarioForTest(
-		t, set, guard, func(db *database.Database) {
-			require.NoError(t, db.Metadata().IterateAccounts(nil,
-				func(a *models.Account) error {
-					h.refs = append(h.refs, models.NewStakeCredentialRef(
-						a.CredentialTag, a.StakingKey,
-					))
-					if h.pool == nil {
-						h.pool = bytes.Clone(a.Pool)
-					}
-					return nil
-				}))
+		t, set, nil, func(db *database.Database) {
 			seedRewardInputFacts(t, db.Metadata())
 		},
 	)
+	require.NoError(t, set.Accounts(
+		func(a *models.Account) error {
+			h.refs = append(h.refs, models.NewStakeCredentialRef(
+				a.CredentialTag, a.StakingKey,
+			))
+			if h.pool == nil {
+				h.pool = bytes.Clone(a.Pool)
+			}
+			return nil
+		}))
 	h.store = dbadapter.New(h.scenario.DB)
 	require.Len(t, h.refs, 2, "the harness has two accounts")
 	s := h.scenario
@@ -121,23 +103,6 @@ func allGraduatedRun(
 	return out, h
 }
 
-// requireEveryGraduatedFamilyDrained requires the latch bit of each graduated
-// family and every one of its tables empty, with no statement having touched
-// a drained table.
-func requireEveryGraduatedFamilyDrained(t *testing.T, h *p5Harness) {
-	t.Helper()
-	tables := graduatedTables()
-	require.Equal(t, []string{"epoch"}, tables[nodesettings.FamilyEpochs])
-	require.Equal(
-		t, []string{"epoch_summary"}, tables[nodesettings.FamilySummaries],
-	)
-	families := make([]nodesettings.Family, 0, len(tables))
-	for _, e := range statedrain.Graduated(drainTestSource{}) {
-		families = append(families, e.Family)
-	}
-	h.requireDrained(t, families, tables)
-}
-
 // The pool scenario: a registration, a VRF key rotation, a retirement and its
 // reap at the boundary, a rollback and a replay.
 func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
@@ -164,7 +129,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 			require.NoError(t, err)
 		})
 	}
-	out, h := allGraduatedRun(
+	out, h := releasedFactsRun(
 		t,
 		func(h *p5Harness) func() []string {
 			// The op-cert write keeps the pool row's counter in step in
@@ -233,7 +198,6 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 	out["replay"] = readPools(
 		t, h.scenario.LedgerDB(), h.scenario.DB, slots,
 	)
-	requireEveryGraduatedFamilyDrained(t, h)
 	for _, name := range []string{"applied", "rolled back", "replay"} {
 		require.NotEmpty(t, out[name], name)
 	}
@@ -248,12 +212,9 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 // the metadata store and the set both consume, so the live stake the two hold
 // agrees. Without an anchor the store counts the overlay slots by pparams the
 // harness does not give it.
-func newRewardBoundaryRun(
-	t *testing.T,
-	guard *statedrain.TripGuard,
-) *rewardBlocksRun {
+func newRewardBoundaryRun(t *testing.T) *rewardBlocksRun {
 	t.Helper()
-	r := newRewardBlocksRun(t, "set", guard, true)
+	r := newRewardBlocksRun(t, "set", nil, true)
 	s := r.scenario
 	s.Collateral(0xc0, 1_000)
 	s.Block(9, s.PoolB)
@@ -276,8 +237,7 @@ func TestBoundaryRewardCaptureSurvivesRollbackAndReplay(
 	t *testing.T,
 ) {
 	t.Parallel()
-	guard := statedrain.NewTripGuard()
-	r := newRewardBoundaryRun(t, guard)
+	r := newRewardBoundaryRun(t)
 	s := r.scenario
 	s.InstallDrainedSources()
 	out := map[string]string{}
@@ -297,36 +257,30 @@ func TestBoundaryRewardCaptureSurvivesRollbackAndReplay(
 	s.Fee(11, 25)
 	s.Boundary()
 	read("replay")
-	raw, err := dbtest.RawSQLiteMetadata(t, s.DB)
-	require.NoError(t, err)
-	mask, err := s.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	for family, tables := range graduatedTables() {
-		require.True(t, mask.Has(family), "latch bit of %s", family)
-		for _, table := range tables {
-			require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-		}
-	}
 	require.Equal(t, out["boundary"], out["replay"])
 	require.NotEqual(t, out["boundary"], out["rollback"])
 	require.NotEqual(t, out["before the boundary"], out["boundary"])
 }
 
-// seedRewardInputFacts stores the reward input rows a harness block run does
-// not write: pool and stake inputs, and an imported basis failure.
+// seedRewardInputFacts stores, as a v0.94.2 database holds them, the reward
+// input rows a harness block run does not write: pool and stake inputs, and
+// an imported basis failure, in the epoch the harness's boundary ends.
 func seedRewardInputFacts(
 	t *testing.T,
 	store metadata.MetadataStore,
 ) {
 	t.Helper()
-	epochs, err := store.GetEpochs(nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, epochs)
-	var epoch uint64
-	for _, e := range epochs {
-		epoch = max(epoch, e.EpochId)
+	epoch := ledger.BoundaryScenarioEndedEpochForTest
+	slot := uint64(1)
+	// The set takes over the reward inputs of the epochs the store holds a
+	// row of, which are the harness's own.
+	length := ledger.BoundaryScenarioEpochLengthForTest
+	for e := range epoch + 1 {
+		require.NoError(t, store.SetEpoch(
+			e*uint64(length), e, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1000, length, nil,
+		))
 	}
-	slot := epochs[0].StartSlot + 1
 	pool := bytes.Repeat([]byte{0x61}, 28)
 	other := bytes.Repeat([]byte{0x62}, 28)
 	blocks := uint64(5)

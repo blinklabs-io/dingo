@@ -33,7 +33,7 @@ func existingTxTestHash(i int) []byte {
 // lookup must chunk and still report every stored hash and no missing one.
 func TestGetExistingTransactionHashesAcrossChunks(t *testing.T) {
 	t.Parallel()
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 	const total = 1200
 	tx, err := raw.Begin()

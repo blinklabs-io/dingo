@@ -118,7 +118,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Start(t.Context()))
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(1, txn))
+		require.NoError(t, store.SetSyncState("timeout_probe", "1", txn))
 		require.NoError(t, txn.Commit())
 		require.NoError(t, store.Close())
 	})
@@ -3138,32 +3138,4 @@ func (emptyLiveSource) EachLiveUtxoStake(
 	types.Txn, func(uint8, []byte, uint64) error,
 ) error {
 	return nil
-}
-
-// TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction registers a
-// credential and pays its base address in the same transaction, with and
-// without utxo rows, and requires the same reward_live_stake row: the live
-// set does not yet hold the transaction's outputs when the credential's row
-// is first computed.
-func TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction(t *testing.T) {
-	t.Parallel()
-	row := func(live bool) string {
-		f := newPointerStakeFixture(t)
-		f.setEra(t, babbage.EraIdBabbage)
-		if live {
-			f.store.SetLiveUtxoSource(emptyLiveSource{})
-		}
-		f.apply(t, 100, 0,
-			[]lcommon.Certificate{f.register(), f.delegate()},
-			f.output(700, f.baseAddress(t)),
-		)
-		var utxo, total string
-		require.NoError(t, f.db.QueryRow(
-			`SELECT utxo_stake, total_stake FROM reward_live_stake WHERE staking_key = ?`,
-			f.stakeKey.Bytes(),
-		).Scan(&utxo, &total))
-		return utxo + "/" + total
-	}
-	require.Equal(t, "700/700", row(false))
-	require.Equal(t, row(false), row(true))
 }

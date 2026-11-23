@@ -60,39 +60,6 @@ type ContextDeferredIndexDropper interface {
 	DropDeferredIndexesContext(ctx context.Context) error
 }
 
-// LazyDeferredIndexDropper is an optional companion to DeferredIndexManager
-// for callers that keep serving while they write in bulk: it drops only the
-// non-critical manifest entries (deferred.LazyManifest), so every index the
-// API, rollback and block application read stays in place.
-//
-// It records the deferred.SyncStateKey marker before any DROP runs, exactly
-// as DropDeferredIndexes does, so an interrupted cycle is repaired by the
-// same startup maintenance, and BuildDeferredIndexes ends the cycle.
-type LazyDeferredIndexDropper interface {
-	DropLazyDeferredIndexesContext(ctx context.Context) error
-}
-
-// CatchUpIndexManager is an optional companion to DeferredIndexManager for a
-// node-managed Mithril stream catch-up that holds network and chain ingest
-// while it applies certified blocks. Its drop goes further than
-// LazyDeferredIndexDropper: it also drops deferred.CatchUpDroppableManifest,
-// the critical entries only rollback, the API and LocalStateQuery read.
-//
-// The caller must rebuild those with BuildCatchUpIndexesContext before it
-// lets ingest resume. The drop records the deferred.SyncStateKey marker first,
-// as DropDeferredIndexes does, so a process that dies before the rebuild
-// leaves startup maintenance to restore every critical entry before the node
-// ingests again.
-type CatchUpIndexManager interface {
-	// DropCatchUpIndexesContext records the marker and drops the lazy and
-	// catch-up droppable manifest entries in one transaction.
-	DropCatchUpIndexesContext(ctx context.Context) error
-	// BuildCatchUpIndexesContext rebuilds any missing catch-up droppable
-	// entry. It leaves the marker set: the lazy entries the drop removed are
-	// still missing, and BuildDeferredIndexes ends the cycle.
-	BuildCatchUpIndexesContext(ctx context.Context) error
-}
-
 // MissingCriticalDeferredIndexLister is an optional companion to
 // DeferredIndexManager: it answers which critical manifest entries are absent
 // without building anything.

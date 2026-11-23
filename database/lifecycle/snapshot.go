@@ -52,8 +52,8 @@ const (
 	LeiosBackupFileName = "leios.bak"
 )
 
-// Snapshot captures a point-in-time backup of db's blob and metadata
-// stores into dir, which must not already exist, writing a manifest
+// Snapshot captures a point-in-time backup of db's blob and, when it has
+// one, metadata stores into dir, which must not already exist, writing a manifest
 // alongside them. Both stores are backed up via their native
 // MVCC/versioned mechanism (blob.Backuper, metadata.Backuper), each
 // independently consistent as of whenever it runs — but the two backup
@@ -112,12 +112,17 @@ func Snapshot(
 			blobPluginName,
 		)
 	}
-	metadataBackuper, ok := db.Metadata().(metadata.Backuper)
-	if !ok {
-		return Manifest{}, fmt.Errorf(
-			"metadata plugin %q does not support snapshotting",
-			metadataPluginName,
-		)
+	// The ledger's database keeps no metadata store; only a v0.94.2 database
+	// opened before its migration has one, and its snapshot carries it.
+	var metadataBackuper metadata.Backuper
+	if store := db.Metadata(); store != nil {
+		var ok bool
+		if metadataBackuper, ok = store.(metadata.Backuper); !ok {
+			return Manifest{}, fmt.Errorf(
+				"metadata plugin %q does not support snapshotting",
+				metadataPluginName,
+			)
+		}
 	}
 
 	// dir's leaf component is created with a plain, non-recursive Mkdir
@@ -250,31 +255,34 @@ func Snapshot(
 	// "capture a version now" from "stream that version" — a larger
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
-	// BackupTo writes by path, so it cannot write through snapshotRoot.
-	// Stage the backup in a private directory beside the snapshot, under
-	// the parent validated above, and move it into the opened snapshot
-	// directory afterwards. The system temp directory is not used: it may be
-	// small, memory-backed, or on another volume, and the metadata backup is
-	// as large as the metadata store.
-	metadataStageDir, err := os.MkdirTemp(parentDir, ".dingo-snapshot-metadata-*")
-	if err != nil {
-		return Manifest{}, fmt.Errorf("create private metadata staging directory: %w", err)
+	var metadataStageDir, metadataStagePath string
+	if metadataBackuper != nil {
+		// BackupTo writes by path, so it cannot write through snapshotRoot.
+		// Stage the backup in a private directory beside the snapshot, under
+		// the parent validated above, and move it into the opened snapshot
+		// directory afterwards. The system temp directory is not used: it may
+		// be small, memory-backed, or on another volume, and the metadata
+		// backup is as large as the metadata store.
+		metadataStageDir, err = os.MkdirTemp(parentDir, ".dingo-snapshot-metadata-*")
+		if err != nil {
+			return Manifest{}, fmt.Errorf("create private metadata staging directory: %w", err)
+		}
+		defer os.RemoveAll(metadataStageDir) //nolint:errcheck // best-effort removal of private temporary data
+		metadataStageRoot, err := os.OpenRoot(metadataStageDir)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("open private metadata staging directory: %w", err)
+		}
+		if err := restrictPrivateSnapshotDirectory(metadataStageRoot); err != nil {
+			_ = metadataStageRoot.Close()
+			return Manifest{}, fmt.Errorf(
+				"restrict private metadata staging directory: %w", err,
+			)
+		}
+		if err := metadataStageRoot.Close(); err != nil {
+			return Manifest{}, fmt.Errorf("close private metadata staging directory: %w", err)
+		}
+		metadataStagePath = filepath.Join(metadataStageDir, MetadataBackupFileName)
 	}
-	defer os.RemoveAll(metadataStageDir) //nolint:errcheck // best-effort removal of private temporary data
-	metadataStageRoot, err := os.OpenRoot(metadataStageDir)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("open private metadata staging directory: %w", err)
-	}
-	if err := restrictPrivateSnapshotDirectory(metadataStageRoot); err != nil {
-		_ = metadataStageRoot.Close()
-		return Manifest{}, fmt.Errorf(
-			"restrict private metadata staging directory: %w", err,
-		)
-	}
-	if err := metadataStageRoot.Close(); err != nil {
-		return Manifest{}, fmt.Errorf("close private metadata staging directory: %w", err)
-	}
-	metadataStagePath := filepath.Join(metadataStageDir, MetadataBackupFileName)
 	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
 		return Manifest{}, err
 	}
@@ -380,10 +388,9 @@ func Snapshot(
 	}
 	defer cancelBackup()
 	type snapshotState struct {
-		tip             ochainsync.Tip
-		commitTimestamp int64
-		gates           nodesettings.Values
-		err             error
+		tip   ochainsync.Tip
+		gates nodesettings.Values
+		err   error
 	}
 	stateReady := make(chan snapshotState, 1)
 	go func() {
@@ -392,10 +399,7 @@ func Snapshot(
 		state.tip, state.err = db.GetTip(tipTxn)
 		tipTxn.Release()
 		if state.err == nil && backupCtx.Err() == nil {
-			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp(backupCtx)
-		}
-		if state.err == nil && backupCtx.Err() == nil {
-			state.gates, state.err = db.Metadata().GetNodeSettingsGates(backupCtx)
+			state.gates, state.err = db.NodeSettingsGates(backupCtx)
 		}
 		stateReady <- state
 	}()
@@ -429,7 +433,7 @@ func Snapshot(
 		}
 		return Manifest{}, err
 	}
-	tip, commitTimestamp, gates := state.tip, state.commitTimestamp, state.gates
+	tip, gates := state.tip, state.gates
 
 	// The chunk files are captured under the same barrier as the blob state
 	// that records their tip, so the two describe one point in time. Linking
@@ -448,7 +452,7 @@ func Snapshot(
 		err   error
 	}
 	backupResults := make(chan backupResult, 4)
-	pending := 2
+	pending := 1
 	if utxoSetBackuper != nil {
 		pending++
 		go func() {
@@ -473,12 +477,15 @@ func Snapshot(
 			err:   blobBackuper.Backup(backupCtx, blobFile),
 		}
 	}()
-	go func() {
-		backupResults <- backupResult{
-			store: "metadata",
-			err:   metadataBackuper.BackupTo(backupCtx, metadataStagePath),
-		}
-	}()
+	if metadataBackuper != nil {
+		pending++
+		go func() {
+			backupResults <- backupResult{
+				store: "metadata",
+				err:   metadataBackuper.BackupTo(backupCtx, metadataStagePath),
+			}
+		}()
+	}
 	var backupErr, metadataErr, utxoSetErr, leiosErr error
 	backupCtxDone := backupCtx.Done()
 	pauseLimitExpired := false
@@ -571,8 +578,10 @@ func Snapshot(
 	if leiosErr != nil {
 		return Manifest{}, fmt.Errorf("backup Leios store: %w", leiosErr)
 	}
-	if err := os.Chmod(metadataStagePath, 0o600); err != nil {
-		return Manifest{}, fmt.Errorf("restrict %q: %w", metadataStagePath, err)
+	if metadataBackuper != nil {
+		if err := os.Chmod(metadataStagePath, 0o600); err != nil {
+			return Manifest{}, fmt.Errorf("restrict %q: %w", metadataStagePath, err)
+		}
 	}
 	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
 		return Manifest{}, err
@@ -609,23 +618,25 @@ func Snapshot(
 			return Manifest{}, fmt.Errorf("close %q: %w", LeiosBackupFileName, err)
 		}
 	}
-	if err := installStagedSnapshotFile(
-		ctx, snapshotRoot, metadataStageDir, MetadataBackupFileName,
-	); err != nil {
-		return Manifest{}, fmt.Errorf("install %q: %w", metadataPath, err)
-	}
-	metadataFile, err := snapshotRoot.OpenFile(MetadataBackupFileName, os.O_WRONLY, 0)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
-	}
-	metadataSyncErr := syncSnapshotFile(metadataFile)
-	metadataCloseErr := metadataFile.Close()
-	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"sync and close %q: %w",
-			metadataPath,
-			err,
-		)
+	if metadataBackuper != nil {
+		if err := installStagedSnapshotFile(
+			ctx, snapshotRoot, metadataStageDir, MetadataBackupFileName,
+		); err != nil {
+			return Manifest{}, fmt.Errorf("install %q: %w", metadataPath, err)
+		}
+		metadataFile, err := snapshotRoot.OpenFile(MetadataBackupFileName, os.O_WRONLY, 0)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
+		}
+		metadataSyncErr := syncSnapshotFile(metadataFile)
+		metadataCloseErr := metadataFile.Close()
+		if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
+			return Manifest{}, fmt.Errorf(
+				"sync and close %q: %w",
+				metadataPath,
+				err,
+			)
+		}
 	}
 	// Persist the backup names before a manifest can make them discoverable.
 	if err := syncDir(dir); err != nil {
@@ -648,18 +659,23 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("stat %q: %w", blobPath, err)
 	}
-	metadataInfo, err := snapshotRoot.Stat(MetadataBackupFileName)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
-	}
-
 	blobDigest, err := hashSnapshotRootFile(ctx, snapshotRoot, BlobBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
 	}
-	metadataDigest, err := hashSnapshotRootFile(ctx, snapshotRoot, MetadataBackupFileName)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
+	var metadataBytes int64
+	var metadataDigest string
+	if metadataBackuper != nil {
+		metadataInfo, err := snapshotRoot.Stat(MetadataBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
+		}
+		metadataBytes = metadataInfo.Size()
+		metadataDigest, err = hashSnapshotRootFile(ctx, snapshotRoot, MetadataBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
+		}
+		metrics.bytes.WithLabelValues("metadata").Add(float64(metadataBytes))
 	}
 	var utxoSetBytes int64
 	var utxoSetDigest string
@@ -707,14 +723,12 @@ func Snapshot(
 		metrics.bytes.WithLabelValues("leios").Add(float64(leiosBytes))
 	}
 	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
-	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
 	manifest := Manifest{
 		CreatedAt:            time.Now().UTC(),
 		Trigger:              trigger,
 		StorageMode:          db.Config().StorageMode,
 		Network:              db.Config().Network,
-		CommitTimestamp:      commitTimestamp,
 		TipSlot:              tip.Point.Slot,
 		TipHash:              tip.Point.Hash,
 		TipBlockNumber:       tip.BlockNumber,
@@ -723,7 +737,7 @@ func Snapshot(
 		Gates:                gates,
 		DingoVersion:         dingoVersion,
 		BlobBytes:            blobInfo.Size(),
-		MetadataBytes:        metadataInfo.Size(),
+		MetadataBytes:        metadataBytes,
 		BlobSHA256:           blobDigest,
 		MetadataSHA256:       metadataDigest,
 		UtxoSetBytes:         utxoSetBytes,

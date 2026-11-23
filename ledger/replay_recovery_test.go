@@ -139,24 +139,20 @@ type replayRecoveryInput struct {
 	index uint32
 }
 
+// seedReplayRecoveryTransaction indexes a transaction as applied in the block
+// at (slot, blockHash), as the ledger does for a block it applies.
 func seedReplayRecoveryTransaction(
 	t *testing.T,
-	db *database.Database,
+	ls *LedgerState,
 	hash []byte,
 	blockHash []byte,
 	slot uint64,
 ) {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	ls.stageTxIndex(nil, hash, ocommon.NewPoint(slot, blockHash), 0, 1, true)
+	got, err := ls.TransactionByHash(t.Context(), hash)
 	require.NoError(t, err)
-	_, err = testutil.ExecTransactionInsert(raw,
-		`
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, valid, block_index
-) VALUES (?, ?, ?, 1, TRUE, 0)`,
-		hash, blockHash, slot,
-	)
-	require.NoError(t, err)
+	require.NotNil(t, got, "the LedgerDB did not index the seeded transaction")
 }
 
 func (m *replayRecoveryInput) Id() lcommon.Blake2b256 {
@@ -277,14 +273,14 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 
 	seedReplayRecoveryTransaction(
 		t,
-		db,
+		ls,
 		testHashBytes("producer-tx-1"),
 		producerOneBlock.Hash,
 		producerOneBlock.Slot,
 	)
 	seedReplayRecoveryTransaction(
 		t,
-		db,
+		ls,
 		testHashBytes("producer-tx-2"),
 		producerTwoBlock.Hash,
 		producerTwoBlock.Slot,
@@ -381,7 +377,7 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 
 	producerTxHash := testHashBytes("producer-with-missing-parent")
 	seedReplayRecoveryTransaction(
-		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
+		t, ls, producerTxHash, producerBlock.Hash, producerBlock.Slot,
 	)
 	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
 		BlockPoint: currentTip.Point,
@@ -480,7 +476,7 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 			producerTxHash := testHashBytes("pruned-tail-producer-tx")
 			seedReplayRecoveryTransaction(
 				t,
-				db,
+				ls,
 				producerTxHash,
 				blocks[3].Hash,
 				blocks[3].Slot,
@@ -591,7 +587,7 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 				knownTxHash := testHashBytes("no-anchor-known-producer-tx")
 				seedReplayRecoveryTransaction(
 					t,
-					db,
+					ls,
 					knownTxHash,
 					blocks[3].Hash,
 					blocks[3].Slot,
@@ -727,7 +723,7 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerBlockIsMissing(
 	producerTxHash := testHashBytes("pruned-producer-metadata-tx")
 	seedReplayRecoveryTransaction(
 		t,
-		db,
+		ls,
 		producerTxHash,
 		blocks[3].Hash,
 		blocks[3].Slot,
@@ -774,14 +770,14 @@ func TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing(
 			SetTx(txn.Blob(), producerTxHash, database.EncodeTxOffset(offset))
 	}))
 
-	// No transaction metadata row: resolution goes through the tx blob.
-	storedTx, err := db.GetTransactionByHash(
+	// No transaction index entry: resolution goes through the tx blob.
+	storedTx, err := ls.ledgerDB().GetTransactionByHash(
 		context.Background(),
 		producerTxHash,
 		nil,
 	)
 	require.NoError(t, err)
-	require.Nil(t, storedTx, "fixture must not seed transaction metadata")
+	require.Nil(t, storedTx, "fixture must not index the transaction")
 
 	candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
 		BlockPoint: ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
@@ -922,7 +918,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	producerTxHash := testHashBytes("mithril-recovery-producer-tx")
 	seedReplayRecoveryTransaction(
 		t,
-		db,
+		ls,
 		producerTxHash,
 		producerBlock.Hash,
 		producerBlock.Slot,
@@ -1045,27 +1041,18 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
+	producerTxHash := testHashBytes("producer-tx-live")
+	seedTestLiveOutput(t, ls, producerTxHash, 0, 100)
 	fxJournalChain(t, ls)
+	// The failing block's spend reached the set although the ledger tip
+	// stayed below it.
+	failingPoint := ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash)
+	fxSpendAt(t, ls, failingPoint, producerTxHash)
+	require.False(t, fxOutputLive(t, ls, producerTxHash))
 	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
 	ls.validationEnabled = true
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
-
-	producerTxHash := testHashBytes("producer-tx-live")
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:      producerTxHash,
-		OutputIdx: 0,
-		AddedSlot: producerBlock.Slot,
-		Amount:    types.Uint64(100),
-	}))
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
-		failingBlock.Slot,
-	))
-
-	seedTestOutputCBOR(t, db, producerTxHash, 0, 100)
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -1103,10 +1090,11 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
-	utxo, err := db.Metadata().GetUtxoIncludingSpent(producerTxHash, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, utxo)
-	assert.Zero(t, utxo.DeletedSlot, "at-tip recovery must restore spent UTxOs")
+	assert.True(
+		t,
+		fxOutputLive(t, ls, producerTxHash),
+		"at-tip recovery must restore spent UTxOs",
+	)
 
 	// Second and third attempts: same failing (slot, block, tx).
 	// The pipeline should keep recovering with progressively deeper
@@ -2817,7 +2805,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 	knownTxHash := testHashBytes("known-producer-with-unresolved-sibling")
 	seedReplayRecoveryTransaction(
 		t,
-		ls.db,
+		ls,
 		knownTxHash,
 		producerBlock.Hash,
 		producerBlock.Slot,
@@ -2846,8 +2834,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
-	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
-	require.NoError(t, seedDB(t, ls.db).SetSyncState(pruneFloorSyncKey, "120", nil))
+	fxEmptyJournal(t, ls)
 	chainTipBefore := ls.chain.Tip().Point
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -3937,15 +3924,8 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	// it rewound 230 times.
 	producerTxHash := testHashBytes("resolvable-producer-tx")
 	seedReplayRecoveryTransaction(
-		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
+		t, ls, producerTxHash, producerBlock.Hash, producerBlock.Slot,
 	)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:      producerTxHash,
-		OutputIdx: 1,
-		Amount:    types.Uint64(11688720),
-		AddedSlot: producerBlock.Slot,
-	}))
-
 	seedTestLiveOutput(t, ls, producerTxHash, 1, 11688720)
 
 	validationErr := &txValidationError{
@@ -3978,153 +3958,6 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	assert.Equal(t, currentTip, ls.chain.Tip())
 }
 
-// An input consumed by a block the ledger has applied is a bad input the
-// failing block carries, not a gap in local state: no rollback can make it
-// spendable again. The failing batch's transaction is discarded before
-// recovery runs, so a row marked spent above the applied ledger tip is a stale
-// write, and an input with no UTxO row at all is missing state; both must keep
-// resolving to the producer.
-func TestReplayRecoverySpentInputIsNotMissingState(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		name            string
-		spentAtSlot     uint64
-		floorAtProducer bool
-		wantRecovered   bool
-	}{
-		{name: "consumed at the applied ledger tip", spentAtSlot: 140},
-		{
-			name:            "marked spent above the durable applied floor",
-			spentAtSlot:     140,
-			floorAtProducer: true,
-			wantRecovered:   true,
-		},
-		{
-			name:          "marked spent above the applied ledger tip",
-			spentAtSlot:   150,
-			wantRecovered: true,
-		},
-		{
-			name:          "marked spent at the failing block",
-			spentAtSlot:   160,
-			wantRecovered: true,
-		},
-		{name: "no utxo row", wantRecovered: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			db, err := dbtest.NewDatabase(t, &database.Config{
-				DataDir: t.TempDir(),
-			})
-			require.NoError(t, err)
-			cm, err := chain.NewManager(context.Background(), db, nil)
-			require.NoError(t, err)
-
-			parentBlock := testRawBlock("spent-parent", 100, 1, nil)
-			producerBlock := testRawBlock(
-				"spent-producer", 120, 2, parentBlock.Hash,
-			)
-			spenderBlock := testRawBlock(
-				"spent-spender", 140, 3, producerBlock.Hash,
-			)
-			failingBlock := testRawBlock(
-				"spent-failing", 160, 4, spenderBlock.Hash,
-			)
-			require.NoError(t, cm.PrimaryChain().AddRawBlocks(
-				context.Background(),
-				[]chain.RawBlock{
-					parentBlock, producerBlock, spenderBlock, failingBlock,
-				},
-			))
-			chainTip := rawBlockTip(failingBlock)
-
-			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
-				Database:          db,
-				ChainManager:      cm,
-				CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-				Logger: slog.New(
-					slog.NewJSONHandler(io.Discard, nil),
-				),
-			})
-			require.NoError(t, err)
-			ls.metrics.init(prometheus.NewRegistry())
-
-			ledgerTip := rawBlockTip(spenderBlock)
-			floor := ledgerTip
-			if tc.floorAtProducer {
-				// currentTip leads the durably applied state, as a
-				// slot-based rollback can leave it.
-				floor = rawBlockTip(producerBlock)
-			}
-			require.NoError(t, seedBlockNonce(t, db,
-				floor.Point.Hash, floor.Point.Slot,
-				[]byte("nonce-floor"), false, nil,
-			))
-			require.NoError(t, db.SetTip(ledgerTip, nil))
-			ls.currentTip = ledgerTip
-			fxJournalChain(t, ls)
-			ls.currentTipBlockNonce = []byte("nonce-floor")
-			ls.publishSnapshotsLocked()
-
-			producerTxHash := testHashBytes("spent-producer-tx")
-			seedReplayRecoveryTransaction(
-				t, db, producerTxHash, producerBlock.Hash,
-				producerBlock.Slot,
-			)
-			if tc.spentAtSlot != 0 {
-				require.NoError(t, db.CreateUtxo(
-					context.Background(), nil, &models.Utxo{
-						TxId:      producerTxHash,
-						OutputIdx: 0,
-						Amount:    types.Uint64(1_000_000),
-						AddedSlot: producerBlock.Slot,
-					},
-				))
-				raw, err := dbtest.RawSQLiteMetadata(t, db)
-				require.NoError(t, err)
-				res, err := raw.Exec(
-					`UPDATE utxo SET deleted_slot = ? WHERE tx_id = `+
-						`(SELECT id FROM "transaction" WHERE hash = ?) `+
-						`AND output_idx = 0`,
-					tc.spentAtSlot, producerTxHash,
-				)
-				require.NoError(t, err)
-				rows, err := res.RowsAffected()
-				require.NoError(t, err)
-				require.Equal(t, int64(1), rows)
-				live, err := db.UtxoExists(
-					context.Background(), producerTxHash, 0, nil,
-				)
-				require.NoError(t, err)
-				require.False(t, live, "the seeded row must be spent")
-			}
-
-			validationErr := &txValidationError{
-				BlockPoint: chainTip.Point,
-				TxHash:     testHashBytes("spent-failing-tx"),
-				Inputs: []lcommon.TransactionInput{
-					&replayRecoveryInput{txId: producerTxHash, index: 0},
-				},
-				Cause: fmt.Errorf(
-					"shelley utxo validation rule 8: %w",
-					shelley.BadInputsUtxoError{},
-				),
-			}
-
-			recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantRecovered, recovered)
-			if !tc.wantRecovered {
-				assert.Equal(t, ledgerTip, ls.currentTip,
-					"a spent input must not rewind the ledger")
-				assert.Equal(t, chainTip, ls.chain.Tip())
-			}
-		})
-	}
-}
-
 // TestResolveReplayRecoveryProducerReportsPresentInput pins the distinction the
 // candidate search depends on. resolveReplayRecoveryProducer returns a nil
 // producer for two unrelated situations — the input is present so there is
@@ -4148,13 +3981,6 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	ls.metrics.init(prometheus.NewRegistry())
 
 	presentTx := testHashBytes("present-producer-tx")
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:      presentTx,
-		OutputIdx: 0,
-		Amount:    types.Uint64(1_000_000),
-		AddedSlot: 10,
-	}))
-
 	seedTestLiveOutput(t, ls, presentTx, 0, 1_000_000)
 
 	index := &replayRecoveryChainIndex{
@@ -4516,7 +4342,7 @@ func newTrustWindowLedger(
 	producerTxHash := testHashBytes("trust-window-producer-tx")
 	seedReplayRecoveryTransaction(
 		t,
-		db,
+		ls,
 		producerTxHash,
 		parentBlock.Hash,
 		parentBlock.Slot,
@@ -5384,24 +5210,16 @@ func TestDeterministicTxRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
 
 // TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor covers the Mithril-
 // bootstrapped shape reported by the test. The Mithril anchor sits far below
-// the consumed-UTxO prune floor, so the existing trust-boundary check admits
-// every target the rewind schedule produces while the sweep has already made
-// them unrestorable. The prune floor is the binding constraint, and the node
+// the live UTxO set's journal floor, so the existing trust-boundary check
+// admits every target the rewind schedule produces while the journal no
+// longer reaches them. The journal floor is the binding constraint, and the node
 // halts at the anchor only after the descent has destroyed the UTxO set on the
 // way down.
 func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 	const mithrilAnchorSlot = pruneFixtureRootSlot
 	f := newDeepPrunedUtxoFixture(t, mithrilAnchorSlot)
 
-	f.ls.cleanupConsumedUtxos(context.Background())
-	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Greater(
-		t,
-		floor,
-		uint64(mithrilAnchorSlot),
-		"the fixture must place the prune floor above the Mithril anchor",
-	)
+	f.pruneJournal(t)
 
 	f.driveAtTipRecovery(t, 3)
 

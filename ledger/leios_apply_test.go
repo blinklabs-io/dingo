@@ -17,7 +17,6 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -33,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -107,19 +105,7 @@ func leiosApplyTestSeedKeyUtxo(
 		1: amount,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
-			TxId:       txID,
-			OutputIdx:  0,
-			PaymentKey: pathSignerHash(),
-			AddedSlot:  1,
-			Amount:     types.Uint64(amount),
-			Cbor:       outputCbor,
-		}); err != nil {
-			return err
-		}
-		return db.Blob().SetUtxo(txn.Blob(), txID, 0, outputCbor)
-	}))
+	fxSeedOutput(t, db, txID, 0, 1, outputCbor)
 	return txID
 }
 
@@ -321,24 +307,6 @@ func leiosApplyTestApplyEndorserBlock(
 	return applied, err
 }
 
-// leiosApplyTestUtxoState returns a produced UTxO's spender and deletion slot.
-func leiosApplyTestUtxoState(
-	t *testing.T,
-	raw *sql.DB,
-	txId []byte,
-	outputIdx uint32,
-) (spentBy []byte, deletedSlot uint64) {
-	t.Helper()
-	var spender []byte
-	require.NoError(t, raw.QueryRow(`
-SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id), deleted_slot FROM utxo
-WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
-		txId,
-		outputIdx,
-	).Scan(&spender, &deletedSlot))
-	return spender, deletedSlot
-}
-
 // The Musashi/Haskell-conformant closure apply folds a certified endorser
 // block's transactions onto the ledger without validation, mirroring the
 // reference ledger's applyLeiosClosure (ruleApplyTxValidation ValidateNone in
@@ -351,17 +319,15 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 // applying the certified endorser block at ranking-block slot 1864040): the
 // failing apply is the endorser block's, and the conflict is between two
 // *different* certified transactions, so no transaction-hash dedup can address
-// it. The tolerance lives in the metadata store (SetTransactionLeiosClosure)
-// and is selected by BatchedTxIngestOpts.SkipConsumedInputRecovery; this test
-// covers the ledger-side wiring that reaches it (applyEndorserBlock ->
-// LedgerDelta.skipConsumedInputRecovery -> Database.SetTransactionWithOpts),
-// which the store-level test in database/plugin/metadata/sqlite cannot reach.
+// it. applyEndorserBlock selects the tolerance through
+// LedgerDelta.skipConsumedInputRecovery, and the live UTxO set's apply leaves
+// the absent input a no-op.
 func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xa1)
 	require.Len(t, producerTx.Produced(), 2)
@@ -392,9 +358,11 @@ func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, applied)
-	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 0)
-	require.Equal(t, firstTx.Hash().Bytes(), spentBy)
-	require.Equal(t, firstPoint.Slot, deletedSlot)
+	requireSpentAt(
+		t, ls, producerHash, 0,
+		ocommon.Point{Slot: firstPoint.Slot - 1},
+		ocommon.Point{Slot: firstPoint.Slot},
+	)
 
 	// The second certified endorser block re-consumes the same input. The
 	// closure apply must fold it on instead of failing with ErrUtxoConflict.
@@ -407,30 +375,23 @@ func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 
 	// The contested input stays consumed by the first certified transaction,
 	// at the ranking-block slot that applied it.
-	spentBy, deletedSlot = leiosApplyTestUtxoState(t, gdb, producerHash, 0)
-	require.Equal(t, firstTx.Hash().Bytes(), spentBy)
-	require.Equal(t, firstPoint.Slot, deletedSlot)
+	requireSpentAt(
+		t, ls, producerHash, 0,
+		ocommon.Point{Slot: firstPoint.Slot - 1},
+		ocommon.Point{Slot: firstPoint.Slot},
+	)
 
 	// Absence case: the second transaction is present in the endorser block
 	// and in no ranking block, so it must still be applied -- its row is
 	// recorded and its produced output is live at its ranking block's slot.
-	var storedSlot uint64
-	require.NoError(t, gdb.QueryRow(`
-SELECT a.slot FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
-		secondTx.Hash().Bytes(),
-	).Scan(&storedSlot))
-	require.Equal(t, secondPoint.Slot, storedSlot)
-	spentBy, deletedSlot = leiosApplyTestUtxoState(
-		t, gdb, secondTx.Hash().Bytes(), 0,
+	stored := requireLeiosApplyTestApplied(t, ls, secondTx.Hash().Bytes())
+	require.Equal(t, secondPoint.Slot, stored.Slot)
+	require.True(t, outputLiveIn(t, ls, secondTx.Hash().Bytes(), 0))
+	requireCreatedAt(
+		t, ls, secondTx.Hash().Bytes(), 0,
+		ocommon.Point{Slot: secondPoint.Slot - 1},
+		ocommon.Point{Slot: secondPoint.Slot},
 	)
-	require.Empty(t, spentBy)
-	require.Equal(t, uint64(0), deletedSlot)
-	var addedSlot uint64
-	require.NoError(t, gdb.QueryRow(`
-SELECT added_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
-		secondTx.Hash().Bytes(),
-	).Scan(&addedSlot))
-	require.Equal(t, secondPoint.Slot, addedSlot)
 }
 
 func enableLeiosApplyInputValidation(ls *LedgerState) {
@@ -455,7 +416,7 @@ func enableLeiosApplyInputValidation(ls *LedgerState) {
 func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xc1)
 	producerHash := producerTx.Hash().Bytes()
@@ -473,11 +434,9 @@ func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrUtxoAlreadyConsumed)
 	require.NotErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
-	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 0)
-	require.Empty(t, spentBy)
-	require.Zero(t, deletedSlot)
+	require.True(t, outputLiveIn(t, ls, producerHash, 0))
 	for _, tx := range []lcommon.Transaction{firstTx, secondTx} {
-		stored, getErr := db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+		stored, getErr := ls.ledgerDB().GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 		require.NoError(t, getErr)
 		require.Nil(t, stored)
 	}
@@ -486,7 +445,7 @@ func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
 func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
 	t.Parallel()
 
-	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xd1)
 	producerHash := producerTx.Hash().Bytes()
@@ -533,7 +492,7 @@ func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
 func TestApplyEndorserBlockKeepsProtocolParamFaultRetryable(t *testing.T) {
 	t.Parallel()
 
-	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	ls.currentEra = eras.DijkstraEraDesc
 	ls.activeEras = []eras.EraDesc{eras.DijkstraEraDesc}
 	ls.currentPParams = &conway.ConwayProtocolParameters{}
@@ -549,19 +508,20 @@ func TestApplyEndorserBlockKeepsProtocolParamFaultRetryable(t *testing.T) {
 	require.NotErrorAs(t, err, &validationErr)
 }
 
-// A ranking block's own transactions are applied by a delta with the closure
-// options off (ledger/state.go). Absence case for the closure tolerance: a
-// transaction present only in the ranking block is applied normally and
-// consumes its input, and a ranking-block transaction that re-consumes an
-// input an earlier certified endorser-block transaction already spent is still
-// rejected as a double-spend.
-func TestRankingBlockDeltaKeepsHardConsumedInputConflict(t *testing.T) {
+// A ranking block's own transactions are validated before a delta with the
+// closure options off applies them (ledger/state.go). Absence case for the
+// closure tolerance: a transaction present only in the ranking block passes
+// validation and consumes its input, and a ranking-block transaction that
+// re-consumes an input an earlier certified endorser-block transaction
+// already spent fails BadInputsUTxO and is never applied.
+func TestRankingBlockRejectsAnInputACertifiedClosureSpent(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
+	enableLeiosApplyBadInputsValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xe1)
 	producerHash := producerTx.Hash().Bytes()
-	rawClosure, closureTx := leiosApplyTestSpendingTx(t, 0xf1, producerHash, 0)
+	rawClosure, _ := leiosApplyTestSpendingTx(t, 0xf1, producerHash, 0)
 	// Spends the producer's second (still live) output.
 	rawRankingOnly, rankingOnlyTx := leiosApplyTestSpendingTx(
 		t, 0xf2, producerHash, 1,
@@ -583,31 +543,156 @@ func TestRankingBlockDeltaKeepsHardConsumedInputConflict(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// A transaction present only in the ranking block still applies.
+	// A transaction present only in the ranking block validates and applies.
+	require.NoError(t, ls.ValidateTx(rankingOnlyTx))
 	rankingPoint := leiosApplyTestRankingPoint(0x32)
 	require.NoError(t, leiosApplyTestApplyRankingDelta(
 		t, ls, db, rankingPoint, 3, rawRankingOnly, rankingOnlyTx,
 	))
-	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 1)
-	require.Equal(t, rankingOnlyTx.Hash().Bytes(), spentBy)
-	require.Equal(t, rankingPoint.Slot, deletedSlot)
+	requireSpentAt(
+		t, ls, producerHash, 1,
+		ocommon.Point{Slot: rankingPoint.Slot - 1},
+		ocommon.Point{Slot: rankingPoint.Slot},
+	)
 
 	// A ranking-block transaction re-consuming the closure's input is a
-	// double-spend and must be rejected.
-	err = leiosApplyTestApplyRankingDelta(
+	// double spend, which validation rejects before anything applies it.
+	err = ls.ValidateTx(conflictTx)
+	var badInputs shelley.BadInputsUtxoError
+	require.ErrorAs(t, err, &badInputs)
+	require.Len(t, badInputs.Inputs, 1)
+	require.Equal(t, producerHash, badInputs.Inputs[0].Id().Bytes())
+	require.Equal(t, uint32(0), badInputs.Inputs[0].Index())
+	requireSpentAt(
+		t, ls, producerHash, 0,
+		ocommon.Point{Slot: closurePoint.Slot - 1},
+		ocommon.Point{Slot: closurePoint.Slot},
+	)
+	applied, err := ls.ExistingTransactionHashes(
+		t.Context(), [][]byte{conflictTx.Hash().Bytes()},
+	)
+	require.NoError(t, err)
+	require.Empty(t, applied)
+	// Applied without validation, the spend of the absent input is a no-op.
+	require.NoError(t, leiosApplyTestApplyRankingDelta(
 		t, ls, db, leiosApplyTestRankingPoint(0x33), 4, rawConflict,
 		conflictTx,
+	))
+	requireSpentAt(
+		t, ls, producerHash, 0,
+		ocommon.Point{Slot: closurePoint.Slot - 1},
+		ocommon.Point{Slot: closurePoint.Slot},
 	)
-	require.ErrorIs(t, err, types.ErrUtxoConflict)
-	spentBy, deletedSlot = leiosApplyTestUtxoState(t, gdb, producerHash, 0)
-	require.Equal(t, closureTx.Hash().Bytes(), spentBy)
-	require.Equal(t, closurePoint.Slot, deletedSlot)
-	var rows int64
-	require.NoError(t, gdb.QueryRow(`
-SELECT COUNT(*) FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
-		conflictTx.Hash().Bytes(),
-	).Scan(&rows))
-	require.Equal(t, int64(0), rows)
+}
+
+// A validated ranking block whose own transaction spends an input a certified
+// closure already consumed is an invalid block: ledgerProcessBlock rejects the
+// transaction with BadInputsUTxO before its delta applies it.
+func TestRankingBlockApplyRejectsAnInputACertifiedClosureSpent(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newLeiosApplyTestLedger(t)
+	enableLeiosApplyBadInputsValidation(ls)
+	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xe5)
+	producerHash := producerTx.Hash().Bytes()
+	rawClosure, _ := leiosApplyTestSpendingTx(t, 0xf5, producerHash, 0)
+	_, conflictTx := leiosApplyTestSpendingTx(t, 0xf6, producerHash, 0)
+
+	closurePoint := leiosApplyTestRankingPoint(0x35)
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x34), 1, 920,
+		leiosApplyTestEbHash(0xe6), rawProducer,
+	)
+	require.NoError(t, err)
+	_, err = leiosApplyTestApplyEndorserBlock(
+		t, ls, db, closurePoint, 2, 921, leiosApplyTestEbHash(0xf7),
+		rawClosure,
+	)
+	require.NoError(t, err)
+
+	// The full Dijkstra descriptor, so the header's protocol version is
+	// within the node's enabled eras.
+	dijkstraEra := eras.DijkstraEraDesc
+	dijkstraEra.ValidateTxFunc = shelley.UtxoValidateBadInputsUtxo
+	ls.currentEra = dijkstraEra
+	ls.activeEras = []eras.EraDesc{dijkstraEra}
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls.config.CardanoNodeConfig = nodeConfig
+	ls.publishSnapshotsLocked()
+	rankingPoint := leiosApplyTestRankingPoint(0x36)
+	block := &validityOutcomeTestBlock{
+		header: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 3,
+					Slot:        rankingPoint.Slot,
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: dijkstra.MinProtocolVersionDijkstra,
+					},
+				},
+			},
+		},
+		txs: []lcommon.Transaction{conflictTx},
+		era: dijkstra.EraDijkstra,
+	}
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: dijkstra.MinProtocolVersionDijkstra,
+			},
+			MaxBlockBodySize:   100_000,
+			MaxBlockHeaderSize: 100_000,
+		},
+	}
+	err = db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				rankingPoint,
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				nil,
+				ls.currentEra,
+				pparams,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
+	var invalid *txValidationError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, conflictTx.Hash().Bytes(), invalid.TxHash)
+	var badInputs shelley.BadInputsUtxoError
+	require.ErrorAs(t, err, &badInputs)
+	require.Len(t, badInputs.Inputs, 1)
+	require.Equal(t, producerHash, badInputs.Inputs[0].Id().Bytes())
+	require.Equal(t, uint32(0), badInputs.Inputs[0].Index())
+	requireSpentAt(
+		t, ls, producerHash, 0,
+		ocommon.Point{Slot: closurePoint.Slot - 1},
+		ocommon.Point{Slot: closurePoint.Slot},
+	)
+	applied, err := ls.ExistingTransactionHashes(
+		t.Context(), [][]byte{conflictTx.Hash().Bytes()},
+	)
+	require.NoError(t, err)
+	require.Empty(t, applied)
+}
+
+// enableLeiosApplyBadInputsValidation validates transactions with the
+// BadInputsUTxO rule alone.
+func enableLeiosApplyBadInputsValidation(ls *LedgerState) {
+	ls.currentEra.ValidateTxFunc = shelley.UtxoValidateBadInputsUtxo
+	ls.activeEras[0].ValidateTxFunc = shelley.UtxoValidateBadInputsUtxo
+	ls.publishSnapshotsLocked()
 }
 
 // leiosApplyTestApplyRankingDelta applies one transaction as a ranking-block
@@ -662,13 +747,11 @@ func leiosApplyTestApplyRankingDelta(
 
 func newLeiosApplyTestLedger(
 	t *testing.T,
-) (*LedgerState, *database.Database, *sql.DB) {
+) (*LedgerState, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	ls := &LedgerState{
 		db: db,
@@ -678,7 +761,7 @@ func newLeiosApplyTestLedger(
 	}
 	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
-	return ls, db, raw
+	return ls, db
 }
 
 func initializeLeiosApplyTestState(ls *LedgerState) {
@@ -729,17 +812,31 @@ func leiosApplyTestRankingPoint(seed byte) ocommon.Point {
 	}
 }
 
+// requireLeiosApplyTestTxCount counts the transactions the ledger's
+// transaction index holds. Every fixture applies past slot 0.
 func requireLeiosApplyTestTxCount(
 	t *testing.T,
-	raw *sql.DB,
-	want int64,
+	ls *LedgerState,
+	want int,
 ) {
 	t.Helper()
-	var got int64
-	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM applied_transaction`,
-	).Scan(&got))
-	require.Equal(t, want, got)
+	hashes, err := ls.TxHashesAfterSlot(nil, 0)
+	require.NoError(t, err)
+	require.Len(t, hashes, want)
+}
+
+// requireLeiosApplyTestApplied returns where the ledger applied the
+// transaction with hash, failing when it applied none.
+func requireLeiosApplyTestApplied(
+	t *testing.T,
+	ls *LedgerState,
+	hash []byte,
+) *models.Transaction {
+	t.Helper()
+	tx, err := ls.ledgerDB().GetTransactionByHash(t.Context(), hash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, tx, "the transaction was not applied")
+	return tx
 }
 
 func requireLeiosApplyTestEndorserBacking(
@@ -762,7 +859,7 @@ func requireLeiosApplyTestEndorserBacking(
 func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx, _, tx := leiosApplyTestTx(t, 0x01)
 
 	const ebSlot = uint64(200)
@@ -784,22 +881,17 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	}))
 
 	require.Equal(t, 1, applied)
-	requireLeiosApplyTestTxCount(t, gdb, 1)
+	requireLeiosApplyTestTxCount(t, ls, 1)
 	requireLeiosApplyTestEndorserBacking(
 		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx},
 	)
 	// The transaction is recorded under the ranking block's point.
-	var got int64
-	require.NoError(t, gdb.QueryRow(
-		`SELECT COUNT(*) FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
-		tx.Hash().Bytes(),
-	).Scan(&got))
-	require.Equal(t, int64(1), got)
+	requireLeiosApplyTestApplied(t, ls, tx.Hash().Bytes())
 }
 
 func TestApplyEndorserBlockPreservesStandaloneBacking(t *testing.T) {
 	t.Parallel()
-	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x18)
 	const ebSlot = uint64(218)
 	ebHash := leiosApplyTestEbHash(0x28)
@@ -834,7 +926,7 @@ func TestApplyEndorserBlockPreservesStandaloneBacking(t *testing.T) {
 func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx1, _, _ := leiosApplyTestTx(t, 0x02)
 	rawTx2, _, _ := leiosApplyTestTx(t, 0x03)
 
@@ -857,7 +949,7 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	}))
 
 	require.Equal(t, 2, applied)
-	requireLeiosApplyTestTxCount(t, gdb, 2)
+	requireLeiosApplyTestTxCount(t, ls, 2)
 	requireLeiosApplyTestEndorserBacking(
 		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx1, rawTx2},
 	)
@@ -866,7 +958,7 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx1, _, _ := leiosApplyTestTx(t, 0x04)
 	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
 
@@ -915,7 +1007,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	require.Equal(t, 1, appliedFirst)
 	require.Equal(t, 0, appliedSameTxnDuplicate)
 	require.Equal(t, 1, appliedSecondUnique)
-	requireLeiosApplyTestTxCount(t, gdb, 2)
+	requireLeiosApplyTestTxCount(t, ls, 2)
 	// The backing is served whole, so it keeps the repeated transaction; only
 	// its ledger effects are recorded once.
 	requireLeiosApplyTestEndorserBacking(
@@ -942,7 +1034,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 		return err
 	}))
 	require.Equal(t, 0, appliedCommittedDuplicate)
-	requireLeiosApplyTestTxCount(t, gdb, 2)
+	requireLeiosApplyTestTxCount(t, ls, 2)
 }
 
 // On the Haskell-conformant path (Musashi prototype) the endorser block's
@@ -953,7 +1045,7 @@ func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx, _, tx := leiosApplyTestTx(t, 0x06)
 
 	const ebSlot = uint64(400)
@@ -977,12 +1069,8 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	// The transaction is applied and recorded under the ranking block's point,
 	// and the endorser blob is stored.
 	require.Equal(t, 1, applied)
-	requireLeiosApplyTestTxCount(t, gdb, 1)
-	var gotTx models.Transaction
-	require.NoError(t, gdb.QueryRow(
-		`SELECT a.slot FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
-		tx.Hash().Bytes(),
-	).Scan(&gotTx.Slot))
+	requireLeiosApplyTestTxCount(t, ls, 1)
+	gotTx := requireLeiosApplyTestApplied(t, ls, tx.Hash().Bytes())
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
 	requireLeiosApplyTestEndorserBacking(
 		t, db, ebSlot, ebHash, []cbor.RawMessage{rawTx},
@@ -1032,7 +1120,7 @@ func leiosApplyTestTxWithOutput(
 func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6a)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
@@ -1057,13 +1145,11 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 
 	// The endorser transaction's produced output is a live UTxO stamped at the
 	// ranking block's slot (rollback-safe) and not marked spent.
-	var utxo models.Utxo
-	require.NoError(t, gdb.QueryRow(`
-SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
-		tx.Hash().Bytes(),
-	).Scan(&utxo.AddedSlot, &utxo.DeletedSlot))
-	require.Equal(t, rbPoint.Slot, utxo.AddedSlot)
-	require.Equal(t, uint64(0), utxo.DeletedSlot)
+	require.True(t, outputLiveIn(t, ls, tx.Hash().Bytes(), 0))
+	requireCreatedAt(
+		t, ls, tx.Hash().Bytes(), 0,
+		ocommon.Point{Slot: rbPoint.Slot - 1}, ocommon.Point{Slot: rbPoint.Slot},
+	)
 }
 
 // The Haskell-conformant path commits the endorser-block blob in its own blob
@@ -1124,7 +1210,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 
-	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	rawTx, _, tx := leiosApplyTestTx(t, 0x07)
 	firstPoint := leiosApplyTestRankingPoint(0x91)
 	replayPoint := leiosApplyTestRankingPoint(0x93)
@@ -1157,12 +1243,8 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 		return err
 	}))
 
-	requireLeiosApplyTestTxCount(t, gdb, 1)
-	var gotTx models.Transaction
-	require.NoError(t, gdb.QueryRow(`
-SELECT a.slot, a.block_index FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
-		tx.Hash().Bytes(),
-	).Scan(&gotTx.Slot, &gotTx.BlockIndex))
+	requireLeiosApplyTestTxCount(t, ls, 1)
+	gotTx := requireLeiosApplyTestApplied(t, ls, tx.Hash().Bytes())
 	require.Equal(t, firstPoint.Slot, gotTx.Slot)
 	require.Equal(t, uint32(0), gotTx.BlockIndex)
 	requireLeiosApplyTestEndorserBacking(
@@ -2563,41 +2645,9 @@ func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	)
 }
 
-func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
-	t.Parallel()
-	ls, db, raw := newLeiosApplyTestLedger(t)
-	closure, tx := leiosApplyTestProducerTx(t, 0xA5)
-	second, _ := leiosApplyTestProducerTx(t, 0xA8)
-	_, err := raw.Exec(`CREATE TRIGGER fail_closure_context BEFORE INSERT ON leios_transaction_context WHEN (SELECT COUNT(*) FROM leios_transaction_context) > 0 BEGIN SELECT RAISE(ABORT, 'injected closure context failure'); END`)
-	require.NoError(t, err)
-	contextSlot := uint64(990)
-	point := leiosApplyTestRankingPoint(0xA6)
-	point.Slot = 1020
-	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
-		return err
-	}
-	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(apply), "injected closure context failure")
-	stored, err := db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
-	require.NoError(t, err)
-	require.Nil(t, stored)
-	var outputs int
-	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, tx.Hash().Bytes()).Scan(&outputs))
-	require.Zero(t, outputs)
-	fees, err := db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
-	require.NoError(t, err)
-	require.Zero(t, fees)
-	_, err = raw.Exec(`DROP TRIGGER fail_closure_context`)
-	require.NoError(t, err)
-	require.NoError(t, db.Transaction(t.Context(), true).Do(apply))
-	fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
-	require.NoError(t, err)
-	require.Equal(t, 2*tx.Fee().Uint64(), fees)
-}
-
 func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
 	t.Parallel()
-	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	closure, _ := leiosApplyTestProducerTx(t, 0xB1)
 	point := leiosApplyTestRankingPoint(0xB2)
 	point.Slot = 1020
@@ -2644,7 +2694,7 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	require.NotNil(t, ls.untickedClosure)
 	require.NoError(t, ls.rollbackWithBlocks(t.Context(), fixture.ancestorTip.Point, nil, false))
 	require.Nil(t, ls.untickedClosure)
-	stored, err := ls.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored, "a same-tip rollback must remove closure effects owned by the rejected next block")
 }
@@ -2667,7 +2717,7 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	require.NotNil(t, ls.untickedClosure)
 	require.NoError(t, ls.rollbackWithBlocks(t.Context(), ocommon.Point{Slot: fixture.ancestorTip.Point.Slot + 1, Hash: fixture.ancestorTip.Point.Hash}, nil, false))
 	require.Nil(t, ls.untickedClosure)
-	stored, err := ls.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored, "rollback before the certifier must remove pending closure effects")
 }
@@ -2681,7 +2731,7 @@ func TestApplyEndorserBlockPreverifiesSignaturesAndRollsBackInvalidClosure(t *te
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			ls, db, rawDB := newLeiosApplyTestLedger(t)
+			ls, db := newLeiosApplyTestLedger(t)
 			input := leiosApplyTestSeedKeyUtxo(t, db, 0x81, 5_000_000)
 			firstRaw, first := leiosApplyTestSignedSpendingTx(t, 1, input, 0, 5_000_000)
 			secondRaw, _ := leiosApplyTestSignedSpendingTx(t, 2, first.Hash().Bytes(), 0, 4_799_999)
@@ -2710,14 +2760,15 @@ func TestApplyEndorserBlockPreverifiesSignaturesAndRollsBackInvalidClosure(t *te
 			require.Equal(t, 2, calls)
 			if corrupt {
 				require.Error(t, err)
-				requireLeiosApplyTestTxCount(t, rawDB, 0)
-				spender, deleted := leiosApplyTestUtxoState(t, rawDB, input, 0)
-				require.Empty(t, spender)
-				require.Zero(t, deleted)
+				requireLeiosApplyTestTxCount(t, ls, 0)
+				require.True(
+					t, outputLiveIn(t, ls, input, 0),
+					"the rolled back closure spent its input",
+				)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, 2, applied)
-				requireLeiosApplyTestTxCount(t, rawDB, 2)
+				requireLeiosApplyTestTxCount(t, ls, 2)
 			}
 		})
 	}

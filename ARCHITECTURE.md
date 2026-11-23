@@ -120,9 +120,7 @@ claim their ports between allocation and server startup.
 
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
-unambiguous: a non-nil error never accompanies a live runtime, while a
-recoverable commit-timestamp mismatch is available from
-`DatabaseRuntime.RecoveryError()` on the successfully returned runtime. The
+unambiguous: a non-nil error never accompanies a live runtime. The
 caller must close every returned runtime, and `DatabaseRuntime.Close` preserves
 database-before-provider shutdown order.
 
@@ -1167,32 +1165,23 @@ rollback, primary-chain reconciliation, tip-floor enforcement) drives the
 same supervised restart, which reloads these caches fresh from the database
 before any further block is validated.
 
-`LedgerState.rollback` also refuses a target below the consumed-UTxO prune
-floor. `cleanupConsumedUtxos` hard-deletes spent `utxo` rows (blob objects and
-the metadata row) once `deleted_slot <= tip - stabilityWindow`, while
-`database.TruncateAfterSlot` restores spent UTxOs with an UPDATE
-(`SetUtxosNotDeletedAfterSlot`, `deleted_slot > ?`). An UPDATE cannot reach a
-row that no longer exists, so a rollback below the swept slot leaves the live
-set short of every output consumed above the target and reports the tip
-repaired anyway. The two bounds are meant to line up — the sweep runs a
-stability window below the tip and a single rollback reaches at most that far —
-but nothing enforced it, and successive recovery rewinds compound: each attempt
-rewinds a further stability window below the *already lowered* tip while the
-floor stays fixed at the highest tip the node reached. Blocks the node had
-applied cleanly then failed to resolve their inputs, which drove the next,
-deeper rewind, until the descent ran out of room at the Mithril anchor and the
-pipeline halted with a UTxO set no rewind could repair.
+`LedgerState.rollback` also refuses a target below the live UTxO set's
+journal. The set is the only copy of the UTxO set and rolls back from its
+journal alone, and it prunes that journal one Shelley stability window behind
+its tip. A single rollback reaches at most that far, but successive recovery
+rewinds compound: each attempt rewinds a further stability window below the
+*already lowered* tip while the journal's floor stays where the highest tip
+the node reached left it. A rollback the journal does not reach would move
+the ledger tip to a point the set cannot return to.
 
-The sweep therefore records how deep it removed rows in the
-`consumed_utxo_prune_floor` sync-state key, written in the same transaction that
-removes them. The value is read from the database at each check rather than
-mirrored in memory: a mirror is only ever refreshed after the sweep's own
-transaction commits, so between commit and refresh it reports a floor lower than
-the database holds — permissive in exactly the direction the check exists to
-prevent. A read or parse failure fails closed and refuses the rollback.
+The set is asked at each check (`UtxoSetRollbacker.JournalReaches`, which
+answers what `RollbackUtxoSet` would refuse as older than the journal) rather
+than a value kept beside it: the journal is pruned as the tip advances, so a
+remembered floor can be lower than the one the set holds. A failed read
+refuses the rollback.
 
-`rollback` and `rollbackChainAndState` refuse a target below the floor with
-`ErrRollbackBelowUtxoPruneFloor` before mutating anything, and
+`rollback` and `rollbackChainAndState` refuse such a target with
+`ErrRollbackBelowUtxoJournal` before mutating anything, and
 `rollbackIsAppliable` matches so the loop detector does not classify such a
 target as crossable. Both checks run against the *resolved* target from
 `resolveRollbackTarget`, because the same-slot competitor redirect above can
@@ -1200,9 +1189,11 @@ turn a target sitting exactly on a boundary into one below it;
 `rollbackChainAndState` checks separately, and pre-resolves, because it
 truncates the primary chain before synchronizing the ledger, so a refusal raised
 only by `rollback` would leave the chain rewound past a point the ledger cannot
-follow.
+follow. A target that is also deeper than the security parameter is reported
+as that refusal (`chain.ErrRollbackExceedsSecurityParam`), which no journal
+depth would lift.
 
-A peer rollback the floor refuses is handled like the Mithril boundary —
+A peer rollback the journal refuses is handled like the Mithril boundary —
 chainsync state resets and a fresh intersection is requested — rather than
 returned, because `handleEventChainsync` routes a rollback error to
 `FatalErrorFunc` and a peer's choice of rollback point must not terminate the
@@ -1211,10 +1202,10 @@ ledger tip instead of erroring
 (`dingo_ledger_attip_recovery_prune_floor_clamped_total`), keeping the
 non-destructive half of recovery — a fresh intersection so peer rotation can
 offer a different candidate chain — and dropping only a rewind that could not
-have repaired anything. The Mithril trust boundary does not subsume this floor:
-on a Mithril-bootstrapped node the anchor sits far below the prune floor, so the
-boundary check admits every target the rewind schedule produces and only the
-prune floor refuses them.
+have repaired anything. The Mithril trust boundary does not subsume the
+journal: on a Mithril-bootstrapped node the anchor sits far below the
+journal's floor, so the boundary check admits every target the rewind schedule
+produces and only the journal refuses them.
 
 At-tip recovery also keeps its rewind target at or after the current epoch's
 start slot while the ledger tip or the failing block is inside that epoch, so a
@@ -1230,14 +1221,16 @@ pre-boundary history can still be repaired.
 Startup reconciliation rolls both stores back to their newest applied common
 ancestor when metadata leads the selected chain, and that rollback can be
 arbitrarily deep, so it can now fail with
-`ErrRollbackBelowUtxoPruneFloor` and refuse to start. That is the intended
+`ErrRollbackBelowUtxoJournal` and refuse to start. That is the intended
 outcome rather than a regression: the rewind it was about to perform could not
 have rebuilt the live UTxO set, so the alternative is a node that starts,
-validates against a UTxO set missing rows, and halts later with no way to tell
-what went wrong. The operator recovery is a `dingo database truncate` target at
-or above the floor, or a fresh bootstrap. Truncate is not bound by the security
-parameter, but it refuses to cross the consumed-UTxO prune floor because the
-deleted rows cannot be reconstructed.
+validates against a UTxO set that stopped following the ledger, and halts
+later with no way to tell what went wrong. The operator recovery is a
+`dingo database truncate` target the set's journal or a checkpoint reaches, or
+a fresh bootstrap. Truncate is not bound by the security parameter, but it
+refuses a target neither reaches, and, on a v0.94.2 database that has not yet
+moved its UTxO set, a target below the slot that release deleted spent `utxo`
+rows up to.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **primary-chain undo events must be emitted before primary-chain truncation,
@@ -1250,45 +1243,69 @@ emits the `ledger.block` undo events, which are a different event type and so a
 different lane. Emitting the undo events from a `go` statement onto the
 reordering shared pool loses the same race twice over.
 
-Before that enqueue, the rollback path writes `ledger.rollback.pending` in
-`sync_state`. The versioned record contains the rollback point and explicitly
-tagged block fields needed to decode the undo transactions. It is written after
-rollback validation but before either the undo enqueue or `chain.Rollback`,
-because the latter deletes the block bodies. Success clears the record only
-after metadata truncation, cache reload, durable-floor enforcement, and an
-ordered-lane delivery barrier. Startup replays the stored payload while holding
-the transaction-event mutex, finishes the chain rewind if necessary, and then
-completes metadata truncation. A payload successfully captured in the outbox is
-delivered at least once: an interruption after delivery and before clearing may
-replay an undo, so consumers must tolerate duplicate rollback notifications.
-An applied point whose block body was removed before a restart and is absent
-from the retained block cache cannot be added to that payload; the reconciler
-logs and counts the notification gap rather than using the replacement chain's
-block at the same slot.
+Before that enqueue, the rollback path writes the rollback intent,
+`chainstate/ledger.rollback.pending`, in the block store. The versioned record
+names the rollback point and the blocks the rollback removes; it does not carry
+them. It is written after rollback validation but before either the undo
+enqueue or `chain.Rollback`. The block store keeps the bodies: every removal of
+a block from the primary chain (`ChainManager.removeBlockByIndex`, which
+`Rollback`, `RollbackUnbounded`, the deferred variants,
+`RollbackDeferredWithPreflight`, `RewindPrimaryChainToPoint` and
+`RewindPrimaryChainAtStartup` all reach) calls `database.BlockRetireTxn`, which
+deletes the block's chain keys and writes its body under an `rb` key in one blob
+transaction. The chain therefore truncates exactly as before -- a rolled-back
+block is not found by point, hash or index -- while the body outlives the
+truncation. An operator truncate copies the bodies a pending intent names to
+their `rb` keys before it deletes anything. Endorser-block transactions a
+rolled-back ranking block applied are named by position and read from the
+endorser block provider or the Leios store, which demotes a rolled-back
+certification's endorser block instead of deleting it; the intent does not
+hold that store's records against collection.
 
-The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
-rollback continues with live ordered delivery and logs that crash recovery is
-degraded instead of allocating and writing an unbounded JSON value. Consecutive
-deeper rollback windows merge their payloads into the pending record rather
-than overwriting an earlier window. A record that cannot drive a truncation --
-one whose point leads the applied ledger tip, or whose point has left the
-primary chain -- still emits its captured undo before it is retired, because
-the chain truncation that preceded it already deleted those bodies. Only an
-undecodable or unsupported record is dropped without delivery, and none of
-these outcomes makes startup permanently fail on the same value.
+Success clears the record only after the ledger rollback committed, cache
+reload, durable-floor enforcement, and an ordered-lane delivery barrier, and
+deletes the `rb` bodies after the clear (`Database.ReleaseRolledBackBlocks`,
+which runs only while no intent is pending). Startup replays the undo from the
+kept bodies while holding the transaction-event mutex, finishes the chain
+rewind if necessary, and then completes the ledger rollback. The three stops
+this ordering has to survive:
+
+- after the chain truncation, before the ledger rollback: the intent is
+  pending and the bodies are `rb` keys; start replays the undo, rolls the
+  ledger back, clears, deletes;
+- after the ledger rollback, before the clear: start replays the undo once
+  more, finds the ledger at the point, clears, deletes;
+- after the clear, before the delete: start finds bodies no intent names and
+  deletes them without replaying anything.
+
+An intent is delivered at least once: an interruption after delivery and before
+clearing may replay an undo, so consumers must tolerate duplicate rollback
+notifications. An applied point whose block body was removed with no intent
+pending and whose `rb` key was already released cannot be added after a
+restart; the reconciler logs and counts the notification gap rather than using
+the replacement chain's block at the same slot.
+
+The record names at most 4096 blocks. A larger rollback continues with live
+ordered delivery and logs that crash recovery is degraded. Consecutive deeper
+rollback windows merge their blocks into the pending record rather than
+overwriting an earlier window. A record that cannot drive a truncation -- one
+whose point leads the applied ledger tip, or whose point has left the primary
+chain -- still emits its undo before it is retired. Only an undecodable or
+unsupported record is dropped without delivery, and none of these outcomes
+makes startup permanently fail on the same value.
 
 When a lagging ledger iterator reports a rollback after `chain.Rollback` has
 already removed the abandoned blocks, the iterator result carries the chain's
 captured `RollbackBlocks` payload (newest first) into
-`processChainIteratorRollback`. That path uses the captured models to persist
-`ledger.rollback.pending` before metadata truncation; it does not attempt to
-re-read block bodies that chain selection has already deleted. Multiple queued
-iterator rollbacks retain the combined removed-block payload in rollback order.
-The iterator rollback holds the transaction-event mutex while it updates ledger
-metadata, emits undo events from the captured blocks, and waits for their
-ordered delivery before retiring the matching intent. If a reconciliation
-rewind is refused before changing the chain, it restores the intent that was
-pending before preparation, or clears only the new intent when there was none.
+`processChainIteratorRollback`. That path writes the intent from the captured
+models before the ledger rollback, first writing as an `rb` key any body a
+release has already deleted since the chain kept it. Multiple queued iterator
+rollbacks retain the combined removed-block payload in rollback order. The
+iterator rollback holds the transaction-event mutex while it updates ledger
+state, emits undo events from the captured blocks, and waits for their ordered
+delivery before retiring the matching intent. If a reconciliation rewind is
+refused before changing the chain, it restores the intent that was pending
+before preparation, or clears only the new intent when there was none.
 
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
@@ -1828,8 +1845,8 @@ not durably adopted:
 - **Duplicate-slot fence.** The chain-tip check (`currentSlot < tipSlot`)
   cannot see a slot whose block was signed and diffused but never adopted,
   and it forgets slots entirely when the tip rolls back or the process
-  restarts. `ForgeFenceStore` (`ledger/forging/store.go`, persisted in
-  `sync_state` under `forge_fence:<poolid>`) records the highest slot the
+  restarts. `ForgeFenceStore` (`ledger/forging/store.go`, persisted in the
+  block store as `chainstate/forge_fence:<poolid>`) records the highest slot the
   node committed to *before* the header for that slot is signed, and the
   forger refuses any slot at or below it. Refusing a slot the node did not
   actually use costs one block; signing a second, different block for a
@@ -1838,11 +1855,12 @@ not durably adopted:
   cannot be written fails the forge, rather than signing unprotected.
   The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
   operation: any increment points at a slot-clock regression or a
-  rolled-back database. The fence lives in `sync_state`, and the Mithril
-  import's completion cleanup (`mithril/sync_import.go`) deletes only
-  transient sync keys and leaves every `forge_fence:` row untouched.
-  Concurrent fence advances cannot be overwritten by a stale import read,
-  so a producer bootstrapped from a snapshot keeps its latest fence.
+  rolled-back database. The fence is block-store chain state, written
+  through `Database.SetChainStateSynced` so it is flushed before the header
+  is signed. The Mithril import's completion cleanup
+  (`mithril/sync_import.go`) clears `sync_state` only and never reads or
+  writes the fence, so a producer bootstrapped from a snapshot keeps its
+  latest fence.
 - **Credential and rotation metrics.** Alongside the KES gauges
   (`cardano_node_metrics_currentKESPeriod_int`,
   `..._remainingKESPeriods_int`, `..._operationalCertificateStartKESPeriod_int`,
@@ -2219,7 +2237,7 @@ type Node struct {
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     dbLifecycleMgr *dblifecycle.Manager           // Automatic epoch-boundary DB snapshots
-    plannerStatsMgr *plannerstats.Manager        // SQLite planner statistics maintenance
+    indexerPlannerStatsMgr *plannerstats.Manager // IndexerDB SQLite planner statistics maintenance
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
@@ -2395,11 +2413,9 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-    Planner statistics managers (`internal/plannerstats.Manager`): for the
-    consensus store, the startup incremental planner-statistics pass runs after any
-    commit-timestamp recovery and before the ledger starts processing blocks,
-    to populate statistics before the first block batch. An API node runs a
-    second manager over the IndexerDB: it starts after the API listeners and
+    Planner statistics manager (`internal/plannerstats.Manager`): the
+    ledger's database keeps no metadata store, so only an API node runs one,
+    over the IndexerDB. It starts after the API listeners and
     runs its startup pass on the manager worker, so a long refresh over the
     API history does not delay availability. A failed pass is logged and the
     node continues with the statistics it had. A live restore or truncate runs
@@ -2639,17 +2655,6 @@ storage. Ouroboros is not in this list: an NtC client can acquire a
 LocalStateQuery snapshot until its connection drains, so shutdown closes
 Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
 there skips the phase-3 storage closes like an unfinished phase-1 wait.
-The legacy SQL UTxO row cleanup worker finishes a set-only migration that
-`reconcileUtxoSet` committed and marked with `DeferUtxoRowCleanup`: the cutover
-returns once the mark is durable, and the worker deletes the redundant SQL rows
-in bounded batches, clearing the migration progress record only after the last
-batch so a restart resumes it. `Run` starts it after every other service
-(`startInitialUtxoMigrationCleanup`, under `liveLifecycleMu` so it serializes
-with live restore and truncate). It has its own context, because restore and
-truncate stop storage users without cancelling the node context. It is the
-first quiesce stop, so it is cancelled and joined before storage closes during
-shutdown, restore and truncate; `reinitializeAndResume` starts it again against
-the reopened storage. A cancelled run leaves the progress record in place.
 Each wait is routed through `stopWithDeadline` with whatever remains of the
 one shutdown deadline, not a fresh timeout per component, so a goroutine that
 never observes
@@ -3248,12 +3253,32 @@ allocate.
 on the ledger state, or `stagingLedgerDB` over an adapter of its database.
 `stagingLedgerDB` stages every ledger-state write for the live UTxO set and
 answers every ledger-state read from the set, so a read the set cannot answer
-fails with `ErrDrainedFamilyUnserved`. What it passes to the SQL store is
-chain data and the transaction index: the transaction and certificate rows
-of `SetTransactionWithOpts` and `SetTransactionBatchedWithOpts`, and the
-`sync_state` keys that name chain data (`isChainSyncStateKey`: the deferred
-header validation markers and their floor, the Mithril trust boundary, and
-the consumed-UTxO prune floor). Any other key is refused with
+fails instead of falling back. The transaction index is LedgerDB
+state too: `SetTransactionWithOpts`, `SetTransactionBatchedWithOpts` and
+`SetGenesisTransaction` stage a `TxIndexEntry` (the block a transaction was
+applied in, its position, era and validity) on the transaction's batch. In a
+database transaction without a metadata transaction, `SetTransactionWithOpts`
+and `SetGenesisTransaction` write only blob offsets, and a database without a
+metadata store has no `NewBatchAccumulator`, so neither writes a metadata row.
+`GetTransactionByHash` and `GetTransactionsByHashes` answer from the index as
+the calling transaction sees it (`txIndexView`): an entry the transaction
+staged, minus the ones a rollback it staged drops, over the LedgerDB's
+committed rows. Endorser-block deduplication, rollback undo of endorser
+transactions, replay recovery, the continuation audit, spent-output
+resolution and governance proposal repair all read it there. The database
+layer has no transaction row to read either, so its output CBOR recovery asks
+the ledger through `types.TxIndexSource` (`LedgerState.TxLocation`), which
+answers as the metadata transaction it is given sees the index.
+`LedgerState.ExistingTransactionHashes`, which the UTxO RPC `WaitForTx` stream
+uses to report transactions committed before it subscribed, reads the index
+too. A lookup fails
+with `errTxIndexUnavailable` when the LedgerDB has stopped following the
+ledger; it never reports a transaction absent in that case, because an absent
+transaction is one the ledger applies again. With the live UTxO source set the
+SQL store writes no row for a transaction the ledger applies; the IndexerDB
+writer records transaction and certificate history from the block.
+`stagingLedgerDB` passes no `sync_state` key to the SQL store: a key that
+names ledger state is staged for the set, and any other key is refused with
 `errSyncStateKeyUnowned`, so a ledger-state key cannot reach SQL unnoticed.
 `SetGenesisGovernance` stages the genesis DReps and delegations for the set
 alone; their certificate history is written to the IndexerDB by its writer's
@@ -3275,9 +3300,10 @@ reward precompute cursors, the incomplete stake input snapshots
 (`dingo:governance:ratify-pending`) and the delegator inactivity activation
 (`delegator_inactivity_activated`), whose stamped credentials
 `AccountInactivityActivationMembership` reads from the set's account rows.
-`Database.GetSyncState`, `SetSyncState` and `DeleteSyncState` return
-`ErrFamilyDrained` for the last three once the LedgerDB set keeps the family
-that owns each. It reads back only the other `sync_state` keys. The ledger, the stake
+On the ledger's database, which keeps no metadata store,
+`Database.GetSyncState`, `SetSyncState` and `DeleteSyncState` fail with
+`ErrNoMetadataStore`, except the protocol parameter markers, which they read
+from the `PParamsSource`. The ledger, the stake
 snapshot manager and calculator, and the governance package read and write
 ledger state through it, and carry a `ledgerdb.Txn` rather than a
 `*database.Txn`. Transactions open with `Begin`, or with `BeginLedgerOnly`
@@ -3469,7 +3495,7 @@ column. `ComputeAndApplyPParamUpdates` computes the enactment from the set's
 proposals and epoch records with
 `database.ComputeClassicPParamEnactmentFromRows` over a copy of the current
 parameters, stages the resulting row and returns the set's result; a set
-that does not hold every proposal refuses it (`ErrDrainedFamilyUnserved`). A batch's rollback applies before its writes, as in a rollback
+that does not hold every proposal refuses it (`ErrLedgerStateUnserved`). A batch's rollback applies before its writes, as in a rollback
 transaction the truncation precedes anything it rewrites.
 The ledger stages nonces where it writes them; the other writes go through
 `stagingLedgerDB`, the `LedgerDB` that `LedgerState.LedgerDB` returns, which
@@ -3496,7 +3522,7 @@ The op-cert counter reads (`LatestPoolOpCertSequence`, `...After`,
 answered from the set.
 The set keeps each pool's highest sequence and latest slot, with the `k`
 journal for earlier slots, not every row: a read as of a slot before its
-record fails with `ErrDrainedFamilyUnserved`; `...After` and `...InRange` are
+record fails with `ErrLedgerStateUnserved`; `...After` and `...InRange` are
 answered when the pool has no observation in the bound or its highest
 sequence rose inside it, and otherwise a lower counter could be the only
 observation there, so the read fails the same way. The existence read at a slot and the per-pool map at a slot
@@ -3713,20 +3739,19 @@ ImmutableDB configuration (`nodestorage.ImmutableConfig`, off under history
 expiry, which it refuses on a database that holds an ImmutableDB state record)
 and the live UTxO set of that database's data directory
 (`nodestorage.OpenUtxoSet`, a temporary directory for a database without one),
-and hands the set to the ledger. Before the ledger starts it runs
-`nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: refuse a
-set an import has not finished, move a released database's SQL UTxO set into the
-set (first reverting such a database `k` blocks below its tip, as the node
-does, then rebuilding from its SQL history any reward stake inputs a deferred
-write left partial, then moving its SQL UTxO rows into the set), mark a database
-at origin as set-only, reconcile the set with the ledger, and drain the graduated
-families. `LoadWithDB` replays the kept blocks after reconciliation returns and
+and hands the set to the ledger. A v0.94.2 database's ledger state has
+already moved by then: the open runs `nodestorage.ReleasedMigration` as every
+opener of the ledger's database does (see below). Before the ledger starts it
+runs `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: refuse
+a set an import has not finished, mark a database at origin as holding its UTxO
+set in the set, reconcile the set with the ledger, and remove the per-family
+SQL rows the set holds. `LoadWithDB` replays the kept blocks after reconciliation returns and
 before the ledger appends any. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through
 `LedgerState.LedgerDB`. A loaded database is therefore one a node opens with
 nothing to migrate, and load runs on a database a node or an earlier load
-drained. It stops, before it copies a block, on a set that cannot be brought
+left with its ledger state in the LedgerDB. It stops, before it copies a block, on a set that cannot be brought
 to the database's ledger tip, on an import into the set that is still writing
 (`badgerutxo.ErrImportPending`), and on a chain behind the recorded
 ImmutableDB tip (`ErrLoadBehindImmutableTip`). Load writes no checkpoint, has
@@ -3736,46 +3761,50 @@ node's block promoter moves the loaded bodies on its first start.
 The set is the only store of that state on every node. A database
 written by a release that kept the state in SQL moves in place at startup in a
 fixed order (see DATABASE.md, "Storage layout and the move from a released
-database"). The `dingo` command runs the move before any command opens a
-store; `Node.Run` does not, and refuses a PostgreSQL or MySQL API store that
-has a tip but was not adopted (`storageadopt.CheckServerAdopted`). The node's
-reconcile reverts the released metadata store to the block `k` blocks below
-its tip before the state moves (`nodestorage.Reconcile.RewindBlocks`,
-`lifecycle.RewindMetadata`) and the ledger applies the kept blocks again
-through the set, so the set's rollback journal covers the last `k` blocks of
-the released tip and a fork on the first start is followed. A truncate below the set's journal does not replace the set: it
+database"). The `dingo` command adopts an API store as the IndexerDB before
+any command opens a store; `Node.Run` does not, and refuses a PostgreSQL or
+MySQL API store that has a tip but was not adopted
+(`storageadopt.CheckServerAdopted`).
+
+The ledger state moves in a phase of its own, before the ledger's database
+opens (`nodestorage.ReleasedMigration`). The block store says whether it runs:
+a block store v0.94.2 opened holds the blob store identity and not the
+`chainstate/ledger_migrated` marker, which a fresh block store gets the first
+time the ledger's database opens it and a v0.94.2 one gets as the phase's last
+write. The ledger's database refuses a block store the phase has not finished
+(`database.ErrLedgerNotMigrated`). `Node.Run` and `reinitializeCoreStorage`
+run the phase between resolving the stores and `database.New`; every
+`internalplugins.OpenDatabase` caller that opens the ledger's database of a
+configured data directory (`dingo load`, the `serve` preflight, the offline
+lifecycle service) passes `StorageDependencies.MigrateReleased`
+(`nodestorage.MigrateReleased`). `mithril sync` and `leios-db-bench` pass none
+and refuse such a block store. The phase opens the configured metadata
+provider on a plugin host of its own, opens the v0.94.2 database over it and
+the block store as `database.RoleReleased` (the role storage adoption also
+opens it with), reverts it to the block `k` blocks below its tip
+(`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
+(`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
+ledger-state family into the live UTxO set, checks the set holds them at the
+metadata store's tip, syncs the set and writes the marker. The ledger applies
+the kept blocks again through the set, so the set's rollback journal covers
+the last `k` blocks of the released tip and a fork on the first start is
+followed. A restore validates a restored v0.94.2 snapshot by opening it as
+`database.RoleReleased`; the node migrates it when it opens it. A truncate below the set's journal does not replace the set: it
 removes the blocks and leaves the set ahead of the ledger, and the next start's
 reconcile restores the newest checkpoint at or below the ledger's tip and has
 the ledger replay from it.
-At startup, after `reconcileUtxoSet`, `internal/statedrain.Run` deletes the SQL
-rows of each family the release graduates once its set markers are loaded and
-the set tip equals the metadata tip, then records the family in the
-`ledger_state_drained` latch of `node_settings_gate`. The latch only widens, a
-schema bump stops an older binary, and this release graduates the block
-nonces, the mid-epoch era switch, the network state and donations, live
-stake (`reward_live_stake`), the committee and constitution, governance, the
-protocol parameters, update proposals and synthetic PlutusV2 markers, and the
-genesis key delegations (`mir-genesis`; the MIR tables stay as API history),
-the reward snapshot inputs (`reward-inputs`) and the imported block counts
-(`reward-blocks-fees`), the op-cert counters (`op-certs`), the DReps and
-accounts, which drain as a pair after live stake, the pool history
-(`pools-history`), after accounts, and the derived reward outputs
-(`reward-outputs`), and then the epoch summaries and epochs, last.
-The summaries and epochs families are graduated and drain last, summaries
-first, so the summaries `Verify` still reads the epoch rows it bounds its scan
-by. A drained epochs family has its only copy in the set, which holds the
-ledger's epochs once reconciled to its tip, so `Node.prepareEpochCache`
-reconciles the set before the ledger loads its epoch cache. The op-certs family
-drains after reward-blocks-fees, whose `Verify` reads the op-cert rows. Each
-counter keeps the sequence of its latest observation beside the highest, so a
-header read after a slot is answered when a pool repeated its counter.
-The reward-blocks-fees family is graduated: per-epoch block counts and fees
+The set holds the ledger's epochs once reconciled to its tip, so
+`Node.prepareEpochCache` reconciles the set before the ledger loads its epoch
+cache. Each op-cert counter keeps the sequence of its latest observation
+beside the highest, so a header read after a slot is answered when a pool
+repeated its counter.
+The set keeps the per-epoch block counts and fees,
 accumulated in each block's apply batch and served to `rewardBlockCounts` and
 the boundary fee total through `ledger.RewardBlocksReader`, loaded by
 `ledger.RewardBlocksFromStore`. The epoch-boundary reward input capture reads
 its overlay-inclusive counts through `LedgerDB.CountEpochPoolBlocks`, which the
 staging LedgerDB serves from the same rows. The
-reward-inputs family, which is graduated, keeps the reward snapshot's pots, header, pool inputs and
+set keeps the reward snapshot's pots, header, pool inputs and
 stake inputs in the set: the staging LedgerDB stages each save and delete,
 serves the reward round's reads through `ledger.RewardInputsReader`, writes
 nothing to the store, skips the deferred stake
@@ -3784,57 +3813,27 @@ resolves pool reward-account auto-votes from the pools and accounts it serves.
 The startup check for mark snapshots of an older accounting version reads their
 versions from the set (`Set.StaleStakeSnapshotEpochs`).
 
-The reward-outputs family is graduated and drains after pools-history, ahead of the epoch families. It keeps each epoch's
-pool outputs, account outputs and
-precompute cursor in the set (`ledger.RewardDerivedReader`): the staging
-LedgerDB stages every save, replace and prune, serves the reward round's reads
-and the cursor from the set, writes nothing to
-the store, computes the claims from the set and rechecks eligibility by the
-durable rollback counter the cursor records. The readers of the account tables
-that the reward path used (live stake inputs, post-snapshot credits, historical
-stake) refuse a drained table in the SQL store and are answered from the set.
-The committee and governance tables are still read by API-only queries (the
-votes history, the proposal listing order and the off-chain anchor discovery),
-which the ledger's core-mode store never runs: on the storage-role layout
-the IndexerDB answers them. A drained
-governance family has its new proposal and vote row IDs allocated by the set
-(`GovernanceReader.NextGovernanceIDs`), above every ID the set or a staged
-commit holds, since the SQL upsert no longer returns them. The metadata store
-learns the latch through `metadata.DrainedFamilyAware` and stops writing and
-rolling back those tables. `Database.FamilyDrained` reports the
-latch plus every family with a `ledger.state_drain.<family>` marker (a drain
-that began and has not latched, whose rows are partly deleted), as
-`DrainedFamilies`, `EffectiveDrainedFamilies` and `RecordDrainedFamily` last
-saw them. If a stop splits the DReps and accounts pair, DReps latched and
-accounts not yet marked, the next startup's drain finishes the accounts and no
-SQL write runs in between. For every
-family `stagingLedgerDB` stages only and writes no SQL row, serves every
-read from the set (failing with `ledger.ErrDrainedFamilyUnserved` when the set
-cannot), and, for a latched family, `Database.TruncateAfterSlot` skips its
-rollback deletes and reads the rollback target's nonce from the `NonceSource` the ledger
+The set keeps each epoch's pool outputs, account outputs and precompute
+cursor (`ledger.RewardDerivedReader`): the staging LedgerDB stages every save,
+replace and prune, serves the reward round's reads and the cursor from the
+set, computes the claims from the set and rechecks eligibility by the durable
+rollback counter the cursor records. The committee and governance tables are
+read by API-only queries (the votes history, the proposal listing order and
+the off-chain anchor discovery), which the IndexerDB answers. New proposal and
+vote row IDs are allocated by the set (`GovernanceReader.NextGovernanceIDs`),
+above every ID the set or a staged commit holds. `stagingLedgerDB` stages
+only and writes no SQL row, serves every read from the set (failing with
+`ledger.ErrLedgerStateUnserved` when the set cannot), and a rollback of the
+ledger's database reads the target's nonce from the `NonceSource` the ledger
 installs, and the recorded era switch and the newest epoch a rollback leaves
-from the `EpochSource` it installs (`Database` epoch reads of a drained epochs
-family come from it too, as do the protocol parameter, proposal and marker
-reads of a drained pparams-updates family from the `PParamsSource` it installs,
-and an entry may name `sync_state` keys, `Entry.SyncKeys`, or key prefixes,
-`Entry.SyncKeyPrefixes`, deleted under the same marker); the set keeps the two
-synthetic PlutusV2 markers and drops them in its own rollback across the epoch
-that confirmed real data; `lifecycle.Truncate` reloads the latch and installs
-the opened set
-as that source itself, and refuses a drained family it cannot serve
-(`lifecycle.ErrDrainedFamilyUnserved`). `statedrain.Graduated` takes a
-`Source` that supplies the set's markers (`ledger.FamilyLoaded`). Whenever
-`Database` learns the latch (`DrainedFamilies`, `RecordDrainedFamily`) it tells
-the metadata store whether live stake is drained
-(`Store.SetRewardLiveStakeDrained`): the store then no longer refreshes,
-rebuilds or probes `reward_live_stake`, so no account or UTxO write, rollback,
-resume or startup check touches the table. A backfill
-into a database with a latch bit or a drain marker is refused
-(`Database.RefuseLedgerStateRewrite`), the
-MCP raw-SQL tools refuse a table of a drained family, and the standalone
-Koios parity reader refuses a database drained of a family it reads.
-`stagingLedgerDB` overrides each `LedgerDB` method a running node reads a
-drained family through, and a method it leaves to the store must be classified
+from the `EpochSource` it installs, as it reads protocol parameters from the
+`PParamsSource`; the set keeps the two synthetic PlutusV2 markers and drops
+them in its own rollback across the epoch that confirmed real data.
+`lifecycle.Truncate` installs the opened set as those sources itself and
+refuses without one (`lifecycle.ErrTruncateNeedsUtxoSet`). The MCP raw-SQL
+tools refuse a ledger-state table when the ledger state is in the LedgerDB.
+`stagingLedgerDB` overrides each `LedgerDB` method a running node reads ledger
+state through, and a method it leaves to the store must be classified
 in `stagingPromoted` (`ledger/staging_promoted_test.go`). A read that lists accounts,
 pools or DRep links takes its candidates from the set's indexes, the batches
 the transaction sees, and, when one of them staged a rollback, the keys the
@@ -3847,19 +3846,38 @@ journals do not cover a batch not yet applied, and the epoch-boundary reads
 that run inside the boundary transaction use the current view
 (`boundaryCurrent`). `GetPostSnapshotRewardCreditEvents` answers from the
 set's post-snapshot credits.
-`database/plugin/metadata.StatementGuard` lets a debug build or a test catch a
-read or a write of a drained family's table; only the drain's tagged chunked
-delete passes. `DATABASE.md` ("Ledger state set-only and the drain") has the
-latch format, the steps and the per-reader behavior.
+`DATABASE.md` ("Ledger state in the LedgerDB") has the per-reader behavior.
 
 ### Cross-Store Commit Ordering
 
 A transaction spanning both stores is coordinated by `database.Txn`, which
 treats them as first-class siblings rather than nesting one inside the other.
-`Txn.Commit` runs three steps in a fixed order: commit the blob transaction,
-`BlobStore.Sync`, then commit the metadata transaction. The invariant it
-maintains is that the blob store is never *behind* the metadata tip on disk,
-only ever ahead.
+`Txn.Commit` runs its steps in a fixed order: write and flush the ledger tip
+the transaction set when that tip retreats, commit the blob transaction,
+`BlobStore.Sync`, commit the metadata transaction, then write the ledger tip
+when it advances. The invariant it maintains is that the blob store is never
+*behind* the metadata tip on disk, only ever ahead.
+
+The ledger tip is block-store chain state (`chainstate/tip`), not a metadata
+row; the name metadata tip is kept below for the point the committed metadata
+reaches. The tip is written through a blob transaction of its own, ahead of
+the after-commit callbacks that update the LedgerDB, on the side of the
+metadata commit that keeps it at or below that point: an advance after the
+commit, a retreat before it. After a stop at any step the tip is at the lower
+block, the LedgerDB is at or above it, and startup applies the blocks above
+the tip again. A retreat is written with a mark
+(`chainstate/tip_revert_pending`) that the commit removes after the metadata
+commit, so a stop between the two is distinguishable from a ledger that is
+merely at the lower tip: `LedgerState.Start` finds the mark naming the stored
+tip and runs the metadata revert at that tip again
+(`repeatInterruptedTipRevert`), after the rollback intent recovery and before
+any block is applied. The
+chain manager derives the chain tip from the newest stored block, and startup
+brings the three together in one direction: the ledger tip is rolled back to
+the chain when the chain no longer holds it
+(`reconcilePrimaryChainTipWithLedgerTip`), and a LedgerDB ahead of the ledger
+tip is rolled back to it from its journal (`Set.Reconcile`). An IndexerDB
+reads the ledger's block store but keeps its own tip in its metadata store.
 
 That asymmetry is deliberate, because only one direction is recoverable.
 A blob store ahead of the metadata tip holds orphaned blocks that startup
@@ -3927,8 +3945,8 @@ before the writer's segment are re-read at the boundary slot of every round
 that still holds unfolded outputs, and each applied credit marks its output
 folded. Each bounded journal page is ordered by credential, slot and source
 before it is applied, matching the reward journal's credential-leading unique
-index without retaining a whole reward round in memory. With the
-accounts family drained the journal is the live UTxO set's reward records,
+index without retaining a whole reward round in memory. The journal is the
+live UTxO set's reward records,
 which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The
 account and DRep facts of a batch's slot range are read from the set's state
@@ -3997,7 +4015,7 @@ and refuses to advance a complete split database.
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
 opens the second metadata store, in API mode, as a `database.Database` over
 the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
-UTxO and transaction offsets under their own key prefix, no commit timestamp),
+UTxO and transaction offsets under their own key prefix),
 after the ledger database is recovered and before the ledger starts. The writer
 starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
 fires, and stops before the IndexerDB closes, which precedes the ledger
@@ -4195,25 +4213,9 @@ Dingo supports two storage modes, configured via `storageMode`:
   UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not
   part of that API surface.
 
-In core mode, the ledger's background consumed-UTxO pruner is advisory: it
-defers while the local tip is materially behind the known upstream tip, so its
-potentially large SQLite write transaction cannot compete with blockfetch
-state persistence during historical catch-up. The timer and epoch-boundary
-triggers are single-flight; once the node is near the upstream tip, each run
-deletes at most one bounded batch of eligible rows using the era's stability
-window. Later runs continue the cleanup, keeping SQLite occupancy bounded.
-
-`LedgerState.Close` stops that timer and waits for a run already in flight,
-under a dedicated mutex rather than the `LedgerState` `RWMutex` (an in-flight
-run still takes `RLock` to read the tip, so draining under the ledger lock
-would deadlock). Both are required: the timer callback re-arms itself, so a
-`Close` that only stopped it would let an in-flight run install a fresh timer
-behind `Close`'s back, and `time.Timer.Stop` never waits for an `AfterFunc`
-callback that has already fired. Both triggers also refuse to start once
-`Close` has set the closed flag, which is what constrains the epoch
-transition's own `go ls.cleanupConsumedUtxos()` — stopping the timer does not
-reach that goroutine. `LedgerState` does not own the database, and its owner
-closes it as soon as `Close` returns.
+The ledger keeps its UTxO set in the live UTxO set and writes no `utxo` row
+to its metadata store, so it runs no spent-row cleanup there. The set prunes
+its own rollback journal as it commits.
 
 ### Midnight gRPC Server
 
@@ -4679,8 +4681,11 @@ fallback:
   starting from a durable cursor in `sync_state` so each round costs the newly
   eligible blocks rather than every earlier tombstone. With an IndexerDB its
   `Ceiling` keeps it below the IndexerDB tip, so the writer reads every body
-  before it is expired. `Database.PruneBlock` materializes any UTxO CBOR still
-  stored as block offsets before replacing the block CBOR value with an
+  before it is expired, and its `BeforeExpire` rewrites the IndexerDB's own
+  offset entries into the block as raw CBOR
+  (`Database.MaterializeBlockUtxos`). `Database.PruneBlock` materializes any
+  UTxO CBOR still stored as block offsets (the ledger's database, whose
+  outputs the live UTxO set holds, stores none) before replacing the block CBOR value with an
   expired-history marker, leaving block indexes and metadata intact. Startup
   refuses history expiry on a database with an ImmutableDB state record.
 - A node with `barkBaseUrl` is wired by `node.go` with a `bark.BlobStoreBark`
@@ -4724,7 +4729,8 @@ node opts in.
 The syncer resolves `LedgerState.SecurityParam()` and
 `Chain.PointAtDepth(securityParam)` on a timer (default five minutes, plus
 once immediately at `Start`) and pushes the result into
-`Database.SetCommitteeAuthImmutableSlot`, which the metadata package cannot
+`Database.SetCommitteeAuthImmutableSlot` (a no-op for a database without a
+metadata store, which has no authorization rows to prune), which the metadata package cannot
 resolve itself: `chain` already imports `database`, so the reverse import
 would cycle. A resolution failure (security parameter not yet known, or fewer
 than `securityParam` blocks on chain) pushes `known=false` rather than a
@@ -4940,9 +4946,10 @@ the active `.dingo-namespaces/<id>/` objects share that legacy prefix.
   needed for a snapshot. The two backup calls are not, however, atomic with
   respect to each other: each is independently MVCC-consistent as of whenever it
   runs, but a commit landing between the blob backup and the metadata backup
-  would write its commit timestamp to one store's backup and not the other's,
-  and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store
-  validation. `lifecycle.Snapshot` runs the two backup calls concurrently (in
+  would reach one store's backup and not the other's, and the restored copy
+  would pair two different commit boundaries. A database without a metadata
+  store has no metadata backup, and its snapshot carries none.
+  `lifecycle.Snapshot` runs the two backup calls concurrently (in
   separate goroutines, collecting results through a tagged result channel), not
   sequentially; a successful snapshot holds the commit barrier through the
   slower backup, while failure or cancellation releases it before waiting for
@@ -4958,8 +4965,8 @@ the active `.dingo-namespaces/<id>/` objects share that legacy prefix.
   quiesce: nothing is torn down or disconnected) for that span. A blob-only
   `Txn` (`NewBlobOnlyTxn`) deliberately does not participate: unlike SQLite,
   Badger natively supports concurrent read-write access, so a blob-only `Txn`
-  never holds the single metadata connection the barrier protects and never
-  writes the commit timestamp it keeps consistent, and it can still mutate the
+  never holds the single metadata connection the barrier protects, and it can
+  still mutate the
   blob store while a `Snapshot`'s pause is in effect — safe because badger's own
   `Backup` is independently MVCC-consistent as of whenever it runs, so it does
   not depend on blob writes being paused the way the cross-store
@@ -5417,11 +5424,13 @@ failure there (or a context cancellation caught before `DeleteBlocksAfter`
 starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate`
 resumes normally on it instead of calling `n.cancel()`. Before the first batched
 blob delete, truncate writes a durable `database_lifecycle_truncate_pending`
-`sync_state` marker containing its target and original tip. If a later batch
+marker containing its target and original tip to the block store's chain
+state, beside the blocks it names. If a later batch
 fails, normal node startup detects the marker and refuses to serve the partially
 completed database; rerunning the offline truncate resumes the recorded ID
-range, then truncates metadata and clears the marker in that same metadata
-transaction. This turns the former undetectable intermediate state into an
+range, truncates metadata, and clears the marker once that metadata
+transaction has committed. A stop between the two leaves the marker over a
+finished truncate, and resuming it repeats steps that find nothing to do. This turns the former undetectable intermediate state into an
 explicit, resumable recovery state.
 
 `Service.SetLiveNode` lets a caller reach this path through the same
@@ -5468,12 +5477,9 @@ letting the collector "escape" that cleanup pass even though it's genuinely
 registered; the next rebuild cycle's attempt to register a fresh collector under
 the same name then hits a duplicate-registration error most callers don't handle
 gracefully. `Truncate`'s temporary target-resolution database (`tmpDB`) is
-deferred-closed as soon as `database.New` returns, before checking its error —
-`database.New` can return a non-nil `*Database` alongside a recoverable
-`CommitTimestampError`, and an early return on that error before the `defer` is
-registered would leak `tmpDB`'s open badger/sqlite handles, so
-`reinitializeAndResume`'s reopen of the same data directory a moment later could
-hit a lock-contention failure instead of gracefully recovering the same error.
+deferred-closed as soon as `OpenDatabase` returns a runtime, before any check
+that can return early, so `reinitializeAndResume`'s reopen of the same data
+directory a moment later never meets its badger/sqlite locks.
 
 ### Database Models
 
@@ -5767,52 +5773,7 @@ source take that role at runtime, without the construction-time
   output the batch both creates and spends is removed inside that transaction,
   so its row is never committed. An epoch boundary inside the batch splits it
   into the pre-boundary transaction, the rollover transaction and the
-  post-boundary transaction, as on every apply path. The batch writes through
-  the row-batching accumulator whatever `ApplyRowBatchingEnabled` says. On
-  SQLite outside API storage mode, and outside Dijkstra blocks, each block-apply
-  transaction also attaches a batch UTxO overlay
-  (`LedgerDeltaBatch.enableTrustedUtxoOverlay` calling
-  `Database.EnableBatchUtxoOverlay`): the ledger hands the store the batch's
-  pre-batch inputs, the store resolves every spend in memory and writes the net
-  UTxO change at `FlushBatch`, the batch's `transaction` rows are staged with
-  the ids the per-row inserts would take and written in bulk, and live stake is
-  written once per transaction, by replaying each block's deltas with the
-  per-block row lifecycle in memory. A read barrier on the transaction's handle
-  writes the pending rows and the ended blocks' stake before any statement reads
-  `utxo`, `utxo_pointer` or `reward_live_stake`, and the staged transaction rows
-  before any statement naming `transaction` or a table with a foreign key to it.
-  Dijkstra and later eras keep the per-row path, and so does a batch committed
-  while a pending reward stake input snapshot exists, because the overlay's
-  intra-batch deletion would advance the history floor that snapshot still
-  needs. Stored state, row ids included, is the per-row path's; see
-  `DATABASE.md`, "Trusted batch UTxO overlay". When the overlay's write hits a
-  `UNIQUE` or foreign-key conflict (`types.ErrBatchUtxoOverlayConflict`) --
-  including one a read barrier recorded but could not return, which
-  `applyBatched` joins to its error through `database.WithBatchUtxoOverlayError`
-  -- the call logs a Warn line, counts
-  `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the blocks
-  that did not commit again on the per-row path. Regression tests are in
-  `ledger/trusted_batch_overlay_test.go` and
-  `database/plugin/metadata/sqlstore/utxo_overlay_test.go`. Before the call
-  returns, the consumed-UTxO cleanup runs without its catch-up deferral, up to
-  the tip the last trusted batch committed (never further, even once the live
-  loop has moved the ledger tip) rather than the stability window behind it,
-  after the first batch a process commits and then once every
-  `trustedBatchPruneEvery` (16) committed batches. It deletes
-  `trustedBatchPruneRows` (10,000) rows at a time until nothing prunable is left
-  or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less to
-  delete the more rows its transaction deletes with it, so a few large deletes
-  every sixteen batches cost less than one or two small ones after each. A
-  cleanup that skips because a run is already in flight, fails or runs out of
-  budget is retried after the next batch, and a Debug line per run reports the
-  rows pruned and the remaining prunable backlog (counted up to 10,000).
-  `DrainTrustedPrune` runs the cleanup still owed until nothing is left up to
-  that tip, with no time budget and waiting out another cleanup run instead of
-  skipping; it stops only when its context ends or the cleanup fails. When
-  cleanup is owed it logs its start and its end, with the rows deleted and the
-  duration, at Info. The Mithril coordinator calls it before it resumes chain
-  ingest (see "Mithril catch-up"), so a completed catch-up leaves the backlog an
-  every-batch cleanup leaves. API storage mode keeps spent rows.
+  post-boundary transaction, as on every apply path.
 - Chainsync rollbacks still run while paused. They serialize with block apply
   through `submitBlockApplyDBTxn`, so a rollback that moves the tip under an
   in-flight batch fails it with `ErrStaleBatch` rather than letting it commit
@@ -5823,7 +5784,7 @@ source take that role at runtime, without the construction-time
   whose reader was positioned before that discards its read on resume and
   restarts from the new tip.
 
-Crash consistency rests on replay from the committed metadata tip: blocks
+Crash consistency rests on replay from the committed ledger tip: blocks
 stored above it by a failed batch stay in the chain, and a retry from the same
 tip reuses them, whether in the same process or after a restart. A chain
 that holds different blocks past the batch's join point is refused rather
@@ -6747,17 +6708,16 @@ manifest order against the closure state and an overlay of earlier
 transactions' produced and consumed UTxOs. Only then does it apply their full
 effects — produced outputs, consumed inputs, certificates, governance, and
 network donations, recorded under the certifying ranking block's point so a
-rollback removes them. Consumed-input recovery remains disabled
-(`Database.SetTransactionWithOpts` with `SkipConsumedInputRecovery`) because
-validation already established input availability. An input that is present
-but already spent by a
-*different* certified endorser transaction is also a no-op
-(`TransactionStore.SetTransactionLeiosClosure`): two certified endorser blocks
-may legitimately name the same input across blocks, and failing there wedged
-block application. Closure validation resolves such a prior consumed input
-from spent history, while its in-closure consumed overlay still rejects two
-transactions in the same closure that spend the same input.
-Ranking-block application keeps the hard `ErrUtxoConflict` check. Replayed
+rollback removes them. Consumed-input recovery remains disabled because
+validation already established input availability. An input absent from the
+live UTxO set, including one a *different* certified endorser transaction
+already spent, is a no-op, as in the reference ledger's `updateUTxOState`: two
+certified endorser blocks may legitimately name the same input across blocks,
+and failing there wedged block application. Closure validation resolves such a
+prior consumed input from spent history, while its in-closure consumed overlay
+still rejects two transactions in the same closure that spend the same input.
+A ranking-block transaction spending an input no longer in the UTxO set fails
+`BadInputsUTxO` validation and is never applied. Replayed
 endorser transaction hashes are skipped so effects are not applied twice.
 Applying the produced outputs keeps the UTxO set — and the stake distribution
 derived from it — complete, matching the reference; recording metadata only
@@ -7596,7 +7556,7 @@ in `uint64`. `LedgerState`'s `securityParamForEra` and
 `calculateStabilityWindowForEra` (`ledger/state.go`) treat any other value as
 unavailable and substitute `blockfetchBatchSlotThresholdDefault` (50000) as the
 security parameter and the stability window used for chain-selection rollback
-depth, the consumed-UTxO prune window, and the hard-fork safe zone;
+depth and the hard-fork safe zone;
 `nonceStabilityWindow` returns 0 when `4k/f` overflows, so the candidate nonce
 never freezes. `internal/node/load.go`'s `loadSecurityParamForConfig` and
 `ledger/eras/shape.go`'s `StabilityWindowForEra` return errors for the same
@@ -8456,7 +8416,7 @@ releases its set pin. A live-set snapshot failure rejects acquisition and
 releases the database snapshot. Contention on the live-set lock drops the
 database snapshot before retrying within the acquisition deadline. Provider
 panics release the lock, and historical-view construction releases its parent
-borrow on failure. Set-only acquisitions reject
+borrow on failure. Acquisitions served by the set alone reject
 providers that cannot supply snapshots and historical reads. A boundary can
 commit before its job is published, so a snapshot that still contains the
 boundary's pending-ratification record is dropped and the open retried once the job settles. A wait that
@@ -8752,11 +8712,10 @@ the applied-slot wait has already returned, so nothing else would wake it.
 
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
-*before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
-and the pool-snapshot retention guard each cap their prune floor at the oldest
-pinned slot. Each pruning path reads the pins, caps its floor, and announces
-that floor in memory under the registry's lock, then releases the lock and only
-afterwards deletes; `VerifyPointQueryable` refuses any point below an announced
+*before* `AcquireQueryView` verifies the point, and the pool-snapshot
+retention guard caps its prune floor at the oldest pinned slot. It reads the
+pins, caps its floor, and announces that floor in memory under the registry's
+lock, then releases the lock and only afterwards deletes; `VerifyPointQueryable` refuses any point below an announced
 floor. So either the pin lands first and the prune retains the point, or the
 prune announces first and the point is refused at Acquire, where the protocol
 has a clean reply. No I/O runs under that lock: holding a lock across the
@@ -8771,9 +8730,10 @@ previous session first, so a rejected re-Acquire leaves no pin), connection
 close, `Ouroboros.Close`, and lifetime expiry. A failed Acquire releases its pin
 before replying. A connection that closes while its Acquire is still verifying
 cancels that acquisition, and the Acquire closes the view it opened and releases
-its pin. A pin cannot hold pruning back without limit in any case: the UTxO
-floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
-windows, and pool snapshots by the existing `poolSnapshotRetentionMaxDepth`.
+its pin. A pin cannot hold pruning back without limit in any case: pool
+snapshots are held back by at most `poolSnapshotRetentionMaxDepth`. The live
+UTxO set's journal is not held back by a pin; a point it no longer reaches is
+refused at Acquire.
 Protocol-parameter rows need no pin; they are only ever deleted on rollback.
 
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
@@ -11699,7 +11659,7 @@ indicate a peer chain we cannot follow (rollback or fork resolution exceeding
 the security parameter K, and both Mithril trust-boundary reasons) place the
 peer on the deny list for a cooldown in addition to closing the connection, so
 the node does not redial a peer that will deterministically be rejected again
-moments later. A rollback below the consumed-UTxO prune floor also closes the
+moments later. A rollback below the live UTxO set's journal also closes the
 bearer for a fresh intersection, but does not deny the peer: another chain from
 that peer may still be usable.
 
@@ -11787,7 +11747,7 @@ threshold. Second, even when a point does reach the threshold, the detector only
 breaks the loop if the rollback is genuinely un-crossable: `rollbackIsAppliable`
 mirrors the pre-checks `rollbackChainAndStateDeferred` uses (target block
 present and within the security parameter K via `chain.ValidateRollback`,
-at/above the Mithril anchor, and at/above the consumed-UTxO prune floor), and a
+at/above the Mithril anchor, and within the live UTxO set's journal), and a
 rollback that would succeed is applied even on the repeat rather than
 suppressed. Only a rollback the node cannot cross takes the skip path, which
 would otherwise wedge the node in a reconnect loop behind a legitimately
@@ -11808,7 +11768,7 @@ node in this state cannot self-recover and needs operator intervention
 the point's accumulated failures for every rollback reason, so a canonical
 node continuing to advance does not emit a false divergence diagnosis for a
 peer's fork. Without progress, every reason, including the protocol-constrained
-ones (exceeding K, the Mithril boundary, or the UTxO prune floor), uses the bounded
+ones (exceeding K, the Mithril boundary, or the live UTxO set's journal), uses the bounded
 local primary-chain membership check also used for historical headers: an
 absent point escalates at the recurrence threshold, while an on-chain point
 waits for the full tracking window, since a refused rollback to our own chain
@@ -12047,9 +12007,9 @@ Replay recovery engages only for the failure it can repair. `txValidationError`
 carries every referenced input of the failing transaction regardless of what
 the transaction failed on, so a failure with nothing missing — a script data
 hash mismatch, say — arrived at the candidate search with a full input list.
-Before any replay recovery path rewinds the primary chain, it checks the
-consumed-UTxO prune floor; a target below that floor is refused while both the
-primary chain and ledger metadata remain untouched.
+Before any replay recovery path rewinds the primary chain, it checks the live
+UTxO set's journal; a target the journal does not reach is refused while both
+the primary chain and ledger metadata remain untouched.
 `resolveReplayRecoveryProducer` returns a nil producer both for an input that
 is present in the UTxO set (nothing to find) and for one that is missing with
 no producer locatable, and folding the two together made every input of such a
@@ -12061,17 +12021,24 @@ yields no candidate and the branch is rejected instead. Presence is asked of
 `Database.UtxoExists`, which does not materialize the output's CBOR: `UtxoByRef`
 reconstructs it by decoding the producing block on a blob miss, which turned a
 UTxO that demonstrably exists into a hard error out of recovery.
-A failing input whose UTxO row was spent at or below the applied ledger tip,
+A failing input that a block at or below the applied ledger tip consumed,
 bounded by the durable applied floor, is also reported as present: the block
 spends an input the local chain already consumed, and no rollback makes it
-spendable. The failing batch's metadata transaction is discarded before
-recovery runs, so a row marked spent above that ceiling is a stale write and
-still resolves to its producer, as does a missing or pruned row. The check
-applies only to the failing transaction's own inputs. The inputs, collateral,
-and reference inputs walked from a resolved producer are provenance
-dependencies and skip it: their spend state says nothing about whether the
-failing block carries a bad input. The check reads only the row's spend state
-where the metadata store supports it, so the output's assets are not loaded.
+spendable. The live UTxO set records no spend slot, so
+`replayRecoverySpentBy` reads the answer from its journal: the producer's
+transaction-index row is at or below that ceiling, the output was live once
+its producer applied or a later transaction of the producer's block consumed
+it, and it is not live at the ceiling. An output consumed
+only above the ceiling, and one the set never held though its producer
+applied, still resolve to the producer, whose rollback repairs them. An output
+of a producer that failed phase-2 validation never existed and is a bad input.
+When the journal no longer reaches the ceiling or the producer, no rollback to
+the producer can run either, so an absent output there is a bad input, as the
+reference ledger reports any input absent from its UTxO set, and recovery logs
+a `Warn`. The check applies only to the failing transaction's own inputs. The
+inputs, collateral, and reference inputs walked from a resolved producer are
+provenance dependencies and skip it: their spend state says nothing about
+whether the failing block carries a bad input.
 
 A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
 pointing at blocks the block store no longer holds. Three lookups on the
@@ -15295,11 +15262,6 @@ the references during the copy and records the completed range. The
 node-managed snapshot restore's block copy (`node.CopyImmutableBlocks`) follows
 the same rule.
 
-`dingo load` uses the bulk-load pragma and deferred-index path as well. Before
-it returns successfully, it rebuilds the critical deferred indexes needed for
-startup queries; the existing recovery path completes an interrupted index
-cycle on the next open.
-
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
 the later `serve` command run as one tracked direct child: the handler forwards
@@ -15331,17 +15293,21 @@ the local chain and that the selected state is not earlier than the database's
 existing stable Mithril ledger point. The state is selected at or below the
 last block of the artifact's immutable files, the signed ancillary chunk
 included, as for any import.
-Before replay, every repair rolls metadata back to the selected state slot,
-including restoring UTxOs spent afterward. When the local tip is beyond the
+Before replay, every repair leaves the LedgerDB set at the selected state: the
+catch-up load rolls a set past it back through the set's journal, which undoes
+every output, spend and family row the later blocks wrote, and the import then
+writes the state over it. A set whose journal does not reach the selected state,
+such as one the v0.94.2 migration has just built at its tip, is refused before
+the first repair write, and the repair keeps the marker pending and retries for
+an artifact whose state it reaches. When the local tip is beyond the
 certified tip, repair also verifies that state point on the local chain and
 retains only its canonical block tail for ordinary replay, discarding other
-volatile blocks. It rebuilds critical deferred indexes before the metadata
-rollback so foreign-key checks and rollback queries remain indexed. Legacy
+volatile blocks. Legacy
 anchors that predate stored Mithril block hashes resolve the anchor hash from
 the block stored at the recorded slot. A stored gap that does not reach the
 signed state, or fails continuity validation, is cleaned before importing an
-ancillary state beyond the certified immutable tip, so rollback removes stale
-gap metadata before the snapshot UTxOs are written.
+ancillary state beyond the certified immutable tip, so no stale gap rows
+remain before the snapshot UTxOs are written.
 If the selected state predates the existing stable point, repair does not alter
 block or ledger contents, keeps the marker pending, and retries for a newer
 artifact.
@@ -16300,9 +16266,7 @@ contacted.
   (`PauseChainIngest`). Held, it re-reads the tip, locates it again (usually
   in a file already probed) and applies. A slow, failing or degraded
   aggregator therefore costs Ouroboros nothing until the run is ready to
-  apply. The release drains the consumed-UTxO cleanup the trusted batches
-  still owe (`DrainTrustedPrune`, after the catch-up index rebuild and on the
-  same context, so a live Restore or Truncate skips or stops it), resumes
+  apply. The release resumes
   chain ingest and then releases network ingest on every exit, a panic
   included, and the coordinator releases it as well if
   the source returns without doing so; the release's resync makes every peer
@@ -16315,65 +16279,6 @@ contacted.
   `mithril.retryBackoff`. A batch closes after at most `batchChunks` files or
   `MaxTrustedBatchBlocks` blocks, so a longer gap means the downloads have
   stalled. Batches committed before it stay applied.
-- **Catch-up tuning.** Once held, a run calls `mithrilCatchUpTuning.begin`
-  (`node_mithril_tuning.go`). It returns two steps: `restore`, which the
-  coordinator runs inside the hold's release before it resumes chain ingest
-  and releases network ingest, and `end`, which it runs after the release,
-  on every exit, so the work `end` does holds neither Ouroboros nor the
-  no-progress watchdog. Every run defers the planner statistics manager
-  (`plannerstats.Manager.Defer`); triggers that arrive while deferred
-  collapse into one run after the end. A run whose gap is at least
-  `mithrilTunedCatchUpMinChunks` (100) immutable files also sets the store's
-  crash-safe catch-up pragmas (`metadata.CatchUpPragmaTuner`) and drops the
-  lazy deferred indexes. When the gap, estimated in
-  blocks from the local chain's blocks per file, is also at least
-  `mithrilCatchUpIndexMinGapFraction` (0.5) of the blocks the ledger already
-  holds (an empty ledger always qualifies), it drops, in the same
-  transaction, the catch-up droppable indexes
-  (`deferred.CatchUpDroppableManifest`, through
-  `metadata.CatchUpIndexManager`): critical utxo, transaction and asset
-  indexes that only rollback, the API and LocalStateQuery read. The trusted
-  batch apply, the consumed-UTxO prune and epoch rollover read none of them,
-  so they are pure write cost while the run holds the ledger. Their rebuild
-  inside the hold reads every existing row, while the drop saves only the
-  maintenance of the rows the gap adds, so a gap that is small next to the
-  chain (a node a few weeks behind on mainnet) keeps them and drops only the
-  lazy entries. LocalStateQuery
-  and API queries that use them (UTxOs by address or stake key, a block's
-  transactions, assets by policy) still answer during the run, but as full
-  scans of their table, and a long read there also holds back SQLite's WAL
-  checkpoint.
-  `restore` rebuilds them before Ouroboros resumes, because rollback and
-  chain selection read them at once. It runs on the coordinator's loop
-  context, not the run's, so a run that failed, stalled or gave up on a
-  moving tip still rebuilds them, and only a node shutdown cancels the
-  rebuild. A run a live Restore or Truncate aborted is cancelled with
-  `errMithrilLifecycleAbort` and skips the rebuild, or stops it when the
-  abort arrives while it runs, so the operation's bounded quiesce never
-  waits on it: the Truncate repairs the critical
-  indexes on the database it rewrites before its rollback, and
-  `reinitializeCoreStorage` repairs them on whatever database it reopens
-  before it builds the chain manager and ledger. The run's end, and so the
-  Mithril rate, is stamped before the rebuild. The rebuild has no timeout of
-  its own; the stream's watchdog is already stopped when the release runs,
-  because `RunStreamCatchUp` defers the release before the watchdog's stop.
-  `end` restores the normal pragmas, then rebuilds the deferred manifest on
-  the run's context, which clears the recovery marker; after an aborted run
-  that context is cancelled, so the lazy remainder waits for the next
-  start's repair. Critical indexes that block application, the prune, epoch
-  rollover and chainsync serving read are never dropped. A rebuild that
-  fails or is cancelled leaves the marker set. Every path that starts chain
-  ingest repairs the missing critical entries of a pending cycle first:
-  `dingo serve` rebuilds the whole manifest before the node runs, and
-  `Node.Run` and `reinitializeCoreStorage` rebuild the critical subset
-  (`repairCriticalIndexesBeforeIngest`, core mode), logging each index and
-  the total. Smaller gaps touch neither, because the rebuild reads whole
-  tables whatever the gap. API-mode databases drop only the lazy entries.
-  Only a SQLite metadata store is tuned (`mithrilCatchUpTuningBackend` on
-  the database's recorded plugin name, empty meaning the SQLite default):
-  PostgreSQL and MySQL rebuild the manifest in one transaction whose locks
-  would stall the writes Ouroboros resumes, so they keep every index and
-  their settings and get only the planner deferral.
 - **Fallback.** Every probe or run error is logged (`... falling back to
   Ouroboros`) and suppresses Mithril for `mithril.retryBackoff`. Batches
   committed before the error stay applied, so Ouroboros continues from the
@@ -16439,16 +16344,15 @@ contacted.
   file's last block. No file below the cutoff's is requested. Probing
   stops after `maxCutoffProbes` (16) files; the files below the lowest probe
   then come through a windowed feed from file 0, and that is logged. All of that
-  is read-only; the restore's first write then records, in one metadata
+  is read-only; the restore's first write then records, in one block-store
   transaction, the pinned artifact, `mithril_snapshot_restore_active` and
   `sync_status=in_progress` (a fresh database first has stray copies of the
   first two deleted), and does what `dingo mithril sync` does, through shared
-  helpers: bulk-load pragmas and deferred indexes, block load
+  helpers: block load
   (`node.CopyImmutableBlocks`, then the signed ancillary chunk's blocks),
   ledger import (`importPreparedLedgerState`,
   checkpointed by `"{digest}:{slot}"`), the stable ledger tip,
-  `finishMithrilImport` (critical index rebuild, planner statistics, the
-  completion clear and the `mithril_ledger_slot`/`mithril_ledger_hash` trust
+  `updateMithrilReadyState` (the completion clear and the `mithril_ledger_slot`/`mithril_ledger_hash` trust
   boundary), then `mithril_immutable_max`, which makes `WasBootstrapped` true.
   Probed
   files wait for the load on disk, in a probe directory named like a feed's so a
@@ -16564,8 +16468,8 @@ as up-to-date (advancing the marker) only when no sync is in progress. While
 resuming an interrupted catch-up, an ahead local chain is expected (the
 interrupted run stored the signed ancillary chunk's blocks past the artifact's
 certified range), so the import proceeds instead of returning early, letting
-the idempotent pipeline finish the deferred index rebuild and the sync-state
-cleanup that the interrupted run never reached. It
+the idempotent pipeline finish the sync-state cleanup that the interrupted run
+never reached. It
 then forward-copies the missing blocks and imports the new ledger state as a
 replacement boundary. The ledger import reconciles stale live rows
 (`ImportConfig.Reconcile`): the new snapshot is the complete ledger state at its
@@ -16699,10 +16603,11 @@ API storage also resets and reruns historical metadata backfill through the
 certified ledger anchor. The artifact may trail the live local tip if its
 immutable tip is on that chain and the selected state does not precede the
 existing stable Mithril ledger point. In that case, repair retains only local
-canonical block blobs after the selected state point, clears their derived
-metadata for normal ledger replay, and discards unrelated volatile blocks. A
-selected state behind the stable point is not imported; startup leaves the
-repair marker pending and retries. The repair marker remains until import and
+canonical block blobs after the selected state point, rolls the LedgerDB set
+back to that point for normal ledger replay, and discards unrelated volatile
+blocks. A selected state behind the stable point, or below the oldest point the
+set's journal reaches, is not imported; startup leaves the repair marker pending
+and retries. The repair marker remains until import and
 deferred index rebuilding complete, so an interrupted repair resumes with
 startup blocked instead of serving partially reconciled state.
 
@@ -17140,21 +17045,10 @@ start; changing the epoch or parameters afterwards is refused. Signing itself is
 not part of the aggregator, and certificates carry no KES operational
 certificates. The caller supplies the epoch's signer stakes.
 
-After a completed metadata backfill,
-`internal/node.FinalizeMithrilBackfillPlannerStats` refreshes planner statistics
-after critical index repair and before Mithril sync clears import readiness
-state. It records a checkpoint identity in
-`metadata_planner_stats_backfill` only after successful analysis; startup
-repairs older completed imports without that marker, and interruption or failure
-leaves the refresh retryable. Built-in SQL providers accept the startup context
-through `ContextPlannerStatsUpdater`. Subsequent starts skip analysis when the
-checkpoint identity matches. This prevents pre-backfill row-count estimates from
-driving expensive query plans on the completed database.
-
-A fresh Mithril bootstrap restores normal SQLite pragmas after rebuilding
-critical indexes, then uses the startup planner optimizer. Unsupported or
-skipped optimization falls back to the full planner-statistics update. Resumed
-imports and other backfills keep the full update path.
+A Mithril import into the ledger's database tunes no SQL and rebuilds no
+indexes: the ledger's database keeps no metadata store. The IndexerDB's
+planner-statistics manager (`node_plannerstats.go`) runs a startup pass when it
+starts, which covers an IndexerDB a replay has just filled.
 
 MCP node status inspects SQLite's index catalog and sync state to distinguish
 critical index readiness from pending background maintenance. Neither a complete
@@ -17360,9 +17254,15 @@ proposal and vote state (`get_epoch_summary`, `get_governance_state`,
 `get_governance_proposal`) read it through the ledger's `LedgerDB` when the
 server has a ledger state (`api/mcp/ledger_reads.go`), so they see what
 consensus sees in every mode and need no SQLite connection; with no ledger
-state they read the SQLite database as before. The generic `utxo` and
-`account` row dumps, the pool performance, transaction, asset and datum
-tools and the schema catalog still read SQLite.
+state they read the SQLite database as before. `get_account` reads the
+account from the ledger and takes only its IndexerDB row references from the
+IndexerDB. `get_pool_performance` reads the IndexerDB's reward rows, which
+keep every epoch, and without an IndexerDB the epochs the ledger state keeps.
+`get_utxos` reads the IndexerDB's address index and `utxo` rows, and without
+an IndexerDB the ledger's live UTxO set (`LedgerState.IterateLiveUtxos`),
+paged by offset. The transaction, block, asset, datum and script tools, the
+`sqlite_*` tools and the schema catalog read only the IndexerDB's SQLite; on a
+node without an IndexerDB the API-index tools say they need one.
 
 See [MCP architecture](docs/mcp/architecture.md) for tool semantics and upstream
 protocol references.
@@ -18263,13 +18163,14 @@ undos, keeping its stream and query results consistent.
 allocating pending state, subscribing, or looking up transactions. Empty
 reference lists remain a no-op. Duplicate references are deduplicated in
 first-request order for committed-state lookup, which reads every reference
-through one `LedgerState.ExistingTransactionHashes` call: one metadata read
-transaction per stream, bound to the stream's deadline, rather than one per
-reference. References found there are confirmed in first-request order.
+through one `LedgerState.ExistingTransactionHashes` call: one read of the
+LedgerDB's transaction index per stream rather than one per reference.
+References found there are confirmed in first-request order.
 
-`WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
-metadata or a forward `ledger.tx` `TransactionEvent`. Persisted metadata is
-durable commit evidence; for later transactions, the ledger publishes the event
+`WaitForTx` reports `STAGE_CONFIRMED` from the ledger's transaction index or
+a forward `ledger.tx` `TransactionEvent`. An index entry is durable commit
+evidence, journaled with the block that applied the transaction; for later
+transactions, the ledger publishes the event
 only after its active-chain database transaction commits. The handler subscribes
 before looking up requested references, closing the gap in which a transaction
 could commit between those operations. Both paths share one pending set, so a
@@ -19455,9 +19356,8 @@ second sync:
     collateral inputs, reference inputs and produced outputs including lovelace
     and native-asset amounts, plus the validity flag. A phase-2-invalid
     transaction is compared on what the ledger applied: its collateral and
-    collateral return. Core storage mode is not sampled: it hard-deletes
-    consumed UTxOs after the stability window and does not retain the
-    collateral and reference associations. On an API node the consensus
+    collateral return. Core storage mode is not sampled: it keeps no utxo
+    rows and does not retain the collateral and reference associations. On an API node the consensus
     database is itself core mode, so the node builds the source with
     `WithTransactionHistory` over the IndexerDB: the epoch's slot range still
     comes from the consensus database, and the blocks' transactions from the
@@ -20991,27 +20891,23 @@ live value.
 epoch records are never pruned); both it and the protocol-parameters
 handler resolve their epoch through the same shared helper,
 `ledger.LedgerState.resolveAsOfEpoch`, rather than each re-deriving it.
-`GetUTxOByTxIn` (`queryShelleyUtxoByTxIn`) also fully honors the point: the
-utxo table already tracks each row's creation and spend slot
-(`AddedSlot`/`DeletedSlot`), so a ref is answered live-at-the-pin when it
-was created at-or-before the pinned slot and either never spent or spent
-strictly after it (`database.UtxosByRefsAsOf`) -- a real historical
-reconstruction, not an approximation. This closed a real gap:
+`GetUTxOByTxIn` (`queryShelleyUtxoByTxIn`) also fully honors the point: a
+ref is answered live-at-the-pin when it was created at-or-before the pinned
+slot and either never spent or spent strictly after it, from the live UTxO
+set's view of the point -- a real historical reconstruction, not an
+approximation. This closed a real gap:
 before it, this handler ignored the pinned point
 entirely and always answered from live state, proven live by acquiring an
 older point and then observing a still-acquired session return a later
 block's output through it. The one limit is retention, not reconstruction:
-a spent row can be hard-deleted by the periodic stability-window cleanup
-(`ledger.LedgerState.cleanupConsumedUtxos`) once its `DeletedSlot` falls
-far enough behind the live tip, so a pin older than that same floor is
-rejected with `ErrHistoricalStateUnavailable`
-(`ledger.checkUtxoRetentionWindow`) rather than risk answering "absent" for
-a ref whose spend record is already gone -- except in API storage mode,
-which never prunes spent rows and so has no such floor. `GetUTxOWhole`
+the ledger answers from the live UTxO set's view of the point
+(`liveUtxoView`), which the set's journal reaches one stability window
+behind its tip, so a pin older than that is rejected with
+`ErrHistoricalStateUnavailable` at Acquire rather than risk answering
+"absent" for a ref whose spend the journal no longer holds. `GetUTxOWhole`
 (`queryShelleyUtxoWhole`) now honors the point too,
-via the same `AddedSlot`/`DeletedSlot` predicate as `GetUTxOByTxIn`
-(`database.IterateUtxoRefsAsOf`) applied to the whole table instead of a
-bounded ref list, and the same `checkUtxoRetentionWindow` floor -- a pin
+through the same view as `GetUTxOByTxIn` applied to the whole set instead of
+a bounded ref list, and the same journal floor -- a pin
 older than it is rejected with `ErrHistoricalStateUnavailable`, same as
 `GetUTxOByTxIn`. Unlike a per-ref lookup, this has no indexed shortcut:
 for a pin near the live tip (the common case -- every periodic node-parity
@@ -21028,8 +20924,7 @@ live against a real Preview cardano-node: every flagged row's own
 `AddedSlot` was strictly after the pinned slot. The live path's
 reply is still fully materialized rather than streamed.
 `GetUTxOByAddress` (`queryShelleyUtxoByAddress`) applies the same predicate
-and `checkUtxoRetentionWindow` floor to the requested addresses
-(`database.UtxosByAddressAsOf`). `GetAccountState`
+and journal floor to the requested addresses. `GetAccountState`
 (`queryShelleyAccountState`) reads the `network_state` row in effect at the
 pinned slot (`GetNetworkStateAsOfSlot`); those rows are removed only by
 rollback, so no retention floor applies, and a slot older than every row is
@@ -22155,7 +22050,7 @@ the value came from the database. `Apply` is also a no-op — returning `nil`
 without touching the directory — when `DatabasePath` exists but is empty, the
 same as when it does not exist at all: an empty directory (a freshly mounted
 container/k8s volume, or a `dingo database restore` target) has nothing
-persisted to resume from, and without this check `readPersistedGateValues` would
+persisted to resume from, and without this check the v0.94.2 read below could
 resolve a metadata provider and run its migration registry as a side effect of
 merely starting it, creating a database in a directory
 `lifecycle.RestoreValidated`'s `requireEmptyOrAbsent` check needs to still find
@@ -22164,55 +22059,31 @@ all of which derive from `Network`, and it works at all only because
 `DatabasePath` defaults to `.dingo` and is not itself network-derived.
 `settingsresolve` is its own package, not part of `internal/config`,
 specifically so that `internal/config` — imported by roughly half the tree —
-does not have to depend on the plugin host and storage plugins that opening a
-metadata store requires. It opens metadata stores only
+does not have to depend on the plugin host and storage plugins that the
+v0.94.2 read below requires. It reads the ledger's node settings from the data
+directory's `dingo.dbinfo` (`database/dbinfo`), where the ledger keeps them
+(DATABASE.md, "Node settings"), and opens no store. It first refuses a file
+that names a different metadata plugin than the one configured: resolving a
+metadata store runs its migration registry as a side effect of merely starting
+it, so opening the wrong provider would create an empty database beside the
+real one. Only a data directory v0.94.2 left, whose file is format 1 and whose
+settings the first open by this release has not yet moved, has its settings in
+the metadata store: `Apply` then opens that store alone
 (`plugin.Resolve[metadata.MetadataStore]` directly, never
 `internal/plugins.ResolveStorage`, which also resolves the blob store), reads
-the legacy `node_settings` row and `node_settings_gate`, and closes each store
-and stops its plugin host on every path, including every error path, before
-returning — leaving either open would block the real
-`database.New` that follows moments later. It first reads the configured metadata
-store, using `DatabasePath` for SQLite. For a split PostgreSQL or MySQL node,
-that store is the IndexerDB, so it also reads the consensus namespace in core
-storage mode. If the consensus namespace has a persisted network, its settings
-take precedence;
-otherwise the IndexerDB settings remain the source until adoption has copied
-them into the consensus namespace. Before opening a provider, it reads the
-`dbinfo` sidecar (`database/dbinfo`, a small JSON file named `dingo.dbinfo`
-recording only the metadata plugin that created the database) and refuses to
-proceed if it names a different plugin than the one configured: resolving a
-metadata store runs its migration registry as a side effect of merely starting
-it, so opening the wrong provider first would silently create a fresh, empty
-database beside the real one instead of ever reaching `node_settings_gate`'s own
-`metadata_plugin` gate, which would otherwise have caught the mismatch. The
-sidecar itself is written by `database/commit_timestamp.go`'s
-`writeDBInfoSidecar`, guarded so it is never written with an empty plugin name
-(the partial `Config`s `mithril/sync.go` and `database/lifecycle/restore.go`
-reopen with) and never overwrites a sidecar that is already present.
-`evaluateAndPersistGates` calls it on every open, not only one that writes a
-gate to `node_settings_gate` — a steady-state start with nothing new to persist
-still restores a sidecar an operator deleted, rather than leaving this pre-open
-check silently disabled from then on. Before provider resolution can migrate a
-SQLite store, `Apply` opens its existing metadata file read-only and checks for
-an interrupted v0.94.2 API-history backfill. A persisted backfill status is fatal
-unless the store's persisted storage mode is core; startup leaves the database
-untouched. Provider resolution also propagates `metadata.ErrInterruptedBackfill`
-instead of treating it as an unavailable store. Missing or inaccessible
-directories and ordinary store-open or read failures leave settings unresolved
-so `database.New` can report the storage error. These no-op paths do not suppress
-sidecar validation errors, interrupted-backfill refusals, or persisted gate
-conflicts.
-
-A sidecar write failure is fatal while the `metadata_plugin` gate is not
-yet persisted: a database in that state has no `metadata_plugin` gate row
-yet for this pre-open check to compare against
-until that same call creates it, so the sidecar is the only thing that will
-catch a mistyped provider the next time this directory is opened, and losing
-it here fails the database open rather than starting silently unprotected.
-Every other call — backfilling a sidecar an operator deleted from an
-already-established database — keeps the original warn-and-continue
-behavior, since `node_settings_gate`'s own gate row is already the real
-enforcement for it by then.
+the `node_settings` row with `node_settings_gate` on top, and closes the store
+and stops its plugin host on every path before returning, since either left
+open would block the real `database.New` that follows. Before provider
+resolution can migrate a SQLite store, `Apply` opens its existing metadata
+file read-only and checks for an interrupted v0.94.2 API-history backfill. A
+persisted backfill status is fatal unless the store's persisted storage mode
+is core; startup leaves the database untouched. Provider resolution also
+propagates `metadata.ErrInterruptedBackfill` instead of treating it as an
+unavailable store. Missing or inaccessible directories, a `dingo.dbinfo` it
+cannot read, and ordinary store-open or read failures leave settings
+unresolved so `database.New` can report the error. These no-op paths do not
+suppress a plugin mismatch, an incomplete format 1 file, interrupted-backfill
+refusals, or persisted gate conflicts.
 
 On every path that returns without an error — including the no-op ones
 above, where `cfg` is left completely unchanged — `Apply` finishes by
@@ -22401,18 +22272,22 @@ Beyond `settingsresolve.Apply`'s pre-open resolution above, node startup
 enforces `database/nodesettings.Gates()` in two phases, split by what each
 stage can know rather than by gate importance.
 
-Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
+The ledger's settings live in the data directory's `dingo.dbinfo` and an
+IndexerDB's in its own `node_settings_gate`; DATABASE.md's "Node settings"
+describes the file, the fresh-directory rule, and the one-time move of a
+v0.94.2 database's settings out of its metadata store, which `database.New`
+runs before phase 1.
+
+Phase 1 runs inside `database.New` (`database/node_settings.go`'s
 `CheckNodeSettings`) and validates every gate a bare database open can
 supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
 selections, and `blob_store_id` — persisting first-start values via
 `writeGateValues`. Before those ordinary gates, it validates the dedicated
-`alonzo_pparams_unit` provenance marker written by metadata migration v20.
+`alonzo_pparams_unit` provenance marker.
 Before rejecting a legacy marker, phase 1 tries two idempotent repairs.
 It upgrades the marker when an exact era-only query finds no Alonzo row,
-which also closes the crash window after rollback commits deletion of the
-last Alonzo row but before recovery rewrites the marker: the following
-ordinary startup can finish the durable repair even though commit timestamps
-now match. Otherwise `repairAlonzoPParamsUnit`
+which also closes the crash window after a rollback commits deletion of the
+last Alonzo row but before the marker is rewritten. Otherwise `repairAlonzoPParamsUnit`
 (`database/alonzo_pparams_unit.go`) rewrites the surviving rows from Alonzo
 genesis: releases up to gouroboros v0.205.5 stored
 `lovelacePerUTxOWord / 8`, so a row still holding that quotient identifies
@@ -22488,84 +22363,63 @@ the same way phase 1 treats its own gates: `node.go` assembles them from the
 fully-resolved node configuration, not a partial one, so there is no
 "not yet known" case to leave override room for.
 
-Phase 2 runs at one of two points, chosen by whether the database needed
-recovery. On the normal path, it runs immediately after `database.New`'s
-error handling completes and before the pending-truncate check — after the
-cardano config has been parsed but strictly before the ledger can apply its
-first block, since the era genesis hashes it validates come only from
-`Config.CardanoNodeConfig()`. When `dbNeedsRecovery` is set instead, that
-first call site only logs that enforcement is deferred and does not call
-`EnforceNodeSettings`: a database awaiting commit-timestamp recovery has a
-known-inconsistent commit state, and evaluating gates against it could
-report a mismatch that has nothing to do with the operator's configuration
-and would mask the recovery path that is about to repair that same
-inconsistency. The deferred call runs later in the same `Run`, through the
-shared `Node.enforceRecoveredNodeSettings` helper immediately after
-`n.ledgerState.RecoverCommitTimestampConflict()` succeeds and before
-`n.config.historyExpiry.Enabled` starts the pruner, the Midnight indexer is
-created, or any network listener starts — so it still lands before
-anything can apply a block or act on a ledger feature flag phase 2 would
-have rejected. Deferring rather than skipping matters because the ledger
-feature flags phase 2 gates (pledge leverage, full-pot rewards, delegator
-inactivity, and the two validation taints) are wired into the ledger from
-`n.config` independently of gate enforcement: skipping enforcement outright
-on a recovery-needed startup would let a forbidden transition — disabling
-an already-enabled `full_pot_rewards`, for instance — silently take effect
-in the ledger for that entire run, and would later record a legitimate
-transition's activation stamped with whatever epoch and slot a subsequent
-startup happened to reach, not the epoch it actually took effect in. A
-mismatch found by the deferred call fails startup the same way the normal
-path's does, by returning an error out of `Run`, which unwinds through the
-same `started` cleanup stack every other startup failure does.
+Phase 2 runs immediately after `database.New`'s error handling completes and
+before the pending-truncate check — after the cardano config has been parsed
+but strictly before the ledger can apply its first block, since the era
+genesis hashes it validates come only from `Config.CardanoNodeConfig()`. A
+mismatch fails startup by returning an error out of `Run`, which unwinds
+through the same `started` cleanup stack every other startup failure does.
+Live restore/truncate reinitialization reopens the database through
+`database.New`, which runs phase 1 again, including the reconciliation of a
+conservative `legacy-byte-v0` marker: it becomes `word-v1` only when no Alonzo
+protocol-parameter row is left. A surviving Alonzo row keeps the marker and
+fails closed; a missing or unknown marker is never inferred.
 
-Live restore/truncate reinitialization uses the same post-recovery helper, so
-its independent commit-timestamp recovery route cannot resume components
-without both settings phases. Recovery also reconciles migration v20's
-conservative marker: it changes `legacy-byte-v0` to `word-v1` only when the
-successful rollback left no Alonzo protocol-parameter row at all. A surviving
-Alonzo row remains legacy and fails closed; a missing or unknown marker is
-never inferred.
+Block-store chain state moves out of `sync_state` at open
+(`moveChainStateToBlockStore`, `database/chain_state.go`): the rows of a
+database from a release that kept them there, listed with the `chainstate/`
+blob key in `DATABASE.md`. `init` runs the move first when the persisted
+`blob_store_id` gate equals the identity the blob store holds
+(`movePairedChainStateToBlockStore`), after the node settings have their home
+in `dingo.dbinfo`: phase 1 reads the tip from the block store, and node startup
+checks for an interrupted truncate before the ledger starts. A database that
+has no `blob_store_id` gate yet has nothing proving the pairing, so phase 1
+runs the move again after the gates, where it finds nothing left on a paired
+store. The
+ledger's database refuses those `sync_state` keys afterwards
+(`ErrBlockStoreChainState`), so the block store is their only writer; an
+IndexerDB is exempt.
 
-The recovery path defers phase 1 the same way, and for a reason that is
-easy to miss: `database.New`'s `init` calls `checkCommitTimestamp` before
-`CheckNodeSettings`, and returns immediately on a `CommitTimestampError`
-without ever reaching phase 1 — so on the recovery path, phase 1 has not
-merely been deferred by `New`, it has not run at all for that startup.
-Nothing in the original recovery flow re-ran it afterward, which meant
-`storage_mode`, `network`, `network_magic`, `start_era`, the plugin
-selections, and `blob_store_id` all went completely unenforced for the
-entire recovery run. This mattered most for the plugin gates: a fresh or
-swapped blob store's `GetCommitTimestamp` returns `(0, nil)`, which against
-a non-zero metadata timestamp is exactly a `CommitTimestampError` — so
-swapping the blob provider was one of the most direct ways to land on this
-path, and `blob_plugin`/`blob_store_id`, the gates that would have caught
-it, were exactly the ones going unchecked. `Node.Run` now calls the
-exported `(*database.Database).CheckNodeSettings` explicitly on the
-`dbNeedsRecovery` path, immediately after
-`RecoverCommitTimestampConflict()` succeeds and before the deferred phase 2
-call described above — re-running phase 1 there is safe because any
-database that can reach a genuine commit-timestamp mismatch has already
-completed one successful full open, so `blob_store_id` is already
-persisted: an unchanged blob store reads the same id back, and a swapped
-one mismatches against the persisted id, the correct loud failure.
+Import progress is part of that chain state (`database/import_progress.go`):
+`sync_status`, every `mithril_` name and the `ledger.state_reimport.` marks.
+The Mithril package, the serve preflight, the truncate checks and the node's
+re-import check read and write it with `GetChainState`/`SetChainState`, and
+the ledger reads its boundary through
+`Database.ImportedLedgerStateBoundarySlotStrict` and
+`ImportedLedgerStateBoundaryHash`. An import flushes the in-progress status
+before its first other write, and completion clears the group and records the
+boundary in one block-store transaction, after the sweep of whatever other
+transient rows a released database left in `sync_state`. The boundary
+accessors branch on the database's role: an IndexerDB reads the block store
+through a view of the ledger's, so it keeps the boundary its writer recorded
+in its own `sync_state`, which is also the row the metadata store's block
+counts and the standalone Koios parity reader use.
 
 Both phases share one `evaluateAndPersistGates` helper
-(`database/commit_timestamp.go`) for the read-persisted/evaluate/
+(`database/node_settings.go`) for the read-persisted/evaluate/
 fail-on-mismatch/write/verify-write body; `CheckNodeSettings` and
 `EnforceNodeSettings` differ only in which `nodesettings.Values` map they
 pass in.
 
-That body also guards against two openers racing the same gate's
-first-ever write: it reserves each gate name absent from what it just read
-as persisted via `SettingsStore.InsertNodeSettingsGateIfAbsent` (a
-conditional insert, distinct from the plain upsert used for every other
-write) before persisting anything, and a caller that loses re-reads what
-is now actually persisted and evaluates its own configuration against that
-instead of assuming its own write landed. This only matters when the
-metadata plugin is shared across processes by design (postgres, mysql);
-sqlite is opened per-process, and the default blob plugin's exclusive
-per-directory lock already rules out two full database opens racing at
-once regardless of metadata plugin.
+For an IndexerDB, that body also guards against two openers racing the
+same gate's first-ever write: it reserves every gate name absent from what
+it just read in one `SettingsStore.InsertNodeSettingsGatesIfAbsent`
+transaction before persisting anything, and a caller that loses re-reads
+what is now actually persisted and evaluates its own configuration against
+that instead of assuming its own write landed. This matters because a
+PostgreSQL or MySQL IndexerDB is shared across processes by design. The
+ledger's settings need no reservation: only the process holding its data
+directory opens it.
 
 ### Redacted Configuration Logging
 
@@ -23079,10 +22933,10 @@ stake-history endpoints, and pruned to the four-epoch window in `core` mode (and
 by the Koios parity observer, which needs only `RewardAccountOutput`). Rollback
 does not consult storage mode: the set rolls its reward rows back through its
 journal, the IndexerDB removes the reward fact rows dated after the rollback
-point (`RollbackFacts`), and `Database.TruncateAfterSlot`, which the ledger's rollback and
-`lifecycle.Truncate` both run, deletes a
-metadata store's rows through `DeleteRewardStateAfterSlot` while their family
-is not latched.
+point (`RollbackFacts`), and the v0.94.2 revert
+(`Database.RevertStoredLedgerAfterSlot`) deletes a metadata store's rows
+through `DeleteRewardStateAfterSlot`. The ledger's rollback and
+`lifecycle.Truncate` run `Database.TruncateAfterSlot`, which issues no SQL.
 
 ### Reward Metadata State
 
@@ -23145,34 +22999,12 @@ pointer-address stake matters.
 union of account credentials and live UTxO stake credentials. It retains
 UTxO-only credentials as unregistered and undelegated so a later registration
 can activate their existing stake without losing it.
-`RewardLiveStakeNeedsBackfill` distinguishes an upgraded database with accounts
-but no aggregate rows from a legitimately fresh empty database. Node startup
-performs the check and rebuild after database recovery and before ledger
-processing.
-
-The `RewardLiveStakeNeedsBackfill` probe is read-only and runs inside a
-read-only metadata transaction, so it resolves against the read connection
-pool. The write pool is engaged only when the probe has already determined a
-rebuild is required, in a second transaction opened for that rebuild alone.
-Holding the single writer connection open merely to ask the question would
-contend with block processing on SQLite, and in the skipped case would spend
-the writer on work the flag exists to avoid. Separating the two is safe because
-both call sites run before ledger processing can advance the chain, so nothing
-can write `reward_live_stake` between the probe and the rebuild.
-
-`skipRewardLiveStakeBackfillCheck` (`--skip-reward-live-stake-backfill-check`,
-`CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK`, default false) skips the
-`RewardLiveStakeNeedsBackfill` probe and any rebuild it would trigger, and logs
-a warning. The cost it avoids is the check itself, not just a repair: deciding
-whether a backfill is needed scans the live UTxO table, so on a mainnet-scale
-database every startup pays close to the price of a rebuild whether or not one
-is required. It is a diagnostic control, not a tuning knob — the check is what
-catches a stale or pre-migration `reward_live_stake` table, so skipping it is
-only safe against a database already known to be consistent (repeated restarts
-while investigating an unrelated problem) and is unsafe to leave enabled. It is
-deliberately not a provenance-gated field: it records no persisted
-node-settings gate state and does not change how the chain is validated, only
-whether this one startup check runs.
+`RewardLiveStakeNeedsBackfill` distinguishes a store with accounts but no
+aggregate rows from a legitimately fresh empty one. The ledger's database keeps
+no `reward_live_stake` table, so node startup runs neither the check nor the
+rebuild; it runs only the stake-snapshot provenance check
+(`Node.checkStakeSnapshotProvenance`) against LedgerDB. The
+`skipRewardLiveStakeBackfillCheck` key is still accepted and has no effect.
 
 The flag's scope stops there. The same startup step also checks the
 provenance of the consensus stake snapshots, and that check is unconditional:
@@ -23340,11 +23172,10 @@ Every valid reward-withdrawal map entry is also persisted in the rollback-aware
 `account_withdrawal_witness` history, independently of balance deltas. This
 includes zero-amount withdrawals: they move no rewards but still prove account
 activity under CIP-0163. The truncate recompute's affected-set and
-last-witness queries include this history. `Database.TruncateAfterSlot`, which the ledger's rollback and
-`lifecycle.Truncate` both run,
-deletes its rows past the target with the account reward journal while the
-accounts family is not latched; the set's journal restores its own witness
-slots.
+last-witness queries include this history. The v0.94.2 revert
+(`Database.RevertStoredLedgerAfterSlot`) deletes its rows past the target with
+the account reward journal; on the ledger's database the set's journal
+restores its own witness slots.
 
 The insert is elided when the gate is off. `account_withdrawal_witness` is
 read only by the truncate's witness queries above, the SQL expiry
@@ -23436,8 +23267,8 @@ Retention itself is never configurable or age-based for any of these tables
 `DeleteCertificatesAfterSlot` and the `account_reward_delta`/
 `account_withdrawal_witness` deletes in
 `database/plugin/metadata/sqlstore/account.go`
-(`DeleteAccountRewardsAfterSlot`, which `Database.TruncateAfterSlot` runs
-only while the accounts family is not latched), all of the form `added_slot >
+(`DeleteAccountRewardsAfterSlot`, which only the v0.94.2 revert
+`Database.RevertStoredLedgerAfterSlot` runs), all of the form `added_slot >
 slot` for a rollback or lifecycle-truncate target slot (see "CIP-0163 Bookkeeping in
 Lifecycle Truncate" below). That target slot is derived from consensus chain
 state, not wall-clock time or per-node configuration, so it produces
@@ -24016,7 +23847,7 @@ POOLREAP precedes SNAP.
    in the tick. A rollback
    below the pending boundary discards the decision; start-up with a pending
    record rewinds below its boundary through the rollback intent and fails when
-   the rewind exceeds the intent's limits. Transaction validation reads the
+   the rewind exceeds the intent's block limit. Transaction validation reads the
    proposals set, not RATIFY's marks; LSQ `GetProposals` returns the proposals
    set; Blockfrost DRep power and the hard-fork stability check call
    `WaitEpochBoundaryJob` before reading proposal deposits and active
@@ -25110,51 +24941,16 @@ mirror the gouroboros-side cumulative `PipelineStats` counters as gauges
 the cumulative totals, which can only be `Set` from a periodic snapshot,
 not incremented in place from dingo's side.
 
-**Batched apply for unvalidated blocks.**
-`LedgerStateConfig.ApplyRowBatchingEnabled` (config
-`ledgerApplyRowBatchingEnabled` / `DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED` /
-`--ledger-apply-row-batching-enabled`; default off; honoured by serve mode and
-by `dingo load`) extends the API-mode accumulator path of
-`LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
-batches whether or not it is set. In core mode the accumulator reuses one
-prepared transaction-row upsert and coalesces each block's live-stake deltas, which
-`FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
-before `apply` returns, inside the same database transaction and before the next
-validated block runs, so stored state is identical to the per-row path. A reward
-withdrawal or reward credit that re-sums a credential's live stake from the
-`utxo` table while its delta is still queued stores the sum less that delta, so
-the flush counts the queued change once (`DATABASE.md`, "Incremental live-UTxO
-stake maintenance").
-Validated blocks apply each transaction as it is validated and keep the
-per-transaction path for the donation-only delta they return. Leios certified
-closures retain ordered validation and use the provider's optional API-detail
-accumulator; in API mode it groups output-address, transaction-address, key
-witness and metadata-label rows across the closure before flushing inside the
-same transaction. Those indexes are not validation inputs; assets and datums
-remain immediately readable by the next transaction. SQLite can additionally
-stage UTxO changes for bounded plain-payment windows through
-`metadata.LeiosClosureUtxoOverlay`: preflight changes no rows, parents and
-contexts remain immediate, and every output, spent marker and address row
-survives the flush. Known exact reads use staged metadata; other UTxO readers
-materialize it before querying. Before the next window validates,
-`metadata.LeiosClosureBatchPreparer` flushes an active payment overlay and its
-API-detail indexes inside the outer transaction. The final window
-flushes before closure events are published. The shared `internal/sqlreadonly`
-parser classifies SQLite reads for both MCP and the retained overlay. Ineligible
-windows and other providers retain immediate UTxO writes. The outer metadata
-transaction owns rollback of every effect, including failures after staging
-begins.
-
-Regression tests:
-`TestApplyRowBatchingSerialEquivalence`,
-`TestApplyRowBatchingSameChunkDependencies` and
-`TestApplyRowBatchingSkipsValidatedDeltas`
-(`ledger/apply_row_batching_test.go`),
-`TestWithdrawalResumAfterSameBlockStakeChange`
-(`ledger/withdrawal_resum_test.go`) and `TestReSumCountsPendingBatchedStakeOnce`
-(`database/plugin/metadata/sqlstore/live_stake_pending_test.go`); the
-equivalence scenario populates every queued detail table and pins that a datum
-shared by two transactions of one chunk keeps the earlier slot.
+**Unvalidated blocks.** The ledger applies every block's deltas one
+transaction at a time, writing to the LedgerDB and staging the live UTxO set;
+its database has no metadata store, so there is no batched row path. The
+released `ledgerApplyRowBatchingEnabled` setting still loads and has no effect.
+The IndexerDB writer (`internal/node/indexer_blocks.go`,
+`internal/node/indexer_closure.go`) keeps the metadata store's batch
+accumulator: `FlushBatch` writes a block's rows inside its transaction, and a
+Leios closure goes through the API-detail accumulator and, on SQLite, the
+`metadata.LeiosClosureUtxoOverlay` windows that
+`metadata.LeiosClosureBatchPreparer` selects.
 
 **Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
 pipeline's only submitter — runs on its own goroutine, entirely decoupled
@@ -25270,7 +25066,7 @@ chain rewind would risk reentrancy into `c.mutex` or `c.manager.mutex`. The
 durable intent allows the reconciler to commit metadata before publishing
 without opening a loss window, while holding `transactionEventMutex` keeps the
 undo ahead of any forward `ledger.tx` event on the same ordered lane. The
-Mithril and consumed-UTxO prune boundaries are checked before the intent is
+Mithril boundary and the live UTxO set's journal are checked before the intent is
 written or the primary chain is truncated. The boundary-refusal regression is
 covered by
 `TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`;

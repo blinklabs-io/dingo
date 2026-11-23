@@ -20,17 +20,14 @@ import (
 	"math"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	db := newIndexerDB(t)
 	for i, tc := range []struct {
 		name                 string
 		activity, inactivity uint64

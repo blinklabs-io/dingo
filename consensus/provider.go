@@ -39,11 +39,6 @@ const (
 	// TachysIdentity binds network, database, and schedule state to the
 	// supported CIP-0177 semantics.
 	TachysIdentity = "tachys/cip177/" + gconsensus.TachysSpecificationRevision
-	// DatabaseIdentitySyncKey is the sync-state key that binds a database to
-	// the DatabaseIdentity of the provider that created it. It must outlive
-	// any bulk sync-state cleanup: a database that loses it is read as an
-	// unmarked Praos database on the next start.
-	DatabaseIdentitySyncKey = "consensus_provider_identity"
 )
 
 const networkMagicDomain = "dingo/consensus-network/v1"

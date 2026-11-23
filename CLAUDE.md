@@ -14,7 +14,7 @@ file is only what isn't derivable.
 - Top-level tests call `t.Parallel()` in most packages, including every one that
   dominates the suite; new tests there should too. Keep a test sequential — with
   a `// Not t.Parallel: ...` comment — when it reaches process-global state:
-  swapping a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
+  swapping a package-level seam (`syncDir`,
   `deliveryStallWarnInterval`, `leiosPersistShutdownDrainTimeout`) or another
   package's variable (`ledger.Close*Timeout`), replacing a process-global
   (`slog.SetDefault`, `config.PublishConfig`), asserting a delta of a

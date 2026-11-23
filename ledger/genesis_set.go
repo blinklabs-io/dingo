@@ -26,8 +26,7 @@ import (
 )
 
 // The genesis writes put accounts, pools, DReps and delegations in the set
-// as data, not as transitions of certificates; the metadata store keeps only
-// the certificate history of a drained family. The set computes them from the
+// as data, not as transitions of certificates. The set computes them from the
 // genesis configuration with the functions the metadata store imports them
 // with (models.GenesisStakeAccounts, models.GenesisDelegateeOf,
 // models.GenesisDRep, models.PoolRegistrationFromCertificate), and reads

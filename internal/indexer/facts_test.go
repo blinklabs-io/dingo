@@ -26,9 +26,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newFactsDB opens an IndexerDB, whose SQL fact tables the tests seed and
+// compare on both sides of a copy.
 func newFactsDB(t *testing.T) (*database.Database, *sql.DB) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Role:    database.RoleIndexer,
+	})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)

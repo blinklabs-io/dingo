@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -364,7 +363,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
 	primaryChainRewound := false
-	err = ls.withConsumedUtxoPruneBoundary(func() error {
+	err = ls.withRollbackBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
@@ -417,7 +416,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		})
 	})
 	if err != nil {
-		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+		if errors.Is(err, ErrRollbackBelowUtxoJournal) {
 			// The peer's block requires state older than the retained UTxO
 			// history. Rotate the ChainSync intersection instead of returning
 			// an error that would retry the same peer and target.
@@ -465,21 +464,20 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 	if err != nil {
 		return fmt.Errorf("resolve replay recovery rollback target: %w", err)
 	}
-	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+	belowJournal, err := ls.rollbackBelowUtxoSetJournal(
 		resolved,
 	)
 	if err != nil {
 		return fmt.Errorf(
-			"check replay recovery rollback against consumed UTxO prune floor: %w",
+			"check replay recovery rollback against the live UTxO set journal: %w",
 			err,
 		)
 	}
-	if belowPruneFloor {
+	if belowJournal {
 		return fmt.Errorf(
-			"replay recovery rollback target slot %d is below consumed UTxO prune floor %d: %w",
+			"replay recovery rollback target slot %d is below the live UTxO set journal: %w",
 			resolved.Slot,
-			pruneFloor,
-			ErrRollbackBelowUtxoPruneFloor,
+			ErrRollbackBelowUtxoJournal,
 		)
 	}
 	return nil
@@ -916,7 +914,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		)
 	}
 	yielded := false
-	err := ls.withConsumedUtxoPruneBoundary(func() error {
+	err := ls.withRollbackBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
@@ -1284,7 +1282,7 @@ func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
 	if err := ls.recoverRollbackIntentLocked(ls.lifecycleContext()); err != nil {
 		return false, fmt.Errorf("complete prior rollback intent: %w", err)
 	}
-	_, _, pendingIntent, err := loadRollbackIntent(ls.db)
+	_, _, pendingIntent, err := pendingRollbackIntent(ls.db)
 	if err != nil {
 		return false, fmt.Errorf("check prior rollback intent: %w", err)
 	}
@@ -1892,29 +1890,22 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		validationErr,
 		attempts,
 	)
-	// Never target a point below the consumed-UTxO prune floor. The sweep
-	// hard-deletes spent rows at or below tip-stabilityWindow, while each
-	// escalating attempt rewinds a further stability window below the
-	// *already lowered* tip -- so successive attempts walk past a floor that
-	// stays fixed at the highest tip the node reached.
-	// database.TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
-	// deleted_slot, which cannot reach a row that no longer exists, so such a
-	// target moves the tip and reports a repair while leaving the live set
-	// short of every output consumed above it. Blocks the node already applied
-	// cleanly then fail to resolve their inputs, which drives the next, deeper
-	// rewind: the descent that ends at the Mithril anchor with a halted
-	// pipeline.
+	// Never target a point below the live UTxO set's journal. The set prunes
+	// its journal one stability window behind the highest tip the node
+	// reached, while each escalating attempt rewinds a further stability
+	// window below the *already lowered* tip -- so successive attempts walk
+	// past a floor that does not come back down with the tip.
 	//
 	// Fall back to the ledger tip, which is always at or above the floor and
 	// is what attempt 1 uses. Recovery keeps its non-destructive lever -- a
 	// fresh intersection so peer rotation can offer a different candidate
 	// chain -- and loses only a rewind that could not have repaired anything.
-	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+	belowJournal, floorErr := ls.rollbackBelowUtxoSetJournal(
 		rewindPoint,
 	)
 	if floorErr != nil {
 		ls.config.Logger.Error(
-			"failed to read consumed UTxO prune floor, using ledger tip as the rewind target",
+			"failed to read the live UTxO set journal, using ledger tip as the rewind target",
 			"component",
 			"ledger",
 			"rewind_target_slot",
@@ -1923,19 +1914,16 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			floorErr.Error(),
 		)
 		rewindPoint = ledgerTip.Point
-	} else if belowPruneFloor {
+	} else if belowJournal {
 		ls.metrics.atTipRecoveryPruneFloorClamped.Inc()
 		ls.config.Logger.Warn(
-			"at-tip recovery rewind target is below the consumed UTxO prune floor, holding at ledger tip instead",
+			"at-tip recovery rewind target is below the live UTxO set journal, holding at ledger tip instead",
 			"component", "ledger",
 			"tx_hash", hex.EncodeToString(validationErr.TxHash),
 			"failing_block_slot", validationErr.BlockPoint.Slot,
 			"requested_rewind_slot", rewindPoint.Slot,
-			"utxo_prune_floor_slot", pruneFloor,
 			"ledger_tip_slot", ledgerTip.Point.Slot,
 			"attempt", attempts,
-			"hint",
-			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 		)
 		rewindPoint = ledgerTip.Point
 	}
@@ -2005,7 +1993,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// re-running it would turn the retry loop into a full database rollback.
 	repairSameTip := !isSameFailure &&
 		pointMatches(rewindPoint, ledgerTip.Point)
-	err := ls.withConsumedUtxoPruneBoundary(func() error {
+	err := ls.withRollbackBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
@@ -2206,7 +2194,7 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
-	if err := ls.withConsumedUtxoPruneBoundary(func() error {
+	if err := ls.withRollbackBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
@@ -2322,9 +2310,13 @@ func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
 		return rewindPoint
 	}
 	clamped := ledgerTip
-	block, err := database.FirstBlockAtOrAfterSlot(
-		ls.lifecycleContext(), ls.db, boundary,
-	)
+	// A blob-only transaction does not observe ctx, so a stopping ledger
+	// must not start the scan.
+	ctx := ls.lifecycleContext()
+	block, err := models.Block{}, ctx.Err()
+	if err == nil {
+		block, err = database.FirstBlockAtOrAfterSlot(ctx, ls.db, boundary)
+	}
 	if err == nil && block.Slot <= ledgerTip.Slot {
 		clamped = ocommon.Point{Slot: block.Slot, Hash: block.Hash}
 	} else if err != nil {
@@ -2383,7 +2375,7 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 	)
 	// The failing batch's transaction is discarded before recovery runs, so
 	// only spends at or below the applied ledger tip are committed history. A
-	// row marked spent above it is a stale write that a rollback repairs. The
+	// spend above it is local state that a rollback repairs. The
 	// durable floor bounds it too: a slot-based rollback can leave currentTip
 	// above the state that was durably applied.
 	ls.RLock()
@@ -2600,33 +2592,118 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
-// replayRecoveryDeletedSlot returns the slot at which input's UTxO row was
-// spent, or zero when the row is live or absent. It reads only the spend state
-// where the store supports it, so the output's assets are never loaded.
-func (ls *LedgerState) replayRecoveryDeletedSlot(
+// replayRecoverySpentBy reports whether input was an output of the live UTxO
+// set that a block at or below ceiling consumed. The set records no spend
+// slot, so the answer is read from its journal: the producer applied at or
+// below ceiling, the output live once its producer applied, and no longer live
+// at ceiling. An output never live, though its producer applied, is state the
+// set lost, which a rollback to the producer repairs; the answer is then
+// false. The one exception is an output of a transaction that failed phase-2
+// validation, which never created it: no rollback makes it spendable.
+//
+// Where the journal no longer reaches the producer, no rollback to it can run
+// either, so an output that is gone is a bad input the failing block carries,
+// as the reference ledger reports any input absent from its UTxO set.
+func (ls *LedgerState) replayRecoverySpentBy(
 	input lcommon.TransactionInput,
-) (uint64, error) {
-	store := ls.db.Metadata()
-	if reader, ok := store.(metadata.UtxoSpendStateReader); ok {
-		state, err := reader.GetUtxoSpendState(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		if err != nil || state == nil {
-			return 0, err
+	ceiling uint64,
+) (bool, error) {
+	set := ls.readSet(nil)
+	index, indexOK := set.(TxIndexReader)
+	history, historyOK := set.(UtxoSetHistory)
+	if !indexOK || !historyOK || ls.utxoSetFailed.Load() {
+		return false, errLiveUtxoSetUnavailable
+	}
+	txID := input.Id().Bytes()
+	entry, err := index.TxIndexEntry(txID)
+	if err != nil {
+		return false, fmt.Errorf("read the producer of %s: %w", input, err)
+	}
+	if entry == nil || entry.Slot > ceiling {
+		// An output not yet produced at ceiling cannot be spent by then.
+		return false, nil
+	}
+	liveAt := func(slot uint64) (bool, error) {
+		view, err := history.UtxoSetAt(ocommon.Point{Slot: slot})
+		if err != nil {
+			return false, err
 		}
-		return state.DeletedSlot, nil
+		defer view.Close()
+		_, live, err := view.Get(txID, input.Index())
+		return live, err
 	}
-	utxo, err := store.GetUtxoIncludingSpent(
-		input.Id().Bytes(),
-		input.Index(),
-		nil,
-	)
-	if err != nil || utxo == nil {
-		return 0, err
+	beyondJournal := func(err error) (bool, error) {
+		if !errors.Is(err, ErrUtxoAsOfUnavailable) {
+			return false, fmt.Errorf(
+				"read %s from the live UTxO set's journal: %w", input, err,
+			)
+		}
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"replay recovery input is absent and its producer is "+
+					"older than the live UTxO set's journal: treating it "+
+					"as a bad input",
+				"component", "ledger",
+				"input", input.String(),
+				"producer_slot", entry.Slot,
+				"spent_ceiling", ceiling,
+			)
+		}
+		return true, nil
 	}
-	return utxo.DeletedSlot, nil
+	liveAtCeiling, err := liveAt(ceiling)
+	if err != nil {
+		return beyondJournal(err)
+	}
+	if liveAtCeiling {
+		return false, nil
+	}
+	produced, err := liveAt(entry.Slot)
+	if err != nil {
+		return beyondJournal(err)
+	}
+	if produced || !entry.Valid {
+		return true, nil
+	}
+	// A later transaction of the producer's own block can consume the output,
+	// which the set's state after that block then never shows.
+	return ls.replayRecoveryBlockConsumes(entry.BlockHash, input)
+}
+
+// replayRecoveryBlockConsumes reports whether a transaction of the stored
+// block with hash consumes input. A block the store no longer holds, or one
+// that does not decode, answers false, leaving the input to its producer's
+// provenance as the chain scan does.
+func (ls *LedgerState) replayRecoveryBlockConsumes(
+	hash []byte,
+	input lcommon.TransactionInput,
+) (bool, error) {
+	block, err := database.BlockByHash(context.Background(), ls.db, hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the producer block of %s: %w", input, err)
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		ls.config.Logger.Debug(
+			"skipping undecodable producer block during replay recovery",
+			"component", "ledger",
+			"block_hash", hex.EncodeToString(hash),
+			"error", err,
+		)
+		return false, nil
+	}
+	for _, tx := range decoded.Transactions() {
+		for _, consumed := range tx.Consumed() {
+			if consumed.Index() == input.Index() &&
+				consumed.Id() == input.Id() {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // resolveReplayRecoveryProducer locates the block that produced pending.Input.
@@ -2661,18 +2738,20 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		return nil, true, nil
 	}
 	if pending.SpentCeiling != 0 {
-		// A row consumed at or below SpentCeiling was spent by a block the
-		// ledger has applied. Rolling back to its producer cannot make it
+		// An output consumed at or below SpentCeiling was spent by a block
+		// the ledger has applied. Rolling back to its producer cannot make it
 		// spendable, so it is a bad input, not a provenance gap.
-		deletedSlot, err := ls.replayRecoveryDeletedSlot(pending.Input)
-		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
+		spent, err := ls.replayRecoverySpentBy(
+			pending.Input, pending.SpentCeiling,
+		)
+		if err != nil {
 			return nil, false, fmt.Errorf(
 				"lookup spent validation input %s: %w",
 				pending.Input.String(),
 				err,
 			)
 		}
-		if deletedSlot != 0 && deletedSlot <= pending.SpentCeiling {
+		if spent {
 			return nil, true, nil
 		}
 	}

@@ -75,7 +75,7 @@ func (ls *LedgerState) failAccountStaging(err error) {
 // staged: the set is the only copy, so the change would be lost.
 func (ls *LedgerState) failDrainedAccountStaging() {
 	if !ls.utxoSetFailed.Load() {
-		ls.failAccountStaging(drainedUnserved(nodesettings.FamilyAccounts))
+		ls.failAccountStaging(ledgerStateUnserved(nodesettings.FamilyAccounts))
 	}
 }
 
@@ -533,36 +533,11 @@ func (s stagingLedgerDB) SetTransactionWithOpts(
 		return err
 	}
 	s.ls.stageTransactionFee(txn, tx, point.Slot, opts) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-
-	s.ls.stagePParamUpdates(txn, tx, point.Slot, idx, updateEpoch, pparamUpdates) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	return nil
-}
-
-func (s stagingLedgerDB) SetTransactionBatchedWithOpts(
-	ctx context.Context,
-	tx lcommon.Transaction,
-	point common.Point,
-	idx uint32,
-	updateEpoch uint64,
-	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
-	certDeposits map[int]uint64,
-	offsets *database.BlockIngestionResult,
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-	opts database.BatchedTxIngestOpts,
-) error {
-	if err := s.LedgerDB.SetTransactionBatchedWithOpts(
-		ctx, tx, point, idx, updateEpoch, pparamUpdates, certDeposits,
-		offsets, acc, txn, opts,
-	); err != nil {
-		return err
-	}
-	if err := s.ls.stageAccountTransaction( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		txn, tx, point.Slot, idx, point.Hash, opts, certDeposits,
-	); err != nil {
-		return err
-	}
-	s.ls.stageTransactionFee(txn, tx, point.Slot, opts) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageTxIndex(                                  //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		txn, tx.Hash().Bytes(), point, idx,
+		uint8(tx.Type()), //nolint:gosec // era ids fit a byte
+		tx.IsValid(),
+	)
 
 	s.ls.stagePParamUpdates(txn, tx, point.Slot, idx, updateEpoch, pparamUpdates) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
@@ -570,8 +545,7 @@ func (s stagingLedgerDB) SetTransactionBatchedWithOpts(
 
 // requireRewardCreditAccounts reports models.ErrAccountNotFound for the
 // first credit whose account the set does not hold active, as the metadata
-// store's credit does, for a drained accounts family whose store credit is
-// skipped. Callers route the amount elsewhere (the treasury) on that answer,
+// store's credit did, since no store credit is written. Callers route the amount elsewhere (the treasury) on that answer,
 // so it must reach them without staging anything or stopping the set.
 // skipApplied skips a credit already applied, as the store's batch credit
 // does before it looks the account up; the single credit looks the account
@@ -763,7 +737,7 @@ func (ls *LedgerState) stageAccountExpirationsWithActivation(
 	if r == nil {
 		// The set is the only copy, so an expiration it cannot take would
 		// be lost.
-		ls.failAccountStaging(drainedUnserved(nodesettings.FamilyAccounts))
+		ls.failAccountStaging(ledgerStateUnserved(nodesettings.FamilyAccounts))
 		return nil
 	}
 	if ls.utxoSetFailed.Load() {
@@ -837,7 +811,7 @@ func (s stagingLedgerDB) SetGenesisStakingWithDeposits(
 	// Genesis pools and accounts are ledger state only, so the set staged
 	// below is their only copy.
 	if s.ls.accountReader(txn) == nil {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	s.ls.stageGenesisStaking(
 		txn,
@@ -859,10 +833,10 @@ func (s stagingLedgerDB) SetGenesisGovernance(
 	// delegations. Their certificate history is the IndexerDB's, which its
 	// writer seeds from genesis.
 	if s.ls.accountReader(txn) == nil {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	if s.ls.drepReader(txn) == nil {
-		return drainedUnserved(nodesettings.FamilyDReps)
+		return ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	s.ls.stageGenesisGovernance(txn, initialDReps, delegs)
 	return nil
@@ -912,5 +886,5 @@ func (s stagingLedgerDB) GetAccountsByCredential(
 
 // accountsUnserved is the error of an account read the set cannot answer.
 func (s stagingLedgerDB) accountsUnserved() error {
-	return drainedAccountsRefusal()
+	return accountsUnserved()
 }

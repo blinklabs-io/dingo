@@ -218,7 +218,6 @@ func TestOpCertViewDropsByCurrentRollbackTarget(t *testing.T) {
 func drainedStaging(f nodesettings.Family) stagingLedgerDB {
 	ls := &LedgerState{}
 	ls.config.Logger = slog.New(slog.DiscardHandler)
-	ls.SetDrainedFamilies(nodesettings.FamilyMask(0).With(f))
 	return stagingLedgerDB{ls: ls}
 }
 
@@ -245,7 +244,7 @@ func TestDrainedDRepWritesFailWhenSetCannotStage(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			err := write(drainedStaging(nodesettings.FamilyDReps))
-			require.ErrorIs(t, err, ErrDrainedFamilyUnserved)
+			require.ErrorIs(t, err, ErrLedgerStateUnserved)
 		})
 	}
 }
@@ -294,7 +293,6 @@ func drainedBumpLedger(
 	ls := overlayLedger(append(batches, own)...)
 	ls.config.Logger = slog.New(slog.DiscardHandler)
 	ls.config.UtxoSet = set
-	ls.SetDrainedFamilies(nodesettings.FamilyMask(0).With(nodesettings.FamilyDReps))
 	return stagingLedgerDB{ls: ls}, own.txn
 }
 

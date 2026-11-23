@@ -31,6 +31,8 @@ func TestDatabaseOwnTransactionsHonorCancelledContext(t *testing.T) {
 
 	db := newTestDB(t)
 	insertTestBlock(t, db, 1, randomHash(t), []byte("cbor"))
+	// DReps and committee members are SQL rows only an IndexerDB keeps.
+	indexer := openIndexerTestDB(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -61,11 +63,11 @@ func TestDatabaseOwnTransactionsHonorCancelledContext(t *testing.T) {
 			return err
 		},
 		"GetActiveDreps": func() error {
-			_, err := db.GetActiveDreps(ctx, nil)
+			_, err := indexer.GetActiveDreps(ctx, nil)
 			return err
 		},
 		"GetCommitteeMembers": func() error {
-			_, err := db.GetCommitteeMembers(ctx, nil)
+			_, err := indexer.GetCommitteeMembers(ctx, nil)
 			return err
 		},
 	} {
@@ -81,10 +83,8 @@ func TestDatabaseStartupSettingsHonorCancelledContext(t *testing.T) {
 	db := newTestDB(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.ErrorIs(t, db.checkCommitTimestamp(ctx), context.Canceled)
 	require.ErrorIs(t, db.CheckNodeSettings(ctx), context.Canceled)
 	require.ErrorIs(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx), context.Canceled)
-	require.NoError(t, db.checkCommitTimestamp(t.Context()))
 	require.NoError(t, db.CheckNodeSettings(t.Context()))
 	require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(t.Context()))
 }
@@ -92,7 +92,8 @@ func TestDatabaseStartupSettingsHonorCancelledContext(t *testing.T) {
 func TestMetadataRecoveryHonorsCancelledContextAtCommitBarrier(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	// Consumed-input recovery reads the metadata store of an IndexerDB.
+	db := openIndexerTestDB(t)
 	txn := db.BlobTxn(true)
 	t.Cleanup(txn.Release)
 

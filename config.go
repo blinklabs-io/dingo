@@ -306,7 +306,6 @@ type Config struct {
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
 	advertiseAddress                                                                    string
-	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
 	shutdownTimeout                                                                     time.Duration
@@ -353,7 +352,6 @@ type Config struct {
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
 	ledgerValidateAheadEnabled                                                          bool
-	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	cip0203Enabled                                                                      bool
@@ -986,7 +984,6 @@ func (c *Config) syncCompatFields() {
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.advertiseAddress = c.cfg.AdvertiseAddress
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
-	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
 	// storageMode is the ledger's own store's mode, which is core when the
 	// IndexerDB holds the API rows.
 	c.splitIndexer = c.cfg.SplitIndexer()
@@ -1122,7 +1119,6 @@ func (c *Config) syncCompatFields() {
 	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
 	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
-	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1886,8 +1882,9 @@ func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
 	}
 }
 
-// WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
-// reward live-stake rows against the full UTxO table.
+// WithSkipRewardLiveStakeBackfillCheck has no effect: the ledger's database
+// keeps no reward live-stake rows to verify. The stake-snapshot provenance
+// check always runs.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.SkipRewardLiveStakeBackfillCheck = skip
@@ -2257,13 +2254,9 @@ func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
-// that are not validated through the metadata store's batched path in core
-// storage mode, as API storage mode already does. Validated blocks, Leios
-// endorser-block applies, and batches applied with closure context keep the
-// per-transaction path in every storage mode, API mode included. Off by
-// default; the stored state is identical either way. See
-// LedgerStateConfig.ApplyRowBatchingEnabled.
+// WithLedgerApplyRowBatchingEnabled sets a released setting that no longer
+// has an effect: the ledger writes its state to the LedgerDB, which has no
+// batched row path. It is kept so released configurations keep loading.
 func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerApplyRowBatchingEnabled = enabled
@@ -3407,8 +3400,8 @@ func (c *Config) LedgerValidateAheadEnabled() bool {
 	return c.cfg.LedgerValidateAheadEnabled
 }
 
-// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
-// are applied through the batched metadata write path.
+// LedgerApplyRowBatchingEnabled returns the released row-batching setting,
+// which no longer has an effect.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
 	return c.cfg.LedgerApplyRowBatchingEnabled
 }

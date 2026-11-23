@@ -19,57 +19,29 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-// tipWriteFailingMetadataStore fails the final step of
-// database.TruncateAfterSlot -- writing the rolled-back tip -- with an error
-// the caller would otherwise read as "the rollback was refused and nothing
-// changed". Everything else, including the blob-side block deletion the chain
-// truncation performs, keeps working, so the injected failure lands exactly
-// where the ledger rollback runs: after chain.RollbackDeferred has already
-// removed the abandoned blocks.
-type tipWriteFailingMetadataStore struct {
-	metadata.MetadataStore
-	err error
-}
-
-func (s tipWriteFailingMetadataStore) SetTip(
-	_ ochainsync.Tip,
-	_ dbtypes.Txn,
-) error {
-	return s.err
-}
-
-// failLedgerRollbackAfterChainTruncation points ls at a database whose ledger
-// truncation fails with err while leaving the chain manager's own database
-// untouched, so ls.chain.RollbackDeferred still succeeds.
+// failLedgerRollbackAfterChainTruncation fails the ledger's own truncation
+// with err, an error the caller would otherwise read as "the rollback was
+// refused and nothing changed". The chain truncation keeps working, so the
+// failure lands where the ledger rollback runs: after chain.RollbackDeferred
+// has removed the abandoned blocks.
 func failLedgerRollbackAfterChainTruncation(
 	t *testing.T,
 	ls *LedgerState,
 	err error,
 ) {
 	t.Helper()
-	base := ls.db
-	failing, newErr := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: tipWriteFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           err,
-			},
-		},
-	)
-	require.NoError(t, newErr)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point, uint64, ledgerdb.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, err
+	}
 }
 
 // TestRollbackChainAndStateDeferredReportsChainTruncationOnLedgerFailure pins

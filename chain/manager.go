@@ -486,7 +486,7 @@ func (cm *ChainManager) loadPrimaryChain(ctx context.Context) error {
 			chain.tipBlockIndex = recentBlocks[0].ID
 			chain.rollbackAnchorBlockIndex = recentBlocks[0].ID
 		}
-		raw, err := cm.db.GetSyncState(rollbackHighWaterSyncKey, nil)
+		raw, err := cm.db.GetChainState(rollbackHighWaterKey, nil)
 		if err != nil {
 			return fmt.Errorf("load rollback high-water mark: %w", err)
 		}
@@ -650,7 +650,10 @@ func (cm *ChainManager) removeBlockByIndex(
 		removedBlock = tmpBlock
 		// Add block to LRU cache in case other chains are using it
 		cm.blockCache.Put(tmpBlock)
-		if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
+		// The body stays in the block store as a rolled-back block: a
+		// rollback intent may still need it to tell subscribers what this
+		// removal undid.
+		if err := database.BlockRetireTxn(txn, tmpBlock); err != nil {
 			return err
 		}
 		return nil

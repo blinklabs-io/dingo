@@ -21,8 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -30,8 +28,7 @@ import (
 )
 
 // TestNodeStartedFromAnImportServesTheImportedState imports a devnet
-// snapshot, empties the metadata store's ledger-state tables, and opens the
-// LedgerDB set as a node's start does. The node must serve the snapshot's
+// snapshot and opens the LedgerDB set as a node's start does. The node must serve the snapshot's
 // accounts, pools, treasury and tip nonce from the LedgerDB alone.
 func TestNodeStartedFromAnImportServesTheImportedState(t *testing.T) {
 	t.Parallel()
@@ -65,14 +62,6 @@ func TestNodeStartedFromAnImportServesTheImportedState(t *testing.T) {
 			LedgerDB: NewImportLedgerDB(db, set, nil),
 		},
 	))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	for _, f := range nodesettings.Families() {
-		for _, table := range statedrain.TableNames(f) {
-			_, err := raw.Exec("DELETE FROM " + table)
-			require.NoError(t, err)
-		}
-	}
 	AdoptLiveSetForTest(t, db, set)
 
 	ls := &LedgerState{db: db}

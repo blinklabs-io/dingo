@@ -126,10 +126,6 @@ func (s *indexerStore) TombstoneBlock(types.Txn, uint64, []byte) error {
 	return ErrIndexerReadOnly
 }
 
-func (s *indexerStore) SetCommitTimestamp(int64, types.Txn) error {
-	return ErrIndexerReadOnly
-}
-
 // The wrapped store's optional capabilities are forwarded: hiding them would
 // make the IndexerDB's batches look unbounded to a store that bounds its
 // transactions.

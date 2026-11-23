@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -43,53 +42,10 @@ func localStorageSelections() StorageSelections {
 	}
 }
 
-func TestOpenDatabaseReturnsRecoveryErrorOnRuntime(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	deps := StorageDependencies{DataDir: dataDir}
-	runtime, err := OpenDatabase(
-		context.Background(),
-		&database.Config{DataDir: dataDir},
-		localStorageSelections(),
-		deps,
-	)
-	require.NoError(t, err)
-	firstRuntime := runtime
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		require.NoError(t, firstRuntime.Close(ctx))
-	})
-
-	metaTxn := runtime.Database.Metadata().Transaction(t.Context())
-	require.NoError(
-		t,
-		runtime.Database.Metadata().SetCommitTimestamp(123456789, metaTxn),
-	)
-	require.NoError(t, metaTxn.Commit())
-	require.NoError(t, runtime.Close(context.Background()))
-
-	runtime, err = OpenDatabase(
-		context.Background(),
-		&database.Config{DataDir: dataDir},
-		localStorageSelections(),
-		deps,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, runtime)
-	t.Cleanup(func() {
-		require.NoError(t, runtime.Close(context.Background()))
-	})
-	var timestampErr database.CommitTimestampError
-	require.ErrorAs(t, runtime.RecoveryError(), &timestampErr)
-	require.Equal(t, int64(123456789), timestampErr.MetadataTimestamp)
-	require.Zero(t, timestampErr.BlobTimestamp)
-}
-
 func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
 	t.Parallel()
 	selections := localStorageSelections()
-	selections.Metadata.Provider = "missing"
+	selections.Blob.Provider = "missing"
 	runtime, err := OpenDatabase(
 		context.Background(),
 		&database.Config{DataDir: t.TempDir()},
@@ -101,7 +57,7 @@ func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
 	require.ErrorContains(
 		t,
 		err,
-		"plugin provider not found: storage.metadata/missing",
+		"plugin provider not found: storage.blob/missing",
 	)
 }
 
@@ -137,14 +93,7 @@ func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) 
 
 	require.Equal(t, "core", runtime.Database.StorageMode())
 	require.Equal(t, "api", indexer.StorageMode())
-	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
 	require.FileExists(t, filepath.Join(dataDir, IndexerDirName, "metadata.sqlite"))
-
-	// A row written through one store is not visible through the other.
-	require.NoError(t, indexer.SetSyncState("only_in_indexer", "x", nil))
-	got, err := runtime.Database.GetSyncState("only_in_indexer", nil)
-	require.NoError(t, err)
-	require.Empty(t, got)
 
 	// The indexer sees the ledger's blocks through the shared blob store.
 	require.NoError(t, runtime.Database.BlockCreate(models.Block{
@@ -155,17 +104,6 @@ func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, uint64(7), blk.Slot)
 
-	// Committing in the indexer must not move the ledger's commit timestamp
-	// pairing: the consensus database reopens cleanly with no mismatch.
-	before, err := runtime.Database.Blob().GetCommitTimestamp()
-	require.NoError(t, err)
-	txn := indexer.Transaction(t.Context(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return indexer.SetSyncState("k", "v", txn)
-	}))
-	after, err := runtime.Database.Blob().GetCommitTimestamp()
-	require.NoError(t, err)
-	require.Equal(t, before, after, "an indexer commit must not write the ledger's commit timestamp")
 }
 
 func TestOpenIndexerDatabaseRegistersMetricsUnderTheIndexerRole(t *testing.T) {

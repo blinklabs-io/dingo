@@ -43,7 +43,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   the root package. A new test there should too.
 - Keep a test sequential — with a `// Not t.Parallel: ...` comment saying why —
   when it reaches process-global state. The classes seen here: swapping a
-  package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
+  package-level seam (`syncDir`,
   `deliveryStallWarnInterval`, `afterDeferredMarkerDeleteHook`,
   `leiosPersistShutdownDrainTimeout`); swapping another package's variable
   (`ledger.Close*Timeout`); replacing a process-global (`slog.SetDefault`,

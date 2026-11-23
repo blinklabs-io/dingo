@@ -82,7 +82,7 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 1, nil))
 
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg

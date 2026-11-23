@@ -295,13 +295,6 @@ func (s *Set) ensureGovernance(ctx context.Context, ldb ledgerdb.LedgerDB) error
 	return nil
 }
 
-// InvalidateGovernance makes the next Reconcile or LoadLedgerState reload the
-// proposals and votes from the metadata store, for a caller that deleted
-// governance rows from it without going through the ledger.
-func (s *Set) InvalidateGovernance() error {
-	return s.store.InvalidateGovernance()
-}
-
 // GovernanceLoaded reports whether the set holds every proposal and vote.
 func (s *Set) GovernanceLoaded() (bool, error) {
 	return s.store.GovernanceLoaded()

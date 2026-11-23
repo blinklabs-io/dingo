@@ -45,8 +45,8 @@ type poolBook struct {
 	lister PoolHistoryLister
 }
 
-// poolBook returns the book for a drained pools-history family, or
-// ErrDrainedFamilyUnserved when the set cannot answer every read.
+// poolBook returns the set's pool book, or
+// ErrLedgerStateUnserved when the set cannot answer every read.
 func (ls *LedgerState) poolBook(txn ledgerdb.Txn) (*poolBook, error) {
 	state := ls.poolServing(txn)
 	hist := ls.poolHistoryServes(txn)
@@ -677,7 +677,7 @@ func (b *poolBook) effective(
 	return out, nil
 }
 
-// retiringAtEpoch is GetPoolsRetiringAtEpoch for a drained family. A retiring
+// retiringAtEpoch is GetPoolsRetiringAtEpoch read from the set. A retiring
 // pool whose state is gone cannot be refunded from the set.
 func (b *poolBook) retiringAtEpoch(
 	epoch, boundary uint64,
@@ -693,7 +693,7 @@ func (b *poolBook) retiringAtEpoch(
 			return err
 		}
 		if st == nil {
-			return drainedUnserved(nodesettings.FamilyPoolsHistory)
+			return ledgerStateUnserved(nodesettings.FamilyPoolsHistory)
 		}
 		var held uint64
 		if st.DepositHeld != nil {

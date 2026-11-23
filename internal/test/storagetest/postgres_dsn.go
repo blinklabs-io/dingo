@@ -23,12 +23,6 @@ import (
 // keyword/value connection string, so a password containing a space,
 // single quote, or backslash -- all legal in a Postgres password --
 // produces a well-formed DSN instead of breaking the conninfo parse.
-//
-// Lives here, not in internal/test/conformance or a metadata plugin
-// package, so both a plugin's own conformance tests (which import this
-// package already) and internal/test/conformance (which imports the plugin
-// packages directly to open a real backend) can share it without an import
-// cycle.
 func EscapeLibpqValue(value string) string {
 	escaped := strings.ReplaceAll(value, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `'`, `\'`)

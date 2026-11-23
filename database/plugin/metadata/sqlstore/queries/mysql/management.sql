@@ -1,13 +1,3 @@
--- name: GetCommitTimestamp :one
-SELECT timestamp
-FROM commit_timestamp
-WHERE id = 1;
-
--- name: SetCommitTimestamp :exec
-INSERT INTO commit_timestamp (id, timestamp)
-VALUES (1, ?)
-ON DUPLICATE KEY UPDATE timestamp = VALUES(timestamp);
-
 -- name: GetNodeSettings :one
 SELECT storage_mode, network
 FROM node_settings

@@ -28,7 +28,7 @@ import (
 // with no stored datum is a nil entry, not an error that discards the rest.
 func TestGetDatumsAlignsResultsAndReportsMissingAsNil(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t, nil).indexer
 	raw := []byte{0x01}
 	require.NoError(t, db.SetDatum(raw, 1, nil))
 	stored := lcommon.Blake2b256Hash(raw).Bytes()

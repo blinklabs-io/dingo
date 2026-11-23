@@ -48,11 +48,11 @@ const (
 	// recent block, then fall back to exponentially older points to avoid
 	// origin intersects when the peer lags by more than a few dozen blocks.
 	intersectDensePointCount = 32
-	// rollbackHighWaterSyncKey names the sync-state row holding the highest
+	// rollbackHighWaterKey names the chain state value holding the highest
 	// block index the persistent chain held before its most recent
 	// rollback. The in-memory anchor is rebuilt from it on load; without it a
 	// restart would measure the next rollback from the already-lowered tip.
-	rollbackHighWaterSyncKey = database.RollbackHighWaterSyncKey
+	rollbackHighWaterKey = database.RollbackHighWaterKey
 )
 
 type Chain struct {
@@ -74,7 +74,7 @@ type Chain struct {
 	// lowers it.
 	rollbackAnchorBlockIndex uint64
 	// persistedRollbackAnchor is the value last written under
-	// rollbackHighWaterSyncKey, so repeated rollbacks from one anchor write
+	// rollbackHighWaterKey, so repeated rollbacks from one anchor write
 	// it once.
 	persistedRollbackAnchor uint64
 	// mutationGeneration counts mutations of the in-memory block state:
@@ -2087,7 +2087,7 @@ func (c *Chain) rollbackForkDepth(
 	return 0
 }
 
-// persistRollbackAnchorLocked records anchor under rollbackHighWaterSyncKey
+// persistRollbackAnchorLocked records anchor under rollbackHighWaterKey
 // before a rollback removes the blocks above it, so a crash or restart cannot
 // lose the high-water mark. Callers must hold c.mutex.
 func (c *Chain) persistRollbackAnchorLocked(anchor uint64) error {
@@ -2095,8 +2095,8 @@ func (c *Chain) persistRollbackAnchorLocked(anchor uint64) error {
 		anchor == c.persistedRollbackAnchor {
 		return nil
 	}
-	if err := c.manager.db.SetSyncState(
-		rollbackHighWaterSyncKey,
+	if err := c.manager.db.SetChainState(
+		rollbackHighWaterKey,
 		strconv.FormatUint(anchor, 10),
 		nil,
 	); err != nil {

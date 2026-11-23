@@ -323,9 +323,6 @@ func (c *rollbackCycle) run(
 		s.ls.ratificationWG.Wait()
 		s.ls.rewardPrecomputeWG.Wait()
 	} else {
-		require.NoError(t, s.db.RollbackMetadataAfterSlot(
-			context.Background(), ocommon.Point{Slot: target}, 0, nil,
-		))
 		// Ledger state lives in the set, which rolls back along its
 		// journal.
 		fxRollback(t, s.ls, rollbackPoint(target))

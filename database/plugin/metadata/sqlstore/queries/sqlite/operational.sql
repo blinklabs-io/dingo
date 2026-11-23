@@ -207,16 +207,6 @@ ON CONFLICT (slot) DO UPDATE SET
 DELETE FROM network_donation
 WHERE slot > ?;
 
--- name: GetImportCheckpoint :one
-SELECT id, import_key, phase
-FROM import_checkpoint
-WHERE import_key = ?;
-
--- name: SetImportCheckpoint :exec
-INSERT INTO import_checkpoint (import_key, phase)
-VALUES (?, ?)
-ON CONFLICT (import_key) DO UPDATE SET phase = excluded.phase;
-
 -- name: GetBackfillCheckpoint :one
 SELECT id, phase, last_slot, last_index_id, last_block_hash,
     total_slots, started_at, updated_at, completed

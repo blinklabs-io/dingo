@@ -63,7 +63,7 @@ func TestAccountReadsUseLoadedSetAfterDrain(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, delegators)
 	_, err = ldb.GetDRepDelegators(ctx, 2, nil, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved, "predefined DRep has no set key")
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved, "predefined DRep has no set key")
 	hide(false)
 	require.Zero(t, reached(), "account reads reached the metadata store")
 }

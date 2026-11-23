@@ -201,6 +201,13 @@ const (
 	// RewardLikelihoodTag keys the non-myopic pool-ranking state a reward
 	// update installs: 2 <kind:1> <epoch:8 BE> [<pool:28>].
 	RewardLikelihoodTag = '2'
+	// TxIndexTag keys the transaction index, every transaction the ledger has
+	// applied on its chain: 3 <tx hash:32>, valued with the slot of the block
+	// the transaction was applied in (8 bytes BE), its position in that
+	// block (4 bytes BE), its era id (1 byte), whether it is phase-2 valid
+	// (1 byte) and the block's hash. A Leios closure transaction records the
+	// ranking block that certified its endorser block.
+	TxIndexTag = '3'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -376,6 +383,9 @@ var (
 	// closureUtxoKey is set once the store holds every closure output effect
 	// up to its tip.
 	closureUtxoKey = []byte("mclosureutxo")
+	// txIndexKey is set once the store holds the transaction index up to its
+	// tip.
+	txIndexKey = []byte("mtxindex")
 	// rewardInputsKey is set once the store holds the reward inputs of every
 	// epoch reward calculation can still read, up to its tip.
 	rewardInputsKey = []byte("mrewardin")
