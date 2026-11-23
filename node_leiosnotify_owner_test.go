@@ -17,6 +17,7 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"log/slog"
 	"net"
 	"sync"
@@ -98,6 +99,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database: db, ChainManager: chainManager, Logger: logger,
+		UtxoSet: livesettest.New(),
 	})
 	require.NoError(t, err)
 	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{

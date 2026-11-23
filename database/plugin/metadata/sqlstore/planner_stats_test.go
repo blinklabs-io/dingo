@@ -488,8 +488,11 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 	supported, err := SQLiteDialect().OptimizePlannerStats(context.Background(), sqliteExec)
 	require.NoError(t, err)
 	require.True(t, supported)
-	require.Len(t, sqliteExec.statements, 1)
-	require.Contains(t, sqliteExec.statements[0], "PRAGMA optimize")
+	require.Equal(t, []string{
+		"PRAGMA analysis_limit = 1000",
+		"ANALYZE",
+		"PRAGMA analysis_limit = 0",
+	}, sqliteExec.statements)
 
 	// Explicit full ANALYZE remains available; fresh Mithril bootstraps prefer
 	// incremental planner-stat maintenance on supported backends.
@@ -597,4 +600,108 @@ func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
 		}
 	}
 	require.Equal(t, 12, series, "3 triggers x 4 results")
+}
+
+func TestHasPlannerStatsTracksSqliteStat1(t *testing.T) {
+	t.Parallel()
+
+	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
+	has, err := store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.False(t, has, "a database never analyzed has no statistics")
+
+	seedPlannerStatsProbeUtxos(t, store)
+	require.NoError(t, store.UpdatePlannerStats())
+	has, err = store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.True(t, has)
+}
+
+// BenchmarkPlannerStatsResume compares the full ANALYZE a resumed backfill
+// used to run with the incremental path. The grown cases analyze utxo, then
+// double it before the timed run, as an interrupted backfill does; each
+// iteration builds that state afresh, because one run refreshes the
+// statistics and a second would measure the unchanged case instead.
+func BenchmarkPlannerStatsResume(b *testing.B) {
+	const rows = 500_000
+	grownStore := func(b *testing.B) *Store {
+		b.Helper()
+		store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
+		seedStakeRefLookupUtxos(b, store, rows, 4096)
+		require.NoError(b, store.UpdatePlannerStats())
+		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
+  staking_key, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + 4, staking_key, credential_tag,
+  added_slot + ?, deleted_slot, amount FROM utxo`, rows)
+		require.NoError(b, err)
+		return store
+	}
+	b.Run("grown/full_analyze", func(b *testing.B) {
+		for range b.N {
+			b.StopTimer()
+			store := grownStore(b)
+			b.StartTimer()
+			require.NoError(b, store.UpdatePlannerStats())
+		}
+	})
+	b.Run("grown/incremental", func(b *testing.B) {
+		for range b.N {
+			b.StopTimer()
+			store := grownStore(b)
+			b.StartTimer()
+			_, err := store.OptimizePlannerStatsContext(
+				b.Context(), PlannerStatsTriggerStartup,
+			)
+			require.NoError(b, err)
+		}
+	})
+	b.Run("unchanged/incremental", func(b *testing.B) {
+		store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
+		seedStakeRefLookupUtxos(b, store, rows, 4096)
+		require.NoError(b, store.UpdatePlannerStats())
+		b.ResetTimer()
+		for range b.N {
+			_, err := store.OptimizePlannerStatsContext(
+				b.Context(), PlannerStatsTriggerStartup,
+			)
+			require.NoError(b, err)
+		}
+	})
+}
+
+// A resumed backfill runs the incremental optimizer over statistics collected
+// before the interrupted run, after that run grew the tables. The batched
+// spend lookup must plan as it would after a full ANALYZE of the same data.
+func TestResumedPlannerStatsKeepFullAnalyzeSpendPlan(t *testing.T) {
+	skipPlanTestUnderRace(t)
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
+	seedPlannerStatsProbeUtxos(t, store)
+	require.NoError(t, store.UpdatePlannerStats())
+	// Grow utxo 32x so the resumed statistics describe a much smaller table.
+	for shift := range 5 {
+		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
+  staking_key, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + ?, staking_key, credential_tag,
+  added_slot + ?, deleted_slot, amount FROM utxo`,
+			4<<shift, 3000<<shift)
+		require.NoError(t, err)
+	}
+
+	has, err := store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.True(t, has)
+	result, err := store.OptimizePlannerStatsContext(
+		t.Context(), PlannerStatsTriggerStartup,
+	)
+	require.NoError(t, err)
+	require.True(t, result.Supported)
+	require.False(t, result.Skipped)
+	require.True(t, result.Changed, "the optimizer must re-analyze utxo")
+	resumed := poolPlans(t, store.writeDB, 1)[0]
+
+	require.NoError(t, store.UpdatePlannerStats())
+	full := poolPlans(t, store.writeDB, 1)[0]
+	require.Contains(t, full, "idx_utxo_tx_id_output_idx")
+	require.Equal(t, full, resumed)
 }

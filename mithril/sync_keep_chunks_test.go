@@ -38,7 +38,7 @@ func TestSyncConfigKeepsChunks(t *testing.T) {
 	}.keepsChunks(false))
 }
 
-func TestSyncConfigImmutableConfigNeedsBadger(t *testing.T) {
+func TestSyncConfigImmutableConfigUsesSupportedProviders(t *testing.T) {
 	t.Parallel()
 	cfg, err := SyncConfig{Network: "preprod"}.immutableConfig()
 	require.NoError(t, err)
@@ -53,10 +53,18 @@ func TestSyncConfigImmutableConfigNeedsBadger(t *testing.T) {
 	require.Equal(t, uint64(21600), cfg.ChunkSlots)
 	require.True(t, cfg.CanContainEBB)
 
-	badConfig := SyncConfig{Network: "preprod", KeepChunks: true}
-	badConfig.StoragePlugins.Blob.Provider = "s3"
-	_, err = badConfig.immutableConfig()
-	require.ErrorContains(t, err, "badger")
+	for _, provider := range []string{"badger", "s3", "gcs"} {
+		syncCfg := SyncConfig{Network: "preprod", KeepChunks: true}
+		syncCfg.StoragePlugins.Blob.Provider = provider
+		got, err := syncCfg.immutableConfig()
+		require.NoError(t, err, provider)
+		require.Equal(t, cfg, got, provider)
+	}
+
+	unsupported := SyncConfig{Network: "preprod", KeepChunks: true}
+	unsupported.StoragePlugins.Blob.Provider = "unsupported"
+	_, err = unsupported.immutableConfig()
+	require.ErrorContains(t, err, "does not support Mithril chunk adoption")
 }
 
 // layoutPrimaryIndex rewrites chunk 0's primary index of db as cardano-node
@@ -126,9 +134,9 @@ func TestSyncKeepChunksMatchesBodyCopy(t *testing.T) {
 
 	run := func(keep bool) SyncConfig {
 		cfg := SyncConfig{
+			UtxoSet:           newSyncTestSet(t),
 			Network:           "preprod",
 			DataDir:           t.TempDir(),
-			StorageMode:       "core",
 			Backend:           BackendV2,
 			AggregatorURL:     srv.URL,
 			AllowInsecureHTTP: true,

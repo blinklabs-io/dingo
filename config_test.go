@@ -316,6 +316,43 @@ func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
 	}
 }
 
+func TestProgrammaticAdvertiseAddressValidation(t *testing.T) {
+	t.Parallel()
+
+	newNode := func(address string) *Node {
+		cfg := NewConfig(
+			WithAdvertiseAddress(address),
+			WithNetworkMagic(42),
+			WithListeners(ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: "127.0.0.1:0",
+			}),
+		)
+		return &Node{config: cfg}
+	}
+
+	require.NoError(t, newNode("45.0.0.7:3001").configValidate())
+	err := newNode("relay.example.com:3001").configValidate()
+	require.ErrorContains(t, err, "invalid advertise address")
+}
+
+// History expiry runs in either storage mode, as it did in v0.94.2.
+func TestNodeAllowsHistoryExpiryInAPIStorageMode(t *testing.T) {
+	t.Parallel()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	_, err := New(NewConfig(
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithStorageMode(StorageModeAPI),
+		WithHistoryExpiry(HistoryExpiryConfig{Enabled: true, Frequency: time.Minute}),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+	))
+	require.NoError(t, err)
+}
+
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	t.Parallel()
 

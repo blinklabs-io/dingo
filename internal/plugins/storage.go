@@ -21,15 +21,14 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
-	"reflect"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
-	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -37,14 +36,25 @@ import (
 )
 
 // StorageSelections identifies the providers and provider-owned
-// configuration for the selectable storage capabilities. The ImmutableDB has
-// one built-in provider and no selection.
+// configuration for the selectable storage capabilities.
 type StorageSelections struct {
-	Blob     plugin.Selection
-	Metadata plugin.Selection
-	// IndexerMetadataConfig holds provider settings that override the
-	// metadata selection's for the split IndexerDB's own store.
-	IndexerMetadataConfig map[string]any
+	// SplitIndexer keeps a client/server API database in place as IndexerDB
+	// and selects the provider-owned consensus namespace beside it.
+	SplitIndexer bool
+	Blob         plugin.Selection
+	Metadata     plugin.Selection
+}
+
+// ConfiguredStorageSelections returns the storage selections of cfg. Every
+// open of a node's own stores goes through it: a selection that omits
+// SplitIndexer opens an adopted PostgreSQL or MySQL IndexerDB as the
+// consensus store, which latches core mode into it.
+func ConfiguredStorageSelections(cfg *config.Config) StorageSelections {
+	return StorageSelections{
+		SplitIndexer: cfg.SplitIndexer() || cfg.ServerCoreNamespace,
+		Blob:         cfg.Plugins.Storage.Blob,
+		Metadata:     cfg.Plugins.Storage.Metadata,
+	}
 }
 
 // StorageDependencies contains shared application settings injected into
@@ -98,6 +108,8 @@ func ResolveStorage(
 		selections.Metadata.Provider,
 		selections.Metadata.Config,
 		metadata.ProviderDependencies{
+			CoreNamespace: selections.SplitIndexer &&
+				(selections.Metadata.Provider == "postgres" || selections.Metadata.Provider == "mysql"),
 			DataDir:             deps.DataDir,
 			StorageMode:         deps.StorageMode,
 			MaxConnections:      deps.MaxConnections,
@@ -114,15 +126,29 @@ func ResolveStorage(
 			err,
 		)
 	}
+	immutableProvider := immplugin.ProviderNameForBlob(selections.Blob.Provider)
+	var immutableObjects blob.ImmutableObjects
+	if immutableProvider == immplugin.S3ProviderName ||
+		immutableProvider == immplugin.GCSProviderName {
+		var ok bool
+		immutableObjects, ok = blobStore.(blob.ImmutableObjects)
+		if !ok {
+			return database.Stores{}, fmt.Errorf(
+				"blob provider %q does not expose ImmutableDB file operations",
+				selections.Blob.Provider,
+			)
+		}
+	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		ctx,
 		host,
 		plugin.CapabilityStorageImmutable,
-		chunkfile.ProviderName,
+		immutableProvider,
 		nil,
 		immplugin.ProviderDependencies{
-			DataDir: deps.DataDir,
-			Logger:  deps.Logger,
+			DataDir:     deps.DataDir,
+			Logger:      deps.Logger,
+			ObjectFiles: immutableObjects,
 		},
 	)
 	if err != nil {
@@ -143,10 +169,11 @@ func ResolveStorage(
 const IndexerDirName = "indexer"
 
 // IndexerMetadataSelection derives the IndexerDB's metadata provider config
-// from the consensus selection and the indexer overrides. A SQLite store gets
-// its own directory under the data directory. A client/server provider has no
-// such default, so the overrides must name a different database: two stores
-// in one schema would share tables.
+// from the released metadata selection. SQLite gets its own directory. On
+// server stores the released database remains the IndexerDB while
+// ResolveStorage selects the provider-owned consensus namespace, so a
+// selection without SplitIndexer would share its tables with the consensus
+// store and is refused.
 func IndexerMetadataSelection(
 	selections StorageSelections,
 	dataDir string,
@@ -156,20 +183,17 @@ func IndexerMetadataSelection(
 	if cfg == nil {
 		cfg = map[string]any{}
 	}
-	maps.Copy(cfg, selections.IndexerMetadataConfig)
 	indexerDir := dataDir
 	if provider == "sqlite" {
 		// The consensus store's directory override must not be inherited.
-		if _, own := selections.IndexerMetadataConfig["dataDir"]; !own {
-			delete(cfg, "dataDir")
+		delete(cfg, "dataDir")
+		if dataDir != "" {
 			indexerDir = filepath.Join(dataDir, IndexerDirName)
 		}
-	} else if len(selections.IndexerMetadataConfig) == 0 ||
-		reflect.DeepEqual(cfg, selections.Metadata.Config) {
+	} else if !selections.SplitIndexer {
 		return plugin.Selection{}, "", fmt.Errorf(
-			"indexer.metadata must configure a separate %s database for "+
-				"the IndexerDB: the layout split would otherwise share "+
-				"tables with the consensus store",
+			"the %s IndexerDB needs the consensus store in its own "+
+				"namespace: the storage selection does not select it",
 			provider,
 		)
 	}
@@ -184,7 +208,10 @@ func ResolveIndexerMetadata(
 	selections StorageSelections,
 	deps StorageDependencies,
 ) (metadata.MetadataStore, error) {
-	selection, dataDir, err := IndexerMetadataSelection(selections, deps.DataDir)
+	selection, dataDir, err := IndexerMetadataSelection(
+		selections,
+		deps.DataDir,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +267,10 @@ func OpenIndexerDatabase(
 		deps.PromRegistry = prometheus.WrapRegistererWithPrefix(
 			IndexerMetricsPrefix,
 			prometheus.WrapRegistererWith(
-				prometheus.Labels{"role": IndexerMetricsRole}, deps.PromRegistry,
+				prometheus.Labels{
+					"role": IndexerMetricsRole,
+				},
+				deps.PromRegistry,
 			),
 		)
 	}

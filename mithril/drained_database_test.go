@@ -15,14 +15,12 @@
 package mithril
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -67,7 +65,7 @@ func TestUpdateMithrilReadyStateRefusesADrainedDatabase(t *testing.T) {
 				context.Background(),
 				db,
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
-				nil, 30, nil, "", true,
+				nil, 30, nil,
 			)
 			require.ErrorIs(t, err, database.ErrLedgerStateDrained)
 			mask, err := db.DrainedFamilies(t.Context())
@@ -81,57 +79,6 @@ func TestUpdateMithrilReadyStateRefusesADrainedDatabase(t *testing.T) {
 			require.Equal(t, "1", marker)
 		})
 	}
-}
-
-// TestSyncRefusesADrainedDatabaseBeforeDownloading requires a catch-up into
-// a database with a latch bit to fail at dispatch.
-func TestSyncRefusesADrainedDatabaseBeforeDownloading(t *testing.T) {
-	t.Parallel()
-	fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
-	dataDir := t.TempDir()
-	seedCompleteDB(t, dataDir, "core", 0, true)
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     dataDir,
-		StorageMode: "core",
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyNonces,
-	))
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	_, err = Sync(context.Background(), SyncConfig{
-		Network:           "preview",
-		DataDir:           dataDir,
-		StorageMode:       "core",
-		Backend:           BackendV2,
-		AggregatorURL:     fix.server.URL,
-		AllowInsecureHTTP: true,
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
-}
-
-// TestProcessGapBlocksRefusesADrainedDatabase requires the gap replay, which
-// reads the epoch rows and writes ledger state, to stop before touching a
-// database that has drained a family.
-func TestProcessGapBlocksRefusesADrainedDatabase(t *testing.T) {
-	t.Parallel()
-	db := newMithrilTestDB(t)
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyNonces,
-	))
-	gap := []models.Block{{Slot: 1, Hash: bytes.Repeat([]byte{1}, 32)}}
-
-	err := processGapBlocks(
-		t.Context(), db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)), gap,
-	)
-
-	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
 }
 
 // TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt requires a catch-up
@@ -159,7 +106,6 @@ func TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt(t *testing.T) {
 	_, err = Sync(context.Background(), SyncConfig{
 		Network:           "preprod",
 		DataDir:           dataDir,
-		StorageMode:       "core",
 		Backend:           BackendV2,
 		AggregatorURL:     fix.server.URL,
 		AllowInsecureHTTP: true,

@@ -128,12 +128,8 @@ func (ls *LedgerState) boundaryCurrent(txn ledgerdb.Txn, slot uint64) bool {
 // journal or in a batch txn sees. A journal that fails to answer is taken to
 // have changed, so the read is answered as of slot or not at all.
 func (ls *LedgerState) poolsChangedAfter(txn ledgerdb.Txn, slot uint64) bool {
-	for _, o := range ls.stagedOps(txn) {
-		for _, c := range o.pools {
-			if c.Slot > slot {
-				return true
-			}
-		}
+	if ls.stagedPoolsChangedAfter(txn, slot) {
+		return true
 	}
 	r := ls.poolReader(txn)
 	if r == nil {
@@ -147,10 +143,41 @@ func (ls *LedgerState) poolsChangedAfter(txn ledgerdb.Txn, slot uint64) bool {
 	return err != nil || len(changed) > 0
 }
 
+// stagedPoolsChangedAfter reports changes visible from other transactions.
+// The reader's own changes are part of its current pool view, not evidence
+// that the view must be reconstructed from history.
+func (ls *LedgerState) stagedPoolsChangedAfter(
+	txn ledgerdb.Txn,
+	slot uint64,
+) bool {
+	ls.utxoSetApplyMu.RLock()
+	defer ls.utxoSetApplyMu.RUnlock()
+	var own *utxoSetBatch
+	if txn != nil {
+		ls.utxoSetMu.Lock()
+		own = ls.utxoSetBatches[txn]
+		ls.utxoSetMu.Unlock()
+	}
+	batches := ls.utxoSetBatchesSeenBy(ls.pinOf(txn), own)
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	for _, b := range batches {
+		if b == own {
+			continue
+		}
+		for _, c := range b.pools {
+			if c.Slot > slot {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // epochRows returns the epochs txn sees, oldest first.
 func (ls *LedgerState) epochRows(txn ledgerdb.Txn) ([]models.Epoch, error) {
 	er, mode := ls.epochStateReader(txn)
-	if er == nil || mode == UtxoSetReadsOff {
+	if er == nil || !mode {
 		return nil, ls.unavailableAsOf("epochs")
 	}
 	view, err := ls.epochStateView(er, txn)
@@ -732,42 +759,6 @@ type poolStakeResult struct {
 	delegators map[string]uint64
 }
 
-func (r poolStakeResult) figures() map[string]uint64 {
-	out := make(map[string]uint64, len(r.stakes)+len(r.delegators))
-	for p, v := range r.stakes {
-		out["stake/"+p] = v
-	}
-	for p, v := range r.delegators {
-		out["delegators/"+p] = v
-	}
-	return out
-}
-
-func inputFigures(rows []*models.RewardStakeInput) map[string]uint64 {
-	out := make(map[string]uint64, len(rows))
-	for _, r := range rows {
-		out[liveStakeKey(r.PoolKeyHash, r.CredentialTag, r.StakingKey)] += uint64(
-			r.Stake,
-		)
-	}
-	return out
-}
-
-func sameFigures(want, got map[string]uint64) (bool, []any) {
-	return sameLiveStake(want, got, false),
-		[]any{"diff", liveStakeDiff(want, got)}
-}
-
-func samePoolHashes(want, got [][]byte) (bool, []any) {
-	w, g := poolSet(want), poolSet(got)
-	same := len(w) == len(g)
-	for p := range w {
-		_, ok := g[p]
-		same = same && ok
-	}
-	return same, []any{"store_count", len(w), "set_count", len(g)}
-}
-
 // boundaryStakeFamilies are the families the metadata store's epoch-boundary
 // stake answer reads.
 var boundaryStakeFamilies = nodesettings.FamilyMask(0).
@@ -794,10 +785,8 @@ func boundaryStakeRead[T any](
 	what string,
 	slot uint64,
 	current bool,
-	fromStore func() (T, error),
 	fromSet func(b *boundaryStake) (T, error),
 	boundary uint64,
-	same func(want, got T) (bool, []any),
 ) (T, error) {
 	leios := s.ls.leiosCertifies()
 	return answerAsOf(s.ls, txn, slot, asOfRead[T]{
@@ -808,25 +797,9 @@ func boundaryStakeRead[T any](
 			if leios && !s.ls.leiosStakeReady(txn) {
 				return false
 			}
-			_, ok, err := s.liveStakeServed(txn, true)
-			return err == nil && ok
+			_, err := s.liveStakeServed(txn)
+			return err == nil
 		},
-		verifies: func() bool {
-			if leios && !s.ls.leiosStakeReady(txn) {
-				return false
-			}
-			src, ok := s.ls.liveStakeSource(txn)
-			if !ok {
-				return false
-			}
-			if src.rr != nil {
-				return true
-			}
-			pending, err := s.HasPendingRewardCreditRounds(txn)
-			return err == nil && !pending
-		},
-		compare:   s.ls.compareLiveStakeRead,
-		fromStore: fromStore,
 		fromSet: func() (T, error) {
 			b, err := s.ls.boundaryStakeFor(txn, slot, boundary, !current)
 			if err != nil {
@@ -835,7 +808,6 @@ func boundaryStakeRead[T any](
 			}
 			return fromSet(b)
 		},
-		same: same,
 	})
 }
 
@@ -850,11 +822,6 @@ func (s stagingLedgerDB) GetEpochBoundaryDelegatedPoolKeyHashes(
 	return boundaryStakeRead(s, txn,
 		fmt.Sprintf("epoch boundary delegated pools at slot %d", snapshotSlot),
 		snapshotSlot, s.ls.boundaryCurrent(txn, snapshotSlot),
-		func() ([][]byte, error) {
-			return s.LedgerDB.GetEpochBoundaryDelegatedPoolKeyHashes(
-				snapshotSlot, boundarySlot, txn,
-			)
-		},
 		func(b *boundaryStake) ([][]byte, error) {
 			delegs, err := b.delegations()
 			if err != nil {
@@ -872,7 +839,6 @@ func (s stagingLedgerDB) GetEpochBoundaryDelegatedPoolKeyHashes(
 			return out, nil
 		},
 		boundarySlot,
-		samePoolHashes,
 	)
 }
 
@@ -892,13 +858,6 @@ func (s stagingLedgerDB) GetEpochBoundaryStakeByPools(
 	res, err := boundaryStakeRead(s, txn,
 		fmt.Sprintf("epoch boundary stake by pools at slot %d", snapshotSlot),
 		snapshotSlot, s.ls.boundaryCurrent(txn, snapshotSlot),
-		func() (poolStakeResult, error) {
-			stakes, delegators, err := s.LedgerDB.GetEpochBoundaryStakeByPools(
-				poolKeyHashes, snapshotSlot, boundarySlot, incomingEraID,
-				expiryEpoch, inactivityPeriod, txn,
-			)
-			return poolStakeResult{stakes, delegators}, err
-		},
 		func(b *boundaryStake) (poolStakeResult, error) {
 			res := poolStakeResult{
 				stakes:     make(map[string]uint64, len(poolKeyHashes)),
@@ -932,9 +891,6 @@ func (s stagingLedgerDB) GetEpochBoundaryStakeByPools(
 			return res, nil
 		},
 		boundarySlot,
-		func(want, got poolStakeResult) (bool, []any) {
-			return sameFigures(want.figures(), got.figures())
-		},
 	)
 	return res.stakes, res.delegators, err
 }
@@ -961,12 +917,6 @@ func (s stagingLedgerDB) GetEpochBoundaryRewardStakeInputsForPools(
 		),
 		snapshotSlot,
 		s.ls.boundaryCurrent(txn, snapshotSlot),
-		func() ([]*models.RewardStakeInput, error) {
-			return s.LedgerDB.GetEpochBoundaryRewardStakeInputsForPools(
-				poolKeyHashes, snapshotSlot, boundarySlot, incomingEraID,
-				expiryEpoch, inactivityPeriod, txn,
-			)
-		},
 		func(b *boundaryStake) ([]*models.RewardStakeInput, error) {
 			if len(poolKeyHashes) == 0 {
 				return nil, nil
@@ -998,9 +948,6 @@ func (s stagingLedgerDB) GetEpochBoundaryRewardStakeInputsForPools(
 			return out, nil
 		},
 		boundarySlot,
-		func(want, got []*models.RewardStakeInput) (bool, []any) {
-			return sameFigures(inputFigures(want), inputFigures(got))
-		},
 	)
 }
 
@@ -1012,18 +959,11 @@ func (s stagingLedgerDB) GetPointerStakeInputsForPools(
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
 	if len(poolKeyHashes) == 0 {
-		return s.LedgerDB.GetPointerStakeInputsForPools(
-			poolKeyHashes, slot, boundarySlot, expiryEpoch, txn,
-		)
+		return nil, nil
 	}
 	return boundaryStakeRead(s, txn,
 		fmt.Sprintf("pointer stake inputs at slot %d", slot),
 		slot, s.ls.boundaryCurrent(txn, slot),
-		func() ([]*models.RewardStakeInput, error) {
-			return s.LedgerDB.GetPointerStakeInputsForPools(
-				poolKeyHashes, slot, boundarySlot, expiryEpoch, txn,
-			)
-		},
 		func(b *boundaryStake) ([]*models.RewardStakeInput, error) {
 			if !b.pointerCounted(nil) {
 				return nil, nil
@@ -1064,9 +1004,6 @@ func (s stagingLedgerDB) GetPointerStakeInputsForPools(
 			return out, nil
 		},
 		max(boundarySlot, slot),
-		func(want, got []*models.RewardStakeInput) (bool, []any) {
-			return sameFigures(inputFigures(want), inputFigures(got))
-		},
 	)
 }
 
@@ -1105,21 +1042,9 @@ func (s stagingLedgerDB) GetEpochBoundaryActivePoolKeyHashes(
 		families: boundaryPoolFamilies,
 		current:  func() bool { return current },
 		serves:   func() bool { return s.ls.poolServing(txn) != nil },
-		verifies: func() bool {
-			return s.ls.poolVerifyReader(txn) != nil
-		},
-		compare: func(g verifyReadGuard, what string, same bool, setErr error, _ ...any) {
-			s.ls.comparePoolRead(g, what, same, setErr)
-		},
-		fromStore: func() ([][]byte, error) {
-			return s.LedgerDB.GetEpochBoundaryActivePoolKeyHashes(
-				slot, boundarySlot, txn,
-			)
-		},
 		fromSet: func() ([][]byte, error) {
 			return s.ls.boundaryActivePools(txn, slot, boundarySlot, !current)
 		},
-		same: samePoolHashes,
 	})
 }
 

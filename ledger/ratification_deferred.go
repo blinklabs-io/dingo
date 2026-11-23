@@ -136,7 +136,9 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
 		}
-		ls.pinSetReads(snapshot)
+		if err == nil {
+			err = ls.pinSetReadsResult(snapshot, false)
+		}
 		ls.ratificationMu.Lock()
 		if previous := ls.ratificationJob; previous != nil {
 			previous.settle()

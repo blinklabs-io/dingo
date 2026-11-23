@@ -57,6 +57,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -64,7 +65,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
-	"github.com/blinklabs-io/dingo/internal/utxoshadow"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -118,11 +118,15 @@ type Node struct {
 	indexerStore           *indexerdb.Store
 	indexerWriter          IndexerWriter
 	indexerWakeSub         event.EventSubscriberId
+	indexerFactsSub        event.EventSubscriberId
 	afterIndexerRollback   func() error // test hook; see Truncate
 	ledgerState            *ledger.LedgerState
 	snapshotMgr            *snapshot.Manager
-	utxoShadow             *utxoshadow.Shadow
 	utxoSet                *utxoset.Set
+	utxoSetTempDir         string
+	// availableDiskBytes reports free space on a path's volume for the
+	// ImmutableDB promotion check; nil uses the platform's.
+	availableDiskBytes func(path string) (uint64, error)
 	// anchoredUtxoSet is the open live UTxO set the anchor updater feeds. It
 	// follows utxoSet across a live close and reopen, which the updater
 	// goroutine cannot read without a race.
@@ -134,6 +138,12 @@ type Node struct {
 	utxoCkptMu     sync.Mutex
 	utxoCkptCancel context.CancelFunc
 	utxoCkptWG     sync.WaitGroup
+	// utxoMigrationCleanup owns the post-cutover SQL row cleanup. It has a
+	// separate context because live restore and truncate stop storage users
+	// without cancelling the node context.
+	utxoMigrationCleanupMu     sync.Mutex
+	utxoMigrationCleanupCancel context.CancelFunc
+	utxoMigrationCleanupDone   chan struct{}
 
 	// durableCloseProgress overrides defaultDurableCloseProgressInterval
 	// when positive.
@@ -143,10 +153,13 @@ type Node struct {
 	finishLedgerReimport    func(ctx context.Context, point ocommon.Point) error
 	dbLifecycleMgr          *dblifecycle.Manager
 	plannerStatsMgr         *plannerstats.Manager
+	indexerPlannerStatsMgr  *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
 	leiosPipelineManager    *leios.PipelineManager
 	leiosAdaptiveEb         *leios.AdaptiveEbController
 	bark                    *bark.Bark
+	eventNodeIDOnce         sync.Once
+	eventNodeIDValue        string
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer
@@ -361,9 +374,6 @@ func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
 }
 
 func New(cfg Config) (*Node, error) {
-	if err := validateImmutableDB(cfg); err != nil {
-		return nil, err
-	}
 	pluginHost, err := internalplugins.NewHost()
 	if err != nil {
 		return nil, fmt.Errorf("create plugin host: %w", err)
@@ -402,6 +412,30 @@ func New(cfg Config) (*Node, error) {
 			); err != nil {
 				return nil, fmt.Errorf("invalid plugin selection: %w", err)
 			}
+		}
+		if err := pluginHost.ValidateSelection(
+			capability, selection.Provider, selection.Config,
+		); err != nil {
+			return nil, fmt.Errorf("invalid plugin selection: %w", err)
+		}
+	}
+	for _, capability := range cfg.malformedPluginSelections {
+		if _, err := plugin.ParseCapability(string(capability)); err != nil {
+			return nil, fmt.Errorf("invalid plugin selection: %w", err)
+		}
+	}
+	var extraSelections map[string]plugin.Selection
+	if cfg.cfg != nil {
+		extraSelections = cfg.cfg.Plugins.Extra
+	}
+	for name, selection := range extraSelections {
+		capability, ok := pluginHost.Contract(name)
+		if !ok {
+			return nil, fmt.Errorf(
+				"invalid plugin selection: no provider can serve %q: "+
+					"the plugin host does not declare that capability",
+				name,
+			)
 		}
 		if err := pluginHost.ValidateSelection(
 			capability, selection.Provider, selection.Config,
@@ -568,7 +602,7 @@ func validateAPIProviderSecurityPolicy(
 func (n *Node) apiPluginSelection(
 	capability plugin.Capability,
 ) (plugin.Selection, uint, error) {
-	selection, ok := n.config.pluginSelections[capability]
+	selection, ok := n.config.pluginSelection(capability)
 	if !ok {
 		return selection, 0, fmt.Errorf(
 			"plugin selection is missing for capability %s",
@@ -638,14 +672,15 @@ func (n *Node) apiPluginSelection(
 // configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when set
 // -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
 // database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
-// etc. RPCs, or the remote Stop/Restart RPCs, will be mounted), this defaults
-// to loopback-only rather than letting bark.go's own empty-Host default
-// ("0.0.0.0") expose them on every interface; with no lifecycle service
-// mounted, "" is returned unchanged so bark's own existing default behavior
-// (all interfaces) is preserved for deployments only using it for the read-only
-// Archive service. Bark serves every RPC to anonymous callers, so the bind
-// address is the only exposure control: a caller that can reach the listener
-// can invoke the lifecycle RPCs, which is why they default to loopback.
+// etc. RPCs, the remote Stop/Restart RPCs, or the EventService will be
+// mounted), this defaults to loopback-only rather than letting bark.go's own
+// empty-Host default ("0.0.0.0") expose them on every interface; with none of
+// these mounted, "" is returned unchanged so bark's own existing default
+// behavior (all interfaces) is preserved for deployments only using it for the
+// read-only Archive service. Bark serves every RPC and event to anonymous
+// callers, so the bind address is the only exposure control: a caller that can
+// reach the listener can invoke the lifecycle RPCs or subscribe to events,
+// which is why these default to loopback.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -681,6 +716,7 @@ func (n *Node) newOuroborosConfig(
 		NetworkMagic:                   n.config.networkMagic,
 		NodeToNodeNetworkMagic:         n.consensusNetworkMagic(),
 		PeerSharing:                    n.config.peerSharing,
+		AdvertiseAddress:               n.config.advertiseAddress,
 		IntersectTip:                   n.config.intersectTip,
 		IntersectPoints:                n.config.intersectPoints,
 		PromRegistry:                   n.retainedComponentPromRegistry(),
@@ -967,6 +1003,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
+	if n.storageSelections().SplitIndexer {
+		if err := n.checkServerAdopted(n.ctx, deps); err != nil {
+			return err
+		}
+	}
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
 		n.ctx, n.pluginHost, n.storageSelections(), deps,
@@ -1043,6 +1084,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	} else {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+		// Before the gates are written: refusing after them would latch
+		// history_expiry_active, and the database could then not be started
+		// with history expiry turned back off.
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
 		}
 		if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
 			return fmt.Errorf("node settings: %w", err)
@@ -1189,6 +1236,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
+		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return fmt.Errorf(
 				"failed to enforce recovered node settings: %w",
@@ -1196,15 +1246,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	}
-	// Statistics should exist before the first block batch: a database that
-	// has never been analyzed plans the batched UTxO spend as a scan of every
-	// live output. After recovery, which can roll metadata back, so the
-	// statistics describe the tables blocks are applied to.
+	// The consensus store's startup pass is synchronous: a database that has
+	// never been analyzed can otherwise plan the first batched UTxO spend as a
+	// scan of every live output. It holds no API history, so the pass is
+	// bounded; the IndexerDB's runs after the API listeners below.
 	n.runPlannerStatsStartup(ctx)
 
-	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
-		return err
-	}
 	// The IndexerDB reads blocks through the ledger database's blob store, so
 	// it opens after that store is recovered and closes before it. The
 	// cleanups run in reverse: writer stop, then the IndexerDB close.
@@ -1226,16 +1273,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 		started = append(started, func() {
 			_ = n.historyExpiry.Stop(context.Background())
-		})
-	}
-
-	if n.config.immutableDB.Enabled {
-		n.blockPromoter = n.newBlockPromoter()
-		if err := n.blockPromoter.Start(n.ctx); err != nil {
-			return fmt.Errorf("failed to start block promotion: %w", err)
-		}
-		started = append(started, func() {
-			_ = n.blockPromoter.Stop(context.Background())
 		})
 	}
 
@@ -1311,6 +1348,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				)
 			}
 		})
+		n.config.logger.Info("midnight indexer started")
 	}
 
 	// Initialize snapshot manager for stake snapshot capture and wire the
@@ -1368,14 +1406,28 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	if err := n.reconcileUtxoSet(ctx); err != nil {
-		return err
+	if !n.utxoSetReconciled {
+		if err := n.reconcileUtxoSet(ctx); err != nil {
+			return err
+		}
 	}
 	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	n.publishStartedLedgerState()
+	// The promoter reads the started ledger's immutable point, so it starts
+	// after the ledger has prepared its epoch cache.
+	if n.immutableEnabled() {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to start block promotion: %w", err)
+		}
+		started = append(started, func() {
+			_ = n.blockPromoter.Stop(context.Background())
+		})
+	}
+
 	n.startUtxoSetAnchorUpdater()
 	if err := n.startIndexerWriter(n.ctx); err != nil { //nolint:contextcheck
 		return err
@@ -1395,10 +1447,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
-	if err := n.startUtxoShadow(); err != nil {
-		return err
-	}
-	started = append(started, func() { _ = n.stopUtxoShadow() })
 	// Initialize and start automatic database-snapshot manager (distinct
 	// from the stake/reward snapshot manager above — see
 	// internal/dblifecycle.Manager doc comment).
@@ -1411,7 +1459,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
 	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to start planner statistics manager: %w", err)
+		return fmt.Errorf(
+			"failed to start planner statistics manager: %w",
+			err,
+		)
 	}
 	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
@@ -1730,6 +1781,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
 			utxorpc.ProviderDependencies{
+				Listen: n.config.apiListenerFactory,
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				QueryDatabase:      n.utxorpcQueryDatabase(),
@@ -1749,9 +1801,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if n.config.barkPort > 0 {
 		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
 		remoteLifecycleEnabled := n.config.barkLifecycleEnabled
+		eventEnabled := n.config.cfg.BarkEventEnabled
 		barkHost := effectiveBarkHost(
 			n.config.barkHost,
-			lifecycleEnabled || remoteLifecycleEnabled,
+			lifecycleEnabled || remoteLifecycleEnabled || eventEnabled,
 		)
 		barkConfig := bark.BarkConfig{
 			Logger:                                   n.config.logger,
@@ -1771,6 +1824,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
+		}
+		if eventEnabled {
+			barkConfig.EventBus = n.eventBus
+			barkConfig.EventPublishEnabled = n.config.cfg.BarkEventPublishEnabled
+			barkConfig.EventNodeID = n.eventNodeID()
+			barkConfig.EventBufferSize = n.config.cfg.BarkEventBufferSize
+			barkConfig.EventMaxSubscribers = n.config.cfg.BarkEventMaxSubscribers
+			barkConfig.EventMaxSubscribersPerClient = n.config.cfg.BarkEventMaxSubscribersPerClient
+			barkConfig.EventEpochForSlot = n.eventEpochForSlot
+			barkConfig.EventEraNameForEpoch = n.eventEraNameForEpoch
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
@@ -1853,6 +1916,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
 			n.mempool,
+			n.indexerStore,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -1860,12 +1924,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				err,
 			)
 		}
-		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 				Ready:              n.apiReadiness(),
 			},
@@ -1888,16 +1952,18 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
-		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		adapter, err := kupo.NewNodeAdapter(
+			n.ledgerState, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("creating kupo node adapter: %w", err)
 		}
-		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
 			kupo.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 				Ready:              n.apiReadiness(),
 			},
@@ -1932,6 +1998,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
+				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
 				LedgerState:        n.meshLedgerState(),
 				Database:           n.meshDatabase(),
@@ -2039,6 +2106,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	// The IndexerDB's planner maintenance starts only after every API
+	// listener is serving. Its startup pass runs first on the manager's
+	// worker, serialized with later epoch and periodic refreshes, without
+	// delaying API availability.
+	if n.indexerDB != nil {
+		if err := n.startIndexerPlannerStatsManager(n.ctx, true); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to start IndexerDB planner statistics manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() {
+			if n.indexerPlannerStatsMgr != nil {
+				_ = n.indexerPlannerStatsMgr.Stop()
+			}
+		})
+	}
+
 	// Node-managed Mithril starts last, once Ouroboros and the ledger it
 	// holds off and hands back to are running.
 	started = append(
@@ -2046,6 +2131,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		//nolint:contextcheck // n.ctx owns the node lifecycle.
 		n.startMithrilCoordinator(n.ctx),
 	)
+	started = append(started, n.startInitialUtxoMigrationCleanup(n.ctx))
 
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()
@@ -2842,11 +2928,14 @@ func mergeEpochs(a, b []uint64) []uint64 {
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("failed to probe reward live stake state: %w", err)
+	}
 	// With the live UTxO set as the only copy, a rebuild reads UTxO stake
 	// from the set, which trails the metadata store after a crash until
 	// reconcileUtxoSet rolls the ledger back to it; reconcileUtxoSet runs
 	// this then.
-	if n.config.ledgerUtxoBadgerOnly && !n.utxoSetReconciled {
+	if !n.utxoSetReconciled {
 		return nil
 	}
 	// Both probes are read-only, so they run on the read-only metadata
@@ -2950,13 +3039,8 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 // repairCriticalIndexesBeforeIngest rebuilds the critical deferred indexes a
 // pending bulk-load cycle left missing in n.db, before anything builds the
 // ledger that ingests. Run calls it at startup and reinitializeCoreStorage
-// after a live Restore or Truncate reopens storage. Core mode only: API mode
-// rebuilds the critical subset before Run, while it resumes its backfill,
-// and finishes the rest in startDeferredIndexMaintenance.
+// after a live Restore or Truncate reopens storage.
 func (n *Node) repairCriticalIndexesBeforeIngest(ctx context.Context) error {
-	if n.config.storageMode.IsAPI() {
-		return nil
-	}
 	return repairPendingCriticalIndexes(ctx, n.db, n.config.logger)
 }
 
@@ -3183,14 +3267,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 // shelleySecurityParam returns the Shelley genesis security parameter, or zero
 // when it is unknown.
 func (n *Node) shelleySecurityParam() uint64 {
-	if n.config.cardanoNodeConfig == nil {
-		return 0
-	}
-	sg := n.config.cardanoNodeConfig.ShelleyGenesis()
-	if sg == nil || sg.SecurityParam <= 0 {
-		return 0
-	}
-	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
+	return nodestorage.SecurityParam(n.config.cardanoNodeConfig)
 }
 
 // wireDeferredRewardStakeInputs lets the authoritative boundary capture leave

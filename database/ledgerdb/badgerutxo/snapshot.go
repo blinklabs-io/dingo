@@ -245,6 +245,7 @@ func (s *Store) dropPrefixAlways(prefixes ...[]byte) error {
 			break
 		}
 	}
+	defer s.rewriteRows()()
 	return s.db.DropPrefix(prefixes...)
 }
 
@@ -266,7 +267,7 @@ func (s *Store) newWriteBatch() *badger.WriteBatch {
 // loaded.
 func rollsBackWithoutJournal(tag byte) bool {
 	switch tag {
-	case NonceTag, EpochTag, SnapshotTag, SummaryTag, NetworkStateTag,
+	case NonceTag, EpochTag, SnapshotTag, SnapshotSlotTag, SummaryTag, NetworkStateTag,
 		DonationTag, PParamsTag, PParamsSlotTag, RewardRecordTag,
 		RewardStakeInputTag, RewardPoolInputTag, RewardSnapshotTag,
 		RewardPotsTag, RewardDerivedTag, RewardCursorTag,

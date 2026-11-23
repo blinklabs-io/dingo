@@ -16,8 +16,11 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math/big"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -95,6 +98,11 @@ type RewardBlocksScenario struct {
 	// PrecomputeRound runs the background precompute of the round the
 	// boundary into epoch 6 applies, to completion.
 	PrecomputeRound func() error
+	// PrecomputeRoundWithBlockCommit runs PrecomputeRound and, while a
+	// chunk's transaction is open, commits a write transaction on another
+	// goroutine. It reports whether that commit completed while the chunk was
+	// still open.
+	PrecomputeRoundWithBlockCommit func() (bool, error)
 	// DeregisterMember deregisters the harness's delegator credential in the
 	// metadata store and the set at slot 11, with no certificate row.
 	DeregisterMember func()
@@ -116,6 +124,8 @@ type RewardBlocksScenario struct {
 	StageNoncesInSet func(rows []models.BlockNonce)
 	// WaitDeferred waits for the writer of a boundary's stake inputs.
 	WaitDeferred func()
+	// StakeInputsIncomplete is LedgerState.RewardStakeInputsIncompleteCommitted.
+	StakeInputsIncomplete func(from, through uint64) (bool, error)
 	// PotsFees is the fee total the boundary stored for epoch.
 	PotsFees func(epoch uint64) uint64
 	// Boundary applies the rollover into epoch 6.
@@ -128,10 +138,7 @@ type RewardBlocksScenario struct {
 	DrainFamilies func(mask nodesettings.FamilyMask)
 	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
 	InstallDrainedSources func()
-	// Computed reports the verify-mode results the set computed for result
-	// and how many differed from the metadata store's.
-	Computed func(result string) (verified, mismatches float64)
-	LedgerDB func() ledgerdb.LedgerDB
+	LedgerDB              func() ledgerdb.LedgerDB
 }
 
 // RewardInputsAnswer is what a read of an epoch's reward snapshot inputs
@@ -236,7 +243,6 @@ func NewRewardBlocksScenarioForTest(
 	})
 	require.NoError(t, err)
 	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	h.ls.config.UtxoSetReads = reads
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
 	require.NoError(
 		t,
@@ -589,6 +595,49 @@ func NewRewardBlocksScenarioForTest(
 			)
 			return err
 		},
+		PrecomputeRoundWithBlockCommit: func() (bool, error) {
+			type result struct {
+				err error
+			}
+			var once sync.Once
+			done := make(chan result, 1)
+			started, committedInChunk := false, false
+			h.ls.rewardPrecomputeBeforeSaveHook = func() {
+				once.Do(func() {
+					started = true
+					go func() {
+						ctx, cancel := context.WithTimeout(
+							context.Background(), time.Minute,
+						)
+						defer cancel()
+						txn := db.Transaction(ctx, true)
+						done <- result{err: txn.Do(func(txn *database.Txn) error {
+							return db.SetSyncState("block-commit-probe", "1", txn)
+						})}
+					}()
+					select {
+					case r := <-done:
+						require.NoError(t, r.err)
+						committedInChunk = true
+					case <-time.After(5 * time.Second):
+					}
+				})
+			}
+			_, err := h.ls.runChunkedStakeRewardPrecomputeRound(
+				replayBoundaryNewEpoch,
+				replayBoundaryEndedEra*uint64(replayBoundaryLength),
+				replayBoundaryNewEpoch*uint64(replayBoundaryLength),
+			)
+			h.ls.rewardPrecomputeBeforeSaveHook = nil
+			// A round that returns before the hook fires never starts the
+			// probe, so only a started probe that stayed behind the chunk is
+			// waited out; that keeps it from outliving the test.
+			if started && !committedInChunk {
+				r := <-done
+				require.NoError(t, r.err)
+			}
+			return committedInChunk, err
+		},
 		DeregisterMember: func() {
 			ref := models.NewStakeCredentialRef(
 				0,
@@ -674,7 +723,8 @@ func NewRewardBlocksScenarioForTest(
 		StageNoncesInSet: func(rows []models.BlockNonce) {
 			h.ls.stageBlockNonces(nil, rows, 0)
 		},
-		WaitDeferred: h.ls.deferredStakeInputsWG.Wait,
+		WaitDeferred:          h.ls.deferredStakeInputsWG.Wait,
+		StakeInputsIncomplete: h.ls.RewardStakeInputsIncompleteCommitted,
 		PotsFees: func(epoch uint64) uint64 {
 			pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
 			require.NoError(t, err)
@@ -700,7 +750,6 @@ func NewRewardBlocksScenarioForTest(
 			h.ls.installPParamsSource()
 			h.ls.installPoolSource()
 		},
-		Computed: computedResultCounts(h.ls),
 	}
 }
 

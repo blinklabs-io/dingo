@@ -336,6 +336,44 @@ func TestValidate(t *testing.T) {
 			modify:  func(c *Config) { c.RunMode = "batch" },
 			wantErr: "invalid runMode",
 		},
+		{name: "advertise address unset", modify: func(*Config) {}},
+		{
+			name:   "advertise address ipv4",
+			modify: func(c *Config) { c.AdvertiseAddress = "45.0.0.7:3001" },
+		},
+		{
+			name: "advertise address ipv6",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "[2001:4860:4860::8888]:3001"
+			},
+		},
+		{
+			name: "advertise address hostname",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "relay.example.com:3001"
+			},
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address without port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address zero port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7:0" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address private",
+			modify:  func(c *Config) { c.AdvertiseAddress = "10.0.0.1:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address wildcard",
+			modify:  func(c *Config) { c.AdvertiseAddress = "0.0.0.0:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
 		{
 			name:    "invalid start era",
 			modify:  func(c *Config) { c.StartEra = "byron" },
@@ -345,43 +383,6 @@ func TestValidate(t *testing.T) {
 			name:    "invalid storage mode",
 			modify:  func(c *Config) { c.StorageMode = "full" },
 			wantErr: "invalid storageMode",
-		},
-		{
-			name: "invalid ledger UTxO read mode",
-			modify: func(c *Config) {
-				c.LedgerUtxoBadger = true
-				c.LedgerUtxoReads = "badger"
-			},
-			wantErr: "invalid ledgerUtxoReads",
-		},
-		{
-			name: "shadow with the Badger set as the only copy",
-			modify: func(c *Config) {
-				c.LedgerUtxoBadger = true
-				c.LedgerUtxoBadgerOnly = true
-				c.LedgerUtxoShadow = true
-			},
-			wantErr: "ledgerUtxoShadow cannot run",
-		},
-		{
-			name:    "ledger UTxO reads without the Badger set",
-			modify:  func(c *Config) { c.LedgerUtxoReads = "set" },
-			wantErr: "needs ledgerUtxoBadger",
-		},
-		{
-			name: "keep mithril chunks without the immutable db",
-			modify: func(c *Config) {
-				c.ImmutableDB.KeepMithrilChunks = true
-			},
-			wantErr: "immutableDb.keepMithrilChunks requires immutableDb.enabled",
-		},
-		{
-			name: "immutable db with history expiry",
-			modify: func(c *Config) {
-				c.ImmutableDB.Enabled = true
-				c.HistoryExpiry.Enabled = true
-			},
-			wantErr: "immutableDb.enabled cannot be combined with historyExpiry.enabled",
 		},
 		{
 			name: "immutable db promote batch above the limit",
@@ -417,6 +418,19 @@ func TestValidate(t *testing.T) {
 				c.HistoryExpiry.Frequency = 0
 			},
 			wantErr: "invalid historyExpiry.frequency",
+		},
+		{
+			name: "negative koios parity unavailable retry limit",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = -1
+			},
+			wantErr: "invalid koiosParity.unavailableRetryLimit",
+		},
+		{
+			name: "zero koios parity unavailable retry limit selects default",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = 0
+			},
 		},
 		{
 			name:    "load mode without immutable db path",
@@ -736,6 +750,17 @@ func TestValidate(t *testing.T) {
 				setMempoolSetting(c, "revalidationDeltaCap", 0)
 			},
 			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
+		},
+		{
+			name: "mempool fee-density selection",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "selection", MempoolSelectionFeeDensity)
+			},
+		},
+		{
+			name:    "unknown mempool selection",
+			modify:  func(c *Config) { setMempoolSetting(c, "selection", "feedensity") },
+			wantErr: "invalid plugins.mempool.config.selection",
 		},
 		{
 			// Every ordered comparison with NaN is false, so a plain
@@ -1186,6 +1211,13 @@ func TestValidate(t *testing.T) {
 		{
 			name:   "empty mithril backend",
 			modify: func(c *Config) { c.Mithril.Backend = "" },
+		},
+		{
+			name: "history expiry in api storage mode",
+			modify: func(c *Config) {
+				c.StorageMode = "api"
+				c.HistoryExpiry.Enabled = true
+			},
 		},
 	}
 	for _, tt := range tests {

@@ -62,7 +62,10 @@ SQLite); API used 123 MiB (88 MiB blob, 34.4 MiB SQLite). The smaller API
 total comes from its smaller blob data at this early chain height.
 
 Mainnet API database (2026-11-08): metadata ~752 GiB; blob ~188 GiB; total
-~941 GiB.
+~941 GiB. Treat this measurement as a lower bound: provision at least 1 TiB
+for the database, plus separate capacity for the Mithril cache and subsequent
+chain growth. If IndexerDB replay stops because the disk fills, add capacity
+and restart Dingo; replay resumes from its last committed batch.
 
 ## Codebase
 

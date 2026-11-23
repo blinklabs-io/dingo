@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -65,6 +66,9 @@ type transactionBatchAccumulator struct {
 	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
+	// store routes the applied-transaction statements through the Store's
+	// prepared statements; nil runs them unprepared.
+	store                *Store
 	mysql                bool
 	sqlite               bool
 	backfillBatchLimits  func() (int64, int)
@@ -84,6 +88,9 @@ type transactionBatchAccumulator struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	// nonces holds block nonces queued by QueueBlockNonce, in application
+	// order, until FlushBatch writes them.
+	nonces []models.BlockNonce
 	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
 	// attached one; nil on the per-row path.
 	overlay *utxoOverlay
@@ -113,6 +120,7 @@ type transactionBatchCheckpoint struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	nonces          []models.BlockNonce
 	overlay         *utxoOverlay
 	overlayVersion  uint64
 }
@@ -156,6 +164,7 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
 		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
+		nonces:          slices.Clone(a.nonces),
 		overlay:         a.overlay,
 	}
 	if a.overlay != nil {
@@ -183,6 +192,7 @@ func (a *transactionBatchAccumulator) restore(
 	a.opCertOrder = append(
 		[]poolOpCertSequenceKey(nil),
 		checkpoint.opCertOrder...)
+	a.nonces = slices.Clone(checkpoint.nonces)
 	if len(checkpoint.stakeDeltas) > 0 {
 		a.stakeDeltas = make(
 			map[string]pendingStakeCredentialDelta,
@@ -676,6 +686,9 @@ func (a *transactionBatchAccumulator) insertTransaction(
 			return a.transactionInsert.QueryRowContext(ctx, hash)
 		},
 		exec: func(query string, args ...any) (sql.Result, error) {
+			if a.store != nil {
+				return a.store.execCached(ctx, db, query, args...)
+			}
 			return db.ExecContext(ctx, query, args...)
 		},
 		queryRow: func(query string, args ...any) *sql.Row {
@@ -717,12 +730,13 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.stakeDeltaOrder = nil
 	a.opCertSequences = nil
 	a.opCertOrder = nil
+	a.nonces = nil
 	a.overlay = nil
 }
 
 // Len reports pending metadata rows for the API backfill batch bound.
 func (a *transactionBatchAccumulator) Len() int {
-	length := len(a.stakeDeltaOrder) + len(a.opCertOrder)
+	length := len(a.stakeDeltaOrder) + len(a.opCertOrder) + len(a.nonces)
 	for i := range a.rows.entries {
 		length += len(a.rows.entries[i].rows)
 	}
@@ -756,6 +770,7 @@ func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{
 		sqlite:        s.dialect.Name() == "sqlite",
 		sqlOperations: s.sqlOperations,
+		store:         s,
 	}
 }
 
@@ -777,7 +792,11 @@ func (s *Store) FlushBatch(
 		}
 	}
 	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
-		len(batched.opCertOrder) > 0 || batched.overlay != nil {
+		len(batched.opCertOrder) > 0 || len(batched.nonces) > 0 ||
+		batched.overlay != nil {
+		if err := s.flushBlockNonces(batched, txn); err != nil {
+			return err
+		}
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
@@ -788,7 +807,7 @@ func (s *Store) FlushBatch(
 					return s.flushOverlay(ctx, db, batched)
 				}
 				if err := batched.rows.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
@@ -944,6 +963,7 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 		sqlite:           s.dialect.Name() == "sqlite",
 		leiosAPIRowsOnly: true,
 		sqlOperations:    s.sqlOperations,
+		store:            s,
 	}
 }
 
@@ -957,6 +977,7 @@ func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulat
 		sqlite:               s.dialect.Name() == "sqlite",
 		validatedAPIRowsOnly: true,
 		sqlOperations:        s.sqlOperations,
+		store:                s,
 	}
 }
 
@@ -1165,7 +1186,7 @@ func (s *Store) setTransactionWithAccumulator(
 					maxRows,
 					func() error {
 						return staged.flush(
-							ctx, db, s.dialect.ParameterLimit(),
+							ctx, db, s, s.dialect.ParameterLimit(),
 						)
 					},
 					batchedAccumulator.backfillBatchFlushed,
@@ -1343,7 +1364,7 @@ func (s *Store) setTransactionWithAccumulator(
 					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
 						return err
 					}
-					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 						return err
 					}
 					return nil
@@ -1382,7 +1403,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if batchedAccumulator != nil {
 					return nil
 				}
-				return staged.flush(ctx, db, s.dialect.ParameterLimit())
+				return staged.flush(ctx, db, s, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1436,13 +1457,13 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if batchedAccumulator != nil &&
 				batchedAccumulator.apiRowsOnly() {
-				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+				if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
 			}
 			if batchedAccumulator == nil {
 				if err := staged.flush(
-					ctx, db, s.dialect.ParameterLimit(),
+					ctx, db, s, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
@@ -1696,12 +1717,10 @@ func (s *Store) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	txn types.Txn,
 	protocolMajor uint64,
-	historyOnly bool,
 ) error {
-	// Gap ingestion intentionally has no available input state, so this is
-	// equivalent to SetTransaction with the consumed-input update suppressed.
-	// The transaction, its certificates, and its produced outputs are all
-	// persisted.
+	// Gap ingestion stores the transaction and its certificates only: the
+	// UTxO set and its stake are the LedgerDB UTxO set's, already at or past
+	// this block.
 	//
 	// certDeposits may be partial or nil: the caller calculates it from the
 	// era's CertDepositFunc, which has no entry for a certificate whose
@@ -1742,10 +1761,8 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				var err error
-				certificateRefs, err = s.applyTransactionCertificates(
+				if _, err := s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -1756,95 +1773,11 @@ func (s *Store) SetGapBlockTransaction(
 					allowUnknownDeposits,
 					false,
 					protocolMajor,
-				)
-				if err != nil {
+				); err != nil {
 					return err
 				}
 			}
-			if historyOnly {
-				// The UTxO set and its stake are the live set's, already
-				// at or past this block.
-				return nil
-			}
-			collateralReturn := transaction.CollateralReturn()
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
-			for _, produced := range transaction.Produced() {
-				model, err := models.UtxoLedgerToModel(produced, point.Slot)
-				if err != nil {
-					return fmt.Errorf(
-						"convert output %d: %w",
-						produced.Id.Index(),
-						err,
-					)
-				}
-				id := uint(transactionID)
-				if collateralReturn != nil &&
-					produced.Output == collateralReturn {
-					model.CollateralReturnForTxID = &id
-				} else {
-					model.TransactionID = &id
-				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return err
-				}
-				if len(model.StakingKey) > 0 {
-					gain, err := producedStakeCredentialDelta(
-						model.CredentialTag,
-						model.StakingKey,
-						model.Amount,
-						inserted,
-					)
-					if err != nil {
-						return err
-					}
-					producedStakeDeltas = append(producedStakeDeltas, gain)
-				}
-			}
-			// Merge as setTransactionWithAccumulator does: certificateRefs
-			// and producedStakeDeltas are each already deduped/summed
-			// against themselves, but not against each other, and a
-			// certificate touching the same credential as one of this gap
-			// block's produced outputs would otherwise apply that
-			// credential's delta twice instead of once net.
-			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					producedStakeDeltas,
-				),
-				point.Slot,
-			)
-		},
-	)
-}
-
-func (s *Store) RecomputeGapCollateralFee(
-	transaction lcommon.Transaction,
-	_ ocommon.Point,
-	txn types.Txn,
-) error {
-	if transaction.IsValid() {
-		return nil
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			fee, err := s.collateralFeeForTransaction(ctx, db, transaction)
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(
-				ctx,
-				`-- name: UpdateTransactionCollateralFee :exec
-UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
-				decimalUint64(types.Uint64(fee)),
-				transaction.Hash().Bytes(),
-			)
-			return err
+			return nil
 		},
 	)
 }
@@ -2085,24 +2018,6 @@ RETURNING id`
 // avoiding a RETURNING cursor; check RowsAffected first, since a skipped
 // conflict leaves LastInsertId unchanged.
 
-// importAssetQuery is the conflict-tolerant asset INSERT used by both the
-// snapshot importer and insertUtxoModel. It is a fixed query shape on every
-// imported asset, so keep one prepared statement for the Store lifetime just
-// like the surrounding UTxO importer statements.
-const importAssetQuery = `-- name: InsertAssetIfAbsent :exec
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
-`
-
-// getAssetIDQuery resolves the caller-visible asset row ID after an
-// insert that may have been skipped by its conflict clause.
-const getAssetIDQuery = `-- name: GetAssetIDByOutput :one
-SELECT id FROM asset
-WHERE utxo_id = ? AND policy_id = ? AND name = ?
-ORDER BY id DESC LIMIT 1`
-
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -2255,30 +2170,11 @@ func (s *Store) persistUtxoRelationsWithAddressRows(
 		if !s.storesUtxoAssets() {
 			break
 		}
-		asset := &utxo.Assets[i]
-		asset.UtxoID = id
-		asset.ID = 0
-		if _, err := s.execCached(ctx, db, importAssetQuery,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			sql.NullInt64{Int64: int64(id), Valid: true},
-			sql.NullString{
-				String: decimalUint64(asset.Amount),
-				Valid:  true,
-			},
+		if err := s.insertAssetHolding(
+			ctx, db, int64(id), &utxo.Assets[i],
 		); err != nil {
 			return err
 		}
-		var assetID uint
-		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
-			id,
-			asset.PolicyId,
-			asset.Name,
-		).Scan(&assetID); err != nil {
-			return err
-		}
-		asset.ID = assetID
 	}
 	return nil
 }
@@ -2334,20 +2230,7 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		if !s.storesUtxoAssets() {
 			break
 		}
-		asset := &utxo.Assets[i]
-		asset.UtxoID = id
-		asset.ID = 0
-		rows.add(
-			assetShape,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			sql.NullInt64{Int64: int64(id), Valid: true},
-			sql.NullString{
-				String: decimalUint64(asset.Amount),
-				Valid:  true,
-			},
-		)
+		queueAssetHolding(rows, int64(id), &utxo.Assets[i])
 	}
 	return nil
 }

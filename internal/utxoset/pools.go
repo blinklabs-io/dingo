@@ -46,6 +46,24 @@ type poolRelayEnc struct {
 
 type poolRegEnc struct {
 	cbor.StructAsArray
+	Vrf            []byte
+	Reward         []byte
+	RewardTag      uint8
+	MetadataURL    string
+	MetadataHash   []byte
+	LeiosPublic    []byte
+	LeiosProof     []byte
+	Owners         [][]byte
+	Relays         []poolRelayEnc
+	Pledge         uint64
+	Cost           uint64
+	Margin         string
+	AddedSlot      uint64
+	LeiosKeyEpochs []uint64
+}
+
+type legacyPoolRegEnc struct {
+	cbor.StructAsArray
 	Vrf          []byte
 	Reward       []byte
 	RewardTag    uint8
@@ -59,6 +77,44 @@ type poolRegEnc struct {
 	Cost         uint64
 	Margin       string
 	AddedSlot    uint64
+}
+
+// The fixed-array encoding grew by appending LeiosKeyEpochs. Accept the old
+// length so a node can restart on a live set written before that field existed.
+func (e *poolRegEnc) UnmarshalCBOR(data []byte) error {
+	var fields []cbor.RawMessage
+	if _, err := cbor.Decode(data, &fields); err != nil {
+		return err
+	}
+	switch len(fields) {
+	case 13:
+		var legacy legacyPoolRegEnc
+		if _, err := cbor.Decode(data, &legacy); err != nil {
+			return err
+		}
+		*e = poolRegEnc{
+			Vrf: legacy.Vrf, Reward: legacy.Reward,
+			RewardTag: legacy.RewardTag, MetadataURL: legacy.MetadataURL,
+			MetadataHash: legacy.MetadataHash, LeiosPublic: legacy.LeiosPublic,
+			LeiosProof: legacy.LeiosProof, Owners: legacy.Owners,
+			Relays: legacy.Relays, Pledge: legacy.Pledge, Cost: legacy.Cost,
+			Margin: legacy.Margin, AddedSlot: legacy.AddedSlot,
+		}
+		return nil
+	case 14:
+		type currentPoolRegEnc poolRegEnc
+		var current currentPoolRegEnc
+		if _, err := cbor.Decode(data, &current); err != nil {
+			return err
+		}
+		*e = poolRegEnc(current)
+		return nil
+	default:
+		return fmt.Errorf(
+			"utxoset: pool registration has %d fields",
+			len(fields),
+		)
+	}
 }
 
 type poolStateEnc struct {
@@ -86,6 +142,9 @@ func encodePoolReg(r *models.PoolRegistration) []poolRegEnc {
 		MetadataHash: r.MetadataHash, LeiosPublic: r.LeiosKeyPublic,
 		LeiosProof: r.LeiosKeyPossessionProof, Pledge: uint64(r.Pledge),
 		Cost: uint64(r.Cost), AddedSlot: r.AddedSlot,
+	}
+	if r.LeiosKeyRegistrationEpoch != nil {
+		e.LeiosKeyEpochs = []uint64{*r.LeiosKeyRegistrationEpoch}
 	}
 	if r.Margin != nil && r.Margin.Rat != nil {
 		e.Margin = r.Margin.String()
@@ -117,6 +176,9 @@ func decodePoolReg(pool []byte, es []poolRegEnc) (*models.PoolRegistration, erro
 		MetadataHash: e.MetadataHash, LeiosKeyPublic: e.LeiosPublic,
 		LeiosKeyPossessionProof: e.LeiosProof, Pledge: types.Uint64(e.Pledge),
 		Cost: types.Uint64(e.Cost), AddedSlot: e.AddedSlot,
+	}
+	if len(e.LeiosKeyEpochs) > 0 {
+		r.LeiosKeyRegistrationEpoch = &e.LeiosKeyEpochs[0]
 	}
 	if e.Margin != "" {
 		rat, ok := new(big.Rat).SetString(e.Margin)

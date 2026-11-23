@@ -926,7 +926,6 @@ func (ls *LedgerState) continuationInputHasProducer(
 		return true, nil
 	}
 	utxo, err := ls.utxoByRefForValidation(
-		ls.lifecycleContext(),
 		producerId,
 		input.Index(),
 		nil,

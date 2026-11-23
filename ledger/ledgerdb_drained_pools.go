@@ -20,31 +20,22 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-func (s stagingLedgerDB) poolsDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyPoolsHistory)
-}
-
-// drainedPoolRead serves a pool read from the set when the pools-history
-// family is drained. ok is false when the family is not drained and the read
-// belongs to the metadata store.
+// drainedPoolRead serves a pool read from the set. Pool state always uses the
+// set layout; an unavailable set family fails closed.
 func drainedPoolRead[T any](
 	s stagingLedgerDB,
 	txn ledgerdb.Txn,
 	read func(b *poolBook) (T, error),
-) (v T, ok bool, err error) {
-	if !s.poolsDrained() {
-		return v, false, nil
-	}
+) (v T, err error) {
 	b, err := s.ls.poolBook(txn)
 	if err != nil {
-		return v, true, err
+		return v, err
 	}
 	v, err = read(b)
-	return v, true, err
+	return v, err
 }
 
 // ListPoolKeyHashes reads from the set when the pools-history family is
@@ -52,17 +43,14 @@ func drainedPoolRead[T any](
 func (s stagingLedgerDB) ListPoolKeyHashes(
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		var out [][]byte
 		err := b.withEvents(func(pool []byte, _ []PoolEvent) error {
 			out = append(out, pool)
 			return nil
 		})
 		return out, err
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.ListPoolKeyHashes(txn)
+	})
 }
 
 // GetPools reads from the set when the pools-history family is drained.
@@ -71,12 +59,9 @@ func (s stagingLedgerDB) GetPools(
 	pkhs []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) ([]models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]models.Pool, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.Pool, error) {
 		return b.poolsByKey(pkhs)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPools(ctx, pkhs, txn)
+	})
 }
 
 // GetPoolByVrfKeyHash reads from the set when the pools-history family is
@@ -87,12 +72,9 @@ func (s stagingLedgerDB) GetPoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(vrfKeyHash, false, epochStartSlot, false)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPoolByVrfKeyHash(ctx, vrfKeyHash, epochStartSlot, txn)
+	})
 }
 
 // GetFuturePoolByVrfKeyHash reads from the set when the pools-history family
@@ -103,14 +85,9 @@ func (s stagingLedgerDB) GetFuturePoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(vrfKeyHash, false, epochStartSlot, true)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetFuturePoolByVrfKeyHash(
-		ctx, vrfKeyHash, epochStartSlot, txn,
-	)
+	})
 }
 
 // GetPoolByLeiosKey reads from the set when the pools-history family is
@@ -121,12 +98,9 @@ func (s stagingLedgerDB) GetPoolByLeiosKey(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(publicKey, true, epochStartSlot, false)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPoolByLeiosKey(ctx, publicKey, epochStartSlot, txn)
+	})
 }
 
 // GetFuturePoolByLeiosKey reads from the set when the pools-history family is
@@ -137,14 +111,9 @@ func (s stagingLedgerDB) GetFuturePoolByLeiosKey(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(publicKey, true, epochStartSlot, true)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetFuturePoolByLeiosKey(
-		ctx, publicKey, epochStartSlot, txn,
-	)
+	})
 }
 
 // GetActivePoolRelays reads from the set when the pools-history family is
@@ -153,12 +122,9 @@ func (s stagingLedgerDB) GetActivePoolRelays(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistrationRelay, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistrationRelay, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistrationRelay, error) {
 		return b.relays()
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetActivePoolRelays(ctx, txn)
+	})
 }
 
 // GetPoolDepositsHeld reads from the set when the pools-history family is
@@ -167,12 +133,9 @@ func (s stagingLedgerDB) GetPoolDepositsHeld(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (map[string]uint64, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (map[string]uint64, error) {
 		return b.deposits(poolKeyHashes)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPoolDepositsHeld(poolKeyHashes, txn)
+	})
 }
 
 // GetRetiringPools reads from the set when the pools-history family is
@@ -181,12 +144,9 @@ func (s stagingLedgerDB) GetRetiringPools(
 	currentEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetiringRow, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetiringRow, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetiringRow, error) {
 		return b.retiring(currentEpoch)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetRetiringPools(currentEpoch, txn)
+	})
 }
 
 // GetPoolKeyHashesRetiredByEpoch reads from the set when the pools-history
@@ -196,12 +156,9 @@ func (s stagingLedgerDB) GetPoolKeyHashesRetiredByEpoch(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.retiredByEpoch(epoch, boundarySlot)
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPoolKeyHashesRetiredByEpoch(epoch, boundarySlot, txn)
+	})
 }
 
 // drainedPoolSource serves the database's pool reads from the set once the
@@ -373,7 +330,7 @@ func (s stagingLedgerDB) GetPoolStatus(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (models.PoolStatus, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) (models.PoolStatus, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) (models.PoolStatus, error) {
 		events, err := b.events(pkh[:])
 		if err != nil || len(events) == 0 {
 			return models.PoolStatus{}, err
@@ -383,8 +340,5 @@ func (s stagingLedgerDB) GetPoolStatus(
 			return models.PoolStatus{}, err
 		}
 		return poolStatusFromEvents(events, current, haveCurrent), nil
-	}); ok {
-		return got, err
-	}
-	return s.LedgerDB.GetPoolStatus(pkh, txn)
+	})
 }

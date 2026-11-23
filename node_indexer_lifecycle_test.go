@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -114,7 +113,24 @@ func newSplitLifecycleTestNode(
 	rollbackTo func(IndexerWriterDeps, indexerdb.Tip) error,
 ) (*Node, []ocommon.Point, *lifecycleIndexerWriters) {
 	t.Helper()
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	return newSplitLifecycleTestNodeAtBlock(t, numBlocks, rollbackTo, 1)
+}
+
+// newSplitLifecycleTestNodeAtBlock is newSplitLifecycleTestNode with the
+// block number the loaded chain starts at.
+func newSplitLifecycleTestNodeAtBlock(
+	t *testing.T,
+	numBlocks int,
+	rollbackTo func(IndexerWriterDeps, indexerdb.Tip) error,
+	startBlockNumber uint64,
+) (*Node, []ocommon.Point, *lifecycleIndexerWriters) {
+	t.Helper()
+	n, points := newLiveLifecycleTestNodeWithStorageModeAtBlock(
+		t, numBlocks, nil, disabledLiveLifecycleTestWorkerPoolCfg,
+		StorageModeCore, startBlockNumber, withLivedInUtxoSet,
+	)
+	// A node holds its live UTxO set open, so a snapshot carries it.
+	require.NoError(t, n.openUtxoSet())
 	// The latch a split node's first start writes; the harness database was
 	// created before the layout was known.
 	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
@@ -126,7 +142,7 @@ func newSplitLifecycleTestNode(
 	),
 	)
 	writers := &lifecycleIndexerWriters{rollbackTo: rollbackTo}
-	n.config.indexerLayout = internalconfig.IndexerLayoutSplit
+	n.config.splitIndexer = true
 	n.config.indexerWriterFactory = writers.build
 	require.NoError(t, n.openIndexerWriter(t.Context()))
 	require.NoError(t, n.startIndexerWriter(n.ctx))
@@ -328,10 +344,9 @@ func TestLiveSnapshotOnSplitCarriesTheIndexerDB(t *testing.T) {
 	manifest, err := n.Snapshot(t.Context(), dir, "", "")
 	require.NoError(t, err)
 
-	raw, err := os.ReadFile(filepath.Join(dir, IndexerPayloadManifestName))
+	payload, err := dblifecycle.ReadIndexerPayload(dir)
 	require.NoError(t, err)
-	var payload indexerPayload
-	require.NoError(t, json.Unmarshal(raw, &payload))
+
 	require.Equal(t, captured.Slot, payload.TipSlot)
 	require.LessOrEqual(t, payload.TipSlot, manifest.TipSlot,
 		"the IndexerDB is captured at or behind the ledger")
@@ -398,15 +413,10 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 		// case multiplies the heavy parallel startups in this package.
 		foreign := snapshotTestDir(t, "foreign")
 		require.NoError(t, os.CopyFS(foreign, os.DirFS(dir)))
-		manifestPath := filepath.Join(foreign, IndexerPayloadManifestName)
-		manifest, err := os.ReadFile(manifestPath)
+		manifest, err := lifecycle.ReadManifest(foreign)
 		require.NoError(t, err)
-		var payload indexerPayload
-		require.NoError(t, json.Unmarshal(manifest, &payload))
-		payload.TipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
-		manifest, err = json.Marshal(payload)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(manifestPath, manifest, 0o600))
+		manifest.IndexerTipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
+		require.NoError(t, lifecycle.WriteManifest(foreign, manifest))
 		current := setIndexerTip(t, n, points, 4)
 		_, err = n.Restore(t.Context(), foreign)
 		require.ErrorContains(t, err, "take the snapshot again")
@@ -439,13 +449,12 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 		))
 		n.config.databaseLifecycle.SnapshotTrustKeyFile = keyFile
 		dir := snapshotTestDir(t, "snap")
-		_, err := n.Snapshot(t.Context(), dir, "", "")
-		require.ErrorContains(
-			t,
-			err,
-			"cannot be combined with a snapshot trust key",
-		)
-		require.NoDirExists(t, dir)
+		manifest, err := n.Snapshot(t.Context(), dir, "", "")
+		require.NoError(t, err)
+		require.NotEmpty(t, manifest.Authentication)
+		require.NotEmpty(t, manifest.IndexerSHA256)
+		_, err = n.Restore(t.Context(), dir)
+		require.NoError(t, err)
 	})
 	t.Run("a cloud destination", func(t *testing.T) {
 		t.Parallel()
@@ -453,7 +462,7 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 		n.config.databaseLifecycle.SnapshotCloudDestination = "s3://bucket/x"
 		dir := snapshotTestDir(t, "snap")
 		_, err := n.Snapshot(t.Context(), dir, "", "")
-		require.ErrorContains(t, err, "cloud destination")
+		require.ErrorContains(t, err, "cloud snapshots require a manifest trust key")
 		require.NoDirExists(t, dir)
 	})
 }
@@ -574,7 +583,7 @@ func TestSplitNodeSchedulesSnapshotsWithTheIndexerDB(t *testing.T) {
 	n.config.databaseLifecycle.SnapshotDir = testutil.OwnerOnlyTempDir(t)
 	n.config.databaseLifecycle.SnapshotCloudDestination = "s3://bucket/x"
 	err := n.newDatabaseLifecycleManager().Start(t.Context())
-	require.ErrorContains(t, err, "cloud destination")
+	require.ErrorIs(t, err, dblifecycle.ErrBadgerAutomaticSnapshots)
 
 	n.config.databaseLifecycle.SnapshotCloudDestination = ""
 	keyFile := filepath.Join(testutil.OwnerOnlyTempDir(t), "trust.key")
@@ -582,13 +591,16 @@ func TestSplitNodeSchedulesSnapshotsWithTheIndexerDB(t *testing.T) {
 		keyFile, bytes.Repeat([]byte{0x42}, 64), 0o600,
 	))
 	n.config.databaseLifecycle.SnapshotTrustKeyFile = keyFile
-	err = n.newDatabaseLifecycleManager().Start(t.Context())
-	require.ErrorContains(t, err, "snapshot trust key")
+	mgr := n.newDatabaseLifecycleManager()
+	require.ErrorIs(t, mgr.Start(t.Context()), dblifecycle.ErrBadgerAutomaticSnapshots)
 }
 
 // refusingUtxoSet is a live UTxO set ahead of every target that holds no
 // journal to roll back through.
-type refusingUtxoSet struct{ tip ocommon.Point }
+type refusingUtxoSet struct {
+	dblifecycle.TruncateUtxoSet
+	tip ocommon.Point
+}
 
 func (s refusingUtxoSet) Tip() (ocommon.Point, bool, error) { return s.tip, true, nil }
 
@@ -600,6 +612,10 @@ func (refusingUtxoSet) CanRollbackTo(ocommon.Point) (bool, error) {
 	return false, nil
 }
 
+func (refusingUtxoSet) CheckpointPoints() ([]ocommon.Point, error) {
+	return nil, nil
+}
+
 func (refusingUtxoSet) RollbackTo(ocommon.Point) error { return nil }
 
 // The refusals of the live UTxO set run before the IndexerDB rolls back, so
@@ -609,14 +625,54 @@ func TestIndexerRollbackForTruncateHonoursTheUtxoSetRefusal(t *testing.T) {
 	t.Parallel()
 	n, points, _ := newSplitLifecycleTestNode(t, 12, nil)
 	current := setIndexerTip(t, n, points, 9)
+	require.NoError(t, n.ledgerState.Close())
+	require.NoError(t, n.closeUtxoSet())
+	set, err := dblifecycle.OpenUtxoSet(n.config.dataDir)
+	require.NoError(t, err)
+	require.NotNil(t, set)
+	t.Cleanup(func() { require.NoError(t, set.Close()) })
 	target, err := database.BlockByHash(t.Context(), n.db, points[5].Hash)
 	require.NoError(t, err)
 
 	err = n.rollbackIndexerForTruncate(
 		t.Context(), n.db, target,
-		lifecycle.WithTruncateUtxoSet(refusingUtxoSet{tip: points[11]}),
+		lifecycle.WithTruncateUtxoSet(refusingUtxoSet{
+			TruncateUtxoSet: dblifecycle.TruncateUtxoSet{Store: set},
+			tip:             points[11],
+		}),
 	)
 
 	require.ErrorContains(t, err, "journal floor")
 	requireIndexerTip(t, n, current)
+}
+
+func TestIndexerWriterWakesForCompletedRewardFacts(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	writer := &lifecycleIndexerWriter{wakes: make(chan struct{}, 8)}
+	n := &Node{eventBus: bus, indexerWriter: writer}
+	require.NoError(t, n.startIndexerWriter(t.Context()))
+	defer n.stopIndexerWriter(context.Background()) //nolint:errcheck
+	testutil.RequireReceive(t, writer.wakes, 5*time.Second, "initial wake")
+	bus.Publish(ledger.RewardFactsEventType, event.NewEvent(
+		ledger.RewardFactsEventType,
+		ledger.RewardFactsEvent{SnapshotEpoch: 12, CapturedSlot: 300},
+	))
+	testutil.RequireReceive(
+		t,
+		writer.wakes,
+		5*time.Second,
+		"reward completion wakes idle writer",
+	)
+	require.NoError(t, n.stopIndexerWriter(t.Context()))
+	bus.Publish(ledger.RewardFactsEventType, event.NewEvent(
+		ledger.RewardFactsEventType, ledger.RewardFactsEvent{},
+	))
+	testutil.RequireNoReceive(
+		t,
+		writer.wakes,
+		50*time.Millisecond,
+		"stopped reward subscription",
+	)
 }

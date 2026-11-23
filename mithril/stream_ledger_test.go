@@ -19,6 +19,7 @@ package mithril_test
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -126,6 +127,7 @@ func TestStreamCatchUpIntoRealLedger(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           livesettest.New(),
 		ChainManager:      cm,
 		EventBus:          bus,
 		Logger:            logger,

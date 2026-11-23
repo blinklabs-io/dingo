@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"math/big"
+	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -32,12 +33,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// sourceDBSlots bounds how many tests hold a source database at once. Most
+// holders run an observer whose pipeline the test waits on for at most five
+// seconds, and under -race the database and observer setups of every other
+// parallel test compete with that pipeline for CPU. Without the bound, a
+// loaded host runs GOMAXPROCS such tests together and the waits time out.
+// A test holds its slot until cleanup and never opens a second database, so
+// holders cannot deadlock waiting on each other.
+var sourceDBSlots = make(chan struct{}, max(2, runtime.NumCPU()/2))
+
 // newTestDatabaseSourceDB creates a real, in-process *database.Database
 // (Badger blob + SQLite metadata, matching ledger/snapshot's own test
 // pattern) for exercising DatabaseSource against the same storage stack a
 // live node uses, rather than a bare raw connection.
 func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 	t.Helper()
+	sourceDBSlots <- struct{}{}
+	t.Cleanup(func() { <-sourceDBSlots })
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	return db

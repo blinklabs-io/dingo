@@ -65,11 +65,7 @@ func (s *Service) databaseConfig() *database.Config {
 }
 
 func (s *Service) storageSelections() internalplugins.StorageSelections {
-	return internalplugins.StorageSelections{
-		Blob:                  s.cfg.Plugins.Storage.Blob,
-		Metadata:              s.cfg.Plugins.Storage.Metadata,
-		IndexerMetadataConfig: s.cfg.Indexer.Metadata,
-	}
+	return internalplugins.ConfiguredStorageSelections(s.cfg)
 }
 
 func (s *Service) storageDependencies() (
@@ -99,8 +95,6 @@ func (s *Service) storageDependencies() (
 func (s *Service) checkSplitSupported() error {
 	return CheckIndexerPayloadSupported(
 		s.cfg.Plugins.Storage.Metadata.Provider,
-		len(s.cfg.Indexer.Metadata) != 0,
-		s.cfg.DatabaseLifecycle.SnapshotTrustKeyFile,
 	)
 }
 
@@ -137,6 +131,9 @@ func (s *Service) withIndexer(
 // indexerStoreExists reports whether a default-location SQLite IndexerDB has
 // been created. Opening one that does not exist would create it empty.
 func (s *Service) indexerStoreExists() bool {
+	if s.cfg.Plugins.Storage.Metadata.Provider == "postgres" || s.cfg.Plugins.Storage.Metadata.Provider == "mysql" {
+		return true
+	}
 	_, err := os.Stat(filepath.Join(
 		s.cfg.DatabasePath, internalplugins.IndexerDirName, "metadata.sqlite",
 	))
@@ -204,9 +201,8 @@ func (s *Service) rollbackIndexer(
 	if err := lifecycle.CheckTruncate(ctx, ledger, target, opts...); err != nil {
 		return err
 	}
-	defaultSQLite := s.cfg.Plugins.Storage.Metadata.Provider == "sqlite" &&
-		len(s.cfg.Indexer.Metadata) == 0
-	if defaultSQLite && !s.indexerStoreExists() {
+	if s.cfg.Plugins.Storage.Metadata.Provider == "sqlite" &&
+		!s.indexerStoreExists() {
 		return nil
 	}
 	return s.withIndexer(ctx, ledger, func(idx *database.Database) error {
@@ -223,58 +219,4 @@ func (s *Service) rollbackIndexer(
 		}
 		return nil
 	})
-}
-
-// indexerRestore stages the snapshot's IndexerDB payload beside the data
-// directory once the ledger manifest is known, and installs it in the
-// ledger's staging directory after checking its tip against the restored
-// ledger.
-type indexerRestore struct {
-	ctx     context.Context //nolint:containedctx // the restore's own context, kept for the staged hook
-	service *Service
-	payload IndexerPayload
-	stage   string
-}
-
-func (r *indexerRestore) stageFor(
-	snapshotDir string,
-	manifest lifecycle.Manifest,
-) error {
-	stage, err := os.MkdirTemp(
-		filepath.Dir(r.service.cfg.DatabasePath), ".dingo-indexer-restore-",
-	)
-	if err != nil {
-		return fmt.Errorf("create IndexerDB restore directory: %w", err)
-	}
-	r.stage = stage
-	return RestoreIndexerPayload(snapshotDir, stage, r.payload, manifest)
-}
-
-func (r *indexerRestore) cleanup() {
-	if r.stage != "" {
-		_ = os.RemoveAll(r.stage)
-	}
-}
-
-// install moves the staged IndexerDB into the ledger's staging directory,
-// which the restore then renames into place, so a data directory never exists
-// holding a restored ledger without its IndexerDB.
-func (r *indexerRestore) install(ledgerStagingDir string) error {
-	deps, err := r.service.storageDependencies()
-	if err != nil {
-		return err
-	}
-	if err := ValidateIndexerPayloadTip(
-		r.ctx, ledgerStagingDir, r.payload,
-		r.service.databaseConfig(), r.service.storageSelections(), deps,
-	); err != nil {
-		return err
-	}
-	if err := os.Rename(
-		filepath.Join(r.stage, internalplugins.IndexerDirName),
-		filepath.Join(ledgerStagingDir, internalplugins.IndexerDirName),
-	); err != nil {
-		return fmt.Errorf("install the restored IndexerDB: %w", err)
-	}
-	return nil
 }

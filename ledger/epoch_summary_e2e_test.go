@@ -71,7 +71,7 @@ func TestLiveUtxoSetEpochSummariesFollowABoundary(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsOff,
+		t, set,
 	)
 	ldb := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), ldb))
@@ -133,22 +133,22 @@ func requireSummaryReads(
 	return summaries, ready
 }
 
-// In verify mode every summary and total active stake read agrees with the
-// metadata store; in set mode the set answers them the same, across a
+// With metadata reads available every summary and total active stake read agrees with the
+// metadata store; from the live set the set answers them the same, across a
 // boundary, a rollback staged in an open transaction (set mode), a save staged in one,
 // and the committed rollback.
 func TestEpochSummaryReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+			scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
-			// The harness's stake is rows the set never saw; in set mode the
+			// The harness's stake is rows the set never saw; from the live set the
 			// boundary's snapshot reads live stake from the outputs the set
 			// holds.
 			scenario.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
@@ -169,15 +169,9 @@ func TestEpochSummaryReadsFromTheLiveUtxoSet(t *testing.T) {
 				}
 			}
 			require.NotNil(t, saved, "no ready summary with stake")
-			if reads == ledger.UtxoSetReadsSet {
-				// Read inside a transaction that stages the rollback, the
-				// summary the boundary saved is gone. Verify mode would read
-				// the store, which has not rolled back, and count the
-				// difference.
-				inside, total := scenario.SummaryInsideRollback(saved.Epoch)
-				require.Nil(t, inside, "the staged rollback hides the summary")
-				require.Zero(t, total, "the staged rollback hides the stake")
-			}
+			inside, total := scenario.SummaryInsideRollback(saved.Epoch)
+			require.Nil(t, inside, "the staged rollback hides the summary")
+			require.Zero(t, total, "the staged rollback hides the stake")
 
 			// A save staged in an open transaction is read back from it.
 			next := models.EpochSummary{
@@ -194,11 +188,6 @@ func TestEpochSummaryReadsFromTheLiveUtxoSet(t *testing.T) {
 
 			scenario.RollbackBeforeBoundary()
 			requireSummaryReads(t, ldb, store, "after the rollback")
-			verified, mismatches := scenario.EpochSummaryReads()
-			if reads == ledger.UtxoSetReadsVerify {
-				require.Positive(t, verified)
-			}
-			require.Zero(t, mismatches)
 		})
 	}
 }
@@ -210,7 +199,7 @@ func TestLiveUtxoSetEpochSummariesLoadFromTheMetadataStore(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, first, ledger.UtxoSetReadsOff,
+		t, first,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, first.LoadLedgerState(t.Context(), store))
@@ -233,30 +222,3 @@ func TestLiveUtxoSetEpochSummariesLoadFromTheMetadataStore(t *testing.T) {
 
 // A summary the metadata store holds and the set does not is a counted
 // divergence, and the read still answers from the store.
-func TestEpochSummaryReadVerificationCountsADivergence(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	// Written around the ledger's LedgerDB, so the set never sees it.
-	require.NoError(t, store.SaveEpochSummary(&models.EpochSummary{
-		Epoch: 50, TotalActiveStake: 123, SnapshotReady: true,
-	}, nil))
-	got, err := scenario.LedgerDB().GetEpochSummary(50, nil)
-	require.NoError(t, err)
-	require.NotNil(t, got, "the read answers from the metadata store")
-	verified, mismatches := scenario.EpochSummaryReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
-	total, err := scenario.LedgerDB().GetTotalActiveStake(50, "mark", nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(123), total)
-	verified, mismatches = scenario.EpochSummaryReads()
-	require.Equal(t, float64(2), verified)
-	require.Equal(t, float64(2), mismatches)
-}

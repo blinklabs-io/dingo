@@ -48,8 +48,9 @@ type Config struct {
 	// pairs the ledger's two stores, and the IndexerDB's own transaction
 	// carries its tip instead.
 	Role string
-	// IndexerLayout is "shared" or "split"; empty means the caller does not
-	// know it and the indexer_layout gate is left unchecked.
+	// IndexerLayout is "split" beside an IndexerDB and "shared" without one;
+	// empty means the caller does not know it and the indexer_layout gate is
+	// left unchecked.
 	IndexerLayout string
 	Network       string // Cardano network name (e.g. "preview", "mainnet")
 	CacheConfig   CborCacheConfig
@@ -511,6 +512,12 @@ func (d *Database) BlockBatchTransactionContext(
 // handle to it. ctx bounds the transaction's statements.
 func (d *Database) MetadataTxn(ctx context.Context, readWrite bool) *Txn {
 	return NewMetadataOnlyTxn(ctx, d, readWrite)
+}
+
+// StagedTxn starts a transaction that holds no metadata write connection and
+// commits only what is staged on it for another store. See NewStagedTxn.
+func (d *Database) StagedTxn(ctx context.Context) *Txn {
+	return NewStagedTxn(ctx, d)
 }
 
 // withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction

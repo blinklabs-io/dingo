@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -38,6 +39,11 @@ type EpochStateReader interface {
 	PoolStakeSnapshots(
 		epoch uint64,
 		typ string,
+	) ([]*models.PoolStakeSnapshot, error)
+	// PoolStakeSnapshotsCapturedIn returns the snapshot rows of every epoch
+	// and type captured in [from, through], from one read.
+	PoolStakeSnapshotsCapturedIn(
+		from, through uint64,
 	) ([]*models.PoolStakeSnapshot, error)
 }
 
@@ -235,6 +241,30 @@ func rollbackEpochStarts(
 	return newest, found
 }
 
+// stagedRollbackEpochStarts maps each epoch the set holds to its start slot
+// when ops stage a rollback, and is empty otherwise. Only a rollback reads the
+// starts, and Epochs decodes every epoch row, so a read with none staged must
+// not pay for it once per epoch it is asked about.
+func stagedRollbackEpochStarts(
+	r EpochStateReader,
+	ops []epochStateOps,
+) (map[uint64]uint64, error) {
+	if !slices.ContainsFunc(ops, func(o epochStateOps) bool {
+		return o.rollbackTo != nil
+	}) {
+		return map[uint64]uint64{}, nil
+	}
+	epochs, err := r.Epochs()
+	if err != nil {
+		return nil, err
+	}
+	starts := make(map[uint64]uint64, len(epochs))
+	for _, e := range epochs {
+		starts[e.EpochId] = e.StartSlot
+	}
+	return starts, nil
+}
+
 // snapshotView is epoch's snapshot rows of typ as txn sees the set.
 func (ls *LedgerState) snapshotView(
 	r EpochStateReader,
@@ -260,13 +290,9 @@ func (ls *LedgerState) snapshotViewLocked(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := r.Epochs()
+	starts, err := stagedRollbackEpochStarts(r, ops)
 	if err != nil {
 		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
 	}
 	view := make(map[string]*models.PoolStakeSnapshot, len(rows))
 	for _, s := range rows {
@@ -312,23 +338,98 @@ func (ls *LedgerState) snapshotViewLocked(
 	return out, nil
 }
 
+// snapshotsCapturedInView is every snapshot row captured in [from, through]
+// as txn sees the set, for every epoch and type, sorted by epoch, type and
+// pool. It applies the staged batches as snapshotViewLocked does for one epoch
+// and type. Rows outside the range are dropped before the batches apply, which
+// cannot change the result: a staged save replaces a row by its key whatever
+// the stored row held, and a staged delete only removes rows.
+func (ls *LedgerState) snapshotsCapturedInView(
+	r EpochStateReader,
+	txn ledgerdb.Txn,
+	from, through uint64,
+) ([]*models.PoolStakeSnapshot, error) {
+	ls.utxoSetApplyMu.RLock()
+	defer ls.utxoSetApplyMu.RUnlock()
+	type rowKey struct {
+		epoch uint64
+		typ   string
+		pool  string
+	}
+	ops := ls.stagedEpochStateOps(txn)
+	rows, err := r.PoolStakeSnapshotsCapturedIn(from, through)
+	if err != nil {
+		return nil, err
+	}
+	starts, err := stagedRollbackEpochStarts(r, ops)
+	if err != nil {
+		return nil, err
+	}
+	view := make(map[rowKey]*models.PoolStakeSnapshot, len(rows))
+	for _, s := range rows {
+		view[rowKey{s.Epoch, s.SnapshotType, string(s.PoolKeyHash)}] = s
+	}
+	for _, o := range ops {
+		if o.rollbackTo != nil {
+			newest, found := rollbackEpochStarts(starts, *o.rollbackTo)
+			if found {
+				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
+					return k.epoch > newest
+				})
+			}
+		}
+		for _, e := range o.epochs {
+			starts[e.EpochId] = e.StartSlot
+		}
+		for _, c := range o.snapshots {
+			switch c.Kind {
+			case SnapshotSave:
+				s := *c.Snapshot
+				view[rowKey{s.Epoch, s.SnapshotType, string(s.PoolKeyHash)}] = &s
+			case SnapshotDeleteForEpoch:
+				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
+					return k.epoch == c.Epoch && k.typ == c.Type
+				})
+			case SnapshotDeleteBeforeEpoch:
+				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
+					return k.epoch < c.Epoch
+				})
+			}
+		}
+	}
+	out := make([]*models.PoolStakeSnapshot, 0, len(view))
+	for _, s := range view {
+		if s.CapturedSlot >= from && s.CapturedSlot <= through {
+			out = append(out, s)
+		}
+	}
+	slices.SortFunc(out, func(a, b *models.PoolStakeSnapshot) int {
+		return cmp.Or(
+			cmp.Compare(a.Epoch, b.Epoch),
+			cmp.Compare(a.SnapshotType, b.SnapshotType),
+			bytes.Compare(a.PoolKeyHash, b.PoolKeyHash),
+		)
+	})
+	return out, nil
+}
+
 // epochStateReader returns the set's epoch state reader and the read mode,
-// or UtxoSetReadsOff when these reads stay on the metadata store.
+// or false when these reads stay on the metadata store.
 func (ls *LedgerState) epochStateReader(
 	txn ledgerdb.Txn,
-) (EpochStateReader, string) {
+) (EpochStateReader, bool) {
 	_, mode := ls.utxoSetReader()
-	if mode == UtxoSetReadsOff {
-		return nil, UtxoSetReadsOff
+	if !mode {
+		return nil, false
 	}
 	r, ok := ls.readSet(txn).(EpochStateReader)
 	if !ok {
-		return nil, UtxoSetReadsOff
+		return nil, false
 	}
 	if !ls.epochStateSetLoaded.Load() {
 		loaded, err := r.EpochStateLoaded()
 		if err != nil || !loaded {
-			return nil, UtxoSetReadsOff
+			return nil, false
 		}
 		ls.epochStateSetLoaded.Store(true)
 	}
@@ -342,168 +443,71 @@ func sameEpochs(a, b []models.Epoch) bool {
 	})
 }
 
-func sameSnapshotSets(a, b []*models.PoolStakeSnapshot) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	key := func(s *models.PoolStakeSnapshot) string {
-		c := *s
-		c.ID = 0
-		return fmt.Sprintf("%+v", c)
-	}
-	seen := make(map[string]int, len(a))
-	for _, s := range a {
-		seen[key(s)]++
-	}
-	for _, s := range b {
-		k := key(s)
-		if seen[k] == 0 {
-			return false
-		}
-		seen[k]--
-	}
-	return true
-}
-
-func (ls *LedgerState) compareEpochStateRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.epochStateReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.epochStateReadMismatches.Add(1)
-	ls.metrics.epochStateReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set epoch state read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
 func (s stagingLedgerDB) GetEpochs(txn ledgerdb.Txn) ([]models.Epoch, error) {
-	return s.epochsWhere(txn, "epochs", nil,
-		func() ([]models.Epoch, error) { return s.LedgerDB.GetEpochs(txn) })
+	return s.epochsWhere(txn, nil)
 }
 
 func (s stagingLedgerDB) GetEpochsByEra(
 	eraId uint,
 	txn ledgerdb.Txn,
 ) ([]models.Epoch, error) {
-	return s.epochsWhere(txn, fmt.Sprintf("epochs of era %d", eraId),
-		func(e models.Epoch) bool { return e.EraId == eraId },
-		func() ([]models.Epoch, error) {
-			return s.LedgerDB.GetEpochsByEra(eraId, txn)
-		},
-	)
+	return s.epochsWhere(txn, func(e models.Epoch) bool { return e.EraId == eraId })
 }
 
 func (s stagingLedgerDB) epochsWhere(
 	txn ledgerdb.Txn,
-	what string,
 	keep func(models.Epoch) bool,
-	stored func() ([]models.Epoch, error),
 ) ([]models.Epoch, error) {
 	r, mode := s.ls.epochStateReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.ls.familyDrained(nodesettings.FamilyEpochs) {
-			return nil, drainedUnserved(nodesettings.FamilyEpochs)
-		}
-		return stored()
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyEpochs)
 	}
-	g := s.ls.beginVerifyRead(txn)
-	view, setErr := s.ls.epochStateView(r, txn)
-	fromSet := sortedEpochs(view, keep)
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := stored()
-	if err != nil {
-		return nil, err
-	}
-	s.ls.compareEpochStateRead(g, what, sameEpochs(want, fromSet), setErr)
-	return want, nil
+	view, err := s.ls.epochStateView(r, txn)
+	return sortedEpochs(view, keep), err
 }
 
 func (s stagingLedgerDB) GetEpoch(
 	epochId uint64,
 	txn ledgerdb.Txn,
 ) (*models.Epoch, error) {
-	return s.epochOne(txn, fmt.Sprintf("epoch %d", epochId),
-		func(view map[uint64]models.Epoch) *models.Epoch {
-			if e, ok := view[epochId]; ok {
-				return &e
-			}
-			return nil
-		},
-		func() (*models.Epoch, error) { return s.LedgerDB.GetEpoch(epochId, txn) },
-	)
+	return s.epochOne(txn, func(view map[uint64]models.Epoch) *models.Epoch {
+		if e, ok := view[epochId]; ok {
+			return &e
+		}
+		return nil
+	})
 }
 
 func (s stagingLedgerDB) GetEpochBySlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Epoch, error) {
-	return s.epochOne(txn, fmt.Sprintf("epoch at slot %d", slot),
-		func(view map[uint64]models.Epoch) *models.Epoch {
-			var best *models.Epoch
-			for _, e := range view {
-				if e.StartSlot <= slot &&
-					slot < e.StartSlot+uint64(e.LengthInSlots) &&
-					(best == nil || e.StartSlot > best.StartSlot) {
-					c := e
-					best = &c
-				}
+	return s.epochOne(txn, func(view map[uint64]models.Epoch) *models.Epoch {
+		var best *models.Epoch
+		for _, e := range view {
+			if e.StartSlot <= slot && slot < e.StartSlot+uint64(e.LengthInSlots) &&
+				(best == nil || e.StartSlot > best.StartSlot) {
+				c := e
+				best = &c
 			}
-			return best
-		},
-		func() (*models.Epoch, error) { return s.LedgerDB.GetEpochBySlot(slot, txn) },
-	)
+		}
+		return best
+	})
 }
 
 func (s stagingLedgerDB) epochOne(
 	txn ledgerdb.Txn,
-	what string,
 	pick func(map[uint64]models.Epoch) *models.Epoch,
-	stored func() (*models.Epoch, error),
 ) (*models.Epoch, error) {
 	r, mode := s.ls.epochStateReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		if s.ls.familyDrained(nodesettings.FamilyEpochs) {
-			return nil, drainedUnserved(nodesettings.FamilyEpochs)
-		}
-		return stored()
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyEpochs)
 	}
-	g := s.ls.beginVerifyRead(txn)
-	view, setErr := s.ls.epochStateView(r, txn)
-	var fromSet *models.Epoch
-	if setErr == nil {
-		fromSet = pick(view)
-	}
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := stored()
+	view, err := s.ls.epochStateView(r, txn)
 	if err != nil {
 		return nil, err
 	}
-	same := sameEpochPtr(want, fromSet)
-	s.ls.compareEpochStateRead(g, what, same, setErr)
-	return want, nil
+	return pick(view), nil
 }
 
 func (s stagingLedgerDB) GetPoolStakeSnapshotsByEpoch(
@@ -511,11 +515,7 @@ func (s stagingLedgerDB) GetPoolStakeSnapshotsByEpoch(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
-	return s.snapshotsWhere(txn, epoch, snapshotType, nil,
-		func() ([]*models.PoolStakeSnapshot, error) {
-			return s.LedgerDB.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, txn)
-		},
-	)
+	return s.snapshotsWhere(txn, epoch, snapshotType, nil)
 }
 
 func (s stagingLedgerDB) GetPoolStakeSnapshotsForPools(
@@ -528,17 +528,10 @@ func (s stagingLedgerDB) GetPoolStakeSnapshotsForPools(
 	for _, p := range poolKeyHashes {
 		want[string(p)] = struct{}{}
 	}
-	return s.snapshotsWhere(txn, epoch, snapshotType,
-		func(sn *models.PoolStakeSnapshot) bool {
-			_, ok := want[string(sn.PoolKeyHash)]
-			return ok
-		},
-		func() ([]*models.PoolStakeSnapshot, error) {
-			return s.LedgerDB.GetPoolStakeSnapshotsForPools(
-				epoch, snapshotType, poolKeyHashes, txn,
-			)
-		},
-	)
+	return s.snapshotsWhere(txn, epoch, snapshotType, func(sn *models.PoolStakeSnapshot) bool {
+		_, ok := want[string(sn.PoolKeyHash)]
+		return ok
+	})
 }
 
 func (s stagingLedgerDB) GetPoolStakeSnapshot(
@@ -547,20 +540,9 @@ func (s stagingLedgerDB) GetPoolStakeSnapshot(
 	poolKeyHash []byte,
 	txn ledgerdb.Txn,
 ) (*models.PoolStakeSnapshot, error) {
-	got, err := s.snapshotsWhere(txn, epoch, snapshotType,
-		func(sn *models.PoolStakeSnapshot) bool {
-			return bytes.Equal(sn.PoolKeyHash, poolKeyHash)
-		},
-		func() ([]*models.PoolStakeSnapshot, error) {
-			one, err := s.LedgerDB.GetPoolStakeSnapshot(
-				epoch, snapshotType, poolKeyHash, txn,
-			)
-			if err != nil || one == nil {
-				return nil, err
-			}
-			return []*models.PoolStakeSnapshot{one}, nil
-		},
-	)
+	got, err := s.snapshotsWhere(txn, epoch, snapshotType, func(sn *models.PoolStakeSnapshot) bool {
+		return bytes.Equal(sn.PoolKeyHash, poolKeyHash)
+	})
 	if err != nil || len(got) == 0 {
 		return nil, err
 	}
@@ -572,40 +554,20 @@ func (s stagingLedgerDB) snapshotsWhere(
 	epoch uint64,
 	typ string,
 	keep func(*models.PoolStakeSnapshot) bool,
-	stored func() ([]*models.PoolStakeSnapshot, error),
 ) ([]*models.PoolStakeSnapshot, error) {
 	r, mode := s.ls.epochStateReader(txn)
-	if mode == UtxoSetReadsOff || r == nil {
-		return stored()
+	if !mode || r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyEpochs)
 	}
-	g := s.ls.beginVerifyRead(txn)
-	all, setErr := s.ls.snapshotView(r, txn, epoch, typ)
-	fromSet := all
-	if keep != nil {
-		fromSet = make([]*models.PoolStakeSnapshot, 0, len(all))
-		for _, sn := range all {
-			if keep(sn) {
-				fromSet = append(fromSet, sn)
-			}
+	all, err := s.ls.snapshotView(r, txn, epoch, typ)
+	if err != nil || keep == nil {
+		return all, err
+	}
+	fromSet := make([]*models.PoolStakeSnapshot, 0, len(all))
+	for _, sn := range all {
+		if keep(sn) {
+			fromSet = append(fromSet, sn)
 		}
 	}
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := stored()
-	if err != nil {
-		return nil, err
-	}
-	s.ls.compareEpochStateRead(
-		g, fmt.Sprintf("snapshots %d/%s", epoch, typ),
-		sameSnapshotSets(want, fromSet), setErr,
-	)
-	return want, nil
-}
-
-func sameEpochPtr(a, b *models.Epoch) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return sameEpochs([]models.Epoch{*a}, []models.Epoch{*b})
+	return fromSet, nil
 }

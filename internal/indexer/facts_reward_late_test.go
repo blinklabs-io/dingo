@@ -19,10 +19,12 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -303,4 +305,99 @@ func TestWriterCopiesRewardRoundFinishedBehindItsTip(t *testing.T) {
 	require.Equal(t, "500", l.accountAmount(t, 12))
 	require.Equal(t, "8", scalar[string](t, l.dstRaw,
 		`SELECT total_reward FROM reward_pool_output WHERE epoch = 12`))
+}
+
+type countingRewardFacts struct {
+	*MetadataFacts
+	refreshes int
+}
+
+func (f *countingRewardFacts) RefreshFacts(
+	ctx context.Context,
+	txn *database.Txn,
+	through uint64,
+) error {
+	f.refreshes++
+	return f.MetadataFacts.RefreshFacts(ctx, txn, through)
+}
+
+func TestCaughtUpWriterCopiesRewardRoundWithoutAnotherBlock(t *testing.T) {
+	t.Parallel()
+	l := newLateRewardFixture(t)
+	store, err := indexerdb.NewStore(l.dst, l.dst, 10)
+	require.NoError(t, err)
+	chain := newFakeChain(3, "idle-reward")
+	facts := &countingRewardFacts{MetadataFacts: l.f}
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 1).WithFacts(facts)
+	require.NoError(t, w.CatchUp(t.Context()))
+	require.Zero(t, facts.refreshes, "block batches already copy reward facts")
+	tip, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Zero(t, l.poolRows(t, 12))
+	l.ledgerPrecomputes(t, 12, tip.Slot, "idle-round", "500")
+
+	require.NoError(t, w.CatchUp(t.Context()))
+	require.Equal(t, 1, facts.refreshes)
+	require.Equal(
+		t,
+		1,
+		l.poolRows(t, 12),
+		"finished rewards must not wait for another block",
+	)
+	require.Equal(t, "500", l.accountAmount(t, 12))
+	got, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, tip, got)
+
+	l.restart(t)
+	w = NewWriter(store, chain, &syncRowIndexer{}, nil, 1).WithFacts(l.f)
+	require.NoError(t, w.CatchUp(t.Context()))
+	require.Equal(t, 1, l.poolRows(t, 12))
+	require.Equal(t, "500", l.accountAmount(t, 12))
+}
+
+func TestRunningCaughtUpWriterRefreshesRewardFactsOnWake(t *testing.T) {
+	t.Parallel()
+	l := newLateRewardFixture(t)
+	store, err := indexerdb.NewStore(l.dst, l.dst, 10)
+	require.NoError(t, err)
+	chain := newFakeChain(3, "idle-live-reward")
+	passes := make(chan int, 8)
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 1).
+		WithFacts(l.f).
+		WithFailureReport(func(failures int) { passes <- failures })
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		cancel()
+		require.ErrorIs(
+			t,
+			testutil.RequireReceive(t, done, 5*time.Second, "writer shutdown"),
+			context.Canceled,
+		)
+	}()
+	require.Zero(
+		t,
+		testutil.RequireReceive(t, passes, 5*time.Second, "initial catch-up"),
+	)
+	tip, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Zero(t, l.poolRows(t, 12))
+	l.ledgerPrecomputes(t, 12, tip.Slot, "completed-while-idle", "500")
+	w.Wake()
+	require.Zero(
+		t,
+		testutil.RequireReceive(
+			t,
+			passes,
+			5*time.Second,
+			"idle reward refresh",
+		),
+	)
+	require.Equal(t, 1, l.poolRows(t, 12))
+	require.Equal(t, "500", l.accountAmount(t, 12))
+	got, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, tip, got)
 }

@@ -15,6 +15,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -62,6 +63,12 @@ type FactsSource interface {
 		dst *database.Txn,
 		point ocommon.Point,
 	) error
+}
+
+// FactsRefresher copies facts completed after their slot was indexed, without
+// replaying blocks or applying their withdrawals again.
+type FactsRefresher interface {
+	RefreshFacts(context.Context, *database.Txn, uint64) error
 }
 
 // maxCursorRestarts bounds how many times one table's copy starts again
@@ -514,6 +521,27 @@ func (f *MetadataFacts) applyJournalRange(
 			if len(batch) == 0 {
 				return nil
 			}
+			// The journal's unique index is credential-leading. Ordering one source
+			// page before the bounded store writes keeps its leaf visits
+			// monotonic without retaining an unbounded reward round in memory.
+			slices.SortFunc(batch, func(a, b models.AccountRewardCredit) int {
+				if a.CredentialTag < b.CredentialTag {
+					return -1
+				}
+				if a.CredentialTag > b.CredentialTag {
+					return 1
+				}
+				if order := bytes.Compare(a.StakingKey, b.StakingKey); order != 0 {
+					return order
+				}
+				if a.Slot < b.Slot {
+					return -1
+				}
+				if a.Slot > b.Slot {
+					return 1
+				}
+				return bytes.Compare(a.SourceHash, b.SourceHash)
+			})
 			err := store.AddAccountRewardsByCredential(batch, dst.Metadata())
 			batch = batch[:0]
 			return err

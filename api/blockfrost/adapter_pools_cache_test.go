@@ -17,8 +17,6 @@ package blockfrost
 import (
 	"context"
 	"errors"
-	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -90,6 +88,9 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 		return [][]byte{{1}}, nil
 	}
 
+	waiting := make(chan struct{}, 2)
+	cache.onWait = func() { waiting <- struct{}{} }
+
 	var wg sync.WaitGroup
 	results := make(chan [][]byte, 2)
 	wg.Go(func() {
@@ -99,23 +100,20 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 	})
 	testutil.RequireReceive(t, entered, 5*time.Second, "load started")
 
+	// A waiter whose context has ended returns instead of parking on the
+	// load; the hook fires before it selects, so it is consumed here.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := cache.get(ctx, key, load)
 	require.ErrorIs(t, err, context.Canceled)
+	testutil.RequireReceive(t, waiting, 5*time.Second, "cancelled waiter")
 
 	wg.Go(func() {
 		got, err := cache.get(context.Background(), key, load)
 		require.NoError(t, err)
 		results <- got
 	})
-	// Two goroutines are inside get once the waiter is parked: the loader
-	// and the waiter.
-	require.Eventually(t, func() bool {
-		buf := make([]byte, 1<<20)
-		buf = buf[:runtime.Stack(buf, true)]
-		return strings.Count(string(buf), "(*activePoolCache).get(") >= 2
-	}, 5*time.Second, 5*time.Millisecond)
+	testutil.RequireReceive(t, waiting, 5*time.Second, "waiter parked")
 	close(release)
 	wg.Wait()
 	require.Equal(t, int32(1), loads.Load())
@@ -155,7 +153,7 @@ func TestPoolsListCachesUnderSnapshotTip(t *testing.T) {
 		Point:       ocommon.NewPoint(50, []byte("snapshot-tip-hash-0000000000")),
 		BlockNumber: 5,
 	}
-	require.NoError(t, db.SetTip(stored, nil))
+	setIndexerTip(t, adapter, stored)
 	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(99, []byte("ledger-tip-hash-00000000000")),
 		BlockNumber: 9,

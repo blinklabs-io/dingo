@@ -30,10 +30,12 @@ type Selection struct {
 	Config   map[string]any `yaml:"config"`
 }
 
-// EnvironmentPrefix returns the generic environment prefix for capability.
+// EnvironmentPrefix returns the generic environment prefix for capability. It
+// is derived from the capability name alone, so the contract version does not
+// appear in environment variable names.
 func EnvironmentPrefix(capability Capability) string {
 	return "DINGO_PLUGINS_" + strings.ToUpper(
-		strings.ReplaceAll(string(capability), ".", "_"),
+		strings.ReplaceAll(capability.Name(), ".", "_"),
 	) + "_"
 }
 
@@ -50,8 +52,8 @@ func ApplyEnvironment(
 	selection *Selection,
 	environ []string,
 ) error {
-	if !capability.Valid() {
-		return fmt.Errorf("unknown plugin capability %q", capability)
+	if err := capability.validate(); err != nil {
+		return err
 	}
 	if selection == nil {
 		return errorsNewNilSelection(capability)

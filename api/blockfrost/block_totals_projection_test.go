@@ -21,13 +21,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,6 +38,16 @@ func (s *blockTotalsLegacyStore) GetTransactionsByBlockHash(
 ) ([]models.Transaction, error) {
 	s.hydratedReads.Add(1)
 	return s.MetadataStore.GetTransactionsByBlockHash(hash, txn)
+}
+
+// RebuildAddressTransactionIndex forwards the capability an API-mode database
+// requires of its metadata store, which embedding the interface hides.
+func (s *blockTotalsLegacyStore) RebuildAddressTransactionIndex(
+	ctx context.Context,
+	rebuild func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+) error {
+	return s.MetadataStore.(metadata.AddressTransactionIndexRebuilder).
+		RebuildAddressTransactionIndex(ctx, rebuild)
 }
 
 type blockTotalsProjectionStore struct {
@@ -67,32 +74,25 @@ func newBlockTotalsProjectionAdapter(
 	t.Helper()
 	var legacy *blockTotalsLegacyStore
 	var projection *blockTotalsProjectionStore
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t, dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(store metadata.MetadataStore) metadata.MetadataStore {
-			legacy = &blockTotalsLegacyStore{MetadataStore: store}
-			if !projected {
-				return legacy
-			}
-			capability, ok := store.(metadata.BlockTransactionTotalsStore)
-			require.True(t, ok)
-			projection = &blockTotalsProjectionStore{
-				blockTotalsLegacyStore: legacy, projection: capability,
-			}
-			return projection
+	adapter, raw, _ := newDBBackedAdapterWithIndexer(
+		t,
+		dbtest.IndexerOptions{
+			WrapMetadata: func(
+				store metadata.MetadataStore,
+			) metadata.MetadataStore {
+				legacy = &blockTotalsLegacyStore{MetadataStore: store}
+				if !projected {
+					return legacy
+				}
+				capability, ok := store.(metadata.BlockTransactionTotalsStore)
+				require.True(t, ok)
+				projection = &blockTotalsProjectionStore{
+					blockTotalsLegacyStore: legacy, projection: capability,
+				}
+				return projection
+			},
 		},
 	)
-	require.NoError(t, err)
-	cm, err := chain.NewManager(t.Context(), db, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database: db, ChainManager: cm,
-	})
-	require.NoError(t, err)
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	return adapter, raw, legacy, projection
 }
 

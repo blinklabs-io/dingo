@@ -238,8 +238,9 @@ func TestFetchBlockAssetsAreCanonical(t *testing.T) {
 		},
 	}
 	srv := &syncServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: stub,
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 	for range 10 {
 		resp, err := srv.FetchBlock(

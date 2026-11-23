@@ -466,9 +466,9 @@ func (n *Node) shutdown() error {
 	// This is the only shutdown close of Ouroboros. Acquired LocalStateQuery
 	// snapshots are read transactions on the database phase 3 closes, and an
 	// NtC client can acquire one until its connection drains, so the close
-	// runs after phase 2 rather than in phase 1. It also drains the Leios
-	// persistence writer and retention GC, which write to the database. Close
-	// waits on Leios validation and EventBus handlers with no deadline of its
+	// runs after phase 2 rather than in phase 1. It also waits for in-flight
+	// Leios endorser-block writes and stops the retention GC, which write to
+	// the database. Close waits on Leios validation and EventBus handlers with no deadline of its
 	// own, so it is bounded like a phase-1 stop, and skipped when phase 2
 	// already abandoned a handler: phase 3 then leaves the database open and
 	// the snapshots with it. An unconfirmed persistence drain likewise leaves

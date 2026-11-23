@@ -16,7 +16,6 @@ package ledger_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"testing"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -126,7 +124,7 @@ func (r *rewardBlocksRun) expected(epoch uint64) rewardBlockAnswer {
 	}[epoch]
 }
 
-// In set mode with the metadata store's reads of blocks, imported counts,
+// With the live set with the metadata store's reads of blocks, imported counts,
 // fees and pots failing, the reward round's counts and fees are the ones the
 // store would give: overlay slots left out, a collateral fee for a
 // phase-2-invalid transaction, the imported counts and fees of a Mithril
@@ -136,7 +134,7 @@ func TestRewardBlockCountsAndFeesAreServedFromTheSet(t *testing.T) {
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprintf("imported=%t", imported), func(t *testing.T) {
 			t.Parallel()
-			r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, imported)
+			r := newRewardBlocksRun(t, "set", nil, imported)
 			r.write()
 			reached, _ := r.scenario.HideStoreReads(rewardBlockReadNames...)
 			for _, epoch := range []uint64{3, 4, 5} {
@@ -145,9 +143,6 @@ func TestRewardBlockCountsAndFeesAreServedFromTheSet(t *testing.T) {
 				)
 			}
 			require.Zero(t, reached(), "a read reached the metadata store")
-			verified, mismatches := r.scenario.Computed("reward_block_counts")
-			require.Zero(t, verified, "set mode compares nothing")
-			require.Zero(t, mismatches)
 		})
 	}
 }
@@ -161,7 +156,7 @@ func TestInvalidTransactionsMoveTheSetsCredentialStake(t *testing.T) {
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprintf("imported=%t", imported), func(t *testing.T) {
 			t.Parallel()
-			r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, imported)
+			r := newRewardBlocksRun(t, "set", nil, imported)
 			r.write()
 			stake, err := r.set.CredentialStake(
 				0, bytes.Repeat([]byte{0xab}, 28),
@@ -210,7 +205,7 @@ func TestEpochCaptureBlockCountsIncludeOverlaySlotsFromTheSet(t *testing.T) {
 					counts: counts, total: total, known: known,
 				}
 			}
-			reads := ledger.UtxoSetReadsOff
+			reads := ""
 			store := newRewardBlocksRun(t, reads, nil, imported)
 			store.write()
 			for _, epoch := range []uint64{3, 4, 5} {
@@ -219,7 +214,7 @@ func TestEpochCaptureBlockCountsIncludeOverlaySlotsFromTheSet(t *testing.T) {
 					"store, epoch %d", epoch,
 				)
 			}
-			r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, imported)
+			r := newRewardBlocksRun(t, "set", nil, imported)
 			r.write()
 			reached, _ := r.scenario.HideStoreReads(rewardBlockReadNames...)
 			for _, epoch := range []uint64{3, 4, 5} {
@@ -233,208 +228,11 @@ func TestEpochCaptureBlockCountsIncludeOverlaySlotsFromTheSet(t *testing.T) {
 	}
 }
 
-// In verify mode the metadata store answers and the set's answer is compared
-// with it: the same writes leave the two equal for every epoch.
-func TestRewardBlockCountsAndFeesMatchTheStoreInVerifyMode(t *testing.T) {
-	t.Parallel()
-	for _, imported := range []bool{false, true} {
-		t.Run(fmt.Sprintf("imported=%t", imported), func(t *testing.T) {
-			t.Parallel()
-			r := newRewardBlocksRun(t, ledger.UtxoSetReadsVerify, nil, imported)
-			r.write()
-			for _, epoch := range []uint64{3, 4, 5} {
-				require.Equal(
-					t, r.expected(epoch), r.read(t, epoch), "epoch %d", epoch,
-				)
-			}
-			for _, result := range []string{
-				"reward_block_counts", "reward_epoch_fees",
-			} {
-				verified, mismatches := r.scenario.Computed(result)
-				require.Positive(t, verified, result)
-				require.Zero(t, mismatches, result)
-			}
-		})
-	}
-}
-
-// A write the set never saw is a difference verify mode reports, so the
-// comparison is not vacuous.
-func TestRewardBlockVerifyModeReportsADifference(t *testing.T) {
-	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsVerify, nil, false)
-	r.write()
-	r.scenario.FeeAroundTheSet(11, 1)
-	r.scenario.BlockAroundTheSet(11, r.scenario.PoolA)
-	_ = r.read(t, 5)
-	for _, result := range []string{
-		"reward_block_counts", "reward_epoch_fees",
-	} {
-		_, mismatches := r.scenario.Computed(result)
-		require.Positive(t, mismatches, result)
-	}
-}
-
-// The boundary stores the fee total of the epoch it ends from the set, a
-// rollback past the epoch's last block undoes that block's count and fee, and
-// the replayed block and boundary end where the first pass did.
-func TestRewardBlockFeesAcrossABoundaryRollbackAndReplay(t *testing.T) {
-	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, false)
-	s := r.scenario
-	r.write()
-	// The boundary itself reads the pots row it extends.
-	reached, _ := s.HideStoreReads(rewardBlockReadNames[:4]...)
-
-	s.Boundary()
-	require.Equal(t, uint64(675), s.PotsFees(6))
-	require.Equal(t, r.expected(5), r.read(t, 5))
-	// The boundary opened epoch 6 with zero counts and fees, known to the
-	// set, so the store is not asked.
-	opened, err := s.Fees(6)
-	require.NoError(t, err)
-	require.Zero(t, opened)
-
-	s.RollbackBeforeBoundary()
-	after := r.read(t, 5)
-	require.Equal(t, uint64(650), after.fees, "slot 11's fee is undone")
-	require.Equal(t, uint64(0), after.counts[string(s.PoolB)])
-	require.Zero(t, after.total, "slot 11's block is undone")
-
-	s.Block(11, s.PoolB)
-	s.Fee(11, 25)
-	s.Boundary()
-	require.Equal(t, uint64(675), s.PotsFees(6))
-	require.Equal(t, r.expected(5), r.read(t, 5))
-	require.Zero(t, reached(), "a read reached the metadata store")
-}
-
-// The same run with the family drained, its tables empty and the statement
-// guard armed gives the same answers as the undrained run, across a boundary,
-// a rollback and a replay, and the guard sees no statement on a drained table.
-func TestRewardBlocksFeesDrainMatchesAnUndrainedRun(t *testing.T) {
-	t.Parallel()
-	run := func(t *testing.T, drain bool) (map[string]string, *statedrain.TripGuard, *rewardBlocksRun) {
-		guard := statedrain.NewTripGuard()
-		r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, true)
-		s := r.scenario
-		out := map[string]string{}
-		phase := func(name string, epochs ...uint64) {
-			for _, epoch := range epochs {
-				a := r.read(t, epoch)
-				out[fmt.Sprintf("%s/%d", name, epoch)] = fmt.Sprintf("%+v", a)
-			}
-		}
-		r.write()
-		if drain {
-			src := rewardBlocksDrainSource{r: r}
-			var entries []statedrain.Entry
-			for _, e := range statedrain.Graduated(src) {
-				if e.Family == nodesettings.FamilyRewardBlocksFees {
-					entries = append(entries, e)
-				}
-			}
-			require.Len(t, entries, 1)
-			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
-			}, entries))
-		}
-		phase("before", 3, 4, 5)
-		s.Boundary()
-		out["pots"] = fmt.Sprint(s.PotsFees(6))
-		phase("boundary", 4, 5)
-		if drain {
-			// The boundary pruned epoch 3, which the drained set no longer
-			// holds and the emptied tables cannot answer.
-			_, err := s.Fees(3)
-			require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-		}
-		s.RollbackBeforeBoundary()
-		phase("rollback", 4, 5)
-		s.Block(11, s.PoolB)
-		s.Fee(11, 25)
-		s.Boundary()
-		out["pots replay"] = fmt.Sprint(s.PotsFees(6))
-		phase("replay", 4, 5)
-		return out, guard, r
-	}
-	undrained, _, plain := run(t, false)
-	drained, guard, r := run(t, true)
-	require.Empty(t, guard.Trips(), "a drained table was touched")
-	rawPlain, err := dbtest.RawSQLiteMetadata(t, plain.scenario.DB)
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, r.scenario.DB)
-	require.NoError(t, err)
-	for _, table := range []string{
-		"imported_pool_block_count", "imported_epoch_block_total",
-	} {
-		require.Positive(
-			t,
-			tableRows(t, rawPlain, table),
-			"undrained %s",
-			table,
-		)
-		require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-	}
-	mask, err := r.scenario.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.True(t, mask.Has(nodesettings.FamilyRewardBlocksFees))
-	require.Equal(t, undrained, drained)
-	require.Equal(t, "675", drained["pots"])
-	require.Equal(t, "675", drained["pots replay"])
-}
-
-// A set that differs from the metadata store refuses the drain and leaves the
-// rows.
-func TestRewardBlocksFeesVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		corrupt func(*rewardBlocksRun)
-		want    string
-	}{
-		{"fees", func(r *rewardBlocksRun) {
-			r.scenario.FeeAroundTheSet(11, 1)
-		}, "fees"},
-		{"blocks", func(r *rewardBlocksRun) {
-			r.scenario.BlockAroundTheSet(11, r.scenario.PoolA)
-		}, "block"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			guard := statedrain.NewTripGuard()
-			r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, true)
-			r.write()
-			tc.corrupt(r)
-			src := rewardBlocksDrainSource{r: r}
-			var entries []statedrain.Entry
-			for _, e := range statedrain.Graduated(src) {
-				if e.Family == nodesettings.FamilyRewardBlocksFees {
-					entries = append(entries, e)
-				}
-			}
-			err := statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{r.scenario.DB, r.scenario.DrainFamilies},
-				Set:   src, Guard: guard, VerifyBeforeDrain: true,
-			}, entries)
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, err, tc.want)
-			mask, err := r.scenario.DB.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyRewardBlocksFees))
-			raw, err := dbtest.RawSQLiteMetadata(t, r.scenario.DB)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, "imported_pool_block_count"))
-		})
-	}
-}
-
 // With the family drained and the set holding no rows for it, the reward
 // round's fee read fails rather than answer from the emptied tables.
 func TestRewardBlockFeesFailWhenTheDrainedSetHasNoRows(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	r.write()
 	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
 		t.Context(), nodesettings.FamilyRewardBlocksFees,
@@ -460,11 +258,4 @@ func (s rewardBlocksDrainSource) Tip() (ocommon.Point, bool, error) {
 
 func (s rewardBlocksDrainSource) Loaded(f nodesettings.Family) (bool, error) {
 	return ledger.FamilyLoaded(f, s.r.set)
-}
-
-func (s rewardBlocksDrainSource) Verify(
-	ctx context.Context,
-	f nodesettings.Family,
-) error {
-	return ledger.VerifyFamily(ctx, f, dbadapter.New(s.r.scenario.DB), s.r.set)
 }

@@ -31,9 +31,11 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -69,7 +71,7 @@ func seedStakeCredentialUtxos(
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		adapter.ledgerState.Database().CreateAccount(
+		adapter.db().CreateAccount(
 			context.Background(),
 			nil,
 			&models.Account{StakingKey: stakeKey, Active: true},
@@ -208,10 +210,7 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Parallel()
 
-	adapter, raw, db := newDBBackedAdapterWithStorageMode(
-		t,
-		types.StorageModeAPI,
-	)
+	adapter, raw, db := newDBBackedAdapter(t)
 
 	payment := bytes.Repeat([]byte{0x99}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -332,6 +331,7 @@ func TestNodeAdapterAddressUTXOsDescendingPageStopsAtRequestedWindow(t *testing.
 				TxId:       txHash,
 				OutputIdx:  0,
 				PaymentKey: payment,
+				Address:    []byte(addr.String()),
 				AddedSlot:  uint64(i) + 1,
 				Amount:     types.Uint64(amount),
 			}},
@@ -382,6 +382,7 @@ func TestNodeAdapterAddressUTXOsStopsAfterRequestedWindow(t *testing.T) {
 				TxId:       txHash,
 				OutputIdx:  0,
 				PaymentKey: payment,
+				Address:    []byte(addr.String()),
 				AddedSlot:  uint64(i) + 1,
 				Amount:     types.Uint64(1_000_000),
 			}},
@@ -423,7 +424,7 @@ func TestNodeAdapterAssetAddressesHonorsCancellation(t *testing.T) {
 func TestNodeAdapterAssetAddressesHydratesCompleteAssets(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
+	adapter, store, db := newDBBackedAdapter(t)
 	payment := bytes.Repeat([]byte{0x35}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -575,10 +576,6 @@ VALUES (?, 1, 0, '1', 0, FALSE)`)
 INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
 	require.NoError(t, err)
 	defer addressStmt.Close()
-	assetStmt, err := txn.Prepare(`
-INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
-	require.NoError(t, err)
-	defer assetStmt.Close()
 	for i := range addresses {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
@@ -588,8 +585,9 @@ INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
 		require.NoError(t, err)
 		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
 		require.NoError(t, err)
-		_, err = assetStmt.Exec(assetName, policyID, utxoID, amounts[i])
-		require.NoError(t, err)
+		testutil.InsertAssetHolding(
+			t, txn, utxoID, policyID, assetName, amounts[i],
+		)
 	}
 	require.NoError(t, txn.Commit())
 }
@@ -737,7 +735,7 @@ func TestNodeAdapterAssetAddressesRejectsQuantityOverflow(t *testing.T) {
 func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
+	adapter, store, db := newDBBackedAdapter(t)
 
 	payment := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -818,38 +816,43 @@ func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
 	assert.Equal(t, addresses[3], holders[1].Address)
 }
 
-// newDBBackedAdapter builds a NodeAdapter over a real, in-package LedgerState
-// backed by an on-disk (temp-dir) database, plus the sqlite metadata store so
-// tests can insert transaction/block rows directly. A CardanoNodeConfig is
-// optional; callers supply one when exercising network-specific behavior.
-func newDBBackedAdapter(
-	t *testing.T,
-	nodeConfig ...*cardano.CardanoNodeConfig,
-) (*NodeAdapter, *sql.DB, *database.Database) {
-	return newDBBackedAdapterWithStorageMode(
-		t,
-		types.StorageModeCore,
-		nodeConfig...,
-	)
+// adapterFixture is a NodeAdapter on the composition a node serves its APIs
+// from: a LedgerState over a core consensus database and a live UTxO set, and
+// an IndexerDB over that database's blob store.
+//
+// The fixture stands in for the indexer writer. It seeds the rows the adapter
+// reads into the IndexerDB, through indexerDB or raw, and records the
+// position they cover with setIndexerTip, above which the adapter answers
+// nothing. Blocks go into the consensus database,
+// adapter.ledgerState.Database(), and the unspent outputs the ledger itself
+// resolves into utxoSet.
+type adapterFixture struct {
+	adapter   *NodeAdapter
+	raw       *sql.DB
+	indexerDB *database.Database
+	utxoSet   *livesettest.Mem
 }
 
-func newDBBackedAdapterWithStorageMode(
+func newAdapterFixture(
 	t *testing.T,
-	storageMode string,
+	opts dbtest.IndexerOptions,
 	nodeConfig ...*cardano.CardanoNodeConfig,
-) (*NodeAdapter, *sql.DB, *database.Database) {
+) *adapterFixture {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     t.TempDir(),
-		StorageMode: storageMode,
+	consensus, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-
-	cm, err := chain.NewManager(context.Background(), db, nil)
+	indexerDB, err := dbtest.NewIndexerDatabase(t, consensus, opts)
 	require.NoError(t, err)
 
+	cm, err := chain.NewManager(context.Background(), consensus, nil)
+	require.NoError(t, err)
+
+	utxoSet := livesettest.New()
 	lsConfig := ledger.LedgerStateConfig{
-		Database:     db,
+		Database:     consensus,
+		UtxoSet:      utxoSet,
 		ChainManager: cm,
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
@@ -859,13 +862,110 @@ func newDBBackedAdapterWithStorageMode(
 	ls, err := ledger.NewLedgerState(lsConfig)
 	require.NoError(t, err)
 
-	adapter, err := NewNodeAdapter(ls, nil)
+	store, err := indexerdb.NewStore(indexerDB, indexerDB, 0)
+	require.NoError(t, err)
+	adapter, err := NewNodeAdapter(ls, nil, store)
 	require.NoError(t, err)
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	raw, err := dbtest.RawSQLiteMetadata(t, indexerDB)
 	require.NoError(t, err)
 
-	return adapter, raw, db
+	return &adapterFixture{
+		adapter:   adapter,
+		raw:       raw,
+		indexerDB: indexerDB,
+		utxoSet:   utxoSet,
+	}
+}
+
+// newDBBackedAdapter returns an adapterFixture's adapter, the SQLite handle
+// of its IndexerDB and the IndexerDB. A CardanoNodeConfig is optional;
+// callers supply one when exercising network-specific behavior.
+func newDBBackedAdapter(
+	t *testing.T,
+	nodeConfig ...*cardano.CardanoNodeConfig,
+) (*NodeAdapter, *sql.DB, *database.Database) {
+	t.Helper()
+	return newDBBackedAdapterWithIndexer(
+		t, dbtest.IndexerOptions{}, nodeConfig...,
+	)
+}
+
+// newDBBackedAdapterWithIndexer is newDBBackedAdapter with the IndexerDB
+// opened from opts.
+func newDBBackedAdapterWithIndexer(
+	t *testing.T,
+	opts dbtest.IndexerOptions,
+	nodeConfig ...*cardano.CardanoNodeConfig,
+) (*NodeAdapter, *sql.DB, *database.Database) {
+	t.Helper()
+	fx := newAdapterFixture(t, opts, nodeConfig...)
+	return fx.adapter, fx.raw, fx.indexerDB
+}
+
+// setIndexerTip records tip as the position the IndexerDB's rows cover, as
+// the indexer writer does in the transaction that writes them.
+func setIndexerTip(t *testing.T, adapter *NodeAdapter, tip ochainsync.Tip) {
+	t.Helper()
+	store := adapter.indexer
+	require.NoError(t, store.Database().Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			return store.SetTip(indexerdb.Tip{
+				Slot:        tip.Point.Slot,
+				BlockNumber: tip.BlockNumber,
+				Hash:        tip.Point.Hash,
+			}, txn)
+		},
+	))
+}
+
+// setIndexedThrough records block as the IndexerDB tip.
+func setIndexedThrough(t *testing.T, adapter *NodeAdapter, block gledger.Block) {
+	t.Helper()
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			block.SlotNumber(), block.Hash().Bytes(),
+		),
+		BlockNumber: block.BlockNumber(),
+	})
+}
+
+// setChainTip puts the ledger and the IndexerDB at tip: an indexer that has
+// caught up with the ledger.
+func setChainTip(t *testing.T, adapter *NodeAdapter, tip ochainsync.Tip) {
+	t.Helper()
+	adapter.ledgerState.SetTipForTesting(tip)
+	setIndexerTip(t, adapter, tip)
+}
+
+// seedEpochs stores epochs [from, to) of 86400 one-second slots in the
+// consensus database, where the ledger's epoch cache loads them from, and in
+// the IndexerDB, where the adapter's SQL reads them, and reloads the cache.
+func seedEpochs(
+	t *testing.T,
+	adapter *NodeAdapter,
+	raw *sql.DB,
+	from uint64,
+	to uint64,
+) {
+	t.Helper()
+	ledgerRaw, err := dbtest.RawSQLiteMetadata(
+		t, adapter.ledgerState.Database(),
+	)
+	require.NoError(t, err)
+	for _, store := range []*sql.DB{ledgerRaw, raw} {
+		for epoch := from; epoch < to; epoch++ {
+			_, err := store.Exec(
+				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (?, ?, 86400, 1000, 6)`,
+				epoch, epoch*86400,
+			)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(
+		t,
+		adapter.ledgerState.PrepareEpochCacheForStartup(t.Context()),
+	)
 }
 
 // sqlExecer is satisfied by both *sql.DB and *sql.Tx, so a fixture that
@@ -924,16 +1024,10 @@ INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
-		_, err = raw.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, ?)`,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			utxoID,
+		testutil.InsertAssetHolding(
+			t, raw, utxoID, asset.PolicyId, asset.Name,
 			strconv.FormatUint(uint64(asset.Amount), 10),
 		)
-		require.NoError(t, err)
 	}
 }
 
@@ -1079,7 +1173,7 @@ func inSQLTransaction(t *testing.T, raw *sql.DB, seed func(tx *sql.Tx)) {
 func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
+	adapter, store, db := newDBBackedAdapter(t)
 
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	wantAddr := testPointerAddress(t, paymentHash, 0x01)
@@ -1213,6 +1307,7 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 			TxId:          txHash,
 			OutputIdx:     0,
 			PaymentKey:    paymentHash,
+			Address:       []byte(addresses[i].String()),
 			AddedSlot:     uint64(i + 1),
 			Amount:        types.Uint64((i + 1) * 1_000_000),
 		})
@@ -1353,7 +1448,7 @@ func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
 func TestNodeAdapterNextBlockHash(t *testing.T) {
 	t.Parallel()
 
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 
 	// Three consecutive blocks at Cardano heights 0, 1, 2. Dingo's blob index
 	// is 1-based (BlockInitialIndex), so height H lives at index H+1.
@@ -1363,7 +1458,7 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 		2: fill32(0x12),
 	}
 	for height := uint64(0); height <= 2; height++ {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash:   hashes[height],
 			Slot:   height * 10,
 			Number: height,
@@ -1393,7 +1488,7 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	assert.Nil(t, next)
 
 	// A successor after a gap in the ID space is the next indexed block.
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash: fill32(0x18), Slot: 80, Number: 8, ID: 8, Cbor: []byte{8},
 	}, nil))
 	next, err = adapter.nextBlockHash(
@@ -1408,24 +1503,18 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 
 func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash: fill32(byte(block.height)), Slot: block.slot,
 			Number: block.height, ID: block.height * 10,
 			Type: 0, Cbor: []byte{byte(block.height)},
 		}, nil))
 	}
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(30, fill32(3)),
-				BlockNumber: 3,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, fill32(3)),
+		BlockNumber: 3,
+	})
 
 	bound, ok, err := adapter.resolveBlockRangeBound(
 		context.Background(), &BlockRangePosition{Block: 2}, false,
@@ -1472,7 +1561,7 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		{height: 3, slot: 30, hash: fill32(0x43), txHash: fill32(0x53)},
 	}
 	for i, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash: block.hash, Slot: block.slot, Number: block.height,
 			ID:   block.height + database.BlockInitialIndex,
 			Type: 0, Cbor: []byte{byte(block.height)},
@@ -1496,13 +1585,10 @@ INSERT INTO address_transaction (
 ) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
-			require.NoError(t, db.SetTip(
-				ochainsync.Tip{
-					Point:       ocommon.NewPoint(block.slot, block.hash),
-					BlockNumber: block.height,
-				},
-				nil,
-			))
+			setIndexerTip(t, adapter, ochainsync.Tip{
+				Point:       ocommon.NewPoint(block.slot, block.hash),
+				BlockNumber: block.height,
+			})
 		}
 	}
 
@@ -1829,6 +1915,7 @@ func TestNodeAdapterAddressUTXOsFarPastEnd(t *testing.T) {
 		rows, total, err := adapter.AddressUTXOs(t.Context(), addr.String(), params)
 		require.NoError(t, err)
 		require.Empty(t, rows)
-		require.Zero(t, total)
+		// An offset past the end leaves the address index's total unknown.
+		require.Equal(t, -1, total)
 	}
 }

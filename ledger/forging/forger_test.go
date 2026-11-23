@@ -3365,12 +3365,13 @@ func (b *forgerTestBlock) Cbor() []byte     { return b.cbor }
 func (b *forgerTestBlock) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 type forgerTestLeiosChecker struct {
-	calls       int
-	allowed     bool
-	reason      string
-	err         error
-	callback    func() error
-	callbackErr error
+	prepareCallback func(uint64) (bool, string, error)
+	calls           int
+	allowed         bool
+	reason          string
+	err             error
+	callback        func() error
+	callbackErr     error
 }
 
 type forgerTestConfirmedTxRemover struct {
@@ -3503,6 +3504,13 @@ func TestCheckAndForgeProductionProceedsWithoutUpstreamFrontier(t *testing.T) {
 	assert.Equal(t, 1, broadcaster.calls)
 }
 
+func (c *forgerTestLeiosChecker) MayPrepareEndorserBlock(slot uint64) (bool, string, error) {
+	if c.prepareCallback != nil {
+		return c.prepareCallback(slot)
+	}
+	return c.allowed, c.reason, c.err
+}
+
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
 	uint64,
 ) (bool, string, error) {
@@ -3521,6 +3529,7 @@ type forgerTestLeiosCaster struct {
 	hash     []byte
 	cbor     []byte
 	txBodies [][]byte
+	err      error
 }
 
 func (c *forgerTestLeiosCaster) BroadcastEndorserBlock(
@@ -3533,7 +3542,7 @@ func (c *forgerTestLeiosCaster) BroadcastEndorserBlock(
 	c.hash = append([]byte(nil), hash...)
 	c.cbor = append([]byte(nil), cbor...)
 	c.txBodies = append([][]byte(nil), txBodies...)
-	return nil
+	return c.err
 }
 
 type forgerTestMempoolProvider struct {

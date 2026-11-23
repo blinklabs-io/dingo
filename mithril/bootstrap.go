@@ -291,9 +291,9 @@ type BootstrapResult struct {
 	// AncillaryVerified reports that the ancillary tree's contents were checked
 	// against the signed ancillary manifest (a verified v2 bootstrap).
 	//
-	// The ledger-state import accepts a verified tree's state even when it is
-	// newer than the certified tip, and refuses a verified tree that yields no
-	// state at all.
+	// Only a verified tree contributes the immutable file after the certified
+	// tip to the ImmutableDB. Its ledger state is loaded at or below the last
+	// block the import stored, never above it.
 	AncillaryVerified bool
 	// CertificateVerified reports that the bootstrap was asked to verify the
 	// certificate chain, so a missing ancillary tree is a verification failure

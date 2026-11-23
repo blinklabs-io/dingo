@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -83,7 +82,7 @@ func (h *liveStakeHarness) requireAccountListReads(
 // reap and a rollback, and requires every answer to be the store's.
 func TestAccountListReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	h := newLiveStakeHarnessWithReads(t, false, ledger.UtxoSetReadsSet)
+	h := newLiveStakeHarnessWithReads(t, false, "set")
 	reached, _ := h.scenario.HideStoreReads(accountListReadNames...)
 	h.scenario.ApplyBoundary()
 	drepKey := bytes.Repeat([]byte{0x5d}, 28)
@@ -107,9 +106,6 @@ func TestAccountListReadsFromTheLiveUtxoSet(t *testing.T) {
 		reached(),
 		"an account list read reached the metadata store",
 	)
-	verified, mismatches := h.scenario.AccountReads()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
 // TestAccountListReadsSeeTheirTransactionsStagedAccountsInSetMode requires the
@@ -119,7 +115,7 @@ func TestAccountListReadsSeeTheirTransactionsStagedAccountsInSetMode(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newLiveStakeHarnessWithReads(t, false, ledger.UtxoSetReadsSet)
+	h := newLiveStakeHarnessWithReads(t, false, "set")
 	reached, _ := h.scenario.HideStoreReads(accountListReadNames...)
 	script := bytes.Repeat([]byte{0x74}, 28)
 	creds, count := h.scenario.RegisterCredentialInsideTxn(1, script, h.pool)

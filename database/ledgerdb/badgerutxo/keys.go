@@ -37,6 +37,11 @@ const (
 	EpochTag = 'e'
 	// SnapshotTag keys pool stake snapshot rows: s <epoch:8 BE> ...
 	SnapshotTag = 's'
+	// SnapshotSlotTag keys the pool stake snapshot capture index:
+	// $ <captured slot:8 BE> <epoch:8 BE> <len:1> <type> <pool>, with no
+	// value. The key after the slot is the row's key under SnapshotTag, so a
+	// range of capture slots reads exactly the rows captured in it.
+	SnapshotSlotTag = '$'
 	// SummaryTag keys epoch summary rows: f <epoch:8 BE>.
 	SummaryTag = 'f'
 	// NetworkStateTag keys treasury and reserves rows: t <slot:8 BE>.
@@ -217,6 +222,9 @@ var (
 	// account-only journal key, which are reloaded rather than read.
 	accountsKey       = []byte("maccounts2")
 	legacyAccountsKey = []byte("maccounts")
+	// accountInactivityActivationKey is set once legacy account rows and
+	// their retained journal states carry CIP-0163 activation provenance.
+	accountInactivityActivationKey = []byte("maccountact")
 	// epochStateKey is set once the store holds every epoch and pool stake
 	// snapshot row up to its tip. legacyEpochStateKey marked rows without an
 	// era field, which are reloaded rather than read. eraSwitchKey holds the
@@ -224,6 +232,11 @@ var (
 	epochStateKey       = []byte("mepoch2")
 	legacyEpochStateKey = []byte("mepoch")
 	eraSwitchKey        = []byte("mera")
+	// snapshotSlotsKey is set once every pool stake snapshot row carries its
+	// capture slot and has its SnapshotSlotTag entry. Rows written before
+	// the index existed have neither; a store without the marker reads the
+	// rows by their values and indexes them at the next epoch state load.
+	snapshotSlotsKey = []byte("msnapslot")
 	// pparamsKey is set once the store holds every protocol parameter row
 	// up to its tip. pparamsSeqKey holds the next protocol parameter
 	// sequence number.

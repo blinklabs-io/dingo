@@ -36,7 +36,7 @@ func newOpCertExistsHarness(t *testing.T) (
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -80,17 +80,11 @@ func TestOpCertExistenceReadAgreesWithTheLiveUtxoSet(t *testing.T) {
 	for _, slot := range unobserved {
 		require.False(t, existsAt(t, ldb, store, slot), "slot %d", slot)
 	}
-	verified, mismatches := scenario.OpCertReads()
-	require.Equal(t, float64(len(observed)+len(unobserved)), verified)
-	require.Zero(t, mismatches)
 
 	scenario.RollbackBeforeBoundary()
 	require.True(t, existsAt(t, ldb, store, slots.Base))
 	require.False(t, existsAt(t, ldb, store, slots.Raised),
 		"the rollback undoes the observations after its target")
-	verified, mismatches = scenario.OpCertReads()
-	require.Equal(t, float64(len(observed)+len(unobserved)+2), verified)
-	require.Zero(t, mismatches)
 }
 
 // TestOpCertExistenceReadSeesItsTransactionsStagedObservation requires the
@@ -101,21 +95,18 @@ func TestOpCertExistenceReadSeesItsTransactionsStagedObservation(t *testing.T) {
 	scenario, _, _ := newOpCertExistsHarness(t)
 	pool := bytes.Repeat([]byte{0x46}, 28)
 	require.True(t, scenario.OpCertObservedInsideTxn(pool, 3, 77))
-	verified, mismatches := scenario.OpCertReads()
-	require.Equal(t, float64(1), verified)
-	require.Zero(t, mismatches, "the set sees the staged observation")
 }
 
-// TestOpCertExistenceReadSkipsSlotsBeforeTheSetsRecord requires a slot the
-// set has no record of, because it loaded the counters after it, to be left
-// to the metadata store.
-func TestOpCertExistenceReadSkipsSlotsBeforeTheSetsRecord(t *testing.T) {
+// TestOpCertExistenceReadBeforeTheSetsRecordUsesItsBaseline requires a slot
+// before the set's record to be answered from the counters the set was
+// loaded with, which were last observed after it.
+func TestOpCertExistenceReadBeforeTheSetsRecordUsesItsBaseline(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x44}, 28))
@@ -127,34 +118,27 @@ func TestOpCertExistenceReadSkipsSlotsBeforeTheSetsRecord(t *testing.T) {
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	ldb := scenario.LedgerDB()
 
-	require.True(t, existsAt(t, ldb, store, 100))
-	verified, mismatches := scenario.OpCertReads()
-	require.Zero(t, verified, "the set holds the counter as of slot 200 only")
-	require.Zero(t, mismatches)
+	ok, err := ldb.PoolOpCertSequencesExistAtSlot(t.Context(), 100, nil)
+	require.NoError(t, err)
+	require.False(t, ok)
 	require.True(t, existsAt(t, ldb, store, 200))
 	require.False(t, existsAt(t, ldb, store, 250))
-	verified, mismatches = scenario.OpCertReads()
-	require.Equal(t, float64(2), verified)
-	require.Zero(t, mismatches)
 }
 
-// TestOpCertExistenceVerificationCountsADivergence requires a verify-mode
-// read to count a mismatch when the metadata store holds an observation the
-// set does not.
-func TestOpCertExistenceVerificationCountsADivergence(t *testing.T) {
+// TestOpCertExistenceReadUsesSetStateAfterAnUntrackedObservation pins the
+// set result when a counter observation exists only in metadata.
+func TestOpCertExistenceReadUsesSetStateAfterAnUntrackedObservation(t *testing.T) {
 	t.Parallel()
 	scenario, _, store := newOpCertExistsHarness(t)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x45}, 28))
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(
 		t,
 		store.UpdatePoolOpCertSequence(t.Context(), pool, 9, 10, nil),
 	)
+	reached, _ := scenario.HideStoreReads("PoolOpCertSequencesExistAtSlot")
 	ok, err := scenario.LedgerDB().
 		PoolOpCertSequencesExistAtSlot(t.Context(), 10, nil)
 	require.NoError(t, err)
-	require.True(t, ok, "the read answers from the metadata store")
-	verified, mismatches := scenario.OpCertReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.False(t, ok)
+	require.Zero(t, reached(), "op-cert read reached the metadata store")
 }

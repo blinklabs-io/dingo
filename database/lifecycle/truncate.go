@@ -608,7 +608,7 @@ func checkTruncateTarget(
 	// read must fail the truncate closed rather than being silently
 	// treated as "no boundary recorded" and letting an unverifiable
 	// truncate through.
-	mithrilFloor, err = db.MithrilTrustBoundarySlotStrict(nil)
+	mithrilFloor, err = db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return models.Block{}, 0, false, fmt.Errorf(
 			"%w: could not verify Mithril trust boundary: %w",
@@ -720,7 +720,7 @@ func CheckTruncate(
 	} else if noop {
 		return nil
 	}
-	if err := cfg.checkUtxoSet(target); err != nil {
+	if err := cfg.checkUtxoSet(ctx, db, target); err != nil {
 		return fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
 	}
 	return nil
@@ -823,7 +823,7 @@ func Truncate(
 		return 0, nil
 	}
 
-	if err := cfg.checkUtxoSet(target); err != nil {
+	if err := cfg.checkUtxoSet(ctx, db, target); err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
 	}
 
@@ -888,7 +888,7 @@ func checkPendingMithrilFloor(
 				"finish it before resuming the pending truncate",
 		)
 	}
-	floor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	floor, err := db.ImportedLedgerStateBoundarySlotStrict(nil)
 	if err != nil {
 		return fmt.Errorf(
 			"truncate: could not verify Mithril trust boundary: %w", err,
@@ -915,10 +915,10 @@ func finishPendingTruncate(
 	delegatorInactivity uint64,
 	cfg truncateConfig,
 ) (uint64, error) {
-	if err := cfg.rollBackUtxoSet(ocommon.Point{
+	if err := cfg.rollBackUtxoSet(ctx, db, ocommon.Point{
 		Slot: pending.TargetSlot,
 		Hash: pending.TargetHash,
-	}); err != nil {
+	}, pending.TargetID); err != nil {
 		return 0, fmt.Errorf("truncate: %w", err)
 	}
 	// Everything above this point is read-only validation; DeleteBlocksAfter
@@ -948,115 +948,13 @@ func finishPendingTruncate(
 		Slot: pending.TargetSlot,
 		Hash: pending.TargetHash,
 	}
-	// CIP-0163: collect the reward-account credentials witnessed in the
-	// truncated-away blocks (added_slot > target.Slot) before
-	// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
-	// their rows, then recompute their expiration_epoch against the
-	// surviving chain once TruncateAfterSlot has restored account state.
-	// Both must run in the same write transaction as TruncateAfterSlot --
-	// this is the exact same CIP-0163 bookkeeping
-	// ledger.LedgerState.rollback applies for a normal (security-
-	// parameter-bounded) rollback; skipping it here would leave a
-	// CIP-0163-enabled network with incorrect stake/reward/DRep
-	// calculations after any offline or live truncate, since rolled-away
-	// activity could leave expiration_epoch renewed past what the
-	// surviving chain actually witnessed.
 	txn := db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
-		var affectedRefs []models.StakeCredentialRef
-		if delegatorInactivityEnabled {
-			var affErr error
-			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
-				ctx,
-				point.Slot,
-				txn,
-			)
-			if affErr != nil {
-				return fmt.Errorf(
-					"collect truncated-away witnessed accounts: %w",
-					affErr,
-				)
-			}
-		}
-		newTip, _, err := db.TruncateAfterSlot(
-			ctx,
-			point,
-			pending.MithrilFloor,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("truncate metadata: %w", err)
-		}
-		metadataStore := db.Metadata()
-		metadataTxn := txn.Metadata()
-		if err := metadataStore.DeleteMidnightAriadneRollbacksAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
+		if err := rewindMetadata(
+			ctx, db, txn, point, pending.MithrilFloor,
+			delegatorInactivityEnabled, delegatorInactivity,
 		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight Ariadne rollback journals: %w",
-				err,
-			)
-		}
-		if err := metadataStore.DeleteMidnightCandidateRemovalsAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
-		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight candidate removal journals: %w",
-				err,
-			)
-		}
-		if err := metadataStore.DeleteMidnightEpochTransitionsAfterBlock(
-			metadataTxn,
-			newTip.BlockNumber,
-		); err != nil {
-			return fmt.Errorf(
-				"truncate: delete Midnight epoch transition journals: %w",
-				err,
-			)
-		}
-		checkpoint, err := metadataStore.GetBackfillCheckpoint(
-			"midnight",
-			metadataTxn,
-		)
-		if err != nil {
-			return fmt.Errorf("truncate: read Midnight backfill checkpoint: %w", err)
-		}
-		if checkpoint != nil && checkpoint.LastSlot > point.Slot {
-			checkpoint.LastSlot = point.Slot
-			checkpoint.TotalSlots = 0
-			checkpoint.Completed = false
-			if err := metadataStore.SetBackfillCheckpoint(
-				checkpoint,
-				metadataTxn,
-			); err != nil {
-				return fmt.Errorf("truncate: rewind Midnight backfill checkpoint: %w", err)
-			}
-		}
-		if err := database.RecomputeAccountExpirationsAfterTruncate(
-			ctx,
-			db,
-			txn,
-			delegatorInactivityEnabled,
-			delegatorInactivity,
-			point.Slot,
-			affectedRefs,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute account expirations after truncate: %w",
-				err,
-			)
-		}
-		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
-			db,
-			txn,
-			point.Slot,
-		); err != nil {
-			return fmt.Errorf(
-				"recompute synthetic PlutusV2 cost model marker after truncate: %w",
-				err,
-			)
+			return err
 		}
 		if err := db.LowerRollbackHighWater(pending.TargetID, txn); err != nil {
 			return fmt.Errorf("truncate: %w", err)
@@ -1070,6 +968,129 @@ func finishPendingTruncate(
 		return 0, fmt.Errorf("truncate: %w", err)
 	}
 	return blocksDeleted, nil
+}
+
+// rewindMetadata reverts the metadata store to point inside txn: the sweep an
+// operator truncate and the rewind of a released database share.
+//
+// CIP-0163: it collects the reward-account credentials witnessed in the
+// truncated-away blocks (added_slot > target.Slot) before
+// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
+// their rows, then recompute their expiration_epoch against the
+// surviving chain once TruncateAfterSlot has restored account state.
+// Both must run in the same write transaction as TruncateAfterSlot --
+// this is the exact same CIP-0163 bookkeeping
+// ledger.LedgerState.rollback applies for a normal (security-
+// parameter-bounded) rollback; skipping it here would leave a
+// CIP-0163-enabled network with incorrect stake/reward/DRep
+// calculations after any offline or live truncate, since rolled-away
+// activity could leave expiration_epoch renewed past what the
+// surviving chain actually witnessed.
+func rewindMetadata(
+	ctx context.Context,
+	db *database.Database,
+	txn *database.Txn,
+	point ocommon.Point,
+	mithrilFloor uint64,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
+) error {
+	var affectedRefs []models.StakeCredentialRef
+	if delegatorInactivityEnabled {
+		var affErr error
+		affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
+			ctx,
+			point.Slot,
+			txn,
+		)
+		if affErr != nil {
+			return fmt.Errorf(
+				"collect truncated-away witnessed accounts: %w",
+				affErr,
+			)
+		}
+	}
+	newTip, _, err := db.TruncateAfterSlot(
+		ctx,
+		point,
+		mithrilFloor,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("truncate metadata: %w", err)
+	}
+	metadataStore := db.Metadata()
+	metadataTxn := txn.Metadata()
+	if err := metadataStore.DeleteMidnightAriadneRollbacksAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight Ariadne rollback journals: %w",
+			err,
+		)
+	}
+	if err := metadataStore.DeleteMidnightCandidateRemovalsAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight candidate removal journals: %w",
+			err,
+		)
+	}
+	if err := metadataStore.DeleteMidnightEpochTransitionsAfterBlock(
+		metadataTxn,
+		newTip.BlockNumber,
+	); err != nil {
+		return fmt.Errorf(
+			"truncate: delete Midnight epoch transition journals: %w",
+			err,
+		)
+	}
+	checkpoint, err := metadataStore.GetBackfillCheckpoint(
+		"midnight",
+		metadataTxn,
+	)
+	if err != nil {
+		return fmt.Errorf("truncate: read Midnight backfill checkpoint: %w", err)
+	}
+	if checkpoint != nil && checkpoint.LastSlot > point.Slot {
+		checkpoint.LastSlot = point.Slot
+		checkpoint.TotalSlots = 0
+		checkpoint.Completed = false
+		if err := metadataStore.SetBackfillCheckpoint(
+			checkpoint,
+			metadataTxn,
+		); err != nil {
+			return fmt.Errorf("truncate: rewind Midnight backfill checkpoint: %w", err)
+		}
+	}
+	if err := database.RecomputeAccountExpirationsAfterTruncate(
+		ctx,
+		db,
+		txn,
+		delegatorInactivityEnabled,
+		delegatorInactivity,
+		point.Slot,
+		affectedRefs,
+	); err != nil {
+		return fmt.Errorf(
+			"recompute account expirations after truncate: %w",
+			err,
+		)
+	}
+	if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+		db,
+		txn,
+		point.Slot,
+	); err != nil {
+		return fmt.Errorf(
+			"recompute synthetic PlutusV2 cost model marker after truncate: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // TruncateUtxoSet is a live UTxO set that Truncate keeps in step with the
@@ -1087,6 +1108,16 @@ type TruncateUtxoSet interface {
 	RollbackTo(point ocommon.Point) error
 }
 
+// TruncateCheckpoints is a live UTxO set that keeps checkpoints of itself.
+// Truncate uses them for a target below the set's journal: the set is left as
+// it is, and the next start restores the newest checkpoint at or below the
+// ledger's tip and has the ledger replay its stored blocks from there.
+type TruncateCheckpoints interface {
+	// CheckpointPoints lists the tips of the set's checkpoints, newest
+	// first.
+	CheckpointPoints() ([]ocommon.Point, error)
+}
+
 // TruncateOption configures Truncate.
 type TruncateOption func(*truncateConfig)
 
@@ -1100,9 +1131,56 @@ func WithTruncateUtxoSet(set TruncateUtxoSet) TruncateOption {
 	return func(cfg *truncateConfig) { cfg.utxoSet = set }
 }
 
-// checkUtxoSet refuses a target the set cannot be rolled back to. A set at
-// or behind target needs no rollback: startup resumes it from its own tip.
-func (c truncateConfig) checkUtxoSet(target models.Block) error {
+// restorableCheckpoint reports whether a checkpoint of the set at or below
+// target lies on the chain target ends, and returns the slot of every
+// checkpoint whose block the chain stores, newest first. A checkpoint of
+// another fork cannot seed a replay of this chain.
+func (c truncateConfig) restorableCheckpoint(
+	ctx context.Context,
+	db *database.Database,
+	target ocommon.Point,
+	targetID uint64,
+) (ok bool, slots []uint64, err error) {
+	cps, isCheckpointed := c.utxoSet.(TruncateCheckpoints)
+	if !isCheckpointed {
+		return false, nil, nil
+	}
+	points, err := cps.CheckpointPoints()
+	if err != nil {
+		return false, nil, fmt.Errorf(
+			"list live UTxO set checkpoints: %w", err,
+		)
+	}
+	for _, p := range points {
+		block, err := database.BlockByHash(ctx, db, p.Hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return false, nil, fmt.Errorf(
+				"look up checkpoint block: %w", err,
+			)
+		}
+		if block.Slot != p.Slot {
+			continue
+		}
+		slots = append(slots, p.Slot)
+		if !ok && block.ID <= targetID && p.Slot <= target.Slot {
+			ok = true
+		}
+	}
+	return ok, slots, nil
+}
+
+// checkUtxoSet refuses a target the set cannot be brought to. A set at or
+// behind target needs no rollback: startup resumes it from its own tip. A set
+// ahead of target rolls back from its journal, or, below the journal, is
+// restored from a checkpoint at or below target.
+func (c truncateConfig) checkUtxoSet(
+	ctx context.Context,
+	db *database.Database,
+	target models.Block,
+) error {
 	if c.utxoSet == nil {
 		return nil
 	}
@@ -1123,20 +1201,51 @@ func (c truncateConfig) checkUtxoSet(target models.Block) error {
 	if can {
 		return nil
 	}
+	restorable, slots, err := c.restorableCheckpoint(
+		ctx, db, ocommon.Point{Slot: target.Slot, Hash: target.Hash}, target.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if restorable {
+		return nil
+	}
 	floor, _, err := c.utxoSet.JournalFloor()
 	if err != nil {
 		return fmt.Errorf("read live UTxO set journal floor: %w", err)
 	}
+	// A target between the journal floor and the tip that the journal
+	// cannot reach is a point off the set's chain, not a depth problem.
+	if target.Slot >= floor.Slot {
+		return fmt.Errorf(
+			"target slot %d is not a point the live UTxO set's journal "+
+				"holds (journal floor slot %d, set tip slot %d)",
+			target.Slot, floor.Slot, tip.Slot,
+		)
+	}
+	earliest := floor.Slot
+	for _, s := range slots {
+		earliest = min(earliest, s)
+	}
 	return fmt.Errorf(
 		"target slot %d is below the live UTxO set's journal floor (slot %d, "+
-			"set tip slot %d); the set holds no earlier state to roll back "+
-			"to -- choose a target at or above the floor",
-		target.Slot, floor.Slot, tip.Slot,
+			"set tip slot %d) and no checkpoint of this chain is at or below "+
+			"it; the earliest reachable slot is %d",
+		target.Slot, floor.Slot, tip.Slot, earliest,
 	)
 }
 
-// rollBackUtxoSet rolls the set back to point when it is ahead of it.
-func (c truncateConfig) rollBackUtxoSet(point ocommon.Point) error {
+// rollBackUtxoSet rolls the set back to point from its journal when it is
+// ahead of it. A point below the journal that a checkpoint covers is left to
+// the next start, which restores that checkpoint: the truncate's own reads of
+// the set (nonces and epochs by slot) are answered by the set as it is, and a
+// restore here would remove the state those reads need.
+func (c truncateConfig) rollBackUtxoSet(
+	ctx context.Context,
+	db *database.Database,
+	point ocommon.Point,
+	targetID uint64,
+) error {
 	if c.utxoSet == nil {
 		return nil
 	}
@@ -1152,9 +1261,19 @@ func (c truncateConfig) rollBackUtxoSet(point ocommon.Point) error {
 		return fmt.Errorf("check live UTxO set journal: %w", err)
 	}
 	if !can {
+		restorable, _, err := c.restorableCheckpoint(
+			ctx, db, point, targetID,
+		)
+		if err != nil {
+			return err
+		}
+		if restorable {
+			return nil
+		}
 		return fmt.Errorf(
 			"live UTxO set at slot %d cannot be rolled back to slot %d; "+
-				"its journal does not hold that point",
+				"its journal does not hold that point and no checkpoint "+
+				"is at or below it",
 			tip.Slot, point.Slot,
 		)
 	}

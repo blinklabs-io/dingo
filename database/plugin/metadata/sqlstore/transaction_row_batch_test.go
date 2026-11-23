@@ -454,7 +454,7 @@ VALUES (?, ?, ?, 0, 0, TRUE)`, hash, bytes.Repeat([]byte{0xaa}, 32), slot)
 		))
 		require.NoError(t, rows.flush(
 			ctx, newDialectQueryer(store.writeDB, store.dialect.Name()),
-			store.dialect.ParameterLimit(),
+			nil, store.dialect.ParameterLimit(),
 		))
 	}
 	keyInput, err := mockledger.NewSimpleTransactionInput(keyProducer, 0)
@@ -772,20 +772,27 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	}
 	require.Zero(
 		t,
-		tableCounts(t, store, txn, "asset")["asset"],
-		"new UTxO asset rows must remain staged with the transaction batch",
+		tableCounts(t, store, txn, "asset_holding")["asset_holding"],
+		"new UTxO holdings must remain staged with the transaction batch",
 	)
 	require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	require.NoError(t, store.FlushBatch(acc, txn))
-	require.Equal(t, 3, tableCounts(t, store, txn, "asset")["asset"])
+	require.Equal(
+		t, 3,
+		tableCounts(t, store, txn, "asset_holding")["asset_holding"],
+	)
 	require.Equal(t, 3, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	for _, ref := range assets {
-		stored, err := store.GetAssetByPolicyAndName(
+		held, err := store.AssetHeld(
 			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
 		)
 		require.NoError(t, err)
-		require.NotZero(t, stored.ID)
-		require.Equal(t, types.Uint64(7), stored.Amount)
+		require.True(t, held)
+		quantity, err := store.GetAssetQuantityByPolicyAndName(
+			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
+		)
+		require.NoError(t, err)
+		require.Equal(t, uint64(7), quantity)
 	}
 }
 
@@ -1029,7 +1036,7 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 		)
 	}
 	insertsBefore := counterValue(t, reg, "insert")
-	require.NoError(t, rows.flush(ctx, db, parameterLimit))
+	require.NoError(t, rows.flush(ctx, db, nil, parameterLimit))
 	require.Equal(t, float64(2), counterValue(t, reg, "insert")-insertsBefore)
 	require.Equal(t, rowCount, keyWitnessCount(t, store, txn))
 	require.True(t, rows.empty())
@@ -1068,7 +1075,7 @@ func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	rows.add(assetMintBurnShape, txHash, policyID, []byte("second"), []byte("fp2"), uint64(100), "-2", uint32(0))
 	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
 
-	require.NoError(t, rows.flush(ctx, db, store.dialect.ParameterLimit()))
+	require.NoError(t, rows.flush(ctx, db, nil, store.dialect.ParameterLimit()))
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM asset_mint_burn`,
@@ -1182,7 +1189,7 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 		require.NoError(t, batch.flush(
 			context.Background(),
 			newDialectQueryer(recorder, dialect),
-			1000,
+			nil, 1000,
 		))
 		// Each flushed statement leads with its shape's fixed
 		// "-- name:" comment; the translated text below it is unchanged.

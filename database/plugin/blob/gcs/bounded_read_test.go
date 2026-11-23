@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 func TestGetContextLimited(t *testing.T) {
@@ -44,8 +46,21 @@ func TestGetContextLimited(t *testing.T) {
 
 	if _, err := store.GetContextLimited(
 		context.Background(), txn, key, int64(len(want)-1),
-	); err == nil {
-		t.Fatal("oversized value was accepted")
+	); !errors.Is(err, types.ErrBlobTooLarge) {
+		t.Fatalf("oversized read error = %v, want ErrBlobTooLarge", err)
+	}
+
+	// A value staged in the transaction is bounded the same way.
+	write := store.NewTransaction(true)
+	defer write.Rollback() //nolint:errcheck
+	if err := store.Set(write, []byte("staged-read"), want); err != nil {
+		t.Fatalf("stage value: %v", err)
+	}
+	if _, err := store.GetContextLimited(
+		context.Background(), write, []byte("staged-read"),
+		int64(len(want)-1),
+	); !errors.Is(err, types.ErrBlobTooLarge) {
+		t.Fatalf("oversized staged read error = %v, want ErrBlobTooLarge", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

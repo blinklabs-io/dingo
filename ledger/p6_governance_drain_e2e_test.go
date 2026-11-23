@@ -386,7 +386,7 @@ func p6GovernanceRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
@@ -406,7 +406,6 @@ func p6GovernanceRun(
 		run.err = statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies},
 			Set:   drainTestSource{set: set, db: scenario.DB}, Guard: guard,
-			VerifyBeforeDrain: true,
 		}, govEntries(set, scenario.DB))
 		run.drains++
 	}
@@ -556,69 +555,6 @@ func TestGovernanceDrainMatchesAnUndrainedRun(t *testing.T) {
 	}
 }
 
-// A set that differs from the metadata store refuses the drain and leaves
-// the rows.
-func TestGovernanceDrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		corrupt func(*testing.T, *database.Database)
-	}{
-		{"a proposal only the store holds", func(t *testing.T, db *database.Database) {
-			index := uint32(7)
-			require.NoError(t, db.Metadata().SetGovernanceProposal(&models.GovernanceProposal{
-				TxHash: bytes.Repeat([]byte{0xa1}, 32), ActionType: 6,
-				ExpiresEpoch: 99, AnchorURL: "u", AnchorHash: []byte{1},
-				ReturnAddress: []byte{2}, AddedSlot: 3, TxIndex: &index,
-			}, nil))
-		}},
-		{"a lifecycle field only the store holds", func(t *testing.T, db *database.Database) {
-			all, err := db.GetAllGovernanceProposals(t.Context(), nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, all)
-			p := all[0]
-			e, s := uint64(4), uint64(5)
-			p.DroppedEpoch, p.DroppedSlot = &e, &s
-			require.NoError(t, db.Metadata().SetGovernanceProposal(p, nil))
-		}},
-		{"a vote only the store holds", func(t *testing.T, db *database.Database) {
-			all, err := db.GetAllGovernanceProposals(t.Context(), nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, all)
-			require.NoError(t, db.Metadata().SetGovernanceVote(&models.GovernanceVote{
-				ProposalID: all[0].ID, VoterType: models.VoterTypeSPO,
-				VoterCredential: bytes.Repeat([]byte{0xb2}, 28),
-				Vote:            models.VoteYes, AddedSlot: 9,
-			}, nil))
-		}},
-		{"a vote the store changed", func(t *testing.T, db *database.Database) {
-			refs, err := db.GetAllGovernanceVotes(t.Context(), nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, refs)
-			v := refs[0].Vote
-			v.Vote = (v.Vote + 1) % 3
-			updated := uint64(77)
-			v.VoteUpdatedSlot = &updated
-			require.NoError(t, db.Metadata().SetGovernanceVote(&v, nil))
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			run := p6GovernanceRun(t, true, 6, func(db *database.Database) {
-				tc.corrupt(t, db)
-			})
-			require.ErrorIs(t, run.err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, run.err, "differ")
-			mask, err := run.db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyGovernance))
-			raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, "governance_proposal"))
-		})
-	}
-}
-
 // With the family drained and the set not holding it, the LedgerDB fails
 // every read and write rather than answer from the empty SQL tables.
 func TestDrainedGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
@@ -627,7 +563,7 @@ func TestDrainedGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's rows.
 	require.NoError(t, scenario.DB.RecordDrainedFamily(
@@ -688,7 +624,7 @@ func TestDrainedGovernancePinnedReadsSeeTheirSnapshot(t *testing.T) {
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
@@ -696,12 +632,8 @@ func TestDrainedGovernancePinnedReadsSeeTheirSnapshot(t *testing.T) {
 	require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 		Store: drainStore{scenario.DB, scenario.DrainFamilies},
 		Set:   drainTestSource{set: set, db: scenario.DB}, Guard: guard,
-		VerifyBeforeDrain: true,
 	}, govEntries(set, scenario.DB)))
 
-	counts := scenario.SnapshotReadsAfterLaterCommit()
-
-	require.Zero(t, counts.GovernanceMismatches)
 	require.Empty(t, guard.Trips(), "a drained table was read or written")
 	requireNoGovernanceRows(t, scenario.DB)
 }

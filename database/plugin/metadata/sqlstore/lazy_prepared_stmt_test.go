@@ -17,12 +17,15 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -109,27 +112,97 @@ func TestLazyHotStatementsPrepareOnFirstUse(t *testing.T) {
 	require.Same(t, first, second)
 }
 
-// TestLazyHotStatementsSkipTransactionsAndUnknownQueries proves a lazy prepare
-// never runs from a transaction queryer (it would need a second connection
-// from a one-connection pool) and never for a query outside hotStatements; both
-// take the uncached path rather than return a nil statement.
-func TestLazyHotStatementsSkipTransactionsAndUnknownQueries(t *testing.T) {
+func TestLazyHotStatementsSkipUnknownQueries(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStoreLazy(t, true)
 	ctx := context.Background()
-	tx, err := store.writeDB.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	stmt, _, ok := store.borrowStmt(
-		ctx, newDialectQueryer(tx, "sqlite"), sumCredentialUtxoStakeQuery,
-	)
-	require.False(t, ok)
-	require.Nil(t, stmt)
-	require.NoError(t, tx.Rollback())
-	_, _, ok = store.borrowStmt(
+	_, _, ok := store.borrowStmt(
 		ctx, newDialectQueryer(store.writeDB, "sqlite"), "SELECT 1",
 	)
 	require.False(t, ok)
 	require.Zero(t, cachedStmtCount(store))
+}
+
+func TestLazyHotStatementsReuseTransactionWrites(t *testing.T) {
+	t.Parallel()
+	for _, commit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("commit=%t", commit), func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStoreLazy(t, true)
+			txn := store.Transaction(context.Background()).(*sqlTxn)
+			t.Cleanup(func() { require.NoError(t, txn.Rollback()) })
+			hash, nonce := []byte{1}, []byte{2}
+			require.NoError(t, store.SetBlockNonce(hash, 1, nonce, false, txn))
+			store.txStmtMu.Lock()
+			first := store.lazyTxStmts[txn.tx][sqlitequery.SetBlockNonceQuery]
+			store.txStmtMu.Unlock()
+			require.NotNil(t, first, "transaction-only write was not cached")
+			for range 10 {
+				require.NoError(
+					t,
+					store.SetBlockNonce(hash, 1, nonce, true, txn),
+				)
+			}
+			store.txStmtMu.Lock()
+			second := store.lazyTxStmts[txn.tx][sqlitequery.SetBlockNonceQuery]
+			derived := len(store.txStmts[txn.tx])
+			store.txStmtMu.Unlock()
+			require.Same(t, first, second)
+			require.Equal(t, 1, derived, "writes retained redundant statements")
+			require.Zero(t, cachedStmtCount(store))
+			if commit {
+				require.NoError(t, txn.Commit())
+			} else {
+				require.NoError(t, txn.Rollback())
+			}
+			store.txStmtMu.Lock()
+			retained := len(store.lazyTxStmts) + len(store.txStmts)
+			store.txStmtMu.Unlock()
+			require.Zero(
+				t,
+				retained,
+				"finished transaction retained statements",
+			)
+			_, err := first.ExecContext(
+				context.Background(),
+				hash,
+				1,
+				nonce,
+				false,
+			)
+			require.Error(t, err)
+			stored, err := store.GetBlockNonce(ocommon.NewPoint(1, hash), nil)
+			require.NoError(t, err)
+			if commit {
+				require.Equal(t, nonce, stored)
+			} else {
+				require.Empty(t, stored)
+			}
+		})
+	}
+}
+
+func TestLazyTransactionStatementsAfterCancellation(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStoreLazy(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	txn := store.Transaction(ctx).(*sqlTxn)
+	hash, nonce := []byte{1}, []byte{2}
+	require.NoError(t, store.SetBlockNonce(hash, 1, nonce, false, txn))
+	cancel()
+	require.ErrorIs(
+		t, store.SetBlockNonce(hash, 1, nonce, false, txn), context.Canceled,
+	)
+	err := txn.Rollback()
+	require.True(t, err == nil || errors.Is(err, sql.ErrTxDone))
+	store.txStmtMu.Lock()
+	retained := len(store.lazyTxStmts) + len(store.txStmts)
+	store.txStmtMu.Unlock()
+	require.Zero(t, retained)
+	stored, err := store.GetBlockNonce(ocommon.NewPoint(1, hash), nil)
+	require.NoError(t, err)
+	require.Empty(t, stored)
 }
 
 // TestLazyHotStatementsConcurrentFirstUse races first use of one statement and

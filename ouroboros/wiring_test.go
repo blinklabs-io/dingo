@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -204,6 +205,17 @@ func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {
 	require.ErrorContains(t, err, "invalid chainsync capacity")
 }
 
+func TestNewOuroborosRejectsInvalidAdvertiseAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := newWiringTestDeps(t)
+	cfg.AdvertiseAddress = "relay.example.com:3001"
+
+	o, err := NewOuroboros(cfg)
+	require.Nil(t, o)
+	require.ErrorContains(t, err, "invalid advertise address")
+}
+
 // TestSetLeiosHandlersRejectNil guards the optional handlers against being
 // silently cleared: node_leios.go wires them from a separate path that reruns
 // across live restore cycles, so a nil there is a wiring bug, not a request
@@ -275,6 +287,7 @@ func TestNewOuroborosWiresPeerRelativeHeaderVerification(t *testing.T) {
 	conn := wiringTestConnId(t)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database: db, ChainManager: cm, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UtxoSet: livesettest.New(),
 		PeerHeaderLookupFunc: func(got ouroboros.ConnectionId, _ []byte) (ledger.ChainsyncEvent, []byte, bool) {
 			require.Equal(t, conn, got)
 			queried = true

@@ -148,3 +148,131 @@ func TestStaleRewardSnapshotEpochsNamesMarkSnapshotsOfAnotherVersion(
 	require.NoError(t, err)
 	require.Equal(t, []uint64{4, 7}, none)
 }
+
+// The pending stake-input record is replaced as a whole by each change, read
+// back oldest first, and a rollback below a snapshot's boundary drops its
+// entry.
+func TestPendingStakeInputsAreReplacedAndRolledBack(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	apply := func(slot uint64, entries ...ledger.RewardStakeInputsPendingEntry) {
+		tip := ocommon.NewPoint(slot, bytes.Repeat([]byte{byte(slot)}, 32))
+		require.NoError(t, set.ApplyLedgerChanges(
+			&tip, ledger.LedgerChanges{RewardInputs: []ledger.RewardInputChange{{
+				Kind: ledger.RewardInputPending, Pending: entries,
+			}}},
+		))
+	}
+	entry := func(epoch, slot uint64) ledger.RewardStakeInputsPendingEntry {
+		return ledger.RewardStakeInputsPendingEntry{
+			Epoch: epoch, BoundarySlot: slot,
+		}
+	}
+	apply(10, entry(5, 10), entry(4, 5))
+	got, err := set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.RewardStakeInputsPendingEntry{
+		entry(4, 5), entry(5, 10),
+	}, got)
+
+	apply(20, entry(5, 10))
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.RewardStakeInputsPendingEntry{entry(5, 10)}, got)
+
+	apply(30)
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	apply(40, entry(6, 40))
+	_, err = set.Rollback(ocommon.NewPoint(30, bytes.Repeat([]byte{30}, 32)))
+	require.NoError(t, err)
+	got, err = set.RewardStakePending(nil)
+	require.NoError(t, err)
+	require.Empty(t, got, "a rollback below the boundary drops the entry")
+}
+
+// Listing the epochs the set holds reward inputs of steps once per epoch and
+// tag, not once per stored row, so the cost of a listing does not grow with
+// the stake rows an epoch holds.
+func TestRewardInputEpochsDoesNotStepOverEveryRow(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+
+	const perEpoch = 500
+	epochs := []uint64{5, 6, 7}
+	var changes []ledger.RewardInputChange
+	for _, e := range epochs {
+		changes = append(changes, ledger.RewardInputChange{
+			Kind: ledger.RewardInputStakes, Epoch: e,
+			Stakes: stakeRows(e, perEpoch, 10),
+		})
+	}
+	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{10}, 32))
+	require.NoError(t, set.ApplyLedgerChanges(
+		&tip, ledger.LedgerChanges{RewardInputs: changes},
+	))
+
+	before := set.RangeRowsVisited()
+	snaps, _, err := set.RewardInputEpochs()
+	require.NoError(t, err)
+	visited := set.RangeRowsVisited() - before
+
+	require.Equal(t, epochs, snaps)
+	require.LessOrEqual(t, visited, uint64(3*len(epochs)+3),
+		"the listing stepped over stored rows, not one row per epoch")
+}
+
+// RewardStakeSlotBounds names the slots of an epoch's first and last stake
+// rows by reading those two rows, whatever the epoch holds, and reports an
+// epoch with no rows as absent.
+func TestRewardStakeSlotBoundsReadsTheEdgeRowsOnly(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+
+	rows := stakeRows(5, 500, 10)
+	for _, r := range rows {
+		if r.PoolKeyHash[0] == 6 {
+			r.CapturedSlot = 99
+		}
+	}
+	var changes []ledger.RewardInputChange
+	changes = append(changes,
+		ledger.RewardInputChange{
+			Kind: ledger.RewardInputStakes, Epoch: 5, Stakes: rows,
+		},
+		ledger.RewardInputChange{
+			Kind: ledger.RewardInputStakes, Epoch: 6,
+			Stakes: stakeRows(6, 500, 20),
+		},
+	)
+	tip := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
+	require.NoError(t, set.ApplyLedgerChanges(
+		&tip, ledger.LedgerChanges{RewardInputs: changes},
+	))
+
+	before := set.RangeRowsVisited()
+	first, last, found, err := set.RewardStakeSlotBounds(6)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, [2]uint64{19, 19}, [2]uint64{first, last})
+	require.LessOrEqual(t, set.RangeRowsVisited()-before, uint64(2),
+		"the bounds read stepped over more than the two edge rows")
+
+	// Keys lead with the pool, so the edges are the lowest and highest pool.
+	first, last, found, err = set.RewardStakeSlotBounds(5)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, [2]uint64{9, 99}, [2]uint64{first, last})
+
+	_, _, found, err = set.RewardStakeSlotBounds(7)
+	require.NoError(t, err)
+	require.False(t, found)
+}

@@ -231,17 +231,17 @@ func requireGenesisReadsMatch(
 // without reading any of it back from the metadata store.
 func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"metadata-visible", "set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			scenario := ledger.NewGenesisScenarioWithReadsForTest(t, set, reads)
+			scenario := ledger.NewGenesisScenarioForTest(t, set)
 			store := dbadapter.New(scenario.DB)
 			require.NoError(t, set.LoadLedgerState(t.Context(), store))
 			hidden := slices.Clone(genesisReadBackNames)
-			if reads == ledger.UtxoSetReadsSet {
+			if reads == "set" {
 				hidden = append(hidden,
 					"GetAccountImportRegistrationByCredential",
 					"AccountLastWitnessSlots")
@@ -295,14 +295,7 @@ func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 				"only the Shelley genesis staker has an import baseline")
 			require.Equal(t, len(delegs), witnesses,
 				"each Conway genesis delegation is a witness at slot 0")
-			if reads == ledger.UtxoSetReadsVerify {
-				verified, mismatches := scenario.RegistrationReads()
-				require.Positive(t, verified, "no baseline read was compared")
-				require.Zero(t, mismatches)
-				verified, mismatches = scenario.AccountReads()
-				require.Positive(t, verified, "no witness read was compared")
-				require.Zero(t, mismatches)
-			}
+
 		})
 	}
 }
@@ -315,8 +308,8 @@ func TestGenesisSeedStagesTheExpiryHistoryOfADRepTheSetHolds(t *testing.T) {
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewGenesisScenarioWithReadsForTest(
-		t, set, ledger.UtxoSetReadsSet,
+	scenario := ledger.NewGenesisScenarioForTest(
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))

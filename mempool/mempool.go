@@ -166,6 +166,22 @@ type TxValidator interface {
 	) error
 }
 
+// SubmittedTxTranslator optionally injects a transaction from an older era
+// into the current ledger era before mempool validation. The translated type
+// and bytes are what the pool retains for forging and transaction relay.
+type SubmittedTxTranslator interface {
+	TranslateSubmittedTx(gledger.Transaction) (gledger.Transaction, error)
+}
+
+type submittedTxValidationError struct {
+	era uint
+	err error
+}
+
+func (e *submittedTxValidationError) Error() string       { return e.err.Error() }
+func (e *submittedTxValidationError) Unwrap() error       { return e.err }
+func (e *submittedTxValidationError) SubmissionEra() uint { return e.era }
+
 // CertifiedClosureProvider optionally resolves the certified endorser-block
 // closure a Leios certifying ranking block applies. Such a block carries no
 // transactions of its own, but the ledger applies its parent's announced
@@ -243,6 +259,9 @@ type MempoolConfig struct {
 	// separate from the pool used by peer relay, so API load never takes
 	// capacity from relay. Zero uses the size of the peer pool.
 	MaxAPISubmissions int
+	// Selection is the order BlockCandidates offers transactions to block
+	// production. Empty means SelectionAdmission.
+	Selection SelectionPolicy
 }
 
 type Mempool struct {
@@ -729,6 +748,12 @@ func newMempool(
 			implementation,
 		)
 	}
+	if !config.Selection.Valid() {
+		return nil, fmt.Errorf(
+			"unknown mempool selection policy %q",
+			config.Selection,
+		)
+	}
 	evictionWatermark := config.EvictionWatermark
 	if evictionWatermark < 0 {
 		return nil, fmt.Errorf(
@@ -1102,6 +1127,9 @@ type ProviderConfig struct {
 	// submitted through an API, separate from the pool used by peer relay.
 	// Zero uses the size of the peer pool; see MempoolConfig.MaxAPISubmissions.
 	MaxAPISubmissions int `yaml:"maxApiSubmissions"`
+	// Selection is "admission" (the default) or "feeDensity"; see
+	// MempoolConfig.Selection.
+	Selection SelectionPolicy `yaml:"selection"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -1163,6 +1191,7 @@ func registerProvider(
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
 				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
 				MaxAPISubmissions:    cfg.MaxAPISubmissions,
+				Selection:            cfg.Selection,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 				CapacityFunc:         deps.CapacityFunc,
 			}
@@ -2127,6 +2156,40 @@ func (m *Mempool) AddTransaction(
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
+	if translator, ok := m.validator.(SubmittedTxTranslator); ok {
+		originalHash := tmpTx.Hash()
+		originalType := txType
+		tmpTx, err = translator.TranslateSubmittedTx(tmpTx)
+		if err != nil {
+			return fmt.Errorf("translate transaction: %w", err)
+		}
+		if tmpTx == nil {
+			return errors.New("translate transaction: translator returned nil")
+		}
+		if tmpTx.Type() < 0 {
+			return fmt.Errorf(
+				"translate transaction: invalid transaction type %d",
+				tmpTx.Type(),
+			)
+		}
+		if tmpTx.Hash() != originalHash {
+			return errors.New(
+				"translate transaction: transaction ID changed",
+			)
+		}
+		txType = uint(tmpTx.Type()) // #nosec G115 -- checked non-negative above
+		txBytes = tmpTx.Cbor()
+		if len(txBytes) == 0 {
+			return errors.New(
+				"translate transaction: empty transaction encoding",
+			)
+		}
+		if txType != originalType {
+			if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+				return &submittedTxValidationError{era: txType, err: err}
+			}
+		}
+	}
 	txHashRaw := tmpTx.Hash()
 	ctx, span = tracing.StartTx(
 		ctx,
@@ -2351,7 +2414,10 @@ func (m *Mempool) addTransactionAttempt(
 			return ErrPendingStateMoved
 		}
 		if validateErr != nil {
-			return fmt.Errorf("validate transaction: %w", validateErr)
+			return fmt.Errorf(
+				"validate transaction: %w",
+				&submittedTxValidationError{era: txType, err: validateErr},
+			)
 		}
 
 		// Resolved after validation, under the gate and in the same

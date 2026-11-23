@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/models"
 	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -158,15 +157,6 @@ func SnapshotRestoreInterrupted(db *database.Database) (bool, error) {
 	return active != "", nil
 }
 
-// gapFetcher fetches the blocks after start up to and including end.
-type gapFetcher func(
-	ctx context.Context,
-	logger *slog.Logger,
-	network string,
-	start ocommon.Point,
-	end ocommon.Point,
-) ([]models.Block, error)
-
 // SnapshotConfig configures RunSnapshotBackfill.
 type SnapshotConfig struct {
 	// Feed carries the aggregator, trust keys and download limits. The
@@ -187,7 +177,7 @@ type SnapshotConfig struct {
 	StabilityWindow uint64
 	// CardanoNodeConfig supplies era epoch lengths to the ledger import.
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// UtxoSet, when set, receives the ledger state's UTxO set; see
+	// UtxoSet receives the ledger state's UTxO set and is required; see
 	// ledgerstate.ImportConfig.UtxoSet.
 	UtxoSet ledgerstate.UtxoSetLoader
 	// DataDir is the node's data directory. The restore downloads under it
@@ -196,7 +186,6 @@ type SnapshotConfig struct {
 	Logger     *slog.Logger
 	OnProgress SyncProgressFunc
 
-	fetchGap gapFetcher
 	// firstWrite, when set, runs inside the transaction of the restore's
 	// first write, after its writes; an error aborts that transaction.
 	firstWrite func(*database.Txn) error
@@ -234,10 +223,13 @@ func pinnedArtifactPruned(
 // It verifies the latest artifact's certificate chain, downloads the
 // immutable files from the certified tip down to the one holding the
 // history-expiry cutoff (ledger slot minus StabilityWindow), and downloads and
-// verifies the ancillary ledger state against its signed manifest. Blocks
-// between the certified tip and a ledger state beyond it are fetched from a
-// relay. All of that happens before the first database write, so a failure
-// there leaves the database exactly as it was.
+// verifies the ancillary archive against its signed manifest. The archive's
+// immutable file, the one after the certified tip, is read against that
+// manifest, and the ledger state is the newest one at or before its last
+// block. All of that happens before the first database write, so a failure
+// there leaves the database exactly as it was. Whether that file's blocks
+// continue the certified chain, and whether the state's block is then stored,
+// is checked only after the certified blocks are loaded.
 //
 // It then loads the blocks, imports the ledger state, records the Mithril
 // trust boundary and the bootstrap marker, and clears the sync state, in the
@@ -444,28 +436,6 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
-	slotLimit := func() (uint64, error) {
-		return ancillarySlotLimit(cfg.CardanoNodeConfig, certifiedTip.Slot)
-	}
-	if cfg.fetchGap == nil {
-		cfg.fetchGap = func(
-			ctx context.Context,
-			logger *slog.Logger,
-			network string,
-			start ocommon.Point,
-			end ocommon.Point,
-		) ([]models.Block, error) {
-			maxGapBlocks, err := ancillaryBlockLimit(
-				cfg.CardanoNodeConfig,
-			)
-			if err != nil {
-				return nil, err
-			}
-			return fetchGapBlocks(
-				ctx, logger, network, start, end, maxGapBlocks,
-			)
-		}
-	}
 	if resume && !repinned {
 		if err := pin.verifyCertifiedTip(certifiedTip.Slot); err != nil {
 			return ocommon.Point{}, err
@@ -488,38 +458,19 @@ func RunSnapshotBackfill(
 		AncillaryVerified: true,
 		AncillaryDigests:  ancillaryDigests,
 	}
+	ancillaryBlocks, err := readAncillaryChunk(logger, result, target)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	immutableTip := ancillaryTip(certifiedTip, ancillaryBlocks)
 	prepared, err := prepareLedgerStateImport(
-		logger, result, certifiedTip.Slot, slotLimit,
+		logger, result, immutableTip.Slot,
 	)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf("preparing ledger state: %w", err)
 	}
 	defer prepared.Close()
-	ledgerPoint := ocommon.NewPoint(
-		prepared.state.Tip.Slot, prepared.state.Tip.BlockHash,
-	)
-	if ledgerPoint.Slot > certifiedTip.Slot && !prepared.beyondCertifiedTip {
-		return ocommon.Point{}, fmt.Errorf(
-			"selected ledger state slot %d is past certified ImmutableDB tip slot %d",
-			ledgerPoint.Slot, certifiedTip.Slot,
-		)
-	}
-	var gap []models.Block
-	if ledgerPoint.Slot > certifiedTip.Slot {
-		gap, err = cfg.fetchGap(
-			ctx, logger, bcfg.Network, certifiedTip, ledgerPoint,
-		)
-		if err != nil {
-			return ocommon.Point{}, fmt.Errorf("fetching volatile blocks: %w", err)
-		}
-		if err := validateCompleteGapBlocks(
-			gap, certifiedTip, ledgerPoint,
-		); err != nil {
-			return ocommon.Point{}, fmt.Errorf(
-				"validating volatile blocks: %w", err,
-			)
-		}
-	}
+	ledgerPoint := prepared.point()
 
 	// From the artifact being restored alone: a same-artifact resume
 	// stored its blocks from this same file, and a re-pin discards them.
@@ -588,6 +539,29 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
+	// The ancillary trio is as authoritative as the certified immutable
+	// archives: its manifest signs every byte. A local tail that forks within
+	// that trio cannot be extended by the signed blocks, so discard the partial
+	// restore before copying the artifact again instead of failing every retry
+	// on the same conflict.
+	if storedTip != nil && storedTip.Slot > certifiedTip.Slot &&
+		storedTip.Slot <= immutableTip.Slot &&
+		!blocksContain(ancillaryBlocks, *storedTip) {
+		logger.Warn(
+			"mithril: discarding local tail that conflicts with signed ancillary blocks",
+			"component", "mithril",
+			"stored_tip_slot", storedTip.Slot,
+			"certified_tip_slot", certifiedTip.Slot,
+			"ancillary_tip_slot", immutableTip.Slot,
+		)
+		if err := discardStoredVolatileTail(ctx, db, logger); err != nil {
+			return ocommon.Point{}, err
+		}
+		storedTip, err = storedChainTip(ctx, db)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+	}
 	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
 	defer func() {
 		if err := cleanupBulkLoadPragmas(); err != nil {
@@ -602,11 +576,27 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
-	if storedTip != nil && !tipOnChain && !blocksContain(gap, *storedTip) {
+	if storedTip != nil && !tipOnChain &&
+		!blocksContain(ancillaryBlocks, *storedTip) {
 		return ocommon.Point{}, fmt.Errorf(
 			"%w: stored tip at slot %d", errStoredChainOffCertified,
 			storedTip.Slot,
 		)
+	}
+
+	// Still the block phase: the ledger import is marked begun only once the
+	// state's block is stored.
+	landed, err := landAncillaryChunk(ctx, db, ancillaryBlocks)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"storing signed ancillary chunk: %w", err,
+		)
+	}
+	loaded += landed
+	if err := requireStateInImmutableDB(
+		ctx, db, immutableTip, ledgerPoint,
+	); err != nil {
+		return ocommon.Point{}, err
 	}
 
 	if nextPhase == restorePhaseBlocks {
@@ -627,7 +617,7 @@ func RunSnapshotBackfill(
 		}
 	}
 	cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
-	_, _, _, err = importPreparedLedgerState(
+	_, _, err = importPreparedLedgerState(
 		ctx, db, logger, cfg.CardanoNodeConfig, result, prepared, false,
 		cfg.UtxoSet,
 		func(p ledgerstate.ImportProgress) {
@@ -650,25 +640,10 @@ func RunSnapshotBackfill(
 	// ones a Core restore left out.
 	if db.StorageMode() != datatypes.StorageModeCore {
 		if err := node.MarkImmutableUtxoOffsetsComplete(
-			db, certifiedTip.Slot,
+			db, immutableTip.Slot,
 		); err != nil {
 			return ocommon.Point{}, fmt.Errorf(
 				"recording immutable UTxO offsets complete: %w", err,
-			)
-		}
-	}
-	if len(gap) > 0 {
-		// Both writes are idempotent, so a resumed restore repeats them.
-		for _, block := range gap {
-			if err := db.BlockCreate(block, nil); err != nil {
-				return ocommon.Point{}, fmt.Errorf(
-					"storing volatile block: %w", err,
-				)
-			}
-		}
-		if err := processGapBlocks(ctx, db, logger, gap); err != nil {
-			return ocommon.Point{}, fmt.Errorf(
-				"processing gap block transactions: %w", err,
 			)
 		}
 	}
@@ -681,7 +656,7 @@ func RunSnapshotBackfill(
 		ctx, db, logger, cfg.emit, deferredIndexes, cleanupBulkLoadPragmas,
 		&node.LoadBlobsResult{
 			BlocksCopied:     loaded,
-			ImmutableTipSlot: certifiedTip.Slot,
+			ImmutableTipSlot: immutableTip.Slot,
 		},
 		ledgerPoint.Slot, ledgerPoint.Hash, true,
 	); err != nil {
@@ -737,6 +712,53 @@ func discardStoredBlocks(
 			"blocks", deleted,
 		)
 	}
+	if err := db.SetSyncState(
+		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
+	); err != nil {
+		return fmt.Errorf("marking mithril snapshot restore active: %w", err)
+	}
+	return nil
+}
+
+// discardStoredVolatileTail removes a conflicting restore tail without
+// crossing the database's immutable floor. The retained floor becomes the
+// resume point and is checked against the certified chain by the caller's
+// normal continuation path.
+func discardStoredVolatileTail(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	recent, err := database.BlocksRecent(ctx, db, 1)
+	if err != nil {
+		return fmt.Errorf("reading chain tip: %w", err)
+	}
+	if len(recent) == 0 {
+		return nil
+	}
+	tip := recent[0]
+	floor, ok := db.ImmutableFloorIndex()
+	if !ok {
+		return discardStoredBlocks(ctx, db, logger)
+	}
+	if tip.ID <= floor {
+		return fmt.Errorf(
+			"%w: conflicting stored tip index %d is at or below immutable tip index %d",
+			database.ErrRollbackBelowImmutableTip, tip.ID, floor,
+		)
+	}
+	deleted, err := lifecycle.DeleteBlocksAfter(
+		ctx, db, floor, tip.ID, 0,
+	)
+	if err != nil {
+		return fmt.Errorf("discarding stored volatile tail: %w", err)
+	}
+	logger.Info(
+		"mithril: discarded conflicting volatile restore tail",
+		"component", "mithril",
+		"blocks", deleted,
+		"immutable_floor_index", floor,
+	)
 	if err := db.SetSyncState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	); err != nil {
@@ -815,7 +837,7 @@ func storedChainTip(
 	return &p, nil
 }
 
-func blocksContain(blocks []models.Block, p ocommon.Point) bool {
+func blocksContain(blocks []immutable.Block, p ocommon.Point) bool {
 	for _, b := range blocks {
 		if b.Slot == p.Slot && bytes.Equal(b.Hash, p.Hash) {
 			return true

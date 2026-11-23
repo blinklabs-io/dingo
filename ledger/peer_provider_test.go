@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -35,9 +36,18 @@ import (
 // newTestDB creates an in-memory database for testing and registers
 // a cleanup function to close it when the test finishes.
 func newTestDB(t *testing.T) *database.Database {
+	return newTestDBWithStorageMode(t, dbtypes.StorageModeCore)
+}
+
+func newCoreTestDB(t *testing.T) *database.Database {
+	return newTestDBWithStorageMode(t, dbtypes.StorageModeCore)
+}
+
+func newTestDBWithStorageMode(t *testing.T, storageMode string) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
+		DataDir:     "",
+		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
 	return db

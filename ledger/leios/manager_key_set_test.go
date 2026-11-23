@@ -198,6 +198,36 @@ func TestVoteManagerKeySetWithoutSeatEmitsNothing(t *testing.T) {
 		"the missing seat is counted as not_seated")
 }
 
+// maxRotationVoteWait bounds the real time a rotation test may let a vote
+// timer sleep.
+const maxRotationVoteWait = 5 * time.Second
+
+// followSlotClock drives the manager's clock from the fake slot provider, so
+// advancing the slot across an epoch moves vote-window time with it instead
+// of making a timer sleep one real second per slot. A timer armed for longer
+// than maxRotationVoteWait fails the test and is not armed.
+func followSlotClock(
+	t *testing.T,
+	fixture *managerFixture,
+	slots *fakeSlotProvider,
+) {
+	t.Helper()
+	fixture.mgr.now = func() time.Time {
+		at, err := slots.SlotToTime(slots.CurrentOrTipSlot())
+		require.NoError(t, err)
+		return at.Add(time.Second)
+	}
+	fixture.mgr.scheduleAfter = func(
+		d time.Duration, f func(),
+	) func() bool {
+		if d > maxRotationVoteWait {
+			t.Errorf("vote timer armed for %s of real time", d)
+			return func() bool { return true }
+		}
+		return time.AfterFunc(d, f).Stop
+	}
+}
+
 func TestVoteManagerKeySetRotationPairFollowsRegisteredKey(t *testing.T) {
 	t.Parallel()
 
@@ -232,6 +262,7 @@ func TestVoteManagerKeySetRotationPairFollowsRegisteredKey(t *testing.T) {
 			},
 		)
 		require.NoError(t, fixture.mgr.ConfigureVotingKeys(keys))
+		followSlotClock(t, fixture, slots)
 		return fixture
 	}
 
@@ -616,6 +647,7 @@ func TestVoteManagerPoolBoundKeyStopsVotingWhenRegistrationRotates(
 	)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	followSlotClock(t, fixture, slots)
 	var pool lcommon.PoolKeyHash
 	copy(pool[:], fixture.members[seat].PoolKeyHash)
 	require.NoError(t, fixture.mgr.EnableVoting(pool, oldKey))

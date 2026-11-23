@@ -123,6 +123,7 @@ VALUES (?, ?, ?, 0, '10', 0, 1, 90, 90)`, key(i%5), key(i), i%4)
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
+	registry = registry[:59]
 	run := func() {
 		runner := migrations.Runner{
 			DB:       db,

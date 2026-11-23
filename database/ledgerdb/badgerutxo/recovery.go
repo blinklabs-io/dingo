@@ -259,8 +259,11 @@ func (s *Store) JournalFloor() (point ocommon.Point, ok bool, err error) {
 			if err != nil {
 				return err
 			}
+			// The first commit of a store has no tip before it; the
+			// oldest point a rollback reaches is the tip before the
+			// next record.
 			if !rec.hadTip {
-				return nil
+				continue
 			}
 			if rec.prevTip.Slot+1 >= floor {
 				point = rec.prevTip
@@ -293,6 +296,7 @@ func (s *Store) Restore(ctx context.Context, r io.Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer s.rewriteRows()()
 	return s.db.Load(r, 256)
 }
 
@@ -463,5 +467,6 @@ func (s *Store) Reset() error {
 	if s.snap != nil {
 		return ErrSnapshotReadOnly
 	}
+	defer s.rewriteRows()()
 	return s.db.DropAll()
 }

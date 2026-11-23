@@ -41,7 +41,7 @@ func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 71)
+	require.Len(t, registry, 74)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

@@ -24,6 +24,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -114,7 +116,7 @@ func (fx *epochFixture) addPool(
 		AddedSlot:     10,
 		Relays:        relays,
 	}
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().ImportPool(
+	require.NoError(t, fx.adapter.db().Metadata().ImportPool(
 		pool, registration, nil,
 	))
 	id, err := poolIDString(poolKeyHash)
@@ -391,6 +393,41 @@ func TestNodeAdapterPoolsRetired(t *testing.T) {
 	assert.Equal(t, uint64(5), retiring[0].Epoch)
 }
 
+func TestPoolRetirementEndpointsUseIndexerTipEpoch(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	pool := bytes32of(28, 0xc4)
+	poolID := fx.addPool(t, pool, nil)
+	cert := fx.addCert(t, fill32(0xd5), 100, 0, 0)
+	_, err := fx.raw.Exec(
+		`INSERT INTO pool_retirement (pool_key_hash, certificate_id, pool_id, epoch, added_slot) VALUES (?, ?, 1, 2, 100)`,
+		pool, cert,
+	)
+	require.NoError(t, err)
+
+	// The ledger is in epoch 2, but the rows served by the API cover epoch 1.
+	setIndexerTip(t, fx.adapter, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 86500, Hash: fill32(0xef)},
+		BlockNumber: 4,
+	})
+
+	retired, total, err := fx.adapter.PoolsRetired(
+		t.Context(),
+		PaginationParams{Count: 100, Page: 1},
+	)
+	require.NoError(t, err)
+	assert.Zero(t, total)
+	assert.Empty(t, retired)
+
+	retiring, total, err := fx.adapter.PoolsRetiring(
+		t.Context(),
+		PaginationParams{Count: 100, Page: 1},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, []PoolRetiringInfo{{PoolID: poolID, Epoch: 2}}, retiring)
+}
+
 // Retirements recorded at the same point, as a bootstrap import writes them,
 // tie on every ordering column but the pool, so pages must still partition
 // the list and the two orders must reverse each other.
@@ -438,7 +475,7 @@ func TestNodeAdapterPoolHistoryMergesImportedBlockCounts(t *testing.T) {
 	ctx := context.Background()
 	poolID := fx.addPool(t, fx.poolA, nil)
 	fx.addMarkSnapshot(t, 0, "700")
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.db().Metadata()
 	// The anchor sits between epoch 1's two blocks of pool A.
 	require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
 	require.NoError(t, meta.SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount{{

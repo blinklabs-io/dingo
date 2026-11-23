@@ -21,10 +21,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
-	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/stretchr/testify/require"
 )
@@ -43,45 +40,39 @@ func (f *failingPatchFacts) PatchFacts(
 ) error {
 	f.calls++
 	if f.calls == f.failOn {
-		return errors.New("injected patch failure")
+		return errors.New("database or disk is full")
 	}
 	return f.FactsSource.PatchFacts(ctx, dst, from, through)
 }
 
 // A failure after IndexBlocks succeeded rolls the batch back; the retry must
-// not continue from the running nonce and epoch state of the lost batch.
-func TestIndexerWriterRetryAfterLatePatchFailureMatchesLiveApply(
+// not continue from the running nonce and epoch state of the lost batch, so
+// it leaves the rows of a pass that never failed.
+func TestIndexerWriterRetryAfterLatePatchFailureMatchesAnUnfailedPass(
 	t *testing.T,
 ) {
 	t.Parallel()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	live, liveRaw := newEquivalenceDB(t)
+	consensus := newEquivalenceDB(t)
 	dir := copyImmutableChunkPrefix(t, equivalenceChunks)
 	require.NoError(t, LoadWithDB(
-		ctx, &config.Config{Network: "preview"}, logger, dir, live,
+		ctx, equivalenceLoadConfig(), logger, dir, consensus,
 	))
-	idxDB, idxRaw := newEquivalenceIndexer(t, live)
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardano.EmbeddedConfigPath("preview"), "preview",
-		cardano.EmbeddedConfigFS,
+	ls, _ := openFactLedger(t, consensus)
+	_, wantRaw := indexFromGenesis(t, consensus, ls, nil)
+
+	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
+	store, ledgerFacts, bf := equivalenceParts(t, consensus, idxDB, ls)
+	facts := &failingPatchFacts{FactsSource: ledgerFacts, failOn: 3}
+	w := newEquivalenceWriter(
+		store, indexer.NewDatabaseSource(consensus), facts, bf,
 	)
-	require.NoError(t, err)
-	store, err := indexerdb.NewStore(idxDB, idxDB, 10)
-	require.NoError(t, err)
-	metaFacts, err := indexer.NewMetadataFacts(live, idxDB)
-	require.NoError(t, err)
-	facts := &failingPatchFacts{FactsSource: metaFacts, failOn: 3}
-	bf := NewBackfill(idxDB, nodeCfg, logger)
-	bf.SetDelegatorInactivityEnabled(false)
-	w := indexer.NewWriter(
-		store, indexer.NewDatabaseSource(live), bf, logger, 700,
-	).WithFacts(facts).WithGenesisSeed(bf.SeedGenesis)
 
 	require.Error(t, w.CatchUp(ctx))
 	require.NoError(t, w.CatchUp(ctx))
 	require.GreaterOrEqual(t, facts.calls, 4)
 
-	requireSameTables(t, dumpTables(t, liveRaw), dumpTables(t, idxRaw))
+	requireSameTables(t, dumpTables(t, wantRaw), dumpTables(t, idxRaw))
 }

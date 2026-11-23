@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -74,6 +75,11 @@ type Config struct {
 // MemTableSize zero; zero keeps Badger's default. A test binary that opens
 // many sets sets it once from TestMain, before any set is opened.
 var DefaultMemTableSize int64
+
+// DefaultBlockCacheSize is the Badger block cache size of every set; zero
+// keeps Badger's default. A test binary that opens many sets sets it once
+// from TestMain, before any set is opened.
+var DefaultBlockCacheSize int64
 
 // pruneEvery is how many tip-moving commits pass between journal prunes.
 const pruneEvery = 1000
@@ -269,6 +275,7 @@ func Open(cfg Config) (*Set, error) {
 		cfg.Dir,
 		badgerutxo.WithAggregator(ledger.UtxoStakeOf),
 		badgerutxo.WithMemTableSize(memTable),
+		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
 	)
 	if err != nil {
 		return nil, err
@@ -406,6 +413,12 @@ func (s *Set) ApplyLedgerChanges(
 	pparams := make([]badgerutxo.PParamsRow, 0, len(lc.PParams))
 	for _, p := range lc.PParams {
 		pparams = append(pparams, pparamsRow(p))
+	}
+	if tip != nil && rollbackTo == nil {
+		batch, err = s.withBlockPoints(batch, nonces, *tip)
+		if err != nil {
+			return err
+		}
 	}
 	leading, batch := splitTipless(tip, changes, batch)
 	var res badgerutxo.ApplyResult
@@ -570,6 +583,29 @@ func splitTipless(
 	return leading, batch[start:]
 }
 
+// RemoveZeroCoinOutputs removes the live outputs among refs whose coin is
+// zero and returns how many it removed. An output with coin, or one that does
+// not decode, stays. The removal is not a change of the chain: it leaves the
+// tip alone and writes no journal record, which would otherwise be undone
+// first by the next rollback of any depth. It is for outputs the ledger's
+// genesis never holds, found in a set built before it dropped them.
+func (s *Set) RemoveZeroCoinOutputs(refs []models.UtxoId) (int, error) {
+	out := make([]badgerutxo.Ref, len(refs))
+	for i, r := range refs {
+		out[i] = badgerutxo.NewRef(r.Hash, r.Idx)
+	}
+	return s.store.RemoveOutputs(out, isZeroCoinOutput)
+}
+
+func isZeroCoinOutput(cbor []byte) bool {
+	out, err := gledger.NewTransactionOutputFromCbor(cbor)
+	if err != nil || out == nil {
+		return false
+	}
+	amount := out.Amount()
+	return amount != nil && amount.Sign() == 0
+}
+
 // Get returns the CBOR of the live output txID#index.
 func (s *Set) Get(txID []byte, index uint32) ([]byte, bool, error) {
 	return s.store.Get(badgerutxo.NewRef(txID, index))
@@ -730,6 +766,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureDrepState(ctx, ldb); err != nil {
@@ -1261,6 +1300,54 @@ func (s *Set) noBaseError(
 
 func samePoint(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+// withBlockPoints returns batch with an empty change at every block of the
+// commit that changed no output. The store journals one record per change
+// point and a rollback can only target a record's point, so without them a
+// block with no transactions that commits with later blocks is not a point
+// the set can roll back to. The commit's blocks are its nonce points, which
+// the ledger stages for every block it applies.
+func (s *Set) withBlockPoints(
+	batch []badgerutxo.Change,
+	nonces []badgerutxo.Nonce,
+	tip ocommon.Point,
+) ([]badgerutxo.Change, error) {
+	if len(nonces) == 0 {
+		return batch, nil
+	}
+	cur, _, err := s.store.Tip()
+	if err != nil {
+		return nil, fmt.Errorf("utxoset: read tip: %w", err)
+	}
+	last := cur.Slot
+	for _, n := range nonces {
+		// Points out of order or outside the commit are not its blocks.
+		if len(n.Point.Hash) == 0 || n.Point.Slot < last ||
+			n.Point.Slot > tip.Slot || samePoint(n.Point, cur) {
+			return batch, nil
+		}
+		last = n.Point.Slot
+	}
+	out := make([]badgerutxo.Change, 0, len(batch)+len(nonces))
+	i := 0
+	for _, n := range nonces {
+		for i < len(batch) && batch[i].Point.Slot < n.Point.Slot {
+			out = append(out, batch[i])
+			i++
+		}
+		if i == len(batch) || !samePoint(batch[i].Point, n.Point) {
+			if len(out) == 0 || !samePoint(out[len(out)-1].Point, n.Point) {
+				out = append(out, badgerutxo.Change{Point: n.Point})
+			}
+			continue
+		}
+		for i < len(batch) && samePoint(batch[i].Point, n.Point) {
+			out = append(out, batch[i])
+			i++
+		}
+	}
+	return append(out, batch[i:]...), nil
 }
 
 // Sum returns the stake sum for a key built by ledger.CredentialStakeKey or

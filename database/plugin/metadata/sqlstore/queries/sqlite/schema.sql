@@ -272,6 +272,25 @@ CREATE TABLE reward_pool_output (
     UNIQUE (epoch, pool_key_hash)
 );
 
+CREATE TABLE reward_likelihood_state (
+    id INTEGER PRIMARY KEY,
+    epoch INTEGER NOT NULL UNIQUE,
+    reward_pot TEXT NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    boundary_slot INTEGER NOT NULL,
+    complete BOOLEAN NOT NULL
+);
+
+CREATE TABLE reward_pool_likelihood (
+    id INTEGER PRIMARY KEY,
+    epoch INTEGER NOT NULL,
+    pool_key_hash BLOB NOT NULL,
+    log_weights BLOB NOT NULL,
+    performance_estimate REAL NOT NULL,
+    boundary_slot INTEGER NOT NULL,
+    UNIQUE (epoch, pool_key_hash)
+);
+
 CREATE TABLE reward_account_output (
     staking_key BLOB NOT NULL,
     pool_key_hash BLOB NOT NULL,
@@ -450,15 +469,23 @@ CREATE TABLE utxo (
     UNIQUE (tx_id, output_idx)
 );
 
-CREATE TABLE asset (
-    name BLOB,
-    policy_id BLOB,
-    fingerprint BLOB,
-    id INTEGER PRIMARY KEY,
-    utxo_id INTEGER,
-    amount TEXT,
-    UNIQUE (name, policy_id, utxo_id)
+CREATE TABLE asset_identity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id BLOB NOT NULL,
+    name BLOB NOT NULL,
+    UNIQUE (policy_id, name)
 );
+
+CREATE TABLE asset_holding (
+    utxo_id INTEGER NOT NULL,
+    asset_id INTEGER NOT NULL,
+    amount TEXT,
+    PRIMARY KEY (utxo_id, asset_id),
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE,
+    FOREIGN KEY (asset_id) REFERENCES asset_identity(id)
+) WITHOUT ROWID;
+
+CREATE INDEX idx_asset_holding_asset_id ON asset_holding(asset_id);
 
 CREATE TABLE utxo_address (
     utxo_id INTEGER PRIMARY KEY,

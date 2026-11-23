@@ -28,7 +28,7 @@ import (
 // recreated, or that was handed the closed database, leaves none.
 func midnightCheckpointSlot(t *testing.T, n *Node) (uint64, bool) {
 	t.Helper()
-	cp, err := n.db.Metadata().GetBackfillCheckpoint("midnight", nil)
+	cp, err := n.apiDatabase().Metadata().GetBackfillCheckpoint("midnight", nil)
 	require.NoError(t, err)
 	if cp == nil {
 		return 0, false
@@ -48,9 +48,8 @@ func TestLiveTruncateReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				t.Parallel()
 
 				const numBlocks = 20
-				n, points := newLiveLifecycleTestNodeWithStorageModeAtBlock(
-					t, numBlocks, nil,
-					disabledLiveLifecycleTestWorkerPoolCfg, StorageModeAPI, 0,
+				n, points, _ := newSplitLifecycleTestNodeAtBlock(
+					t, numBlocks, nil, 0,
 				)
 				n.config.midnight = MidnightConfig{Enabled: enabled}
 
@@ -91,12 +90,11 @@ func TestLiveRestoreReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				t.Parallel()
 
 				const numBlocks = 20
-				n, points := newLiveLifecycleTestNodeWithStorageModeAtBlock(
-					t, numBlocks, nil,
-					disabledLiveLifecycleTestWorkerPoolCfg, StorageModeAPI, 0,
+				n, points, _ := newSplitLifecycleTestNodeAtBlock(
+					t, numBlocks, nil, 0,
 				)
 				snapshotDir := snapshotTestDir(t, "snapshot")
-				_, err := lifecycleSnapshot(t, n, snapshotDir)
+				_, err := n.Snapshot(context.Background(), snapshotDir, "", "")
 				require.NoError(t, err)
 				n.config.midnight = MidnightConfig{Enabled: enabled}
 

@@ -19,6 +19,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -81,11 +82,19 @@ func RegisterProvider(host *plugin.Host) error {
 		},
 		defaultConfig,
 		func(
-			_ context.Context,
+			ctx context.Context,
 			cfg Config,
 			deps metadata.ProviderDependencies,
 		) (*sqlstore.Store, plugin.Instance, error) {
-			store, err := openStore(cfg, deps)
+			namespace := ""
+			if deps.CoreNamespace {
+				var err error
+				cfg, namespace, err = prepareCoreNamespace(ctx, cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			store, err := openScopedStore(cfg, deps, namespace)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -99,9 +108,13 @@ func RegisterProvider(host *plugin.Host) error {
 	)
 }
 
-func openStore(
+// openScopedStore opens the store at cfg. namespace names the consensus
+// schema cfg selects, empty for the configured schema itself; whole-database
+// operations (backup, restore, reset) stay within the store's own schemas.
+func openScopedStore(
 	cfg Config,
 	deps metadata.ProviderDependencies,
+	namespace string,
 ) (*sqlstore.Store, error) {
 	if cfg.PoolMaxOpenConns < 0 ||
 		cfg.PoolMaxIdleConns < 0 ||
@@ -140,6 +153,7 @@ func openStore(
 	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(connMaxLifetime)
+	scope := pgScope{schema: namespace}
 	registry, err := migrations.PostgresRegistry()
 	if err != nil {
 		_ = db.Close()
@@ -152,6 +166,7 @@ func openStore(
 		Dialect:             sqlstore.PostgresDialect(),
 		Logger:              deps.Logger,
 		StorageMode:         deps.StorageMode,
+		Namespace:           namespace,
 		Migrations:          registry,
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"postgres",
@@ -159,13 +174,23 @@ func openStore(
 			30*time.Second,
 		),
 		BackupTo: func(ctx context.Context, dstPath string) error {
-			return backupPostgres(ctx, dsn, dstPath)
+			return backupPostgres(ctx, dsn, dstPath, scope)
 		},
 		RestoreFrom: func(ctx context.Context, srcPath string) error {
-			return restorePostgres(ctx, dsn, srcPath)
+			return restorePostgres(ctx, dsn, srcPath, scope)
 		},
 		Reset: func(ctx context.Context) error {
-			return resetDatabase(ctx, db)
+			return resetDatabase(ctx, db, scope)
+		},
+		CheckRestoreTarget: func(ctx context.Context) error {
+			_, err := tablesForReset(ctx, db, scope)
+			if err != nil && namespace != "" {
+				return fmt.Errorf(
+					"the consensus schema %q beside the IndexerDB is not empty; drop it with DROP SCHEMA %s CASCADE to restore into it: %w",
+					namespace, pgQuoteIdentifier(namespace), err,
+				)
+			}
+			return err
 		},
 		ValidateBackup: validatePostgresBackup,
 	})

@@ -11795,6 +11795,7 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger: slog.New(
@@ -11959,6 +11960,7 @@ func newChainsyncRollbackFixtureWithDB(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger: slog.New(
@@ -12013,6 +12015,7 @@ func newChainsyncRollbackFixtureWithDB(
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
 	}
 
+	ls.config.UtxoSet = newQuerySetHistory()
 	return &chainsyncRollbackFixture{
 		ls:            ls,
 		connId:        connId,
@@ -20846,6 +20849,7 @@ func newChainsyncRollbackFixtureWithBus(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -20885,6 +20889,7 @@ func newChainsyncRollbackFixtureWithBus(
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
+	ls.config.UtxoSet = newQuerySetHistory()
 	return &chainsyncRollbackFixture{
 		ls:          ls,
 		ancestorTip: ancestorTip,

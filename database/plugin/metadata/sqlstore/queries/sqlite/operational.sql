@@ -672,6 +672,61 @@ ON CONFLICT (
     boundary_slot = excluded.boundary_slot
 RETURNING id;
 
+-- name: SaveRewardLikelihoodState :one
+INSERT INTO reward_likelihood_state (
+    epoch, reward_pot, captured_slot, boundary_slot, complete
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    reward_pot = excluded.reward_pot,
+    captured_slot = excluded.captured_slot,
+    boundary_slot = excluded.boundary_slot,
+    complete = excluded.complete
+RETURNING id;
+
+-- name: SaveRewardPoolLikelihood :one
+INSERT INTO reward_pool_likelihood (
+    epoch, pool_key_hash, log_weights, performance_estimate, boundary_slot
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    log_weights = excluded.log_weights,
+    performance_estimate = excluded.performance_estimate,
+    boundary_slot = excluded.boundary_slot
+RETURNING id;
+
+-- name: DeleteRewardPoolLikelihoodsForEpoch :exec
+DELETE FROM reward_pool_likelihood WHERE epoch = ?;
+
+-- name: GetRewardLikelihoodStateBeforeEpoch :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE epoch < ?
+ORDER BY epoch DESC
+LIMIT 1;
+
+-- name: GetRewardLikelihoodStateAtSlot :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE boundary_slot <= ?
+ORDER BY boundary_slot DESC, epoch DESC
+LIMIT 1;
+
+-- name: GetRewardPoolLikelihoods :many
+SELECT id, epoch, pool_key_hash, log_weights, performance_estimate,
+       boundary_slot
+FROM reward_pool_likelihood
+WHERE epoch = ?
+ORDER BY pool_key_hash ASC;
+
+-- name: DeleteRewardLikelihoodStatesAfterSlot :exec
+DELETE FROM reward_likelihood_state WHERE boundary_slot > ?;
+
+-- name: DeleteOrphanRewardPoolLikelihoods :exec
+DELETE FROM reward_pool_likelihood
+WHERE NOT EXISTS (
+    SELECT 1 FROM reward_likelihood_state
+    WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
+);
+
 -- name: GetRewardAccountOutputs :many
 SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
        amount, spendable, guarded, captured_slot, boundary_slot
@@ -988,11 +1043,6 @@ SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
 FROM offchain_metadata
 WHERE source_type = ? AND url = ? AND hash = ?;
 
--- name: GetAssetsByUtxoID :many
-SELECT name, policy_id, fingerprint, id, utxo_id, amount
-FROM asset
-WHERE utxo_id = ?
-ORDER BY id;
 
 -- name: GetLiveUtxoRefsBySlot :many
 SELECT t.hash AS tx_hash, u.output_idx
@@ -1018,24 +1068,15 @@ SELECT amount
 FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0;
 
--- name: CreateAsset :one
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-RETURNING id;
-
--- name: GetAssetByPolicyAndName :one
-SELECT name, policy_id, fingerprint, id, utxo_id, amount
-FROM asset
-WHERE policy_id = ? AND name = ?
-ORDER BY id
-LIMIT 1;
-
--- name: GetAssetQuantityByPolicyAndName :many
-SELECT asset.amount
-FROM asset
-INNER JOIN utxo ON asset.utxo_id = utxo.id
-WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0;
+-- AssetHeld reports whether any retained holding, live or spent and not yet
+-- pruned, exists for the asset. An identity with no holding does not count.
+-- name: AssetHeld :one
+SELECT EXISTS (
+    SELECT 1
+    FROM asset_identity i
+    JOIN asset_holding h ON h.asset_id = i.id
+    WHERE i.policy_id = ? AND i.name = ?
+) AS held;
 
 -- name: GetAssetMintBurnInfo :one
 SELECT
@@ -1090,11 +1131,6 @@ INSERT INTO drep (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
--- name: ImportAsset :exec
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
 
 -- name: ImportDrep :one
 INSERT INTO drep (

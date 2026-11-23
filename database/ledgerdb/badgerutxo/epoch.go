@@ -16,9 +16,12 @@ package badgerutxo
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -27,7 +30,11 @@ import (
 //
 //	e <epoch:8 BE>                         epoch row: start slot, era, then
 //	                                       the caller's encoded row
-//	s <epoch:8 BE> <len:1> <type> <pool>   pool stake snapshot row
+//	s <epoch:8 BE> <len:1> <type> <pool>   pool stake snapshot row: the
+//	                                       capture slot, then the caller's
+//	                                       encoded row
+//	$ <slot:8 BE> <epoch:8 BE> <len:1> <type> <pool>
+//	                                       the snapshot row's capture index
 //	mera                                   the last mid-epoch era switch
 //
 // EpochRow is an epoch's row: its number, first slot, era and encoded
@@ -76,6 +83,8 @@ type SnapshotRow struct {
 	Type  string
 	Pool  []byte
 	Value []byte
+	// CapturedSlot is the slot the snapshot was captured at.
+	CapturedSlot uint64
 }
 
 // SnapshotOpKind is what a SnapshotOp does.
@@ -114,16 +123,137 @@ func snapshotKey(r SnapshotRow) []byte {
 	return append(snapshotTypePrefix(r.Epoch, r.Type), r.Pool...)
 }
 
+// snapshotMark starts a snapshot value that carries its capture slot:
+// mark, slot (8 bytes BE), then the caller's value. It is the CBOR encoding of
+// the integer zero, which no encoded snapshot row starts with, so a value
+// written before the capture slot was kept is told apart by its first byte.
+const snapshotMark = 0x00
+
+var errSnapshotMark = errors.New(
+	"badgerutxo: a snapshot value must not start with the capture slot mark",
+)
+
+func encodeSnapshotValue(slot uint64, v []byte) []byte {
+	out := make([]byte, 0, 9+len(v))
+	out = append(out, snapshotMark)
+	out = binary.BigEndian.AppendUint64(out, slot)
+	return append(out, v...)
+}
+
+// splitSnapshotValue returns the capture slot and the caller's value of a
+// stored snapshot value. headed is false for a value written before the slot
+// was kept, which is returned whole.
+func splitSnapshotValue(v []byte) (slot uint64, value []byte, headed bool, err error) {
+	if len(v) == 0 || v[0] != snapshotMark {
+		return 0, v, false, nil
+	}
+	if len(v) < 9 {
+		return 0, nil, false, errors.New("badgerutxo: malformed snapshot value")
+	}
+	return binary.BigEndian.Uint64(v[1:9]), v[9:], true, nil
+}
+
+// snapshotSlotKey is the capture index key of the row stored under key.
+func snapshotSlotKey(slot uint64, key []byte) []byte {
+	k := binary.BigEndian.AppendUint64([]byte{SnapshotSlotTag}, slot)
+	return append(k, key[1:]...)
+}
+
+// snapshotSlotKeyOf is the capture index key of a stored row, or nil for a
+// value written before the slot was kept, which has none.
+func snapshotSlotKeyOf(key, stored []byte) ([]byte, error) {
+	slot, _, headed, err := splitSnapshotValue(stored)
+	if err != nil || !headed {
+		return nil, err
+	}
+	return snapshotSlotKey(slot, key), nil
+}
+
+// setSnapshotRow stores a snapshot value that already carries its capture
+// slot under key and moves the row's capture index entry with it.
+func setSnapshotRow(txn *badger.Txn, key, stored []byte) error {
+	slot, _, headed, err := splitSnapshotValue(stored)
+	if err != nil {
+		return err
+	}
+	if !headed {
+		return errors.New("badgerutxo: a snapshot value has no capture slot")
+	}
+	if err := deleteSnapshotIndex(txn, key); err != nil {
+		return err
+	}
+	if err := txn.Set(key, stored); err != nil {
+		return err
+	}
+	return txn.Set(snapshotSlotKey(slot, key), nil)
+}
+
+// deleteSnapshotIndex deletes the capture index entry of the row now stored
+// under key, if it has one.
+func deleteSnapshotIndex(txn *badger.Txn, key []byte) error {
+	item, err := txn.Get(key)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	old, err := item.ValueCopy(nil)
+	if err != nil {
+		return err
+	}
+	idx, err := snapshotSlotKeyOf(key, old)
+	if err != nil || idx == nil {
+		return err
+	}
+	return txn.Delete(idx)
+}
+
+// deleteSnapshotRows deletes the rows stored under keys with their capture
+// index entries.
+func deleteSnapshotRows(txn *badger.Txn, keys [][]byte) error {
+	for _, k := range keys {
+		if err := deleteSnapshotIndex(txn, k); err != nil {
+			return err
+		}
+		if err := txn.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// snapshotKeysUnder returns the keys under prefix that keep selects.
+func snapshotKeysUnder(
+	txn *badger.Txn,
+	prefix []byte,
+	keep func(k []byte) bool,
+) ([][]byte, error) {
+	var keys [][]byte
+	err := eachPrefix(txn, prefix, func(k, _ []byte) error {
+		if keep(k) {
+			keys = append(keys, k)
+		}
+		return nil
+	})
+	return keys, err
+}
+
 func decodeSnapshotKey(k, v []byte) (SnapshotRow, error) {
 	if len(k) < 10 || len(k) < 10+int(k[9]) {
 		return SnapshotRow{}, errors.New("badgerutxo: malformed snapshot key")
 	}
 	tl := int(k[9])
+	slot, value, _, err := splitSnapshotValue(v)
+	if err != nil {
+		return SnapshotRow{}, err
+	}
 	return SnapshotRow{
-		Epoch: binary.BigEndian.Uint64(k[1:9]),
-		Type:  string(k[10 : 10+tl]),
-		Pool:  bytes.Clone(k[10+tl:]),
-		Value: v,
+		Epoch:        binary.BigEndian.Uint64(k[1:9]),
+		Type:         string(k[10 : 10+tl]),
+		Pool:         bytes.Clone(k[10+tl:]),
+		Value:        value,
+		CapturedSlot: slot,
 	}, nil
 }
 
@@ -230,30 +360,39 @@ func deleteKeys(txn *badger.Txn, keys [][]byte) error {
 func applySnapshotOp(txn *badger.Txn, op SnapshotOp) error {
 	switch op.Kind {
 	case SnapshotPut:
-		return txn.Set(snapshotKey(op.Row), op.Row.Value)
+		return putSnapshot(txn, op.Row)
 	case SnapshotDeleteEpochType:
-		var keys [][]byte
-		err := eachPrefix(txn, snapshotTypePrefix(op.Row.Epoch, op.Row.Type),
-			func(k, _ []byte) error { keys = append(keys, k); return nil })
+		keys, err := snapshotKeysUnder(
+			txn, snapshotTypePrefix(op.Row.Epoch, op.Row.Type),
+			func([]byte) bool { return true },
+		)
 		if err != nil {
 			return err
 		}
-		return deleteKeys(txn, keys)
+		return deleteSnapshotRows(txn, keys)
 	case SnapshotDeleteBefore:
-		var keys [][]byte
-		err := eachPrefix(txn, []byte{SnapshotTag}, func(k, _ []byte) error {
-			if binary.BigEndian.Uint64(k[1:9]) < op.Row.Epoch {
-				keys = append(keys, k)
-			}
-			return nil
-		})
+		keys, err := snapshotKeysUnder(txn, []byte{SnapshotTag},
+			func(k []byte) bool {
+				return binary.BigEndian.Uint64(k[1:9]) < op.Row.Epoch
+			})
 		if err != nil {
 			return err
 		}
-		return deleteKeys(txn, keys)
+		return deleteSnapshotRows(txn, keys)
 	default:
 		return fmt.Errorf("badgerutxo: unknown snapshot op %d", op.Kind)
 	}
+}
+
+// putSnapshot stores r with its capture slot and index entry, replacing the
+// row of the same key and the index entry that row had.
+func putSnapshot(txn *badger.Txn, r SnapshotRow) error {
+	if len(r.Value) > 0 && r.Value[0] == snapshotMark {
+		return errSnapshotMark
+	}
+	return setSnapshotRow(
+		txn, snapshotKey(r), encodeSnapshotValue(r.CapturedSlot, r.Value),
+	)
 }
 
 // rollbackLedgerState removes what a rollback to slot undoes: the nonces,
@@ -316,17 +455,14 @@ func rollbackLedgerState(txn *badger.Txn, slot uint64) error {
 	if err := deleteSummariesAfter(txn, newest); err != nil {
 		return err
 	}
-	var snaps [][]byte
-	err = eachPrefix(txn, []byte{SnapshotTag}, func(k, _ []byte) error {
-		if binary.BigEndian.Uint64(k[1:9]) > newest {
-			snaps = append(snaps, k)
-		}
-		return nil
-	})
+	snaps, err := snapshotKeysUnder(txn, []byte{SnapshotTag},
+		func(k []byte) bool {
+			return binary.BigEndian.Uint64(k[1:9]) > newest
+		})
 	if err != nil {
 		return err
 	}
-	return deleteKeys(txn, snaps)
+	return deleteSnapshotRows(txn, snaps)
 }
 
 // Epochs returns every epoch row, in epoch order.
@@ -366,6 +502,190 @@ func (s *Store) Snapshots(epoch uint64, typ string) ([]SnapshotRow, error) {
 	return out, err
 }
 
+// EachSnapshot calls fn with the snapshot row of every epoch and type, in
+// key order, from one read transaction.
+func (s *Store) EachSnapshot(fn func(SnapshotRow) error) error {
+	return s.view(func(txn *badger.Txn) error {
+		return eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
+			r, err := decodeSnapshotKey(k, v)
+			if err != nil {
+				return err
+			}
+			return fn(r)
+		})
+	})
+}
+
+// SnapshotsCapturedIn returns the snapshot rows captured in [from, through],
+// in key order, reading no other row. indexed is false, and no row is
+// returned, when the store holds rows without the capture index; the caller
+// then reads them all with EachSnapshot.
+func (s *Store) SnapshotsCapturedIn(
+	from, through uint64,
+) (rows []SnapshotRow, indexed bool, err error) {
+	err = s.view(func(txn *badger.Txn) error {
+		if _, err := txn.Get(snapshotSlotsKey); errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		indexed = true
+		if from > through {
+			return nil
+		}
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = []byte{SnapshotSlotTag}
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		start := binary.BigEndian.AppendUint64([]byte{SnapshotSlotTag}, from)
+		for it.Seek(start); it.Valid(); it.Next() {
+			k := it.Item().Key()
+			if len(k) < 18 {
+				return errors.New("badgerutxo: malformed snapshot capture index key")
+			}
+			slot := binary.BigEndian.Uint64(k[1:9])
+			if slot > through {
+				break
+			}
+			mk := append([]byte{SnapshotTag}, k[9:]...)
+			item, err := txn.Get(mk)
+			if err != nil {
+				return fmt.Errorf(
+					"badgerutxo: snapshot capture index entry has no row: %w", err,
+				)
+			}
+			v, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			r, err := decodeSnapshotKey(mk, v)
+			if err != nil {
+				return err
+			}
+			if r.CapturedSlot != slot {
+				return errors.New(
+					"badgerutxo: snapshot capture index entry disagrees with its row",
+				)
+			}
+			rows = append(rows, r)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	slices.SortFunc(rows, func(a, b SnapshotRow) int {
+		if c := cmp.Compare(a.Epoch, b.Epoch); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(len(a.Type), len(b.Type)); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Type, b.Type); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.Pool, b.Pool)
+	})
+	return rows, indexed, nil
+}
+
+// IndexSnapshotSlots gives every snapshot row written before the capture
+// index existed its capture slot and index entry, then marks the index
+// complete. slotOf reads the capture slot out of a row's value. A store that
+// holds the marker is left alone, and an interrupted run is finished by the
+// next one: rows already converted keep their slot and gain any missing
+// index entry.
+func (s *Store) IndexSnapshotSlots(
+	slotOf func(SnapshotRow) (uint64, error),
+) error {
+	var keys [][]byte
+	done := false
+	err := s.view(func(txn *badger.Txn) error {
+		_, err := txn.Get(snapshotSlotsKey)
+		if err == nil {
+			done = true
+			return nil
+		}
+		if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = []byte{SnapshotTag}
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			keys = append(keys, it.Item().KeyCopy(nil))
+		}
+		return nil
+	})
+	if err != nil || done {
+		return err
+	}
+	// Each chunk reads its rows in the transaction that rewrites them, so a
+	// row changed in between fails the commit rather than being overwritten
+	// with what was read.
+	const chunk = 256
+	for len(keys) > 0 {
+		n := min(chunk, len(keys))
+		batch := keys[:n]
+		keys = keys[n:]
+		err := s.update(func(txn *badger.Txn) error {
+			for _, k := range batch {
+				if err := indexSnapshotRow(txn, k, slotOf); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("badgerutxo: index snapshot slots: %w", err)
+		}
+	}
+	return s.update(func(txn *badger.Txn) error {
+		return txn.Set(snapshotSlotsKey, []byte{1})
+	})
+}
+
+// indexSnapshotRow gives the row under key its capture slot, if it has none,
+// and its index entry.
+func indexSnapshotRow(
+	txn *badger.Txn,
+	key []byte,
+	slotOf func(SnapshotRow) (uint64, error),
+) error {
+	item, err := txn.Get(key)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	raw, err := item.ValueCopy(nil)
+	if err != nil {
+		return err
+	}
+	r, err := decodeSnapshotKey(key, raw)
+	if err != nil {
+		return err
+	}
+	_, _, headed, err := splitSnapshotValue(raw)
+	if err != nil {
+		return err
+	}
+	slot := r.CapturedSlot
+	if !headed {
+		if slot, err = slotOf(r); err != nil {
+			return err
+		}
+		if err := txn.Set(key, encodeSnapshotValue(slot, raw)); err != nil {
+			return err
+		}
+	}
+	return txn.Set(snapshotSlotKey(slot, key), nil)
+}
+
 // LoadEpochState replaces the store's epoch and snapshot rows and its era
 // switch record with the given ones and marks them loaded, for a store from
 // before it kept them.
@@ -375,7 +695,7 @@ func (s *Store) LoadEpochState(
 	eraSwitch *EraSwitch,
 ) error {
 	if err := s.dropPrefix(
-		[]byte{EpochTag}, []byte{SnapshotTag},
+		[]byte{EpochTag}, []byte{SnapshotTag}, []byte{SnapshotSlotTag},
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop epoch state: %w", err)
 	}
@@ -386,9 +706,21 @@ func (s *Store) LoadEpochState(
 			return fmt.Errorf("badgerutxo: load epochs: %w", err)
 		}
 	}
+	merging := s.merging.Load()
 	for _, r := range snapshots {
-		if err := wb.Set(snapshotKey(r), r.Value); err != nil {
+		if len(r.Value) > 0 && r.Value[0] == snapshotMark {
+			return errSnapshotMark
+		}
+		k := snapshotKey(r)
+		if err := wb.Set(k, encodeSnapshotValue(r.CapturedSlot, r.Value)); err != nil {
 			return fmt.Errorf("badgerutxo: load snapshots: %w", err)
+		}
+		// A merge writes through setRow, which also moves the index entry
+		// of a row it replaces.
+		if !merging {
+			if err := wb.Set(snapshotSlotKey(r.CapturedSlot, k), nil); err != nil {
+				return fmt.Errorf("badgerutxo: load snapshots: %w", err)
+			}
 		}
 	}
 	if err := wb.Flush(); err != nil {
@@ -399,9 +731,15 @@ func (s *Store) LoadEpochState(
 			if err := txn.Set(eraSwitchKey, eraSwitch.encode()); err != nil {
 				return err
 			}
-		} else if !s.merging.Load() {
+		} else if !merging {
 			// A merge keeps the last switch the set recorded.
 			if err := txn.Delete(eraSwitchKey); err != nil {
+				return err
+			}
+		}
+		if !merging {
+			// A merge adds to rows the set may hold without the index.
+			if err := txn.Set(snapshotSlotsKey, []byte{1}); err != nil {
 				return err
 			}
 		}

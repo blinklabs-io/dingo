@@ -50,7 +50,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,9 +63,7 @@ type ShadowScenario struct {
 	Resume func(ctx context.Context, point ocommon.Point) (bool, error)
 	// UtxoSetFailed reports whether the ledger stopped following the set.
 	UtxoSetFailed func() bool
-	// UtxoSetReads reports the verify-mode reads and how many of them
-	// differed from the metadata store.
-	UtxoSetReads func() (verified, mismatches float64)
+
 	// ReadsForValidation resolves refs the way validation's block
 	// prefetch does, outside any transaction.
 	ReadsForValidation func(refs []models.UtxoId) ([]models.Utxo, error)
@@ -86,35 +83,14 @@ type ShadowScenario struct {
 	BlockNonce             func(point ocommon.Point) ([]byte, error)
 	BlockNoncesInSlotRange func(start, end uint64) ([]models.BlockNonce, error)
 	LatestBlockNonce       func() (models.BlockNonce, bool, error)
-	// NonceSetReads reports the verify-mode nonce reads and how many of
-	// them differed from the metadata store.
-	NonceSetReads func() (verified, mismatches float64)
 }
 
-// RunShadowScenarioForTest applies the external-ingest blocks, which include
-// an invalid transaction whose collateral return a later block spends, with
-// bus as the ledger's event bus. attach runs on the database before any block
-// is applied.
-func RunShadowScenarioForTest(
-	t *testing.T,
-	storageMode string,
-	bus *event.EventBus,
-	utxoSet UtxoSetWriter,
-	attach func(*database.Database),
-) ShadowScenario {
-	return RunUtxoSetScenarioForTest(
-		t, storageMode, bus, utxoSet, UtxoSetReadsOff, attach,
-	)
-}
-
-// RunUtxoSetScenarioForTest is RunShadowScenarioForTest with validation
-// reading its inputs as reads selects.
+// RunUtxoSetScenarioForTest runs the external-ingest blocks against utxoSet.
 func RunUtxoSetScenarioForTest(
 	t *testing.T,
 	storageMode string,
 	bus *event.EventBus,
 	utxoSet UtxoSetWriter,
-	reads string,
 	attach func(*database.Database),
 ) ShadowScenario {
 	t.Helper()
@@ -123,21 +99,16 @@ func RunUtxoSetScenarioForTest(
 		storageMode,
 		bus,
 		utxoSet,
-		reads,
-		false,
 		nil,
 		attach,
 	)
 }
 
 // RunUtxoSetFailureScenarioForTest is RunUtxoSetScenarioForTest with fatal as
-// the ledger's FatalErrorFunc, for a utxoSet that fails an update. A setOnly
-// run is in core mode, as RunUtxoSetOnlyScenarioForTest's.
+// the ledger's FatalErrorFunc, for a utxoSet that fails an update.
 func RunUtxoSetFailureScenarioForTest(
 	t *testing.T,
 	utxoSet UtxoSetWriter,
-	reads string,
-	setOnly bool,
 	fatal func(error),
 	attach func(*database.Database),
 ) ShadowScenario {
@@ -147,8 +118,6 @@ func RunUtxoSetFailureScenarioForTest(
 		types.StorageModeCore,
 		nil,
 		utxoSet,
-		reads,
-		setOnly,
 		fatal,
 		attach,
 	)
@@ -159,8 +128,6 @@ func runUtxoSetScenario(
 	storageMode string,
 	bus *event.EventBus,
 	utxoSet UtxoSetWriter,
-	reads string,
-	setOnly bool,
 	fatal FatalErrorFunc,
 	attach func(*database.Database),
 	configure ...func(*LedgerState),
@@ -177,14 +144,17 @@ func runUtxoSetScenario(
 		func(ls *LedgerState) {
 			ls.config.EventBus = bus
 			ls.config.UtxoSet = utxoSet
-			ls.config.UtxoSetReads = reads
 			ls.config.FatalErrorFunc = fatal
-			if setOnly {
-				require.NoError(t, ls.EnableUtxoSetOnly())
-			}
 			attach(ls.db)
 			for _, fn := range configure {
 				fn(ls)
+			}
+			if loader, ok := utxoSet.(interface {
+				LoadLedgerState(context.Context, ledgerdb.LedgerDB) error
+			}); ok {
+				require.NoError(t, loader.LoadLedgerState(
+					t.Context(), dbadapter.New(ls.db),
+				))
 			}
 		},
 	)
@@ -212,7 +182,7 @@ func runUtxoSetScenario(
 		},
 		UtxosByAddressAt: func(p ocommon.Point, addrs []gledger.Address) ([]models.Utxo, error) {
 			res, err := run.ls.queryShelleyUtxoByAddress(
-				t.Context(), addrs, QueryPoint{Slot: p.Slot, Hash: p.Hash}, nil,
+				addrs, QueryPoint{Slot: p.Slot, Hash: p.Hash}, nil,
 			)
 			if err != nil {
 				return nil, err
@@ -227,7 +197,7 @@ func runUtxoSetScenario(
 				))
 			}
 			res, err := run.ls.queryShelleyUtxoByTxIn(
-				t.Context(), ins, QueryPoint{Slot: p.Slot, Hash: p.Hash}, nil,
+				ins, QueryPoint{Slot: p.Slot, Hash: p.Hash}, nil,
 			)
 			if err != nil {
 				return nil, err
@@ -246,13 +216,10 @@ func runUtxoSetScenario(
 			return run.ls.UtxoByRefIncludingSpent(txID, index)
 		},
 		ReadsForValidation: func(refs []models.UtxoId) ([]models.Utxo, error) {
-			return run.ls.utxosByRefsForValidation(t.Context(), refs, nil)
+			return run.ls.utxosByRefsForValidation(refs, nil)
 		},
 		UtxoSetFailed: func() bool { return run.ls.utxoSetFailed.Load() },
-		UtxoSetReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(run.ls.metrics.utxoSetReadsVerified),
-				promtestutil.ToFloat64(run.ls.metrics.utxoSetReadMismatches)
-		},
+
 		BlockNonce: func(point ocommon.Point) ([]byte, error) {
 			return run.ls.blockNonce(point, nil)
 		},
@@ -261,10 +228,6 @@ func runUtxoSetScenario(
 		},
 		LatestBlockNonce: func() (models.BlockNonce, bool, error) {
 			return run.ls.latestBlockNonce(nil)
-		},
-		NonceSetReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(run.ls.metrics.nonceSetReadsVerified),
-				promtestutil.ToFloat64(run.ls.metrics.nonceSetReadMismatches)
 		},
 	}
 }
@@ -282,8 +245,6 @@ func RunUtxoSetOnlyScenarioForTest(
 		types.StorageModeCore,
 		nil,
 		utxoSet,
-		UtxoSetReadsOff,
-		true,
 		nil,
 		attach,
 	)
@@ -303,8 +264,6 @@ func RunUtxoSetOnlyDrainedScenarioForTest(
 		types.StorageModeCore,
 		nil,
 		utxoSet,
-		UtxoSetReadsOff,
-		true,
 		nil,
 		attach,
 		func(ls *LedgerState) {
@@ -313,31 +272,6 @@ func RunUtxoSetOnlyDrainedScenarioForTest(
 			}
 			ls.SetDrainedFamilies(mask)
 		},
-	)
-}
-
-// MetadataDigestOutsideUtxoSetForTest digests the metadata store without what
-// UtxoSetOnly moves to the live UTxO set: the utxo table and the tables keyed
-// by its rows.
-func MetadataDigestOutsideUtxoSetForTest(
-	t *testing.T,
-	db *database.Database,
-) string {
-	t.Helper()
-	return metadataDigest(
-		t,
-		db,
-		map[string]bool{
-			"utxo":                  true,
-			"asset":                 true,
-			"utxo_pointer":          true,
-			"utxo_collateral_input": true,
-			"utxo_reference_input":  true,
-			"utxo_address":          true,
-			"utxo_reference_script": true,
-		},
-		nil,
-		nil,
 	)
 }
 
@@ -418,32 +352,15 @@ type BoundaryEpochStateScenario struct {
 	// reached it and a switch for the hiding. A read the live UTxO set
 	// serves never reaches the store.
 	HideStoreReads func(names ...string) (reached func() int64, hide func(on bool))
-	// LedgerStateSetOnly turns the set-only switch on or off and, when on,
-	// also drains every family: the metadata store then holds no copy of
-	// the ledger state the set computes.
-	LedgerStateSetOnly func(on bool)
-	// SetOnlySwitch turns the set-only switch on or off without draining
-	// any family.
-	SetOnlySwitch func(on bool)
 	// DrainFamilies adds mask to the families the ledger treats as drained.
 	DrainFamilies func(mask nodesettings.FamilyMask)
 	// InstallDrainedSources gives the database the sources its reads of a
 	// drained family come from, which a ledger built for set reads installs
 	// when it is created.
 	InstallDrainedSources func()
-	// ComputedResults reports the verify-mode results of kind result
-	// (epoch, epoch_summary, pparam_enactment) the set computed and how
-	// many of them differed from the metadata store's.
-	ComputedResults func(result string) (verified, mismatches float64)
 	// CorruptEpochWrites makes the metadata store keep a different nonce
 	// than each epoch write gives it.
 	CorruptEpochWrites func()
-	// EpochStateReads reports the verify-mode epoch state reads and how
-	// many of them differed from the metadata store.
-	EpochStateReads func() (verified, mismatches float64)
-	// EpochSummaryReads is EpochStateReads for epoch summary and total
-	// active stake reads.
-	EpochSummaryReads func() (verified, mismatches float64)
 	// SummaryInsideRollback reads epoch's summary and mark total active
 	// stake in an abandoned write transaction that stages the rollback.
 	SummaryInsideRollback func(epoch uint64) (*models.EpochSummary, uint64)
@@ -454,25 +371,6 @@ type BoundaryEpochStateScenario struct {
 	// SummaryInsideTxn saves summary in an abandoned write transaction and
 	// reads it and its epoch's mark total active stake back inside it.
 	SummaryInsideTxn func(summary models.EpochSummary) (*models.EpochSummary, uint64)
-	// NetworkStateReads is EpochStateReads for network state and
-	// donation reads.
-	NetworkStateReads func() (verified, mismatches float64)
-	// AccountReads is EpochStateReads for account reads.
-	AccountReads func() (verified, mismatches float64)
-	// DrepReads is EpochStateReads for DRep reads.
-	DrepReads func() (verified, mismatches float64)
-	// PoolReads is EpochStateReads for pool reads.
-	PoolReads func() (verified, mismatches float64)
-	// RegistrationReads is EpochStateReads for registration history and
-	// DRep deposit reads.
-	RegistrationReads func() (verified, mismatches float64)
-	// OpCertReads is EpochStateReads for op-cert counter reads.
-	OpCertReads func() (verified, mismatches float64)
-	// LiveStakeReads is EpochStateReads for live stake reads.
-	LiveStakeReads func() (verified, mismatches float64)
-	// RewardOutputReads is EpochStateReads for reward output, credited round
-	// and post-snapshot credit reads.
-	RewardOutputReads func() (verified, mismatches float64)
 	// EpochStartSlot is the current epoch's first slot, and RollbackSlot the
 	// slot RollbackBeforeBoundary rolls back to.
 	EpochStartSlot func() uint64
@@ -493,12 +391,9 @@ type BoundaryEpochStateScenario struct {
 	// its own write transaction, and reports whether no round was due.
 	CompactRewardCredits func(limit int) bool
 	// PinnedReadTxn begins a read transaction, fixes its snapshot with a
-	// read and pins it for verify reads as the ratification job pins its own
+	// read and pins it as the ratification job pins its own
 	// after the boundary commits.
 	PinnedReadTxn func() ledgerdb.Txn
-	// AccountReadMismatches counts the account reads whose answer differed
-	// from the metadata store's.
-	AccountReadMismatches func() uint64
 	// RelayProviderStake is the stake the pool relay provider's default
 	// lookup reports for pools.
 	RelayProviderStake func(pools [][]byte) (map[string]uint64, error)
@@ -549,6 +444,10 @@ type BoundaryEpochStateScenario struct {
 	// lower counter and a batched raise at slots the rollback undoes, and
 	// one for a pool that is not registered.
 	OpCerts func() OpCertSlots
+	// CheckOpCertCounter judges counter as block validation would for a
+	// block of pool, on a ledger whose state was delivered at loadedTip
+	// (zero when it was built block by block).
+	CheckOpCertCounter func(pool []byte, loadedTip, counter uint64) error
 	// AnchorOpCertCounters is the ledger's export of the counters observed
 	// at exactly slot.
 	AnchorOpCertCounters func(slot uint64) ([]metadata.OpCertCounter, error)
@@ -566,8 +465,6 @@ type BoundaryEpochStateScenario struct {
 	// authorizes hot key hot at from+1, resigns the member at from+2,
 	// authorizes hot2 at from+3 and changes the constitution at from+4.
 	CommitteeLater func(cold, hot, hot2 []byte, from uint64)
-	// CommitteeReads is EpochStateReads for committee and constitution reads.
-	CommitteeReads func() (verified, mismatches float64)
 	// Committee commits the committee, quorum and constitution writes and
 	// the committee certificates described by CommitteeSlots, through the
 	// ledger's LedgerDB.
@@ -576,30 +473,16 @@ type BoundaryEpochStateScenario struct {
 	// constitution in an abandoned write transaction and reads them through
 	// the LedgerDB inside it.
 	CommitteeInsideTxn func(slot uint64)
-	// GovernanceReads is EpochStateReads for governance proposal and vote
-	// reads.
-	GovernanceReads func() (verified, mismatches float64)
 	// Proposals commits the proposal and vote writes described by
 	// GovernanceSlots through the ledger's LedgerDB.
 	Proposals func() GovernanceSlots
-	// SnapshotReadsAfterLaterCommit commits a DRep, a proposal and a vote,
-	// pins a read transaction, commits a DRep activity renewal, a changed
-	// vote and a new vote after it, and then reads the active DReps and the
-	// proposal's votes through the pinned transaction, as the deferred
-	// ratification does. It returns the verify-mode counts of the DRep and
-	// governance reads after the pinned reads.
-	SnapshotReadsAfterLaterCommit func() SnapshotReadCounts
 	// PinInsideCommit commits two DRep activity updates in one write
 	// transaction and a third in another, and pins a read transaction in
 	// the first transaction's AfterCommit, ahead of the callback that applies
 	// its batch to the set, so the pin finds the batch committed but not
 	// applied. It reads the DRep's expiry through the pin and without it.
-	PinInsideCommit func() PinInsideCommitResult
-	// SnapshotReadOfADivergence writes a DRep around the ledger's LedgerDB,
-	// so the set never sees it, pins a read transaction after it with no
-	// later commit, and reads the active DReps through that transaction.
-	// It returns the verify-mode counts of the DRep reads.
-	SnapshotReadOfADivergence func() SnapshotReadCounts
+	SnapshotReadsAfterLaterCommit func()
+	PinInsideCommit               func() PinInsideCommitResult
 	// OnProposalWrite sets f to run after each committed write of Proposals
 	// and the reads that follow it, with the write's number from 1.
 	OnProposalWrite func(f func(step int))
@@ -632,6 +515,18 @@ type BoundaryEpochStateScenario struct {
 	// an epoch row, so a rollback to before that slot is always in an earlier
 	// epoch than the activation marker's. It runs no other boundary rule.
 	ExpireAtBoundary func(ref models.StakeCredentialRef)
+	// ActivateInactivityAtBoundary enables CIP-0163 with window and runs its
+	// one-time activation at the next epoch boundary. It returns the entered
+	// epoch and boundary slot.
+	ActivateInactivityAtBoundary func(window uint64) (uint64, uint64)
+	// RewardAccountGuarded reports whether the production reward-application
+	// guard withholds ref at snapshotEpoch using witness history through
+	// capturedSlot.
+	RewardAccountGuarded func(
+		ref models.StakeCredentialRef,
+		snapshotEpoch uint64,
+		capturedSlot uint64,
+	) bool
 	// Governance drives DRep state through the ledger's LedgerDB at slots
 	// the rollback undoes: it registers a DRep and vote-delegates ref to
 	// it, records DRep activity, bumps and resets the dormancy counter,
@@ -719,9 +614,6 @@ type BoundaryEpochStateScenario struct {
 	// registration event in [from, to] the LedgerDB reports inside an
 	// abandoned write transaction that stages the rollback.
 	RegistrationCredentialsInsideRollback func(from, to uint64) []models.StakeCredentialRef
-	// CertHistoryReads is EpochStateReads for genesis delegation and MIR
-	// certificate reads.
-	CertHistoryReads func() (verified, mismatches float64)
 	// GenesisMIR commits Babbage transactions carrying genesis key
 	// delegation and MIR certificates described by GenesisMIRSlots, through
 	// the ledger's LedgerDB, at slots the rollback undoes, and then applies
@@ -753,10 +645,11 @@ type BoundaryEpochStateScenario struct {
 	// DijkstraBoundary makes the epoch starting at the fixture's boundary a
 	// Dijkstra one, whose SNAP follows the boundary's enactment.
 	DijkstraBoundary func(f BoundaryStakeFixture)
+	// ApplyDijkstraBoundary runs the production rollover in Dijkstra.
+	ApplyDijkstraBoundary func()
 	// ReadBoundaryStake makes the five epoch-boundary stake reads for the
-	// fixture's boundary, through the metadata store when viaStore is set
-	// and through the ledger's LedgerDB otherwise.
-	ReadBoundaryStake func(f BoundaryStakeFixture, viaStore bool) BoundaryStakeAnswers
+	// fixture's boundary through the ledger's LedgerDB.
+	ReadBoundaryStake func(f BoundaryStakeFixture) BoundaryStakeAnswers
 }
 
 // BoundaryStakeFixture names what BoundaryEpochStateScenario.BoundaryStake
@@ -1021,6 +914,12 @@ type RewardViews struct {
 	Credits    []models.AccountRewardDelta
 }
 
+// PinInsideCommitResult is the DRep expiry epoch the pinned transaction reads
+// and the latest one, with the epoch the activity updates start from.
+type PinInsideCommitResult struct {
+	Epoch, Pinned, Latest uint64
+}
+
 // GovernanceSlots names the proposals and slots
 // BoundaryEpochStateScenario.Proposals wrote, in Epoch. P1 is submitted at
 // Base and P2 at Submit. D1 votes on P1 at Vote and again at Revote; D2 votes
@@ -1029,17 +928,6 @@ type RewardViews struct {
 // ClearRatify, has its action CBOR translated at Translate, and is ratified
 // at RatifyAgain and enacted at Enact in one write. P2 expires at Expire and
 // is dropped at Drop.
-type SnapshotReadCounts struct {
-	DrepVerified, DrepMismatches             float64
-	GovernanceVerified, GovernanceMismatches float64
-}
-
-// PinInsideCommitResult is the DRep expiry epoch the pinned transaction reads
-// and the latest one, with the epoch the activity updates start from.
-type PinInsideCommitResult struct {
-	Epoch, Pinned, Latest uint64
-}
-
 type GovernanceSlots struct {
 	P1, P2, D1, D2 []byte
 	Epoch          uint64
@@ -1073,10 +961,9 @@ type OpCertSlots struct {
 func NewBoundaryEpochStateScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 ) BoundaryEpochStateScenario {
 	t.Helper()
-	return NewGuardedBoundaryEpochStateScenarioForTest(t, set, reads, nil)
+	return NewGuardedBoundaryEpochStateScenarioForTest(t, set, nil)
 }
 
 // NewGuardedBoundaryEpochStateScenarioForTest is
@@ -1085,7 +972,6 @@ func NewBoundaryEpochStateScenarioForTest(
 func NewGuardedBoundaryEpochStateScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 	guard metadata.StatementGuard,
 ) BoundaryEpochStateScenario {
 	t.Helper()
@@ -1095,7 +981,6 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 	})
 	require.NoError(t, err)
 	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	h.ls.config.UtxoSetReads = reads
 	// A treasury and reserves baseline, and a donation in the epoch before
 	// the boundary, for the boundary's pots to start from.
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
@@ -1534,11 +1419,15 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			))
 			require.NoError(t, txn.Commit())
 		},
-		ReadBoundaryStake: func(f BoundaryStakeFixture, viaStore bool) BoundaryStakeAnswers {
-			var db ledgerdb.LedgerDB = dbadapter.New(h.ls.db)
-			if !viaStore {
-				db = h.ls.LedgerDB()
-			}
+		ApplyDijkstraBoundary: func() {
+			h.ls.activeEras = eras.ErasWithDijkstra
+			h.ls.currentEra = eras.DijkstraEraDesc
+			h.ls.currentPParams = dijkstraRetentionPParams()
+			h.next.EraId = eras.DijkstraEraDesc.Id
+			h.applyBoundary()
+		},
+		ReadBoundaryStake: func(f BoundaryStakeFixture) BoundaryStakeAnswers {
+			db := h.ls.LedgerDB()
 			pools := [][]byte{f.Pool, f.Idle}
 			var a BoundaryStakeAnswers
 			var err error
@@ -1622,13 +1511,6 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		LedgerStateSetOnly: func(on bool) {
-			h.ls.config.LedgerStateSetOnly = on
-			if on {
-				h.ls.SetDrainedFamilies(nodesettings.AllFamilies())
-			}
-		},
-		SetOnlySwitch: func(on bool) { h.ls.config.LedgerStateSetOnly = on },
 		DrainFamilies: h.ls.SetDrainedFamilies,
 		InstallDrainedSources: func() {
 			h.ls.installNonceSource()
@@ -1636,32 +1518,19 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			h.ls.installPParamsSource()
 			h.ls.installPoolSource()
 		},
-		ComputedResults: computedResultCounts(h.ls),
+
 		CorruptEpochWrites: func() {
 			h.ls.ldb = stagingLedgerDB{
 				LedgerDB: corruptEpochStore{dbadapter.New(h.ls.db)},
 				ls:       h.ls,
 			}
 		},
-		EpochStateReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.epochStateReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.epochStateReadMismatches)
-		},
-		EpochSummaryReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(
-					h.ls.metrics.epochSummaryReadsVerified,
-				),
-				promtestutil.ToFloat64(
-					h.ls.metrics.epochSummaryReadMismatches,
-				)
-		},
+
 		SummaryInsideRollback: func(epoch uint64) (*models.EpochSummary, uint64) {
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			sm, err := ldb.GetEpochSummary(epoch, txn)
 			require.NoError(t, err)
 			total, err := ldb.GetTotalActiveStake(epoch, "mark", txn)
@@ -1692,50 +1561,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			require.NoError(t, err)
 			return sm, total
 		},
-		NetworkStateReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(
-					h.ls.metrics.networkStateReadsVerified,
-				),
-				promtestutil.ToFloat64(
-					h.ls.metrics.networkStateReadMismatches,
-				)
-		},
-		AccountReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.accountReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.accountReadMismatches)
-		},
-		DrepReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.drepReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.drepReadMismatches)
-		},
-		PoolReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.poolReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.poolReadMismatches)
-		},
-		RegistrationReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(
-					h.ls.metrics.registrationReadsVerified,
-				),
-				promtestutil.ToFloat64(
-					h.ls.metrics.registrationReadMismatches,
-				)
-		},
-		OpCertReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.opCertReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.opCertReadMismatches)
-		},
-		LiveStakeReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.liveStakeReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.liveStakeReadMismatches)
-		},
-		RewardOutputReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(
-					h.ls.metrics.rewardOutputReadsVerified,
-				),
-				promtestutil.ToFloat64(
-					h.ls.metrics.rewardOutputReadMismatches,
-				)
-		},
+
 		EpochStartSlot: func() uint64 { return h.ls.currentEpoch.StartSlot },
 		RollbackSlot:   func() uint64 { return h.fixture.ancestorTip.Point.Slot },
 		FoldForWithdrawal: func(ref models.StakeCredentialRef) {
@@ -1764,9 +1590,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			if after != nil {
 				after(ldb, txn)
 			}
@@ -1798,9 +1622,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			h.ls.pinSetReads(txn)
 			return txn
 		},
-		AccountReadMismatches: func() uint64 {
-			return h.ls.accountReadMismatches.Load()
-		},
+
 		CompactRewardCredits: func(limit int) bool {
 			done, err := h.ls.compactRewardCreditChunk(t.Context(), limit)
 			require.NoError(t, err)
@@ -2092,6 +1914,16 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			)}
 			return out
 		},
+		CheckOpCertCounter: func(pool []byte, loadedTip, counter uint64) error {
+			h.ls.mithrilLedgerSlot = loadedTip
+			stored, found, err := h.ls.latestOpCertCounterForValidation(
+				t.Context(), lcommon.PoolKeyHash(pool), nil,
+			)
+			if err != nil {
+				return err
+			}
+			return validateOpCertCounter(stored, found, counter, true)
+		},
 		AnchorOpCertCounters: func(slot uint64) ([]metadata.OpCertCounter, error) {
 			return h.ls.AnchorOpCertCounters(t.Context(), slot)
 		},
@@ -2174,10 +2006,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			require.NoError(t, err)
 			return observed
 		},
-		CommitteeReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.committeeReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.committeeReadMismatches)
-		},
+
 		Committee: func() CommitteeSlots {
 			ldb := h.ls.LedgerDB()
 			start := h.ls.currentEpoch.StartSlot
@@ -2469,10 +2298,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			_, err = ldb.GetActiveCommitteeMembers(t.Context(), txn)
 			require.NoError(t, err)
 		},
-		GovernanceReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(h.ls.metrics.governanceReadsVerified),
-				promtestutil.ToFloat64(h.ls.metrics.governanceReadMismatches)
-		},
+
 		PinInsideCommit: func() PinInsideCommitResult {
 			ldb := h.ls.LedgerDB()
 			start := h.ls.currentEpoch.StartSlot
@@ -2523,32 +2349,8 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				Epoch: epoch, Pinned: expiry(pin), Latest: expiry(nil),
 			}
 		},
-		SnapshotReadOfADivergence: func() SnapshotReadCounts {
-			ldb := h.ls.LedgerDB()
-			require.NoError(t, db.Metadata().InsertDrepIfAbsent(
-				0, bytes.Repeat([]byte{0xe3}, 28),
-				h.ls.currentEpoch.StartSlot+1, "", nil, true, nil,
-			))
-			snap := ldb.Begin(t.Context(), false)
-			defer snap.Release()
-			dreps, err := ldb.GetActiveDreps(t.Context(), snap)
-			require.NoError(t, err)
-			h.ls.pinSetReads(snap)
-			require.NotEmpty(
-				t,
-				dreps,
-				"the read answers from the metadata store",
-			)
-			return SnapshotReadCounts{
-				DrepVerified: promtestutil.ToFloat64(
-					h.ls.metrics.drepReadsVerified,
-				),
-				DrepMismatches: promtestutil.ToFloat64(
-					h.ls.metrics.drepReadMismatches,
-				),
-			}
-		},
-		SnapshotReadsAfterLaterCommit: func() SnapshotReadCounts {
+
+		SnapshotReadsAfterLaterCommit: func() {
 			ldb := h.ls.LedgerDB()
 			start := h.ls.currentEpoch.StartSlot
 			epoch := h.ls.currentEpoch.EpochId
@@ -2626,20 +2428,6 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			votes, err := ldb.GetGovernanceVotes(t.Context(), p.ID, snap)
 			require.NoError(t, err)
 			require.Len(t, votes, 1, "the pinned read still sees one vote")
-			var c SnapshotReadCounts
-			c.DrepVerified = promtestutil.ToFloat64(
-				h.ls.metrics.drepReadsVerified,
-			)
-			c.DrepMismatches = promtestutil.ToFloat64(
-				h.ls.metrics.drepReadMismatches,
-			)
-			c.GovernanceVerified = promtestutil.ToFloat64(
-				h.ls.metrics.governanceReadsVerified,
-			)
-			c.GovernanceMismatches = promtestutil.ToFloat64(
-				h.ls.metrics.governanceReadMismatches,
-			)
-			return c
 		},
 		Proposals: func() GovernanceSlots {
 			ldb := h.ls.LedgerDB()
@@ -2690,7 +2478,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			}
 			var p1, p2 *models.GovernanceProposal
 			// Each write is followed by reads the set answers from what it
-			// staged, which verify mode compares with the metadata store's.
+			// staged in the same transaction.
 			readAll := func() {
 				_, err := ldb.GetGovernanceProposalSet(t.Context(), nil)
 				require.NoError(t, err)
@@ -2996,6 +2784,55 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				txn, []models.StakeCredentialRef{ref}, entered+30, next+1,
 			)
 			require.NoError(t, txn.Commit())
+		},
+		ActivateInactivityAtBoundary: func(window uint64) (uint64, uint64) {
+			h.ls.config.DelegatorInactivityEnabled = true
+			h.ls.config.DelegatorInactivity = window
+			ldb := h.ls.LedgerDB()
+			cur := h.ls.currentEpoch
+			boundary := cur.StartSlot + uint64(cur.LengthInSlots)
+			entered := cur.EpochId + 1
+			txn := ldb.Begin(t.Context(), true)
+			require.NoError(t, ldb.SetEpoch(
+				boundary, entered, nil, nil, nil, nil,
+				cur.EraId, cur.SlotLength, cur.LengthInSlots, txn,
+			))
+			require.NoError(t, h.ls.setEpochCache(t.Context(), txn, []models.Epoch{
+				cur,
+				{
+					EpochId: entered, StartSlot: boundary,
+					EraId: cur.EraId, SlotLength: cur.SlotLength,
+					LengthInSlots: cur.LengthInSlots,
+				},
+			}))
+			require.NoError(t, h.ls.activateDelegatorInactivityIfNeeded(
+				t.Context(), txn, entered, boundary,
+			))
+			require.NoError(t, txn.Commit())
+			return entered, boundary
+		},
+		RewardAccountGuarded: func(
+			ref models.StakeCredentialRef,
+			snapshotEpoch uint64,
+			capturedSlot uint64,
+		) bool {
+			app := &stakeRewardApplication{
+				epochs:               stakeRewardEpochs{snapshot: snapshotEpoch},
+				snapshotCapturedSlot: capturedSlot,
+				accountOutputs: []*models.RewardAccountOutput{{
+					CredentialTag: ref.Tag,
+					StakingKey:    ref.Key,
+				}},
+			}
+			ldb := h.ls.LedgerDB()
+			txn := ldb.Begin(t.Context(), false)
+			defer txn.Release()
+			guarded, err := h.ls.guardedExpiredRewardCredentials(
+				t.Context(), txn, app,
+			)
+			require.NoError(t, err)
+			_, ok := guarded[ref.MapKey()]
+			return ok
 		},
 		Governance: func(ref models.StakeCredentialRef, protocolMajor uint64) {
 			ldb := h.ls.LedgerDB()
@@ -3632,9 +3469,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			got, err := ldb.AccountLastWitnessSlots(
 				t.Context(), refs, math.MaxInt64, txn,
 			)
@@ -3699,9 +3534,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			r := h.ls.registrationHistoryReader(txn)
 			require.NotNil(t, r)
 			events, err := h.ls.stakeHistoryView(
@@ -3716,18 +3549,14 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			return renderAccountReads(t, ldb, txn, pool, drep)
 		},
 		PoolKeysInsideRollback: func() [][]byte {
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			r := h.ls.poolReader(txn)
 			require.NotNil(t, r)
 			pools, err := h.ls.poolKeys(r, txn)
@@ -3755,23 +3584,14 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			refs, err := ldb.GetStakeCredentialsWithRegistrationEvents(
 				from, to, txn,
 			)
 			require.NoError(t, err)
 			return refs
 		},
-		CertHistoryReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(
-					h.ls.metrics.certHistoryReadsVerified,
-				),
-				promtestutil.ToFloat64(
-					h.ls.metrics.certHistoryReadMismatches,
-				)
-		},
+
 		GenesisMIR: func(beforeBoundary func()) GenesisMIRSlots {
 			ldb := h.ls.LedgerDB()
 			cur := h.ls.currentEpoch
@@ -3903,9 +3723,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			delegs, err := ldb.GetGenesisDelegationsInSlotRange(
 				0,
 				math.MaxInt64,
@@ -3925,9 +3743,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, h.ls.stageUtxoRollbackEvent(
-				t.Context(), txn, h.fixture.ancestorTip.Point,
-			))
+			h.ls.stageUtxoSetRollback(txn, h.fixture.ancestorTip.Point)
 			state, err := ldb.GetNetworkState(txn)
 			require.NoError(t, err)
 			require.NotNil(t, state)
@@ -4057,8 +3873,6 @@ type MidEpochEraSwitchScenario struct {
 	ApplySwitch func()
 	// RollbackBeforeSwitch rolls back to the last Babbage block.
 	RollbackBeforeSwitch func()
-	// PParamsReads is EpochStateReads for protocol parameter reads.
-	PParamsReads func() (verified, mismatches float64)
 	// EraInsideRollback stages a rollback to the last Babbage block in a
 	// write transaction, reads the switched epoch's era inside it, and
 	// abandons the transaction.
@@ -4072,11 +3886,6 @@ type MidEpochEraSwitchScenario struct {
 	ReadEpochs func() []string
 	// ReadPParams is ClassicUpdateBoundaryScenario.ReadPParams.
 	ReadPParams func() []string
-	// EpochStateReads reports the verify-mode epoch state reads and how
-	// many of them differed from the metadata store.
-	EpochStateReads func() (verified, mismatches float64)
-	// ComputedResults is BoundaryEpochStateScenario.ComputedResults.
-	ComputedResults func(result string) (verified, mismatches float64)
 }
 
 // NewMidEpochEraSwitchScenarioForTest returns a MidEpochEraSwitchScenario
@@ -4084,10 +3893,9 @@ type MidEpochEraSwitchScenario struct {
 func NewMidEpochEraSwitchScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 ) MidEpochEraSwitchScenario {
 	t.Helper()
-	return NewGuardedMidEpochEraSwitchScenarioForTest(t, set, reads, nil)
+	return NewGuardedMidEpochEraSwitchScenarioForTest(t, set, nil)
 }
 
 // NewGuardedMidEpochEraSwitchScenarioForTest is
@@ -4096,7 +3904,6 @@ func NewMidEpochEraSwitchScenarioForTest(
 func NewGuardedMidEpochEraSwitchScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 	guard metadata.StatementGuard,
 ) MidEpochEraSwitchScenario {
 	t.Helper()
@@ -4113,35 +3920,27 @@ func NewGuardedMidEpochEraSwitchScenarioForTest(
 	require.NoError(t, err)
 	tc.db = db
 	ls, blocks := newBoundaryEraLedgerChain(t, tc)
-	ls.config.UtxoSetReads = reads
 	return MidEpochEraSwitchScenario{
-		DB:              ls.db,
-		LedgerDB:        ls.LedgerDB,
-		DrainFamilies:   ls.SetDrainedFamilies,
-		ReadPParams:     func() []string { return renderPParamState(t, ls.LedgerDB()) },
-		ReadEpochs:      func() []string { return renderEpochRows(t, ls.LedgerDB()) },
-		ComputedResults: computedResultCounts(ls),
-		EpochStateReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.epochStateReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.epochStateReadMismatches)
-		},
+		DB:            ls.db,
+		LedgerDB:      ls.LedgerDB,
+		DrainFamilies: ls.SetDrainedFamilies,
+		ReadPParams:   func() []string { return renderPParamState(t, ls.LedgerDB()) },
+		ReadEpochs:    func() []string { return renderEpochRows(t, ls.LedgerDB()) },
+
 		ApplySwitch: func() {
 			require.NoError(t, processMidEpochEraBlocks(t, ls, blocks))
 			require.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
 		},
-		PParamsReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.pparamsReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.pparamsReadMismatches)
-		},
+
 		EraInsideRollback: func() uint {
 			before := blocks[1]
 			ldb := ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
 			defer func() { require.NoError(t, txn.Rollback()) }()
-			require.NoError(t, ls.stageUtxoRollbackEvent(
-				t.Context(), txn,
+			ls.stageUtxoSetRollback(
+				txn,
 				ocommon.NewPoint(before.SlotNumber(), before.Hash().Bytes()),
-			))
+			)
 			e, err := ldb.GetEpoch(ls.currentEpoch.EpochId, txn)
 			require.NoError(t, err)
 			require.NotNil(t, e)
@@ -4158,21 +3957,6 @@ func NewGuardedMidEpochEraSwitchScenarioForTest(
 			// finish before the test closes the ledger.
 			ls.protocolVersionEvalWG.Wait()
 		},
-	}
-}
-
-// computedResultCounts reports the verify-mode results the set computed
-// for result and how many differed from the metadata store's.
-func computedResultCounts(
-	ls *LedgerState,
-) func(result string) (float64, float64) {
-	return func(result string) (float64, float64) {
-		return promtestutil.ToFloat64(
-				ls.metrics.setComputedVerified.WithLabelValues(result),
-			),
-			promtestutil.ToFloat64(
-				ls.metrics.setComputedMismatches.WithLabelValues(result),
-			)
 	}
 }
 
@@ -4205,9 +3989,6 @@ type ClassicUpdateBoundaryScenario struct {
 	RollbackBeforeBoundary func()
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
-	// PParamsReads reports the verify-mode protocol parameter reads and
-	// how many of them differed from the metadata store.
-	PParamsReads func() (verified, mismatches float64)
 	// ConwayRowsInsideTxn counts the Conway rows an abandoned write
 	// transaction sees after it writes one, after it stages a rollback to
 	// the last block of epoch 0, and after that rollback and a write.
@@ -4220,9 +4001,6 @@ type ClassicUpdateBoundaryScenario struct {
 	// ProposeAroundTheLedger commits the same through the metadata store
 	// alone, so the live UTxO set never sees the proposals.
 	ProposeAroundTheLedger func(p UpdateProposal)
-	// PParamUpdateReads reports the verify-mode proposal reads and how many
-	// of them differed from the metadata store.
-	PParamUpdateReads func() (verified, mismatches float64)
 	// Forecast forecasts the parameters the boundary into epoch enacts,
 	// reading through the ledger's LedgerDB as header verification does.
 	Forecast func(epoch uint64) error
@@ -4241,8 +4019,7 @@ type ClassicUpdateBoundaryScenario struct {
 	// metadata store from now on, and returns the count of reads that
 	// reached it.
 	HideStoreReads func(names ...string) (reached func() int64)
-	// ComputedResults is BoundaryEpochStateScenario.ComputedResults.
-	ComputedResults func(result string) (verified, mismatches float64)
+
 	// DrainFamilies adds mask to the families the ledger treats as drained.
 	DrainFamilies func(mask nodesettings.FamilyMask)
 	// ReadPParams renders the protocol parameter rows, the update proposals
@@ -4278,10 +4055,9 @@ type UpdateProposal struct {
 func NewClassicUpdateBoundaryScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 ) ClassicUpdateBoundaryScenario {
 	t.Helper()
-	return NewGuardedClassicUpdateBoundaryScenarioForTest(t, set, reads, nil)
+	return NewGuardedClassicUpdateBoundaryScenarioForTest(t, set, nil)
 }
 
 // NewGuardedClassicUpdateBoundaryScenarioForTest is
@@ -4290,7 +4066,6 @@ func NewClassicUpdateBoundaryScenarioForTest(
 func NewGuardedClassicUpdateBoundaryScenarioForTest(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 	guard metadata.StatementGuard,
 ) ClassicUpdateBoundaryScenario {
 	t.Helper()
@@ -4309,8 +4084,18 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 		tc.db = db
 	}
 	ls, block := newBoundaryEraLedger(t, tc)
-	ls.config.UtxoSetReads = reads
 	before := ls.currentTip.Point
+	// The set rolls back along its own journal, so it holds the rollback
+	// target as its tip before the scenario's writes.
+	if tipper, ok := set.(interface {
+		Tip() (ocommon.Point, bool, error)
+	}); ok {
+		tip, has, err := tipper.Tip()
+		require.NoError(t, err)
+		if !has || tip.Slot != before.Slot || !bytes.Equal(tip.Hash, before.Hash) {
+			require.NoError(t, set.ApplyUtxoChanges(&before, nil))
+		}
+	}
 	// The setup's blocks start forecasts that read proposals; let them
 	// finish so a test counts only its own reads.
 	ls.protocolVersionEvalWG.Wait()
@@ -4372,11 +4157,11 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 		}
 	}
 	return ClassicUpdateBoundaryScenario{
-		DB:              ls.db,
-		LedgerDB:        ls.LedgerDB,
-		DrainFamilies:   ls.SetDrainedFamilies,
-		ReadPParams:     func() []string { return renderPParamState(t, ls.LedgerDB()) },
-		ComputedResults: computedResultCounts(ls),
+		DB:            ls.db,
+		LedgerDB:      ls.LedgerDB,
+		DrainFamilies: ls.SetDrainedFamilies,
+		ReadPParams:   func() []string { return renderPParamState(t, ls.LedgerDB()) },
+
 		ObserveRealV2: func(epoch uint64) {
 			ldb := ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), true)
@@ -4401,10 +4186,7 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 			require.NoError(t, ls.rollback(t.Context(), before))
 			ls.protocolVersionEvalWG.Wait()
 		},
-		PParamsReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.pparamsReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.pparamsReadMismatches)
-		},
+
 		RollbackTarget: before,
 		Propose: func(p UpdateProposal) {
 			ldb := ls.LedgerDB()
@@ -4420,10 +4202,7 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 			propose(ldb, txn, p)
 			require.NoError(t, txn.Commit())
 		},
-		PParamUpdateReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.pparamUpdateReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.pparamUpdateReadMismatches)
-		},
+
 		Forecast: func(epoch uint64) error {
 			_, err := ls.forecastPendingPParamUpdate(
 				ls.currentEra, epoch, ls.currentPParams,
@@ -4481,9 +4260,7 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 				txn := ldb.Begin(t.Context(), true)
 				defer func() { require.NoError(t, txn.Rollback()) }()
 				if rollback {
-					require.NoError(t, ls.stageUtxoRollbackEvent(
-						t.Context(), txn, before,
-					))
+					ls.stageUtxoSetRollback(txn, before)
 				}
 				if write {
 					require.NoError(t, ldb.SetPParams(
@@ -4518,10 +4295,6 @@ type GenesisScenario struct {
 		initialDReps conway.ConwayGenesisInitialDReps,
 		delegs conway.ConwayGenesisDelegs,
 	)
-	// RegistrationReads and AccountReads are the verify-mode read counts of
-	// the registration and account families.
-	RegistrationReads func() (verified, mismatches float64)
-	AccountReads      func() (verified, mismatches float64)
 }
 
 // NewGenesisScenarioForTest returns a GenesisScenario whose ledger writes to
@@ -4531,15 +4304,13 @@ func NewGenesisScenarioForTest(
 	set UtxoSetWriter,
 ) GenesisScenario {
 	t.Helper()
-	return NewGenesisScenarioWithReadsForTest(t, set, UtxoSetReadsOff)
+	return newGenesisScenario(t, set)
 }
 
-// NewGenesisScenarioWithReadsForTest is NewGenesisScenarioForTest with the
-// ledger's reads in the given mode.
-func NewGenesisScenarioWithReadsForTest(
+// newGenesisScenario constructs the genesis ledger fixture.
+func newGenesisScenario(
 	t *testing.T,
 	set UtxoSetWriter,
-	reads string,
 ) GenesisScenario {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -4554,7 +4325,6 @@ func NewGenesisScenarioWithReadsForTest(
 			Database:          db,
 			CardanoNodeConfig: nodeCfg,
 			UtxoSet:           set,
-			UtxoSetReads:      reads,
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
@@ -4588,14 +4358,6 @@ func NewGenesisScenarioWithReadsForTest(
 			))
 			require.NoError(t, txn.Commit())
 		},
-		RegistrationReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.registrationReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.registrationReadMismatches)
-		},
-		AccountReads: func() (float64, float64) {
-			return promtestutil.ToFloat64(ls.metrics.accountReadsVerified),
-				promtestutil.ToFloat64(ls.metrics.accountReadMismatches)
-		},
 	}
 }
 
@@ -4620,4 +4382,8 @@ func (h *boundaryReplayHarness) coverSlot(slot uint64) {
 		SlotLength: 1000, LengthInSlots: 10, EraId: snap.currentEra.Id,
 	})
 	h.ls.consensus.Store(&cp)
+}
+
+func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
+	_ = ls.pinSetReadsResult(txn, false)
 }

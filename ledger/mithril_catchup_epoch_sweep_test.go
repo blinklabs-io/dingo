@@ -85,8 +85,8 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	// epoch-only sweep could not survive.
 	importAndRollOver := func() *EpochRolloverResult {
 		t.Helper()
-		require.NoError(t, ledgerstate.ImportLedgerState(
-			context.Background(),
+		require.NoError(t, importLedgerStateForTest(
+			t, ls,
 			ledgerstate.ImportConfig{
 				Database: db,
 				Logger: slog.New(

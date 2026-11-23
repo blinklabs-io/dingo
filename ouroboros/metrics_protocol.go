@@ -84,7 +84,7 @@ func (o *Ouroboros) initProtocolMetrics() {
 		txsubmissionAdmissionRetries: factory.NewHistogram(
 			prometheus.HistogramOpts{
 				Name: "dingo_txsubmission_admission_retry_streak",
-				Help: "consecutive mempool admission losses for a peer transaction under contention",
+				Help: "consecutive transient mempool admission failures for a peer transaction",
 				Buckets: []float64{
 					1, 2, 3, 5, 10, 20, 50,
 				},

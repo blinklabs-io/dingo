@@ -15,8 +15,8 @@ file is only what isn't derivable.
   dominates the suite; new tests there should too. Keep a test sequential — with
   a `// Not t.Parallel: ...` comment — when it reaches process-global state:
   swapping a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
-  `deliveryStallWarnInterval`, `leiosPersistMaxQueueBytes`) or another package's
-  variable (`ledger.Close*Timeout`), replacing a process-global
+  `deliveryStallWarnInterval`, `leiosPersistShutdownDrainTimeout`) or another
+  package's variable (`ledger.Close*Timeout`), replacing a process-global
   (`slog.SetDefault`, `config.PublishConfig`), asserting a delta of a
   process-wide counter (`BlobOrphanCount`), or taking a process-wide measurement
   (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`,

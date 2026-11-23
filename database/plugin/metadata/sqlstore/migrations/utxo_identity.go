@@ -521,14 +521,18 @@ func (b identityBackfill) copyEdges(
 	// The window is the next Limit edges after the cursor in primary key
 	// order; its last edge bounds the copy. A short remainder has no
 	// bound and is copied to the end.
-	after := `(e.utxo_id > ? OR (e.utxo_id = ? AND e.transaction_hash > ?))`
+	// Row-value comparisons let the planner seek the composite primary key
+	// to the full cursor; an OR over the two columns is range-scanned on
+	// utxo_id alone, which rescans every edge of a heavily referenced
+	// UTxO on each batch.
+	after := `(e.utxo_id, e.transaction_hash) > (?, ?)`
 	var upperID sql.NullInt64
 	var upperHash []byte
 	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
 SELECT e.utxo_id, e.transaction_hash FROM `+source+` AS e
 WHERE `+after+`
 ORDER BY e.utxo_id, e.transaction_hash
-LIMIT 1 OFFSET ?`), last, last, lastHash, batch.Limit-1).Scan(
+LIMIT 1 OFFSET ?`), last, lastHash, batch.Limit-1).Scan(
 		&upperID, &upperHash,
 	)
 	bounded := err == nil
@@ -536,11 +540,10 @@ LIMIT 1 OFFSET ?`), last, last, lastHash, batch.Limit-1).Scan(
 		return BatchResult{}, fmt.Errorf("select %s window: %w", source, err)
 	}
 	window := after
-	args := []any{last, last, lastHash}
+	args := []any{last, lastHash}
 	if bounded {
-		window += ` AND (e.utxo_id < ? OR (e.utxo_id = ? ` +
-			`AND e.transaction_hash <= ?))`
-		args = append(args, upperID.Int64, upperID.Int64, upperHash)
+		window += ` AND (e.utxo_id, e.transaction_hash) <= (?, ?)`
+		args = append(args, upperID.Int64, upperHash)
 	}
 	identity := b.q(b.identityTable())
 	var dropped int64
@@ -818,7 +821,8 @@ WHERE table_schema = DATABASE() AND table_name = ?
 }
 
 // buildIndex creates the position'th secondary index. Each index is its own
-// transaction so the write-ahead log is checkpointed between builds.
+// transaction so a WAL checkpoint can backfill one build before the next
+// starts; the checkpointer can only copy committed frames.
 func (b identityBackfill) buildIndex(
 	ctx context.Context,
 	batch Batch,

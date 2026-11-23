@@ -17,8 +17,10 @@ package database
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 )
 
 // LockImmutable blocks promotion and operator truncation of the ImmutableDB
@@ -61,6 +63,29 @@ type ImmutableLayout struct {
 	// Files lists every chunk, primary and secondary file with the length to
 	// capture.
 	Files []immutable.File
+}
+
+// ImmutableFilesLocal reports whether the provider keeps its durable files in
+// ImmutableDir, so a snapshot may link them. A provider that publishes chunks
+// elsewhere only stages its writable tail there.
+func (d *Database) ImmutableFilesLocal() bool {
+	if d.immutable == nil {
+		return false
+	}
+	_, remote := d.immutable.svc.(immplugin.ChunkPublisher)
+	return !remote
+}
+
+// ReadImmutableFile streams one ImmutableDB file through its storage provider.
+func (d *Database) ReadImmutableFile(
+	ctx context.Context,
+	name string,
+	dst io.Writer,
+) (int64, error) {
+	if d.immutable == nil {
+		return 0, ErrImmutableNotEnabled
+	}
+	return d.immutable.svc.ReadFile(ctx, name, dst)
 }
 
 // ImmutableLayout reads the recorded state and makes the chunk files durable

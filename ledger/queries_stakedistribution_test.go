@@ -26,7 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -82,7 +84,27 @@ func seedLiveStakeFixture(
 	slot uint64,
 ) lcommon.PoolKeyHash {
 	t.Helper()
+	return seedLiveStakeFixtureWithPledge(
+		t, db, poolKeyHash, vrfKeyHash, stake, slot, 1, 1,
+	)
+}
+
+// seedLiveStakeFixtureWithPledge is seedLiveStakeFixture for a pool with the
+// given pledge and cost. The pool's one delegator is also its owner.
+func seedLiveStakeFixtureWithPledge(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	stake uint64,
+	slot uint64,
+	pledge uint64,
+	cost uint64,
+) lcommon.PoolKeyHash {
+	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+	stakingKey := make([]byte, 28)
+	copy(stakingKey, poolKeyHash)
 	require.NoError(t, db.ImportPool(
 		context.Background(),
 		nil,
@@ -91,12 +113,13 @@ func seedLiveStakeFixture(
 			PoolKeyHash: pkh.Bytes(),
 			VrfKeyHash:  vrfKeyHash,
 			AddedSlot:   slot,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
+			Pledge:      dbtypes.Uint64(pledge),
+			Cost:        dbtypes.Uint64(cost),
+			Owners: []models.PoolRegistrationOwner{
+				{KeyHash: stakingKey},
+			},
 		},
 	))
-	stakingKey := make([]byte, 28)
-	copy(stakingKey, poolKeyHash)
 	require.NoError(
 		t,
 		db.CreateAccount(context.Background(), nil, &models.Account{
@@ -108,13 +131,31 @@ func seedLiveStakeFixture(
 	)
 	txId := make([]byte, 32)
 	copy(txId, poolKeyHash)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		stakingKey,
+	)
+	require.NoError(t, err)
+	addressBytes, err := address.Bytes()
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&babbage.BabbageTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: stake},
+	})
+	require.NoError(t, err)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
+		Address:    addressBytes,
 		Amount:     dbtypes.Uint64(stake),
 		AddedSlot:  slot,
 	}))
+	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded))
+	require.NoError(t, txn.Commit())
 	return pkh
 }
 

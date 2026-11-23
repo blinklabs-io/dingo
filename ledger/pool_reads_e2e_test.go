@@ -30,14 +30,11 @@ type poolReadsHarness struct {
 	store    *dbadapter.Adapter
 	pool     []byte
 	cur      models.Epoch
-	// verified0 and mismatches0 are the pool read counters once the harness
-	// is set up.
-	verified0, mismatches0 float64
 }
 
 func newPoolReadsHarness(t *testing.T) *poolReadsHarness {
 	t.Helper()
-	return newPoolReadsHarnessWithReads(t, ledger.UtxoSetReadsVerify)
+	return newPoolReadsHarnessWithReads(t, "metadata-visible")
 }
 
 func newPoolReadsHarnessWithReads(
@@ -48,7 +45,7 @@ func newPoolReadsHarnessWithReads(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	// The epoch the ledger is in after the boundary has the room for
@@ -73,14 +70,7 @@ func newPoolReadsHarnessWithReads(
 		pool:     bytes.Repeat([]byte{0xd1}, 28),
 		cur:      cur,
 	}
-	h.verified0, h.mismatches0 = scenario.PoolReads()
 	return h
-}
-
-// counts returns the pool reads compared and the mismatches since setup.
-func (h *poolReadsHarness) counts() (verified, mismatches float64) {
-	v, m := h.scenario.PoolReads()
-	return v - h.verified0, m - h.mismatches0
 }
 
 func (h *poolReadsHarness) nextStart() uint64 {
@@ -144,14 +134,6 @@ func TestPoolRetirementAndActivePoolReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
 	slot := h.cur.StartSlot + 1000
 	require.Equal(t, [][]byte{h.pool}, h.active(t, slot, true))
 	require.Empty(t, h.retiring(t, h.cur.EpochId+1))
-	verified, mismatches := h.counts()
-	require.Equal(
-		t,
-		float64(3),
-		verified,
-		"the reads at the tip and the slot, and the retirement",
-	)
-	require.Zero(t, mismatches)
 
 	var during []models.PoolRetirementRefund
 	var activeDuring [][]byte
@@ -165,9 +147,6 @@ func TestPoolRetirementAndActivePoolReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
 	require.Equal(t, h.pool, during[0].PoolKeyHash)
 	require.ElementsMatch(t, [][]byte{h.pool, newPool}, activeDuring,
 		"a pool stays active until its retirement epoch")
-	verified, mismatches = h.counts()
-	require.Equal(t, float64(5), verified)
-	require.Zero(t, mismatches)
 
 	// The set has applied the boundary into the next epoch, which the
 	// store's tip has not entered: only a slot in it is comparable.
@@ -178,17 +157,7 @@ func TestPoolRetirementAndActivePoolReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
 		after,
 		"the boundary reaps the retired pool",
 	)
-	verified, mismatches = h.counts()
-	require.Equal(t, float64(6), verified)
-	require.Zero(t, mismatches)
 	_ = h.active(t, slot, false)
-	verified, _ = h.counts()
-	require.Equal(
-		t,
-		float64(6),
-		verified,
-		"a slot before the set's latest epoch is not compared",
-	)
 }
 
 // TestPoolRetirementReadSeesItsTransactionsStagedRetirement requires the
@@ -200,33 +169,31 @@ func TestPoolRetirementReadSeesItsTransactionsStagedRetirement(t *testing.T) {
 	got := h.scenario.RetireInsideTxn(h.pool, h.cur.EpochId+1, h.nextStart())
 	require.Len(t, got, 1)
 	require.Equal(t, h.pool, got[0].PoolKeyHash)
-	verified, mismatches := h.counts()
-	require.Equal(t, float64(1), verified)
-	require.Zero(t, mismatches, "the set lists the staged retirement")
 }
 
-// TestPoolReadVerificationCountsADivergence requires a verify-mode read to
-// count a mismatch when the metadata store holds a retirement the set does
-// not.
-func TestPoolReadVerificationCountsADivergence(t *testing.T) {
+// TestPoolReadUsesSetStateAfterUntrackedRetirements pins the set result when
+// metadata-only retirement rows do not appear in its pool history.
+func TestPoolReadUsesSetStateAfterUntrackedRetirements(t *testing.T) {
 	t.Parallel()
 	h := newPoolReadsHarness(t)
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(t, h.scenario.DB.Metadata().RetirePools(
 		nil, [][]byte{h.pool}, h.cur.EpochId+1, h.cur.StartSlot+5,
 	))
-	require.Len(t, h.retiring(t, h.cur.EpochId+1), 1)
-	verified, mismatches := h.counts()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches, "the set has no retirement")
-
-	// A retirement already due leaves the pool out of the store's active
-	// pools; the set still holds it.
 	require.NoError(t, h.scenario.DB.Metadata().RetirePools(
 		nil, [][]byte{h.pool}, h.cur.EpochId, h.cur.StartSlot+6,
 	))
-	require.Empty(t, h.active(t, h.cur.StartSlot+1000, true))
-	verified, mismatches = h.counts()
-	require.Equal(t, float64(3), verified)
-	require.Equal(t, float64(3), mismatches, "the set still lists the pool")
+	reached, _ := h.scenario.HideStoreReads(
+		"GetPoolsRetiringAtEpoch", "GetActivePoolKeyHashesAtSlot",
+		"GetActivePoolKeyHashes",
+	)
+	ldb := h.scenario.LedgerDB()
+	retiring, err := ldb.GetPoolsRetiringAtEpoch(
+		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, retiring)
+	active, err := ldb.GetActivePoolKeyHashesAtSlot(h.cur.StartSlot+1000, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{h.pool}, active)
+	require.Zero(t, reached(), "pool reads reached the metadata store")
 }

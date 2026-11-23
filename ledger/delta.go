@@ -374,26 +374,24 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			// Staged per level, right after its write, so a later level or
 			// transaction in this commit resolves this one's outputs from
 			// the live UTxO set's overlay.
-			if ls.config.UtxoSet != nil {
-				utxoEvt, err := utxoEventFor(
-					d.Point,
-					uint32(tr.Index), //nolint:gosec
-					level,
-				)
-				if err != nil {
-					return fmt.Errorf(
-						"build transaction body %d UTxO event: %w",
-						levelIndex,
-						err,
-					)
-				}
-				utxoEvt.EffectiveSlot = d.closureEffectiveSlot()
-				ls.stageUtxoSet( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-					txn,
-					nil,
-					utxoEvt,
+			utxoEvt, err := utxoEventFor(
+				d.Point,
+				uint32(tr.Index), //nolint:gosec
+				level,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"build transaction body %d UTxO event: %w",
+					levelIndex,
+					err,
 				)
 			}
+			utxoEvt.EffectiveSlot = d.closureEffectiveSlot()
+			ls.stageUtxoSet( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+				txn,
+				nil,
+				utxoEvt,
+			)
 			if level.IsValid() {
 				if err := d.processGovernance(
 					ctx,
@@ -459,35 +457,33 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// callbacks in registration order, and this callback walks transactions in
 	// index order before handing each event to the ledger.tx ordered lane. See
 	// publishTransactionEvent.
-	if d.stageApplyEvents != nil || ls.utxoChangesWanted() {
-		applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
-		for i, tr := range d.Transactions {
-			if !appliedTxs[i] {
-				continue
-			}
-			applyEvents = append(applyEvents, TransactionEvent{
-				Transaction: tr.Tx,
-				Point:       d.Point,
-				BlockNumber: d.BlockNumber,
-				TxIndex:     uint32(tr.Index), //nolint:gosec
-				Rollback:    false,
-			})
+	applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
+	for i, tr := range d.Transactions {
+		if !appliedTxs[i] {
+			continue
 		}
-		if len(applyEvents) > 0 && d.stageApplyEvents != nil {
-			d.stageApplyEvents(applyEvents)
-		} else if len(applyEvents) > 0 {
-			if ls.config.EventBus == nil {
-				return nil
-			}
-			txn.AfterCommit(func() {
-				if ls.beforeTransactionApplyPublish != nil {
-					ls.beforeTransactionApplyPublish()
-				}
-				for _, evt := range applyEvents {
-					ls.publishTransactionEvent(ctx, evt)
-				}
-			})
+		applyEvents = append(applyEvents, TransactionEvent{
+			Transaction: tr.Tx,
+			Point:       d.Point,
+			BlockNumber: d.BlockNumber,
+			TxIndex:     uint32(tr.Index), //nolint:gosec
+			Rollback:    false,
+		})
+	}
+	if len(applyEvents) > 0 && d.stageApplyEvents != nil {
+		d.stageApplyEvents(applyEvents)
+	} else if len(applyEvents) > 0 {
+		if ls.config.EventBus == nil {
+			return nil
 		}
+		txn.AfterCommit(func() {
+			if ls.beforeTransactionApplyPublish != nil {
+				ls.beforeTransactionApplyPublish()
+			}
+			for _, evt := range applyEvents {
+				ls.publishTransactionEvent(ctx, evt)
+			}
+		})
 	}
 
 	return nil

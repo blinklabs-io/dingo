@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"testing"
@@ -285,6 +286,7 @@ func newHoldResyncFixture(t *testing.T) *holdResyncFixture {
 	// listens to, as the node wires them.
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		EventBus:     bus,
 		Logger:       logger,

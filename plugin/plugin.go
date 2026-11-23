@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -34,26 +35,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Capability is a stable identifier for a pluggable subsystem.
+// Capability identifies a pluggable subsystem together with the version of
+// the service contract its providers implement. It is written
+// "<name>/v<N>", for example "storage.blob/v0". ParseCapability documents the
+// accepted form. Selections and environment variables are keyed by the name
+// alone, so a contract version change never renames configuration.
 type Capability string
 
 const (
-	CapabilityStorageBlob      Capability = "storage.blob"
-	CapabilityStorageMetadata  Capability = "storage.metadata"
-	CapabilityStorageImmutable Capability = "storage.immutable"
-	CapabilityConsensus        Capability = "consensus"
-	CapabilityMempool          Capability = "mempool"
-	CapabilityAPIBlockfrost    Capability = "api.blockfrost"
-	CapabilityAPIKupo          Capability = "api.kupo"
-	CapabilityAPIMesh          Capability = "api.mesh"
-	CapabilityAPIUtxorpc       Capability = "api.utxorpc"
-	CapabilityAPIMcp           Capability = "api.mcp"
+	CapabilityStorageBlob      Capability = "storage.blob/v0"
+	CapabilityStorageMetadata  Capability = "storage.metadata/v0"
+	CapabilityStorageImmutable Capability = "storage.immutable/v0"
+	CapabilityConsensus        Capability = "consensus/v0"
+	CapabilityMempool          Capability = "mempool/v0"
+	CapabilityAPIBlockfrost    Capability = "api.blockfrost/v0"
+	CapabilityAPIKupo          Capability = "api.kupo/v0"
+	CapabilityAPIMesh          Capability = "api.mesh/v0"
+	CapabilityAPIUtxorpc       Capability = "api.utxorpc/v0"
+	CapabilityAPIMcp           Capability = "api.mcp/v0"
 )
 
-// allCapabilities is the single enumeration of the capabilities this platform
-// supports. A Capability constant declared above but absent here is not valid,
-// so Host.Register rejects it at startup rather than letting it drop silently
-// out of configuration and option coverage.
+// allCapabilities is the set of contracts every Host speaks from NewHost.
 var allCapabilities = []Capability{
 	CapabilityStorageBlob,
 	CapabilityStorageMetadata,
@@ -67,16 +69,10 @@ var allCapabilities = []Capability{
 	CapabilityAPIMcp,
 }
 
-// AllCapabilities returns every capability supported by this platform, in a
-// stable order. It exists so callers and tests can iterate the set rather than
-// maintaining a second copy of it that can fall out of step with Valid.
+// AllCapabilities returns the built-in contracts, in a stable order. A Host
+// speaks these from NewHost; Host.Declare adds others.
 func AllCapabilities() []Capability {
 	return slices.Clone(allCapabilities)
-}
-
-// Valid reports whether c is a capability supported by this platform.
-func (c Capability) Valid() bool {
-	return slices.Contains(allCapabilities, c)
 }
 
 // Descriptor describes a compiled-in provider.
@@ -145,6 +141,9 @@ type startedInstance struct {
 type Host struct {
 	mu        sync.Mutex
 	providers map[providerKey]provider
+	// contracts maps a capability name to the one contract version this host
+	// speaks for it.
+	contracts map[string]Capability
 	started   []startedInstance
 	stopped   bool
 	stopDone  chan struct{}
@@ -192,12 +191,111 @@ func (h *Host) log() *slog.Logger {
 	return h.logger
 }
 
-// NewHost returns an empty plugin host.
+// NewHost returns a plugin host with no providers that speaks the built-in
+// contracts listed by AllCapabilities.
 func NewHost() *Host {
-	return &Host{
+	h := &Host{
 		providers: make(map[providerKey]provider),
+		contracts: make(map[string]Capability, len(allCapabilities)),
 		stopping:  make(map[Capability]int),
 	}
+	for _, c := range allCapabilities {
+		h.contracts[c.Name()] = c
+	}
+	return h
+}
+
+// Declare adds contracts the host speaks beyond the built-in set. Declaring a
+// contract the host already speaks is a no-op. A host speaks one version per
+// name, so declaring a different version of a spoken name is an error that
+// names both versions. A name may not nest under or contain another spoken
+// name: the two would share a configuration subtree under plugins and an
+// environment prefix. Declare is all-or-nothing.
+func (h *Host) Declare(capabilities ...Capability) error {
+	if h == nil {
+		return errors.New("plugin host is nil")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending := make(map[string]Capability, len(capabilities))
+	for _, c := range capabilities {
+		if err := c.validate(); err != nil {
+			return err
+		}
+		name := c.Name()
+		for _, spoken := range []Capability{h.contracts[name], pending[name]} {
+			if spoken != "" && spoken != c {
+				return fmt.Errorf(
+					"plugin capability %q conflicts with %q: a host speaks one version per capability",
+					c,
+					spoken,
+				)
+			}
+		}
+		for _, spoken := range []map[string]Capability{h.contracts, pending} {
+			for other, contract := range spoken {
+				if strings.HasPrefix(name, other+".") ||
+					strings.HasPrefix(other, name+".") {
+					return fmt.Errorf(
+						"plugin capability %q nests with %q: their configuration and environment prefixes overlap",
+						c,
+						contract,
+					)
+				}
+			}
+		}
+		pending[name] = c
+	}
+	maps.Copy(h.contracts, pending)
+	return nil
+}
+
+// Speaks reports whether the host speaks exactly the contract c, name and
+// version.
+func (h *Host) Speaks(c Capability) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	spoken, ok := h.contracts[c.Name()]
+	return ok && spoken == c
+}
+
+// Contract returns the contract the host speaks for a capability name.
+func (h *Host) Contract(name string) (Capability, bool) {
+	if h == nil {
+		return "", false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.contracts[name]
+	return c, ok
+}
+
+// checkSpoken returns an error unless the host speaks c. A name spoken at a
+// different version is reported with both versions.
+func (h *Host) checkSpoken(c Capability) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	spoken, ok := h.Contract(c.Name())
+	switch {
+	case !ok:
+		return fmt.Errorf(
+			"unknown plugin capability %q: the host does not speak %q",
+			c,
+			c.Name(),
+		)
+	case spoken != c:
+		return fmt.Errorf(
+			"plugin capability version mismatch for %q: requested %q, host speaks %q",
+			c.Name(),
+			c,
+			spoken,
+		)
+	}
+	return nil
 }
 
 // Register adds a typed provider to host. defaults is called before strict
@@ -214,8 +312,8 @@ func Register[S, C, D any](
 	if descriptor.Capability == "" {
 		return errors.New("plugin capability is empty")
 	}
-	if !descriptor.Capability.Valid() {
-		return fmt.Errorf("unknown plugin capability %q", descriptor.Capability)
+	if err := host.checkSpoken(descriptor.Capability); err != nil {
+		return err
 	}
 	if descriptor.Name == "" {
 		return fmt.Errorf(
@@ -232,7 +330,7 @@ func Register[S, C, D any](
 	if factory == nil {
 		return fmt.Errorf(
 			"plugin factory is nil for %s/%s",
-			descriptor.Capability,
+			descriptor.Capability.Name(),
 			descriptor.Name,
 		)
 	}
@@ -247,7 +345,7 @@ func Register[S, C, D any](
 			if err := decodeStrict(raw, &cfg); err != nil {
 				return nil, fmt.Errorf(
 					"decode configuration for %s/%s: %w",
-					descriptor.Capability,
+					descriptor.Capability.Name(),
 					descriptor.Name,
 					err,
 				)
@@ -259,7 +357,7 @@ func Register[S, C, D any](
 			if !ok {
 				return nil, nil, fmt.Errorf(
 					"internal configuration type mismatch for %s/%s",
-					descriptor.Capability,
+					descriptor.Capability.Name(),
 					descriptor.Name,
 				)
 			}
@@ -267,7 +365,7 @@ func Register[S, C, D any](
 			if !ok {
 				return nil, nil, fmt.Errorf(
 					"dependency type mismatch for %s/%s: got %T",
-					descriptor.Capability,
+					descriptor.Capability.Name(),
 					descriptor.Name,
 					deps,
 				)
@@ -283,7 +381,7 @@ func Register[S, C, D any](
 	if _, exists := host.providers[key]; exists {
 		return fmt.Errorf(
 			"plugin provider already registered: %s/%s",
-			descriptor.Capability,
+			descriptor.Capability.Name(),
 			descriptor.Name,
 		)
 	}
@@ -327,7 +425,7 @@ func Resolve[S, D any](
 	if err != nil {
 		return zero, fmt.Errorf(
 			"construct plugin %s/%s: %w",
-			capability,
+			capability.Name(),
 			name,
 			err,
 		)
@@ -335,14 +433,14 @@ func Resolve[S, D any](
 	if instance == nil || isNilInstance(instance) {
 		return zero, fmt.Errorf(
 			"plugin %s/%s returned a nil lifecycle",
-			capability,
+			capability.Name(),
 			name,
 		)
 	}
 	if err := instance.Start(ctx); err != nil {
 		stopErr := instance.Stop(ctx)
 		return zero, errors.Join(
-			fmt.Errorf("start plugin %s/%s: %w", capability, name, err),
+			fmt.Errorf("start plugin %s/%s: %w", capability.Name(), name, err),
 			stopErr,
 		)
 	}
@@ -352,7 +450,7 @@ func Resolve[S, D any](
 		return zero, errors.Join(
 			fmt.Errorf(
 				"service type mismatch for %s/%s: got %T",
-				capability,
+				capability.Name(),
 				name,
 				service,
 			),
@@ -459,8 +557,8 @@ func (h *Host) ValidateSelection(
 	if h == nil {
 		return errors.New("plugin host is nil")
 	}
-	if !capability.Valid() {
-		return fmt.Errorf("unknown plugin capability %q", capability)
+	if err := h.checkSpoken(capability); err != nil {
+		return err
 	}
 	h.mu.Lock()
 	p, ok := h.providers[providerKey{capability: capability, name: name}]
@@ -473,9 +571,11 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; if ctx expires before teardown completes, Stop returns ctx.Err
-// and the host continues teardown in the background. A later call waits for
-// that teardown and returns its accumulated result.
+// idempotent. Without durable providers, cancellation returns ctx.Err while
+// teardown continues in the background. With durable providers, Stop waits for
+// closure to finish even after cancellation. Provider errors and cancellation
+// during ordinary teardown remain errors; a durable close exceeding the deadline
+// alone is not an error. A later call waits for the accumulated result.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -631,10 +731,10 @@ func (h *Host) StopCapability(
 
 // stopReverse stops started in reverse order. A DurableClose instance gets a
 // context detached from ctx's cancellation and is waited for, with progress
-// logged. The second result is ctx's error observed after the last
-// non-durable stop, or after the whole list when no durable close is part of
-// this teardown (durableElsewhere reports one running in StopCapability): a
-// deadline that only a durable close outran is not an error.
+// logged. The second result records cancellation during a non-durable stop,
+// or cancellation of a teardown without durable work. A successful stop that
+// begins after durable work exhausted the deadline does not add a context error.
+// durableElsewhere reports durable work outside this list.
 func (h *Host) stopReverse(
 	ctx context.Context,
 	started []startedInstance,
@@ -647,13 +747,16 @@ func (h *Host) stopReverse(
 			durableSeen = true
 			err = h.closeDurable(ctx, item)
 		} else {
+			wasCanceled := ctx.Err() != nil
 			err = item.instance.Stop(ctx)
-			deadlineErr = ctx.Err()
+			if !wasCanceled || !durableSeen {
+				deadlineErr = ctx.Err()
+			}
 		}
 		if err != nil {
 			ret = errors.Join(ret, fmt.Errorf(
 				"stop plugin %s/%s: %w",
-				item.descriptor.Capability,
+				item.descriptor.Capability.Name(),
 				item.descriptor.Name,
 				err,
 			))
@@ -724,6 +827,10 @@ var knownOptionalProviders = map[Capability]map[string]struct{}{
 		"mysql":    {},
 		"postgres": {},
 	},
+	CapabilityStorageImmutable: {
+		"gcs": {},
+		"s3":  {},
+	},
 }
 
 // MissingProviderError returns an actionable error for known providers that
@@ -733,10 +840,14 @@ func MissingProviderError(capability Capability, name string) error {
 		if _, ok := providers[name]; ok {
 			return fmt.Errorf(
 				"plugin provider %s/%s is not included in this build; rebuild with -tags dingo_extra_plugins or use an official release binary",
-				capability,
+				capability.Name(),
 				name,
 			)
 		}
 	}
-	return fmt.Errorf("plugin provider not found: %s/%s", capability, name)
+	return fmt.Errorf(
+		"plugin provider not found: %s/%s",
+		capability.Name(),
+		name,
+	)
 }

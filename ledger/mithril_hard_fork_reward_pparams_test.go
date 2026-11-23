@@ -139,8 +139,8 @@ func runHardForkRewardRound(
 		}
 	}
 	nonce := make([]byte, 32)
-	require.NoError(t, ledgerstate.ImportLedgerState(
-		context.Background(),
+	require.NoError(t, importLedgerStateForTest(
+		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
 			Logger: slog.New(

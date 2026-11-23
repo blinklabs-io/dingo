@@ -29,7 +29,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -37,10 +39,21 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/dgraph-io/badger/v4"
 )
 
 // DefaultBatchBlocks is the default number of blocks per transaction.
 const DefaultBatchBlocks = 500
+
+// SparseBatchBytes is the block content a batch reads before it may stop at
+// its block limit, when sparse batching is on. A batch of near-empty blocks
+// holds few rows however many blocks it spans, and each commit pays a blob
+// store sync, so such a batch keeps reading toward SparseBatchFactor times
+// the block limit.
+const SparseBatchBytes = 4 << 20
+
+// SparseBatchFactor bounds how far past the block limit a sparse batch reads.
+const SparseBatchFactor = 8
 
 // ChainSource is the writer's view of the ledger and its canonical chain.
 type ChainSource interface {
@@ -114,16 +127,26 @@ type WithdrawalDebiter interface {
 
 // Writer follows the ledger into the IndexerDB.
 type Writer struct {
-	store    *indexerdb.Store
-	src      ChainSource
-	idx      BlockIndexer
-	facts    FactsSource
-	genesis  func(ctx context.Context, txn *database.Txn) error
-	logger   *slog.Logger
-	batch    int
-	wake     chan struct{}
-	runMu    sync.Mutex
-	progress func(indexerdb.Tip, ochainsync.Tip)
+	store   *indexerdb.Store
+	src     ChainSource
+	idx     BlockIndexer
+	facts   FactsSource
+	genesis func(ctx context.Context, txn *database.Txn) error
+	logger  *slog.Logger
+	batch   int
+	// limit is the number of blocks the next batch reads. It falls below
+	// batch while the blob store keeps refusing a batch for its size, and
+	// climbs back as batches commit.
+	limit int
+	// sparse lets a batch read past limit while its blocks stay small.
+	sparse bool
+	// reach is how many times limit a sparse batch may read; it falls while
+	// such batches are refused for their size.
+	reach       int
+	sparseBytes int
+	wake        chan struct{}
+	runMu       sync.Mutex
+	progress    func(indexerdb.Tip, ochainsync.Tip)
 	// ancestorLost is called when a rollback is refused with
 	// ErrNoRollbackAncestor.
 	ancestorLost func()
@@ -167,11 +190,23 @@ func NewWriter(
 		idx:    idx,
 		logger: logger,
 		batch:  batchBlocks,
+		limit:  batchBlocks,
 		wake:   make(chan struct{}, 1),
 	}
 	if syncer, ok := store.Database().Metadata().(metadata.CommitSyncer); ok {
 		w.commitSync = syncer.SyncCommits
 	}
+	return w
+}
+
+// WithSparseBatches lets a batch read up to SparseBatchFactor times the block
+// limit while the blocks it has read carry fewer than SparseBatchBytes of
+// content, so ranges of near-empty blocks commit less often. Dense ranges keep
+// the block limit.
+func (w *Writer) WithSparseBatches() *Writer {
+	w.sparse = true
+	w.reach = SparseBatchFactor
+	w.sparseBytes = SparseBatchBytes
 	return w
 }
 
@@ -243,10 +278,11 @@ func (w *Writer) Wake() {
 }
 
 // Run catches up, then again after each Wake, until ctx ends. A pass that
-// fails is logged and retried on the next wake.
+// fails is logged and retried with bounded backoff, or on the next wake.
 func (w *Writer) Run(ctx context.Context) error {
 	var lastErr string
 	var consecutive int
+	delay := time.Second
 	for {
 		err := w.CatchUp(ctx)
 		switch {
@@ -266,16 +302,45 @@ func (w *Writer) Run(ctx context.Context) error {
 		if w.failures != nil && ctx.Err() == nil {
 			w.failures(consecutive)
 		}
+		var timer *time.Timer
+		var retry <-chan time.Time
+		if err != nil && ctx.Err() == nil {
+			timer = time.NewTimer(delay)
+			retry = timer.C
+			delay = min(2*delay, 30*time.Second)
+		} else {
+			delay = time.Second
+		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
 		case <-w.wake:
+		case <-retry:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }
 
 // errForked reports that the chain changed under a batch.
 var errForked = errors.New("indexer: chain changed under batch")
+
+// errBatchShrunk reports that a batch exceeded the blob store's transaction
+// size and the writer halved its batch size, so the step is worth repeating.
+var errBatchShrunk = errors.New(
+	"indexer: batch halved after oversized transaction",
+)
+
+// isTxnTooBig reports whether err is Badger refusing a transaction for its
+// size. Some storage layers format the cause with %v rather than wrap it, so
+// the message is matched as well.
+func isTxnTooBig(err error) bool {
+	return errors.Is(err, badger.ErrTxnTooBig) ||
+		strings.Contains(err.Error(), badger.ErrTxnTooBig.Error())
+}
 
 // CatchUp runs one bounded pass: it moves the IndexerDB to the ledger's
 // durable tip, rolling back first when its own tip left the canonical chain.
@@ -295,12 +360,17 @@ func (w *Writer) CatchUp(ctx context.Context) error {
 		}
 		return err
 	}
+	refreshAtTip := true
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		done, err := w.step(ctx, nil)
+		done, err := w.step(ctx, nil, refreshAtTip)
 		if errors.Is(err, errForked) {
+			refreshAtTip = true
+			continue
+		}
+		if errors.Is(err, errBatchShrunk) {
 			continue
 		}
 		if err != nil {
@@ -310,6 +380,8 @@ func (w *Writer) CatchUp(ctx context.Context) error {
 			w.syncAndAck(ctx)
 			return nil
 		}
+		// The batch copied completed facts. A later reward commit wakes Run.
+		refreshAtTip = false
 	}
 }
 
@@ -374,6 +446,7 @@ func (w *Writer) syncAndAck(ctx context.Context) {
 func (w *Writer) step(
 	ctx context.Context,
 	ceiling *indexerdb.Tip,
+	refreshAtTip bool,
 ) (bool, error) {
 	tip, err := w.store.Tip(nil)
 	if err != nil {
@@ -385,7 +458,10 @@ func (w *Writer) step(
 			return false, fmt.Errorf("check indexer tip: %w", err)
 		}
 		if !canonical {
-			return false, w.rollback(ctx, tip)
+			if err := w.rollback(ctx, tip); err != nil {
+				return false, err
+			}
+			return false, errForked
 		}
 	}
 	ledgerTip, err := w.src.LedgerTip(ctx)
@@ -402,10 +478,20 @@ func (w *Writer) step(
 	if !tip.IsZero() &&
 		(bytes.Equal(tip.Hash, target.Point.Hash) ||
 			tip.Slot > target.Point.Slot) {
+		if refresh, ok := w.facts.(FactsRefresher); ok && ceiling == nil &&
+			refreshAtTip &&
+			bytes.Equal(tip.Hash, target.Point.Hash) {
+			txn := w.store.Database().Transaction(ctx, true)
+			if err := txn.Do(func(txn *database.Txn) error {
+				return refresh.RefreshFacts(ctx, txn, tip.Slot)
+			}); err != nil {
+				return false, fmt.Errorf("refresh ledger facts at tip: %w", err)
+			}
+		}
 		w.report(tip, ledgerTip)
 		return true, nil
 	}
-	blocks, err := w.src.BlocksAfter(ctx, tip, target.Point.Slot, w.batch)
+	blocks, err := w.readBlocks(ctx, tip, target.Point.Slot)
 	if err != nil {
 		return false, fmt.Errorf("read canonical blocks: %w", err)
 	}
@@ -491,7 +577,36 @@ func (w *Writer) step(
 		if a, ok := w.idx.(IndexAborter); ok {
 			a.AbortIndexing()
 		}
+		// The same batch would fail the same way on every retry, so read
+		// fewer blocks. A single block that is too big cannot shrink.
+		if isTxnTooBig(err) && len(blocks) > 1 {
+			if len(blocks) > w.limit {
+				// A sparse batch read past the limit: shorten the reach
+				// before the limit itself.
+				w.reach = max(1, w.reach/2)
+				w.logger.Warn(
+					"indexer sparse batch too big for one blob transaction, shortening",
+					"blocks",
+					len(blocks),
+					"reach",
+					w.reach,
+				)
+				return false, errBatchShrunk
+			}
+			w.limit = len(blocks) / 2
+			w.logger.Warn(
+				"indexer batch too big for one blob transaction, halving",
+				"blocks", len(blocks), "next_blocks", w.limit,
+			)
+			return false, errBatchShrunk
+		}
 		return false, fmt.Errorf("index blocks up to %d: %w", last.Number, err)
+	}
+	if w.limit < w.batch {
+		w.limit = min(2*w.limit, w.batch)
+	}
+	if w.reach < SparseBatchFactor {
+		w.reach = min(2*w.reach, SparseBatchFactor)
 	}
 	w.factsCommitted(ctx)
 	w.report(newTip, ledgerTip)
@@ -501,6 +616,52 @@ func (w *Writer) step(
 	// Volatile blocks can leave the chain while the batch commits; the next
 	// step's canonical check catches that and rolls back.
 	return false, nil
+}
+
+// readBlocks reads the next batch. A sparse batch that fills its block limit
+// with fewer than w.sparseBytes of content keeps reading, limit blocks at a
+// time, until it has that much content or SparseBatchFactor times the limit.
+// The links are checked across the whole batch afterwards, so a chain switch
+// between reads shows as a gap.
+func (w *Writer) readBlocks(
+	ctx context.Context,
+	tip indexerdb.Tip,
+	throughSlot uint64,
+) ([]models.Block, error) {
+	blocks, err := w.src.BlocksAfter(ctx, tip, throughSlot, w.limit)
+	if err != nil || !w.sparse {
+		return blocks, err
+	}
+	size := 0
+	for _, b := range blocks {
+		size += len(b.Cbor)
+	}
+	maxBlocks := w.limit * w.reach
+	for len(blocks) > 0 && len(blocks)%w.limit == 0 &&
+		len(blocks) < maxBlocks && size < w.sparseBytes {
+		last := blocks[len(blocks)-1]
+		more, err := w.src.BlocksAfter(ctx, indexerdb.Tip{
+			Slot: last.Slot, BlockNumber: last.Number, Hash: last.Hash,
+		}, throughSlot, w.limit)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			// The block this read continues from can be rolled back and
+			// deleted after the previous read returned it. The prefix
+			// already read is a valid batch; the next step re-reads from
+			// the committed tip and meets any lasting error itself.
+			break
+		}
+		for _, b := range more {
+			size += len(b.Cbor)
+		}
+		blocks = append(blocks, more...)
+		if len(more) < w.limit {
+			break
+		}
+	}
+	return blocks, nil
 }
 
 func (w *Writer) report(tip indexerdb.Tip, ledgerTip ochainsync.Tip) {

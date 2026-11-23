@@ -69,7 +69,7 @@ func (ls *LedgerState) delegationHistoryReader(
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(DelegationHistoryReader)

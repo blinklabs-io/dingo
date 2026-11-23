@@ -45,7 +45,7 @@ func newWitnessHarness(t *testing.T, reads string, load bool) *witnessHarness {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	h := &witnessHarness{set: set}
-	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	h.store = dbadapter.New(h.scenario.DB)
 	if load {
 		h.slots = h.scenario.Witnesses(true)
@@ -132,12 +132,12 @@ func requireWitnessSlots(
 }
 
 // TestWitnessSlotReadsFromTheLiveUtxoSet reads the witness slots through the
-// ledger's LedgerDB in set mode with the store's read failing, across
+// ledger's LedgerDB from the live set with the store's read failing, across
 // delegation-only certificates, withdrawals with the witness write elided and
 // recorded, and a rollback, and requires every answer to be the store's.
 func TestWitnessSlotReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	h := newWitnessHarness(t, ledger.UtxoSetReadsSet, false)
+	h := newWitnessHarness(t, "set", false)
 	reached, _ := h.scenario.HideStoreReads("AccountLastWitnessSlots")
 	ldb := h.scenario.LedgerDB()
 	require.Equal(t, h.readsOf(t, h.store), h.readsOf(t, ldb))
@@ -158,16 +158,13 @@ func TestWitnessSlotReadsFromTheLiveUtxoSet(t *testing.T) {
 		map[string]uint64{h.slots.Payee.MapKey(): h.slots.Kept}, got,
 		"only the witness at the rollback target survives")
 	require.Zero(t, reached(), "a witness read reached the metadata store")
-	verified, mismatches := h.scenario.AccountReads()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
 // TestWitnessSlotReadsAgreeInVerifyMode requires every verified witness read
 // to agree with the metadata store across the same writes and rollback.
 func TestWitnessSlotReadsAgreeInVerifyMode(t *testing.T) {
 	t.Parallel()
-	h := newWitnessHarness(t, ledger.UtxoSetReadsVerify, false)
+	h := newWitnessHarness(t, "metadata-visible", false)
 	ldb := h.scenario.LedgerDB()
 	requireWitnessSlots(t, ldb, h.slots)
 	h.scenario.RollbackBeforeBoundary()
@@ -175,9 +172,6 @@ func TestWitnessSlotReadsAgreeInVerifyMode(t *testing.T) {
 		_, err := ldb.AccountLastWitnessSlots(t.Context(), h.refs(), max, nil)
 		require.NoError(t, err)
 	}
-	verified, mismatches := h.scenario.AccountReads()
-	require.Positive(t, verified, "no witness read was compared")
-	require.Zero(t, mismatches)
 }
 
 // TestWitnessSlotsLoadFromTheMetadataStore requires a set that never saw the
@@ -185,7 +179,7 @@ func TestWitnessSlotReadsAgreeInVerifyMode(t *testing.T) {
 // from them.
 func TestWitnessSlotsLoadFromTheMetadataStore(t *testing.T) {
 	t.Parallel()
-	h := newWitnessHarness(t, ledger.UtxoSetReadsSet, true)
+	h := newWitnessHarness(t, "set", true)
 	reached, _ := h.scenario.HideStoreReads("AccountLastWitnessSlots")
 	ldb := h.scenario.LedgerDB()
 	require.Equal(t, h.readsOf(t, h.store), h.readsOf(t, ldb))
@@ -193,30 +187,24 @@ func TestWitnessSlotsLoadFromTheMetadataStore(t *testing.T) {
 	require.Zero(t, reached(), "a witness read reached the metadata store")
 }
 
-// TestWitnessSlotVerificationCountsADivergence requires a verify-mode read to
-// count a mismatch when the metadata store holds a witness the set does not,
-// and to answer with the store's.
-func TestWitnessSlotVerificationCountsADivergence(t *testing.T) {
+// TestWitnessSlotReadUsesSetStateAfterAnUntrackedWitness pins the set result
+// when a witness exists only in metadata.
+func TestWitnessSlotReadUsesSetStateAfterAnUntrackedWitness(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	slots := scenario.Witnesses(true)
+	reached, _ := scenario.HideStoreReads("AccountLastWitnessSlots")
 	got, err := scenario.LedgerDB().AccountLastWitnessSlots(
 		t.Context(), []models.StakeCredentialRef{slots.C}, math.MaxInt64, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, slots.Deregister, got[slots.C.MapKey()],
-		"the read answers from the metadata store")
-	verified, mismatches := scenario.AccountReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.Zero(t, got[slots.C.MapKey()])
+	require.Zero(t, reached(), "witness read reached the metadata store")
 }
 
 // TestWitnessSlotViewsSeeTheirTransaction requires a read in a write
@@ -224,7 +212,7 @@ func TestWitnessSlotVerificationCountsADivergence(t *testing.T) {
 // staged rollback to see only the witnesses at or before its target.
 func TestWitnessSlotViewsSeeTheirTransaction(t *testing.T) {
 	t.Parallel()
-	h := newWitnessHarness(t, ledger.UtxoSetReadsSet, false)
+	h := newWitnessHarness(t, "set", false)
 	reached, _ := h.scenario.HideStoreReads("AccountLastWitnessSlots")
 	key := bytes.Repeat([]byte{0xea}, 28)
 	slot := h.scenario.EpochStartSlot() + 90

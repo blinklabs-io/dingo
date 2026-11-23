@@ -155,7 +155,7 @@ type transactionEvaluator interface {
 // implement the BlockfrostNode interface.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
-	// indexer is the IndexerDB on a split layout and nil on the shared one.
+	// indexer is the IndexerDB the API rows are read from.
 	indexer   *indexerdb.Store
 	submitter TransactionSubmitter
 	evaluator transactionEvaluator
@@ -188,21 +188,28 @@ var ErrAddressSummaryTooLarge = errors.New(
 	"address summary exceeds read budget",
 )
 
-// NewNodeAdapter creates a NodeAdapter that queries the
-// given LedgerState for blockchain data.
+// NewNodeAdapter creates a NodeAdapter that reads API rows from indexer and
+// live ledger state from ls.
 func NewNodeAdapter(
 	ls *ledger.LedgerState,
 	submitter TransactionSubmitter,
+	indexer *indexerdb.Store,
 ) (*NodeAdapter, error) {
 	if ls == nil {
 		return nil, errors.New(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
+	if indexer == nil {
+		return nil, errors.New(
+			"new node adapter: IndexerDB store must not be nil",
+		)
+	}
 	reader, _ := submitter.(mempoolReader)
 	addresses, _ := submitter.(mempoolAddressReader)
 	return &NodeAdapter{
 		ledgerState:      ls,
+		indexer:          indexer,
 		submitter:        submitter,
 		evaluator:        ls,
 		mempool:          reader,
@@ -210,20 +217,14 @@ func NewNodeAdapter(
 	}, nil
 }
 
-// SetIndexerStore points API reads at the IndexerDB. Without it the adapter
-// reads the ledger database, which holds the API rows on the shared layout.
-func (a *NodeAdapter) SetIndexerStore(store *indexerdb.Store) {
-	a.indexer = store
+// dataTip is the chain position the served rows cover: the IndexerDB's tip,
+// so no history route answers beyond what the IndexerDB holds.
+func (a *NodeAdapter) dataTip() (ochainsync.Tip, error) {
+	return a.dataTipAt(nil)
 }
 
-// dataTip is the chain position the served rows cover: the IndexerDB's tip on
-// a split layout, so no history route answers beyond what the IndexerDB holds,
-// and the ledger tip otherwise.
-func (a *NodeAdapter) dataTip() (ochainsync.Tip, error) {
-	if a.indexer == nil {
-		return a.ledgerState.Tip(), nil
-	}
-	tip, err := a.indexer.Tip(nil)
+func (a *NodeAdapter) dataTipAt(txn *database.Txn) (ochainsync.Tip, error) {
+	tip, err := a.indexer.Tip(txn)
 	if err != nil {
 		return ochainsync.Tip{}, fmt.Errorf("read indexer tip: %w", err)
 	}
@@ -235,27 +236,18 @@ func (a *NodeAdapter) dataTip() (ochainsync.Tip, error) {
 
 // rewardStakeInputsIncomplete reports whether a snapshot in [from, through)
 // still has stake inputs being written. The ledger store records that state;
-// a split IndexerDB's own transaction is not valid there, so it is read from
-// the ledger store's committed state.
+// the IndexerDB's own transaction is not valid there, so it is read from the
+// ledger store's committed state.
 func (a *NodeAdapter) rewardStakeInputsIncomplete(
-	txn *database.Txn,
 	from uint64,
 	through uint64,
 ) (bool, error) {
-	if a.indexer != nil {
-		return a.ledgerState.RewardStakeInputsIncompleteCommitted(
-			from, through,
-		)
-	}
-	return a.ledgerState.RewardStakeInputsIncomplete(txn, from, through)
+	return a.ledgerState.RewardStakeInputsIncompleteCommitted(from, through)
 }
 
 // db is the database API rows are read from.
 func (a *NodeAdapter) db() *database.Database {
-	if a.indexer != nil {
-		return a.indexer.Database()
-	}
-	return a.ledgerState.Database()
+	return a.indexer.Database()
 }
 
 func uintToUint8(v uint, fieldName string) (uint8, error) {
@@ -449,16 +441,13 @@ func (a *NodeAdapter) resolveBlock(
 	return a.withinDataTip(id, block)
 }
 
-// withinDataTip hides a block above the data tip: on the split layout the
-// shared block store holds blocks the IndexerDB has not indexed, whose
-// transactions would read as missing.
+// withinDataTip hides a block above the data tip: the block store holds
+// blocks the IndexerDB has not indexed, whose transactions would read as
+// missing.
 func (a *NodeAdapter) withinDataTip(
 	id string,
 	block models.Block,
 ) (models.Block, error) {
-	if a.indexer == nil {
-		return block, nil
-	}
 	tip, err := a.dataTip()
 	if err != nil {
 		return models.Block{}, err
@@ -1076,20 +1065,20 @@ func (a *NodeAdapter) Asset(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
-	asset, err := meta.GetAssetByPolicyAndName(
+	held, err := meta.AssetHeld(
 		policyHash,
 		assetName,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
-			"get asset by policy %s and name %x: %w",
+			"check holdings of asset %s%x: %w",
 			policyID,
 			assetName,
 			err,
 		)
 	}
-	if asset.ID == 0 {
+	if !held {
 		return AssetInfo{}, fmt.Errorf(
 			"asset %s%x: %w",
 			policyID,
@@ -1126,11 +1115,13 @@ func (a *NodeAdapter) Asset(
 	}
 
 	info := AssetInfo{
-		Asset:           policyID + hex.EncodeToString(assetName),
-		PolicyID:        policyID,
-		AssetName:       hex.EncodeToString(assetName),
-		AssetNameASCII:  assetNameASCII(assetName),
-		Fingerprint:     string(asset.Fingerprint),
+		Asset:          policyID + hex.EncodeToString(assetName),
+		PolicyID:       policyID,
+		AssetName:      hex.EncodeToString(assetName),
+		AssetNameASCII: assetNameASCII(assetName),
+		Fingerprint: lcommon.NewAssetFingerprint(
+			policyIDBytes, assetName,
+		).String(),
 		Quantity:        strconv.FormatUint(quantity, 10),
 		MintOrBurnCount: mintOrBurnCount,
 	}
@@ -1991,13 +1982,17 @@ func (a *NodeAdapter) PoolsRetiring(
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	current, err := a.currentEpochNumberAt(txn)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	offset, ok := paginationOffset(params)
 	if !ok {
 		return []PoolRetiringInfo{}, 0, nil
 	}
 	rows, total, err := db.Metadata().GetRetiringPoolsPage(
-		a.ledgerState.CurrentEpoch(),
+		current,
 		params.Count,
 		offset,
 		params.Order == PaginationOrderDesc,

@@ -39,7 +39,7 @@ type poolHistoryHarness struct {
 	refunds []models.PoolRetirementRefund
 }
 
-// newPoolHistoryHarness runs the pool scenario in verify mode over a set
+// newPoolHistoryHarness runs the pool scenario with metadata reads available over a set
 // that loaded its history first.
 func newPoolHistoryHarness(t *testing.T) *poolHistoryHarness {
 	t.Helper()
@@ -48,7 +48,7 @@ func newPoolHistoryHarness(t *testing.T) *poolHistoryHarness {
 	t.Cleanup(func() { _ = set.Close() })
 	h := &poolHistoryHarness{set: set}
 	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	h.store = dbadapter.New(h.scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
@@ -169,9 +169,6 @@ func TestPoolHistoryReadsAgreeAcrossAVRFRotation(t *testing.T) {
 	_, found := vrfAt(t, ldb, s.Retired, s.Boundary, false)
 	require.True(t, found, "a reaped pool's registration still answers")
 
-	verified, mismatches := h.scenario.PoolReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // TestPoolHistoryRollsBackAcrossAReRegistration requires a rollback to
@@ -204,9 +201,6 @@ func TestPoolHistoryRollsBackAcrossAReRegistration(t *testing.T) {
 	require.False(t, found)
 	_, found = vrfAt(t, h.scenario.LedgerDB(), s.Retired, s.Boundary, false)
 	require.True(t, found)
-	verified, mismatches := h.scenario.PoolReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // TestPoolHistoryLoadsFromTheMetadataStore requires a set from before it kept
@@ -257,16 +251,13 @@ func TestPoolHistoryLoadsFromTheMetadataStore(t *testing.T) {
 	}, shapes(fresh, h.slots.Pool))
 }
 
-// TestPoolHistoryVerificationCountsADivergence requires a verified history
-// read to count a mismatch when the metadata store holds a registration the
-// set never saw.
-func TestPoolHistoryVerificationCountsADivergence(t *testing.T) {
+// TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration pins the set
+// result when a registration exists only in metadata.
+func TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
 	t.Parallel()
 	h := newPoolHistoryHarness(t)
-	_, before := h.scenario.PoolReads()
 	pool := bytes.Repeat([]byte{0x7e}, 28)
 	vrf := bytes.Repeat([]byte{0x7f}, 32)
-	// Written around the ledger's LedgerDB, so the set never sees it.
 	require.NoError(t, h.scenario.DB.Metadata().ImportPool(
 		&models.Pool{PoolKeyHash: pool, VrfKeyHash: vrf},
 		&models.PoolRegistration{
@@ -275,9 +266,9 @@ func TestPoolHistoryVerificationCountsADivergence(t *testing.T) {
 		},
 		nil,
 	))
+	reached, _ := h.scenario.HideStoreReads("GetPoolVrfKeyHashAtSlot")
 	got, found := vrfAt(t, h.scenario.LedgerDB(), pool, 10, false)
-	require.True(t, found, "the read answers from the metadata store")
-	require.Equal(t, vrf, got)
-	_, after := h.scenario.PoolReads()
-	require.Equal(t, before+1, after)
+	require.False(t, found)
+	require.Nil(t, got)
+	require.Zero(t, reached(), "pool history read reached the metadata store")
 }

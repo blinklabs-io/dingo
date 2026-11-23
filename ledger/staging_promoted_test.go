@@ -41,7 +41,7 @@ const (
 // must be placed here deliberately.
 var stagingPromoted = map[string]string{
 	// The transaction and lifecycle methods of the interface itself.
-	"Begin": noFamilyRows, "BeginLedgerOnly": noFamilyRows, "Run": noFamilyRows,
+	"Begin": noFamilyRows, "BeginLedgerOnly": noFamilyRows, "BeginStaged": noFamilyRows, "Run": noFamilyRows,
 	"StorageMode": noFamilyRows, "Logger": noFamilyRows,
 	"BeginDestructiveTransitionContext":       noFamilyRows,
 	"BlockAtOrAfterIndex":                     noFamilyRows,
@@ -86,7 +86,6 @@ var stagingPromoted = map[string]string{
 	"UtxoByRef":                               noFamilyRows,
 	"UtxoByRefIncludingSpent":                 noFamilyRows,
 	"UtxoExists":                              noFamilyRows,
-	"UtxoRollbackChanges":                     noFamilyRows,
 	"UtxosByAddress":                          noFamilyRows,
 	"UtxosByAddressAsOf":                      noFamilyRows,
 	"UtxosByRefs":                             noFamilyRows,
@@ -100,9 +99,13 @@ var stagingPromoted = map[string]string{
 	"AccountsWitnessedAfterSlot":              databaseServes,
 	"AccountInactivityActivationMembership":   databaseServes,
 	"ConsumedUtxoPruneFloor":                  databaseServes,
-	"MithrilTrustBoundarySlotStrict":          databaseServes,
+	"ImportedLedgerStateBoundarySlotStrict":   databaseServes,
 	"UtxosDeleteConsumed":                     databaseServes,
 	"GetPParamsRows":                          databaseServes,
+	"GetRewardLikelihoodStateAtSlot":          noFamilyRows,
+	"GetRewardLikelihoodStateBeforeEpoch":     noFamilyRows,
+	"GetRewardPoolLikelihoods":                noFamilyRows,
+	"SaveRewardLikelihoodState":               noFamilyRows,
 	"DeleteRewardAccountOutputsBeforeEpoch":   writeSkips,
 	"FlushBatch":                              writeSkips,
 	"FlushBatchStakeDeltas":                   writeSkips,

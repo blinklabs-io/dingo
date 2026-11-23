@@ -130,7 +130,8 @@ func logRepeatedShutdownSignals(
 			case sig := <-ch:
 				logger.Warn(
 					"shutdown already in progress; storage close runs to completion and is not interrupted by this signal, send SIGKILL to abandon it",
-					"signal", sig.String(),
+					"signal",
+					sig.String(),
 				)
 			case <-done:
 				return
@@ -178,7 +179,8 @@ func runRequestedShutdown(
 		overrun := fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
 		logger.Warn(
 			"graceful shutdown exceeded the request deadline; waiting for storage close to finish",
-			"timeout", req.Timeout,
+			"timeout",
+			req.Timeout,
 		)
 		start := time.Now()
 		ticker := time.NewTicker(progressInterval)
@@ -641,8 +643,7 @@ func Run(
 	}
 	if cfg.SplitIndexer() {
 		logger.Info(
-			"indexer.layout split: API endpoints read the IndexerDB and " +
-				"answer 503 until it is ready",
+			"API endpoints read the IndexerDB and answer 503 until it is ready",
 		)
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
@@ -650,7 +651,7 @@ func Run(
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
-	apiMode := storageMode.IsAPI() || cfg.SplitIndexer()
+	apiMode := storageMode.IsAPI()
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", apiMode && blockfrostPort > 0,
@@ -856,10 +857,10 @@ func forgeEBCap(v *uint64, fallback uint64) uint64 {
 	return *v
 }
 
-// nodeStorageMode validates cfg's storage mode and returns the mode the
-// ledger's own store opens in. The split layout keeps that store in core mode
-// and holds API rows in the IndexerDB, which the node opens in API mode itself
-// and serves the API endpoints from.
+// nodeStorageMode validates cfg's storage mode and returns it. In API mode the
+// node keeps the ledger's own store in core mode and holds API rows in the
+// IndexerDB, which it opens in API mode itself and serves the API endpoints
+// from.
 func nodeStorageMode(cfg *config.Config) (dingo.StorageMode, error) {
 	storageMode := dingo.StorageMode(cfg.StorageMode)
 	if storageMode == "" {
@@ -872,9 +873,6 @@ func nodeStorageMode(cfg *config.Config) (dingo.StorageMode, error) {
 			dingo.StorageModeCore,
 			dingo.StorageModeAPI,
 		)
-	}
-	if cfg.SplitIndexer() {
-		return dingo.StorageModeCore, nil
 	}
 	return storageMode, nil
 }
@@ -948,6 +946,7 @@ func buildDingoConfig(
 		dingo.WithListeners(listeners...),
 		dingo.WithOutboundSourcePort(cfg.RelayPort),
 		dingo.WithPeerSharing(peerSharing),
+		dingo.WithAdvertiseAddress(cfg.AdvertiseAddress),
 		dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 		dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 		dingo.WithAPIConfig(cfg.API),
@@ -971,6 +970,14 @@ func buildDingoConfig(
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
+		dingo.WithBarkEventService(
+			cfg.BarkEventEnabled,
+			cfg.BarkEventPublishEnabled,
+			cfg.BarkEventBufferSize,
+			cfg.BarkEventMaxSubscribers,
+			cfg.BarkEventMaxSubscribersPerClient,
+		),
+		dingo.WithBarkEventNodeID(cfg.BarkEventNodeID),
 		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
 		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
@@ -982,7 +989,6 @@ func buildDingoConfig(
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithImmutableDB(dingo.ImmutableDBConfig{
-			Enabled:          cfg.ImmutableDB.Enabled,
 			PromoteBatch:     cfg.ImmutableDB.PromoteBatch,
 			PromoteFrequency: cfg.ImmutableDB.PromoteFrequency,
 		}),
@@ -995,6 +1001,7 @@ func buildDingoConfig(
 			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
 			Strict:                cfg.KoiosParity.Strict,
+			UnavailableRetryLimit: cfg.KoiosParity.UnavailableRetryLimit,
 			GraceHours:            cfg.KoiosParity.GraceHours,
 			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here
@@ -1154,10 +1161,8 @@ func buildDingoConfig(
 		),
 		dingo.WithBindAddr(cfg.BindAddr),
 		dingo.WithStorageMode(storageMode),
-		dingo.WithIndexerLayout(cfg.Indexer.Layout),
 		dingo.WithIndexerWriterFactory(NewIndexerService),
 		dingo.WithIndexerMaxReadyLagBlocks(cfg.Indexer.MaxReadyLagBlocks),
-		dingo.WithIndexerMetadata(cfg.Indexer.Metadata),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
 		dingo.WithCIP0203(cfg.CIP0203Enabled),
@@ -1236,16 +1241,8 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
-		dingo.WithLedgerUtxoShadow(cfg.LedgerUtxoShadow),
-		dingo.WithLedgerUtxoBadger(cfg.LedgerUtxoBadger),
-		dingo.WithLedgerUtxoReads(cfg.LedgerUtxoReads),
-		dingo.WithLedgerUtxoBadgerOnly(cfg.LedgerUtxoBadgerOnly),
-		dingo.WithLedgerStateSetOnly(cfg.LedgerStateSetOnly),
 		dingo.WithLedgerUtxoCheckpoint(
 			cfg.LedgerUtxoCheckpointEpochs, cfg.LedgerUtxoCheckpointKeep,
-		),
-		dingo.WithLedgerStateVerifyBeforeDrain(
-			cfg.LedgerStateVerifyBeforeDrain,
 		),
 		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(

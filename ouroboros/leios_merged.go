@@ -366,6 +366,9 @@ type leiosEndorserBlockData struct {
 	// (bindLeiosEndorserBlockSlot) replaces it with a new, distinct value
 	// under the lock rather than flipping this field on the shared one.
 	slotVerified bool
+	// durable records that this entry's current content was written to the
+	// LeiosDB. A copy whose transaction set grows must reset it.
+	durable bool
 }
 
 type selectedLeiosHeader struct {
@@ -701,6 +704,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		if len(existing.txsRaw) > len(data.txsRaw) {
 			data.txsRaw = existing.txsRaw
 		}
+		// Without this every re-offer of the block, from every connection,
+		// would rewrite its closure to the LeiosDB.
+		if len(data.txsRaw) == len(existing.txsRaw) {
+			data.durable = existing.durable
+		}
 		// Carry retained partial-fetch state forward for the same reason: a
 		// manifest-only store arrives on every connection that offers the
 		// block, and dropping the partial would send the next re-offer back to
@@ -787,34 +795,65 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// announcement (or the ledger's chain-derived reference) corroborates the
 	// slot, so a peer that offers before announcing cannot make dingo vote,
 	// track pipeline timing, or persist a blob under a slot of its choosing.
+	var publishErr error
 	if data.slotVerified {
-		o.publishLeiosEndorserBlock(point, blockRaw, data)
+		publishErr = o.publishLeiosEndorserBlock(point, blockRaw, data)
 	}
 	// A block this node forged itself did not arrive from anywhere.
 	if origin != leiosStoreAuthoritative && !wasClosureReady &&
 		data.completeTxCache() && data.slotVerified {
 		o.recordLeiosEbArrival(point, data.txCount)
 	}
-	return nil
+	return publishErr
 }
 
 // publishLeiosEndorserBlock performs the side effects keyed on a verified
-// endorser-block slot. It must be called with leiosMu released.
+// endorser-block slot. It must be called with leiosMu released, and it writes
+// to the LeiosDB, so with no other lock held either.
+//
+// The block is written before it is offered downstream, so nothing is offered
+// that would not survive a restart. A failed write withholds the relay offers
+// and is returned; the remaining side effects still run, because the
+// slot-binding path publishes only once.
 func (o *Ouroboros) publishLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
-) {
+) error {
 	if data == nil || !data.slotVerified {
-		return
+		return nil
 	}
-	o.enqueueLeiosRelayOffers(point, data)
 	// Persist verified content and advance the advisory slot watermark even
 	// when it is still manifest-only. Voting and pipeline admission remain
 	// separately gated on complete transaction bodies and semantic validation.
+	persistErr := o.persistVerifiedLeiosEndorserBlock(point, blockRaw, data)
+	if persistErr == nil {
+		o.enqueueLeiosRelayOffers(point, data)
+	}
 	o.advanceLeiosVerifiedEbSlot(point.Slot)
-	o.enqueueLeiosPersist(point, blockRaw, data)
 	o.scheduleLeiosEndorserBlockValidation(point, data)
+	return persistErr
+}
+
+// ensureLeiosEndorserBlockDurable writes a slot-verified cached entry that is
+// not yet durable, then offers it downstream. It is the retry for a publish
+// whose write failed: a later offer of a block already cached whole finds
+// nothing to fetch and would otherwise report success for it.
+func (o *Ouroboros) ensureLeiosEndorserBlockDurable(
+	data *leiosEndorserBlockData,
+) error {
+	if data == nil || !data.slotVerified || o.leiosEndorserBlockDurable(data) {
+		return nil
+	}
+	if err := o.persistVerifiedLeiosEndorserBlock(
+		data.point,
+		data.blockRaw,
+		data,
+	); err != nil {
+		return err
+	}
+	o.enqueueLeiosRelayOffers(data.point, data)
+	return nil
 }
 
 // enqueueLeiosRelayOffers forwards a peer-offered endorser block after its
@@ -864,7 +903,10 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 	}
 	o.leiosMu.Lock()
 	current := o.leiosEndorserBlocks[key]
-	if current == nil || !current.slotVerified || !current.completeTxCache() {
+	// An entry that is not durable stays pending, with its offer requested:
+	// the write that makes it durable enqueues again.
+	if current == nil || !current.slotVerified ||
+		!o.leiosRelayContentReady(current) {
 		o.leiosMu.Unlock()
 		return
 	}
@@ -1306,7 +1348,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 			break
 		}
 	}
-	if err == nil {
+	if err == nil && !ledger.ReusePreparedLeiosSelection(ctx, header, validationParent, txCbors) {
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			ctx,
 			header,
@@ -1721,9 +1763,10 @@ func (o *Ouroboros) publishValidatedLeiosEndorserBlock(
 //     simply sees no evidence. Reloading an evicted manifest from the blob
 //     store does not raise it, and cannot need to: the startup restore
 //     already takes the maximum over every persisted manifest, and every
-//     manifest persisted after that went through publishLeiosEndorserBlock,
-//     which advances the watermark first -- so within a process the watermark
-//     is always at least the maximum persisted slot.
+//     manifest persisted after that was first published through
+//     publishLeiosEndorserBlock, which advances the watermark as part of the
+//     same publication -- so within a process the watermark is at least the
+//     maximum persisted slot once that publication returns.
 //
 //   - It is NEVER lowered. An endorser block corroborated for a chain this
 //     node does not adopt leaves the watermark above the local tip
@@ -1861,6 +1904,7 @@ func (o *Ouroboros) bindCachedLeiosEndorserBlockSlot(
 			completed.partialTxs = nil
 			completed.txCount = candidate.txCount
 			completed.semanticValidationStatus = leiosEBValidationUnknown
+			completed.durable = false
 			for _, cacheKey := range data.cacheKeys {
 				if current := o.leiosEndorserBlocks[cacheKey]; current == data ||
 					current == nil {
@@ -1920,11 +1964,19 @@ func (o *Ouroboros) bindCachedLeiosEndorserBlockSlot(
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
 	return func() {
-		o.publishLeiosEndorserBlock(
+		if err := o.publishLeiosEndorserBlock(
 			verified.point,
 			verified.blockRaw,
 			&verified,
-		)
+		); err != nil {
+			// The next offer or backfill of this block retries the write.
+			o.config.Logger.Debug(
+				"failed to persist leios EB bound to its slot",
+				"component", "network",
+				"slot", verified.point.Slot,
+				"error", err,
+			)
+		}
 		// Recorded here, not above: the caller may hold
 		// leiosAnnouncementsMu until it runs this closure, and recording
 		// resolves the slot through the ledger.
@@ -2377,15 +2429,17 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		txCount:    len(block.TransactionReferences),
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
-		// The blob store is written only from publishLeiosEndorserBlock,
-		// which never runs before slotVerified is true (see
-		// storeLeiosEndorserBlock and bindLeiosEndorserBlockSlot), so a
+		// The blob store is written only through
+		// persistVerifiedLeiosEndorserBlock, which never writes before
+		// slotVerified is true (see storeLeiosEndorserBlock and
+		// bindLeiosEndorserBlockSlot), so a
 		// persisted (slot, hash) pair is already an authoritatively bound
 		// one. Reconstructing it as unverified would withhold it from
 		// EndorserBlockTxsByHash until something re-verifies a hash whose
 		// announcement may have long since aged out of the acceptance
 		// window.
 		slotVerified: true,
+		durable:      true,
 	}
 	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
 	// even though storeLeiosEndorserBlock would reject it on the write path;

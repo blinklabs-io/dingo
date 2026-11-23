@@ -127,10 +127,9 @@ INSERT INTO utxo (
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
-		_, err = metadataTxn.Exec(`
-INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
-		require.NoError(t, err)
+		testutil.InsertAssetHolding(
+			t, metadataTxn, utxoID, []byte("policy"), []byte("asset"), "1",
+		)
 		if outputCbor != nil {
 			require.NoError(t, db.Blob().SetUtxo(
 				blobTxn.Blob(), txID, 0, outputCbor,
@@ -637,11 +636,10 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, testutil.TransactionID(t, txn, txID))
 		)
 		require.NoError(t, err)
 		if i == 1 {
-			_, err = txn.Exec(
-				`INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, '5')`,
-				[]byte{0x01}, bytes.Repeat([]byte{0x48}, 28), utxoID,
+			testutil.InsertAssetHolding(
+				t, txn, utxoID, bytes.Repeat([]byte{0x48}, 28),
+				[]byte{0x01}, "5",
 			)
-			require.NoError(t, err)
 		}
 	}
 	require.NoError(t, txn.Commit())
@@ -686,14 +684,10 @@ VALUES (?, 1, 0, '1', 0, FALSE)`,
 	)
 	require.NoError(t, err)
 	for assetName := range 3 {
-		_, err = raw.Exec(`
-INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES (?, ?, ?, '1')`,
-			[]byte{byte(assetName)},
-			bytes.Repeat([]byte{0x4a}, 28),
-			utxoID,
+		testutil.InsertAssetHolding(
+			t, raw, utxoID, bytes.Repeat([]byte{0x4a}, 28),
+			[]byte{byte(assetName)}, "1",
 		)
-		require.NoError(t, err)
 	}
 
 	_, err = db.utxoStore().GetUtxoBalanceByAddressAtSlot(
@@ -2045,7 +2039,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2118,7 +2112,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2195,7 +2189,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2280,7 +2274,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2368,7 +2362,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2466,7 +2460,7 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -2565,7 +2559,7 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(), 0, false,
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)

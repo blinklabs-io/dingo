@@ -93,6 +93,7 @@ func newLeiosApplyDenseLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
 
 	budget, ok := db.Blob().(interface {

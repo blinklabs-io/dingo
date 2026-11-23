@@ -45,6 +45,13 @@ func (*memSummarySet) PoolStakeSnapshots(
 	return nil, nil
 }
 
+func (*memSummarySet) PoolStakeSnapshotsCapturedIn(
+	uint64,
+	uint64,
+) ([]*models.PoolStakeSnapshot, error) {
+	return nil, nil
+}
+
 func (s *memSummarySet) EpochSummary(epoch uint64) (*models.EpochSummary, error) {
 	sm, ok := s.summaries[epoch]
 	if !ok {
@@ -66,12 +73,8 @@ func TestPoolAbsentFromPopulatedSnapshotReadsTheSet(t *testing.T) {
 			1: {Epoch: 1, TotalActiveStake: types.Uint64(500), SnapshotReady: true},
 		},
 	}
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	snap := electingSnapshot{epoch: 1, kind: models.PoolStakeSnapshotTypeMark}
 	require.True(t, ls.poolAbsentFromPopulatedSnapshot(snap),
 		"the set's ready summary shows a populated snapshot")
 
-	ls.config.UtxoSetReads = UtxoSetReadsOff
-	require.False(t, ls.poolAbsentFromPopulatedSnapshot(snap),
-		"the metadata store holds no summary")
 }

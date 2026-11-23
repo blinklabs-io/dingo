@@ -226,9 +226,7 @@ func newSlotTimeDBBackedAdapter(
 	t *testing.T,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
-	adapter, raw, db := newDBBackedAdapterWithStorageMode(
-		t, types.StorageModeAPI,
-	)
+	adapter, raw, db := newDBBackedAdapter(t)
 	adapter.slotTime = testSlotTime
 	return adapter, raw, db
 }
@@ -238,7 +236,7 @@ func newSlotTimeDBBackedAdapter(
 func seedAssetTransaction(
 	t *testing.T,
 	raw *sql.DB,
-	db *database.Database,
+	adapter *NodeAdapter,
 	txHash []byte,
 	height uint64,
 	slot uint64,
@@ -246,7 +244,7 @@ func seedAssetTransaction(
 ) *models.Transaction {
 	t.Helper()
 	blockHash := fill32(byte(0xd0 + height))
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash: blockHash, Slot: slot, Number: height,
 		ID:   height + database.BlockInitialIndex,
 		Type: 0, Cbor: []byte{byte(height)},
@@ -266,18 +264,12 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	policyHex := hex.EncodeToString(policy)
 	mint, move := fill32(0x01), fill32(0x02)
 
-	seedAssetTransaction(t, raw, db, mint, 1, 10, 0)
-	seedAssetTransaction(t, raw, db, move, 3, 30, 1)
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(30, fill32(0xd3)),
-				BlockNumber: 3,
-			},
-			nil,
-		),
-	)
+	seedAssetTransaction(t, raw, adapter, mint, 1, 10, 0)
+	seedAssetTransaction(t, raw, adapter, move, 3, 30, 1)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, fill32(0xd3)),
+		BlockNumber: 3,
+	})
 	seedMintBurn(t, raw, mint, policy, "T", 10, "5")
 	addr, _, _ := testKeyAddress(t, 0xd2, 0)
 	// produce creates an output holding the asset in block 2, which move
@@ -286,7 +278,7 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	seedAddressOutput(t, raw, db, addr, produce, 20, 1_000_000,
 		[]models.Asset{{PolicyId: policy, Name: []byte("T"), Amount: 5}}, move)
 	blockHash := fill32(0xd2)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 		Hash: blockHash, Slot: 20, Number: 2,
 		ID:   2 + database.BlockInitialIndex,
 		Type: 0, Cbor: []byte{2},
@@ -403,9 +395,9 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 
 	// first: an inline-datum output in block 1; second: a plain output in
 	// block 3. A spent holding in block 2 is not a current UTxO.
-	firstTx := seedAssetTransaction(t, raw, db, fill32(0x01), 1, 10, 0)
-	spentTx := seedAssetTransaction(t, raw, db, fill32(0x02), 2, 20, 0)
-	secondTx := seedAssetTransaction(t, raw, db, fill32(0x03), 3, 30, 1)
+	firstTx := seedAssetTransaction(t, raw, adapter, fill32(0x01), 1, 10, 0)
+	spentTx := seedAssetTransaction(t, raw, adapter, fill32(0x02), 2, 20, 0)
+	secondTx := seedAssetTransaction(t, raw, adapter, fill32(0x03), 3, 30, 1)
 	spender := &models.Transaction{Hash: fill32(0x04), Slot: 40, Valid: true}
 	insertAdapterTransaction(t, raw, spender)
 	for i, tx := range []*models.Transaction{firstTx, spentTx, secondTx} {
@@ -486,16 +478,10 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(secondTx.Hash), rows[0].TxHash)
 
 	// A block range selects on the producing transaction's position.
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(30, fill32(0xd3)),
-				BlockNumber: 3,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, fill32(0xd3)),
+		BlockNumber: 3,
+	})
 	ranged := params
 	ranged.From = &BlockRangePosition{Block: 2}
 	rows, total, err = adapter.AssetUTXOs(ctx, policyHex, []byte("T"), ranged)
@@ -556,7 +542,7 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 		return []models.Asset{{PolicyId: policy, Name: []byte("C"), Amount: 1}}
 	}
 
-	valid := seedAssetTransaction(t, raw, db, fill32(0x11), 5, 50, 1)
+	valid := seedAssetTransaction(t, raw, adapter, fill32(0x11), 5, 50, 1)
 	insertAdapterUtxo(t, raw, &models.Utxo{
 		TransactionID: &valid.ID,
 		TxId:          valid.Hash,
@@ -583,16 +569,10 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 	}
 	insertAdapterTransaction(t, raw, failed)
 	storePointerOutputCbor(t, db, failed.Hash, 1, addr, 2_000_000)
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(50, fill32(0xd5)),
-				BlockNumber: 5,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(50, fill32(0xd5)),
+		BlockNumber: 5,
+	})
 
 	index := uint32(2)
 	params := TransactionRangeParams{
@@ -622,4 +602,76 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 	require.Equal(t, 1, total)
 	require.Len(t, rows, 1)
 	require.Equal(t, hex.EncodeToString(valid.Hash), rows[0].TxHash)
+}
+
+// TestNodeAdapterAssetDetailReadsHoldings covers the detail read's reliance
+// on the held-asset lookup: a held asset reports its live quantity, a spent
+// holding keeps the asset known with no quantity, and an unknown asset is not
+// found.
+func TestNodeAdapterAssetDetailReadsHoldings(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc4, 0)
+	policy := bytes.Repeat([]byte{0xc5}, lcommon.AddressHashSize)
+	policyHex := hex.EncodeToString(policy)
+
+	seedAddressOutput(t, raw, db, addr, fill32(0x51), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("live"), Amount: 4}},
+		nil)
+	seedAddressOutput(t, raw, db, addr, fill32(0x52), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte{}, Amount: 9}}, nil)
+	insertAdapterTransaction(t, raw, &models.Transaction{
+		Hash: fill32(0x98), Slot: 7, Valid: true,
+	})
+	seedAddressOutput(t, raw, db, addr, fill32(0x53), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("gone"), Amount: 2}},
+		fill32(0x98))
+
+	info, err := adapter.Asset(context.Background(), policyHex, []byte("live"))
+	require.NoError(t, err)
+	require.Equal(t, "4", info.Quantity)
+
+	info, err = adapter.Asset(context.Background(), policyHex, []byte{})
+	require.NoError(t, err)
+	require.Equal(t, "9", info.Quantity, "the empty name is a real asset")
+
+	info, err = adapter.Asset(context.Background(), policyHex, []byte("gone"))
+	require.NoError(t, err)
+	require.Equal(t, "0", info.Quantity)
+
+	_, err = adapter.Asset(context.Background(), policyHex, []byte("never"))
+	require.ErrorIs(t, err, ErrAssetNotFound)
+}
+
+// TestNodeAdapterAssetIdentityWithoutHoldingsIs404 removes every holding of an
+// asset while its identity row stays, as pruning the last holding UTxO does,
+// and requires the asset to read as absent rather than as an asset with zero
+// quantity.
+func TestNodeAdapterAssetIdentityWithoutHoldingsIs404(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc6, 0)
+	policy := bytes.Repeat([]byte{0xc7}, lcommon.AddressHashSize)
+	policyHex := hex.EncodeToString(policy)
+	seedAddressOutput(t, raw, db, addr, fill32(0x61), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("pruned"), Amount: 4}},
+		nil)
+	_, err := adapter.Asset(context.Background(), policyHex, []byte("pruned"))
+	require.NoError(t, err)
+
+	_, err = raw.Exec(`DELETE FROM asset_holding`)
+	require.NoError(t, err)
+	var identities int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM asset_identity`,
+	).Scan(&identities))
+	require.Equal(t, 1, identities)
+
+	_, err = adapter.Asset(context.Background(), policyHex, []byte("pruned"))
+	require.ErrorIs(t, err, ErrAssetNotFound)
+	_, _, err = adapter.AssetHistory(
+		context.Background(), policyHex, []byte("pruned"),
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.ErrorIs(t, err, ErrAssetNotFound)
 }

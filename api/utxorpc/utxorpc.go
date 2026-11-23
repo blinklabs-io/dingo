@@ -78,12 +78,14 @@ type Utxorpc struct {
 }
 
 type UtxorpcConfig struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen      func(string, string) (net.Listener, error)
 	Logger      *slog.Logger
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
 	// QueryDatabase serves the QueryService's UTxO, datum and transaction
-	// reads. Nil reads the ledger, which holds those rows on the shared
-	// layout.
+	// reads from the IndexerDB.
 	QueryDatabase QueryDatabase
 	Mempool       UtxorpcMempool
 	TLS           apiconfig.EffectiveTLS
@@ -228,8 +230,8 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 			cfg.MaxReplayBlocksPerClient,
 			cfg.ReplayBudgetWindow,
 		),
-		listener: apilistener.New(
-			"utxorpc gRPC", cfg.Logger,
+		listener: apilistener.NewWithListenerFactory(
+			"utxorpc gRPC", cfg.Logger, cfg.Listen,
 		),
 	}
 }

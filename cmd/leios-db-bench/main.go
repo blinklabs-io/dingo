@@ -18,7 +18,7 @@
 // Every measured endorser block (EB) goes through:
 //
 //   - Fetch: its Tx chunks arrive from the upstream peers and the complete EB is
-//     committed with one SetLeiosEB call, as the EB persistence writer does.
+//     committed with one SetLeiosEB call, as EB persistence does.
 //   - Vote read: once fetched, one transaction-closure read.
 //   - Serve: once fetched, every downstream peer reads the manifest, then the
 //     transactions request by request, each request reloading the stored

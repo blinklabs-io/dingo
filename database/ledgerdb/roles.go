@@ -31,15 +31,6 @@ import (
 
 // UtxoStore resolves and maintains the live UTxO set consensus reads.
 type UtxoStore interface {
-	// UtxoRollbackChanges reports what a rollback to slot does to the live
-	// UTxO set, read before the rollback runs: the live outputs created after
-	// slot, which it removes, and the outputs created at or before slot but
-	// spent after it, which it restores, with their CBOR.
-	UtxoRollbackChanges(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) ([]models.UtxoId, []models.Utxo, error)
 	// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep
 	// has hard-deleted spent rows at or below, or 0 when nothing has been
 	// swept. Rolling back below this slot cannot restore the UTxOs consumed
@@ -711,6 +702,28 @@ type RewardStore interface {
 	) ([]*models.AccountRewardDelta, error)
 	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
 	GetRewardAdaPots(epoch uint64, txn Txn) (*models.RewardAdaPots, error)
+	// SaveRewardLikelihoodState installs the non-myopic state visible from a
+	// completed reward boundary.
+	SaveRewardLikelihoodState(
+		state *models.RewardLikelihoodState,
+		pools []*models.RewardPoolLikelihood,
+		txn Txn,
+	) error
+	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
+	GetRewardLikelihoodStateBeforeEpoch(
+		epoch uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
+	GetRewardLikelihoodStateAtSlot(
+		slot uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
+	GetRewardPoolLikelihoods(
+		epoch uint64,
+		txn Txn,
+	) ([]*models.RewardPoolLikelihood, error)
 	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
 	GetRewardPoolInputs(
 		epoch uint64,
@@ -2012,23 +2025,10 @@ type ChainStore interface {
 	// ListSyncStateKeysByPrefix returns every sync_state key beginning with
 	// prefix.
 	ListSyncStateKeysByPrefix(prefix string, txn Txn) ([]string, error)
-	// MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
-	// the underlying read error instead of swallowing it as "no boundary
-	// recorded" — for a caller that must fail closed (refuse the operation)
-	// rather than fail open when the boundary can't be verified. A malformed
-	// stored value is also propagated as an error here (unlike
-	// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
-	// persisted boundary must not be indistinguishable from "no snapshot was
-	// ever imported" for a caller enforcing a safety check, or the check is
-	// defeated exactly when it matters most.
-	//
-	// That includes a recorded empty value. GetSyncState reports an absent key
-	// as the empty string, so an empty return alone cannot tell "no snapshot
-	// was ever imported" from "a boundary row exists and holds nothing"; only
-	// the second is malformed, and the two are separated here by asking the
-	// sync_state keyspace whether the row exists at all. The extra query runs
-	// only on that path.
-	MithrilTrustBoundarySlotStrict(txn Txn) (uint64, error)
+	// ImportedLedgerStateBoundarySlotStrict returns the boundary of ledger
+	// state loaded without replaying the blocks below it. It fails closed on
+	// unreadable or malformed persisted state.
+	ImportedLedgerStateBoundarySlotStrict(txn Txn) (uint64, error)
 	// OldestRetainedSlot returns the slot of the oldest block whose body is
 	// still stored, as last computed by RefreshOldestRetainedSlot. ok is false
 	// before the first refresh, when history expiry has never run, when the
@@ -2319,9 +2319,9 @@ type LeiosStore interface {
 	// tx set otherwise. Note the nil contract differs from SetLeiosEBTxs:
 	// SetLeiosEBTxs(nil) writes an empty tx list under the "et" key, whereas
 	// SetLeiosEB(..., nil) omits the "et" key entirely (manifest-only), so the
-	// two must not be treated as interchangeable nil handlers. Used by the
-	// asynchronous EB-persistence writer so historical-serving storage costs
-	// one commit per endorser block off the leios-fetch hot path.
+	// two must not be treated as interchangeable nil handlers. Used by
+	// endorser-block persistence so historical-serving storage costs one
+	// commit per endorser block.
 	SetLeiosEB(
 		slot uint64,
 		hash []byte,

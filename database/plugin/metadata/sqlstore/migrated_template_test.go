@@ -66,7 +66,7 @@ func buildMigratedTemplate() error {
 	// Run the migrations without Start so no maintenance ticker or prepared
 	// statement outlives the template.
 	runner := migrations.Runner{
-		BeforeUpgrade: store.preflightRewardStakeUpgrade,
+		BeforeUpgrade: store.beforeUpgrade,
 		DB:            db,
 		Dialect:       store.dialect.Name(),
 		Registry:      registry,

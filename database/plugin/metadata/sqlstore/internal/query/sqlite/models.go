@@ -51,13 +51,16 @@ type AppliedTransaction struct {
 	Valid         sql.NullBool
 }
 
-type Asset struct {
-	Name        []byte
-	PolicyID    []byte
-	Fingerprint []byte
-	ID          int64
-	UtxoID      sql.NullInt64
-	Amount      sql.NullString
+type AssetHolding struct {
+	UtxoID  int64
+	AssetID int64
+	Amount  sql.NullString
+}
+
+type AssetIdentity struct {
+	ID       int64
+	PolicyID []byte
+	Name     []byte
 }
 
 type AssetMintBurn struct {
@@ -441,6 +444,15 @@ type RewardAdaPot struct {
 	ImportedEpochFees sql.NullString
 }
 
+type RewardLikelihoodState struct {
+	ID           int64
+	Epoch        int64
+	RewardPot    string
+	CapturedSlot int64
+	BoundarySlot int64
+	Complete     bool
+}
+
 type RewardPoolInput struct {
 	Margin                     sql.NullString
 	PoolKeyHash                []byte
@@ -457,6 +469,15 @@ type RewardPoolInput struct {
 	RewardAccountCredentialTag int64
 	CapturedSlot               int64
 	BoundarySlot               int64
+}
+
+type RewardPoolLikelihood struct {
+	ID                  int64
+	Epoch               int64
+	PoolKeyHash         []byte
+	LogWeights          []byte
+	PerformanceEstimate float64
+	BoundarySlot        int64
 }
 
 type RewardPoolOutput struct {

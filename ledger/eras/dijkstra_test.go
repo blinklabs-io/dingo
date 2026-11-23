@@ -194,7 +194,7 @@ func TestHardForkDijkstraAppliesAndClonesCurrentGenesisFields(t *testing.T) {
 		t,
 		cloned.PerasQuorumThresholdSafetyMargin.Cmp(big.NewRat(1, 2)),
 	)
-	require.Equal(t, uint64(105), cloned.RefInputsCostPerMultiAssetPolicy)
+	require.Equal(t, uint64(105), cloned.RefInputsCostPerMultiAssetByte)
 	require.Equal(t, uint64(106), cloned.RefInputsCostPerDatumByte)
 }
 

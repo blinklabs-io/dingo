@@ -15,7 +15,6 @@
 package sqlite
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -45,54 +44,4 @@ func TestDRepVotingPowerByTypeRefusesIncompleteLiveStake(t *testing.T) {
 		[]uint64{models.DrepTypeAlwaysAbstain}, 0, nil,
 	)
 	require.ErrorContains(t, err, "reward_live_stake is incomplete")
-}
-
-// TestGetUtxosRestoredByRollbackBoundaries requires a rollback to slot S to
-// restore exactly the outputs created at or before S and spent after S.
-func TestGetUtxosRestoredByRollbackBoundaries(t *testing.T) {
-	t.Parallel()
-	store, writeDB := newSharedSQLStore(t)
-	const slot = 100
-	seed := []struct {
-		name    string
-		added   uint64
-		deleted uint64
-		want    bool
-	}{
-		{"live", 10, 0, false},
-		{"spent after", 20, 150, true},
-		{"created after", 150, 200, false},
-		{"created at, spent after", slot, slot + 1, true},
-		{"spent at", 30, slot, false},
-	}
-	for i, row := range seed {
-		txID := bytes.Repeat([]byte{byte(i + 1)}, 32)
-		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
-			TxId:       txID,
-			StakingKey: []byte("restored-by-rollback-staking-k1"),
-			Amount:     1,
-		}))
-		_, err := writeDB.Exec(
-			`UPDATE utxo SET added_slot = ?, deleted_slot = ?
-WHERE id = (SELECT MAX(id) FROM utxo)`,
-			row.added, row.deleted,
-		)
-		require.NoError(t, err)
-	}
-	got, err := store.GetUtxosRestoredByRollback(slot, nil)
-	require.NoError(t, err)
-	gotAdded := map[uint64]bool{}
-	for _, u := range got {
-		gotAdded[u.AddedSlot] = true
-	}
-	var want []uint64
-	for _, row := range seed {
-		if row.want {
-			want = append(want, row.added)
-		}
-	}
-	require.Len(t, got, len(want))
-	for _, key := range want {
-		require.True(t, gotAdded[key], "missing output added at slot %d", key)
-	}
 }

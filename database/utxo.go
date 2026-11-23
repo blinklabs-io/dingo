@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -737,6 +738,20 @@ func (d *Database) UtxosByRefs(
 		}
 	}
 	return utxos, nil
+}
+
+// PrefetchBackfillInputs lets a metadata provider warm the rows an upcoming
+// historical block will consume. Providers without a prefetch path leave the
+// ordered writer unchanged.
+func (d *Database) PrefetchBackfillInputs(
+	ctx context.Context,
+	refs []models.UtxoId,
+) error {
+	prefetcher, ok := d.Metadata().(metadata.BackfillInputPrefetcher)
+	if !ok || len(refs) == 0 {
+		return nil
+	}
+	return prefetcher.PrefetchBackfillInputs(ctx, refs)
 }
 
 // ErrUtxoBytesExceeded is returned by UtxosByRefsBounded when the CBOR of the
@@ -2258,53 +2273,68 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 	})
 }
 
-// UtxoRollbackChanges reports what a rollback to slot does to the live UTxO
-// set, read before the rollback runs: removed are live outputs created after
-// slot, and restored are outputs created at or before slot but spent after
-// it, with their CBOR. Outputs both created and spent after slot are in
-// neither, because they are not live on either side of the rollback.
-func (d *Database) UtxoRollbackChanges(
+// genesisUtxoRemover is the metadata store hook RemoveGenesisUtxos drives.
+type genesisUtxoRemover interface {
+	DeleteUnspentGenesisUtxos(
+		[]models.UtxoId, [][]byte, types.Txn,
+	) ([]models.UtxoId, uint64, error)
+}
+
+// RemoveGenesisUtxos removes the outputs named by refs that are unspent, with
+// their address, pointer and reference-script rows, and then the genesis
+// transaction rows named by txHashes that no output, spend or edge refers to.
+// It returns the references it removed and how many applied_transaction rows
+// it removed. An output that is spent, referenced by a transaction or
+// carrying an asset is left alone.
+func (d *Database) RemoveGenesisUtxos(
 	ctx context.Context,
-	slot uint64,
+	refs []models.UtxoId,
+	txHashes [][]byte,
 	txn *Txn,
-) ([]models.UtxoId, []models.Utxo, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	added, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"read UTxOs added after slot %d: %w",
-			slot,
-			err,
+) ([]models.UtxoId, uint64, error) {
+	remover, ok := d.metadata.(genesisUtxoRemover)
+	if !ok {
+		return nil, 0, errors.New(
+			"the metadata store cannot remove genesis outputs",
 		)
 	}
-	removed := make([]models.UtxoId, 0, len(added))
-	for _, u := range added {
-		if u.DeletedSlot != 0 {
-			continue
-		}
-		removed = append(removed, models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(ctx, true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
 	}
-	restored, err := d.utxoStore().GetUtxosRestoredByRollback(
-		slot,
-		txn.Metadata(),
+	removed, applied, err := remover.DeleteUnspentGenesisUtxos(
+		refs, txHashes, txn.Metadata(),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"read UTxOs restored by rollback to slot %d: %w", slot, err,
-		)
+		return nil, 0, err
 	}
-	for i := range restored {
-		if err := loadCbor(&restored[i], txn); err != nil {
-			return nil, nil, fmt.Errorf(
-				"load CBOR of restored UTxO %x#%d: %w",
-				restored[i].TxId, restored[i].OutputIdx, err,
-			)
+	// A store that keeps output offsets in the blob store holds one per
+	// output; the live UTxO set a core store reads instead has none.
+	if !d.liveUtxo && len(removed) > 0 {
+		blobStore := txn.BlobStore()
+		blobTxn := txn.Blob()
+		if blobStore == nil || blobTxn == nil {
+			return nil, 0, types.ErrBlobStoreUnavailable
+		}
+		for _, ref := range removed {
+			if err := blobStore.DeleteUtxo(
+				blobTxn, ref.Hash, ref.Idx,
+			); err != nil {
+				return nil, 0, fmt.Errorf(
+					"delete genesis utxo offset %x#%d: %w",
+					bytePrefix(ref.Hash), ref.Idx, err,
+				)
+			}
 		}
 	}
-	return removed, restored, nil
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return nil, 0, fmt.Errorf("commit transaction: %w", err)
+		}
+	}
+	return removed, applied, nil
 }
 
 // UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
@@ -2331,21 +2361,6 @@ func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
 	setter.SetLiveUtxoSource(src)
 	d.liveUtxo = src != nil
 	return nil
-}
-
-// utxoSetOnly reports whether the metadata store holds no UTxO set: a live
-// source is attached, or the database is marked set-only. A Mithril import
-// detaches its live source before the gap blocks are ingested, so the mark is
-// what tells the gap path.
-func (d *Database) utxoSetOnly(txn *Txn) (bool, error) {
-	if d.liveUtxo {
-		return true, nil
-	}
-	marked, err := d.GetSyncState(UtxoSetOnlySyncKey, txn)
-	if err != nil {
-		return false, fmt.Errorf("read the UTxO-set-only mark: %w", err)
-	}
-	return marked != "", nil
 }
 
 // LiveUtxo reports whether the ledger holds the live UTxO set outside the
