@@ -965,12 +965,10 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 
 	// Convert assets
 	for _, a := range u.Assets {
-		fingerprint := lcommon.NewAssetFingerprint(a.PolicyId, a.Name)
 		utxo.Assets = append(utxo.Assets, models.Asset{
-			PolicyId:    a.PolicyId,
-			Name:        a.Name,
-			Amount:      types.Uint64(a.Amount),
-			Fingerprint: []byte(fingerprint.String()),
+			PolicyId: a.PolicyId,
+			Name:     a.Name,
+			Amount:   types.Uint64(a.Amount),
 		})
 	}
 

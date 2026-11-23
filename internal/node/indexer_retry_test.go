@@ -40,7 +40,7 @@ func (f *failingPatchFacts) PatchFacts(
 ) error {
 	f.calls++
 	if f.calls == f.failOn {
-		return errors.New("injected patch failure")
+		return errors.New("database or disk is full")
 	}
 	return f.FactsSource.PatchFacts(ctx, dst, from, through)
 }

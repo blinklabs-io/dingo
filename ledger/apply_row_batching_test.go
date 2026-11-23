@@ -453,6 +453,23 @@ func runRowBatchingScenarioTolerating(
 	return run
 }
 
+// digestTableQuery returns the statement that dumps table for a digest, and
+// false for a table the digest leaves out. Asset identity ids are node-local
+// and the per-row path may create identities the overlay does not, so
+// identities are not dumped: holdings are, with the identity's policy and
+// name in place of its id.
+func digestTableQuery(table string) (string, bool) {
+	switch table {
+	case "asset_identity":
+		return "", false
+	case "asset_holding":
+		return `SELECT h.utxo_id AS utxo_id, i.policy_id AS policy_id,
+       i.name AS name, h.amount AS amount
+FROM asset_holding h JOIN asset_identity i ON i.id = h.asset_id`, true
+	}
+	return fmt.Sprintf(`SELECT * FROM "%s"`, table), true
+}
+
 // rowBatchingDigest dumps every metadata table, minus surrogate keys and
 // wall-clock columns, as sorted text rows. Surrogate ids are excluded because
 // queued API detail rows receive theirs at flush time; every column that
@@ -495,7 +512,11 @@ func metadataDigest(
 		if skipTables[table] {
 			continue
 		}
-		rows, err := raw.Query(fmt.Sprintf(`SELECT * FROM "%s"`, table))
+		query, ok := digestTableQuery(table)
+		if !ok {
+			continue
+		}
+		rows, err := raw.Query(query)
 		require.NoError(t, err)
 		cols, err := rows.Columns()
 		require.NoError(t, err)

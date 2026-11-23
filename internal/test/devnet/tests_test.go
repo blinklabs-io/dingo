@@ -769,6 +769,8 @@ case "${1:-}" in
     printf 'TXPUMP_TRANSACTION_ERA=%s\n' "${DEVNET_TXPUMP_TRANSACTION_ERA:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'NETWORK_MAGIC=%s\n' "${DEVNET_NETWORK_MAGIC:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'TXPUMP_START_DELAY=%s\n' "${DEVNET_TXPUMP_START_DELAY_SECONDS:-0}" >>"${FAKE_DOCKER_LOG}"
+    printf 'TXPUMP_USERS=%s\nGOVERNANCE_PAYMENT_KEY=%s\n' \
+      "${DEVNET_TXPUMP_USERS:-}" "${DEVNET_GOVERNANCE_PAYMENT_KEY:-}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
@@ -1020,6 +1022,77 @@ func TestRunTestsTakesNetworkMagicFromSpec(t *testing.T) {
 	}
 }
 
+func TestTxpumpUsersLeaveGenesisOneToGovernance(t *testing.T) {
+	t.Parallel()
+	helper, err := filepath.Abs("compose-project.sh")
+	require.NoError(t, err)
+	for _, c := range []struct {
+		name, spec, want string
+	}{
+		{"three pools", "poolCount: 3\n", "1-2"},
+		{"inline comment", "poolCount: 3 # producers\n", "1-2"},
+		{"leading zero is decimal", "poolCount: 08\n", "1-7"},
+		{"one pool", "poolCount: 1\n", ""},
+		{"no pool count", "networkMagic: 42\n", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			spec := filepath.Join(t.TempDir(), "testnet.yaml")
+			require.NoError(t, os.WriteFile(spec, []byte(c.spec), 0o600))
+			cmd := exec.Command(
+				"bash", "-c", `source "$1"; devnet_txpump_users "$2"`,
+				"bash", helper, spec,
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if c.want == "" {
+				require.Error(t, err, stdout.String())
+				require.Contains(t, stderr.String(), "needs poolCount >= 2")
+				return
+			}
+			require.NoError(t, err, stderr.String())
+			require.Equal(t, c.want+"\n", stdout.String())
+		})
+	}
+}
+
+// Only the accelerated all-Dingo run hosts the governance scenario, so only
+// it withholds genesis.1 from txpump; every other run clears values a caller
+// may have inherited.
+func TestRunTestsReservesGovernanceKeyForAcceleratedDingo(t *testing.T) {
+	t.Parallel()
+	stale := map[string]string{
+		"DEVNET_TXPUMP_USERS":           "0",
+		"DEVNET_GOVERNANCE_PAYMENT_KEY": "genesis.9",
+	}
+	for _, c := range []struct {
+		name     string
+		args     []string
+		users    string
+		reserved string
+	}{
+		{
+			name: "accelerated dingo", args: []string{"--accelerated"},
+			users: "1-2", reserved: "genesis.1",
+		},
+		{
+			name: "accelerated conformance",
+			args: []string{"--conformance", "--accelerated"},
+		},
+		{name: "canonical dingo"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			result := runFakeDevnetWithEnv(t, 0, false, stale, c.args...)
+			require.Zero(t, result.exitCode, result.output)
+			require.Contains(t, result.dockerLog,
+				"TXPUMP_USERS="+c.users+"\nGOVERNANCE_PAYMENT_KEY="+c.reserved+"\n")
+		})
+	}
+}
+
 func TestRunTestsCompileFailureDoesNotStartGenesis(t *testing.T) {
 	t.Parallel()
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
@@ -1262,6 +1335,8 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"DEVNET_TESTNET_YAML":                {},
 		"DEVNET_SPEC_OVERRIDE":               {},
 		"DEVNET_NETWORK_MAGIC":               {},
+		"DEVNET_TXPUMP_USERS":                {},
+		"DEVNET_GOVERNANCE_PAYMENT_KEY":      {},
 		"FAKE_DOCKER_LOG":                    {},
 		"FAKE_GO_EXIT":                       {},
 		"FAKE_GO_COMPILE_EXIT":               {},

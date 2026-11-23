@@ -317,7 +317,7 @@ func (s *DatabaseSource) GetEarliestAvailableEpoch(
 	}
 	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
-	slot, err := s.db.MithrilTrustBoundarySlotStrict(txn)
+	slot, err := s.db.ImportedLedgerStateBoundarySlotStrict(txn)
 	if err != nil {
 		return 0, false, fmt.Errorf("mithril trust boundary: %w", err)
 	}

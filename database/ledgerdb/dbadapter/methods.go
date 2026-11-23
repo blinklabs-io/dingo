@@ -791,6 +791,35 @@ func (a Adapter) GetRewardAdaPots(
 	return a.db.Metadata().GetRewardAdaPots(epoch, metaTxn(txn))
 }
 
+func (a Adapter) SaveRewardLikelihoodState(
+	state *models.RewardLikelihoodState,
+	pools []*models.RewardPoolLikelihood,
+	txn ledgerdb.Txn,
+) error {
+	return a.db.Metadata().SaveRewardLikelihoodState(state, pools, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateBeforeEpoch(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateBeforeEpoch(epoch, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardLikelihoodStateAtSlot(
+	slot uint64,
+	txn ledgerdb.Txn,
+) (*models.RewardLikelihoodState, error) {
+	return a.db.Metadata().GetRewardLikelihoodStateAtSlot(slot, metaTxn(txn))
+}
+
+func (a Adapter) GetRewardPoolLikelihoods(
+	epoch uint64,
+	txn ledgerdb.Txn,
+) ([]*models.RewardPoolLikelihood, error) {
+	return a.db.Metadata().GetRewardPoolLikelihoods(epoch, metaTxn(txn))
+}
+
 func (a Adapter) GetRewardPoolInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
@@ -2506,10 +2535,10 @@ func (a Adapter) ListSyncStateKeysByPrefix(
 	return a.db.ListSyncStateKeysByPrefix(prefix, dbTxn(txn))
 }
 
-func (a Adapter) MithrilTrustBoundarySlotStrict(
+func (a Adapter) ImportedLedgerStateBoundarySlotStrict(
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	return a.db.MithrilTrustBoundarySlotStrict(dbTxn(txn))
+	return a.db.ImportedLedgerStateBoundarySlotStrict(dbTxn(txn))
 }
 
 func (a Adapter) OldestRetainedSlot() (uint64, bool) {
@@ -3205,8 +3234,10 @@ func (a Adapter) accountReadsDrained() error {
 	)
 }
 
-// rewardSyncKeyDrained refuses a read or write of a sync_state key the
-// reward-outputs family owns once it is drained.
+// rewardSyncKeyDrained refuses a read or write of a sync_state key a reward
+// family owns once it is drained: the precompute cursors and the eligibility
+// recheck belong to reward outputs, the pending stake-input record to reward
+// inputs.
 func (a Adapter) rewardSyncKeyDrained(key string) error {
 	if strings.HasPrefix(
 		key,
@@ -3214,6 +3245,9 @@ func (a Adapter) rewardSyncKeyDrained(key string) error {
 	) ||
 		key == models.RewardEligibilityRecheckKey {
 		return a.rewardOutputsDrained()
+	}
+	if key == models.RewardStakeInputsPendingKey {
+		return a.rewardInputsDrained()
 	}
 	return nil
 }

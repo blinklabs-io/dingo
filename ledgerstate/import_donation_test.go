@@ -36,7 +36,7 @@ func donationTestCurrentEra(t *testing.T, utxoStateTail ...any) []byte {
 		[]uint64{1_000, 2_000},
 		[]any{[]any{}, utxoState},
 		[]any{},
-		[]any{},
+		[]any{emptyMap, uint64(0)},
 	}
 	newEpochState := []any{uint64(317), emptyMap, emptyMap, epochState}
 	tip := []any{[]any{uint64(1_500), uint64(7), make([]byte, 32)}}

@@ -310,7 +310,7 @@ func TestHistoricalRewardCreditQueryUsesCredentialIndexWithoutStats(
 			args,
 		)
 		require.Contains(
-			t, plan, "idx_account_reward_delta_credential",
+			t, plan, "idx_account_reward_delta_credential_slot_kind_source",
 			"postSnapshot %v plan:\n%s", postSnapshot, plan,
 		)
 		require.NotContains(

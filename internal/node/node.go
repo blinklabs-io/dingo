@@ -946,6 +946,7 @@ func buildDingoConfig(
 		dingo.WithListeners(listeners...),
 		dingo.WithOutboundSourcePort(cfg.RelayPort),
 		dingo.WithPeerSharing(peerSharing),
+		dingo.WithAdvertiseAddress(cfg.AdvertiseAddress),
 		dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 		dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 		dingo.WithAPIConfig(cfg.API),
@@ -969,6 +970,14 @@ func buildDingoConfig(
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
+		dingo.WithBarkEventService(
+			cfg.BarkEventEnabled,
+			cfg.BarkEventPublishEnabled,
+			cfg.BarkEventBufferSize,
+			cfg.BarkEventMaxSubscribers,
+			cfg.BarkEventMaxSubscribersPerClient,
+		),
+		dingo.WithBarkEventNodeID(cfg.BarkEventNodeID),
 		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
 		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
@@ -992,6 +1001,7 @@ func buildDingoConfig(
 			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
 			Strict:                cfg.KoiosParity.Strict,
+			UnavailableRetryLimit: cfg.KoiosParity.UnavailableRetryLimit,
 			GraceHours:            cfg.KoiosParity.GraceHours,
 			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here

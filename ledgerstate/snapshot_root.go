@@ -307,19 +307,13 @@ func OpenSnapshotAtOrBefore(
 	return files, err
 }
 
-// OpenNewestSnapshot is OpenSnapshotAtOrBefore with no trust boundary: it
-// returns the newest ledger state anywhere in the tree, together with the slot
-// it was found at.
+// OpenNewestSnapshot is OpenSnapshotAtOrBefore with no slot bound: it returns
+// the newest ledger state anywhere in the tree, together with the slot it was
+// found at. Every other check OpenSnapshotAtOrBefore applies, such as symlink
+// refusal and substitution detection, applies here too.
 //
-// It exists for one narrow, deliberate exception to "at or before the
-// certified tip": a verified Mithril ancillary tree whose signed manifest
-// vouches for a ledger state that happens to be newer than the certified
-// ImmutableDB tip. mithril/sync_import.go documents why that shape is ordinary
-// rather than adversarial, and why it is the only caller allowed to reach for
-// this instead of OpenSnapshotAtOrBefore. Every safety check
-// OpenSnapshotAtOrBefore applies — symlink refusal, substitution detection,
-// newest-first selection — applies here too; the only difference is that no
-// candidate is filtered out by slot.
+// It is for a caller that packages or reports the newest state. An import
+// selects with OpenSnapshotAtOrBefore, bounded by its ImmutableDB tip.
 func OpenNewestSnapshot(root *os.Root) (*SnapshotFiles, uint64, error) {
 	return findSnapshotWithinBound(root, ^uint64(0))
 }

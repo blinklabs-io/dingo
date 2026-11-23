@@ -18,42 +18,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 )
 
 func accountRow(a models.Account) badgerutxo.AccountRow {
 	return badgerutxo.AccountRow{
-		Tag:             a.CredentialTag,
-		Key:             a.StakingKey,
-		Pool:            a.Pool,
-		Drep:            a.Drep,
-		DrepType:        uint8(a.DrepType), //nolint:gosec // a DRep type code
-		Active:          a.Active,
-		Reward:          uint64(a.Reward),
-		AddedSlot:       a.AddedSlot,
-		CreatedSlot:     a.CreatedSlot,
-		ExpirationEpoch: a.ExpirationEpoch,
+		Tag:                       a.CredentialTag,
+		Key:                       a.StakingKey,
+		Pool:                      a.Pool,
+		Drep:                      a.Drep,
+		DrepType:                  uint8(a.DrepType), //nolint:gosec // a DRep type code
+		Active:                    a.Active,
+		Reward:                    uint64(a.Reward),
+		AddedSlot:                 a.AddedSlot,
+		CreatedSlot:               a.CreatedSlot,
+		ExpirationEpoch:           a.ExpirationEpoch,
+		InactivityActivation:      a.InactivityActivation,
+		InactivityActivationEpoch: a.InactivityActivationEpoch,
 	}
 }
 
 func accountModel(r badgerutxo.AccountRow) *models.Account {
 	return &models.Account{
-		StakingKey:      r.Key,
-		CredentialTag:   r.Tag,
-		Pool:            r.Pool,
-		Drep:            r.Drep,
-		DrepType:        uint64(r.DrepType),
-		Active:          r.Active,
-		Reward:          types.Uint64(r.Reward),
-		AddedSlot:       r.AddedSlot,
-		CreatedSlot:     r.CreatedSlot,
-		ExpirationEpoch: r.ExpirationEpoch,
+		StakingKey:                r.Key,
+		CredentialTag:             r.Tag,
+		Pool:                      r.Pool,
+		Drep:                      r.Drep,
+		DrepType:                  uint64(r.DrepType),
+		Active:                    r.Active,
+		Reward:                    types.Uint64(r.Reward),
+		AddedSlot:                 r.AddedSlot,
+		CreatedSlot:               r.CreatedSlot,
+		ExpirationEpoch:           r.ExpirationEpoch,
+		InactivityActivation:      r.InactivityActivation,
+		InactivityActivationEpoch: r.InactivityActivationEpoch,
 	}
 }
 
@@ -99,6 +105,8 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 					row.AddedSlot = held.AddedSlot
 					row.CreatedSlot = held.CreatedSlot
 					row.ExpirationEpoch = held.ExpirationEpoch
+					row.InactivityActivation = held.InactivityActivation
+					row.InactivityActivationEpoch = held.InactivityActivationEpoch
 				}
 			}
 			return put(row)
@@ -111,9 +119,116 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	return nil
 }
 
+// ensureAccountInactivityActivation upgrades legacy set account rows with the
+// CIP-0163 activation membership and floor. The SQL relation is authoritative
+// when retained; a set that activated after the account family was drained
+// reconstructs the same membership from its rollback state immediately before
+// the activation boundary.
+func (s *Set) ensureAccountInactivityActivation(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+) error {
+	loaded, err := s.store.AccountInactivityActivationLoaded()
+	if err != nil {
+		return fmt.Errorf("utxoset: read account inactivity activation marker: %w", err)
+	}
+	if loaded {
+		return nil
+	}
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
+	raw, err := ldb.GetSyncState(database.DelegatorInactivityActivatedSyncKey, txn)
+	if err != nil {
+		return fmt.Errorf("utxoset: read delegator-inactivity activation: %w", err)
+	}
+	if raw == "" {
+		return s.store.LoadAccountInactivityActivation(0, 0, nil)
+	}
+	epoch, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return fmt.Errorf("utxoset: parse delegator-inactivity activation %q: %w", raw, err)
+	}
+	epochs, err := s.Epochs()
+	if err != nil {
+		return fmt.Errorf("utxoset: read activation epoch: %w", err)
+	}
+	var boundary uint64
+	var foundBoundary bool
+	for _, e := range epochs {
+		if e.EpochId == epoch {
+			boundary, foundBoundary = e.StartSlot, true
+			break
+		}
+	}
+	if !foundBoundary {
+		return fmt.Errorf("utxoset: activation epoch %d is absent from epoch state", epoch)
+	}
+	var refs []models.StakeCredentialRef
+	members := make(map[string]struct{})
+	if err := s.Accounts(func(a *models.Account) error {
+		ref := models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
+		refs = append(refs, ref)
+		if a.InactivityActivation {
+			members[ref.MapKey()] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("utxoset: list accounts for activation provenance: %w", err)
+	}
+	if !s.store.LoadsRefusedFor(nodesettings.FamilyAccounts) {
+		for start := 0; start < len(refs); start += 400 {
+			end := min(start+400, len(refs))
+			batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
+			if err != nil {
+				return fmt.Errorf("utxoset: read account activation membership: %w", err)
+			}
+			for key := range batch {
+				members[key] = struct{}{}
+			}
+		}
+	}
+	if boundary > 0 {
+		floor, covered, err := s.JournalFloor()
+		if err != nil {
+			return fmt.Errorf("utxoset: read journal floor for activation provenance: %w", err)
+		}
+		if covered && floor.Slot <= boundary-1 {
+			for _, ref := range refs {
+				a, err := s.AccountAt(ref.Tag, ref.Key, boundary-1)
+				if err != nil {
+					return fmt.Errorf("utxoset: reconstruct account activation membership: %w", err)
+				}
+				if a != nil && a.Active {
+					members[ref.MapKey()] = struct{}{}
+				}
+			}
+		} else if len(members) == 0 {
+			for _, ref := range refs {
+				a, err := s.Account(ref.Tag, ref.Key)
+				if err != nil {
+					return fmt.Errorf("utxoset: inspect account activation provenance: %w", err)
+				}
+				if a != nil && a.CreatedSlot < boundary && a.ExpirationEpoch != 0 {
+					return fmt.Errorf("utxoset: account activation membership is unavailable below journal floor %d", floor.Slot)
+				}
+			}
+		}
+	}
+	if err := s.store.LoadAccountInactivityActivation(epoch, boundary, members); err != nil {
+		return fmt.Errorf("utxoset: load account inactivity activation: %w", err)
+	}
+	return nil
+}
+
 // AccountsLoaded reports whether the set holds every account.
 func (s *Set) AccountsLoaded() (bool, error) {
 	return s.store.AccountsLoaded()
+}
+
+// AccountInactivityActivationLoaded reports whether the set's accounts carry
+// the one-time CIP-0163 activation membership and floor.
+func (s *Set) AccountInactivityActivationLoaded() (bool, error) {
+	return s.store.AccountInactivityActivationLoaded()
 }
 
 // Account returns the account of (tag, key), active or not, or nil.

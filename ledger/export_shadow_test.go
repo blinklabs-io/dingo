@@ -515,6 +515,18 @@ type BoundaryEpochStateScenario struct {
 	// an epoch row, so a rollback to before that slot is always in an earlier
 	// epoch than the activation marker's. It runs no other boundary rule.
 	ExpireAtBoundary func(ref models.StakeCredentialRef)
+	// ActivateInactivityAtBoundary enables CIP-0163 with window and runs its
+	// one-time activation at the next epoch boundary. It returns the entered
+	// epoch and boundary slot.
+	ActivateInactivityAtBoundary func(window uint64) (uint64, uint64)
+	// RewardAccountGuarded reports whether the production reward-application
+	// guard withholds ref at snapshotEpoch using witness history through
+	// capturedSlot.
+	RewardAccountGuarded func(
+		ref models.StakeCredentialRef,
+		snapshotEpoch uint64,
+		capturedSlot uint64,
+	) bool
 	// Governance drives DRep state through the ledger's LedgerDB at slots
 	// the rollback undoes: it registers a DRep and vote-delegates ref to
 	// it, records DRep activity, bumps and resets the dormancy counter,
@@ -633,6 +645,8 @@ type BoundaryEpochStateScenario struct {
 	// DijkstraBoundary makes the epoch starting at the fixture's boundary a
 	// Dijkstra one, whose SNAP follows the boundary's enactment.
 	DijkstraBoundary func(f BoundaryStakeFixture)
+	// ApplyDijkstraBoundary runs the production rollover in Dijkstra.
+	ApplyDijkstraBoundary func()
 	// ReadBoundaryStake makes the five epoch-boundary stake reads for the
 	// fixture's boundary through the ledger's LedgerDB.
 	ReadBoundaryStake func(f BoundaryStakeFixture) BoundaryStakeAnswers
@@ -1404,6 +1418,13 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				gdijkstra.EraIdDijkstra, cur.SlotLength, cur.LengthInSlots, txn,
 			))
 			require.NoError(t, txn.Commit())
+		},
+		ApplyDijkstraBoundary: func() {
+			h.ls.activeEras = eras.ErasWithDijkstra
+			h.ls.currentEra = eras.DijkstraEraDesc
+			h.ls.currentPParams = dijkstraRetentionPParams()
+			h.next.EraId = eras.DijkstraEraDesc.Id
+			h.applyBoundary()
 		},
 		ReadBoundaryStake: func(f BoundaryStakeFixture) BoundaryStakeAnswers {
 			db := h.ls.LedgerDB()
@@ -2763,6 +2784,55 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				txn, []models.StakeCredentialRef{ref}, entered+30, next+1,
 			)
 			require.NoError(t, txn.Commit())
+		},
+		ActivateInactivityAtBoundary: func(window uint64) (uint64, uint64) {
+			h.ls.config.DelegatorInactivityEnabled = true
+			h.ls.config.DelegatorInactivity = window
+			ldb := h.ls.LedgerDB()
+			cur := h.ls.currentEpoch
+			boundary := cur.StartSlot + uint64(cur.LengthInSlots)
+			entered := cur.EpochId + 1
+			txn := ldb.Begin(t.Context(), true)
+			require.NoError(t, ldb.SetEpoch(
+				boundary, entered, nil, nil, nil, nil,
+				cur.EraId, cur.SlotLength, cur.LengthInSlots, txn,
+			))
+			require.NoError(t, h.ls.setEpochCache(t.Context(), txn, []models.Epoch{
+				cur,
+				{
+					EpochId: entered, StartSlot: boundary,
+					EraId: cur.EraId, SlotLength: cur.SlotLength,
+					LengthInSlots: cur.LengthInSlots,
+				},
+			}))
+			require.NoError(t, h.ls.activateDelegatorInactivityIfNeeded(
+				t.Context(), txn, entered, boundary,
+			))
+			require.NoError(t, txn.Commit())
+			return entered, boundary
+		},
+		RewardAccountGuarded: func(
+			ref models.StakeCredentialRef,
+			snapshotEpoch uint64,
+			capturedSlot uint64,
+		) bool {
+			app := &stakeRewardApplication{
+				epochs:               stakeRewardEpochs{snapshot: snapshotEpoch},
+				snapshotCapturedSlot: capturedSlot,
+				accountOutputs: []*models.RewardAccountOutput{{
+					CredentialTag: ref.Tag,
+					StakingKey:    ref.Key,
+				}},
+			}
+			ldb := h.ls.LedgerDB()
+			txn := ldb.Begin(t.Context(), false)
+			defer txn.Release()
+			guarded, err := h.ls.guardedExpiredRewardCredentials(
+				t.Context(), txn, app,
+			)
+			require.NoError(t, err)
+			_, ok := guarded[ref.MapKey()]
+			return ok
 		},
 		Governance: func(ref models.StakeCredentialRef, protocolMajor uint64) {
 			ldb := h.ls.LedgerDB()

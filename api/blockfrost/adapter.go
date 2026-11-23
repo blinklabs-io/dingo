@@ -220,7 +220,11 @@ func NewNodeAdapter(
 // dataTip is the chain position the served rows cover: the IndexerDB's tip,
 // so no history route answers beyond what the IndexerDB holds.
 func (a *NodeAdapter) dataTip() (ochainsync.Tip, error) {
-	tip, err := a.indexer.Tip(nil)
+	return a.dataTipAt(nil)
+}
+
+func (a *NodeAdapter) dataTipAt(txn *database.Txn) (ochainsync.Tip, error) {
+	tip, err := a.indexer.Tip(txn)
 	if err != nil {
 		return ochainsync.Tip{}, fmt.Errorf("read indexer tip: %w", err)
 	}
@@ -1061,20 +1065,20 @@ func (a *NodeAdapter) Asset(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
-	asset, err := meta.GetAssetByPolicyAndName(
+	held, err := meta.AssetHeld(
 		policyHash,
 		assetName,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
-			"get asset by policy %s and name %x: %w",
+			"check holdings of asset %s%x: %w",
 			policyID,
 			assetName,
 			err,
 		)
 	}
-	if asset.ID == 0 {
+	if !held {
 		return AssetInfo{}, fmt.Errorf(
 			"asset %s%x: %w",
 			policyID,
@@ -1111,11 +1115,13 @@ func (a *NodeAdapter) Asset(
 	}
 
 	info := AssetInfo{
-		Asset:           policyID + hex.EncodeToString(assetName),
-		PolicyID:        policyID,
-		AssetName:       hex.EncodeToString(assetName),
-		AssetNameASCII:  assetNameASCII(assetName),
-		Fingerprint:     string(asset.Fingerprint),
+		Asset:          policyID + hex.EncodeToString(assetName),
+		PolicyID:       policyID,
+		AssetName:      hex.EncodeToString(assetName),
+		AssetNameASCII: assetNameASCII(assetName),
+		Fingerprint: lcommon.NewAssetFingerprint(
+			policyIDBytes, assetName,
+		).String(),
 		Quantity:        strconv.FormatUint(quantity, 10),
 		MintOrBurnCount: mintOrBurnCount,
 	}
@@ -1976,13 +1982,17 @@ func (a *NodeAdapter) PoolsRetiring(
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	current, err := a.currentEpochNumberAt(txn)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	offset, ok := paginationOffset(params)
 	if !ok {
 		return []PoolRetiringInfo{}, 0, nil
 	}
 	rows, total, err := db.Metadata().GetRetiringPoolsPage(
-		a.ledgerState.CurrentEpoch(),
+		current,
 		params.Count,
 		offset,
 		params.Order == PaginationOrderDesc,

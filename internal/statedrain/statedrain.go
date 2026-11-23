@@ -271,8 +271,10 @@ const (
 
 // RewardStakeInputsPendingSyncKey is the sync_state key listing the stake
 // input snapshots whose deferred write has not finished, the only sync state
-// of the reward-inputs family. The set writes a snapshot's stake rows in the
-// boundary's own apply, so a drained family has no gap for it to describe.
+// of the reward-inputs family. The set loads the record before the family is
+// drained and keeps it until the snapshot's rows are rebuilt. A drained family
+// writes a snapshot's stake rows in the boundary's own apply, so it adds no
+// entries.
 const RewardStakeInputsPendingSyncKey = "dingo:stake-reward:stake-inputs-pending"
 
 // RewardPrecomputeCursorSyncPrefix starts the sync_state key of each epoch's

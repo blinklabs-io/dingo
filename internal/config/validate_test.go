@@ -336,6 +336,44 @@ func TestValidate(t *testing.T) {
 			modify:  func(c *Config) { c.RunMode = "batch" },
 			wantErr: "invalid runMode",
 		},
+		{name: "advertise address unset", modify: func(*Config) {}},
+		{
+			name:   "advertise address ipv4",
+			modify: func(c *Config) { c.AdvertiseAddress = "45.0.0.7:3001" },
+		},
+		{
+			name: "advertise address ipv6",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "[2001:4860:4860::8888]:3001"
+			},
+		},
+		{
+			name: "advertise address hostname",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "relay.example.com:3001"
+			},
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address without port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address zero port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7:0" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address private",
+			modify:  func(c *Config) { c.AdvertiseAddress = "10.0.0.1:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address wildcard",
+			modify:  func(c *Config) { c.AdvertiseAddress = "0.0.0.0:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
 		{
 			name:    "invalid start era",
 			modify:  func(c *Config) { c.StartEra = "byron" },
@@ -380,6 +418,19 @@ func TestValidate(t *testing.T) {
 				c.HistoryExpiry.Frequency = 0
 			},
 			wantErr: "invalid historyExpiry.frequency",
+		},
+		{
+			name: "negative koios parity unavailable retry limit",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = -1
+			},
+			wantErr: "invalid koiosParity.unavailableRetryLimit",
+		},
+		{
+			name: "zero koios parity unavailable retry limit selects default",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = 0
+			},
 		},
 		{
 			name:    "load mode without immutable db path",
@@ -699,6 +750,17 @@ func TestValidate(t *testing.T) {
 				setMempoolSetting(c, "revalidationDeltaCap", 0)
 			},
 			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
+		},
+		{
+			name: "mempool fee-density selection",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "selection", MempoolSelectionFeeDensity)
+			},
+		},
+		{
+			name:    "unknown mempool selection",
+			modify:  func(c *Config) { setMempoolSetting(c, "selection", "feedensity") },
+			wantErr: "invalid plugins.mempool.config.selection",
 		},
 		{
 			// Every ordered comparison with NaN is false, so a plain

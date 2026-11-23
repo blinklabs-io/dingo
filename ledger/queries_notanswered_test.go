@@ -37,14 +37,6 @@ func TestQueryNotAnswered(t *testing.T) {
 		query   any
 		missing string
 	}{
-		"GetNonMyopicMemberRewards": {
-			query:   &olocalstatequery.ShelleyNonMyopicMemberRewardsQuery{},
-			missing: "performance",
-		},
-		"GetRewardInfoPools": {
-			query:   &olocalstatequery.ShelleyRewardInfoPoolsQuery{},
-			missing: "performance",
-		},
 		"DebugEpochState": {
 			query:   &olocalstatequery.ShelleyDebugEpochStateQuery{},
 			missing: "epoch state",

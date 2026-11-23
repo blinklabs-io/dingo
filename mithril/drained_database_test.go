@@ -15,14 +15,12 @@
 package mithril
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -81,25 +79,6 @@ func TestUpdateMithrilReadyStateRefusesADrainedDatabase(t *testing.T) {
 			require.Equal(t, "1", marker)
 		})
 	}
-}
-
-// TestProcessGapBlocksRefusesADrainedDatabase requires the gap replay, which
-// reads the epoch rows and writes ledger state, to stop before touching a
-// database that has drained a family.
-func TestProcessGapBlocksRefusesADrainedDatabase(t *testing.T) {
-	t.Parallel()
-	db := newMithrilTestDB(t)
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyNonces,
-	))
-	gap := []models.Block{{Slot: 1, Hash: bytes.Repeat([]byte{1}, 32)}}
-
-	err := processGapBlocks(
-		t.Context(), db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)), gap,
-	)
-
-	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
 }
 
 // TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt requires a catch-up

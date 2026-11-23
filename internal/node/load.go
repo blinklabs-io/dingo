@@ -1115,6 +1115,8 @@ func LoadWithDB(
 			utxoSet.SetDrainedFamilies(mask)
 		},
 		Resume:                     ls.ResumeUtxoSetFrom,
+		CardanoNodeConfig:          nodeCfg,
+		ResolveRewardInputs:        ls.ResolvePendingRewardStakeInputs,
 		RewindBlocks:               nodestorage.SecurityParam(nodeCfg),
 		DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 		DelegatorInactivity:        cfg.DelegatorInactivity,

@@ -293,9 +293,10 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
 // answerable by every point-aware query type below -- not just that it is
 // still on this node's chain (verifyPointOnChain), but that it is not older
-// than the strictest per-query-type retention floor (UTxO whole/by-ref via
-// checkUtxoRetentionWindow, stake/pool distribution via
-// PoolStakeDistribution's own recency check, current protocol parameters
+// than the strictest per-query-type retention floor (the live UTxO journal
+// via liveUtxoView, consumed UTxO rows via checkUtxoRetentionWindow,
+// stake and pool distribution via PoolStakeDistribution's own recency check,
+// current protocol parameters
 // via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
 // via queryHardFork's HardForkCurrentEraQuery case, which independently
 // returns ErrHistoricalStateUnavailable and so must be covered here too).
@@ -362,6 +363,21 @@ func (ls *LedgerState) VerifyPointQueryable(
 	}
 	if err := ls.checkMithrilTrustBoundary(at); err != nil {
 		return err
+	}
+	utxoView, err := ls.liveUtxoView(at, txn)
+	if err != nil {
+		if errors.Is(err, ErrUtxoAsOfUnavailable) {
+			return fmt.Errorf(
+				"%w: live UTxO history does not reach slot %d: %w",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				err,
+			)
+		}
+		return err
+	}
+	if utxoView != nil {
+		utxoView.Close()
 	}
 	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 		return err
@@ -1458,13 +1474,9 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyPoolStateQuery:
 		return ls.queryShelleyPoolState(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		return nil, queryNotAnswered(
-			"GetNonMyopicMemberRewards", missingPoolPerformance,
-		)
+		return ls.queryShelleyNonMyopicMemberRewards(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-		return nil, queryNotAnswered(
-			"GetRewardInfoPools", missingPoolPerformance,
-		)
+		return ls.queryShelleyRewardInfoPools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		return nil, queryNotAnswered("DebugEpochState", missingEpochState)
 	case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
@@ -1533,6 +1545,19 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	// PoolDistr newtype, whose CBOR is the bare pool map, pinned by
 	// TestQueryShelleyStakeDistribution_ViaGetCBOR and
 	// TestQueryShelleyPoolDistr_ViaGetCBOR.
+	if info, ok := inner.(olocalstatequery.RewardInfoPoolsResult); ok {
+		// The result type marshals with its own one-element wrapper; the
+		// tag-24 content is the bare array(2) of reward params and pools.
+		encoded, err := cbor.Encode(struct {
+			cbor.StructAsArray
+			Params olocalstatequery.RewardParams
+			Pools  map[ledger.Blake2b224]olocalstatequery.RewardInfoPool
+		}{Params: info.Params, Pools: info.Pools})
+		if err != nil {
+			return nil, err
+		}
+		return []any{cbor.Tag{Number: cbor.CborTagCbor, Content: encoded}}, nil
+	}
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(

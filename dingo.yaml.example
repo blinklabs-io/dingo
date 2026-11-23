@@ -112,6 +112,11 @@
       # by peer relay, so API load never delays relay. Submissions wait for a
       # slot rather than being refused. 0 uses the peer pool's size.
       # maxApiSubmissions: 0
+      # Order in which block production takes pending transactions.
+      # "admission" (default) keeps arrival order. "feeDensity" takes the
+      # highest fee per byte first, never ahead of a transaction it depends
+      # on. Relay and API listings keep arrival order either way.
+      # selection: admission
   # api:
     # blockfrost:
       # provider: "builtin"
@@ -331,6 +336,18 @@
 # CLI: --port
 # relayPort: 3001
 
+# Public IP:port that other nodes can reach this node's NtN listener at. When
+# set and peer sharing is enabled, it is included first in PeerSharing replies as
+# this node's own address. It does not change what the node listens on: use it
+# when the public address differs from bindAddr and relayPort, such as behind
+# NAT or a load balancer. Must be an IP literal (no hostname) that is globally
+# routable; leave unset to advertise no address. The value below is an RFC 5737
+# documentation address, which validation rejects: replace it with the node's
+# real public address.
+#
+# CLI: --advertise-address  Env: DINGO_ADVERTISE_ADDRESS
+# advertiseAddress: "203.0.113.10:3001"
+
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
 #   block producers and relay nodes. Only MCP can serve API requests in core mode.
@@ -403,6 +420,42 @@
 # Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
 # CLI: --bark-archive-caller-lookups-per-second
 # barkArchiveCallerLookupsPerSecond: 0
+
+# Explicitly enable Bark's EventService, which streams this node's internal
+# events (peer churn, chain updates and rollbacks, epoch transitions, mempool
+# and connection events) to subscribers. Disabled by default. Requires a
+# non-zero barkPort. Bark does not authenticate callers, so Bark binds to
+# loopback unless barkHost says otherwise.
+# Can be overridden with DINGO_BARK_EVENT_ENABLED
+# CLI: --bark-event-enabled
+# barkEventEnabled: false
+
+# Also let the EventService accept Publish and PublishBatch from callers.
+# Disabled by default. Requires barkEventEnabled.
+# Can be overridden with DINGO_BARK_EVENT_PUBLISH_ENABLED
+# CLI: --bark-event-publish-enabled
+# barkEventPublishEnabled: false
+
+# Optional: the origin_node_id the EventService puts on this node's events,
+# which every subscriber sees. Empty (the default) selects a random identifier
+# for each run, so no host name is published; set it for an origin that stays
+# the same across restarts.
+# Can be overridden with DINGO_BARK_EVENT_NODE_ID
+# CLI: --bark-event-node-id
+# barkEventNodeId: ""
+
+# Optional: events the EventService keeps so a subscriber can resume after a
+# disconnect (0 selects the built-in size). A subscriber that falls further
+# behind than the buffer is detached. The two limits cap concurrent streams
+# overall and per caller address; they are opt-in, and 0 (the default) means
+# unlimited.
+# Can be overridden with DINGO_BARK_EVENT_BUFFER_SIZE,
+# DINGO_BARK_EVENT_MAX_SUBSCRIBERS, DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT
+# CLI: --bark-event-buffer-size, --bark-event-max-subscribers,
+#      --bark-event-max-subscribers-per-client
+# barkEventBufferSize: 0
+# barkEventMaxSubscribers: 0
+# barkEventMaxSubscribersPerClient: 0
 
 # Explicitly enable Bark's remote LifecycleService (Stop, Restart, GetStatus).
 # Disabled by default. Requires a non-zero barkPort.
@@ -608,14 +661,27 @@
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --koios-parity-allow-private-addresses
   # allowPrivateAddresses: false
-  # Stop/cancel the node on the first Koios/tool error or non-pass parity
-  # result instead of logging it and continuing normal operation. An epoch
-  # whose only significant mismatches are reference_lag (Koios has not caught
-  # up yet) or a fetch that fails on Koios's daily quota is logged, recorded
-  # and retried, but never stops the node.
+  # Stop/cancel the node on the first tool error, local cache error or
+  # non-pass parity result instead of logging it and continuing normal
+  # operation. An epoch whose only significant mismatches are reference_lag
+  # (Koios has not caught up yet), or whose fetch fails on Koios's daily
+  # quota, is logged, recorded and retried but never stops the node. A Koios
+  # request that failed because Koios is unavailable is retried too, until
+  # unavailableRetryLimit consecutive attempts fail.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   # strict: true
+  # Consecutive attempts at one epoch's check that may fail because Koios is
+  # unavailable (transport error, timeout, 5xx or exhausted 408 budget;
+  # daily-quota exhaustion never counts). In strict mode the attempt that
+  # reaches the
+  # limit stops the node; otherwise it is logged at ERROR and retried. Any
+  # Koios answer, including reference lag, resets the count. A failed check
+  # is retried every ten minutes at the fastest, so the default of 144 is at
+  # least about 24 hours of continuous unavailability. 0 selects the default.
+  # Can be overridden with DINGO_KOIOS_PARITY_UNAVAILABLE_RETRY_LIMIT
+  # CLI: --koios-parity-unavailable-retry-limit
+  # unavailableRetryLimit: 144
   # Can be overridden with DINGO_KOIOS_PARITY_GRACE_HOURS
   # CLI: --koios-parity-grace-hours
   # graceHours: 24
@@ -1476,11 +1542,11 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
-# SQLite only: keep planner statistics current with PRAGMA optimize, run
-# before block processing starts and after each epoch rollover. A database
-# synced from genesis otherwise never has statistics and some queries scan most
-# of a large table. The first run on a large database can take minutes; later
-# runs are near-free. Escape hatch only.
+# SQLite only: keep planner statistics current with a bounded ANALYZE, run
+# before block processing starts, after each epoch rollover and once a minute.
+# A database synced from genesis otherwise never has statistics and some
+# queries scan most of a large table. Each run samples at most 1000 rows per
+# index, so it stays short on a large database. Escape hatch only.
 # Default: true
 # CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
 # plannerStatsRefreshEnabled: true

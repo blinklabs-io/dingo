@@ -60,7 +60,7 @@ func TestPruneSnapshotsKeepsNewest(t *testing.T) {
 	t.Parallel()
 
 	store, dir := newLocalStore(t)
-	hashes := createSnapshots(t, store, 1, 2, 3, 4)
+	hashes := createSnapshots(t, store, 2, 3, 4, 5)
 
 	removed, err := PruneSnapshots(context.Background(), store, 2)
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestPruneSnapshotsRetainsEverythingBelowOne(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newLocalStore(t)
-	hashes := createSnapshots(t, store, 1, 2)
+	hashes := createSnapshots(t, store, 2, 3)
 	for _, keep := range []int{0, -1, 2, 5} {
 		removed, err := PruneSnapshots(context.Background(), store, keep)
 		require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestPruneSnapshotsLeavesSnapshotInProgress(t *testing.T) {
 	t.Parallel()
 
 	store, dir := newLocalStore(t)
-	createSnapshots(t, store, 1, 2)
+	createSnapshots(t, store, 2, 3)
 	partial := strings.Repeat("a", 64)
 	require.NoError(t, store.Put(
 		context.Background(),
@@ -129,7 +129,7 @@ func TestPruneSnapshotsInterruptedRemovalIsUnlisted(t *testing.T) {
 	t.Parallel()
 
 	inner, _ := newLocalStore(t)
-	hashes := createSnapshots(t, inner, 1, 2)
+	hashes := createSnapshots(t, inner, 2, 3)
 	store := failingDeleteStore{ArtifactStore: inner, failOn: hashes[0]}
 
 	_, err := PruneSnapshots(context.Background(), store, 1)

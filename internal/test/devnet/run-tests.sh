@@ -226,6 +226,16 @@ if [[ -z "${DEVNET_NETWORK_MAGIC}" ]]; then
   exit 1
 fi
 export DEVNET_NETWORK_MAGIC
+# The accelerated all-Dingo governance scenario funds deposits from a genesis
+# key that txpump never spends, so the timeline scenario's payments cannot
+# exhaust it first.
+unset DEVNET_TXPUMP_USERS DEVNET_GOVERNANCE_PAYMENT_KEY
+if [[ "${MODE}" != "conformance" && "${ACCELERATED}" == "true" &&
+  "${TACHYS}" != "true" && "${LEIOS}" != "true" ]]; then
+  DEVNET_TXPUMP_USERS="$(devnet_txpump_users "${DEVNET_TESTNET_YAML}")" || exit 1
+  export DEVNET_TXPUMP_USERS
+  export DEVNET_GOVERNANCE_PAYMENT_KEY="genesis.1"
+fi
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"

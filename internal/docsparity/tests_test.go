@@ -2972,11 +2972,15 @@ func TestPipelineRunsEachSuiteOnce(t *testing.T) {
 	}
 
 	// The whole-suite runs: one plain Linux run for pull-request feedback,
-	// one race run and one macOS run on the merged commit.
+	// one race run and one macOS run on the merged commit. A nested module is
+	// its own suite, because the root ./... stops at its go.mod, so its runs
+	// are keyed by the step's working-directory.
 	want := map[string]string{
-		"ubuntu-latest plain": "check",
-		"ubuntu-latest race":  "race",
-		"macos-latest plain":  "macos",
+		"ubuntu-latest plain":       "check",
+		"ubuntu-latest race":        "race",
+		"macos-latest plain":        "macos",
+		"ubuntu-latest plain (sdk)": "check",
+		"ubuntu-latest race (sdk)":  "race",
 	}
 	got := make(map[string][]string)
 	for name, rawJob := range pipelineJobs(t, root, prPipeline) {
@@ -2994,6 +2998,9 @@ func TestPipelineRunsEachSuiteOnce(t *testing.T) {
 					mode = "race"
 				}
 				key := runner + " " + mode
+				if dir, _ := step["working-directory"].(string); dir != "" {
+					key += " (" + dir + ")"
+				}
 				got[key] = append(got[key], name)
 			}
 		}
