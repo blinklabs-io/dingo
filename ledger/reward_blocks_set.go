@@ -250,18 +250,6 @@ func (ls *LedgerState) rewardBlockCountsFromSet(
 	return counts, view.Total, true, nil
 }
 
-func sameCounts(a, b map[string]uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if w, ok := b[k]; !ok || w != v {
-			return false
-		}
-	}
-	return true
-}
-
 // rewardEpochFeesFor is rewardEpochFees answered from the set when the set
 // serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(

@@ -23,9 +23,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// drainedPoolRead serves a pool read from the set. Pool state always uses the
+// setPoolRead serves a pool read from the set. Pool state always uses the
 // set layout; an unavailable set family fails closed.
-func drainedPoolRead[T any](
+func setPoolRead[T any](
 	s stagingLedgerDB,
 	txn ledgerdb.Txn,
 	read func(b *poolBook) (T, error),
@@ -43,7 +43,7 @@ func drainedPoolRead[T any](
 func (s stagingLedgerDB) ListPoolKeyHashes(
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		var out [][]byte
 		err := b.withEvents(func(pool []byte, _ []PoolEvent) error {
 			out = append(out, pool)
@@ -59,7 +59,7 @@ func (s stagingLedgerDB) GetPools(
 	pkhs []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) ([]models.Pool, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.Pool, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]models.Pool, error) {
 		return b.poolsByKey(pkhs)
 	})
 }
@@ -72,7 +72,7 @@ func (s stagingLedgerDB) GetPoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(vrfKeyHash, false, epochStartSlot, false)
 	})
 }
@@ -85,7 +85,7 @@ func (s stagingLedgerDB) GetFuturePoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(vrfKeyHash, false, epochStartSlot, true)
 	})
 }
@@ -98,7 +98,7 @@ func (s stagingLedgerDB) GetPoolByLeiosKey(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(publicKey, true, epochStartSlot, false)
 	})
 }
@@ -111,7 +111,7 @@ func (s stagingLedgerDB) GetFuturePoolByLeiosKey(
 	epochStartSlot uint64,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.poolByKey(publicKey, true, epochStartSlot, true)
 	})
 }
@@ -122,7 +122,7 @@ func (s stagingLedgerDB) GetActivePoolRelays(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistrationRelay, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistrationRelay, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistrationRelay, error) {
 		return b.relays()
 	})
 }
@@ -133,7 +133,7 @@ func (s stagingLedgerDB) GetPoolDepositsHeld(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (map[string]uint64, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (map[string]uint64, error) {
 		return b.deposits(poolKeyHashes)
 	})
 }
@@ -144,7 +144,7 @@ func (s stagingLedgerDB) GetRetiringPools(
 	currentEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetiringRow, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetiringRow, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetiringRow, error) {
 		return b.retiring(currentEpoch)
 	})
 }
@@ -155,20 +155,20 @@ func (s stagingLedgerDB) GetPoolKeyHashesRetiredByEpoch(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.retiredByEpoch(epoch, boundarySlot)
 	})
 }
 
-// drainedPoolSource serves the database's pool reads from the set. It reads the committed set with no
-// transaction: a caller holding a staged write reads through the ledger's
-// LedgerDB instead.
-type drainedPoolSource struct {
+// setPoolSource serves the database's pool reads from the set. It reads the
+// committed set with no transaction: a caller holding a staged write reads
+// through the ledger's LedgerDB instead.
+type setPoolSource struct {
 	ls *LedgerState
 }
 
 func poolSourceRead[T any](
-	d drainedPoolSource,
+	d setPoolSource,
 	read func(b *poolBook) (T, error),
 ) (v T, err error) {
 	b, err := d.ls.poolBook(nil)
@@ -178,7 +178,7 @@ func poolSourceRead[T any](
 	return read(b)
 }
 
-func (d drainedPoolSource) Pool(
+func (d setPoolSource) Pool(
 	pkh lcommon.PoolKeyHash,
 	includeInactive bool,
 ) (*models.Pool, error) {
@@ -187,7 +187,7 @@ func (d drainedPoolSource) Pool(
 	})
 }
 
-func (d drainedPoolSource) Pools(
+func (d setPoolSource) Pools(
 	pkhs []lcommon.PoolKeyHash,
 ) ([]models.Pool, error) {
 	return poolSourceRead(d, func(b *poolBook) ([]models.Pool, error) {
@@ -195,7 +195,7 @@ func (d drainedPoolSource) Pools(
 	})
 }
 
-func (d drainedPoolSource) PoolByVrfKeyHash(
+func (d setPoolSource) PoolByVrfKeyHash(
 	vrf []byte,
 	epochStartSlot uint64,
 ) (*models.Pool, error) {
@@ -204,7 +204,7 @@ func (d drainedPoolSource) PoolByVrfKeyHash(
 	})
 }
 
-func (d drainedPoolSource) FuturePoolByVrfKeyHash(
+func (d setPoolSource) FuturePoolByVrfKeyHash(
 	vrf []byte,
 	epochStartSlot uint64,
 ) (*models.Pool, error) {
@@ -213,7 +213,7 @@ func (d drainedPoolSource) FuturePoolByVrfKeyHash(
 	})
 }
 
-func (d drainedPoolSource) PoolByLeiosKey(
+func (d setPoolSource) PoolByLeiosKey(
 	key []byte,
 	epochStartSlot uint64,
 ) (*models.Pool, error) {
@@ -222,7 +222,7 @@ func (d drainedPoolSource) PoolByLeiosKey(
 	})
 }
 
-func (d drainedPoolSource) FuturePoolByLeiosKey(
+func (d setPoolSource) FuturePoolByLeiosKey(
 	key []byte,
 	epochStartSlot uint64,
 ) (*models.Pool, error) {
@@ -231,7 +231,7 @@ func (d drainedPoolSource) FuturePoolByLeiosKey(
 	})
 }
 
-func (d drainedPoolSource) ActivePoolRelays() (
+func (d setPoolSource) ActivePoolRelays() (
 	[]models.PoolRegistrationRelay,
 	error,
 ) {
@@ -243,13 +243,13 @@ func (d drainedPoolSource) ActivePoolRelays() (
 	)
 }
 
-func (d drainedPoolSource) ActivePoolKeyHashes() ([][]byte, error) {
+func (d setPoolSource) ActivePoolKeyHashes() ([][]byte, error) {
 	return poolSourceRead(d, func(b *poolBook) ([][]byte, error) {
 		return b.active()
 	})
 }
 
-func (d drainedPoolSource) PoolRegistrations(
+func (d setPoolSource) PoolRegistrations(
 	pkh lcommon.PoolKeyHash,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	return poolSourceRead(
@@ -260,7 +260,7 @@ func (d drainedPoolSource) PoolRegistrations(
 	)
 }
 
-func (d drainedPoolSource) PoolsRetiringAtEpoch(
+func (d setPoolSource) PoolsRetiringAtEpoch(
 	epoch, boundarySlot uint64,
 ) ([]models.PoolRetirementRefund, error) {
 	return poolSourceRead(
@@ -271,13 +271,13 @@ func (d drainedPoolSource) PoolsRetiringAtEpoch(
 	)
 }
 
-var _ database.PoolSource = drainedPoolSource{}
+var _ database.PoolSource = setPoolSource{}
 
 // installPoolSource gives the database the set's pools for the reads it
 // makes.
 func (ls *LedgerState) installPoolSource() {
 	if ls.db != nil {
-		ls.db.SetPoolSource(drainedPoolSource{ls})
+		ls.db.SetPoolSource(setPoolSource{ls})
 	}
 }
 
@@ -327,7 +327,7 @@ func (s stagingLedgerDB) GetPoolStatus(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (models.PoolStatus, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) (models.PoolStatus, error) {
+	return setPoolRead(s, txn, func(b *poolBook) (models.PoolStatus, error) {
 		events, err := b.events(pkh[:])
 		if err != nil || len(events) == 0 {
 			return models.PoolStatus{}, err

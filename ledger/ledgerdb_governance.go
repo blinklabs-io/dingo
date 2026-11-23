@@ -27,10 +27,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
-// drainedGovernanceReader returns the set's governance reader for a drained
+// setGovernanceReader returns the set's governance reader for a drained
 // family. The metadata store holds nothing to fall back to, so a set that is
 // not following the ledger or does not hold every row is an error.
-func (ls *LedgerState) drainedGovernanceReader(
+func (ls *LedgerState) setGovernanceReader(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {
 	r := ls.governanceReader(txn)
@@ -75,9 +75,9 @@ func (ls *LedgerState) nextGovernanceIDs(
 	return proposal, vote, nil
 }
 
-// setDrainedProposal is SetGovernanceProposal staged for the set: the set
+// stageProposal is SetGovernanceProposal staged for the set: the set
 // is the only copy, so it gives a new proposal its row ID.
-func (s stagingLedgerDB) setDrainedProposal(
+func (s stagingLedgerDB) stageProposal(
 	proposal *models.GovernanceProposal,
 	txn ledgerdb.Txn,
 ) error {
@@ -89,7 +89,7 @@ func (s stagingLedgerDB) setDrainedProposal(
 			"set governance proposal: ratified epoch and slot must both be set or both be nil",
 		)
 	}
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return err
 	}
@@ -118,15 +118,15 @@ func (s stagingLedgerDB) setDrainedProposal(
 	return nil
 }
 
-// clearDrainedRatification is ClearGovernanceProposalRatification staged for
+// stageRatificationClear is ClearGovernanceProposalRatification staged for
 // the set.
-func (s stagingLedgerDB) clearDrainedRatification(
+func (s stagingLedgerDB) stageRatificationClear(
 	txHash []byte,
 	actionIndex uint32,
 	transitionSlot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return err
 	}
@@ -155,16 +155,16 @@ func (s stagingLedgerDB) clearDrainedRatification(
 	return nil
 }
 
-// setDrainedVote is SetGovernanceVote staged for the set. A voter's first
+// stageVote is SetGovernanceVote staged for the set. A voter's first
 // vote on a proposal takes a new row ID; a replacement keeps the row's.
-func (s stagingLedgerDB) setDrainedVote(
+func (s stagingLedgerDB) stageVote(
 	vote *models.GovernanceVote,
 	txn ledgerdb.Txn,
 ) error {
 	if vote == nil {
 		return errors.New("set governance vote: nil vote")
 	}
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func (s stagingLedgerDB) GetAllGovernanceProposals(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ func (s stagingLedgerDB) GetAllGovernanceVotes(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceVoteRef, error) {
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ func (s stagingLedgerDB) GetGovernanceProposalsRefundedAt(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	r, err := s.ls.drainedGovernanceReader(txn)
+	r, err := s.ls.setGovernanceReader(txn)
 	if err != nil {
 		return nil, err
 	}

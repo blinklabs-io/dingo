@@ -35,10 +35,11 @@ func init() {
 	utxoset.DefaultBlockCacheSize = 1 << 20
 }
 
-// TestCheckUtxoSetOnlyMarksAFreshDatabase marks a v0.94.2 database at origin
-// as holding its UTxO set only in the live UTxO set. checkUtxoSetOnly alone
-// refuses an unmarked synced database; migrateUtxoRows is what marks one.
-func TestCheckUtxoSetOnlyMarksAFreshDatabase(t *testing.T) {
+// TestCheckUtxoSetMigratedMarksAFreshDatabase marks a v0.94.2 database at
+// origin as holding its UTxO set only in the live UTxO set.
+// checkUtxoSetMigrated alone refuses an unmarked synced database;
+// migrateUtxoRows is what marks one.
+func TestCheckUtxoSetMigratedMarksAFreshDatabase(t *testing.T) {
 	t.Parallel()
 	node := func(db *database.Database) *Node {
 		n := &Node{db: db}
@@ -49,8 +50,8 @@ func TestCheckUtxoSetOnlyMarksAFreshDatabase(t *testing.T) {
 	fresh, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(fresh) })
-	require.NoError(t, node(fresh).checkUtxoSetOnly())
-	require.NoError(t, node(fresh).checkUtxoSetOnly(), "already marked")
+	require.NoError(t, node(fresh).checkUtxoSetMigrated())
+	require.NoError(t, node(fresh).checkUtxoSetMigrated(), "already marked")
 
 	synced, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
@@ -58,7 +59,7 @@ func TestCheckUtxoSetOnlyMarksAFreshDatabase(t *testing.T) {
 	require.NoError(t, synced.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
 	}, nil))
-	require.Error(t, node(synced).checkUtxoSetOnly())
+	require.Error(t, node(synced).checkUtxoSetMigrated())
 }
 
 // TestMigrateUtxoRowsMarksASyncedDatabase moves a synced v0.94.2 database that
@@ -71,16 +72,16 @@ func TestMigrateUtxoRowsMarksASyncedDatabase(t *testing.T) {
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	tip := ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)}
 	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	n := &Node{db: db, utxoSet: set}
 	n.config.dataDir = t.TempDir()
 	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	require.Error(t, n.checkUtxoSetOnly(), "unmarked before the move")
+	require.Error(t, n.checkUtxoSetMigrated(), "unmarked before the move")
 	require.NoError(t, n.migrateUtxoRows(t.Context()))
-	require.NoError(t, n.checkUtxoSetOnly())
+	require.NoError(t, n.checkUtxoSetMigrated())
 	setTip, ok, err := set.Tip()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -158,8 +159,7 @@ func TestCheckpointPolicyCountsAnEarlierRunsCheckpointFromNow(t *testing.T) {
 func TestCloseUtxoSetStopsARunningCheckpointCopy(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: t.TempDir(), Only: true,
-		CheckpointDir: t.TempDir(), CheckpointKeep: 2,
+		Dir: t.TempDir(), CheckpointDir: t.TempDir(), CheckpointKeep: 2,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
@@ -192,4 +192,3 @@ func TestCloseUtxoSetStopsARunningCheckpointCopy(t *testing.T) {
 	require.False(t, n.launchUtxoSetCheckpoint(t.Context(), set, func() {}),
 		"a copy started after the set closed")
 }
-

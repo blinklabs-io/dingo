@@ -237,39 +237,6 @@ func (ls *LedgerState) setLatestNonce(
 	return ns[len(ns)-1], true, nil
 }
 
-// nonceDiff describes up to three entries only the metadata store holds and
-// three only the set holds, for a mismatch report.
-func nonceDiff(stored, set []models.BlockNonce) string {
-	key := func(n models.BlockNonce) string {
-		return fmt.Sprintf("%d/%x=%x/%t", n.Slot, n.Hash, n.Nonce, n.IsCheckpoint)
-	}
-	in := func(ns []models.BlockNonce) map[string]struct{} {
-		m := make(map[string]struct{}, len(ns))
-		for _, n := range ns {
-			m[key(n)] = struct{}{}
-		}
-		return m
-	}
-	only := func(ns []models.BlockNonce, other map[string]struct{}) []string {
-		var out []string
-		for _, n := range ns {
-			if _, ok := other[key(n)]; !ok && len(out) < 3 {
-				out = append(out, key(n))
-			}
-		}
-		return out
-	}
-	return fmt.Sprintf("store_only=%v set_only=%v (store %d, set %d)",
-		only(stored, in(set)), only(set, in(stored)), len(stored), len(set))
-}
-
-func sameNonces(a, b []models.BlockNonce) bool {
-	return slices.EqualFunc(a, b, func(x, y models.BlockNonce) bool {
-		return x.Slot == y.Slot && bytes.Equal(x.Hash, y.Hash) &&
-			bytes.Equal(x.Nonce, y.Nonce) && x.IsCheckpoint == y.IsCheckpoint
-	})
-}
-
 // utxoSetPin is the live UTxO set as of the moment a read transaction was
 // pinned: a snapshot of the set's applied state, and the batches that had
 // committed but not yet reached the set. Reads of the transaction see the

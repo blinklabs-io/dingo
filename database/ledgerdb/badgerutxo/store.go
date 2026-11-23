@@ -137,12 +137,6 @@ func (s *Store) RefuseLoads() {
 	s.loadsRefused.Store(true)
 }
 
-// LoadsRefused reports whether RefuseLoads was called. In-place upgrades of
-// the set's rows use it to avoid querying a source that holds none.
-func (s *Store) LoadsRefused() bool {
-	return s.loadsRefused.Load()
-}
-
 // Open opens or creates the store in dir.
 func Open(dir string, options ...Option) (*Store, error) {
 	s := &Store{}

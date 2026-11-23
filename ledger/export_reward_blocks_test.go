@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -104,14 +103,12 @@ type RewardBlocksScenario struct {
 	RollbackBeforeBoundary func()
 	// HideStoreReads is BoundaryEpochStateScenario.HideStoreReads.
 	HideStoreReads func(names ...string) (func() int64, func(bool))
-	// DrainFamilies publishes the drained mask to the ledger.
-	DrainFamilies func(mask nodesettings.FamilyMask)
 	// FailSet makes the ledger treat its set as failed, as an update the
 	// set refused does.
 	FailSet func()
-	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
-	InstallDrainedSources func()
-	LedgerDB              func() ledgerdb.LedgerDB
+	// InstallSetSources is BoundaryEpochStateScenario.InstallSetSources.
+	InstallSetSources func()
+	LedgerDB          func() ledgerdb.LedgerDB
 }
 
 // RewardInputsAnswer is what a read of an epoch's reward snapshot inputs
@@ -555,9 +552,8 @@ func NewRewardBlocksScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		DrainFamilies: func(nodesettings.FamilyMask) {},
-		FailSet:       func() { h.ls.utxoSetFailed.Store(true) },
-		InstallDrainedSources: func() {
+		FailSet: func() { h.ls.utxoSetFailed.Store(true) },
+		InstallSetSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
 			h.ls.installPParamsSource()

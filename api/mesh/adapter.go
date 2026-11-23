@@ -79,7 +79,7 @@ func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(ctx context.Context,
 	return a.db.GetTransactionsByBlockHash(ctx, hash, nil)
 }
 
-// boundedDatabase hides the blocks above a tip: on the split layout the
+// boundedDatabase hides the blocks above a tip: with an IndexerDB the
 // ledger's block store is ahead of the IndexerDB that holds their
 // transactions, and a block answered from the store alone would be empty.
 type boundedDatabase struct {

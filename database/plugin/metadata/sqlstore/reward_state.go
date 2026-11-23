@@ -1568,7 +1568,7 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 
 // DeleteRewardAccountOutputsBeforeEpoch prunes reward_account_output below
 // epoch as DeleteRewardStateBeforeEpoch does, without touching
-// reward_stake_input, for a database that drained it.
+// reward_stake_input.
 func (s *Store) DeleteRewardAccountOutputsBeforeEpoch(
 	ctx context.Context,
 	epoch uint64,

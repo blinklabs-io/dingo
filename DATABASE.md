@@ -280,13 +280,7 @@ the position columns and runs the cleanup. Imports and recovered inputs create
 only the identity row of a producer they have to name (`transactionIdentityIDs`
 in `utxo_identity.go`) and never an application row. An output an import stored
 before its producer was applied is one row under the producer's id; applying
-the producer repairs only the collateral-return marker. The trusted-batch
-overlay writes identity and application rows with explicit ids. It reads the
-identity rows of the batch's producers when it is enabled: an imported
-producer's row is reused and only its application row is written, as the
-per-row path does. A producer that is already applied, or that produces an
-index an import already stored, is a `types.ErrBatchUtxoOverlayConflict`, which
-its caller answers by applying the batch on the per-row path.
+the producer repairs only the collateral-return marker.
 
 `"transaction".id` is `AUTOINCREMENT` on SQLite (an identity sequence on
 PostgreSQL and MySQL) and that is load-bearing: `utxo.tx_id`,
@@ -2961,7 +2955,7 @@ UTxO changes. Their tags and markers are declared in
 | `mreghist2` | set once every stake registration event and DRep deposit is loaded, each event with its effective slot; the earlier `mreghist` marked events without it and makes the set reload them |
 | `B` + credential tag (1 byte) + key | an account's import baseline: an active flag (1 byte), the baseline slot (8 bytes, big-endian), a deposit-known flag (1 byte) and the deposit (8 bytes, big-endian), then a marker byte, the DRep type (8 bytes, big-endian), and the pool and the DRep the import recorded, each behind a one-byte length. A row written before the set kept the delegations stops after the deposit and reads with none |
 | `mbaseline` | set once every import baseline is loaded |
-| `mbasedelegs` | set once the import baselines carry their delegations, or marked lost when the set holds baselines written before it kept them and the metadata store no longer held the rows to reload them from |
+| `mbasedelegs` | set once the import baselines carry their delegations |
 | `K` + credential tag (1 byte) + key length (1 byte) + key + slot (8 bytes, big-endian) | a slot at which a credential was witnessed by an account certificate or a reward withdrawal; empty value. A witness of a Leios closure takes effect at the closure's context slot, before the slot it was applied at, and appends that effective slot (8 bytes, big-endian) to the key; the applied-slot reads (`LastWitnessSlot`) count it at the applied slot and `LastWitnessEffectiveSlot` at the effective slot. A reward withdrawal of such a closure also writes a row of its own, the witness's key with one marker byte (`01`) appended, so a certificate of the closure that witnesses the credential at the same slots does not stand for it (`EachWithdrawalWitness`); the set loads these rows with `IterateAccountWithdrawalEffectiveSlots`, which lists the withdrawals whose transaction context slot differs from their applied slot |
 | `mwitness2` | set once every witness slot is loaded with its effective slot; the earlier `mwitness` marked rows without it and makes the set reload them |
 | `L` + applied slot (8 bytes, big-endian) + kind (1 byte) + transaction hash (32 bytes) + output index (4 bytes, big-endian) | a staked output a Leios closure transaction created (kind 0) or spent (kind 1) whose context slot is before the slot it was applied at: the effective slot (8 bytes), the lovelace (8 bytes) and the credential stake sum key. Only a stake credential output of such a closure has a row, so an output of any other transaction costs no byte (about 92 bytes per row, key and value); the live output's own row is unchanged. Rows are journaled at the applied slot, so a rollback removes them, and pruned with the journal below its floor |
@@ -3697,7 +3691,7 @@ with none of them does nothing.
 - IndexerDB. `NewIndexerService` runs the same repair on the IndexerDB, which
   has its own `sync_state` key, before the writer reads it. That covers an
   IndexerDB seeded from genesis by a release and an API store copied by the
-  move to the split layout; both would otherwise disagree with a Mithril-imported
+  move to the IndexerDB layout; both would otherwise disagree with a Mithril-imported
   state when the replay reaches its anchor. The seed of a replay toward a
   Mithril anchor counted the genesis transactions it wrote into
   `indexer_replay_txs`, which the anchor check compares with the
@@ -3719,7 +3713,7 @@ Removing them changes no live stake: a Byron address has no stake credential and
 the amount is zero, so no `reward_live_stake` row or stake sum includes them.
 `TestRepairZeroValueByronGenesisCoreStore`,
 `TestRepairZeroValueByronGenesisAPIStore` and
-`TestReconcileRemovesGenesisFromLiveSetOnlyStore` pin the store shapes,
+`TestReconcileRemovesGenesisFromAStoreWithoutUtxoRows` pin the store shapes,
 `TestReconcileRemovesLegacyZeroValueByronGenesis` and
 `TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
 `TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
@@ -3897,7 +3891,7 @@ back. A rollback below a load accepts these families as they are loaded; the
 metadata store's own rollback restores them when the set is rebuilt from it.
 
 `Store.RefuseLoads` makes a `Load*` fail with `ErrLoadsRefused` before it
-drops a row of a family that holds rows; `Set.ServeLedgerOnly` sets it, since
+drops a row of a family that holds rows; `Set.Reconcile` sets it, since
 no metadata store holds the rows a reload would read. A release that changes
 a family's layout must ship an in-place migration of the set's rows;
 `Reconcile` reads the layout version the set records (`Store.FormatVersion`)
@@ -3963,10 +3957,10 @@ On a database with no metadata store:
 - A staged transaction (`NewStagedTxn`) commits only what its callers stage
   for the set; it holds no store of its own.
 
-`nodestorage.Reconcile` calls `Set.ServeLedgerOnly` before it reconciles: the
-set is then the ledger's only copy, so `Reconcile` never rebuilds it from a
-store and a `Load*` over held rows fails with `badgerutxo.ErrLoadsRefused`
-(`Store.RefuseLoads`). A release that changes a family's layout ships an
+Outside the v0.94.2 migration the set is the ledger's only copy, so
+`Set.Reconcile` never rebuilds it from a store, and it calls
+`Store.RefuseLoads` first, so a `Load*` over held rows fails with
+`badgerutxo.ErrLoadsRefused`. A release that changes a family's layout ships an
 in-place migration of the set's rows.
 
 Readers outside the ledger's LedgerDB:
@@ -4249,7 +4243,7 @@ A database written by such a release moves in place at startup, with no resync
 and no command. The steps run in this order, and each is resumable, so a stop
 between any two leaves a node that starts and continues:
 
-1. API-mode SQLite store to the IndexerDB (`MigrateToSplit`, before any command
+1. API-mode SQLite store to the IndexerDB (`MigrateToIndexerDB`, before any command
    opens the consensus store): copy, rename, latch. It checks the volume holds
    a second copy of the store and refuses with the sizes otherwise. The ledger's
    UTxO and transaction offset entries (`u` and `t` keys) are copied into the
@@ -4286,7 +4280,7 @@ between any two leaves a node that starts and continues:
 
    A PostgreSQL or MySQL API-mode store is adopted in place as the IndexerDB
    instead, and the consensus store is built beside it in a consensus
-   namespace (see [Split stores](#split-stores)). Each step commits before the
+   namespace (see [IndexerDB stores](#indexerdb-stores)). Each step commits before the
    next, and a stop at any point leaves a node that resumes on the next start:
    1. Create the consensus namespace if it is absent.
    2. Record the IndexerDB tip, checkpoints and copied offset entries in the
@@ -4310,7 +4304,7 @@ between any two leaves a node that starts and continues:
       to 4 below revert it and move its state into the LedgerDB. On
       PostgreSQL each copied table's sequences are moved past the copied
       keys.
-   4. Latch the namespace as core mode on the split layout, together with
+   4. Latch the namespace as core mode with an IndexerDB, together with
       its completion marker `dingo:storage:core-copy:complete`.
    5. Record `dingo:storage:core-copy:adopted` in the API store. A start that
       finds this marker beside a namespace without the completion marker
@@ -4461,9 +4455,9 @@ anchor, current-state endpoints also need it within
 `indexer_bootstrap` (`replay`, `index`, `done`); nothing is ready while the
 phase is `replay` or `index`.
 
-### Split stores
+### IndexerDB stores
 
-On `split` the ledger's own store opens in core mode and holds no API rows. A
+With an IndexerDB (`indexer_layout=split`) the ledger's own store opens in core mode and holds no API rows. A
 second metadata plugin instance of the same provider is the IndexerDB, opened in
 API mode. A SQLite IndexerDB lives in `<dataDir>/indexer/` and does not inherit
 a `dataDir` override of the consensus store.
@@ -4587,10 +4581,7 @@ never by row id, from `metadata.FactTables`:
   numbering and clears the consumer's acknowledged position with it. The DRep
   history is read by slot range from the set. The stake
   inputs and the derived reward rows are loaded for every epoch, and pruned
-  only for epochs the writer has copied past the reward window. A set whose
-  database lost the journal before the set kept it has nothing to load: it
-  marks the journal lost and the export fails with `ErrLedgerStateUnserved`,
-  since the credits before then are in neither store.
+  only for epochs the writer has copied past the reward window.
 
 The copy reads fact rows through `ledger.LedgerState.ReadFactRows`. The
 tables that grow with the chain (`account`, `drep`, `drep_expiry_history`,
@@ -4662,10 +4653,7 @@ protocol version 10 dangling-delegation sweep), a set loads them from the
 metadata store on its first start with the marker absent, and the journal
 drops the rows after a rollback target as the metadata store deletes them.
 The v0.94.2 migration verifies them against the metadata store with the rest
-of the `dreps` family. A set whose database lost the imported block counts or
-the DRep history before the set kept them has nothing to read: the load marks it as having
-lost them, and a read of those tables fails with `ErrFactTableUnserved`
-instead of exporting an empty table. A catch-up import replaces the imported block
+of the `dreps` family. A catch-up import replaces the imported block
 rows of the epochs its snapshot carries and keeps the others. Every table the
 copy reads is served this way (`UnservedFactTables` is empty); a table without
 an exporter would fail with `ErrFactTableUnserved` instead of reading rows no
@@ -4682,11 +4670,6 @@ lock, so a credit or withdrawal that lands between the two reads is in neither
 the balance nor the journal (`metadata.AnchorStateViewer`). A
 copied account reward above the signed 64-bit range is rejected rather than
 truncated while applying signed reward-journal movements. A
-set whose baselines
-were written before it kept the delegations has them reloaded from the metadata
-store at its first load, while the rows exist, and marked lost once they do
-not; a set that lost them, or the reward journal, refuses the bootstrap with
-`indexer.ErrAnchorUnserved` naming which. That is the one case left. A
 journal that no longer reaches the anchor leaves the replay uncompared with the
 UTxO set at the anchor, with a warning.
 
@@ -4752,7 +4735,7 @@ epoch is applied with the previous epoch's parameters and dated by
 `leios_transaction_context` at the parent's slot, as the ledger applies it ahead
 of the boundary. A closure that cannot be read stops the writer.
 
-A live database truncate works on `split`. The node stops the writer and the
+A live database truncate works with an IndexerDB. The node stops the writer and the
 API servers, rolls the IndexerDB back to the block the ledger keeps while the
 ledger still stores the blocks being removed (so the writer finds exact
 ancestors by parent links), removes the Midnight indexer's journals above that
@@ -4762,7 +4745,7 @@ restarts the writer. A crash between the two steps leaves the IndexerDB tip at
 or below the ledger tip, and the writer's canonical check and catch-up heal
 the difference.
 
-A split snapshot includes a provider-native `indexer.metadata` backup. The
+An API node's snapshot includes a provider-native `indexer.metadata` backup. The
 snapshot captures it before the consensus snapshot and records its size,
 SHA-256 digest and tip in the same manifest as the other store backups.
 The snapshot trust key authenticates the IndexerDB fields along with the
@@ -4776,7 +4759,7 @@ also retains compensation backups for server databases it replaces before
 the local directory swap.
 
 Released API snapshots contain a single metadata backup. SQLite restores it
-inside the staging directory and adopts it into the split layout before the
+inside the staging directory and adopts it into the IndexerDB layout before the
 directory swap. An offline PostgreSQL or MySQL restore requires an empty
 consensus namespace and restores the API database for adoption at startup. A
 populated namespace is refused by name, with the statement that empties it
@@ -4790,7 +4773,7 @@ moves its ledger state into the LedgerDB.
 - `snapshot` backs up the IndexerDB before the ledger and refuses a
   directory without an IndexerDB or a backup whose tip is past the ledger.
 - `restore` validates both stores before publishing them and requires the
-  IndexerDB payload when restoring a split-layout snapshot.
+  IndexerDB payload when restoring a IndexerDB snapshot.
 - `truncate` rolls the IndexerDB back first through the writer, over the ledger
   database that still stores the blocks, and truncates the Midnight journals
   it holds, then truncates the ledger. A data
@@ -4832,7 +4815,7 @@ from the potentially lagging IndexerDB again. A database of another network or m
 
 ### Mithril bootstrap
 
-`mithril sync` runs on `split`. The ledger's own store opens in core mode,
+`mithril sync` runs with an IndexerDB. The ledger's own store opens in core mode,
 latches the `indexer_layout` gate on the empty database and imports the
 snapshot's ledger state, so the node can follow the tip as soon as it starts.
 The IndexerDB is built when the node runs, from the blocks already in the
@@ -4845,9 +4828,7 @@ When the writer finds a Mithril anchor in the ledger database
 records the anchor, the op-cert counters the snapshot certified (dated at the
 anchor slot) and phase `replay` in one transaction, before any reader can ask.
 It refuses with `indexer.ErrAnchorUnserved` when the live UTxO set cannot
-serve the imported accounts (no
-set, or one that lost the delegations of its import baselines or its reward
-journal before it kept them). Then:
+serve the imported accounts (no set). Then:
 
 1. `replay` drops the deferred-index manifest and indexes blocks from the
    chain's origin to the anchor block, seeding genesis state in the first
@@ -5240,8 +5221,8 @@ in a temporary directory.
   `copyReleasedNodeSettings` reads the `node_settings` row with
   `node_settings_gate` copied on top, adds the format 1 file's plugin if the
   `metadata_plugin` gate is missing (v0.94.2 writes the file first), keeps
-  only the registered gates and the unit marker (the per-family state mask
-  stays in the table), and writes the result to the file once.
+  only the registered gates and the unit marker (other rows stay in the
+  table), and writes the result to the file once.
   It refuses unless the copied `blob_store_id` names this blob store, the
   pairing that gate enforced in the metadata store; with no `blob_store_id`
   to copy, the file was lost and the open fails with
@@ -5457,7 +5438,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
-| `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import, the batch overlay and `CreateUtxo` write no rows there. |
+| `asset_holding` | `utxo_id`, `asset_id`, `amount` | PK `(utxo_id, asset_id)`, `WITHOUT ROWID` on SQLite; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; FK `asset_id -> asset_identity.id`; index `idx_asset_holding_asset_id` (`asset_id`) | Quantity of one asset held by one output. `amount` is decimal text, nullable, copied verbatim from the legacy column. The primary key serves the cascade from `utxo` and keeps one output's holdings together; rows are written in ascending `utxo_id` order, so inserts append. `idx_asset_holding_asset_id` serves holders, quantity and UTxO lookups by asset and is a critical deferred index. Use `utxo.deleted_slot = 0` for live balances. Maintained in API storage mode only: core mode reads output values from the stored CBOR, so block apply, ledger-state import and `CreateUtxo` write no rows there. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset_holding` (holdings of retained outputs), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot`, `idx_transaction_metadata_label_label_slot` `(label, slot, transaction_id)` (schema version 58) | API-mode per-label metadata index. Join to `transaction.id`. `GetTransactionsByMetadataLabel` drives from the label rows through the `(label, slot, transaction_id)` index and joins `transaction` and `applied_transaction`, so a page reads its first rows in slot order and sorts only ties within a slot (by `block_index`, `id`) instead of every transaction carrying the label. A label row's `slot` equals its transaction's `slot`. The label, slot and label-slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |

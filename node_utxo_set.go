@@ -62,7 +62,7 @@ func (n *Node) utxoSetConfig() nodestorage.UtxoSetConfig {
 		DataDir:             n.config.dataDir,
 		Logger:              n.config.logger,
 		CardanoNodeConfig:   n.config.cardanoNodeConfig,
-		RetainRewardRecords: n.splitIndexer(),
+		RetainRewardRecords: n.hasIndexerDB(),
 		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
 	}
 }

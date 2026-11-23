@@ -26,9 +26,9 @@ import (
 )
 
 // With a failed set that holds none of the ledger's state, the LedgerDB and
-// the database fail the read rather than answer from the empty SQL tables,
+// the database fail the read rather than answer nothing,
 // and the database refuses a write to them.
-func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
+func TestPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)

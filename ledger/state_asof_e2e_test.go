@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -390,25 +389,6 @@ func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 // an attached set's journal to fail without consulting metadata.
 func TestAsOfReadsFailClosedOutsideTheSetJournal(t *testing.T) {
 	t.Parallel()
-	needs := map[string]nodesettings.FamilyMask{
-		"GetDrepsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetDRepDelegatorsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-		"GetDrepRegistrationDepositsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetGovernanceVotesAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyGovernance),
-		"GetPoolRegistrationsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetRetiringPoolsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetPoolDepositsHeldAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetAccountsByCredentialAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-	}
-	require.Len(t, needs, len(asOfReadNames))
 	const outside = 0
 	for _, name := range asOfReadNames {
 		t.Run(name, func(t *testing.T) {

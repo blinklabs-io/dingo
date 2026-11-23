@@ -22,8 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,13 +72,12 @@ func anchorStateLines(
 	return append(lines, journal...)
 }
 
-// With the accounts family drained, the ledger serves the imported accounts,
-// delegations included, and the reward journal from the live UTxO set, as the
-// metadata store served them.
-func TestDrainedSetServesTheImportedAnchorStateTheStoreServes(t *testing.T) {
+// The ledger serves the imported accounts, delegations included, and the
+// reward journal from the live UTxO set.
+func TestSetServesTheImportedAnchorState(t *testing.T) {
 	t.Parallel()
 	var lines []string
-	out, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
+	out, _ := releasedFactsRun(t, func(h *setHarness) func() []string {
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
 		lines = anchorStateLines(t, h.scenario.AnchorState)
@@ -108,46 +105,13 @@ func countPrefixed(lines []string, prefix string) int {
 	return n
 }
 
-// lostDelegationsSet is a set whose import baselines were written before it
-// kept their delegations, with the metadata store's rows already drained.
-type lostDelegationsSet struct {
-	*utxoset.Set
-}
-
-func (lostDelegationsSet) ImportBaselineDelegationsLost() (bool, error) {
-	return true, nil
-}
-
-// An import baseline without the delegations the import recorded cannot give
-// an anchor's accounts their delegations, so the ledger refuses to serve them
-// and says why.
-func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, nil,
-	)
-	s.InstallDrainedSources()
-	s.WrapSet(func(ledger.UtxoSetWriter) ledger.UtxoSetWriter {
-		return lostDelegationsSet{set}
-	})
-
-	err = s.AnchorState.AnchorStateReady(t.Context())
-	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
-	require.ErrorContains(t, err, "delegations they record")
-	_, _, err = s.AnchorState.AnchorImportedAccounts(t.Context(), 0, nil, 10)
-	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
-}
-
 // A pinned view of the anchor state reads the ledger at the point it was
 // taken: a credit applied afterwards is in neither its balances nor its
 // journal, so a balance less the journal still gives the balance at the
 // anchor. The live source moves with the credit.
 func TestAnchorStateViewReadsOnePointWhileTheLedgerMoves(t *testing.T) {
 	t.Parallel()
-	releasedFactsRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *setHarness) func() []string {
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
 		before := anchorStateLines(t, h.scenario.AnchorState)

@@ -3238,7 +3238,7 @@ func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	)}
 
 	assert.True(t, node.config.blockProducer)
-	assert.True(t, node.config.splitIndexer)
+	assert.True(t, node.config.hasIndexerDB)
 	assert.Equal(t, StorageModeCore, node.config.storageMode)
 	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }

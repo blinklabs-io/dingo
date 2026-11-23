@@ -199,7 +199,7 @@ func (ls *LedgerState) RewardStakeInputsPendingState() (string, error) {
 // RewardStakeInputsIncompleteCommitted is RewardStakeInputsIncomplete read
 // from the ledger store's committed state, for a reader whose own
 // transaction belongs to another store: the ledger store records which
-// snapshots are still being written, and a split IndexerDB copies their rows
+// snapshots are still being written, and an IndexerDB copies their rows
 // from it.
 func (ls *LedgerState) RewardStakeInputsIncompleteCommitted(
 	from uint64,

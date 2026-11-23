@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -138,35 +137,6 @@ func (s stagingLedgerDB) GetPParamUpdates(
 		return rows, nil
 	}
 	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
-}
-
-type pparamProposal struct {
-	slot, epoch uint64
-	cbor        string
-}
-
-// samePParamUpdates compares the store's proposals, newest first, with the
-// set's, oldest first: the same proposals for each genesis key in the same
-// order. The order between keys is not compared; the store gives it by row
-// ID, which within one transaction is the order of a map, and the proposal
-// selection reads only each key's latest.
-func samePParamUpdates(want, got []models.PParamUpdate) bool {
-	group := func(rows []models.PParamUpdate, newestFirst bool) map[string][]pparamProposal {
-		out := make(map[string][]pparamProposal)
-		for i := range rows {
-			u := rows[i]
-			if !newestFirst {
-				u = rows[len(rows)-1-i]
-			}
-			out[string(u.GenesisHash)] = append(out[string(u.GenesisHash)],
-				pparamProposal{u.AddedSlot, u.Epoch, string(u.Cbor)})
-		}
-		return out
-	}
-	return maps.EqualFunc(
-		group(want, true), group(got, false),
-		func(a, b []pparamProposal) bool { return slices.Equal(a, b) },
-	)
 }
 
 // ForecastPParamUpdates is answered from the proposals the set holds, when it

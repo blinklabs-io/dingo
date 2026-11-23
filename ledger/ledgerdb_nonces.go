@@ -131,16 +131,16 @@ func (s stagingLedgerDB) DeleteBlockNoncesAfterPoint(
 	return nil
 }
 
-// drainedNonceSource serves a rollback's nonce reads from the set.
-type drainedNonceSource struct {
+// setNonceSource serves a rollback's nonce reads from the set.
+type setNonceSource struct {
 	ls *LedgerState
 }
 
-func (d drainedNonceSource) BlockNonceAt(point ocommon.Point) ([]byte, error) {
+func (d setNonceSource) BlockNonceAt(point ocommon.Point) ([]byte, error) {
 	return d.ls.blockNonce(point, nil)
 }
 
-func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
+func (d setNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 	rows, err := d.ls.blockNoncesInSlotRange(0, slot+1, nil)
 	if err != nil {
 		return false, err
@@ -157,6 +157,6 @@ func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 // runs.
 func (ls *LedgerState) installNonceSource() {
 	if ls.db != nil {
-		ls.db.SetNonceSource(drainedNonceSource{ls})
+		ls.db.SetNonceSource(setNonceSource{ls})
 	}
 }

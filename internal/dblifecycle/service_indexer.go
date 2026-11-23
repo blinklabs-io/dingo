@@ -44,7 +44,7 @@ type IndexerRollbackFactory func(
 	consensus, indexer *database.Database,
 ) (IndexerRoller, error)
 
-// SetIndexerRollbackFactory sets what an offline truncate on the split layout
+// SetIndexerRollbackFactory sets what an offline truncate with an IndexerDB
 // rolls the IndexerDB back with. Without it such a truncate is refused.
 func (s *Service) SetIndexerRollbackFactory(f IndexerRollbackFactory) {
 	s.rollbackFactory = f
@@ -95,9 +95,9 @@ func (s *Service) storageDependencies() (
 	}, nil
 }
 
-// checkSplitSupported refuses, before anything changes, the snapshot and
+// checkIndexerSupported refuses, before anything changes, the snapshot and
 // restore shapes the IndexerDB payload does not cover.
-func (s *Service) checkSplitSupported() error {
+func (s *Service) checkIndexerSupported() error {
 	return CheckIndexerPayloadSupported(
 		s.cfg.Plugins.Storage.Metadata.Provider,
 	)
@@ -122,7 +122,7 @@ func (s *Service) withIndexer(
 		return err
 	}
 	dbConfig := s.databaseConfig()
-	dbConfig.IndexerLayout = config.IndexerLayoutSplit
+	dbConfig.IndexerLayout = config.IndexerLayoutIndexerDB
 	idx, err := internalplugins.OpenIndexerDatabase(
 		ctx, host, ledger, dbConfig, s.storageSelections(), deps,
 	)
@@ -155,7 +155,7 @@ func (s *Service) captureIndexer(
 	if !s.indexerStoreExists() {
 		return "", payload, cleanup, errors.New(
 			"the data directory holds no IndexerDB to snapshot: start the " +
-				"node on the split layout first",
+				"node with an IndexerDB first",
 		)
 	}
 	err = s.withIndexer(ctx, ledger, func(idx *database.Database) error {
@@ -192,9 +192,9 @@ func (s *Service) captureIndexer(
 	return staged, payload, cleanup, nil
 }
 
-// rollbackIndexer rolls the IndexerDB back to target while ledger still
-// stores the blocks being removed. A split data directory that never created
-// an IndexerDB has nothing to roll back.
+// rollbackIndexer rolls the IndexerDB back to target while ledger still stores
+// the blocks being removed. An API node's data directory that never created an
+// IndexerDB has nothing to roll back.
 func (s *Service) rollbackIndexer(
 	ctx context.Context,
 	ledger *database.Database,

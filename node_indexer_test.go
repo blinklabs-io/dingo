@@ -114,12 +114,12 @@ func TestAPIDatabaseFollowsTheLayout(t *testing.T) {
 	indexer := &database.Database{}
 	store, err := indexerdb.NewStore(indexer, indexer, 10)
 	require.NoError(t, err)
-	split := &Node{db: consensus, indexerDB: indexer, indexerStore: store}
-	require.Same(t, indexer, split.apiDatabase())
-	require.NotNil(t, split.apiReadiness())
+	apiNode := &Node{db: consensus, indexerDB: indexer, indexerStore: store}
+	require.Same(t, indexer, apiNode.apiDatabase())
+	require.NotNil(t, apiNode.apiReadiness())
 }
 
-func TestMeshReportsTheIndexerTipOnTheSplitLayout(t *testing.T) {
+func TestMeshReportsTheIndexerTip(t *testing.T) {
 	t.Parallel()
 	ledgerDB, err := dbtest.NewDatabase(t, &database.Config{})
 	require.NoError(t, err)

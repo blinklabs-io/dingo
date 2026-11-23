@@ -2561,8 +2561,7 @@ func seedLiveUtxoSetJournal(
 	t.Helper()
 	require.Positive(t, epochLength)
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-		CheckpointDir: utxoset.CheckpointDirFor(dataDir),
+		Dir: utxoset.DirFor(dataDir), CheckpointDir: utxoset.CheckpointDirFor(dataDir),
 	})
 	require.NoError(t, err)
 	// The first commit has no tip before it, and a journal reaches back only
@@ -2647,9 +2646,7 @@ func loadLiveUtxoSetFamiliesAtOrigin(
 	dataDir string,
 ) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(dataDir)})
 	require.NoError(t, err)
 	require.NoError(t, set.Reconcile(t.Context(), dbadapter.New(db), nil))
 	require.NoError(t, set.Close())

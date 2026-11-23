@@ -28,8 +28,8 @@ import (
 
 // SetClosureSource sets where IndexBlocks reads the certified endorser blocks
 // of certifying ranking blocks from. The default is the backfill's own
-// database, which reads through to the ledger's blob store on the split
-// layout.
+// database, which reads through to the ledger's block store when the node
+// has an IndexerDB.
 func (b *Backfill) SetClosureSource(src dledger.CertifiedClosureSource) {
 	b.closures = src
 }

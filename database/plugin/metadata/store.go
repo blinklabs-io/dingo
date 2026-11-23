@@ -3662,28 +3662,6 @@ type LeiosClosureBatchPreparer interface {
 	) (int, error)
 }
 
-// BatchUtxoOverlay is an optional interface for metadata stores that can
-// stage a trusted block-apply batch's UTxO writes in memory. After
-// EnableBatchUtxoOverlay reports true, the accumulator's batched transaction
-// writes resolve their inputs from the overlay and FlushBatch writes the net
-// UTxO change; a store returns false, changing nothing, where it does not
-// support the overlay. inputs are the batch's consumed inputs that it does
-// not itself produce, and deleteOnSpend the subset of them an earlier
-// transaction of the same trusted batch committed, whose rows are deleted
-// when spent. producers are the hashes of the transactions the batch
-// applies, read up front so that a producer an import already stored an
-// identity row for is not reported as a conflict. A write the overlay cannot
-// apply without a conflict fails with types.ErrBatchUtxoOverlayConflict.
-type BatchUtxoOverlay interface {
-	EnableBatchUtxoOverlay(
-		accumulator types.MetadataBatchAccumulator,
-		txn types.Txn,
-		inputs []models.UtxoId,
-		deleteOnSpend []models.UtxoId,
-		producers [][]byte,
-	) (bool, error)
-}
-
 // PlannerStatsUpdater is an optional interface for metadata stores that can
 // collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
 // refreshes statistics through deferred-index maintenance instead.

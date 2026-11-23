@@ -25,8 +25,8 @@ import (
 
 // The account lookups and lists answer from the LedgerDB set with the
 // metadata store's reads hidden, and a predefined DRep, which has no set key,
-// is refused as unserved rather than read from the emptied table.
-func TestAccountReadsUseLoadedSetAfterDrain(t *testing.T) {
+// is refused as unserved rather than read as empty.
+func TestAccountReadsServeFromTheSet(t *testing.T) {
 	t.Parallel()
 	h := newLiveStakeHarnessWithReads(t, false, "set")
 	ldb := h.scenario.LedgerDB()

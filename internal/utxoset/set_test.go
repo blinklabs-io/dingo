@@ -138,7 +138,7 @@ func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 
 func TestUtxoSetAtRejectsPointOutsideJournalLineage(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{1}, 32))
@@ -161,7 +161,7 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	tip := ocommon.NewPoint(5, bytes.Repeat([]byte{5}, 32))
 	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	behind := ocommon.NewPoint(4, bytes.Repeat([]byte{4}, 32))

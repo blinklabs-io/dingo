@@ -89,8 +89,8 @@ type transactionBatchAccumulator struct {
 	// nonces holds block nonces queued by QueueBlockNonce, in application
 	// order, until FlushBatch writes them.
 	nonces []models.BlockNonce
-	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
-	// attached one; nil on the per-row path.
+	// overlay stages UTxO writes in memory when
+	// EnableLeiosClosureUtxoOverlay attached one; nil on the per-row path.
 	overlay *utxoOverlay
 }
 
@@ -523,7 +523,7 @@ type transactionRowOps struct {
 	// refreshAddressOrder asks for the address-page position of the
 	// transaction's outputs to be refreshed after its application row is
 	// written. API storage mode sets it; a staged UTxO overlay does not,
-	// because it refreshes when it writes the staged rows.
+	// because it writes its outputs' address rows after the application row.
 	refreshAddressOrder bool
 }
 
@@ -996,8 +996,7 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	txn types.Txn, protocolMajor uint64,
 ) error {
 	acc, ok := accumulator.(*transactionBatchAccumulator)
-	if !ok || !acc.leiosAPIRowsOnly ||
-		(acc.overlay != nil && !acc.overlay.retainHistory) {
+	if !ok || !acc.leiosAPIRowsOnly {
 		return errors.New("closure batching requires an API-only accumulator")
 	}
 	if txn == nil {
@@ -1147,7 +1146,7 @@ func (s *Store) setTransactionWithAccumulator(
 	if batchedAccumulator != nil {
 		overlay = batchedAccumulator.overlay
 	}
-	if overlay != nil && overlay.retainHistory {
+	if overlay != nil {
 		if !batchedAccumulator.leiosAPIRowsOnly ||
 			!tolerateConsumedInputConflict ||
 			historicalBackfill ||
@@ -1217,21 +1216,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return err
 			}
 			phase.next(ctx, "dingo.sqlstore.tx.identity")
-			if overlay != nil && !overlay.retainHistory {
-				transactionID, err = overlay.stageTransaction(
-					hash,
-					point.Hash,
-					metadataValue,
-					point.Slot,
-					transaction.Type(),
-					decimalUint64(transactionFee(transaction)),
-					decimalUint64(types.Uint64(collateralFee)),
-					decimalUint64(types.Uint64(transaction.TTL())),
-					index,
-					transaction.IsValid(),
-				)
-				transactionIsNew = true
-			} else if batched := batchedAccumulator; batched != nil {
+			if batched := batchedAccumulator; batched != nil {
 				var id uint
 				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
@@ -1374,21 +1359,15 @@ func (s *Store) setTransactionWithAccumulator(
 					skipped,
 					produced,
 				)
-				if overlay.retainHistory {
-					for i := range producedModels {
-						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
-						producedModels[i].ID = uint(output.id)
-					}
-					phase.next(ctx, "dingo.sqlstore.tx.api_details")
-					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
-						return err
-					}
-					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
-						return err
-					}
-					return nil
+				for i := range producedModels {
+					output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
+					producedModels[i].ID = uint(output.id)
 				}
-				return nil
+				phase.next(ctx, "dingo.sqlstore.tx.api_details")
+				if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
+					return err
+				}
+				return staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1709,7 +1688,7 @@ func (s *Store) setTransactionWithAccumulator(
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
-	retained := batchedAccumulator.overlay != nil && batchedAccumulator.overlay.retainHistory
+	retained := batchedAccumulator.overlay != nil
 	if !batchedAccumulator.apiRowsOnly() || retained {
 		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
 			return err
@@ -1917,7 +1896,7 @@ SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 			}
 			// The delete below removes these transactions' certificate and
 			// context rows, the keys their pool certificates rank by. A
-			// drained pools family has no pool rows to refresh.
+			// store without pool rows has none to refresh.
 			var poolHashes [][]byte
 			poolHashes, err = poolHashesOfTransactions(ctx, db, txIDs)
 			if err != nil {

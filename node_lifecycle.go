@@ -1357,7 +1357,7 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 	return internalplugins.StorageSelections{
 		Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
 		Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
-		SplitIndexer: n.splitIndexer() ||
+		IndexerDB: n.hasIndexerDB() ||
 			(n.config.cfg != nil && n.config.cfg.ServerCoreNamespace),
 	}
 }
@@ -1478,7 +1478,7 @@ func (n *Node) Snapshot(
 		stagedIndexer string
 		indexerMeta   indexerPayload
 	)
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		if err := n.checkIndexerSnapshotSupported(); err != nil {
 			return lifecycle.Manifest{}, err
 		}
@@ -1578,7 +1578,7 @@ func (n *Node) Restore(
 	restoreStorage := n.restoreStorageConfig()
 	validateManifest := func(m lifecycle.Manifest) error {
 		compatibilityGates := n.nodeSettingsGateValues()
-		if n.splitIndexer() {
+		if n.hasIndexerDB() {
 			compatibilityGates["indexer_layout"] = n.indexerLayout()
 		}
 		if n.config.networkMagic != 0 {
@@ -1605,7 +1605,7 @@ func (n *Node) Restore(
 		}
 		return nil
 	}
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		// Refuse an incompatible snapshot before pausing the node. Restore
 		// validates the manifest again before touching any staged stores.
 		manifest, err := lifecycle.PeekManifest(
@@ -2097,7 +2097,7 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
 	}
-	if n.splitIndexer() && n.config.cfg != nil &&
+	if n.hasIndexerDB() && n.config.cfg != nil &&
 		storageadopt.SupportsAPIAdoption(n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider) {
 		restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
 			cfg := *n.config.cfg

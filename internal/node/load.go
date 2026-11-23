@@ -223,11 +223,11 @@ func Load(
 }
 
 // loadIndexerLayout is the layout a load freezes into a new database: the
-// split layout's gate must be filled while the database has no chain state, or
-// the node refuses to start over the loaded blocks.
+// IndexerDB layout's gate must be filled while the database has no chain
+// state, or the node refuses to start over the loaded blocks.
 func loadIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() || cfg.ServerCoreNamespace {
-		return config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() || cfg.ServerCoreNamespace {
+		return config.IndexerLayoutIndexerDB
 	}
 	return ""
 }
@@ -602,7 +602,7 @@ func openLoadUtxoSet(
 		DataDir:             dataDir,
 		Logger:              logger,
 		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: cfg.SplitIndexer(),
+		RetainRewardRecords: cfg.HasIndexerDB(),
 		CheckpointKeep:      cfg.LedgerUtxoCheckpointKeep,
 	})
 	if err != nil {

@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -38,9 +37,9 @@ func tableRows(t *testing.T, raw *sql.DB, table string) int {
 	return n
 }
 
-// The startup nonce prune of a drained family checks that the set holds none
-// past the ledger tip instead of deleting SQL rows that do not exist.
-func TestDrainedNoncePruneChecksTheSetAgainstTheTip(t *testing.T) {
+// The startup nonce prune checks that the set holds no nonce past the ledger
+// tip.
+func TestNoncePruneChecksTheSetAgainstTheTip(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -55,9 +54,6 @@ func TestDrainedNoncePruneChecksTheSetAgainstTheTip(t *testing.T) {
 		Slot: cur.Slot + 5, Hash: bytes.Repeat([]byte{9}, 32),
 		Nonce: bytes.Repeat([]byte{8}, 32),
 	}})
-	scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyNonces),
-	)
 	ldb := scenario.LedgerDB()
 	err = ldb.DeleteBlockNoncesAfterPoint(cur, nil)
 	require.ErrorContains(t, err, "past the ledger tip")

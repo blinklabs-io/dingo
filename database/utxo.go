@@ -2038,9 +2038,9 @@ func (d *Database) RemoveGenesisUtxos(
 	return removed, applied, nil
 }
 
-// UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
+// UtxoSetMigratedSyncKey marks, in sync_state, a database whose metadata store
 // holds no UTxO set because the ledger's live UTxO set is its only copy.
-const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
+const UtxoSetMigratedSyncKey = "ledger.utxo_set_only"
 
 // liveUtxoSourceSetter is the metadata store hook SetLiveUtxoSource drives.
 type liveUtxoSourceSetter interface {

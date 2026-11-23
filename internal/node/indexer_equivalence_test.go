@@ -65,7 +65,7 @@ func newEquivalenceDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		StorageMode:   types.StorageModeCore,
-		IndexerLayout: config.IndexerLayoutSplit,
+		IndexerLayout: config.IndexerLayoutIndexerDB,
 		DataDir:       t.TempDir(),
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Network:       "preview",

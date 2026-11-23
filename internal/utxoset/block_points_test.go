@@ -29,7 +29,7 @@ import (
 // and so stages no change of its own.
 func TestCommitOfSeveralBlocksRollsBackToEachBlock(t *testing.T) {
 	t.Parallel()
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	defer set.Close()
 	point := func(i int) ocommon.Point {
 		return ocommon.NewPoint(

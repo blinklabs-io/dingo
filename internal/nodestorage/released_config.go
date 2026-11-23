@@ -63,7 +63,7 @@ func MigrateReleased(
 				DataDir:             cfg.DatabasePath,
 				Logger:              logger,
 				CardanoNodeConfig:   nodeCfg,
-				RetainRewardRecords: cfg.SplitIndexer() || cfg.ServerCoreNamespace,
+				RetainRewardRecords: cfg.HasIndexerDB() || cfg.ServerCoreNamespace,
 			},
 			Logger:                     logger,
 			RewindBlocks:               SecurityParam(nodeCfg),

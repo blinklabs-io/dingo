@@ -242,7 +242,7 @@ func (m ReleasedMigration) Move(
 	); err != nil {
 		return err
 	}
-	if err := CheckUtxoSetOnly(db); err != nil {
+	if err := CheckUtxoSetMigrated(db); err != nil {
 		return err
 	}
 	if err := m.step(ReleasedStepOutputs); err != nil {

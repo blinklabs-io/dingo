@@ -75,7 +75,7 @@ func migrateLegacyDatabase(
 ) string {
 	t.Helper()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -88,7 +88,7 @@ func migrateLegacyDatabase(
 	return dir
 }
 
-// openConsensus opens the consensus database of the split data directory
+// openConsensus opens the consensus database of the API node's data directory
 // dir. The returned function closes it.
 func openConsensus(t *testing.T, dir string) (*database.Database, func()) {
 	t.Helper()
@@ -104,7 +104,7 @@ func openReleased(t *testing.T, dir string) *database.Database {
 		&database.Config{
 			Role:    database.RoleReleased,
 			DataDir: dir, StorageMode: "core", Network: "preview",
-			IndexerLayout:  config.IndexerLayoutSplit,
+			IndexerLayout:  config.IndexerLayoutIndexerDB,
 			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 		},
@@ -131,7 +131,7 @@ func openConsensusRewound(
 	cfg := parityConfig(dir)
 	dbConfig := &database.Config{
 		DataDir: dir, StorageMode: "core", Network: "preview",
-		IndexerLayout:  config.IndexerLayoutSplit,
+		IndexerLayout:  config.IndexerLayoutIndexerDB,
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
@@ -362,7 +362,7 @@ func TestMigratedDatabaseTruncatesBelowItsMigrationPoint(t *testing.T) {
 func TestMigrationRewindRunsOnce(t *testing.T) {
 	t.Parallel()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -398,7 +398,7 @@ func TestMigrationRewindRunsOnce(t *testing.T) {
 func TestMigrationResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	t.Parallel()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -414,7 +414,7 @@ func TestMigrationResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	require.ErrorContains(t, nodestorage.ReleasedMigration{
 		RewindBlocks: previewSecurityParam(t),
 	}.Move(t.Context(), db, nil), "is not open")
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, marked, "the UTxO rows have not moved yet")
 	pending, err := db.GetSyncState(models.RewardStakeInputsPendingKey, nil)
@@ -431,7 +431,7 @@ func TestLoadResolvesPendingRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(ctx, parityConfig(dir), logger))
+	require.NoError(t, MigrateToIndexerDB(ctx, parityConfig(dir), logger))
 	// Below every rewind point, so only the resolve can clear it.
 	raw, err := json.Marshal(map[string][]ledger.RewardStakeInputsPendingEntry{
 		"entries": {{Epoch: 999, BoundarySlot: 1}},
@@ -462,7 +462,7 @@ func seedReleasedSyncState(t *testing.T, dir, key, value string) {
 		&database.Config{
 			Role:    database.RoleReleased,
 			DataDir: dir, StorageMode: "core", Network: "preview",
-			IndexerLayout:  config.IndexerLayoutSplit,
+			IndexerLayout:  config.IndexerLayoutIndexerDB,
 			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 		},

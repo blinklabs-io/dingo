@@ -32,13 +32,13 @@ type SyncMarkerReader interface {
 	SyncMarker(name string) (string, bool, error)
 }
 
-// drainedPParamsSource serves the database's own protocol parameter reads,
+// setPParamsSource serves the database's own protocol parameter reads,
 // and a rollback's, from the committed rows of the set.
-type drainedPParamsSource struct {
+type setPParamsSource struct {
 	ls *LedgerState
 }
 
-func (d drainedPParamsSource) pparams() (PParamsReader, error) {
+func (d setPParamsSource) pparams() (PParamsReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamsReader)
 	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
@@ -46,7 +46,7 @@ func (d drainedPParamsSource) pparams() (PParamsReader, error) {
 	return r, nil
 }
 
-func (d drainedPParamsSource) updates() (PParamUpdateReader, error) {
+func (d setPParamsSource) updates() (PParamUpdateReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamUpdateReader)
 	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
@@ -54,7 +54,7 @@ func (d drainedPParamsSource) updates() (PParamUpdateReader, error) {
 	return r, nil
 }
 
-func (d drainedPParamsSource) markers() (SyncMarkerReader, error) {
+func (d setPParamsSource) markers() (SyncMarkerReader, error) {
 	r, ok := d.ls.readSet(nil).(SyncMarkerReader)
 	if !ok || d.ls.utxoSetFailed.Load() {
 		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
@@ -62,7 +62,7 @@ func (d drainedPParamsSource) markers() (SyncMarkerReader, error) {
 	return r, nil
 }
 
-func (d drainedPParamsSource) PParamsLoaded() (bool, error) {
+func (d setPParamsSource) PParamsLoaded() (bool, error) {
 	r, ok := d.ls.readSet(nil).(PParamsReader)
 	if !ok {
 		return false, nil
@@ -70,7 +70,7 @@ func (d drainedPParamsSource) PParamsLoaded() (bool, error) {
 	return r.PParamsLoaded()
 }
 
-func (d drainedPParamsSource) PParamsForEra(
+func (d setPParamsSource) PParamsForEra(
 	era uint,
 ) ([]models.PParams, error) {
 	r, err := d.pparams()
@@ -80,7 +80,7 @@ func (d drainedPParamsSource) PParamsForEra(
 	return r.PParamsForEra(era)
 }
 
-func (d drainedPParamsSource) PParamUpdatesLoaded() (bool, error) {
+func (d setPParamsSource) PParamUpdatesLoaded() (bool, error) {
 	r, ok := d.ls.readSet(nil).(PParamUpdateReader)
 	if !ok {
 		return false, nil
@@ -88,7 +88,7 @@ func (d drainedPParamsSource) PParamUpdatesLoaded() (bool, error) {
 	return r.PParamUpdatesLoaded()
 }
 
-func (d drainedPParamsSource) PParamUpdates(
+func (d setPParamsSource) PParamUpdates(
 	fn func(models.PParamUpdate) error,
 ) error {
 	r, err := d.updates()
@@ -98,7 +98,7 @@ func (d drainedPParamsSource) PParamUpdates(
 	return r.PParamUpdates(fn)
 }
 
-func (d drainedPParamsSource) SyncMarkersLoaded() (bool, error) {
+func (d setPParamsSource) SyncMarkersLoaded() (bool, error) {
 	r, ok := d.ls.readSet(nil).(SyncMarkerReader)
 	if !ok {
 		return false, nil
@@ -106,7 +106,7 @@ func (d drainedPParamsSource) SyncMarkersLoaded() (bool, error) {
 	return r.SyncMarkersLoaded()
 }
 
-func (d drainedPParamsSource) SyncMarker(name string) (string, bool, error) {
+func (d setPParamsSource) SyncMarker(name string) (string, bool, error) {
 	r, err := d.markers()
 	if err != nil {
 		return "", false, err
@@ -118,7 +118,7 @@ func (d drainedPParamsSource) SyncMarker(name string) (string, bool, error) {
 // proposals and sync markers for the reads it makes.
 func (ls *LedgerState) installPParamsSource() {
 	if ls.db != nil {
-		ls.db.SetPParamsSource(drainedPParamsSource{ls})
+		ls.db.SetPParamsSource(setPParamsSource{ls})
 	}
 }
 

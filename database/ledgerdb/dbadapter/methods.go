@@ -2674,15 +2674,6 @@ func (a Adapter) GetAccountsActiveAtSlot(
 		GetAccountsActiveAtSlot(stakeCredentials, slot, metaTxn(txn))
 }
 
-// EachRewardLiveStake lists the metadata store's reward_live_stake rows for
-// the drain's comparison.
-func (a Adapter) EachRewardLiveStake(
-	txn ledgerdb.Txn,
-	fn func(*models.RewardLiveStake) error,
-) error {
-	return a.db.EachRewardLiveStake(dbTxn(txn), fn)
-}
-
 func (a Adapter) MergeImportedPoolBlockCounts(
 	epoch uint64,
 	epochStartSlot uint64,

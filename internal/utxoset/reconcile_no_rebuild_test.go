@@ -46,7 +46,6 @@ func TestReconcileNeverRebuildsASetServingTheLedger(t *testing.T) {
 			set := openRecoverySet(t, utxoset.Config{})
 			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
-			set.ServeLedgerOnly()
 			if tc.ledgerTip.Slot < applied {
 				require.NoError(t, set.PruneHistory(applied))
 			}
@@ -76,12 +75,11 @@ func TestReconcileRefusesToRebuildAfterAFailedRewindOfASetServingTheLedger(
 ) {
 	t.Parallel()
 	{
-		set := openRecoverySet(t, utxoset.Config{Authoritative: true})
+		set := openRecoverySet(t, utxoset.Config{})
 		require.NoError(t, set.StartEmptyForTest())
 		applySlots(t, set, 6)
 		require.NoError(t, set.PruneHistory(5))
 		require.NoError(t, set.MarkUtxoSetFailed(2))
-		set.ServeLedgerOnly()
 		db := ledgerAt(t, slotPoint(6))
 		err := set.Reconcile(t.Context(), dbadapter.New(db), neverResume)
 		n, countErr := set.Count()

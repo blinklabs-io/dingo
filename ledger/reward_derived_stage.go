@@ -119,20 +119,6 @@ func (s stagingLedgerDB) derivedServed(
 	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardOutputs)
 }
 
-func samePoolOutput(a, b *models.RewardPoolOutput) bool {
-	return a.Epoch == b.Epoch && bytes.Equal(a.PoolKeyHash, b.PoolKeyHash) &&
-		a.OptimalReward == b.OptimalReward && a.TotalReward == b.TotalReward &&
-		a.LeaderReward == b.LeaderReward &&
-		a.LeaderRewardDeficit == b.LeaderRewardDeficit &&
-		a.MemberRewardTotal == b.MemberRewardTotal &&
-		a.OwnerStake == b.OwnerStake && a.Undistributed == b.Undistributed &&
-		a.Unspendable == b.Unspendable && a.CapturedSlot == b.CapturedSlot &&
-		a.BoundarySlot == b.BoundarySlot &&
-		(a.ApparentPerformance == nil) == (b.ApparentPerformance == nil) &&
-		(a.ApparentPerformance == nil ||
-			a.ApparentPerformance.Cmp(b.ApparentPerformance.Rat) == 0)
-}
-
 func (s stagingLedgerDB) GetRewardPoolOutputs(
 	epoch uint64,
 	txn ledgerdb.Txn,

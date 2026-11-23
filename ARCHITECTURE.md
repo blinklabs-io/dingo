@@ -3614,7 +3614,7 @@ Leios key lookups, registrations, effective registrations, active and
 retiring pools (`GetPoolsRetiringAtEpoch`, `GetActivePoolKeyHashes`,
 `GetActivePoolKeyHashesAtSlot`), relays, deposits and the retirement refunds)
 is answered from the set's pool states and certificate history
-(`ledger/drained_pools.go`), through the staged batches the read's
+(`ledger/pool_book.go`), through the staged batches the read's
 transaction sees, and never reaches the store; the database's own pool reads
 go through `database.PoolSource`.
 
@@ -4002,7 +4002,7 @@ service built without one, as the offline truncate builds it, only rolls the
 IndexerDB back: its reads fail with `indexer.ErrNoLedger` and it does not
 start. `mithril sync` in API storage mode imports
 the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
-and refuses to advance a complete split database.
+and refuses to advance a complete API node database.
 
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
 opens the second metadata store, in API mode, as a `database.Database` over
@@ -4894,7 +4894,7 @@ recovery record before that mutation. Startup combines the record with the
 live/backup directory state to compensate an incomplete swap or retain the
 activated external pair.
 
-A split snapshot's authenticated manifest describes a second provider-native
+An API node's snapshot manifest describes a second provider-native
 backup for IndexerDB. Live restore retains the original external IndexerDB
 alongside the original consensus metadata. For a released API snapshot, the
 live restore first verifies the staged API store, then adopts it with the

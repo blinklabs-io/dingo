@@ -29,7 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
-func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
+func (m *indexerMigration) migrateServer(ctx context.Context) (err error) {
 	deps, err := m.dependencies("api")
 	if err != nil {
 		return err
@@ -56,7 +56,7 @@ func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
 	if err != nil {
 		return fmt.Errorf("read the API database settings: %w", err)
 	}
-	if !m.cfg.SplitIndexer() &&
+	if !m.cfg.HasIndexerDB() &&
 		(settings == nil || settings.StorageMode == "core") {
 		return nil
 	}
@@ -130,7 +130,7 @@ func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
 	// The source is the released database itself, not the consensus
 	// namespace the configured selection names.
 	sourceSelections := m.selections()
-	sourceSelections.SplitIndexer = false
+	sourceSelections.IndexerDB = false
 	stores, err := internalplugins.ResolveStorage(
 		ctx,
 		sourceHost,
@@ -174,7 +174,7 @@ func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
 			return fmt.Errorf("load adoption tip block: %w", err)
 		}
 		selections := m.selections()
-		selections.SplitIndexer = true
+		selections.IndexerDB = true
 		if err := m.prepareCopy(ctx, source, selections, deps, m.cfg.DatabasePath, indexerdb.Tip{Slot: block.Slot, BlockNumber: block.Number, Hash: block.Hash}, epoch); err != nil {
 			return err
 		}
@@ -218,7 +218,7 @@ func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
 
 // markAdopted records on the IndexerDB that its consensus namespace is
 // complete, so a namespace lost later is refused rather than rebuilt.
-func (m *splitMigration) markAdopted(source metadata.MetadataStore) error {
+func (m *indexerMigration) markAdopted(source metadata.MetadataStore) error {
 	if err := source.SetSyncState(sqlstore.CoreCopyAdoptedKey, "1", nil); err != nil {
 		return fmt.Errorf("record the IndexerDB adoption: %w", err)
 	}
@@ -231,12 +231,12 @@ var ErrServerAPINotAdopted = errors.New(
 	"the configured database holds a released API store that has not been adopted as the IndexerDB",
 )
 
-// CheckServerAdopted refuses to open a split node over a released
+// CheckServerAdopted refuses to open an API node over a released
 // PostgreSQL or MySQL API store whose adoption has not completed. Opening it
 // would leave an empty consensus namespace beside an IndexerDB already at the
 // released tip. The dingo command adopts it at startup, before any store
 // opens; Node.Run does not. A store holds a released API store when it has a
-// tip and either no split layout latch, or a latch beside a consensus
+// tip and either no IndexerDB layout latch, or a latch beside a consensus
 // namespace an interrupted copy started. host registers the configured
 // provider and is stopped by the caller.
 func CheckServerAdopted(
@@ -289,10 +289,10 @@ func CheckServerAdopted(
 		"%w (%s tip at slot %d): start the dingo command once to adopt it, then start the node",
 		ErrServerAPINotAdopted, selection.Provider, tip.Point.Slot,
 	)
-	if gates["indexer_layout"] != config.IndexerLayoutSplit {
+	if gates["indexer_layout"] != config.IndexerLayoutIndexerDB {
 		return refuse
 	}
-	// A split IndexerDB the node built itself has a consensus namespace with
+	// An IndexerDB the node built itself has a consensus namespace with
 	// no copy cursors; an interrupted adoption leaves them.
 	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
 		return err

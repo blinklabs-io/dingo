@@ -14,10 +14,7 @@
 
 package nodesettings
 
-import (
-	"math/bits"
-	"strconv"
-)
+import "strconv"
 
 // Family names one group of ledger-state records the live UTxO set holds and
 // a v0.94.2 metadata store kept in SQL tables.
@@ -78,43 +75,6 @@ func Families() []Family {
 	out := make([]Family, 0, familyEnd)
 	for f := range familyEnd {
 		out = append(out, f)
-	}
-	return out
-}
-
-// FamilyMask is a set of families.
-type FamilyMask uint64
-
-// AllFamilies is the mask of every family this binary knows.
-func AllFamilies() FamilyMask {
-	return FamilyMask(1)<<familyEnd - 1
-}
-
-// Has reports whether f is in the mask.
-func (m FamilyMask) Has(f Family) bool {
-	return f < 64 && m&(FamilyMask(1)<<f) != 0
-}
-
-// With returns the mask with f added.
-func (m FamilyMask) With(f Family) FamilyMask {
-	if f >= 64 {
-		return m
-	}
-	return m | FamilyMask(1)<<f
-}
-
-// Contains reports whether every family of other is in m.
-func (m FamilyMask) Contains(other FamilyMask) bool {
-	return m&other == other
-}
-
-// Families lists the members in bit order.
-func (m FamilyMask) Families() []Family {
-	out := make([]Family, 0, bits.OnesCount64(uint64(m)))
-	for f := range Family(64) {
-		if m.Has(f) {
-			out = append(out, f)
-		}
 	}
 	return out
 }
