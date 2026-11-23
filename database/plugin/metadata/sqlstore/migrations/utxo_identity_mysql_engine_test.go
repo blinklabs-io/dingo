@@ -25,10 +25,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUtxoIdentityMySQLSwapResumesAfterRename leaves the migration on the
-// post-rename side of its atomic swap and requires a restart to finish without
-// dropping the migrated outputs or reusing the legacy autoincrement range.
-func TestUtxoIdentityMySQLSwapResumesAfterRename(t *testing.T) {
+// stopMySQLIdentitySwapAfterRename seeds a v60 database and interrupts the
+// v61 swap right after its atomic rename, leaving utxo_identity_legacy beside
+// the new utxo.
+func stopMySQLIdentitySwapAfterRename(t *testing.T) *assetSplitEngine {
+	t.Helper()
 	// Not t.Parallel: the MySQL engine fixtures create a fixed database name.
 	e := newMySQLAssetSplitEngine(t)
 	e.run(t, e.registry[:identityMigrationVersion-1])
@@ -54,23 +55,79 @@ func TestUtxoIdentityMySQLSwapResumesAfterRename(t *testing.T) {
 	require.ErrorIs(t, err, stop)
 	require.True(t, e.tableExists(t, "utxo_identity_legacy"))
 	require.False(t, e.tableExists(t, "utxo_identity"))
+	return e
+}
 
+// requireMySQLIdentitySwapResumes restarts the migration and requires it to
+// finish with the migrated outputs intact, the child foreign keys restored,
+// and the autoincrement counter at or above minNext.
+func requireMySQLIdentitySwapResumes(
+	t *testing.T,
+	e *assetSplitEngine,
+	minNext int64,
+) {
+	t.Helper()
 	require.NoError(t, (&migrations.Runner{
 		DB: e.db, Dialect: "mysql",
 		Registry: e.registry[:identityMigrationVersion],
 		Locker:   migrations.NewProcessLocker(),
-	}).Run(context.Background()), "restart after the atomic utxo rename")
+	}).Run(context.Background()), "restart after an interrupted swap")
 	require.False(t, e.tableExists(t, "utxo_identity"))
 	require.False(t, e.tableExists(t, "utxo_identity_legacy"))
 	require.Equal(t, 2, queryInt(t, e.db, "SELECT COUNT(*) FROM utxo"))
 	require.Equal(t, 2, queryInt(t, e.db,
 		"SELECT COUNT(*) FROM utxo u JOIN `transaction` t ON t.id = u.tx_id"))
+	require.Equal(t, 6, queryInt(t, e.db, `
+SELECT COUNT(*) FROM information_schema.referential_constraints
+WHERE constraint_schema = DATABASE() AND referenced_table_name = 'utxo'`))
+	require.Equal(t, 0, queryInt(t, e.db, `
+SELECT COUNT(*) FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'transaction'
+  AND column_name = 'slot'`))
 
 	var next int64
 	require.NoError(t, e.db.QueryRow(`
 SELECT auto_increment FROM information_schema.tables
 WHERE table_schema = DATABASE() AND table_name = 'utxo'`).Scan(&next))
-	require.GreaterOrEqual(t, next, int64(50))
+	require.GreaterOrEqual(t, next, minNext)
+}
+
+// TestUtxoIdentityMySQLSwapResumesAfterRename leaves the migration on the
+// post-rename side of its atomic swap and requires a restart to finish without
+// dropping the migrated outputs or reusing the legacy autoincrement range.
+func TestUtxoIdentityMySQLSwapResumesAfterRename(t *testing.T) {
+	e := stopMySQLIdentitySwapAfterRename(t)
+	requireMySQLIdentitySwapResumes(t, e, 50)
+}
+
+// TestUtxoIdentityMySQLSwapResumesWithoutUtxo covers a release that dropped
+// utxo before renaming the replacement: only utxo_identity remains.
+func TestUtxoIdentityMySQLSwapResumesWithoutUtxo(t *testing.T) {
+	e := stopMySQLIdentitySwapAfterRename(t)
+	require.NoError(t, execMySQLIdentity(t, e,
+		"RENAME TABLE `utxo` TO `utxo_identity`"))
+	require.NoError(t, execMySQLIdentity(t, e,
+		"DROP TABLE `utxo_identity_legacy`"))
+	require.NoError(t, execMySQLIdentity(t, e,
+		"ALTER TABLE `utxo_identity` AUTO_INCREMENT = 50"))
+	require.False(t, e.tableExists(t, "utxo"))
+
+	requireMySQLIdentitySwapResumes(t, e, 50)
+}
+
+// TestUtxoIdentityMySQLSwapResumesAfterCleanup covers a swap whose legacy
+// table cleanup committed before the migration cursor did: utxo is already
+// the replacement and neither utxo_identity nor utxo_identity_legacy remain.
+func TestUtxoIdentityMySQLSwapResumesAfterCleanup(t *testing.T) {
+	e := stopMySQLIdentitySwapAfterRename(t)
+	require.NoError(t, execMySQLIdentity(t, e,
+		"DROP TABLE `utxo_identity_legacy`"))
+	require.NoError(t, execMySQLIdentity(t, e,
+		"ALTER TABLE `utxo` AUTO_INCREMENT = 50"))
+	require.False(t, e.tableExists(t, "utxo_identity"))
+	require.False(t, e.tableExists(t, "utxo_identity_legacy"))
+
+	requireMySQLIdentitySwapResumes(t, e, 50)
 }
 
 func seedMySQLIdentityUpgradeRows(t *testing.T, e *assetSplitEngine) {
