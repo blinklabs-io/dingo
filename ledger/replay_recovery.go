@@ -2310,13 +2310,9 @@ func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
 		return rewindPoint
 	}
 	clamped := ledgerTip
-	// A blob-only transaction does not observe ctx, so a stopping ledger
-	// must not start the scan.
-	ctx := ls.lifecycleContext()
-	block, err := models.Block{}, ctx.Err()
-	if err == nil {
-		block, err = database.FirstBlockAtOrAfterSlot(ctx, ls.db, boundary)
-	}
+	block, err := database.FirstBlockAtOrAfterSlot(
+		ls.lifecycleContext(), ls.db, boundary,
+	)
 	if err == nil && block.Slot <= ledgerTip.Slot {
 		clamped = ocommon.Point{Slot: block.Slot, Hash: block.Hash}
 	} else if err != nil {
