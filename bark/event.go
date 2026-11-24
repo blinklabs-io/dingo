@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -164,6 +165,12 @@ func (h *eventHub) close() {
 // append assigns the next sequence to ev and wakes the subscribers.
 func (h *eventHub) append(ev *eventv1alpha1.Event) {
 	h.mu.Lock()
+	h.appendLocked(ev)
+	h.mu.Unlock()
+}
+
+// appendLocked is append for a caller that holds h.mu.
+func (h *eventHub) appendLocked(ev *eventv1alpha1.Event) {
 	h.last++
 	ev.Sequence = h.last
 	if ev.GetId() == "" {
@@ -178,7 +185,6 @@ func (h *eventHub) append(ev *eventv1alpha1.Event) {
 	h.ring[(h.last-1)%uint64(len(h.ring))] = ev
 	close(h.wake)
 	h.wake = make(chan struct{})
-	h.mu.Unlock()
 }
 
 // position returns the sequence of the newest event.
@@ -197,6 +203,17 @@ func (h *eventHub) oldestLocked() uint64 {
 	return h.last - size + 1
 }
 
+// lagged reports whether events after cursor have already left the ring.
+func (h *eventHub) lagged(cursor uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.laggedLocked(cursor)
+}
+
+func (h *eventHub) laggedLocked(cursor uint64) bool {
+	return cursor+1 < h.oldestLocked() && cursor < h.last
+}
+
 // read returns up to max matching events after cursor, the new cursor, and a
 // channel closed when more events arrive. lagged is true when events after
 // cursor have already left the ring.
@@ -207,7 +224,7 @@ func (h *eventHub) read(
 ) (out []*eventv1alpha1.Event, next uint64, lagged bool, wake <-chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cursor+1 < h.oldestLocked() && cursor < h.last {
+	if h.laggedLocked(cursor) {
 		return nil, cursor, true, nil
 	}
 	next = cursor
@@ -331,25 +348,34 @@ func (s *eventServiceHandler) Subscribe(
 	log := s.hub.logger.With("rpc", "Subscribe", "client", host)
 	log.Info("event subscription opened")
 	defer log.Info("event subscription closed")
+	lagErr := func() error {
+		log.Warn("event subscriber fell behind and was detached")
+		return connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("subscriber fell behind and was detached"),
+		)
+	}
+	guard := s.hub.guardSends(ctx)
+	defer guard.stop()
 
 	for {
 		events, next, lagged, wake := s.hub.read(cursor, match, 64)
 		if lagged {
-			log.Warn("event subscriber fell behind and was detached")
-			return connect.NewError(
-				connect.CodeResourceExhausted,
-				errors.New("subscriber fell behind and was detached"),
-			)
+			return lagErr()
 		}
 		cursor = next
-		for _, ev := range events {
-			if err := stream.Send(
-				&eventv1alpha1.SubscribeResponse{Event: ev},
-			); err != nil {
+		if len(events) > 0 {
+			if err := guard.begin(cursor, lagErr); err != nil {
 				return err
 			}
-		}
-		if len(events) > 0 {
+			for _, ev := range events {
+				if err := stream.Send(
+					&eventv1alpha1.SubscribeResponse{Event: ev},
+				); err != nil {
+					return guard.sendError(err, lagErr)
+				}
+			}
+			guard.end()
 			continue
 		}
 		select {
@@ -357,10 +383,7 @@ func (s *eventServiceHandler) Subscribe(
 		case <-ctx.Done():
 			return nil
 		case <-s.hub.closed:
-			return connect.NewError(
-				connect.CodeUnavailable,
-				errors.New("event service is shutting down"),
-			)
+			return errEventServiceClosing()
 		}
 	}
 }
@@ -468,6 +491,16 @@ func (s *eventServiceHandler) SubscribeWithAck(
 		}
 	}()
 
+	lagErr := func() error {
+		log.Warn("acknowledging subscriber fell out of the buffer")
+		return connect.NewError(
+			connect.CodeOutOfRange,
+			errors.New("subscriber fell behind the buffered events"),
+		)
+	}
+	guard := s.hub.guardSends(ctx)
+	defer guard.stop()
+
 	for {
 		if win.outstanding() >= s.hub.window {
 			timer := time.NewTimer(eventAckTimeout)
@@ -488,34 +521,31 @@ func (s *eventServiceHandler) SubscribeWithAck(
 				return nil
 			case <-s.hub.closed:
 				timer.Stop()
-				return connect.NewError(
-					connect.CodeUnavailable,
-					errors.New("event service is shutting down"),
-				)
+				return errEventServiceClosing()
 			}
 			continue
 		}
 		events, next, lagged, wake := s.hub.read(cursor, match, 64)
 		if lagged {
-			log.Warn("acknowledging subscriber fell out of the buffer")
-			return connect.NewError(
-				connect.CodeOutOfRange,
-				errors.New("subscriber fell behind the buffered events"),
-			)
+			return lagErr()
 		}
 		cursor = next
-		for _, ev := range events {
-			// Recorded before the send: the client may acknowledge the
-			// event before Send returns here.
-			sent.Store(ev.GetSequence())
-			win.add(ev.GetSequence())
-			if err := stream.Send(
-				&eventv1alpha1.SubscribeWithAckResponse{Event: ev},
-			); err != nil {
+		if len(events) > 0 {
+			if err := guard.begin(cursor, lagErr); err != nil {
 				return err
 			}
-		}
-		if len(events) > 0 {
+			for _, ev := range events {
+				// Recorded before the send: the client may acknowledge the
+				// event before Send returns here.
+				sent.Store(ev.GetSequence())
+				win.add(ev.GetSequence())
+				if err := stream.Send(
+					&eventv1alpha1.SubscribeWithAckResponse{Event: ev},
+				); err != nil {
+					return guard.sendError(err, lagErr)
+				}
+			}
+			guard.end()
 			continue
 		}
 		select {
@@ -525,12 +555,132 @@ func (s *eventServiceHandler) SubscribeWithAck(
 		case <-ctx.Done():
 			return nil
 		case <-s.hub.closed:
-			return connect.NewError(
-				connect.CodeUnavailable,
-				errors.New("event service is shutting down"),
-			)
+			return errEventServiceClosing()
 		}
 	}
+}
+
+func errEventServiceClosing() error {
+	return connect.NewError(
+		connect.CodeUnavailable,
+		errors.New("event service is shutting down"),
+	)
+}
+
+type responseControllerKey struct{}
+
+// newEventServiceHTTPHandler mounts the Event Service with each call's
+// http.ResponseController in its context, which sendGuard needs to end a
+// blocked send.
+func newEventServiceHTTPHandler(
+	h *eventServiceHandler,
+	opts ...connect.HandlerOption,
+) (string, http.Handler) {
+	path, handler := eventconnect.NewEventServiceHandler(h, opts...)
+	return path, http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(
+				r.Context(),
+				responseControllerKey{},
+				http.NewResponseController(w),
+			)
+			handler.ServeHTTP(w, r.WithContext(ctx))
+		},
+	)
+}
+
+const (
+	sendExpiredLagged int32 = iota + 1
+	sendExpiredClosing
+)
+
+// sendGuard ends a stream.Send that cannot usefully complete. A client that
+// stops reading blocks Send on HTTP/2 flow control, and the send loop then
+// never returns to its lag and shutdown checks. The guard makes those same
+// checks while a batch is in flight and, when one fires, expires the write so
+// the blocked Send fails. It adds no timeout: a client that is slow but still
+// within the ring is never cut off.
+type sendGuard struct {
+	hub *eventHub
+	rc  *http.ResponseController
+	// sending is the cursor after the batch in flight plus one, or zero
+	// between batches.
+	sending atomic.Uint64
+	expired atomic.Int32
+	done    chan struct{}
+}
+
+// guardSends starts a guard for one stream. Without a response controller in
+// ctx the guard still reports lag and shutdown at each batch, but cannot end a
+// Send that is already blocked.
+func (h *eventHub) guardSends(ctx context.Context) *sendGuard {
+	g := &sendGuard{hub: h, done: make(chan struct{})}
+	g.rc, _ = ctx.Value(responseControllerKey{}).(*http.ResponseController)
+	if g.rc != nil {
+		go g.watch(ctx)
+	}
+	return g
+}
+
+func (g *sendGuard) stop() { close(g.done) }
+
+// begin marks the batch ending at cursor as in flight. It is stored before
+// the checks below, and the watcher reads it after observing a change, so a
+// lag or close is seen by at least one of them.
+func (g *sendGuard) begin(cursor uint64, lagErr func() error) error {
+	g.sending.Store(cursor + 1)
+	select {
+	case <-g.hub.closed:
+		return errEventServiceClosing()
+	default:
+	}
+	if g.hub.lagged(cursor) {
+		return lagErr()
+	}
+	return nil
+}
+
+func (g *sendGuard) end() { g.sending.Store(0) }
+
+// sendError maps a failed Send to the reason the guard ended it, if any.
+func (g *sendGuard) sendError(err error, lagErr func() error) error {
+	switch g.expired.Load() {
+	case sendExpiredLagged:
+		return lagErr()
+	case sendExpiredClosing:
+		return errEventServiceClosing()
+	}
+	return err
+}
+
+func (g *sendGuard) watch(ctx context.Context) {
+	for {
+		g.hub.mu.Lock()
+		wake := g.hub.wake
+		g.hub.mu.Unlock()
+		if s := g.sending.Load(); s != 0 && g.hub.lagged(s-1) {
+			g.expire(sendExpiredLagged)
+			return
+		}
+		select {
+		case <-wake:
+		case <-g.hub.closed:
+			if g.sending.Load() != 0 {
+				g.expire(sendExpiredClosing)
+			}
+			return
+		case <-g.done:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (g *sendGuard) expire(reason int32) {
+	g.expired.Store(reason)
+	// A deadline in the past fails the pending write at once.
+	_ = g.rc.SetWriteDeadline(time.Unix(1, 0))
 }
 
 // ackWindow tracks the sequences delivered to an acknowledging subscriber

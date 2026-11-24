@@ -16,6 +16,7 @@ package bark
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,7 +67,7 @@ func newEventFixture(
 	hub := newEventHub(cfg)
 	hub.start()
 	mux := http.NewServeMux()
-	path, handler := eventconnect.NewEventServiceHandler(
+	path, handler := newEventServiceHTTPHandler(
 		&eventServiceHandler{hub: hub, publishEnabled: publish},
 	)
 	mux.Handle(path, handler)
@@ -345,6 +346,73 @@ func TestEventHubDetachesLaggingReader(t *testing.T) {
 	require.False(t, lagged)
 	require.Len(t, evs, 4)
 	require.Equal(t, uint64(10), next)
+}
+
+// A client that stops reading blocks the server's Send on flow control, so the
+// lag check at the top of the send loop is never reached again. The stream must
+// still be detached once the events after its position have left the ring.
+func TestEventSubscribeDetachesClientThatStopsReading(t *testing.T) {
+	t.Parallel()
+
+	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 64 }, false)
+	stream := openSubscribe(t, f, eventtype.PeerChurn)
+	appendBlockingBatch(f)
+	// The call returns with the first message, so the handler has read the
+	// batch and is sending it. Then move the ring past that batch.
+	stream.wait(t)
+	for range 200 {
+		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+	}
+	waitActive(t, f, 0)
+}
+
+// A stuck client must not hold shutdown either: closing the hub ends its
+// stream although Send is blocked.
+func TestEventSubscribeHubCloseEndsBlockedSend(t *testing.T) {
+	t.Parallel()
+
+	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 64 }, false)
+	stream := openSubscribe(t, f, eventtype.PeerChurn)
+	appendBlockingBatch(f)
+	stream.wait(t)
+	f.hub.close()
+	waitActive(t, f, 0)
+}
+
+// An acknowledging client that stops reading blocks Send the same way, and
+// must not hold shutdown either.
+func TestEventAckHubCloseEndsBlockedSend(t *testing.T) {
+	t.Parallel()
+
+	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 64 }, false)
+	a := openAck(t, f, "stuck", 0)
+	waitActive(t, f, 1)
+	appendBlockingBatch(f)
+	// One event received shows the handler is sending the batch; the rest
+	// cannot fit while the client does not read.
+	a.recv(t)
+	f.hub.close()
+	waitActive(t, f, 0)
+}
+
+// appendBlockingBatch fills a 64-slot ring with 1 MiB events under one lock,
+// so the handler reads them as a single batch. A client that does not read
+// cannot take 64 MiB, so Send blocks part-way through that batch, before the
+// handler can return to its lag check.
+func appendBlockingBatch(f *eventFixture) {
+	// Random bytes: the stream is gzip-compressed, so zeros would shrink to
+	// nothing and never fill the window.
+	blob := make([]byte, 1<<20)
+	_, _ = cryptorand.Read(blob)
+	payload := &anypb.Any{TypeUrl: "type.test/blob", Value: blob}
+	f.hub.mu.Lock()
+	defer f.hub.mu.Unlock()
+	for range 64 {
+		f.hub.appendLocked(&eventv1alpha1.Event{
+			EventType: eventtype.PeerChurn,
+			TypedData: payload,
+		})
+	}
 }
 
 type ackSession struct {
