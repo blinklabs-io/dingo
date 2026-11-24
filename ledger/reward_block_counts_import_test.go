@@ -32,8 +32,8 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 ) {
 	t.Parallel()
 
-	observed := stakeRewardApplicationForTest(t, false)
-	imported := stakeRewardApplicationForTest(t, true)
+	observed := stakeRewardApplicationForTest(t, false, 0, 0)
+	imported := stakeRewardApplicationForTest(t, true, 10, 10)
 
 	require.Len(t, observed.PoolOutputs, 1)
 	require.Len(t, imported.PoolOutputs, len(observed.PoolOutputs))
@@ -62,27 +62,43 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 
 // stakeRewardApplicationForTest computes the epoch 4 reward round twice over
 // the same state: once from the ten blocks the node itself applied in epoch 2,
-// and once with those blocks hidden behind a trust anchor and supplied instead
-// as the snapshot's imported counts for the same epoch.
+// and once with those observed rows dropped and the epoch's counts supplied
+// only by a snapshot import.
 func stakeRewardApplicationForTest(
 	t *testing.T,
 	fromImport bool,
+	importedBlocks, importedTotal uint64,
 ) *epochengine.StakeRewardApplication {
 	t.Helper()
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	if fromImport {
+		importer := fxImporter(t, db)
+		// The seed counted epoch 2's ten blocks as observed, and the live
+		// set keeps those rows whatever the snapshot imports. Drop them so
+		// the round can learn the epoch's blocks only from the import.
+		writer, ok := ls.config.UtxoSet.(importRowsWriter)
+		require.True(t, ok)
+		require.NoError(t, writer.ReplaceRewardBlocks(
+			map[uint64]RewardEpochBlocks{},
+		))
+		held, err := ls.rewardBlocksReader(nil).RewardBlocksEpoch(2, nil)
+		require.NoError(t, err)
+		require.Empty(t, held.Pools)
+		require.False(t, held.CountsKnown)
+
 		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey,
 			"199",
 			nil,
 		))
-		require.NoError(t, fxImporter(t, db).ReplaceImportedBlockCounts(
+		require.NoError(t, importer.ReplaceImportedBlockCounts(
 			2,
-			map[string]uint64{string(rewardCalcHash(0x4a)): 10},
-			10,
+			map[string]uint64{string(rewardCalcHash(0x4a)): importedBlocks},
+			importedTotal,
 			199,
 			nil,
 		))
+		require.NoError(t, importer.ImportRewardBlocks(t.Context(), 199))
 	}
 	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })

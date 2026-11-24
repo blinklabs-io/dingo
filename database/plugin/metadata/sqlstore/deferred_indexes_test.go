@@ -255,8 +255,7 @@ func TestBulkLoadDefersAddressAndScriptIndexes(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	names := []string{
-		"idx_utxo_address_address", "idx_utxo_address_order",
-		"idx_redeemer_script_position",
+		"idx_utxo_address_order", "idx_redeemer_script_position",
 	}
 
 	require.NoError(t, store.DropDeferredIndexesContext(t.Context()))
