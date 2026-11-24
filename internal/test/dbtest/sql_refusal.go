@@ -48,6 +48,17 @@ func (g *SQLRefusal) CheckStatement(query string) error {
 	return nil
 }
 
+// observe records query even before Arm or Record, and refuses it once armed.
+func (g *SQLRefusal) observe(query string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.refused = append(g.refused, query)
+	if g.refusing {
+		return ErrSQLRefused
+	}
+	return nil
+}
+
 // Arm makes the guard refuse every statement from here on.
 func (g *SQLRefusal) Arm() {
 	g.mu.Lock()

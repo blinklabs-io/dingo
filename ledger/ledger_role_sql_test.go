@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -25,8 +24,8 @@ import (
 )
 
 // The ledger applies blocks and rolls back against its block store and the
-// live UTxO set alone: with every statement on its metadata store refused,
-// both succeed and none was attempted.
+// live UTxO set alone: with SQLite refused in its data directory, both
+// succeed and no connection was attempted.
 func TestLedgerApplyAndRollbackIssueNoSQL(t *testing.T) {
 	t.Parallel()
 	guard := &dbtest.SQLRefusal{}
@@ -52,7 +51,7 @@ func TestLedgerApplyAndRollbackIssueNoSQL(t *testing.T) {
 
 // The ledger's node settings live in its data directory: opening a fresh
 // ledger database, reopening it, and running both settings phases record and
-// enforce them without a statement on the metadata store's settings tables.
+// enforce them without opening SQLite there.
 func TestLedgerNodeSettingsIssueNoSettingsTableSQL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -63,20 +62,6 @@ func TestLedgerNodeSettingsIssueNoSettingsTableSQL(t *testing.T) {
 		NetworkMagic:   1,
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
-	}
-	// The metadata store's own start reads the per-family state mask, which
-	// stays in its settings table: that one statement is not a settings
-	// read.
-	const maskRead = "SELECT value FROM node_settings_gate WHERE name = ?"
-	settingsSQL := func(guard *dbtest.SQLRefusal) []string {
-		var found []string
-		for _, statement := range guard.Statements() {
-			if strings.Contains(statement, "node_settings") &&
-				statement != maskRead {
-				found = append(found, statement)
-			}
-		}
-		return found
 	}
 	for _, open := range []string{"fresh", "reopened"} {
 		guard := &dbtest.SQLRefusal{}
@@ -92,7 +77,7 @@ func TestLedgerNodeSettingsIssueNoSettingsTableSQL(t *testing.T) {
 				"history_expiry_active": nodesettings.LatchOn,
 			},
 		), open)
-		require.Empty(t, settingsSQL(guard), open)
+		require.Empty(t, guard.Statements(), open)
 		gates, err := db.NodeSettingsGates(t.Context())
 		require.NoError(t, err, open)
 		require.Equal(t, "preprod", gates["network"], open)

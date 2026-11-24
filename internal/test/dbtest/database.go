@@ -159,7 +159,9 @@ type Options struct {
 	InMemoryMetadata bool
 
 	// StatementGuard, when set, vets every SQL statement the metadata
-	// store's connections run.
+	// store's connections run. The ledger's database has no metadata store,
+	// so for it the guard vets every SQLite connection opened on a file in
+	// Config.DataDir, which it then needs.
 	StatementGuard metadata.StatementGuard
 
 	// WrapImmutable, when set, passes the resolved ImmutableDB provider
@@ -307,6 +309,14 @@ func newDatabaseWithOptions(
 	}
 	// The ledger's database keeps no metadata store.
 	var metadataStore metadata.MetadataStore
+	if ledgerRole && opts.StatementGuard != nil {
+		if err := guardLedgerDir(
+			tb, config.DataDir, opts.StatementGuard,
+		); err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
+	}
 	if !ledgerRole {
 		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
 			context.Background(), host,
