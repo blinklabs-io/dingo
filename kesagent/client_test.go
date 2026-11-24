@@ -893,6 +893,80 @@ func TestClient_SignRejectsInvalidSignature(t *testing.T) {
 	require.ErrorContains(t, err, "failed KES signature verification")
 }
 
+func TestClient_SharedSignerAlreadySignedIsNotASignFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		shared           bool
+		refusal          string
+		wantSharedMarker bool
+		wantFailures     float64
+	}{
+		{
+			name:             "shared signer already signed",
+			shared:           true,
+			refusal:          "kesagent: a different header was already signed for this slot",
+			wantSharedMarker: true,
+		},
+		{
+			name:             "unshared signer already signed",
+			refusal:          "kesagent: a different header was already signed for this slot",
+			wantSharedMarker: true,
+			wantFailures:     1,
+		},
+		{
+			name:         "shared signer other refusal",
+			shared:       true,
+			refusal:      "kesagent: header slot below the last signed slot refused",
+			wantFailures: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, vkey, _ := testKESMaterial(t)
+			ln, sockPath := listenUnix(t)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				sendHello(t, conn, ModeSign)
+				var req SignRequest
+				if err := readFrame(conn, MaxSignFrameLen, &req); err != nil {
+					return
+				}
+				_ = writeFrame(conn, MaxSignFrameLen, SignResponse{
+					Type:   "sign_response",
+					Period: req.Period,
+					Error:  tc.refusal,
+				})
+			}()
+
+			metrics := NewMetrics(prometheus.NewRegistry())
+			client, err := NewClient(Config{
+				SocketPath:   sockPath,
+				Mode:         ModeSign,
+				KESVKey:      vkey,
+				SharedSigner: tc.shared,
+				Metrics:      metrics,
+			})
+			require.NoError(t, err)
+			defer client.Close()
+
+			_, err = client.Sign(0, []byte("header-bytes"))
+			require.ErrorIs(t, err, ErrAgentRefused)
+			require.Equal(t, tc.wantSharedMarker,
+				isSharedKESSlotAlreadySigned(err))
+			require.Equal(t, tc.wantFailures,
+				promtestutil.ToFloat64(metrics.signFailures))
+			require.Equal(t, tc.wantFailures,
+				promtestutil.ToFloat64(metrics.reconnectFailures))
+		})
+	}
+}
+
 // TestClient_SignTimeoutBounded proves a sign-mode round trip is bounded by
 // SignTimeout even when the agent never responds (P1: "sign round-trip
 // ignores SignTimeout").

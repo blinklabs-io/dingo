@@ -729,6 +729,11 @@
 #   # The agent profile to sign for, named when the agent admits a session.
 #   # An agent with one profile needs none.
 #   # shelleyKesAgentProfile: "pool-a"
+#   # When the same pool signs through this agent from several producers, set
+#   # this on every producer. A shared-agent producer forges only with a live
+#   # upstream, so a disconnected producer cannot take the agent's first
+#   # signature for a slot from a synced producer.
+#   # shelleyKesAgentShared: true
 #   # Or forge for several pools, each with its own keys and KES source
 #   # (replaces the shelley* settings above; YAML only, not with Leios
 #   # forging):
@@ -747,6 +752,7 @@
 #   #     shelleyOperationalCertificate: "/keys/pool-c/opcert.cert"
 #   #     shelleyKesAgentAddress: "kes-agent.example:3443"
 #   #     shelleyKesAgentProfile: "pool-c"
+#   #     shelleyKesAgentShared: true
 #   #   - shelleyVrfKey: "/keys/pool-d/vrf.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-d/opcert.cert"
 #   #     shelleyKesAgentAddress: "kes-agent.example:3443"

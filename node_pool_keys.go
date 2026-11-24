@@ -41,6 +41,7 @@ type producerKeys struct {
 	agentClientKeyFile    string
 	agentServerSPKISHA256 string
 	agentProfile          string
+	agentShared           bool
 }
 
 // poolKeySource loads and validates one pool's credentials. client and
@@ -77,6 +78,7 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
 		agentProfile:          p.ShelleyKESAgentProfile,
+		agentShared:           p.ShelleyKESAgentShared,
 	}
 }
 
@@ -125,6 +127,7 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
 			agentProfile:          n.config.shelleyKESAgentProfile,
+			agentShared:           n.config.shelleyKESAgentShared,
 		},
 		client:        &n.kesAgentClient,
 		cancel:        &n.kesAgentCancel,
@@ -501,6 +504,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 			SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 			KESVKey:           opCertKey.VKey,
 			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+			SharedSigner:      ks.keys.agentShared,
 			Logger:            ks.n.config.logger,
 			Metrics:           ks.metrics(),
 		})
@@ -514,6 +518,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		Profile:           ks.keys.agentProfile,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		SharedSigner:      ks.keys.agentShared,
 		OpCert:            opCertKey.RawCBOR,
 		SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 		Logger:            ks.n.config.logger,

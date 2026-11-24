@@ -1859,7 +1859,9 @@ not durably adopted:
   and did not turn into a block of its own on the chain after leader selection:
   a build, validation or adoption failure, a post-selection refusal, or an
   equal-slot alternative that lost. KES and tip safety refusals before leader
-  selection are excluded. It is not a count of leader slots that passed;
+  selection are excluded, and so is a slot a shared KES signer had already
+  signed for another producer, which moves neither this counter nor
+  `Forge_could_not_forge_int`. It is not a count of leader slots that passed;
   `dingo_leader_scheduled_slots_elapsed_total` is. When the ledger detects a
   slot battle it asks the forgers which one forged the local block
   (`ledger.SlotBattleOutcomeRecorder`, resolved by block hash from the slot
@@ -13483,11 +13485,17 @@ slot is not below its own, which `Chain.AddLocalBlock` then refuses
 `dingo_forge_selection_fallback_total` reports how slots whose selection was
 aborted ended, by `result`: `retried` when a later attempt in the same slot
 produced the adopted block, `empty` when the transaction-free fallback did,
-and `lost` when the slot produced no block at all. The first two are counted
+and `lost` when this node adopted no block for the slot. The first two are counted
 after local adoption rather than after the build, so a block that
-self-validation dropped or `AddBlock` rejected counts as `lost`.
+self-validation dropped or `AddBlock` rejected counts as `lost`. `lost` is
+decided by local adoption alone and takes no view of whether a peer produced a
+block for the slot.
 
 This vector covers aborted slots that reached a build, not every aborted slot.
+A slot whose transaction-free fallback meets a shared KES signer that has
+already signed the slot is a yield to the producer that signed it, not a loss,
+so it is counted on none of the three results either; it is reported as
+`shared_kes_yielded` on the forge timing line.
 An abort whose re-check is then refused by the tip gates above produces no
 block and is counted on none of the three results -- refusing before building
 is not a fallback outcome, and reporting one would credit or blame a path that
@@ -13498,7 +13506,9 @@ exception. A parent slot past the forged slot refuses on
 `errChainTipAheadOfSlot` and moves none of those three. What records it there
 is `cardano_node_metrics_Forge_could_not_forge_int`, which
 `checkAndForgeProduction` increments for every failed build before it asks
-whether the failure was a tip-gate refusal.
+whether the failure was a tip-gate refusal. The one failed build it does not
+count is a shared KES signer reporting that it already signed the slot, which
+is a yield rather than a failure.
 `TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
 reading: no fallback result, no slot battle, no stale-tip skip.
 
@@ -13620,8 +13630,9 @@ a transaction the block could actually have carried can end the pass.
 Each leader slot that reaches block production emits one `forge timing` log
 line, whatever becomes of it. It carries the slot, the `leader_check` and
 `pre_build` intervals, the `build` duration and the number of build
-`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, or `lost`, and
-an `adopted` boolean. `outcome` describes what production produced and
+`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, `lost`, or
+`shared_kes_yielded`, and an `adopted` boolean. `outcome` describes what
+production produced and
 `adopted` whether it reached the chain, so a block dropped by self-validation
 or rejected by `AddBlock` reads as `outcome=forged, adopted=false` rather than
 as a success. Reconstructing those intervals from block timestamps after the
@@ -13779,7 +13790,7 @@ policy-approved upstream target:
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 
-`dingo_forge_stale_tip_skip_total` carries a `reason` label with nine values:
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with ten values:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
@@ -13792,8 +13803,9 @@ policy-approved upstream target:
 | `unapplied_rival_at_leader_slot` | The primary chain tip already holds a block at this slot that the ledger has not applied, so forging would parent a block for slot S on a tip already at slot S. | current slot, applied tip slot, primary chain tip slot |
 | `eb_manifest_ahead` | The local tips alone looked fine; a corroborated Leios endorser block leads the applied tip by more than `forgeEndorserBlockStalenessSlots`, proving a ranking block exists at a slot whose header this node has not admitted. **Opt-in and off by default (0 = disabled)**, governed by that bound alone -- so this series stays at 0 unless an operator sets it. | applied tip slot, highest corroborated endorser-block slot |
 | `applied_tip_stale` | Local evidence trails the corroborated upstream target beyond `forgeUpstreamStalenessSlots`, or with a usable target the optional `forgeAppliedTipStalenessSlots` wall-clock bound fires. | `newestKnown`, upstream sync target, current slot |
+| `shared_kes_no_upstream` | A producer configured to share its KES signer has no live selected upstream, so it cannot establish a current parent before competing for the signer's first signature in the slot. | shared-signer configuration, upstream liveness |
 
-The nine reasons do not share one diagnosis, and reading them as if they did
+The ten reasons do not share one diagnosis, and reading them as if they did
 sends an operator to the wrong component. The ancestry and block-gap reasons
 compare local ledger state with the primary chain; peer height and endorser
 block reasons use corroborated network evidence:
@@ -13827,9 +13839,11 @@ block reasons use corroborated network evidence:
   refused the slot rather than the shared "ledger tip stale vs primary chain
   tip", and `stale_source` distinguishes the two bounds behind
   `applied_tip_stale`.
+- `shared_kes_no_upstream` means this producer cannot compare its parent with
+  a selected upstream before asking a signer shared with another producer.
 
-All nine count lost blocks rather than leader checks, but they do not establish
-leadership the same way. Eight are counted after leader selection has proven
+All ten count lost blocks rather than leader checks, but they do not establish
+leadership the same way. Nine are counted after leader selection has proven
 this node elected. `unapplied_rival_at_leader_slot` is refused *before* the
 leader check -- it is the one gate that can drop a scheduled leader slot
 without moving `Forge_node_is_leader`, `Forge_node_not_leader` or
@@ -14513,6 +14527,25 @@ implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
 which one it uses at startup (`KES agent link: TLS, pinned server key`,
 `TLS, verified by CA`, or `plain TCP`):
 
+When several producers for the same pool use that first-header-per-slot
+guard, every producer sets `--shelley-kes-agent-shared` (or
+`shelleyKesAgentShared`). A shared-agent forger requires a live upstream in
+the cycle's single tip reading. After it wins leader selection but before it
+builds or signs a block, it refuses the slot with
+`shared_kes_no_upstream` when no upstream is live. A disconnected producer
+therefore cannot consume the agent's first signature before a connected,
+synced producer. The setting is explicit because the signing protocol cannot
+tell a client whether another producer uses the same key. It defaults off, so
+an unshared producer retains the intentional ability to forge without a peer.
+When the agent reports that another header was already signed for the slot, a
+configured shared producer records a normal shared-signing yield rather than a
+failed forge or signing request: the forge timing outcome is
+`shared_kes_yielded`, and the slot moves neither
+`Forge_could_not_forge_int` nor `dingo_forge_missed_leader_slots_total`
+nor the signing failure counter. Every other refusal and signing error remains
+a failure. An unshared producer also retains the failure behavior for that
+refusal, because it indicates an unexpected competing header.
+
 - TLS 1.3 (the default). With `--shelley-kes-agent-server-spki-sha256`, the
   hex SHA-256 of the agent's server SubjectPublicKeyInfo, the agent is
   authenticated by that pin, compared in constant time during the handshake,
@@ -14709,8 +14742,10 @@ is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
 neither, since both need TLS. None of these four, nor
-`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
-than falling back to local-file or Unix-socket signing.
+`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a
+mistyped remote configuration is refused rather than falling back to
+local-file or Unix-socket signing. `shelleyKesAgentShared` is accepted only
+with a local or remote agent in sign mode.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.

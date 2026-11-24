@@ -264,6 +264,24 @@ func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
 		errs = append(errs, err)
 	}
 	errs = append(errs, validateRemoteKESAgent(p, prefix)...)
+	if p.ShelleyKESAgentShared {
+		mode := p.ShelleyKESAgentMode
+		if mode == "" {
+			switch {
+			case len(p.RemoteAgentAddresses()) > 0:
+				mode = "sign"
+			case p.ShelleyKESAgentSocket != "":
+				mode = "serve-key"
+			}
+		}
+		if mode != "sign" ||
+			(p.ShelleyKESAgentSocket == "" && len(p.RemoteAgentAddresses()) == 0) {
+			errs = append(errs, fmt.Errorf(
+				"%sshelleyKesAgentShared requires a KES agent in sign mode",
+				prefix,
+			))
+		}
+	}
 	if p.ShelleyOperationalCertificate == "" {
 		missing = append(missing, prefix+"shelleyOperationalCertificate")
 	}
@@ -290,7 +308,7 @@ func (c *Config) validateBlockProducerPools() []error {
 				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
 				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
 				"shelleyKesAgentServerSpkiSha256, shelleyKesAgentPlaintext and "+
-				"shelleyKesAgentProfile; set them in each pool",
+				"shelleyKesAgentProfile and shelleyKesAgentShared; set them in each pool",
 		))
 	}
 	opCerts := make(map[string]int, len(c.BlockProducerPools))
