@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package epochengine
 
 import (
 	"bytes"
@@ -23,13 +23,11 @@ import (
 	"maps"
 	"math"
 	"math/big"
-	"slices"
 	"sort"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -47,22 +45,22 @@ import (
 
 // The rollover stack consumes the application entry points below.
 
-var errRequiredStakeRewardBasisUnavailable = errors.New(
+var ErrRequiredStakeRewardBasisUnavailable = errors.New(
 	"required stake reward basis unavailable",
 )
 
-func (ls *LedgerState) applyStakeRewards(ctx context.Context,
+func (e *Engine) ApplyStakeRewards(ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 	validationOnly bool,
 ) error {
-	err := ls.applyStakeRewardUpdate(ctx, txn, newEpoch, boundarySlot)
+	err := e.applyStakeRewardUpdate(ctx, txn, newEpoch, boundarySlot)
 	if err == nil || (!errors.Is(err, rewards.ErrNegativeLeaderReward) &&
-		!errors.Is(err, errRequiredStakeRewardBasisUnavailable)) {
+		!errors.Is(err, ErrRequiredStakeRewardBasisUnavailable)) {
 		return err
 	}
-	haltErr := &rewardUpdateHaltError{err: err}
+	haltErr := &rewardUpdateHaltError{err: err, halt: e.config.HaltError}
 	if validationOnly {
 		// A validation-only tick runs the boundary speculatively inside a
 		// transaction its caller discards. The failure rejects that
@@ -70,26 +68,26 @@ func (ls *LedgerState) applyStakeRewards(ctx context.Context,
 		// stop the node or count as a skipped round.
 		return haltErr
 	}
-	ls.metrics.incSkippedStakeRewardRounds()
+	e.host.IncSkippedStakeRewardRounds()
 	// cardano-ledger fails this epoch boundary too, so no replay or retry
 	// gets past it: stop the pipeline and the node rather than restart.
-	ls.config.Logger.Error(
+	e.config.Logger.Error(
 		"stake reward update cannot be applied, stopping",
 		"component", "ledger",
 		"epoch", newEpoch,
 		"error", err,
 	)
-	if ls.config.FatalErrorFunc != nil {
-		ls.config.FatalErrorFunc(haltErr)
+	if e.config.FatalErrorFunc != nil {
+		e.config.FatalErrorFunc(haltErr)
 	}
 	return haltErr
 }
 
-// shouldApplyStakeRewardUpdate reports whether cardano-ledger's RUPD rule
+// ShouldApplyStakeRewardUpdate reports whether cardano-ledger's RUPD rule
 // could have started during the epoch being closed. RUPD runs only while
 // ticking a block, and slots through start + 4k/f are too early, so NEWEPOCH
 // sees no update when the epoch has no later block.
-func (ls *LedgerState) shouldApplyStakeRewardUpdate(
+func (e *Engine) ShouldApplyStakeRewardUpdate(
 	txn ledgerdb.Txn,
 	endedEpoch models.Epoch,
 ) (bool, error) {
@@ -104,12 +102,12 @@ func (ls *LedgerState) shouldApplyStakeRewardUpdate(
 			endedEpoch.EpochId,
 		)
 	}
-	stabilityWindow := ls.rewardUpdateStabilityWindow()
+	stabilityWindow := e.RewardUpdateStabilityWindow()
 	if stabilityWindow >= epochLength-1 {
 		return false, nil
 	}
 	startAfterSlot := endedEpoch.StartSlot + stabilityWindow
-	tip, err := ls.ledgerDB().GetTip(txn)
+	tip, err := e.ledgerDB().GetTip(txn)
 	if err != nil {
 		return false, fmt.Errorf(
 			"get tip for reward update epoch %d: %w",
@@ -124,7 +122,8 @@ func (ls *LedgerState) shouldApplyStakeRewardUpdate(
 // rewardUpdateHaltError is a reward update that cannot be applied at its
 // boundary. It is an errHaltLedgerPipeline, so the pipeline does not retry it.
 type rewardUpdateHaltError struct {
-	err error
+	err  error
+	halt error
 }
 
 func (e *rewardUpdateHaltError) Error() string {
@@ -132,10 +131,13 @@ func (e *rewardUpdateHaltError) Error() string {
 }
 
 func (e *rewardUpdateHaltError) Unwrap() []error {
-	return []error{e.err, errHaltLedgerPipeline}
+	if e.halt == nil {
+		return []error{e.err}
+	}
+	return []error{e.err, e.halt}
 }
 
-func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
+func (e *Engine) applyStakeRewardUpdate(ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -147,16 +149,16 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	// Byron performance epoch but still moves the pots; see
 	// applyFirstShelleyStakeRewardRound.
 	//
-	// Resolved through stakeRewardEpochsForApplication, the same helper the
-	// guarded path uses (calculateStakeRewardApplication,
-	// precomputedStakeRewardApplication). The two helpers agree from newEpoch
-	// 3 up; at newEpoch 1 and 2 stakeRewardEpochsForNewEpoch reports ok=false
+	// Resolved through StakeRewardEpochsForApplication, the same helper the
+	// guarded path uses (CalculateStakeRewardApplication,
+	// PrecomputedStakeRewardApplication). The two helpers agree from newEpoch
+	// 3 up; at newEpoch 1 and 2 StakeRewardEpochsForNewEpoch reports ok=false
 	// for being below 3 while the application path resolves a bootstrap round
 	// against performance epoch 0. Guarding on the narrower helper skipped
 	// exactly the rounds this guard exists to catch, and epochs 1 and 2 are
 	// inside the Byron prefix on every network this affects.
 	if newEpoch > 0 {
-		endedEpoch, err := ls.ledgerDB().GetEpoch(
+		endedEpoch, err := e.ledgerDB().GetEpoch(
 			newEpoch-1,
 			txn,
 		)
@@ -171,33 +173,33 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 			return nil
 		}
 	}
-	replay, err := ls.replaysPreviousStakeRewardRound(txn, newEpoch)
+	replay, err := e.ReplaysPreviousStakeRewardRound(txn, newEpoch)
 	if err != nil {
 		return err
 	}
 	if replay {
-		return ls.applyReplayedStakeRewardRound(
+		return e.applyReplayedStakeRewardRound(
 			ctx, txn, newEpoch, boundarySlot,
 		)
 	}
-	byronPerformance, err := ls.rewardPerformanceEpochIsByron(txn, newEpoch)
+	byronPerformance, err := e.rewardPerformanceEpochIsByron(txn, newEpoch)
 	if err != nil {
 		return err
 	}
 	if byronPerformance {
-		return ls.applyFirstShelleyStakeRewardRound(
+		return e.applyFirstShelleyStakeRewardRound(
 			ctx, txn, newEpoch, boundarySlot,
 		)
 	}
-	app, ok, err := ls.boundaryStakeRewardApplication(ctx,
+	app, ok, err := e.BoundaryStakeRewardApplication(ctx,
 		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
-		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
-			epochs, epochsOK := stakeRewardEpochsForApplication(newEpoch)
+		if errors.Is(err, ErrRewardStakeInputsUnrecoverable) {
+			epochs, epochsOK := StakeRewardEpochsForApplication(newEpoch)
 			if epochsOK {
-				return ls.classifyRewardStakeInputReconstructionError(
-					true, newEpoch, epochs.snapshot, err,
+				return e.classifyRewardStakeInputReconstructionError(
+					true, newEpoch, epochs.Snapshot, err,
 				)
 			}
 		}
@@ -206,28 +208,28 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	if !ok {
 		return nil
 	}
-	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+	return e.ApplyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
 // rewardPerformanceEpochIsByron reports whether the round applied at the
 // boundary into newEpoch has a Byron performance epoch, which has no pparams
 // or stake snapshot. Only the round of the first Shelley epoch does.
-func (ls *LedgerState) rewardPerformanceEpochIsByron(
+func (e *Engine) rewardPerformanceEpochIsByron(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 ) (bool, error) {
-	rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch)
+	rewardEpochs, ok := StakeRewardEpochsForApplication(newEpoch)
 	if !ok {
 		return false, nil
 	}
-	performanceEpoch, err := ls.ledgerDB().GetEpoch(
-		rewardEpochs.performance,
+	performanceEpoch, err := e.ledgerDB().GetEpoch(
+		rewardEpochs.Performance,
 		txn,
 	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"get reward performance epoch %d: %w",
-			rewardEpochs.performance,
+			rewardEpochs.Performance,
 			err,
 		)
 	}
@@ -238,16 +240,16 @@ func (ls *LedgerState) rewardPerformanceEpochIsByron(
 // applyFirstShelleyStakeRewardRound applies the update built during the first
 // Shelley epoch of a network that starts in Byron at the boundary into
 // newEpoch.
-func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
+func (e *Engine) applyFirstShelleyStakeRewardRound(ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	app, err := ls.firstShelleyStakeRewardApplication(txn, newEpoch)
+	app, err := e.firstShelleyStakeRewardApplication(txn, newEpoch)
 	if err != nil {
 		return err
 	}
-	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+	return e.ApplyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
 // firstShelleyStakeRewardApplication builds the round of the boundary into
@@ -257,12 +259,12 @@ func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 // pool performance and, under d >= 0.8, expands reserves with eta = 1.
 // Parameters come from the first Shelley epoch, the one whose prevPParams the
 // update was built under.
-func (ls *LedgerState) firstShelleyStakeRewardApplication(
+func (e *Engine) firstShelleyStakeRewardApplication(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
-) (*stakeRewardApplication, error) {
+) (*StakeRewardApplication, error) {
 	firstShelley := newEpoch - 1
-	pots, err := ls.ledgerDB().GetRewardAdaPots(
+	pots, err := e.ledgerDB().GetRewardAdaPots(
 		firstShelley, txn,
 	)
 	if err != nil {
@@ -271,7 +273,7 @@ func (ls *LedgerState) firstShelleyStakeRewardApplication(
 		)
 	}
 	if pots == nil {
-		if err := ls.requiredStakeRewardBasisUnavailable(
+		if err := e.RequiredStakeRewardBasisUnavailable(
 			true, newEpoch, "missing ADA pots", "pots_epoch", firstShelley,
 		); err != nil {
 			return nil, err
@@ -281,7 +283,7 @@ func (ls *LedgerState) firstShelleyStakeRewardApplication(
 			newEpoch,
 		)
 	}
-	pparams, params, err := ls.rewardParameters(
+	pparams, params, err := e.RewardParameters(
 		txn, firstShelley, firstShelley, pots,
 	)
 	if err != nil {
@@ -302,27 +304,27 @@ func (ls *LedgerState) firstShelleyStakeRewardApplication(
 			newEpoch, err,
 		)
 	}
-	suppressBootstrapStakeRewards(result)
-	return &stakeRewardApplication{
-		epochs: stakeRewardEpochs{
-			snapshot:    firstShelley,
-			performance: firstShelley,
-			pots:        firstShelley,
-			bootstrap:   true,
+	SuppressBootstrapStakeRewards(result)
+	return &StakeRewardApplication{
+		Epochs: StakeRewardEpochs{
+			Snapshot:    firstShelley,
+			Performance: firstShelley,
+			Pots:        firstShelley,
+			Bootstrap:   true,
 		},
-		pparams:          pparams,
-		params:           params,
-		pots:             pots,
-		totalRewardPot:   result.TotalRewardPot,
-		availableRewards: result.AvailableRewards,
-		undistributed:    result.Undistributed,
-		totalCirculation: result.TotalCirculation,
-		totalBlocks:      result.TotalBlocks,
-		rewardEfficiency: result.Efficiency,
+		Pparams:          pparams,
+		Params:           params,
+		Pots:             pots,
+		TotalRewardPot:   result.TotalRewardPot,
+		AvailableRewards: result.AvailableRewards,
+		Undistributed:    result.Undistributed,
+		TotalCirculation: result.TotalCirculation,
+		TotalBlocks:      result.TotalBlocks,
+		RewardEfficiency: result.Efficiency,
 	}, nil
 }
 
-// boundaryStakeRewardApplication resolves the reward round a boundary
+// BoundaryStakeRewardApplication resolves the reward round a boundary
 // applies. A round the per-pool precompute can split is taken from that
 // precompute: a finished one is accepted from pool-level reads, and an
 // unfinished one is completed from its cursor inside txn, reusing every chunk
@@ -330,30 +332,30 @@ func (ls *LedgerState) firstShelleyStakeRewardApplication(
 // bootstrap rounds and pre-Allegra rounds -- and rounds whose inputs are
 // missing use the single-pass calculation, which also reports a skipped
 // round.
-func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
+func (e *Engine) BoundaryStakeRewardApplication(ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
-) (*stakeRewardApplication, bool, error) {
-	round, ok, err := ls.resolveStakeRewardPrecomputeRoundInTxn(ctx,
+) (*StakeRewardApplication, bool, error) {
+	round, ok, err := e.ResolveStakeRewardPrecomputeRoundInTxn(ctx,
 		txn, newEpoch, boundarySlot, boundarySlot, false,
 	)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok || round == nil {
-		app, ok, err := ls.precomputedStakeRewardApplication(ctx,
+		app, ok, err := e.PrecomputedStakeRewardApplication(ctx,
 			txn, newEpoch, boundarySlot,
 		)
 		if err != nil || ok {
 			return app, ok, err
 		}
-		return ls.calculateStakeRewardApplication(ctx,
+		return e.CalculateStakeRewardApplication(ctx,
 			txn, newEpoch, boundarySlot, boundarySlot, true,
 		)
 	}
-	ldb := ls.ledgerDB()
-	cursor, _, err := ls.resumableRewardPrecomputeCursor(
+	ldb := e.ledgerDB()
+	cursor, _, err := e.ResumableRewardPrecomputeCursor(
 		ldb, txn, round,
 	)
 	if err != nil {
@@ -362,7 +364,7 @@ func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
 	if cursor == nil {
 		// A precompute written before the per-pool cursor existed carries
 		// no fingerprint; accept it when its rows still verify.
-		app, ok, err := ls.precomputedStakeRewardApplication(ctx,
+		app, ok, err := e.PrecomputedStakeRewardApplication(ctx,
 			txn, newEpoch, boundarySlot,
 		)
 		if err != nil || ok {
@@ -373,26 +375,26 @@ func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
 	if cursor != nil {
 		resumedFrom = cursor.CompletedPools
 	}
-	done, err := ls.stakeRewardPrecomputeChunksInTxn(ctx, txn, round, 0)
+	done, err := e.StakeRewardPrecomputeChunksInTxn(ctx, txn, round, 0)
 	if err != nil {
 		return nil, false, err
 	}
 	if !done {
 		return nil, false, fmt.Errorf(
 			"complete reward round for epoch %d: chunks did not finish",
-			round.epochs.snapshot,
+			round.Epochs.Snapshot,
 		)
 	}
-	if resumedFrom < len(round.poolInputs) {
-		ls.config.Logger.Info(
+	if resumedFrom < len(round.PoolInputs) {
+		e.config.Logger.Info(
 			"completed stake reward precompute at the epoch boundary",
 			"component", "ledger",
-			"reward_snapshot_epoch", round.epochs.snapshot,
+			"reward_snapshot_epoch", round.Epochs.Snapshot,
 			"pools_completed_in_background", resumedFrom,
-			"pool_count", len(round.poolInputs),
+			"pool_count", len(round.PoolInputs),
 		)
 	}
-	return ls.chunkedStakeRewardApplication(ctx, txn, round, boundarySlot)
+	return e.chunkedStakeRewardApplication(ctx, txn, round, boundarySlot)
 }
 
 // chunkedStakeRewardApplication builds the application for a finished
@@ -402,15 +404,15 @@ func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
 // registration may have changed since -- those with a registration
 // certificate from then to the boundary, and those a rollback restored --
 // are re-read, and their outputs and the totals corrected.
-func (ls *LedgerState) chunkedStakeRewardApplication(
+func (e *Engine) chunkedStakeRewardApplication(
 	ctx context.Context,
 	txn ledgerdb.Txn,
-	round *stakeRewardPrecomputeRound,
+	round *StakeRewardPrecomputeRound,
 	boundarySlot uint64,
-) (*stakeRewardApplication, bool, error) {
-	ldb := ls.ledgerDB()
-	cursor, err := loadRewardPrecomputeCursor(
-		ldb, txn, round.epochs.snapshot,
+) (*StakeRewardApplication, bool, error) {
+	ldb := e.ledgerDB()
+	cursor, err := LoadRewardPrecomputeCursor(
+		ldb, txn, round.Epochs.Snapshot,
 	)
 	if err != nil {
 		return nil, false, err
@@ -418,87 +420,89 @@ func (ls *LedgerState) chunkedStakeRewardApplication(
 	if cursor == nil || !cursor.Done {
 		return nil, false, fmt.Errorf(
 			"reward round for epoch %d has no finished cursor",
-			round.epochs.snapshot,
+			round.Epochs.Snapshot,
 		)
 	}
-	poolOutputs, err := ldb.GetRewardPoolOutputs(round.epochs.snapshot, txn)
+	poolOutputs, err := ldb.GetRewardPoolOutputs(round.Epochs.Snapshot, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get reward pool outputs for epoch %d: %w",
-			round.epochs.snapshot, err,
+			round.Epochs.Snapshot, err,
 		)
 	}
-	effective, unspendable, err := ls.recheckRoundEligibility(ctx,
+	effective, unspendable, err := e.recheckRoundEligibility(ctx,
 		txn, round, cursor.RollbackSeq, boundarySlot, poolOutputs,
 		cursor.EffectiveRewards, cursor.UnspendableRewards,
 	)
 	if err != nil {
 		return nil, false, err
 	}
-	pparams, _, err := ls.rewardParameters(
-		txn, round.epochs.performance, round.epochs.pots, round.pots,
+	pparams, _, err := e.RewardParameters(
+		txn, round.Epochs.Performance, round.Epochs.Pots, round.Pots,
 	)
 	if err != nil {
 		return nil, false, err
 	}
 	availableRewards, err := rewardAvailableRewards(
-		round.totals.TotalRewardPot, round.params,
+		round.Totals.TotalRewardPot, round.Params,
 	)
 	if err != nil {
 		return nil, false, err
 	}
-	accounted, overflow := addRewardUint64(effective, unspendable)
+	accounted, overflow := AddRewardUint64(effective, unspendable)
 	if overflow || accounted > availableRewards {
 		return nil, false, fmt.Errorf(
 			"precomputed rewards exceed available pot: effective=%d unspendable=%d available=%d",
-			effective, unspendable, availableRewards,
+			effective,
+			unspendable,
+			availableRewards,
 		)
 	}
-	snapshot := round.rewardSnapshot
-	return &stakeRewardApplication{
-		epochs:                   round.epochs,
-		pparams:                  pparams,
-		params:                   round.params,
-		pots:                     round.pots,
-		poolOutputs:              poolOutputs,
-		likelihoodPoolInputs:     round.poolInputs,
-		likelihoodBlockCounts:    round.blockCounts,
-		totalRewardPot:           round.totals.TotalRewardPot,
-		availableRewards:         availableRewards,
-		effectiveRewards:         effective,
-		unspendable:              unspendable,
-		undistributed:            availableRewards - accounted,
-		totalsFinal:              true,
-		deferCredits:             true,
-		totalCirculation:         round.totals.TotalCirculation,
-		totalBlocks:              round.totalBlocks,
-		rewardEfficiency:         round.totals.Efficiency,
-		precomputed:              true,
-		snapshotCapturedSlot:     snapshot.CapturedSlot,
-		snapshotBoundarySlot:     snapshot.BoundarySlot,
-		snapshotEpochNonce:       snapshot.EpochNonce,
-		snapshotTotalActiveStake: snapshot.TotalActiveStake,
-		snapshotTotalPoolCount:   snapshot.TotalPoolCount,
-		snapshotTotalDelegators:  snapshot.TotalDelegators,
-		snapshotProtocolVersion:  snapshot.ProtocolVersion,
+	snapshot := round.RewardSnapshot
+	return &StakeRewardApplication{
+		Epochs:                   round.Epochs,
+		Pparams:                  pparams,
+		Params:                   round.Params,
+		Pots:                     round.Pots,
+		PoolOutputs:              poolOutputs,
+		LikelihoodPoolInputs:     round.PoolInputs,
+		LikelihoodBlockCounts:    round.BlockCounts,
+		TotalRewardPot:           round.Totals.TotalRewardPot,
+		AvailableRewards:         availableRewards,
+		EffectiveRewards:         effective,
+		Unspendable:              unspendable,
+		Undistributed:            availableRewards - accounted,
+		TotalsFinal:              true,
+		DeferCredits:             true,
+		TotalCirculation:         round.Totals.TotalCirculation,
+		TotalBlocks:              round.TotalBlocks,
+		RewardEfficiency:         round.Totals.Efficiency,
+		Precomputed:              true,
+		SnapshotCapturedSlot:     snapshot.CapturedSlot,
+		SnapshotBoundarySlot:     snapshot.BoundarySlot,
+		SnapshotEpochNonce:       snapshot.EpochNonce,
+		SnapshotTotalActiveStake: snapshot.TotalActiveStake,
+		SnapshotTotalPoolCount:   snapshot.TotalPoolCount,
+		SnapshotTotalDelegators:  snapshot.TotalDelegators,
+		SnapshotProtocolVersion:  snapshot.ProtocolVersion,
 	}, true, nil
 }
 
 // recheckRoundEligibility re-reads registration for the credentials whose
 // outputs' Spendable flags may be stale, persists every corrected output and
 // pool output, and returns the corrected effective and unspendable totals.
-func (ls *LedgerState) recheckRoundEligibility(
+func (e *Engine) recheckRoundEligibility(
 	ctx context.Context,
 	txn ledgerdb.Txn,
-	round *stakeRewardPrecomputeRound,
+	round *StakeRewardPrecomputeRound,
 	cursorSeq uint64,
 	boundarySlot uint64,
 	poolOutputs []*models.RewardPoolOutput,
 	effective, unspendable uint64,
 ) (uint64, uint64, error) {
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	changed, err := ldb.GetStakeCredentialsWithRegistrationEvents(
-		round.pots.CapturedSlot, boundarySlot, txn,
+		round.Pots.CapturedSlot, boundarySlot, txn,
 	)
 	if err != nil {
 		return 0, 0, err
@@ -511,12 +515,12 @@ func (ls *LedgerState) recheckRoundEligibility(
 	// rollback restored any registration since the round began, which the
 	// credentials a rollback restored no longer list.
 	var byCredential map[string][]*models.RewardAccountOutput
-	seq, err := ls.rewardRollbackSeq(txn)
+	seq, err := e.rewardRollbackSeq(txn)
 	if err != nil {
 		return 0, 0, err
 	}
 	if seq != cursorSeq {
-		all, err := ldb.GetRewardAccountOutputs(round.epochs.snapshot, txn)
+		all, err := ldb.GetRewardAccountOutputs(round.Epochs.Snapshot, txn)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -571,7 +575,7 @@ func (ls *LedgerState) recheckRoundEligibility(
 		if !ok {
 			var err error
 			outputs, err = ldb.GetRewardAccountOutputsForEligibility(
-				[]uint64{round.epochs.snapshot}, ref.Tag, ref.Key, txn,
+				[]uint64{round.Epochs.Snapshot}, ref.Tag, ref.Key, txn,
 			)
 			if err != nil {
 				return 0, 0, err
@@ -644,54 +648,50 @@ const rewardRecheckBatch = 10_000
 
 // rewardRollbackSeq returns the live set's durable rollback counter, zero
 // when no set keeps the derived reward rows.
-func (ls *LedgerState) rewardRollbackSeq(txn ledgerdb.Txn) (uint64, error) {
-	r := ls.rewardDerivedReader(txn)
-	if r == nil {
-		return 0, nil
-	}
-	return r.RewardRollbackSeq()
+func (e *Engine) rewardRollbackSeq(txn ledgerdb.Txn) (uint64, error) {
+	return e.host.RewardRollbackSeq(txn)
 }
 
-type stakeRewardApplication struct {
-	precomputeCursor rewardPrecomputeCursor
-	pparams          lcommon.ProtocolParameters
-	params           rewards.Parameters
-	pots             *models.RewardAdaPots
+type StakeRewardApplication struct {
+	PrecomputeCursor RewardPrecomputeCursor
+	Pparams          lcommon.ProtocolParameters
+	Params           rewards.Parameters
+	Pots             *models.RewardAdaPots
 	// replayBaseline marks a round replayed at a later boundary (see
 	// reward_late_first_block.go). The round's inputs come from pots; its
 	// deltas apply to replayBaseline, the pots at that boundary.
-	replayBaseline        *models.RewardAdaPots
-	poolOutputs           []*models.RewardPoolOutput
-	accountOutputs        []*models.RewardAccountOutput
-	likelihoodPoolInputs  []*models.RewardPoolInput
-	likelihoodBlockCounts map[string]uint64
+	ReplayBaseline        *models.RewardAdaPots
+	PoolOutputs           []*models.RewardPoolOutput
+	AccountOutputs        []*models.RewardAccountOutput
+	LikelihoodPoolInputs  []*models.RewardPoolInput
+	LikelihoodBlockCounts map[string]uint64
 	// reconstructedStakeInputs carries retention-pruned per-credential rows
 	// from the calculation transaction to the transaction that owns the
 	// resulting application. The async precompute calculation is read-only, so
 	// only its guarded write phase may persist these rows. The synchronous path
 	// persists them in the same write transaction that applies the rewards.
-	reconstructedStakeInputs []*models.RewardStakeInput
-	epochs                   stakeRewardEpochs
-	totalRewardPot           uint64
-	availableRewards         uint64
-	effectiveRewards         uint64
-	undistributed            uint64
-	unspendable              uint64
+	ReconstructedStakeInputs []*models.RewardStakeInput
+	Epochs                   StakeRewardEpochs
+	TotalRewardPot           uint64
+	AvailableRewards         uint64
+	EffectiveRewards         uint64
+	Undistributed            uint64
+	Unspendable              uint64
 	// negativeLeaderRewards and unspendableDeficit carry the negative leader
 	// rewards of a CIP-50 round (see rewards.PoolReward.LeaderRewardDeficit).
 	// The output tables hold only non-negative amounts, so these exist only
 	// on a freshly calculated application: the precompute declines such a
 	// round and reuse of persisted outputs rejects one.
-	negativeLeaderRewards []rewards.NegativeLeaderReward
-	unspendableDeficit    uint64
-	precomputed           bool
-	outputsUpdated        bool
+	NegativeLeaderRewards []rewards.NegativeLeaderReward
+	UnspendableDeficit    uint64
+	Precomputed           bool
+	OutputsUpdated        bool
 	// totalsFinal marks effectiveRewards, unspendable and undistributed as
 	// already derived, for an application that carries no account outputs.
-	totalsFinal bool
+	TotalsFinal bool
 	// deferCredits leaves the round's account credits to the pending-round
 	// fold (reward_credit_pending.go) instead of the boundary transaction.
-	deferCredits bool
+	DeferCredits bool
 	// totalCirculation, totalBlocks and rewardEfficiency record the global
 	// reward-round inputs that scale every pool's reward by the same factor,
 	// so a uniform network-wide shortfall can be attributed to the input that
@@ -701,99 +701,87 @@ type stakeRewardApplication struct {
 	// -- which is why a block-count undercount cannot produce a uniform
 	// shortfall and the pots and snapshot totals must be logged to tell the
 	// remaining candidates apart.
-	totalCirculation uint64
-	totalBlocks      uint64
-	rewardEfficiency *big.Rat
+	TotalCirculation uint64
+	TotalBlocks      uint64
+	RewardEfficiency *big.Rat
 	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
 	// populated only at application time when the delegator-inactivity gate is
 	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
 	// StakeCredentialRef.MapKey() values for reward-account credentials that are
-	// expired as of epochs.snapshot -- the same snapshot epoch Task 8 used to
+	// expired as of epochs.Snapshot -- the same snapshot epoch Task 8 used to
 	// build the reward basis. An output whose credential is in this set is
-	// neither credited (applyStakeRewardApplication) nor counted toward
+	// neither credited (ApplyStakeRewardApplication) nor counted toward
 	// effective/unspendable (deriveStakeRewardApplicationTotals), so its amount
 	// falls through to undistributed and is refunded to reserves.
 	// applyGuardedFlagToAccountOutputs persists this same membership test onto
 	// each output's Guarded column before it is saved, so a reader of
 	// reward_account_output does not need to reconstruct this set.
-	guardedRewardCredentials map[string]struct{}
+	GuardedRewardCredentials map[string]struct{}
 	// snapshotCapturedSlot and snapshotBoundarySlot record the reward_snapshot
 	// row's own captured/boundary slots as observed by
-	// calculateStakeRewardApplication. Callers that compute this application
+	// CalculateStakeRewardApplication. Callers that compute this application
 	// in a read-only transaction and persist it later in a separate write
 	// transaction (see precomputeStakeRewardsAfterEpochTransition) use these
 	// to re-verify the snapshot has not moved (e.g. via a rollback) before
-	// writing; see stakeRewardPrecomputeSnapshotGuardOK.
-	snapshotCapturedSlot uint64
-	snapshotBoundarySlot uint64
+	// writing; see StakeRewardPrecomputeSnapshotGuardOK.
+	SnapshotCapturedSlot uint64
+	SnapshotBoundarySlot uint64
 	// snapshotEpochNonce and the snapshot* totals below record the rest of the
 	// reward_snapshot row's content so the deferred-persist guard can reject a
 	// same-slot snapshot whose content changed (a rollback that deletes and
 	// re-derives the snapshot keeps deterministic slots but can alter its
 	// contents). EpochNonce is fork-specific randomness and acts as the
 	// content fingerprint; the totals are cheap belt-and-suspenders checks.
-	snapshotEpochNonce       []byte
-	snapshotTotalActiveStake types.Uint64
-	snapshotTotalPoolCount   uint64
-	snapshotTotalDelegators  uint64
-	snapshotProtocolVersion  uint
+	SnapshotEpochNonce       []byte
+	SnapshotTotalActiveStake types.Uint64
+	SnapshotTotalPoolCount   uint64
+	SnapshotTotalDelegators  uint64
+	SnapshotProtocolVersion  uint
 	// rewardInputGeneration covers every rollback-sensitive input that is read
 	// outside the eventual write transaction: performance blocks, ADA pots,
 	// protocol state, and account certificate history. A rollback brackets its
 	// mutations with generation changes, so the write guard can reject work
 	// calculated before or during that rollback even when the Mark snapshot did
 	// not change.
-	rewardInputGeneration       uint64
-	rewardInputGenerationSource *atomic.Uint64
-	rewardInputRollbackActive   *atomic.Int64
-}
-
-type stakeRewardPrecomputeRetry struct {
-	epochEvent event.EpochTransitionEvent
-	cutoffSlot uint64
-	generation uint64
-}
-
-type rewardPrecomputeRollbackSnapshot struct {
-	pending      *event.EpochTransitionEvent
-	retry        *stakeRewardPrecomputeRetry
-	committed    bool
-	reloadFailed bool
+	RewardInputGeneration       uint64
+	RewardInputGenerationSource *atomic.Uint64
+	RewardInputRollbackActive   *atomic.Int64
 }
 
 // authoritative distinguishes boundary application from the opportunistic
 // precompute that runs the same calculation ahead of it. A precompute that
 // finds an input missing remains retryable because the boundary reads the
 // inputs again.
-func (ls *LedgerState) calculateStakeRewardApplication(
+func (e *Engine) CalculateStakeRewardApplication(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
 	authoritative bool,
-) (*stakeRewardApplication, bool, error) {
-	rewardInputGeneration := ls.rewardInputGeneration.Load()
-	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
+) (*StakeRewardApplication, bool, error) {
+	guards := e.host.RewardInputGuards()
+	rewardInputGeneration := guards.generation()
+	epochs, ok := StakeRewardEpochsForApplication(newEpoch)
 	if !ok {
 		return nil, false, nil
 	}
 
-	rewardSnapshotEpoch := epochs.snapshot
-	performanceEpoch := epochs.performance
-	potsEpoch := epochs.pots
-	if err := ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch); err != nil {
-		if errors.Is(err, errRewardStakeInputsNotReady) && !authoritative {
+	rewardSnapshotEpoch := epochs.Snapshot
+	performanceEpoch := epochs.Performance
+	potsEpoch := epochs.Pots
+	if err := e.EnsureRewardStakeInputsReady(txn, rewardSnapshotEpoch); err != nil {
+		if errors.Is(err, ErrRewardStakeInputsNotReady) && !authoritative {
 			return nil, false, nil
 		}
-		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
-			return nil, false, ls.classifyRewardStakeInputReconstructionError(
+		if errors.Is(err, ErrRewardStakeInputsUnrecoverable) {
+			return nil, false, e.classifyRewardStakeInputReconstructionError(
 				authoritative, newEpoch, rewardSnapshotEpoch, err,
 			)
 		}
 		return nil, false, err
 	}
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	pots, err := ldb.GetRewardAdaPots(potsEpoch, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
@@ -803,7 +791,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if pots == nil {
-		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+		return nil, false, e.RequiredStakeRewardBasisUnavailable(
 			authoritative,
 			newEpoch,
 			"missing ADA pots",
@@ -838,7 +826,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 				reason = "imported reward basis seeding failed: " + failure
 			}
 		}
-		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+		return nil, false, e.RequiredStakeRewardBasisUnavailable(
 			authoritative,
 			newEpoch,
 			reason,
@@ -888,13 +876,16 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// retention window.
 	var reconstructedStakeInputs []*models.RewardStakeInput
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
-		rebuilt, rebuildErr := ls.rebuildPrunedRewardStakeInputs(
+		rebuilt, rebuildErr := e.RebuildPrunedRewardStakeInputs(
 			ldb, txn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
 		)
 		if rebuildErr != nil {
-			if errors.Is(rebuildErr, errRewardStakeInputsUnrecoverable) {
-				return nil, false, ls.classifyRewardStakeInputReconstructionError(
-					authoritative, newEpoch, rewardSnapshotEpoch, rebuildErr,
+			if errors.Is(rebuildErr, ErrRewardStakeInputsUnrecoverable) {
+				return nil, false, e.classifyRewardStakeInputReconstructionError(
+					authoritative,
+					newEpoch,
+					rewardSnapshotEpoch,
+					rebuildErr,
 				)
 			}
 			return nil, false, fmt.Errorf(
@@ -906,7 +897,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		reconstructedStakeInputs = rebuilt
 	}
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
-		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+		return nil, false, e.RequiredStakeRewardBasisUnavailable(
 			authoritative,
 			newEpoch,
 			"reward stake inputs for the snapshot epoch are no longer retained",
@@ -917,7 +908,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 
-	pparams, params, err := ls.rewardParameters(
+	pparams, params, err := e.RewardParameters(
 		txn,
 		performanceEpoch,
 		potsEpoch,
@@ -933,7 +924,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	var totalBlocks uint64
 	blockCountsKnown := true
 	if newEpoch > 1 {
-		blockCounts, totalBlocks, blockCountsKnown, err = ls.rewardBlockCounts(
+		blockCounts, totalBlocks, blockCountsKnown, err = e.RewardBlockCounts(
 			ldb,
 			txn,
 			performanceEpoch,
@@ -950,7 +941,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// instead, so the shortfall is visible here rather than at the first
 	// withdrawal the node then rejects.
 	if !blockCountsKnown {
-		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+		return nil, false, e.RequiredStakeRewardBasisUnavailable(
 			authoritative,
 			newEpoch,
 			"no block counts for the performance epoch: it ended below the"+
@@ -959,12 +950,12 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			performanceEpoch,
 		)
 	}
-	prefilterSlot, err := ls.rewardPrefilterSlot(ldb, txn, potsEpoch)
+	prefilterSlot, err := e.RewardPrefilterSlot(ldb, txn, potsEpoch)
 	if err != nil {
 		return nil, false, err
 	}
 	if params.RequiresRewardPrefilter() && capturedSlot < prefilterSlot {
-		ls.config.Logger.Debug(
+		e.config.Logger.Debug(
 			"skipping stake reward precompute before reward prefilter slot",
 			"component", "ledger",
 			"new_epoch", newEpoch,
@@ -972,13 +963,13 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			"captured_slot", capturedSlot,
 			"prefilter_slot", prefilterSlot,
 		)
-		ls.deferStakeRewardPrecompute(
+		e.host.DeferStakeRewardPrecompute(
 			newEpoch, prefilterSlot, rewardInputGeneration,
 		)
 		return nil, false, nil
 	}
 
-	snapshot, err := ls.rewardCalculatorSnapshot(ctx,
+	snapshot, err := e.rewardCalculatorSnapshot(ctx,
 		ldb,
 		txn,
 		rewardSnapshot,
@@ -1010,12 +1001,12 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 
 	// Prototype test networks warm Set/Go from genesis staking. Standard
 	// cardano-node leaves Go empty until the snapshot pipeline advances.
-	genesisConfig := ls.config.CardanoNodeConfig
-	warmGenesis := ls.config.WarmGenesisStake && genesisConfig != nil &&
+	genesisConfig := e.config.CardanoNodeConfig
+	warmGenesis := e.config.WarmGenesisStake && genesisConfig != nil &&
 		genesisConfig.TestShelleyHardForkAtEpoch != nil &&
 		*genesisConfig.TestShelleyHardForkAtEpoch == 0
-	if epochs.bootstrap && !warmGenesis {
-		suppressBootstrapStakeRewards(result)
+	if epochs.Bootstrap && !warmGenesis {
+		SuppressBootstrapStakeRewards(result)
 	}
 
 	poolOutputs := rewardPoolOutputs(
@@ -1030,78 +1021,78 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		boundarySlot,
 		result.AccountRewards,
 	)
-	cursor := rewardPrecomputeCursor{
+	cursor := RewardPrecomputeCursor{
 		FormatVersion: rewardPrecomputeCursorFormatVersion,
-		SnapshotEpoch: epochs.snapshot, Generation: rewardInputGeneration,
-		InputFingerprint: ls.rewardPrecomputeInputFingerprint(
-			&stakeRewardPrecomputeRound{
-				newEpoch: newEpoch, epochs: epochs, boundarySlot: boundarySlot,
-				pots: pots, rewardSnapshot: rewardSnapshot, poolInputs: poolInputs,
-				params: params, blockCounts: blockCounts, totalBlocks: totalBlocks,
-				prefilterSlot: prefilterSlot,
+		SnapshotEpoch: epochs.Snapshot, Generation: rewardInputGeneration,
+		InputFingerprint: e.rewardPrecomputeInputFingerprint(
+			&StakeRewardPrecomputeRound{
+				NewEpoch: newEpoch, Epochs: epochs, BoundarySlot: boundarySlot,
+				Pots: pots, RewardSnapshot: rewardSnapshot, PoolInputs: poolInputs,
+				Params: params, BlockCounts: blockCounts, TotalBlocks: totalBlocks,
+				PrefilterSlot: prefilterSlot,
 			},
 		),
 		CapturedSlot: capturedSlot, Done: true, CompletedPools: len(poolInputs),
 		EffectiveRewards:   result.EffectiveRewards,
 		UnspendableRewards: result.Unspendable,
-		OutputFingerprint:  rewardPoolOutputFingerprint(poolOutputs),
+		OutputFingerprint:  RewardPoolOutputFingerprint(poolOutputs),
 	}
 	if len(poolInputs) > 0 {
 		cursor.LastPoolKeyHash = hex.EncodeToString(
 			poolInputs[len(poolInputs)-1].PoolKeyHash,
 		)
 	}
-	return &stakeRewardApplication{
-		precomputeCursor:            cursor,
-		epochs:                      epochs,
-		pparams:                     pparams,
-		params:                      params,
-		pots:                        pots,
-		poolOutputs:                 poolOutputs,
-		accountOutputs:              accountOutputs,
-		likelihoodPoolInputs:        poolInputs,
-		likelihoodBlockCounts:       blockCounts,
-		reconstructedStakeInputs:    reconstructedStakeInputs,
-		totalRewardPot:              result.TotalRewardPot,
-		availableRewards:            result.AvailableRewards,
-		effectiveRewards:            result.EffectiveRewards,
-		undistributed:               result.Undistributed,
-		unspendable:                 result.Unspendable,
-		negativeLeaderRewards:       result.NegativeLeaderRewards,
-		unspendableDeficit:          result.UnspendableDeficit,
-		totalCirculation:            result.TotalCirculation,
-		totalBlocks:                 result.TotalBlocks,
-		rewardEfficiency:            result.Efficiency,
-		snapshotCapturedSlot:        rewardSnapshot.CapturedSlot,
-		snapshotBoundarySlot:        rewardSnapshot.BoundarySlot,
-		snapshotEpochNonce:          rewardSnapshot.EpochNonce,
-		snapshotTotalActiveStake:    rewardSnapshot.TotalActiveStake,
-		snapshotTotalPoolCount:      rewardSnapshot.TotalPoolCount,
-		snapshotTotalDelegators:     rewardSnapshot.TotalDelegators,
-		snapshotProtocolVersion:     rewardSnapshot.ProtocolVersion,
-		rewardInputGeneration:       rewardInputGeneration,
-		rewardInputGenerationSource: &ls.rewardInputGeneration,
-		rewardInputRollbackActive:   &ls.rewardInputRollbackActive,
+	return &StakeRewardApplication{
+		PrecomputeCursor:            cursor,
+		Epochs:                      epochs,
+		Pparams:                     pparams,
+		Params:                      params,
+		Pots:                        pots,
+		PoolOutputs:                 poolOutputs,
+		AccountOutputs:              accountOutputs,
+		LikelihoodPoolInputs:        poolInputs,
+		LikelihoodBlockCounts:       blockCounts,
+		ReconstructedStakeInputs:    reconstructedStakeInputs,
+		TotalRewardPot:              result.TotalRewardPot,
+		AvailableRewards:            result.AvailableRewards,
+		EffectiveRewards:            result.EffectiveRewards,
+		Undistributed:               result.Undistributed,
+		Unspendable:                 result.Unspendable,
+		NegativeLeaderRewards:       result.NegativeLeaderRewards,
+		UnspendableDeficit:          result.UnspendableDeficit,
+		TotalCirculation:            result.TotalCirculation,
+		TotalBlocks:                 result.TotalBlocks,
+		RewardEfficiency:            result.Efficiency,
+		SnapshotCapturedSlot:        rewardSnapshot.CapturedSlot,
+		SnapshotBoundarySlot:        rewardSnapshot.BoundarySlot,
+		SnapshotEpochNonce:          rewardSnapshot.EpochNonce,
+		SnapshotTotalActiveStake:    rewardSnapshot.TotalActiveStake,
+		SnapshotTotalPoolCount:      rewardSnapshot.TotalPoolCount,
+		SnapshotTotalDelegators:     rewardSnapshot.TotalDelegators,
+		SnapshotProtocolVersion:     rewardSnapshot.ProtocolVersion,
+		RewardInputGeneration:       rewardInputGeneration,
+		RewardInputGenerationSource: guards.Generation,
+		RewardInputRollbackActive:   guards.RollbackActive,
 	}, true, nil
 }
 
-func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
+func (e *Engine) ApplyStakeRewardApplication(ctx context.Context,
 	txn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 	boundarySlot uint64,
 ) error {
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	if app.deferCredits {
-		return ls.applyDeferredStakeRewardRound(
+	if app.DeferCredits {
+		return e.applyDeferredStakeRewardRound(
 			ctx,
 			txn,
 			app,
 			boundarySlot,
 		)
 	}
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	if err := saveReconstructedRewardStakeInputs(ldb, txn, app); err != nil {
 		return err
 	}
@@ -1117,7 +1108,7 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	// reserves rather than being counted effective. Gate off leaves the set nil
 	// (no load, byte-identical to pre-CIP behavior).
 	//
-	// This must run BEFORE saveStakeRewardOutputs below: the guard decision is
+	// This must run BEFORE SaveStakeRewardOutputs below: the guard decision is
 	// persisted onto each output's Guarded column, the same way Spendable
 	// already is, so a later reader (the Blockfrost account reward-history
 	// endpoint) can tell an uncredited row from a credited one without
@@ -1128,38 +1119,38 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	// known -- rather than trusting whatever a prior run wrote, so it also
 	// self-corrects a stale guarded=true from a credential that was later
 	// renewed, or from the gate being disabled since the row was last written.
-	if ls.config.DelegatorInactivityEnabled {
-		guarded, err := ls.guardedExpiredRewardCredentials(ctx, txn, app)
+	if e.config.DelegatorInactivityEnabled {
+		guarded, err := e.GuardedExpiredRewardCredentials(ctx, txn, app)
 		if err != nil {
 			return err
 		}
-		app.guardedRewardCredentials = guarded
+		app.GuardedRewardCredentials = guarded
 	}
 	if applyGuardedFlagToAccountOutputs(app) {
-		app.outputsUpdated = true
+		app.OutputsUpdated = true
 	}
 	// A negative leader reward halts ledger application only when its account
 	// would receive that reward. The inactivity guard suppresses the credit,
 	// so apply the same eligibility decision before enforcing the halt.
-	if err := negativeLeaderRewardApplicationError(
-		app.negativeLeaderRewards,
-		app.guardedRewardCredentials,
+	if err := NegativeLeaderRewardApplicationError(
+		app.NegativeLeaderRewards,
+		app.GuardedRewardCredentials,
 	); err != nil {
 		return fmt.Errorf(
 			"stake rewards for snapshot epoch %d: %w",
-			app.epochs.snapshot,
+			app.Epochs.Snapshot,
 			err,
 		)
 	}
 
-	if app.replayBaseline == nil && (!app.precomputed || app.outputsUpdated) {
-		if err := saveStakeRewardOutputs(ldb, txn, app); err != nil {
+	if app.ReplayBaseline == nil && (!app.Precomputed || app.OutputsUpdated) {
+		if err := SaveStakeRewardOutputs(ldb, txn, app); err != nil {
 			return err
 		}
 	}
 
-	credits := make([]models.AccountRewardCredit, 0, len(app.accountOutputs))
-	for _, output := range app.accountOutputs {
+	credits := make([]models.AccountRewardCredit, 0, len(app.AccountOutputs))
+	for _, output := range app.AccountOutputs {
 		reward, err := rewardFromAccountOutput(output)
 		if err != nil {
 			return err
@@ -1175,16 +1166,16 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 			StakingKey:    reward.Credential.Hash[:],
 			Amount:        reward.Amount,
 			Slot:          boundarySlot,
-			SourceHash:    stakeRewardSourceHash(app.epochs.snapshot, reward),
+			SourceHash:    stakeRewardSourceHash(app.Epochs.Snapshot, reward),
 		})
 	}
-	if err := ls.ledgerDB().AddAccountRewardsByCredential(ctx, credits, txn); err != nil {
+	if err := e.ledgerDB().AddAccountRewardsByCredential(ctx, credits, txn); err != nil {
 		return fmt.Errorf(
-			"credit stake rewards epoch %d: %w", app.epochs.snapshot, err,
+			"credit stake rewards epoch %d: %w", app.Epochs.Snapshot, err,
 		)
 	}
 
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	reserves, treasury, err := StakeRewardUpdatedPots(app)
 	if err != nil {
 		return err
 	}
@@ -1196,46 +1187,46 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	); err != nil {
 		return fmt.Errorf("set network state after stake rewards: %w", err)
 	}
-	rewardPots := app.pots
-	if app.replayBaseline != nil {
-		rewardPots = app.replayBaseline
+	rewardPots := app.Pots
+	if app.ReplayBaseline != nil {
+		rewardPots = app.ReplayBaseline
 	}
-	rewardPots.Rewards = types.Uint64(app.totalRewardPot)
+	rewardPots.Rewards = types.Uint64(app.TotalRewardPot)
 	if err := ldb.SaveRewardAdaPots(rewardPots, txn); err != nil {
 		return fmt.Errorf("update reward ADA pots: %w", err)
 	}
-	if err := ls.saveRewardLikelihoodForApplication(
+	if err := e.SaveRewardLikelihoodForApplication(
 		app, boundarySlot, txn,
 	); err != nil {
 		return err
 	}
 
-	ls.config.Logger.Info(
+	e.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
-		"reward_snapshot_epoch", app.epochs.snapshot,
-		"performance_epoch", app.epochs.performance,
-		"pots_epoch", app.epochs.pots,
-		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
-		"precomputed", app.precomputed,
-		"total_reward_pot", app.totalRewardPot,
-		"available_rewards", app.availableRewards,
-		"effective_rewards", app.effectiveRewards,
-		"undistributed_rewards", app.undistributed,
-		"unspendable_rewards", app.unspendable,
-		"negative_leader_rewards", len(app.negativeLeaderRewards),
-		"unspendable_deficit", app.unspendableDeficit,
-		"reserves", uint64(app.pots.Reserves),
-		"fees", uint64(app.pots.Fees),
-		"total_active_stake", uint64(app.snapshotTotalActiveStake),
-		"total_circulation", app.totalCirculation,
-		"total_blocks", app.totalBlocks,
-		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
+		"reward_snapshot_epoch", app.Epochs.Snapshot,
+		"performance_epoch", app.Epochs.Performance,
+		"pots_epoch", app.Epochs.Pots,
+		"performance_pparams_type", fmt.Sprintf("%T", app.Pparams),
+		"precomputed", app.Precomputed,
+		"total_reward_pot", app.TotalRewardPot,
+		"available_rewards", app.AvailableRewards,
+		"effective_rewards", app.EffectiveRewards,
+		"undistributed_rewards", app.Undistributed,
+		"unspendable_rewards", app.Unspendable,
+		"negative_leader_rewards", len(app.NegativeLeaderRewards),
+		"unspendable_deficit", app.UnspendableDeficit,
+		"reserves", uint64(app.Pots.Reserves),
+		"fees", uint64(app.Pots.Fees),
+		"total_active_stake", uint64(app.SnapshotTotalActiveStake),
+		"total_circulation", app.TotalCirculation,
+		"total_blocks", app.TotalBlocks,
+		"reward_efficiency", rewardEfficiencyLogValue(app.RewardEfficiency),
 	)
 	return nil
 }
 
-func negativeLeaderRewardApplicationError(
+func NegativeLeaderRewardApplicationError(
 	negative []rewards.NegativeLeaderReward,
 	guarded map[string]struct{},
 ) error {
@@ -1260,14 +1251,14 @@ func negativeLeaderRewardApplicationError(
 // boundary and records the round as pending; its account credits are written
 // after the boundary commits. The outputs' Guarded flags were set by the
 // chunks from the snapshot's captured slot, which no later block changes.
-func (ls *LedgerState) applyDeferredStakeRewardRound(
+func (e *Engine) applyDeferredStakeRewardRound(
 	ctx context.Context,
 	txn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 	boundarySlot uint64,
 ) error {
-	ldb := ls.ledgerDB()
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	ldb := e.ledgerDB()
+	reserves, treasury, err := StakeRewardUpdatedPots(app)
 	if err != nil {
 		return err
 	}
@@ -1276,48 +1267,48 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 	); err != nil {
 		return fmt.Errorf("set network state after stake rewards: %w", err)
 	}
-	app.pots.Rewards = types.Uint64(app.totalRewardPot)
-	if err := ldb.SaveRewardAdaPots(app.pots, txn); err != nil {
+	app.Pots.Rewards = types.Uint64(app.TotalRewardPot)
+	if err := ldb.SaveRewardAdaPots(app.Pots, txn); err != nil {
 		return fmt.Errorf("update reward ADA pots: %w", err)
 	}
-	if err := ls.saveRewardLikelihoodForApplication(
+	if err := e.SaveRewardLikelihoodForApplication(
 		app, boundarySlot, txn,
 	); err != nil {
 		return err
 	}
 	round := models.RewardCreditRound{
-		SnapshotEpoch: app.epochs.snapshot,
+		SnapshotEpoch: app.Epochs.Snapshot,
 		BoundarySlot:  boundarySlot,
 	}
 	if err := registerAppliedRewardCreditRound(ldb, txn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
-	txn.AfterCommit(func() { ls.queueRewardCreditCompaction(ctx) })
-	ls.config.Logger.Info(
+	txn.AfterCommit(func() { e.host.QueueRewardCreditCompaction(ctx) })
+	e.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
-		"reward_snapshot_epoch", app.epochs.snapshot,
-		"performance_epoch", app.epochs.performance,
-		"pots_epoch", app.epochs.pots,
-		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
-		"precomputed", app.precomputed,
+		"reward_snapshot_epoch", app.Epochs.Snapshot,
+		"performance_epoch", app.Epochs.Performance,
+		"pots_epoch", app.Epochs.Pots,
+		"performance_pparams_type", fmt.Sprintf("%T", app.Pparams),
+		"precomputed", app.Precomputed,
 		"credits_pending", true,
-		"total_reward_pot", app.totalRewardPot,
-		"available_rewards", app.availableRewards,
-		"effective_rewards", app.effectiveRewards,
-		"undistributed_rewards", app.undistributed,
-		"unspendable_rewards", app.unspendable,
-		"reserves", uint64(app.pots.Reserves),
-		"fees", uint64(app.pots.Fees),
-		"total_active_stake", uint64(app.snapshotTotalActiveStake),
-		"total_circulation", app.totalCirculation,
-		"total_blocks", app.totalBlocks,
-		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
+		"total_reward_pot", app.TotalRewardPot,
+		"available_rewards", app.AvailableRewards,
+		"effective_rewards", app.EffectiveRewards,
+		"undistributed_rewards", app.Undistributed,
+		"unspendable_rewards", app.Unspendable,
+		"reserves", uint64(app.Pots.Reserves),
+		"fees", uint64(app.Pots.Fees),
+		"total_active_stake", uint64(app.SnapshotTotalActiveStake),
+		"total_circulation", app.TotalCirculation,
+		"total_blocks", app.TotalBlocks,
+		"reward_efficiency", rewardEfficiencyLogValue(app.RewardEfficiency),
 	)
 	return nil
 }
 
-// guardedExpiredRewardCredentials returns the set of credited reward-account
+// GuardedExpiredRewardCredentials returns the set of credited reward-account
 // credentials, including those owed a negative leader reward, that are expired as of the reward snapshot, keyed by
 // StakeCredentialRef.MapKey(). Expiry is reconstructed from witness history at
 // the snapshot's captured slot, rather than read from the mutable account row:
@@ -1326,19 +1317,19 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 // see historicalExpirationSQL's doc comment
 // (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
 // CIP-0163 section for why that holds today.
-func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
+func (e *Engine) GuardedExpiredRewardCredentials(ctx context.Context,
 	txn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 ) (map[string]struct{}, error) {
 	if app == nil ||
-		(len(app.accountOutputs) == 0 && len(app.negativeLeaderRewards) == 0) {
+		(len(app.AccountOutputs) == 0 && len(app.NegativeLeaderRewards) == 0) {
 		return nil, nil
 	}
 	refsByKey := make(
 		map[string]models.StakeCredentialRef,
-		len(app.accountOutputs)+len(app.negativeLeaderRewards),
+		len(app.AccountOutputs)+len(app.NegativeLeaderRewards),
 	)
-	for _, output := range app.accountOutputs {
+	for _, output := range app.AccountOutputs {
 		if output == nil ||
 			len(output.StakingKey) != rewards.CredentialHashSize {
 			continue
@@ -1352,7 +1343,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	// A negative leader reward has no account output, so its reward account
 	// is judged here too; otherwise an expired one would halt the boundary
 	// that a positive reward to the same account would merely skip.
-	for _, reward := range app.negativeLeaderRewards {
+	for _, reward := range app.NegativeLeaderRewards {
 		ref := models.NewStakeCredentialRef(
 			reward.Credential.Tag,
 			reward.Credential.Hash[:],
@@ -1366,7 +1357,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	for _, ref := range refsByKey {
 		refs = append(refs, ref)
 	}
-	accounts, err := ls.ledgerDB().GetAccountsByCredential(
+	accounts, err := e.ledgerDB().GetAccountsByCredential(
 		ctx,
 		refs,
 		true,
@@ -1375,45 +1366,27 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("load reward account expirations: %w", err)
 	}
-	lastWitness, err := ls.ledgerDB().AccountLastWitnessSlots(
+	lastWitness, err := e.ledgerDB().AccountLastWitnessSlots(
 		ctx,
-		refs, app.snapshotCapturedSlot, txn,
+		refs, app.SnapshotCapturedSlot, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load reward account witness history: %w", err)
 	}
-	activationEpoch, activated, err := ls.delegatorInactivityActivationEpoch(
+	activationEpoch, activated, err := e.DelegatorInactivityActivationEpoch(
 		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load delegator-inactivity activation: %w", err)
 	}
-	activationApplies := activated && activationEpoch <= app.epochs.snapshot
+	activationApplies := activated && activationEpoch <= app.Epochs.Snapshot
 	activationFloors := make(map[string]uint64)
 	if activationApplies {
-		r := ls.accountServing(txn)
-		if r == nil {
-			return nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
-		}
-		activationReader, ok := r.(AccountInactivityActivationReader)
-		if !ok {
-			return nil, errors.New("set account activation provenance is unavailable")
-		}
-		loaded, err := activationReader.AccountInactivityActivationLoaded()
+		activationFloors, err = e.host.AccountInactivityActivationFloors(
+			txn, refs,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("load set account activation provenance: %w", err)
-		}
-		if !loaded {
-			return nil, errors.New("set account activation provenance is not loaded")
-		}
-		for _, ref := range refs {
-			a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
-			if err != nil {
-				return nil, fmt.Errorf("load set account activation membership: %w", err)
-			}
-			if a != nil && a.InactivityActivation {
-				activationFloors[ref.MapKey()] = a.InactivityActivationEpoch
-			}
+			return nil, err
 		}
 	}
 	var guarded map[string]struct{}
@@ -1426,7 +1399,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 		// exists it is authoritative at the snapshot cutoff.
 		expiration := account.ExpirationEpoch
 		if slot, ok := lastWitness[key]; ok {
-			epoch, epochErr := ls.SlotToEpoch(slot)
+			epoch, epochErr := e.host.SlotToEpoch(slot)
 			if epochErr != nil {
 				return nil, fmt.Errorf(
 					"map reward witness slot %d to epoch: %w",
@@ -1434,17 +1407,17 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 					epochErr,
 				)
 			}
-			expiration = epoch.EpochId + ls.config.DelegatorInactivity
+			expiration = epoch.EpochId + e.config.DelegatorInactivity
 		}
 		if activationApplies {
 			if floor, applies := activationFloors[key]; applies {
 				expiration = max(
 					expiration,
-					floor+ls.config.DelegatorInactivity,
+					floor+e.config.DelegatorInactivity,
 				)
 			}
 		}
-		if accountExpiredAtEpoch(expiration, app.epochs.snapshot) {
+		if AccountExpiredAtEpoch(expiration, app.Epochs.Snapshot) {
 			if guarded == nil {
 				guarded = make(map[string]struct{})
 			}
@@ -1460,17 +1433,17 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 // deriveStakeRewardApplicationTotals skip exactly the same outputs and remain
 // byte-identical to pre-CIP behavior when the gate is off.
 func rewardOutputGuarded(
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 	output *models.RewardAccountOutput,
 ) bool {
-	if app == nil || len(app.guardedRewardCredentials) == 0 || output == nil {
+	if app == nil || len(app.GuardedRewardCredentials) == 0 || output == nil {
 		return false
 	}
 	key := models.NewStakeCredentialRef(
 		output.CredentialTag,
 		output.StakingKey,
 	).MapKey()
-	_, ok := app.guardedRewardCredentials[key]
+	_, ok := app.GuardedRewardCredentials[key]
 	return ok
 }
 
@@ -1484,12 +1457,12 @@ func rewardOutputGuarded(
 // indefinitely. Returns whether any row's Guarded value changed, so the
 // caller can force a re-save of an otherwise-unchanged reused precomputed
 // application.
-func applyGuardedFlagToAccountOutputs(app *stakeRewardApplication) bool {
+func applyGuardedFlagToAccountOutputs(app *StakeRewardApplication) bool {
 	if app == nil {
 		return false
 	}
 	changed := false
-	for _, output := range app.accountOutputs {
+	for _, output := range app.AccountOutputs {
 		if output == nil {
 			continue
 		}
@@ -1502,30 +1475,30 @@ func applyGuardedFlagToAccountOutputs(app *stakeRewardApplication) bool {
 	return changed
 }
 
-func (ls *LedgerState) precomputedStakeRewardApplication(
+func (e *Engine) PrecomputedStakeRewardApplication(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
-) (*stakeRewardApplication, bool, error) {
-	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
+) (*StakeRewardApplication, bool, error) {
+	epochs, ok := StakeRewardEpochsForApplication(newEpoch)
 	if !ok {
 		return nil, false, nil
 	}
-	ldb := ls.ledgerDB()
-	pots, err := ldb.GetRewardAdaPots(epochs.pots, txn)
+	ldb := e.ledgerDB()
+	pots, err := ldb.GetRewardAdaPots(epochs.Pots, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w",
-			epochs.pots,
+			epochs.Pots,
 			err,
 		)
 	}
 	if pots == nil || pots.Rewards == 0 {
 		return nil, false, nil
 	}
-	if err := ls.ensureRewardStakeInputsReady(txn, epochs.snapshot); err != nil {
-		if errors.Is(err, errRewardStakeInputsNotReady) {
+	if err := e.EnsureRewardStakeInputsReady(txn, epochs.Snapshot); err != nil {
+		if errors.Is(err, ErrRewardStakeInputsNotReady) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -1533,19 +1506,19 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	// A bootstrap calculation has no durable output rows with which to
 	// validate the precompute against rollbacks. Always recalculate it at its
 	// boundary rather than treating pots.Rewards alone as provenance.
-	if epochs.bootstrap {
+	if epochs.Bootstrap {
 		return nil, false, nil
 	}
 
 	rewardSnapshot, err := ldb.GetRewardSnapshot(
-		epochs.snapshot,
+		epochs.Snapshot,
 		"mark",
 		txn,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get precomputed reward snapshot for epoch %d: %w",
-			epochs.snapshot,
+			epochs.Snapshot,
 			err,
 		)
 	}
@@ -1553,26 +1526,26 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, nil
 	}
 
-	poolOutputs, err := ldb.GetRewardPoolOutputs(epochs.snapshot, txn)
+	poolOutputs, err := ldb.GetRewardPoolOutputs(epochs.Snapshot, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get precomputed reward pool outputs for epoch %d: %w",
-			epochs.snapshot,
+			epochs.Snapshot,
 			err,
 		)
 	}
 	if uint64(len(poolOutputs)) != rewardSnapshot.TotalPoolCount {
 		return nil, false, nil
 	}
-	poolInputs, err := ldb.GetRewardPoolInputs(epochs.snapshot, txn)
+	poolInputs, err := ldb.GetRewardPoolInputs(epochs.Snapshot, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get precomputed reward pool inputs for epoch %d: %w",
-			epochs.snapshot,
+			epochs.Snapshot,
 			err,
 		)
 	}
-	inputsMatchSnapshot, err := precomputedRewardPoolInputsMatchSnapshot(
+	inputsMatchSnapshot, err := PrecomputedRewardPoolInputsMatchSnapshot(
 		rewardSnapshot,
 		poolInputs,
 	)
@@ -1582,15 +1555,15 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if !inputsMatchSnapshot {
 		return nil, false, nil
 	}
-	stakeInputs, err := ldb.GetRewardStakeInputs(epochs.snapshot, txn)
+	stakeInputs, err := ldb.GetRewardStakeInputs(epochs.Snapshot, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get precomputed reward stake inputs for epoch %d: %w",
-			epochs.snapshot,
+			epochs.Snapshot,
 			err,
 		)
 	}
-	inputsValid := validateRewardCalculatorInputs(
+	inputsValid := ValidateRewardCalculatorInputs(
 		rewardSnapshot,
 		poolInputs,
 		stakeInputs,
@@ -1603,33 +1576,33 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	}
 
 	accountOutputs, err := ldb.GetRewardAccountOutputs(
-		epochs.snapshot,
+		epochs.Snapshot,
 		txn,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get precomputed reward account outputs for epoch %d: %w",
-			epochs.snapshot,
+			epochs.Snapshot,
 			err,
 		)
 	}
-	if !precomputedRewardAccountOutputsMatchInputs(
+	if !PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		stakeInputs,
 		accountOutputs,
 	) {
 		return nil, false, nil
 	}
-	pparams, params, err := ls.rewardParameters(
+	pparams, params, err := e.RewardParameters(
 		txn,
-		epochs.performance,
-		epochs.pots,
+		epochs.Performance,
+		epochs.Pots,
 		pots,
 	)
 	if err != nil {
 		return nil, false, err
 	}
-	if !precomputedRewardAccountAmountsMatchInputs(
+	if !PrecomputedRewardAccountAmountsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		stakeInputs,
@@ -1645,7 +1618,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
-	outputsComplete, err := precomputedRewardOutputsComplete(
+	outputsComplete, err := PrecomputedRewardOutputsComplete(
 		poolOutputs,
 		accountOutputs,
 		params.RequiresRewardPrefilter(),
@@ -1666,7 +1639,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if !precomputedRewardPotFitsAdaPots(pots) {
 		return nil, false, nil
 	}
-	outputsFit, err := precomputedRewardPoolOutputsFitAvailable(
+	outputsFit, err := PrecomputedRewardPoolOutputsFitAvailable(
 		poolOutputs,
 		availableRewards,
 	)
@@ -1681,15 +1654,15 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	// match. The account-amount and completeness checks above validate the
 	// account rows only against these stored pool totals, so this is what ties
 	// them back to the snapshot inputs; see
-	// precomputedRewardPoolRewardsMatchInputs.
+	// PrecomputedRewardPoolRewardsMatchInputs.
 	if uint64(pots.Reserves) > params.MaxLovelaceSupply {
 		return nil, false, nil
 	}
 	totalCirculation := params.MaxLovelaceSupply - uint64(pots.Reserves)
-	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
+	blockCounts, totalBlocks, blockCountsKnown, err := e.RewardBlockCounts(
 		ldb,
 		txn,
-		epochs.performance,
+		epochs.Performance,
 		poolInputs,
 	)
 	if err != nil {
@@ -1701,7 +1674,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if !blockCountsKnown {
 		return nil, false, nil
 	}
-	poolRewardsMatch, err := precomputedRewardPoolRewardsMatchInputs(
+	poolRewardsMatch, err := PrecomputedRewardPoolRewardsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		blockCounts,
@@ -1718,10 +1691,10 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, nil
 	}
 	if params.RequiresRewardPrefilter() {
-		prefilterSlot, err := ls.rewardPrefilterSlot(
+		prefilterSlot, err := e.RewardPrefilterSlot(
 			ldb,
 			txn,
-			epochs.pots,
+			epochs.Pots,
 		)
 		if err != nil {
 			return nil, false, err
@@ -1733,7 +1706,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		) {
 			return nil, false, nil
 		}
-		prefilterAccounts, err := rewardPrefilterAccounts(
+		prefilterAccounts, err := RewardPrefilterAccounts(
 			ldb,
 			txn,
 			poolInputs,
@@ -1767,28 +1740,28 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if err != nil {
 		return nil, false, err
 	}
-	app := &stakeRewardApplication{
-		epochs:                   epochs,
-		pparams:                  pparams,
-		params:                   params,
-		pots:                     pots,
-		poolOutputs:              poolOutputs,
-		accountOutputs:           accountOutputs,
-		likelihoodPoolInputs:     poolInputs,
-		likelihoodBlockCounts:    blockCounts,
-		totalRewardPot:           uint64(pots.Rewards),
-		totalCirculation:         totalCirculation,
-		totalBlocks:              totalBlocks,
-		rewardEfficiency:         rewards.Efficiency(totalBlocks, params),
-		precomputed:              true,
-		outputsUpdated:           outputsUpdated,
-		snapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
-		snapshotBoundarySlot:     rewardSnapshot.BoundarySlot,
-		snapshotEpochNonce:       rewardSnapshot.EpochNonce,
-		snapshotTotalActiveStake: rewardSnapshot.TotalActiveStake,
-		snapshotTotalPoolCount:   rewardSnapshot.TotalPoolCount,
-		snapshotTotalDelegators:  rewardSnapshot.TotalDelegators,
-		snapshotProtocolVersion:  rewardSnapshot.ProtocolVersion,
+	app := &StakeRewardApplication{
+		Epochs:                   epochs,
+		Pparams:                  pparams,
+		Params:                   params,
+		Pots:                     pots,
+		PoolOutputs:              poolOutputs,
+		AccountOutputs:           accountOutputs,
+		LikelihoodPoolInputs:     poolInputs,
+		LikelihoodBlockCounts:    blockCounts,
+		TotalRewardPot:           uint64(pots.Rewards),
+		TotalCirculation:         totalCirculation,
+		TotalBlocks:              totalBlocks,
+		RewardEfficiency:         rewards.Efficiency(totalBlocks, params),
+		Precomputed:              true,
+		OutputsUpdated:           outputsUpdated,
+		SnapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
+		SnapshotBoundarySlot:     rewardSnapshot.BoundarySlot,
+		SnapshotEpochNonce:       rewardSnapshot.EpochNonce,
+		SnapshotTotalActiveStake: rewardSnapshot.TotalActiveStake,
+		SnapshotTotalPoolCount:   rewardSnapshot.TotalPoolCount,
+		SnapshotTotalDelegators:  rewardSnapshot.TotalDelegators,
+		SnapshotProtocolVersion:  rewardSnapshot.ProtocolVersion,
 	}
 	if err := deriveStakeRewardApplicationTotals(app); err != nil {
 		return nil, false, err
@@ -1833,22 +1806,22 @@ func precomputedRewardPoolOutputsMatchInputs(
 	return len(expectedOwnerStake) == 0
 }
 
-// precomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
+// PrecomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
 // PoolReward (stored as TotalReward) and LeaderReward from the frozen snapshot
 // inputs using the canonical reward arithmetic, and rejects the reuse if either
 // diverges. Without it the reuse path would trust the stored pool reward:
-// precomputedRewardAccountAmountsMatchInputs pins each applied leader amount to
+// PrecomputedRewardAccountAmountsMatchInputs pins each applied leader amount to
 // poolOutput.LeaderReward and re-derives each member amount from
-// poolOutput.TotalReward, and precomputedRewardOutputsComplete only proves the
+// poolOutput.TotalReward, and PrecomputedRewardOutputsComplete only proves the
 // account rows sum to those stored totals. A stale or corrupted pool output
 // paired with account outputs consistent with it therefore passes every other
 // check and is credited to accounts unverified. The block counts and reward
 // globals come from the same sources the authoritative calculation reads
-// (rewardBlockCounts over the immutable performance epoch, availableRewards from
+// (RewardBlockCounts over the immutable performance epoch, availableRewards from
 // the persisted reward pot, total active/circulating stake from the snapshot and
 // ADA pots), so a legitimate precompute reproduces its stored values exactly and
 // only a divergent output is rejected.
-func precomputedRewardPoolRewardsMatchInputs(
+func PrecomputedRewardPoolRewardsMatchInputs(
 	poolInputs []*models.RewardPoolInput,
 	poolOutputs []*models.RewardPoolOutput,
 	blockCounts map[string]uint64,
@@ -1871,7 +1844,7 @@ func precomputedRewardPoolRewardsMatchInputs(
 	// Re-derive each pool's base reward B_i and pair it with its persisted
 	// output. The pool ID is not needed to compute the reward: it only labels
 	// the result and the pool keys were already validated upstream by
-	// validateRewardCalculatorInputs.
+	// ValidateRewardCalculatorInputs.
 	type verifyPool struct {
 		key    string
 		output *models.RewardPoolOutput
@@ -1962,12 +1935,12 @@ func precomputedRewardPoolRewardsMatchInputs(
 	return true, nil
 }
 
-// precomputedRewardAccountAmountsMatchInputs re-derives each persisted account
+// PrecomputedRewardAccountAmountsMatchInputs re-derives each persisted account
 // reward amount from the frozen pool/stake inputs and rejects the reuse if any
 // output's amount does not match.
 //
-// precomputedRewardAccountOutputsMatchInputs proves each output maps to a valid
-// leader/member of its pool, and precomputedRewardOutputsComplete proves the
+// PrecomputedRewardAccountOutputsMatchInputs proves each output maps to a valid
+// leader/member of its pool, and PrecomputedRewardOutputsComplete proves the
 // global, per-pool, and per-pool-per-type totals. None of those pin an
 // individual recipient's share, so a reward redistributed among the members of
 // a single pool (member A's row carrying member B's amount, B's row absent)
@@ -1982,7 +1955,7 @@ func precomputedRewardPoolRewardsMatchInputs(
 // membership, per-pool-total, and prefilter-leader checks. The amount of a row
 // that exists is the stake-derived value in every era, because era dedup only
 // drops rows, it never rewrites amounts.
-func precomputedRewardAccountAmountsMatchInputs(
+func PrecomputedRewardAccountAmountsMatchInputs(
 	poolInputs []*models.RewardPoolInput,
 	poolOutputs []*models.RewardPoolOutput,
 	stakeInputs []*models.RewardStakeInput,
@@ -2078,7 +2051,7 @@ func precomputedRewardAccountAmountsMatchInputs(
 	return true
 }
 
-func precomputedRewardAccountOutputsMatchInputs(
+func PrecomputedRewardAccountOutputsMatchInputs(
 	poolInputs []*models.RewardPoolInput,
 	stakeInputs []*models.RewardStakeInput,
 	accountOutputs []*models.RewardAccountOutput,
@@ -2187,7 +2160,7 @@ func precomputedRewardOutputsMatchBoundary(
 	return true
 }
 
-func precomputedRewardPoolInputsMatchSnapshot(
+func PrecomputedRewardPoolInputsMatchSnapshot(
 	snapshot *models.RewardSnapshot,
 	poolInputs []*models.RewardPoolInput,
 ) (bool, error) {
@@ -2228,7 +2201,7 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			return false, nil
 		}
 		var overflow bool
-		totalDelegators, overflow = addRewardUint64(
+		totalDelegators, overflow = AddRewardUint64(
 			totalDelegators,
 			input.DelegatorCount,
 		)
@@ -2242,7 +2215,7 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			return false, nil
 		}
 		seen[key] = struct{}{}
-		totalDelegated, overflow = addRewardUint64(
+		totalDelegated, overflow = AddRewardUint64(
 			totalDelegated,
 			uint64(input.DelegatedStake),
 		)
@@ -2252,7 +2225,7 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			)
 		}
 	}
-	// Same check as validateRewardCalculatorInputs: pools excluded for
+	// Same check as ValidateRewardCalculatorInputs: pools excluded for
 	// degraded registration data keep their stake in the snapshot's sigma_a
 	// denominator but contribute no reward_pool_input row.
 	matches, err := rewardStakeSumMatchesSnapshot(totalDelegated, snapshot)
@@ -2268,7 +2241,7 @@ func precomputedRewardPoolInputsMatchSnapshot(
 	return true, nil
 }
 
-func precomputedRewardOutputsComplete(
+func PrecomputedRewardOutputsComplete(
 	poolOutputs []*models.RewardPoolOutput,
 	accountOutputs []*models.RewardAccountOutput,
 	allowMissingLeaderOutputs bool,
@@ -2292,21 +2265,21 @@ func precomputedRewardOutputsComplete(
 		poolExpected := totalReward - undistributed
 		leaderReward := uint64(output.LeaderReward)
 		memberReward := uint64(output.MemberRewardTotal)
-		distributed, overflow := addRewardUint64(leaderReward, memberReward)
+		distributed, overflow := AddRewardUint64(leaderReward, memberReward)
 		if overflow || distributed > totalReward {
 			return false, nil
 		}
 		poolKey := string(output.PoolKeyHash)
 		expectedLeaderByPool[poolKey] = leaderReward
 		expectedMemberByPool[poolKey] = memberReward
-		expectedByPool[poolKey], overflow = addRewardUint64(
+		expectedByPool[poolKey], overflow = AddRewardUint64(
 			expectedByPool[poolKey],
 			poolExpected,
 		)
 		if overflow {
 			return false, errors.New("precomputed pool output total overflow")
 		}
-		expected, overflow = addRewardUint64(expected, poolExpected)
+		expected, overflow = AddRewardUint64(expected, poolExpected)
 		if overflow {
 			return false, errors.New("precomputed pool output total overflow")
 		}
@@ -2335,7 +2308,7 @@ func precomputedRewardOutputsComplete(
 		}
 		poolKey := string(output.PoolKeyHash)
 		var overflow bool
-		actualByPool[poolKey], overflow = addRewardUint64(
+		actualByPool[poolKey], overflow = AddRewardUint64(
 			actualByPool[poolKey],
 			amount,
 		)
@@ -2346,12 +2319,12 @@ func precomputedRewardOutputsComplete(
 		}
 		switch rewards.RewardType(output.RewardType) {
 		case rewards.RewardTypeLeader:
-			actualLeaderByPool[poolKey], overflow = addRewardUint64(
+			actualLeaderByPool[poolKey], overflow = AddRewardUint64(
 				actualLeaderByPool[poolKey],
 				amount,
 			)
 		case rewards.RewardTypeMember:
-			actualMemberByPool[poolKey], overflow = addRewardUint64(
+			actualMemberByPool[poolKey], overflow = AddRewardUint64(
 				actualMemberByPool[poolKey],
 				amount,
 			)
@@ -2359,7 +2332,7 @@ func precomputedRewardOutputsComplete(
 		if overflow {
 			return false, errors.New("precomputed reward type total overflow")
 		}
-		actual, overflow = addRewardUint64(actual, amount)
+		actual, overflow = AddRewardUint64(actual, amount)
 		if overflow {
 			return false, errors.New(
 				"precomputed account output total overflow",
@@ -2439,7 +2412,7 @@ func precomputedMissingPrefilterLeaderOutput(
 		amount := uint64(output.Amount)
 		var overflow bool
 		poolKey := string(output.PoolKeyHash)
-		actualLeaderByPool[poolKey], overflow = addRewardUint64(
+		actualLeaderByPool[poolKey], overflow = AddRewardUint64(
 			actualLeaderByPool[poolKey],
 			amount,
 		)
@@ -2511,7 +2484,7 @@ func precomputedRewardPotFitsAdaPots(pots *models.RewardAdaPots) bool {
 	return uint64(pots.Reserves) >= incentives
 }
 
-func precomputedRewardPoolOutputsFitAvailable(
+func PrecomputedRewardPoolOutputsFitAvailable(
 	poolOutputs []*models.RewardPoolOutput,
 	availableRewards uint64,
 ) (bool, error) {
@@ -2520,7 +2493,7 @@ func precomputedRewardPoolOutputsFitAvailable(
 		if output == nil {
 			continue
 		}
-		next, overflow := addRewardUint64(total, uint64(output.TotalReward))
+		next, overflow := AddRewardUint64(total, uint64(output.TotalReward))
 		if overflow {
 			return false, errors.New("precomputed pool reward total overflow")
 		}
@@ -2604,7 +2577,7 @@ func finalizePrecomputedRewardOutputs(
 		}
 		if !output.Spendable {
 			key := string(output.PoolKeyHash)
-			next, overflow := addRewardUint64(
+			next, overflow := AddRewardUint64(
 				unspendableByPool[key],
 				uint64(output.Amount),
 			)
@@ -2632,436 +2605,90 @@ func finalizePrecomputedRewardOutputs(
 	return updated, nil
 }
 
-// queueStartupRewardPrecompute queues the stake-reward precompute for the
-// epoch that is already in progress.
-//
-// The EventBus subscription that normally drives the precompute only fires at
-// an epoch boundary, so a node started mid-epoch never queues the round its
-// next boundary will apply. applyStakeRewards then finds no precompute and
-// falls back to calculateStakeRewardApplication -- the whole round, over every
-// delegator in the mark snapshot -- inside the epoch-rollover write
-// transaction, on the block-processing goroutine. On mainnet that scan takes
-// minutes, during which no block is applied and any leader slot in the window
-// is lost. The async path exists precisely so the calculation never holds
-// SQLite's single writer (see precomputeStakeRewards); this restores it for
-// the one case the event cannot cover.
-//
-// Idempotent and self-limiting: precomputeStakeRewardsCalculate returns early
-// when a valid precompute already exists, so a restart that has one costs a
-// lookup, and a node still syncing defers on the reward prefilter slot rather
-// than scanning inputs it does not yet have.
-func (ls *LedgerState) queueStartupRewardPrecompute() {
-	ls.queueStartupRewardPrecomputeWith(
-		ls.precomputeStakeRewardsAfterEpochTransition,
-	)
-}
-
-func (ls *LedgerState) queueStartupRewardPrecomputeWith(
-	precompute func(event.EpochTransitionEvent) error,
-) {
-	ls.RLock()
-	epoch := ls.currentEpoch
-	capturedSlot := max(epoch.StartSlot, ls.currentTip.Point.Slot)
-	ls.RUnlock()
-	// An epoch with no length has not been established yet (fresh database),
-	// and queueRewardPrecompute drops an event without a nonce, so there is
-	// nothing to catch up on in either case.
-	if epoch.LengthInSlots == 0 || len(epoch.Nonce) == 0 {
-		return
-	}
-	evt := event.EpochTransitionEvent{
-		NewEpoch:     epoch.EpochId,
-		BoundarySlot: capturedSlot,
-		EpochNonce:   epoch.Nonce,
-	}
-	if epoch.EpochId > 0 {
-		evt.PreviousEpoch = epoch.EpochId - 1
-	}
-	if epoch.StartSlot > 0 {
-		evt.SnapshotSlot = epoch.StartSlot - 1
-	}
-	ls.queueRewardPrecompute(evt, precompute)
-}
-
-func (ls *LedgerState) handleRewardPrecomputeEpochTransition(evt event.Event) {
-	ls.handleRewardPrecomputeEpochTransitionWith(
-		evt,
-		ls.precomputeStakeRewardsAfterEpochTransition,
-	)
-}
-
-func (ls *LedgerState) handleRewardPrecomputeEpochTransitionWith(
-	evt event.Event,
-	precompute func(event.EpochTransitionEvent) error,
-) {
-	epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-	if !ok || epochEvent.EpochNonce == nil {
-		return
-	}
-	ls.queueRewardPrecompute(epochEvent, precompute)
-}
-
-// queueRewardPrecompute keeps EventBus delivery independent of the expensive
-// reward calculation. While a calculation is active, each transition replaces
-// the pending one so bulk sync retains the newest useful epoch without filling
-// and overflowing the EventBus subscriber buffer. The active calculation is
-// allowed to finish because its snapshot guard drops stale output; the worker
-// then processes the latest transition observed in the meantime.
-func (ls *LedgerState) queueRewardPrecompute(
-	epochEvent event.EpochTransitionEvent,
-	precompute func(event.EpochTransitionEvent) error,
-) {
-	ls.rewardPrecomputeMu.Lock()
-	start := ls.queueRewardPrecomputeLocked(epochEvent)
-	ls.rewardPrecomputeMu.Unlock()
-	if start {
-		go ls.runRewardPrecompute(precompute)
-	}
-}
-
-// The caller holds rewardPrecomputeMu so releasing a prefilter retry and
-// invalidating it during rollback cannot enqueue events in the wrong order.
-func (ls *LedgerState) queueRewardPrecomputeLocked(
-	epochEvent event.EpochTransitionEvent,
-) bool {
-	if ls.closed.Load() {
-		return false
-	}
-	// Store an independent copy because EventBus callbacks do not own the
-	// publisher's payload after returning.
-	epochEvent.EpochNonce = slices.Clone(epochEvent.EpochNonce)
-	ls.rewardPrecomputePending = &epochEvent
-	if ls.rewardPrecomputeRunning {
-		return false
-	}
-	ls.rewardPrecomputeRunning = true
-	ls.rewardPrecomputeWG.Add(1)
-	return true
-}
-
-// deferStakeRewardPrecompute records the pre-Babbage RUPD cutoff. The retry is
-// queued only after the applied ledger tip reaches that slot, so its
-// BoundarySlot reflects the actual state captured by the calculation rather
-// than a future slot whose certificate history is not available yet.
-func (ls *LedgerState) deferStakeRewardPrecompute(
-	newEpoch uint64,
-	cutoffSlot uint64,
-	generation uint64,
-) {
-	if newEpoch == 0 {
-		return
-	}
-	retry := &stakeRewardPrecomputeRetry{
-		epochEvent: event.EpochTransitionEvent{
-			NewEpoch: newEpoch - 1,
-		},
-		cutoffSlot: cutoffSlot,
-		generation: generation,
-	}
-	ls.rewardPrecomputeMu.Lock()
-	if ls.rewardInputRollbackActive.Load() != 0 ||
-		ls.rewardInputGeneration.Load() != generation {
-		ls.rewardPrecomputeMu.Unlock()
-		return
-	}
-	if ls.rewardPrecomputeRetry == nil ||
-		ls.rewardPrecomputeRetry.epochEvent.NewEpoch <= retry.epochEvent.NewEpoch {
-		ls.rewardPrecomputeRetry = retry
-	}
-	ls.rewardPrecomputeMu.Unlock()
-
-	ls.RLock()
-	capturedSlot := ls.currentTip.Point.Slot
-	ls.RUnlock()
-	ls.maybeQueueStakeRewardPrecomputeRetry(capturedSlot)
-}
-
-// maybeQueueStakeRewardPrecomputeRetry releases a deferred pre-Babbage
-// calculation once committed ledger state has reached its RUPD cutoff.
-func (ls *LedgerState) maybeQueueStakeRewardPrecomputeRetry(
-	capturedSlot uint64,
-) {
-	ls.rewardPrecomputeMu.Lock()
-	retry := ls.rewardPrecomputeRetry
-	if retry == nil || capturedSlot < retry.cutoffSlot || ls.closed.Load() {
-		ls.rewardPrecomputeMu.Unlock()
-		return
-	}
-	ls.rewardPrecomputeRetry = nil
-	if ls.rewardInputRollbackActive.Load() != 0 ||
-		retry.generation != ls.rewardInputGeneration.Load() {
-		ls.rewardPrecomputeMu.Unlock()
-		return
-	}
-	epochEvent := retry.epochEvent
-	epochEvent.BoundarySlot = capturedSlot
-	start := ls.queueRewardPrecomputeLocked(
-		epochEvent,
-	)
-	ls.rewardPrecomputeMu.Unlock()
-	if start {
-		go ls.runRewardPrecompute(
-			ls.precomputeStakeRewardsAfterEpochTransition,
-		)
-	}
-}
-
-func (ls *LedgerState) runRewardPrecompute(
-	precompute func(event.EpochTransitionEvent) error,
-) {
-	defer ls.rewardPrecomputeWG.Done()
-	for {
-		ls.rewardPrecomputeMu.Lock()
-		if ls.closed.Load() || ls.rewardPrecomputePending == nil {
-			ls.rewardPrecomputePending = nil
-			ls.rewardPrecomputeRunning = false
-			ls.rewardPrecomputeMu.Unlock()
-			return
-		}
-		epochEvent := *ls.rewardPrecomputePending
-		ls.rewardPrecomputePending = nil
-		ls.rewardPrecomputeMu.Unlock()
-
-		if err := callRewardPrecompute(precompute, epochEvent); err != nil {
-			ls.config.Logger.Warn(
-				"failed to precompute stake rewards",
-				"component", "ledger",
-				"new_epoch", epochEvent.NewEpoch,
-				"error", err,
-			)
-		}
-	}
-}
-
-// callRewardPrecompute preserves the panic isolation that EventBus provided
-// when the calculation ran directly inside its callback. A failed calculation
-// must not crash the process or prevent the worker from consuming the newest
-// transition that arrived while it was running.
-func callRewardPrecompute(
-	precompute func(event.EpochTransitionEvent) error,
-	epochEvent event.EpochTransitionEvent,
-) (err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("reward precompute panicked: %v", recovered)
-		}
-	}()
-	return precompute(epochEvent)
-}
-
-// precomputeStakeRewardsAfterEpochTransition runs off the EventBus after an
-// epoch transition to opportunistically precompute the next boundary's stake
-// rewards ahead of time, so that the synchronous rollover application
-// (applyStakeRewards, called from processEpochRollover with its own short
-// transaction) can reuse the precomputed result instead of computing rewards
-// inline.
-//
-// The calculation reads a large amount of reward-input state (every pool and
-// per-credential stake input for the mark snapshot epoch, plus per-credential
-// cert-history prefilter queries) and, on a mainnet-scale database, can run
-// for minutes. It must never hold SQLite's single writer for that long, so
-// it is split into a read-only calculation phase and a short write phase:
-// see precomputeStakeRewardsCalculate and saveStakeRewardPrecompute. Between
-// the two phases the world may have moved on (a rollback replacing the
-// reward snapshot, or the boundary-application path already having run);
-// the write phase re-validates before persisting and drops a stale result
-// rather than writing it -- see stakeRewardPrecomputeSnapshotGuardOK.
-func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
-	evt event.EpochTransitionEvent,
-) error {
-	if evt.NewEpoch == math.MaxUint64 {
-		return nil
-	}
-
-	var (
-		haveEpoch               bool
-		applicationBoundarySlot uint64
-	)
-	epochTxn := ls.ledgerDB().Begin(context.Background(), false)
-	if err := ls.ledgerDB().Run(epochTxn, func(txn ledgerdb.Txn) error {
-		epoch, err := ls.ledgerDB().GetEpoch(evt.NewEpoch, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"get epoch %d for reward precompute: %w",
-				evt.NewEpoch,
-				err,
-			)
-		}
-		if epoch == nil || epoch.LengthInSlots == 0 {
-			return nil
-		}
-		applicationBoundarySlot = epoch.StartSlot + uint64(epoch.LengthInSlots)
-		haveEpoch = true
-		return nil
-	}); err != nil {
-		return err
-	}
-	if !haveEpoch {
-		return nil
-	}
-
-	newEpoch := evt.NewEpoch + 1
-	capturedSlot := evt.BoundarySlot
-
-	handled, err := ls.runChunkedStakeRewardPrecomputeRound(
-		newEpoch,
-		capturedSlot,
-		applicationBoundarySlot,
-	)
-	if err != nil || handled {
-		return err
-	}
-	return ls.precomputeStakeRewardsSinglePass(
-		newEpoch, capturedSlot, applicationBoundarySlot,
-	)
-}
-
-// precomputeStakeRewardsSinglePass precomputes a round the per-pool
-// precompute does not split -- a pre-Allegra or bootstrap round -- with the
-// single-pass calculation, in a read-only transaction, then persists it in a
-// short write transaction after re-checking its snapshot and rollback
-// generation under rewardPrecomputeWriteMu.
-func (ls *LedgerState) precomputeStakeRewardsSinglePass(
-	newEpoch uint64,
-	capturedSlot uint64,
-	applicationBoundarySlot uint64,
-) error {
-	var app *stakeRewardApplication
-	readTxn := ls.ledgerDB().Begin(context.Background(), false)
-	if err := ls.ledgerDB().Run(readTxn, func(txn ledgerdb.Txn) error {
-		computed, ok, err := ls.precomputeStakeRewardsCalculate(
-			txn,
-			newEpoch,
-			capturedSlot,
-			applicationBoundarySlot,
-		)
-		if err != nil || !ok {
-			return err
-		}
-		app = computed
-		return nil
-	}); err != nil {
-		return err
-	}
-	if app == nil {
-		return nil
-	}
-	ls.rewardPrecomputeWriteMu.Lock()
-	defer ls.rewardPrecomputeWriteMu.Unlock()
-	writeTxn := ls.ledgerDB().Begin(context.Background(), true)
-	return ls.ledgerDB().Run(writeTxn, func(txn ledgerdb.Txn) error {
-		ldb := ls.ledgerDB()
-		if _, alreadyApplied, err := ls.precomputedStakeRewardApplication(context.Background(),
-			txn,
-			newEpoch,
-			applicationBoundarySlot,
-		); err != nil {
-			return err
-		} else if alreadyApplied {
-			return nil
-		}
-		guardOK, err := stakeRewardPrecomputeSnapshotGuardOK(ldb, txn, app)
-		if err != nil || !guardOK {
-			return err
-		}
-		if ls.rewardPrecomputeBeforeSaveHook != nil {
-			ls.rewardPrecomputeBeforeSaveHook()
-		}
-		return ls.saveStakeRewardPrecompute(
-			ldb,
-			txn,
-			app,
-			newEpoch,
-			capturedSlot,
-			applicationBoundarySlot,
-		)
-	})
-}
-
-// stakeRewardPrecomputeSnapshotGuardOK reports whether every rollback-sensitive
-// input consumed by an already-computed stakeRewardApplication is still valid.
+// StakeRewardPrecomputeSnapshotGuardOK reports whether every rollback-sensitive
+// input consumed by an already-computed StakeRewardApplication is still valid.
 // The rollback generation covers performance blocks, ADA pots, protocol state,
 // and account certificate history; the row comparison additionally detects a
 // direct replacement of the owning Mark snapshot. A mismatch means the
 // application must be dropped rather than persisted; the synchronous boundary
 // path recomputes authoritatively when it runs. The chunked precompute
-// (rewardPrecomputeSnapshotUnchanged) applies the same row comparison per
+// (RewardPrecomputeSnapshotUnchanged) applies the same row comparison per
 // chunk instead of once at the end of a single write phase, so it does not
-// call this directly, but this remains the guard precomputeStakeRewards
+// call this directly, but this remains the guard PrecomputeStakeRewards
 // exercises and its dedicated tests pin.
 //
 //nolint:unused // Used by tests
-func stakeRewardPrecomputeSnapshotGuardOK(
+func StakeRewardPrecomputeSnapshotGuardOK(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 ) (bool, error) {
 	if app == nil {
 		return false, nil
 	}
-	if app.rewardInputGenerationSource != nil &&
-		(app.rewardInputRollbackActive == nil ||
-			app.rewardInputRollbackActive.Load() != 0 ||
-			app.rewardInputGenerationSource.Load() != app.rewardInputGeneration) {
+	if app.RewardInputGenerationSource != nil &&
+		(app.RewardInputRollbackActive == nil ||
+			app.RewardInputRollbackActive.Load() != 0 ||
+			app.RewardInputGenerationSource.Load() != app.RewardInputGeneration) {
 		return false, nil
 	}
 	snapshot, err := meta.GetRewardSnapshot(
-		app.epochs.snapshot,
+		app.Epochs.Snapshot,
 		"mark",
 		metaTxn,
 	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"re-check reward snapshot for epoch %d: %w",
-			app.epochs.snapshot,
+			app.Epochs.Snapshot,
 			err,
 		)
 	}
 	if snapshot == nil {
 		return false, nil
 	}
-	if snapshot.CapturedSlot != app.snapshotCapturedSlot ||
-		snapshot.BoundarySlot != app.snapshotBoundarySlot ||
-		snapshot.TotalActiveStake != app.snapshotTotalActiveStake ||
-		snapshot.TotalPoolCount != app.snapshotTotalPoolCount ||
-		snapshot.TotalDelegators != app.snapshotTotalDelegators ||
-		snapshot.ProtocolVersion != app.snapshotProtocolVersion ||
-		!bytes.Equal(snapshot.EpochNonce, app.snapshotEpochNonce) {
+	if snapshot.CapturedSlot != app.SnapshotCapturedSlot ||
+		snapshot.BoundarySlot != app.SnapshotBoundarySlot ||
+		snapshot.TotalActiveStake != app.SnapshotTotalActiveStake ||
+		snapshot.TotalPoolCount != app.SnapshotTotalPoolCount ||
+		snapshot.TotalDelegators != app.SnapshotTotalDelegators ||
+		snapshot.ProtocolVersion != app.SnapshotProtocolVersion ||
+		!bytes.Equal(snapshot.EpochNonce, app.SnapshotEpochNonce) {
 		return false, nil
 	}
 	return true, nil
 }
 
-// precomputeStakeRewardsCalculate performs the read-only portion of stake
+// PrecomputeStakeRewardsCalculate performs the read-only portion of stake
 // reward precomputation: checking whether a valid precomputed application
 // already exists for newEpoch and, if not, computing one. It issues no
 // writes and is safe to run inside a read-only transaction. Called by
-// precomputeStakeRewards (the single-transaction variant) and its tests; the
+// PrecomputeStakeRewards (the single-transaction variant) and its tests; the
 // production chunked path computes the same shape per pool batch instead
-// (resolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
+// (ResolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
 //
 //nolint:unused // Used by tests
-func (ls *LedgerState) precomputeStakeRewardsCalculate(
+func (e *Engine) PrecomputeStakeRewardsCalculate(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
-) (*stakeRewardApplication, bool, error) {
-	if epochs, ok := stakeRewardEpochsForApplication(newEpoch); ok &&
-		epochs.bootstrap {
+) (*StakeRewardApplication, bool, error) {
+	if epochs, ok := StakeRewardEpochsForApplication(newEpoch); ok &&
+		epochs.Bootstrap {
 		// Epoch 2 is deliberately synchronous: its empty Go distribution leaves
 		// no output rows that can safely prove an async precompute survived a
 		// rollback on the same epoch-1 pots row.
 		return nil, false, nil
 	}
-	if _, ok, err := ls.precomputedStakeRewardApplication(context.Background(),
+	if _, ok, err := e.PrecomputedStakeRewardApplication(context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
 	); err != nil || ok {
 		return nil, false, err
 	}
-	app, ok, err := ls.calculateStakeRewardApplication(context.Background(),
+	app, ok, err := e.CalculateStakeRewardApplication(context.Background(),
 		txn,
 		newEpoch,
 		capturedSlot,
@@ -3074,30 +2701,30 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 	if app == nil {
 		return nil, false, errors.New("missing stake reward application")
 	}
-	if len(app.negativeLeaderRewards) > 0 {
-		ls.config.Logger.Info(
+	if len(app.NegativeLeaderRewards) > 0 {
+		e.config.Logger.Info(
 			"not precomputing stake rewards with negative leader rewards",
 			"component", "ledger",
-			"reward_snapshot_epoch", app.epochs.snapshot,
-			"negative_leader_rewards", len(app.negativeLeaderRewards),
+			"reward_snapshot_epoch", app.Epochs.Snapshot,
+			"negative_leader_rewards", len(app.NegativeLeaderRewards),
 		)
 		return nil, false, nil
 	}
 	return app, true, nil
 }
 
-// saveStakeRewardPrecompute persists a computed stakeRewardApplication as a
+// SaveStakeRewardPrecompute persists a computed StakeRewardApplication as a
 // precompute result: the reward output rows plus the updated RewardAdaPots
 // rewards total. Callers must run it inside a write transaction. Called by
-// precomputeStakeRewards and its tests; the production chunked path persists
+// PrecomputeStakeRewards and its tests; the production chunked path persists
 // the same two things per pool batch instead
 // (stakeRewardPrecomputeChunkStep, finishStakeRewardPrecomputeLocked).
 //
 //nolint:unused // Used by tests
-func (ls *LedgerState) saveStakeRewardPrecompute(
+func (e *Engine) SaveStakeRewardPrecompute(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
@@ -3105,37 +2732,37 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
 		return err
 	}
-	if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
+	if err := SaveStakeRewardOutputs(meta, metaTxn, app); err != nil {
 		return err
 	}
-	app.pots.Rewards = types.Uint64(app.totalRewardPot)
-	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
+	app.Pots.Rewards = types.Uint64(app.TotalRewardPot)
+	if err := meta.SaveRewardAdaPots(app.Pots, metaTxn); err != nil {
 		return fmt.Errorf("save precomputed reward ADA pots: %w", err)
 	}
-	seq, err := ls.rewardRollbackSeq(metaTxn)
+	seq, err := e.rewardRollbackSeq(metaTxn)
 	if err != nil {
 		return err
 	}
-	cursor := app.precomputeCursor
+	cursor := app.PrecomputeCursor
 	cursor.RollbackSeq = seq
 	if err := saveRewardPrecomputeCursor(meta, metaTxn, &cursor); err != nil {
 		return err
 	}
-	ls.rewardFactsAfterCommit(metaTxn, app.epochs.snapshot, capturedSlot)
-	ls.config.Logger.Info(
+	e.rewardFactsAfterCommit(metaTxn, app.Epochs.Snapshot, capturedSlot)
+	e.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",
-		"reward_snapshot_epoch", app.epochs.snapshot,
-		"performance_epoch", app.epochs.performance,
-		"pots_epoch", app.epochs.pots,
+		"reward_snapshot_epoch", app.Epochs.Snapshot,
+		"performance_epoch", app.Epochs.Performance,
+		"pots_epoch", app.Epochs.Pots,
 		"application_epoch", newEpoch,
 		"captured_slot", capturedSlot,
 		"boundary_slot", boundarySlot,
-		"total_reward_pot", app.totalRewardPot,
-		"available_rewards", app.availableRewards,
-		"effective_rewards", app.effectiveRewards,
-		"undistributed_rewards", app.undistributed,
-		"unspendable_rewards", app.unspendable,
+		"total_reward_pot", app.TotalRewardPot,
+		"available_rewards", app.AvailableRewards,
+		"effective_rewards", app.EffectiveRewards,
+		"undistributed_rewards", app.Undistributed,
+		"unspendable_rewards", app.Unspendable,
 	)
 	return nil
 }
@@ -3143,29 +2770,29 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 func saveReconstructedRewardStakeInputs(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 ) error {
-	if app == nil || len(app.reconstructedStakeInputs) == 0 {
+	if app == nil || len(app.ReconstructedStakeInputs) == 0 {
 		return nil
 	}
 	if err := meta.SaveRewardStakeInputs(
-		app.reconstructedStakeInputs,
+		app.ReconstructedStakeInputs,
 		metaTxn,
 	); err != nil {
 		return fmt.Errorf(
 			"save reconstructed reward stake inputs for epoch %d: %w",
-			app.epochs.snapshot,
+			app.Epochs.Snapshot,
 			err,
 		)
 	}
 	return nil
 }
 
-// precomputeStakeRewards computes and immediately persists stake rewards for
+// PrecomputeStakeRewards computes and immediately persists stake rewards for
 // newEpoch within the given transaction. It is kept for callers that already
 // hold a single read-write transaction spanning both phases and for the
-// dedicated tests of precomputeStakeRewardsCalculate/
-// stakeRewardPrecomputeSnapshotGuardOK/saveStakeRewardPrecompute; the
+// dedicated tests of PrecomputeStakeRewardsCalculate/
+// StakeRewardPrecomputeSnapshotGuardOK/SaveStakeRewardPrecompute; the
 // production async EventBus path
 // (precomputeStakeRewardsAfterEpochTransition) instead runs
 // runChunkedStakeRewardPrecomputeRound, which chunks the same read-then-guarded-
@@ -3173,13 +2800,13 @@ func saveReconstructedRewardStakeInputs(
 // stakeRewardPrecomputeChunkStep) rather than one of each.
 //
 //nolint:unused // Used by tests
-func (ls *LedgerState) precomputeStakeRewards(
+func (e *Engine) PrecomputeStakeRewards(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
 ) error {
-	app, ok, err := ls.precomputeStakeRewardsCalculate(
+	app, ok, err := e.PrecomputeStakeRewardsCalculate(
 		txn,
 		newEpoch,
 		capturedSlot,
@@ -3191,8 +2818,8 @@ func (ls *LedgerState) precomputeStakeRewards(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	ldb := ls.ledgerDB()
-	return ls.saveStakeRewardPrecompute(
+	ldb := e.ledgerDB()
+	return e.SaveStakeRewardPrecompute(
 		ldb,
 		txn,
 		app,
@@ -3202,10 +2829,10 @@ func (ls *LedgerState) precomputeStakeRewards(
 	)
 }
 
-// deleteUncreditedRewardOutputs deletes the reward outputs of snapshotEpoch
+// DeleteUncreditedRewardOutputs deletes the reward outputs of snapshotEpoch
 // and refuses when that round is credited: its outputs are then account
 // balances, and recomputing them would erase credited rewards.
-func deleteUncreditedRewardOutputs(
+func DeleteUncreditedRewardOutputs(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	snapshotEpoch uint64,
@@ -3223,41 +2850,41 @@ func deleteUncreditedRewardOutputs(
 	return meta.DeleteRewardOutputsForEpoch(snapshotEpoch, metaTxn)
 }
 
-func saveStakeRewardOutputs(
+func SaveStakeRewardOutputs(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
-	app *stakeRewardApplication,
+	app *StakeRewardApplication,
 ) error {
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	if err := deleteUncreditedRewardOutputs(
-		meta, metaTxn, app.epochs.snapshot,
+	if err := DeleteUncreditedRewardOutputs(
+		meta, metaTxn, app.Epochs.Snapshot,
 	); err != nil {
 		return fmt.Errorf(
 			"replace reward outputs for epoch %d: %w",
-			app.epochs.snapshot,
+			app.Epochs.Snapshot,
 			err,
 		)
 	}
-	if err := meta.SaveRewardPoolOutputs(app.poolOutputs, metaTxn); err != nil {
+	if err := meta.SaveRewardPoolOutputs(app.PoolOutputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward pool outputs: %w", err)
 	}
-	if err := meta.SaveRewardAccountOutputs(app.accountOutputs, metaTxn); err != nil {
+	if err := meta.SaveRewardAccountOutputs(app.AccountOutputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward account outputs: %w", err)
 	}
 	return nil
 }
 
-func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
-	if app == nil || app.pots == nil {
+func deriveStakeRewardApplicationTotals(app *StakeRewardApplication) error {
+	if app == nil || app.Pots == nil {
 		return errors.New("missing stake reward application")
 	}
-	if app.totalsFinal {
+	if app.TotalsFinal {
 		return nil
 	}
-	totalRewardPot := app.totalRewardPot
-	fees := uint64(app.pots.Fees)
+	totalRewardPot := app.TotalRewardPot
+	fees := uint64(app.Pots.Fees)
 	if totalRewardPot < fees {
 		return fmt.Errorf(
 			"invalid precomputed reward pot %d below fees %d",
@@ -3266,16 +2893,16 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 		)
 	}
 	availableRewards, err := rewardAvailableRewards(
-		app.totalRewardPot,
-		app.params,
+		app.TotalRewardPot,
+		app.Params,
 	)
 	if err != nil {
 		return err
 	}
-	app.availableRewards = availableRewards
-	app.effectiveRewards = 0
-	app.unspendable = 0
-	for _, output := range app.accountOutputs {
+	app.AvailableRewards = availableRewards
+	app.EffectiveRewards = 0
+	app.Unspendable = 0
+	for _, output := range app.AccountOutputs {
 		if output == nil {
 			continue
 		}
@@ -3283,7 +2910,7 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 		// snapshot epoch is neither credited nor counted here, so its amount
 		// falls through to undistributed (see undistributed below) and is
 		// refunded to reserves. This must match the crediting loop's skip in
-		// applyStakeRewardApplication exactly. The set is nil unless the gate
+		// ApplyStakeRewardApplication exactly. The set is nil unless the gate
 		// was on at application time, keeping the gate-off path byte-identical.
 		if rewardOutputGuarded(app, output) {
 			continue
@@ -3291,62 +2918,62 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 		amount := uint64(output.Amount)
 		var overflow bool
 		if output.Spendable {
-			app.effectiveRewards, overflow = addRewardUint64(
-				app.effectiveRewards,
+			app.EffectiveRewards, overflow = AddRewardUint64(
+				app.EffectiveRewards,
 				amount,
 			)
 		} else {
-			app.unspendable, overflow = addRewardUint64(app.unspendable, amount)
+			app.Unspendable, overflow = AddRewardUint64(app.Unspendable, amount)
 		}
 		if overflow {
 			return errors.New("stake reward output total overflow")
 		}
 	}
-	credited, overflow := addRewardUint64(
-		app.effectiveRewards,
-		app.unspendable,
+	credited, overflow := AddRewardUint64(
+		app.EffectiveRewards,
+		app.Unspendable,
 	)
 	var undistributed uint64
 	if !overflow {
 		undistributed, err = rewards.UndistributedRewards(
-			app.availableRewards,
+			app.AvailableRewards,
 			credited,
-			app.unspendableDeficit,
+			app.UnspendableDeficit,
 		)
 	}
 	if overflow || err != nil {
 		return fmt.Errorf(
 			"precomputed rewards exceed available pot: effective=%d unspendable=%d deficit=%d available=%d",
-			app.effectiveRewards,
-			app.unspendable,
-			app.unspendableDeficit,
-			app.availableRewards,
+			app.EffectiveRewards,
+			app.Unspendable,
+			app.UnspendableDeficit,
+			app.AvailableRewards,
 		)
 	}
-	app.undistributed = undistributed
+	app.Undistributed = undistributed
 	return nil
 }
 
-func stakeRewardUpdatedPots(
-	app *stakeRewardApplication,
+func StakeRewardUpdatedPots(
+	app *StakeRewardApplication,
 ) (uint64, uint64, error) {
-	if app == nil || app.pots == nil {
+	if app == nil || app.Pots == nil {
 		return 0, 0, errors.New("missing stake reward application")
 	}
 	if err := deriveStakeRewardApplicationTotals(app); err != nil {
 		return 0, 0, err
 	}
-	incentives := app.totalRewardPot - uint64(app.pots.Fees)
-	if uint64(app.pots.Reserves) < incentives {
+	incentives := app.TotalRewardPot - uint64(app.Pots.Fees)
+	if uint64(app.Pots.Reserves) < incentives {
 		return 0, 0, fmt.Errorf(
 			"stake reward incentives %d exceed reserves %d",
 			incentives,
-			app.pots.Reserves,
+			app.Pots.Reserves,
 		)
 	}
-	basePots := app.pots
-	if app.replayBaseline != nil {
-		basePots = app.replayBaseline
+	basePots := app.Pots
+	if app.ReplayBaseline != nil {
+		basePots = app.ReplayBaseline
 	}
 	if uint64(basePots.Reserves) < incentives {
 		return 0, 0, fmt.Errorf(
@@ -3357,31 +2984,31 @@ func stakeRewardUpdatedPots(
 	}
 	reserves := uint64(basePots.Reserves) - incentives
 	var overflow bool
-	reserves, overflow = addRewardUint64(reserves, app.undistributed)
+	reserves, overflow = AddRewardUint64(reserves, app.Undistributed)
 	if overflow {
 		return 0, 0, errors.New("stake reward reserves overflow")
 	}
 	treasuryTax, err := rewardFloorMul(
-		app.params.TreasuryExpansion,
-		app.totalRewardPot,
+		app.Params.TreasuryExpansion,
+		app.TotalRewardPot,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("stake reward treasury tax: %w", err)
 	}
-	treasury, overflow := addRewardUint64(
+	treasury, overflow := AddRewardUint64(
 		uint64(basePots.Treasury),
 		treasuryTax,
 	)
 	if overflow {
 		return 0, 0, errors.New("stake reward treasury tax overflow")
 	}
-	treasury, overflow = addRewardUint64(treasury, app.unspendable)
+	treasury, overflow = AddRewardUint64(treasury, app.Unspendable)
 	if overflow {
 		return 0, 0, errors.New("stake reward treasury overflow")
 	}
 	treasury, err = rewards.SubtractUnspendableDeficit(
 		treasury,
-		app.unspendableDeficit,
+		app.UnspendableDeficit,
 	)
 	if err != nil {
 		return 0, 0, err
@@ -3408,7 +3035,7 @@ func rewardFloorMul(r *big.Rat, amount uint64) (uint64, error) {
 	return q.Uint64(), nil
 }
 
-func addRewardUint64(a, b uint64) (uint64, bool) {
+func AddRewardUint64(a, b uint64) (uint64, bool) {
 	if a > math.MaxUint64-b {
 		return 0, true
 	}
@@ -3429,7 +3056,7 @@ func rewardStakeSumMatchesSnapshot(
 	if snapshot.ExcludedActiveStake == nil {
 		return summed <= uint64(snapshot.TotalActiveStake), nil
 	}
-	total, overflow := addRewardUint64(
+	total, overflow := AddRewardUint64(
 		summed,
 		uint64(*snapshot.ExcludedActiveStake),
 	)
@@ -3441,16 +3068,16 @@ func rewardStakeSumMatchesSnapshot(
 	return total == uint64(snapshot.TotalActiveStake), nil
 }
 
-type stakeRewardEpochs struct {
-	snapshot    uint64
-	performance uint64
-	pots        uint64
-	bootstrap   bool
+type StakeRewardEpochs struct {
+	Snapshot    uint64
+	Performance uint64
+	Pots        uint64
+	Bootstrap   bool
 }
 
-func stakeRewardEpochsForApplication(
+func StakeRewardEpochsForApplication(
 	newEpoch uint64,
-) (stakeRewardEpochs, bool) {
+) (StakeRewardEpochs, bool) {
 	// Initial RUPD calculations use the genesis Go distribution. Epoch 0
 	// reads genesis pots and empty previous block counts; epoch 1 reads the
 	// epoch-1 pots and epoch 0's blocks. Both updates must be applied, even
@@ -3460,26 +3087,26 @@ func stakeRewardEpochsForApplication(
 	// Byron and applies the round after the first Shelley epoch through
 	// applyFirstShelleyStakeRewardRound.
 	if newEpoch == 1 || newEpoch == 2 {
-		return stakeRewardEpochs{
-			snapshot:    0,
-			performance: 0,
-			pots:        newEpoch - 1,
-			bootstrap:   true,
+		return StakeRewardEpochs{
+			Snapshot:    0,
+			Performance: 0,
+			Pots:        newEpoch - 1,
+			Bootstrap:   true,
 		}, true
 	}
-	return stakeRewardEpochsForNewEpoch(newEpoch)
+	return StakeRewardEpochsForNewEpoch(newEpoch)
 }
 
-func (ls *LedgerState) classifyRewardStakeInputReconstructionError(
+func (e *Engine) classifyRewardStakeInputReconstructionError(
 	authoritative bool,
 	newEpoch uint64,
 	rewardSnapshotEpoch uint64,
 	err error,
 ) error {
-	if !errors.Is(err, errRewardStakeInputsUnrecoverable) {
+	if !errors.Is(err, ErrRewardStakeInputsUnrecoverable) {
 		return err
 	}
-	return ls.requiredStakeRewardBasisUnavailable(
+	return e.RequiredStakeRewardBasisUnavailable(
 		authoritative,
 		newEpoch,
 		err.Error(),
@@ -3488,11 +3115,11 @@ func (ls *LedgerState) classifyRewardStakeInputReconstructionError(
 	)
 }
 
-// requiredStakeRewardBasisUnavailable rejects an authoritative reward round
+// RequiredStakeRewardBasisUnavailable rejects an authoritative reward round
 // whose required persisted basis is absent. An opportunistic precompute can
 // observe the basis before the boundary transaction writes it, so that path
 // remains retryable.
-func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
+func (e *Engine) RequiredStakeRewardBasisUnavailable(
 	authoritative bool,
 	newEpoch uint64,
 	reason string,
@@ -3503,7 +3130,7 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 	if !authoritative {
 		return nil
 	}
-	if ls.config.Logger != nil {
+	if e.config.Logger != nil {
 		args := make([]any, 0, 6+len(extra))
 		args = append(args,
 			"component", "ledger",
@@ -3511,7 +3138,7 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 			epochKey, epochValue,
 		)
 		args = append(args, extra...)
-		ls.config.Logger.Error(
+		e.config.Logger.Error(
 			"cannot apply stake rewards: "+reason+
 				"; halting before the boundary can commit with reward balances"+
 				" and the leadership stake distribution permanently short"+
@@ -3524,7 +3151,7 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 		"%w for new epoch %d: %s (%s=%d); recover by re-running Mithril"+
 			" sync or ledger-state import, and see the earlier bootstrap"+
 			" and ledgerstate import warnings",
-		errRequiredStakeRewardBasisUnavailable,
+		ErrRequiredStakeRewardBasisUnavailable,
 		newEpoch,
 		reason,
 		epochKey,
@@ -3534,7 +3161,7 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 
 // rewardStakeReconstructionToleranceRatio bounds how far a pool's
 // reconstructed reward-stake-input total may drift from its retained
-// reward_pool_input.DelegatedStake before rebuildPrunedRewardStakeInputs
+// reward_pool_input.DelegatedStake before RebuildPrunedRewardStakeInputs
 // treats it as corruption rather than accumulated cross-method rounding. A
 // gap passes only when it is within one part in denominator of the pool's
 // stake AND at or below absoluteCeiling lovelace outright -- the second
@@ -3581,7 +3208,7 @@ func rewardStakeInputOutranks(
 	return current == nil || rewardStakeInputLess(current, candidate)
 }
 
-// rebuildPrunedRewardStakeInputs reconstructs the per-credential
+// RebuildPrunedRewardStakeInputs reconstructs the per-credential
 // reward_stake_input rows for rewardSnapshotEpoch when GetRewardStakeInputs
 // finds them already aged out by retention pruning, but the epoch's
 // reward_snapshot/reward_pool_input rows (both retained for the life of the
@@ -3593,24 +3220,24 @@ func rewardStakeInputOutranks(
 // write transaction that owns the reward application; this helper is strictly
 // read-only. Returns (nil, nil) if the reconstruction itself comes back empty,
 // leaving the caller's existing skip path to handle that as before.
-func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
+func (e *Engine) RebuildPrunedRewardStakeInputs(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	rewardSnapshotEpoch uint64,
 	rewardSnapshot *models.RewardSnapshot,
 	poolInputs []*models.RewardPoolInput,
 ) ([]*models.RewardStakeInput, error) {
-	rebuilt, _, err := ls.rebuildPrunedRewardStakeInputsDetailed(
+	rebuilt, _, err := e.rebuildPrunedRewardStakeInputsDetailed(
 		meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	return rebuilt, err
 }
 
-// rebuildPrunedRewardStakeInputsDetailed is rebuildPrunedRewardStakeInputs
+// rebuildPrunedRewardStakeInputsDetailed is RebuildPrunedRewardStakeInputs
 // that also reports whether an empty result means the reconstruction found
-// rows but reconcileRebuiltRewardStakeInputs rejected them against the
+// rows but ReconcileRebuiltRewardStakeInputs rejected them against the
 // retained reward_pool_input totals, rather than finding no rows at all.
-func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
+func (e *Engine) rebuildPrunedRewardStakeInputsDetailed(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	rewardSnapshotEpoch uint64,
@@ -3635,11 +3262,11 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
 	})
 	// Mirrors snapshot.Manager.expiryEpoch/inactivityPeriod: the CIP-0163 gate
 	// is off unless the operator enabled it, in which case the gate argument
-	// is the snapshot epoch itself (see LedgerStateConfig.DelegatorInactivityEnabled).
+	// is the snapshot epoch itself (see Config.DelegatorInactivityEnabled).
 	var expiryEpoch, inactivityPeriod uint64
-	if ls.config.DelegatorInactivityEnabled {
+	if e.config.DelegatorInactivityEnabled {
 		expiryEpoch = rewardSnapshotEpoch
-		inactivityPeriod = ls.config.DelegatorInactivity
+		inactivityPeriod = e.config.DelegatorInactivity
 	}
 	// The live capture passes the incoming era explicitly; the snapshot
 	// epoch's own row records that era, so pass it the same way.
@@ -3717,7 +3344,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
 			if err != nil {
 				return nil, false, fmt.Errorf(
 					"%w: reward pool input for epoch %d: %w",
-					errRewardStakeInputsUnrecoverable,
+					ErrRewardStakeInputsUnrecoverable,
 					rewardSnapshotEpoch, err,
 				)
 			}
@@ -3755,7 +3382,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
 			}
 		}
 	}
-	reconciled := ls.reconcileRebuiltRewardStakeInputs(
+	reconciled := e.ReconcileRebuiltRewardStakeInputs(
 		rebuilt,
 		poolInputs,
 		rewardSnapshotEpoch,
@@ -3763,14 +3390,14 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
 	return reconciled, len(reconciled) == 0, nil
 }
 
-func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
+func (e *Engine) ReconcileRebuiltRewardStakeInputs(
 	rebuilt []*models.RewardStakeInput,
 	poolInputs []*models.RewardPoolInput,
 	rewardSnapshotEpoch uint64,
 ) []*models.RewardStakeInput {
 	// The retained reward_pool_input row for each pool carries the exact
 	// per-pool total the live capture observed at the time (DelegatedStake).
-	// validateRewardCalculatorInputs enforces that the per-credential rows
+	// ValidateRewardCalculatorInputs enforces that the per-credential rows
 	// sum to precisely that total; a retention-pruned epoch never reached
 	// that check before (it was always skipped first), so a disagreement
 	// between the live incremental aggregate and this CTE reconstruction
@@ -3793,7 +3420,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	poolKeys := make([]string, 0, len(poolInputs))
 	for _, poolInput := range poolInputs {
 		if poolInput == nil {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward stake inputs contain a nil retained pool",
 				"component", "ledger",
 				"reward_snapshot_epoch", rewardSnapshotEpoch,
@@ -3845,7 +3472,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			diff*rewardStakeReconstructionToleranceRatio.denominator <= expected
 		largest := largestInputByPool[key]
 		if !tolerable || largest == nil {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward stake inputs disagree with the "+
 					"retained pool total; leaving this epoch's reward "+
 					"round skipped rather than applying a mismatched "+
@@ -3858,7 +3485,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			)
 			return nil
 		}
-		ls.config.Logger.Warn(
+		e.config.Logger.Warn(
 			"reconstructed reward stake inputs differ from the retained "+
 				"pool total by a tolerance-bounded amount; folding the "+
 				"gap into the pool's largest credential",
@@ -3879,7 +3506,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	// Same tolerance treatment, restricted to the Owner-flagged subset: the
 	// owner resolution above only sets which rows are the pool's own stake,
 	// it does not change their amounts, so the same cross-method rounding
-	// gap validateRewardCalculatorInputs would otherwise reject can show up
+	// gap ValidateRewardCalculatorInputs would otherwise reject can show up
 	// again here against the retained OwnerStake total.
 	actualOwnerByPool := make(map[string]uint64, len(poolInputByKey))
 	largestOwnerInputByPool := make(
@@ -3935,11 +3562,14 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		largestOwner := largestOwnerInputByPool[key]
 		counterparty := largestNonOwnerInputByPool[key]
 		if largestOwner == nil || counterparty == nil {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward owner stake inputs cannot be reconciled without owner and non-owner credentials",
-				"component", "ledger",
-				"reward_snapshot_epoch", rewardSnapshotEpoch,
-				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"component",
+				"ledger",
+				"reward_snapshot_epoch",
+				rewardSnapshotEpoch,
+				"pool_key_hash",
+				hex.EncodeToString([]byte(key)),
 			)
 			return nil
 		}
@@ -3960,7 +3590,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			diff <= rewardStakeReconstructionToleranceRatio.absoluteCeiling &&
 			diff*rewardStakeReconstructionToleranceRatio.denominator <= expected
 		if !tolerable || donor == nil || uint64(donor.Stake) < diff {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward owner stake inputs disagree with the "+
 					"retained pool owner total; leaving this epoch's "+
 					"reward round skipped rather than applying a "+
@@ -3973,7 +3603,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			)
 			return nil
 		}
-		ls.config.Logger.Warn(
+		e.config.Logger.Warn(
 			"reconstructed reward owner stake inputs differ from the "+
 				"retained pool owner total by a tolerance-bounded amount; "+
 				"transferring the gap between the pool's largest owner and "+
@@ -4025,7 +3655,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			continue
 		}
 		if uint64(len(rows)) < expectedCount {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward stake inputs have fewer delegators "+
 					"than the retained pool total; leaving this epoch's "+
 					"reward round skipped rather than applying an "+
@@ -4052,7 +3682,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			}
 		}
 		if largest == nil {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward stake inputs have more delegators "+
 					"than the retained pool total and no non-owner "+
 					"credential to fold the excess into; leaving this "+
@@ -4076,7 +3706,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			kept = append(kept, row)
 		}
 		if uint64(len(kept)) != expectedCount {
-			ls.config.Logger.Warn(
+			e.config.Logger.Warn(
 				"reconstructed reward stake inputs have more delegators "+
 					"than the retained pool total and too few non-owner "+
 					"credentials to fold the excess away; leaving this "+
@@ -4089,7 +3719,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 			)
 			return nil
 		}
-		ls.config.Logger.Warn(
+		e.config.Logger.Warn(
 			"reconstructed reward stake inputs have more delegators than "+
 				"the retained pool total; folding the excess credentials' "+
 				"stake into the pool's largest non-owner credential",
@@ -4106,7 +3736,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	sort.Slice(rebuilt, func(i, j int) bool {
 		return compareRewardStakeInputIdentity(rebuilt[i], rebuilt[j]) < 0
 	})
-	ls.config.Logger.Warn(
+	e.config.Logger.Warn(
 		"reconstructed reward stake inputs pruned by retention before this "+
 			"epoch's reward round applied",
 		"component", "ledger",
@@ -4116,9 +3746,9 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	return rebuilt
 }
 
-func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
+func StakeRewardEpochsForNewEpoch(newEpoch uint64) (StakeRewardEpochs, bool) {
 	if newEpoch < 3 {
-		return stakeRewardEpochs{}, false
+		return StakeRewardEpochs{}, false
 	}
 	// At the boundary into epoch N, cardano-ledger's NEWEPOCH rule applies
 	// the reward update that was computed during epoch N-1 before that
@@ -4127,21 +3757,21 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 	// block-performance epoch is N-2, and the ADA pots row captured at the
 	// boundary into N-1 carries the reserves/treasury state plus fees for
 	// epoch N-2 that seed the delayed calculation.
-	return stakeRewardEpochs{
-		snapshot:    newEpoch - 3,
-		performance: newEpoch - 2,
-		pots:        newEpoch - 1,
+	return StakeRewardEpochs{
+		Snapshot:    newEpoch - 3,
+		Performance: newEpoch - 2,
+		Pots:        newEpoch - 1,
 	}, true
 }
 
-func (ls *LedgerState) saveRewardAdaPotsForEpoch(
+func (e *Engine) SaveRewardAdaPotsForEpoch(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	endedEpoch models.Epoch,
 	boundarySlot uint64,
 ) error {
-	ldb := ls.ledgerDB()
-	fees, err := ls.rewardEpochFeesFor(txn, endedEpoch)
+	ldb := e.ledgerDB()
+	fees, err := e.host.RewardEpochFees(txn, endedEpoch)
 	if err != nil {
 		return fmt.Errorf(
 			"sum reward fees for epoch %d: %w",
@@ -4158,7 +3788,7 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	fees, err = ls.carriedRewardFees(txn, newEpoch, fees)
+	fees, err = e.carriedRewardFees(txn, newEpoch, fees)
 	if err != nil {
 		return err
 	}
@@ -4178,11 +3808,11 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	return nil
 }
 
-// minPoolMarginRat converts a CIP-23 minPoolMargin basis-points value to a
+// MinPoolMarginRat converts a CIP-23 minPoolMargin basis-points value to a
 // rational in [0, 1], returning nil when the value is 0 (feature disabled).
 // 150 bp => 150/10000. Uses SetUint64 (not int64(basisPoints)) to avoid a
 // gosec G115 uint->int64 conversion finding.
-func minPoolMarginRat(basisPoints uint) *big.Rat {
+func MinPoolMarginRat(basisPoints uint) *big.Rat {
 	if basisPoints == 0 {
 		return nil
 	}
@@ -4192,16 +3822,16 @@ func minPoolMarginRat(basisPoints uint) *big.Rat {
 	)
 }
 
-// applyMinPoolMarginConfig overlays the CIP-23 minimum pool margin operator
+// ApplyMinPoolMarginConfig overlays the CIP-23 minimum pool margin operator
 // setting onto the reward parameters. It sets params.MinPoolMargin only when the
 // configured value is nonzero AND the calculation is for Dijkstra or later;
 // otherwise it leaves the field nil so pre-Dijkstra reward calculation stays
 // unchanged. This is the reward-path half of the whole-feature Dijkstra+ gate;
 // the certificate half is that checkPoolMarginFloor is wired only into
 // ValidateTxDijkstra.
-func applyMinPoolMarginConfig(
+func ApplyMinPoolMarginConfig(
 	params *rewards.Parameters,
-	cfg LedgerStateConfig,
+	cfg Config,
 	calculationEraID uint,
 ) {
 	if cfg.MinPoolMargin == 0 {
@@ -4210,25 +3840,16 @@ func applyMinPoolMarginConfig(
 	if calculationEraID < eras.DijkstraEraDesc.Id {
 		return
 	}
-	params.MinPoolMargin = minPoolMarginRat(cfg.MinPoolMargin)
+	params.MinPoolMargin = MinPoolMarginRat(cfg.MinPoolMargin)
 }
 
-// MinPoolMargin returns the CIP-23 minimum pool margin as a rational in [0, 1],
-// or nil when disabled (config value 0). It satisfies the eras package
-// MinPoolMarginProvider interface used by the Dijkstra pool-margin-floor
-// certificate rule; the Dijkstra-only era gate is inherent because only
-// ValidateTxDijkstra consults it.
-func (ls *LedgerState) MinPoolMargin() *big.Rat {
-	return minPoolMarginRat(ls.config.MinPoolMargin)
-}
-
-func (ls *LedgerState) rewardParameters(
+func (e *Engine) RewardParameters(
 	txn ledgerdb.Txn,
 	performanceEpoch uint64,
 	calculationEpoch uint64,
 	pots *models.RewardAdaPots,
 ) (lcommon.ProtocolParameters, rewards.Parameters, error) {
-	performanceEpochRow, err := ls.ledgerDB().GetEpoch(
+	performanceEpochRow, err := e.ledgerDB().GetEpoch(
 		performanceEpoch,
 		txn,
 	)
@@ -4244,14 +3865,14 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpoch,
 		)
 	}
-	performanceEraDesc, ok := ls.eraById(performanceEpochRow.EraId)
+	performanceEraDesc, ok := e.host.EraByID(performanceEpochRow.EraId)
 	if !ok || performanceEraDesc == nil {
 		return nil, rewards.Parameters{}, fmt.Errorf(
 			"unknown era ID %d for reward performance epoch %d",
 			performanceEpochRow.EraId, performanceEpoch,
 		)
 	}
-	performancePParams, err := ls.loadPersistedRewardProtocolParameters(
+	performancePParams, err := e.loadPersistedRewardProtocolParameters(
 		performanceEpoch,
 		*performanceEraDesc,
 		txn,
@@ -4268,7 +3889,7 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpoch,
 		)
 	}
-	calculationEpochRow, err := ls.ledgerDB().GetEpoch(
+	calculationEpochRow, err := e.ledgerDB().GetEpoch(
 		calculationEpoch,
 		txn,
 	)
@@ -4304,9 +3925,9 @@ func (ls *LedgerState) rewardParameters(
 	// epoch (1) and 0 at the calculation epoch (2), and taking 0 dropped the
 	// d >= 0.8 short circuit, leaving eta at 0 and suppressing that epoch's
 	// entire monetary expansion.
-	params, err := rewardParametersFromPParams(
+	params, err := RewardParametersFromPParams(
 		performancePParams,
-		ls.config.CardanoNodeConfig,
+		e.config.CardanoNodeConfig,
 		uint64(calculationEpochRow.LengthInSlots),
 	)
 	if err != nil {
@@ -4335,17 +3956,17 @@ func (ls *LedgerState) rewardParameters(
 	// upgraded by Dijkstra enactment. Use the calculation epoch's enacted value
 	// for CIP-50 at that boundary; other reward inputs remain performance-era.
 	pledgeLeveragePParams := performancePParams
-	calculationEraDesc, ok := ls.eraById(calculationEpochRow.EraId)
+	calculationEraDesc, ok := e.host.EraByID(calculationEpochRow.EraId)
 	if !ok || calculationEraDesc == nil {
 		return nil, rewards.Parameters{}, fmt.Errorf(
 			"unknown era ID %d for reward calculation epoch %d",
 			calculationEpochRow.EraId, calculationEpoch,
 		)
 	}
-	applyMinPoolMarginConfig(&params, ls.config, calculationEraDesc.Id)
+	ApplyMinPoolMarginConfig(&params, e.config, calculationEraDesc.Id)
 	if calculationEraDesc.Id == eras.DijkstraEraDesc.Id &&
 		performanceEraDesc.Id != eras.DijkstraEraDesc.Id {
-		pledgeLeveragePParams, err = ls.loadPersistedRewardProtocolParameters(
+		pledgeLeveragePParams, err = e.loadPersistedRewardProtocolParameters(
 			calculationEpoch, *calculationEraDesc, txn,
 		)
 		if err != nil {
@@ -4363,11 +3984,11 @@ func (ls *LedgerState) rewardParameters(
 	}
 	// Before Dijkstra, retain the experimental operator setting. In Dijkstra,
 	// the enacted chain value (including nil) is authoritative.
-	applyPledgeLeveragePParams(&params, pledgeLeveragePParams, ls.config)
+	ApplyPledgeLeveragePParams(&params, pledgeLeveragePParams, e.config)
 	// CIP-0163: overlay the operator-configured full-pot feature gate onto the
 	// on-chain-derived parameters. This is the single chokepoint feeding both
 	// the boundary apply and the async precompute path, so both agree.
-	applyFullPotConfig(&params, ls.config)
+	applyFullPotConfig(&params, e.config)
 	if params.MaxLovelaceSupply < uint64(pots.Reserves) {
 		return nil, rewards.Parameters{}, fmt.Errorf(
 			"invalid reward pots: reserves %d exceed max supply %d",
@@ -4382,11 +4003,11 @@ func (ls *LedgerState) rewardParameters(
 // config onto the reward parameters. When disabled the parameters are left with
 // FullPotRewardsEnabled false, preserving the pre-CIP-0163 residual-to-reserves
 // behavior.
-func applyFullPotConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
+func applyFullPotConfig(params *rewards.Parameters, cfg Config) {
 	params.FullPotRewardsEnabled = cfg.FullPotRewardsEnabled
 }
 
-// rewardBlockCounts resolves the per-pool and total block counts for a reward
+// RewardBlockCounts resolves the per-pool and total block counts for a reward
 // round's performance epoch.
 //
 // The bool reports whether the counts are known. It is false only when part of
@@ -4401,7 +4022,7 @@ func applyFullPotConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
 //
 // A node that never imported a snapshot has no trust anchor and reaches none of
 // this: its counts come from its own block history exactly as before.
-func (ls *LedgerState) rewardBlockCounts(
+func (e *Engine) RewardBlockCounts(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	performanceEpoch uint64,
@@ -4434,25 +4055,10 @@ func (ls *LedgerState) rewardBlockCounts(
 	if len(poolKeys) == 0 {
 		return nil, 0, true, nil
 	}
-	if r := ls.rewardBlocksServing(metaTxn); r != nil {
-		counts, total, ok, err := ls.rewardBlockCountsFromSet(
-			r, metaTxn, performanceEpoch, poolKeys,
-		)
-		if err != nil {
-			return nil, 0, false, err
-		}
-		if ok {
-			return counts, total, true, nil
-		}
-		// The metadata store has no rows to fall back to; the epoch is
-		// one whose counts the set never held, which the reward round
-		// declines rather than distributes.
-		return nil, 0, false, nil
-	}
-	return nil, 0, false, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
+	return e.host.RewardBlockCounts(metaTxn, performanceEpoch, poolKeys)
 }
 
-func rewardIsOverlaySlot(
+func RewardIsOverlaySlot(
 	firstSlot uint64,
 	decentralization *big.Rat,
 	slot uint64,
@@ -4483,7 +4089,7 @@ func rewardOverlayStep(offset uint64, decentralization *big.Rat) *big.Int {
 	return q
 }
 
-func (ls *LedgerState) rewardPrefilterSlot(
+func (e *Engine) RewardPrefilterSlot(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	potsEpoch uint64,
@@ -4502,7 +4108,7 @@ func (ls *LedgerState) rewardPrefilterSlot(
 		return epoch.StartSlot, nil
 	}
 	endSlot := epoch.StartSlot + uint64(epoch.LengthInSlots) - 1
-	stabilityWindow := ls.rewardUpdateStabilityWindow()
+	stabilityWindow := e.RewardUpdateStabilityWindow()
 	prefilterSlot := epoch.StartSlot
 	if stabilityWindow > 0 {
 		if stabilityWindow >= math.MaxUint64-epoch.StartSlot {
@@ -4517,18 +4123,18 @@ func (ls *LedgerState) rewardPrefilterSlot(
 	return prefilterSlot, nil
 }
 
-// rewardUpdateStabilityWindow returns the randomness stabilisation window used
+// RewardUpdateStabilityWindow returns the randomness stabilisation window used
 // by cardano-ledger's RUPD rule. This is deliberately separate from
 // nonceStabilityWindow: historical eras can use a 3k/f nonce cutoff while RUPD
 // starts after the 4k/f randomness window.
-func (ls *LedgerState) rewardUpdateStabilityWindow() uint64 {
-	if ls.rewardUpdateWindowOverride != nil {
-		return *ls.rewardUpdateWindowOverride
+func (e *Engine) RewardUpdateStabilityWindow() uint64 {
+	if e.config.RewardUpdateStabilityWindow != nil {
+		return *e.config.RewardUpdateStabilityWindow
 	}
-	if ls.config.CardanoNodeConfig == nil {
+	if e.config.CardanoNodeConfig == nil {
 		return 0
 	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyGenesis := e.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return 0
 	}
@@ -4556,7 +4162,7 @@ func (ls *LedgerState) rewardUpdateStabilityWindow() uint64 {
 	return result.Uint64()
 }
 
-func (ls *LedgerState) rewardCalculatorSnapshot(
+func (e *Engine) rewardCalculatorSnapshot(
 	ctx context.Context,
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
@@ -4568,7 +4174,7 @@ func (ls *LedgerState) rewardCalculatorSnapshot(
 	prefilterSlot uint64,
 	requiresRewardPrefilter bool,
 ) (rewards.Snapshot, error) {
-	if err := validateRewardCalculatorInputs(
+	if err := ValidateRewardCalculatorInputs(
 		snapshot,
 		poolInputs,
 		stakeInputs,
@@ -4584,7 +4190,7 @@ func (ls *LedgerState) rewardCalculatorSnapshot(
 	if err != nil {
 		return rewards.Snapshot{}, err
 	}
-	prefilterAccounts, err := rewardPrefilterAccounts(
+	prefilterAccounts, err := RewardPrefilterAccounts(
 		meta,
 		metaTxn,
 		poolInputs,
@@ -4632,7 +4238,7 @@ func (ls *LedgerState) rewardCalculatorSnapshot(
 	return ret, nil
 }
 
-func validateRewardCalculatorInputs(
+func ValidateRewardCalculatorInputs(
 	snapshot *models.RewardSnapshot,
 	poolInputs []*models.RewardPoolInput,
 	stakeInputs []*models.RewardStakeInput,
@@ -4721,11 +4327,11 @@ func validateRewardCalculatorInputs(
 		poolDelegatorCountByKey[key] = input.DelegatorCount
 		poolLabelByKey[key] = poolID.String()
 		var overflow bool
-		totalPoolStake, overflow = addRewardUint64(totalPoolStake, stake)
+		totalPoolStake, overflow = AddRewardUint64(totalPoolStake, stake)
 		if overflow {
 			return errors.New("reward pool input delegated stake overflow")
 		}
-		totalDelegators, overflow = addRewardUint64(
+		totalDelegators, overflow = AddRewardUint64(
 			totalDelegators,
 			input.DelegatorCount,
 		)
@@ -4824,7 +4430,7 @@ func validateRewardCalculatorInputs(
 			)
 		}
 		var overflow bool
-		stakeByPool[key], overflow = addRewardUint64(
+		stakeByPool[key], overflow = AddRewardUint64(
 			stakeByPool[key],
 			uint64(input.Stake),
 		)
@@ -4835,7 +4441,7 @@ func validateRewardCalculatorInputs(
 			)
 		}
 		if input.Owner {
-			ownerStakeByPool[key], overflow = addRewardUint64(
+			ownerStakeByPool[key], overflow = AddRewardUint64(
 				ownerStakeByPool[key],
 				uint64(input.Stake),
 			)
@@ -4983,7 +4589,7 @@ type rewardAccountHistoryReader interface {
 	) (map[string]struct{}, error)
 }
 
-func rewardPrefilterAccounts(
+func RewardPrefilterAccounts(
 	meta rewardAccountHistoryReader,
 	metaTxn ledgerdb.Txn,
 	poolInputs []*models.RewardPoolInput,
@@ -5158,16 +4764,16 @@ func rewardFromAccountOutput(
 	}, nil
 }
 
-// applyPledgeLeveragePParams uses the enacted Dijkstra CIP-50 parameter when
+// ApplyPledgeLeveragePParams uses the enacted Dijkstra CIP-50 parameter when
 // available. Before Dijkstra, the legacy operator setting remains available
 // for experimental local networks.
-func applyPledgeLeveragePParams(
+func ApplyPledgeLeveragePParams(
 	params *rewards.Parameters,
 	pparams lcommon.ProtocolParameters,
-	cfg LedgerStateConfig,
+	cfg Config,
 ) {
 	if pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters); ok {
-		params.PledgeLeverage = cloneCBORRat(pp.MaxPledgeLeverage)
+		params.PledgeLeverage = CloneCBORRat(pp.MaxPledgeLeverage)
 		params.PledgeLeverageEnabled = params.PledgeLeverage != nil
 		return
 	}
@@ -5184,17 +4790,17 @@ func applyPledgeLeveragePParams(
 // loadPersistedRewardProtocolParameters loads a reward round's protocol
 // parameters through the era decoder so persisted values follow the ledger's
 // validation rules for that era.
-func (ls *LedgerState) loadPersistedRewardProtocolParameters(
+func (e *Engine) loadPersistedRewardProtocolParameters(
 	epoch uint64,
 	era eras.EraDesc,
 	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	return ls.loadPersistedProtocolParametersWith(
+	return e.loadPersistedProtocolParametersWith(
 		epoch, era, era.DecodePParamsFunc, txn,
 	)
 }
 
-func rewardParametersFromPParams(
+func RewardParametersFromPParams(
 	pparams lcommon.ProtocolParameters,
 	nodeConfig interface {
 		ShelleyGenesis() *shelley.ShelleyGenesis
@@ -5236,37 +4842,37 @@ func rewardParametersFromPParams(
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
-		params.Decentralization = cloneCBORRat(pp.Decentralization)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
+		params.Decentralization = CloneCBORRat(pp.Decentralization)
 	case *mary.MaryProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
-		params.Decentralization = cloneCBORRat(pp.Decentralization)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
+		params.Decentralization = CloneCBORRat(pp.Decentralization)
 	case *alonzo.AlonzoProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
-		params.Decentralization = cloneCBORRat(pp.Decentralization)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
+		params.Decentralization = CloneCBORRat(pp.Decentralization)
 	case *babbage.BabbageProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
 	case *conway.ConwayProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
 	case *dijkstra.DijkstraProtocolParameters:
 		params.OptimalPoolCount = uint64(pp.NOpt)
-		params.PledgeInfluence = cloneCBORRat(pp.A0)
-		params.MonetaryExpansion = cloneCBORRat(pp.Rho)
-		params.TreasuryExpansion = cloneCBORRat(pp.Tau)
+		params.PledgeInfluence = CloneCBORRat(pp.A0)
+		params.MonetaryExpansion = CloneCBORRat(pp.Rho)
+		params.TreasuryExpansion = CloneCBORRat(pp.Tau)
 	default:
 		return rewards.Parameters{}, fmt.Errorf(
 			"unsupported reward pparams type %T",
@@ -5279,7 +4885,7 @@ func rewardParametersFromPParams(
 	return params, nil
 }
 
-// rewardEpochFees sums the fees an ended epoch collected, for the
+// RewardEpochFees sums the fees an ended epoch collected, for the
 // RewardAdaPots row of the epoch that follows it.
 //
 // A node running through the whole epoch has every one of its transactions
@@ -5299,7 +4905,7 @@ func rewardParametersFromPParams(
 // A row with no ImportedEpochFees -- every row a live boundary writes, and
 // every imported row written before the field existed -- keeps the
 // whole-epoch local sum.
-func rewardEpochFees(
+func RewardEpochFees(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
 	epoch models.Epoch,
@@ -5325,7 +4931,7 @@ func rewardEpochFees(
 		if err != nil {
 			return 0, err
 		}
-		total, overflow := addRewardUint64(
+		total, overflow := AddRewardUint64(
 			postAnchorFees, uint64(*imported.ImportedEpochFees),
 		)
 		if overflow {
@@ -5378,7 +4984,7 @@ func ratOrZero(r *types.Rat) *big.Rat {
 	return new(big.Rat).Set(r.Rat)
 }
 
-func cloneCBORRat(r *cbor.Rat) *big.Rat {
+func CloneCBORRat(r *cbor.Rat) *big.Rat {
 	if r == nil || r.Rat == nil {
 		return nil
 	}
@@ -5392,7 +4998,7 @@ func rewardRat(r *big.Rat) *types.Rat {
 	return &types.Rat{Rat: new(big.Rat).Set(r)}
 }
 
-func suppressBootstrapStakeRewards(result *rewards.Result) {
+func SuppressBootstrapStakeRewards(result *rewards.Result) {
 	if result == nil {
 		return
 	}
@@ -5405,17 +5011,9 @@ func suppressBootstrapStakeRewards(result *rewards.Result) {
 	result.Undistributed = result.AvailableRewards
 }
 
-func (ls *LedgerState) rewardFactsAfterCommit(
+func (e *Engine) rewardFactsAfterCommit(
 	txn ledgerdb.Txn,
 	epoch, slot uint64,
 ) {
-	if ls.config.EventBus == nil {
-		return
-	}
-	txn.AfterCommit(func() {
-		ls.config.EventBus.Publish(RewardFactsEventType, event.NewEvent(
-			RewardFactsEventType,
-			RewardFactsEvent{SnapshotEpoch: epoch, CapturedSlot: slot},
-		))
-	})
+	e.host.PublishRewardFacts(txn, epoch, slot)
 }

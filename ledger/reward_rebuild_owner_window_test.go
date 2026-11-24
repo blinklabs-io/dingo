@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/stretchr/testify/require"
@@ -50,7 +51,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 		context.Background(), snapshotEpoch+1, nil,
 	))
 
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		seedDB(t, db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)
@@ -95,8 +96,8 @@ func TestEnsureRewardStakeInputsReadyReportsRejectedReconstruction(
 
 	txn := db.Transaction(context.Background(), true)
 	defer func() { _ = txn.Rollback() }()
-	err = ls.ensureRewardStakeInputsReady(txn, snapshotEpoch)
-	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	err = ls.engine().EnsureRewardStakeInputsReady(txn, snapshotEpoch)
+	require.ErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err,
 		"reconstruction disagrees with the retained reward_pool_input totals",
 	)
@@ -320,7 +321,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 		context.Background(), snapshotEpoch+1, nil,
 	))
 
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		ls.ledgerDB(), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)

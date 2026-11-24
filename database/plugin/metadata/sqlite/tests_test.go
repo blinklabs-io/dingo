@@ -515,7 +515,7 @@ func (f *gapDepositFixture) applyGap(
 // pool whose registration was ingested from a Mithril gap block.
 //
 // GetPoolsRetiringAtEpoch takes the retiring pool's latest pool_registration
-// row and applyPoolRetirements credits that row's deposit_held as the refund.
+// row and ApplyPoolRetirements credits that row's deposit_held as the refund.
 // A gap block replays from raw CBOR with no ledger delta, so nothing upstream
 // calculates its deposits; mithril's gapCertDeposits derives them from the
 // block's era and the epoch's protocol parameters and passes them in here.
@@ -2956,7 +2956,7 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 		AddedSlot:  10,
 	}).Error)
 
-	// Pre-SNAP: delayed reward update (ledger.applyStakeRewards) and MIR
+	// Pre-SNAP: delayed reward update (ledger.ApplyStakeRewards) and MIR
 	// (governance.CreditRegisteredRewardAccountBeforeSnapshot).
 	for i, amount := range []uint64{50, 3} {
 		require.NoError(t, store.AddAccountRewardByCredential(

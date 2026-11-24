@@ -205,7 +205,7 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // ledger/snapshot/rotation.go's buildRewardStateInputs (which stamps
 // BlocksProduced from evt.PreviousEpoch onto the *next* epoch's
 // reward_pool_input row) and ledger/reward_calculation.go's
-// stakeRewardEpochsForNewEpoch (epochs.snapshot = epochs.performance - 1,
+// StakeRewardEpochsForNewEpoch (epochs.snapshot = epochs.performance - 1,
 // with reward_pool_output written at epochs.snapshot alongside the
 // reward_pool_input row actually consumed for that computation) — rather
 // than two structs with equal same-epoch fields.

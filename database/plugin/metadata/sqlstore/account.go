@@ -915,7 +915,7 @@ WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(args))+`)`,
 // transition (domain-restrict the delegation map by the retired pools, Shelley
 // spec Fig. 41).
 //
-// Called from ledger.applyPoolRetirements with the same boundary slot the
+// Called from ledger.ApplyPoolRetirements with the same boundary slot the
 // deposit refund is written at. Stamping added_slot with that slot is what
 // makes the clear rollback-safe: RestoreAccountStateAtSlot only revisits
 // accounts whose added_slot is past the rollback target, and re-derives the

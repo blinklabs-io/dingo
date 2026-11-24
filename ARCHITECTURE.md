@@ -547,6 +547,7 @@ graph LR
     ev["event"]
     ledger["ledger"]
     ledger_eras["ledger/eras"]
+    ledger_epochengine["ledger/epochengine"]
     ledger_forging["ledger/forging"]
     ledger_governance["ledger/governance"]
     ledger_hardfork["ledger/hardfork"]
@@ -598,6 +599,9 @@ graph LR
     ledger --> chain & chainsel & cardano_cfg & praos
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
+    ledger --> ledger_epochengine
+    ledger_epochengine --> cardano_cfg & db & db_models & db_types & ev
+    ledger_epochengine --> ledger_eras & ledger_governance & ledger_snapshot
     ledger_eras --> cardano_cfg & ledger_hardfork
     ledger_forging --> ev & ledger_eras
     ledger_governance --> db & db_models & db_types & ledger_eras
@@ -2013,6 +2017,12 @@ dingo/
 │   ├── metrics.go       # Ledger metrics
 │   ├── peer_provider.go # Ledger-based peer discovery
 │   ├── era_summary.go   # Era transition handling
+│   ├── epochengine/     # Epoch-boundary computation over a LedgerDB, host-independent
+│   │   ├── engine.go    # Engine, Config, Host
+│   │   ├── reward_*.go  # Stake reward calculation, precompute chunks, application
+│   │   ├── mir.go       # MIR certificates
+│   │   ├── poolreap.go  # Pool retirement refunds
+│   │   └── epoch_nonce.go # Epoch nonce assembly
 │   ├── eras/            # Era-specific validation rules
 │   │   ├── byron.go     # Byron era
 │   │   ├── shelley.go   # Shelley era
@@ -3799,7 +3809,7 @@ cache. Each op-cert counter keeps the sequence of its latest observation
 beside the highest, so a header read after a slot is answered when a pool
 repeated its counter.
 The set keeps the per-epoch block counts and fees,
-accumulated in each block's apply batch and served to `rewardBlockCounts` and
+accumulated in each block's apply batch and served to `RewardBlockCounts` and
 the boundary fee total through `ledger.RewardBlocksReader`, loaded by
 `ledger.RewardBlocksFromStore`. The epoch-boundary reward input capture reads
 its overlay-inclusive counts through `LedgerDB.CountEpochPoolBlocks`, which the
@@ -5566,7 +5576,7 @@ boundary rows. A database synced through the boundary before this translation
 existed keeps its genesis-derived reserves and every pot derived from them; the
 first Shelley reward round compounds the gap, so only a resync from genesis
 corrects it. Networks with a Byron prefix have no Shelley reward round at either
-of those boundaries, and `applyStakeRewards`' Byron-ended-epoch guard suppresses
+of those boundaries, and `ApplyStakeRewards`' Byron-ended-epoch guard suppresses
 both there; networks that declare Shelley at genesis, such as preview, run both.
 The boundary after the first Shelley epoch on a Byron-prefix network still has a
 Byron performance epoch, but cardano-ledger applies the update built during that
@@ -5582,7 +5592,7 @@ hands RUPD the epoch state and blocks-made from *before* NEWEPOCH ran, and the
 update NEWEPOCH leaves is empty, so that tick starts the update from the end of
 the previous epoch: the same snapshot, performance epoch, reserves and fee seed
 as the update applied at the boundary into that epoch. The boundary after it
-therefore applies the previous round again (`replaysPreviousStakeRewardRound`,
+therefore applies the previous round again (`ReplaysPreviousStakeRewardRound`,
 `reward_late_first_block.go`). With X the epoch whose first block was late,
 the boundary into X+1 would normally apply the round whose performance epoch
 is X-1; that round is never built, so the performance of epoch X-1 is never
@@ -5593,7 +5603,7 @@ pparams or stake snapshot. The replayed round is calculated from the previous
 round's inputs but its deltas are added to the ADA pots of the boundary it is applied at, as
 `applyRUpdFiltered` adds `deltaR`/`deltaT` to the live pots, and its `deltaF`
 removes the replayed fee seed from the fees carried into the next round:
-`saveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
+`SaveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
 carried at the previous boundary minus that seed, and halts the boundary if
 that would be negative. The decision reads persisted blocks (the first block of
 the ended epoch, and a block in the epoch before it, since NEWEPOCH does not run
@@ -5617,7 +5627,7 @@ difference.
 One exception is d. Babbage's `PParams` defines `ppDG = to (const minBound)` and
 translating the previous era's parameters into Babbage drops the field, so a
 round computed during a Babbage-or-later epoch reads d as 0 even when the
-performance epoch's Alonzo parameters held a non-zero value. `rewardParameters`
+performance epoch's Alonzo parameters held a non-zero value. `RewardParameters`
 therefore zeroes d whenever the pots epoch is Babbage or later. Prime Mainnet
 crosses from d = 7/10 at epoch 39 into Babbage at epoch 40, so its epoch-39
 round uses d = 0. Block counting still uses the performance epoch's d, because
@@ -5658,10 +5668,10 @@ rewards pass those eligibility checks. The one exception is when no pool earned
 a base reward (`W == 0`, e.g. every pool disqualified): apportionment is skipped
 and the whole available pot returns to reserves, identical to the disabled path.
 The gate is overlaid onto the on-chain-derived reward parameters at a single
-chokepoint, `rewardParameters` (`applyFullPotConfig`), which feeds both the
+chokepoint, `RewardParameters` (`applyFullPotConfig`), which feeds both the
 epoch-boundary apply and the async precompute path, so both compute identical
 rewards; the precompute reuse verifier
-(`precomputedRewardPoolRewardsMatchInputs`) reproduces the same apportionment
+(`PrecomputedRewardPoolRewardsMatchInputs`) reproduces the same apportionment
 before validating persisted pool totals. Because it changes consensus, startup
 validation permits it only on devnet/custom networks by default. Predefined
 standard networks reject it unless the operator also sets the explicit unsafe
@@ -18627,14 +18637,14 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     are the mark stake
     distribution Praos actually used as K's active-stake/reward-calculation
     basis — derived from `ledger/reward_calculation.go`'s
-    `stakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
+    `StakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
     where `epochs.performance` is the unambiguous calendar epoch whose blocks
     are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
     total`) is written from that same `epochs.snapshot` value in the same
     reward-application call, so it is read at the identical epoch as
     `reward_pool_input`'s stake fields, never at K. `reward_account_output`
     shares this exact offset too: `ledger/reward_calculation.go`'s
-    `saveStakeRewardOutputs` calls `meta.SaveRewardAccountOutputs` in the same
+    `SaveStakeRewardOutputs` calls `meta.SaveRewardAccountOutputs` in the same
     transaction and at the same `app.epochs.snapshot` value as
     `SaveRewardPoolOutputs`, and `rewardAccountOutputs`'s own `Epoch` field is
     stamped from that identical `rewardSnapshotEpoch` parameter — so
@@ -18677,7 +18687,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `value_mismatch` instead of reporting the row as genuinely absent. This
   derivation could not be verified empirically against live Koios data from
   this environment the way `CompareEpochTotals`'s field pairing was (see
-  below); it is derived directly from `stakeRewardEpochsForNewEpoch` and
+  below); it is derived directly from `StakeRewardEpochsForNewEpoch` and
   `buildRewardStateInputs`, and should be spot-checked against a real synced
   preview/preprod node's reward tables before being treated as final.
 
@@ -18791,7 +18801,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
   The comparable quantity is the sum over the stake epoch's
   `reward_account_output` member rows that the ledger credits — `spendable`
-  set and `guarded` clear, the same pair `applyStakeRewards` tests before
+  set and `guarded` clear, the same pair `ApplyStakeRewards` tests before
   calling `AddAccountRewardByCredential`. `cleanupOldSnapshots` retains
   `reward_account_output` without bound only in `api` storage mode, so those
   rows can be absent; the comparison then falls back to
@@ -22680,7 +22690,7 @@ rotation and delayed reward model need (current through current-3).
 full per-epoch and per-pool reward history stays queryable and a missing
 summary row keeps its diagnostic meaning of a boundary that was never
 captured. Because a retained snapshot can outlive its per-credential rows,
-`applyStakeRewards` skips an epoch whose snapshot claims delegators over an
+`ApplyStakeRewards` skips an epoch whose snapshot claims delegators over an
 empty `RewardStakeInput` set rather than failing the rollover.
 
 `PoolStakeSnapshot` retention has one extra lower-watermark rule: it is the
@@ -22755,7 +22765,7 @@ it.
 
 That fee pot -- `SnapShots.ssFee` -- is exact for the imported epoch's own row
 and the boundary that reads it, but was not enough for the boundary after that
-one. `LedgerState.rewardEpochFees` computes the *following* epoch's fee pot by
+one. `LedgerState.RewardEpochFees` computes the *following* epoch's fee pot by
 summing stored transaction fees over the whole epoch that just ended, reading
 only this node's local transactions. A node bootstrapped mid-epoch stores no
 transactions at or before its anchor, so that sum silently dropped every
@@ -22771,7 +22781,7 @@ anchor. cardano-ledger's NEWEPOCH rule leaves `utxosFees` equal to the new
 a snapshot whose `utxosFees` is below its `ssFee` was not decoded as a
 consistent ledger state, and the import refuses it. Leaving the field `NULL`
 instead would be indistinguishable from a live-computed row and would credit the
-next round short with no record of why. `rewardEpochFees` reads the ended
+next round short with no record of why. `RewardEpochFees` reads the ended
 epoch's own pots row, and when its anchor (`CapturedSlot`) lies within that
 epoch -- its first and last slots included -- and `ImportedEpochFees` is set,
 sums local fees only over `(CapturedSlot, epochEnd]` and adds the imported
@@ -22803,7 +22813,7 @@ repair marker.
 Treasury donations follow the same pre-anchor rule. Conway's EPOCH rule adds
 `UTxOState.utxosDonation` -- the donations collected this epoch up to and
 including the anchor -- to the treasury at the next boundary and counts it in
-the RATIFY treasury seed, while `applyEpochDonations` and the RATIFY seed read
+the RATIFY treasury seed, while `ApplyEpochDonations` and the RATIFY seed read
 `SumNetworkDonationsForEpoch`, which sees only `network_donation` rows. The
 import therefore replaces the anchor epoch's donation rows in the LedgerDB set
 with one row at the anchor slot carrying the snapshot's `utxosDonation` when it
@@ -22880,7 +22890,7 @@ epoch range detached from the tip.
 
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
-`rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
+`RewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
 past `mithril_ledger_slot` precisely so the certified opcert rows are not
 mistaken for blocks, which leaves an epoch that ended below the anchor with a
 count of zero for every pool. Pool performance is beta/sigma_a with beta the
@@ -22892,7 +22902,7 @@ minted in epoch E-1 and `nesBcur` those minted in E up to the anchor, which are
 the performance epochs of the first two rounds after an import in E.
 `importBlocksMade` persists both into `imported_pool_block_count`, with the
 epoch total and the fact of the import in `imported_epoch_block_total`, and
-`rewardBlockCounts` adds them to the disjoint counts observed above the anchor.
+`RewardBlockCounts` adds them to the disjoint counts observed above the anchor.
 The separate total row exists because a `BlocksMade` map with no entries writes
 no per-pool rows, and a certified zero-block epoch must not read as an epoch
 nothing was imported for. An epoch the anchor covers with no seeded counts has
@@ -23052,7 +23062,7 @@ remain outside the snapshot manager's responsibility.
 
 CIP-0163 reward-account inactivity (proof-of-life) tracks each account's
 `expiration_epoch`. An account is active iff `expiration_epoch == 0` (unset) or
-`expiration_epoch >= currentEpoch` (`ledger.accountExpiredAtEpoch`, negated).
+`expiration_epoch >= currentEpoch` (`ledger.AccountExpiredAtEpoch`, negated).
 DRep activity uses the same inclusive boundary: a DRep is active iff
 `drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch`
 (`ledger/governance/epoch.go` `drepActiveAtEpoch`). Expiry equal to the current
@@ -23089,7 +23099,7 @@ per-pool reward basis, and SPO governance vote power; the DRep voting-power
 queries
 (`GetDRepVotingPower`/`GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`, see
 "Epoch Boundary State Transitions" step 5) for the DRep governance tally; and
-the reward-crediting guard in `applyStakeRewardApplication`
+the reward-crediting guard in `ApplyStakeRewardApplication`
 (`ledger/reward_calculation.go`). The stake-aggregation chokepoint already
 removes an expired delegator's stake from the reward basis, so an expired
 delegator earns nothing. A pool's reward (leader) account, however, is credited
@@ -23099,7 +23109,7 @@ guard reconstructs expiry for every credited credential from witness history
 through the reward snapshot's captured slot (plus the activation floor, with the
 current row retained only as an import-history fallback) and skips crediting any
 whose account is expired as of the reward's snapshot epoch —
-`stakeRewardEpochsForApplication(newEpoch).snapshot`, the same snapshot epoch
+`StakeRewardEpochsForApplication(newEpoch).snapshot`, the same snapshot epoch
 the basis was judged against, so the two agree on which snapshot an account is
 measured at. A skipped amount is excluded from the credited (effective) total
 and from the unspendable (treasury) total by
@@ -23112,7 +23122,7 @@ derivation are byte-identical to pre-CIP behavior.
 The guard decision is also persisted onto the row it withheld, not just acted
 on in memory: `applyGuardedFlagToAccountOutputs` sets each
 `RewardAccountOutput.Guarded` column to match `rewardOutputGuarded` before
-`saveStakeRewardOutputs` writes the row, the same way `Spendable` already
+`SaveStakeRewardOutputs` writes the row, the same way `Spendable` already
 records a deregistered credential's withheld reward. This runs ahead of the
 save for both application paths — a freshly calculated application (whose
 rows are always saved) and a reused precomputed application (whose rows were
@@ -23162,8 +23172,8 @@ just ended, matching the `currentEpoch + DelegatorInactivity` convention the
 per-block renewal hook uses. The new epoch row is persisted later in the same
 transaction. The stored epoch is not just a flag: because the
 activation stamp sets `A + DelegatorInactivity` without leaving any witness,
-the reward round (`guardedExpiredRewardCredentials`, read back via
-`LedgerState.delegatorInactivityActivationEpoch`) reads `A` as an activation
+the reward round (`GuardedExpiredRewardCredentials`, read back via
+`LedgerState.DelegatorInactivityActivationEpoch`) reads `A` as an activation
 floor and clamps each account the activation marked up to
 `A + DelegatorInactivity` — otherwise an account whose last witness predates
 the activation would be taken as expired at its witness epoch plus the window.
@@ -23265,7 +23275,7 @@ the current-epoch N row is still captured.)
 
 Besides the Mithril gap above, expiry reconstruction also requires two
 from-genesis nodes to retain the same witness history for the same slot. The
-reward-crediting guard (`guardedExpiredRewardCredentials`) reads the LedgerDB
+reward-crediting guard (`GuardedExpiredRewardCredentials`) reads the LedgerDB
 set's journaled witness slots. The SQL stake-aggregation chokepoint
 (`historicalExpirationSQL`), which a store whose accounts are still in SQL
 answers from, reads the ten
@@ -23592,7 +23602,25 @@ version changes still run HARDFORK after ENACT inside `processEpochRollover`.
 The incoming era therefore owns every EPOCH sub-rule below, including whether
 POOLREAP precedes SNAP.
 
-1. Delayed stake reward application (`applyStakeRewards`): apply the reward
+The computation behind these steps lives in `ledger/epochengine`, not in
+`LedgerState`. An `epochengine.Engine` runs over a `ledgerdb.LedgerDB` and a
+`Host`, and holds no other state: stake reward calculation and application
+(including the per-pool precompute chunks), MIR, pool retirement refunds,
+treasury donations, ADA pot capture, epoch nonce assembly and the decision and
+application of a deferred ratification. The `Host` supplies what the host owns:
+the live set's block counts, fees, derived-reward rollback counter and account
+view; era and slot-to-epoch lookups; the tip and the candidate and lab nonce
+sources; the rollback-detection counters of the reward inputs; and the
+notifications after commit (reward facts, credit compaction, pool boundary
+staging). `LedgerState` implements `Host` with the same live-set reads it used
+before, and keeps the scheduling: the background reward precompute and its
+locks and generation counters, the ratification job, the rollover transaction
+and the Byron-translation and AVVM steps that iterate the in-memory UTxO set.
+An engine step may not touch `LedgerState` fields, its locks, the event bus or
+the chain manager; a second host reaches the same steps by implementing `Host`
+over its own `LedgerDB`.
+
+1. Delayed stake reward application (`ApplyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
@@ -23602,9 +23630,9 @@ POOLREAP precedes SNAP.
    epoch 0 or at a boundary whose ended or performance epoch is Byron. Any
    triggered boundary whose required inputs are absent (ADA pots, mark
    snapshot, reward stake inputs, or performance-epoch block counts) fails
-   with `errRequiredStakeRewardBasisUnavailable`, which
+   with `ErrRequiredStakeRewardBasisUnavailable`, which
    names the new epoch and the missing input and points the operator at
-   re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
+   re-running Mithril sync or ledger-state import. `ApplyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the
    rollover does not commit, the ledger tip stops advancing, and the node shuts
    down rather than forging on a short reward state. The producer loop runs
@@ -23623,7 +23651,7 @@ POOLREAP precedes SNAP.
    to reserves. Epoch 1 uses empty previous block counts, so its expansion is
    zero unless `d >= 0.8`. Neither is precomputed because zero output rows
    cannot provide rollback-safe precompute provenance.
-2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
+2. Embedded MIR (`ApplyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot
    transfers between treasury and reserves. It is a no-op for Conway+ epochs,
@@ -23692,7 +23720,7 @@ POOLREAP precedes SNAP.
    When the outgoing era supports classic updates, this step was performed
    immediately before translation with that era's update decoder and is not
    repeated here.
-5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+5. Embedded POOLREAP (`ApplyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. The refunded amount is the deposit
    the pool's effective registration retains (`pool_registration.deposit_held`),
    not what the current protocol parameters would charge: a re-registration of a
@@ -24016,9 +24044,9 @@ POOLREAP precedes SNAP.
    committee object, even if every member is expired; `CommitteeNoConfidence`
    applies only when no committee is present. This follows Conway's
    `votingCommitteeThreshold` rule, which tests whether `ensCommittee` is set.
-8. Treasury donations (`applyEpochDonations`), added after withdrawals. Step
+8. Treasury donations (`ApplyEpochDonations`), added after withdrawals. Step
    7's RATIFY already counted them (see above).
-9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
+9. ADA-pot capture (`SaveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
    reserves top-up). This `reward_ada_pots` row seeds the delayed reward
@@ -24079,8 +24107,8 @@ them.
 
 CIP-23 minimum pool margin is an optional, consensus-affecting operator setting
 that defaults off (0) and takes effect only in Dijkstra and later. When
-`LedgerStateConfig.MinPoolMargin` (basis points) is nonzero, `rewardParameters`
-sets `rewards.Parameters.MinPoolMargin` via `applyMinPoolMarginConfig` only for
+`LedgerStateConfig.MinPoolMargin` (basis points) is nonzero, `RewardParameters`
+sets `rewards.Parameters.MinPoolMargin` via `ApplyMinPoolMarginConfig` only for
 protocol major version >= 12, and the reward split uses
 `params.effectiveMargin(pool.Margin) = max(pool.Margin, MinPoolMargin)` for both
 the operator (leader) and delegator (member) shares. In the same era,
@@ -24098,7 +24126,7 @@ epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
 CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
-parameter. `rewardParameters` normally reads it from the performance epoch's
+parameter. `RewardParameters` normally reads it from the performance epoch's
 protocol parameters, matching cardano-ledger's previous-epoch reward inputs.
 For the first Dijkstra reward round, it reads the upgraded value from the
 calculation epoch's Dijkstra parameters while all other reward inputs remain
@@ -24117,7 +24145,7 @@ unregistered reward account, the negative amount is charged to the treasury
 and returned to reserves with the undistributed pot, matching
 `applyRUpdFiltered`'s `frTotalUnregistered` and `completeRupd`'s `deltaR2`.
 Owed to a registered one, the update cannot be applied, because
-cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
+cardano-ledger's `compactCoinOrError` fails that boundary: `ApplyStakeRewards`
 returns an `errHaltLedgerPipeline` error wrapping
 `rewards.ErrNegativeLeaderReward`, before writing anything, and calls
 `FatalErrorFunc`. The CIP-0163 account-inactivity guard judges every reward
@@ -24202,7 +24230,7 @@ queued work untouched. Pre-Babbage precomputation is deferred until applied
 block progress reaches the RUPD prefilter slot, which queues a retry using the
 actual captured slot; later eras can precompute immediately. Pre-Allegra
 rounds (`ProtocolMajorVersion < 3`) and the two bootstrap rounds use the
-single-pass calculation (`calculateStakeRewardApplication`), because a
+single-pass calculation (`CalculateStakeRewardApplication`), because a
 pre-Allegra credential earning from several pools is paid once, which needs the
 whole pool set at once. `LedgerState.Start` queues the same work once for the
 epoch already in progress (`queueStartupRewardPrecompute`), because the
@@ -24211,13 +24239,13 @@ did. The EventBus callback only queues this work. One background calculation
 runs at a time, and epoch transitions received while it runs are coalesced to
 the newest pending event.
 
-At the boundary, `applyStakeRewards` resolves the round's Pass 1 from
+At the boundary, `ApplyStakeRewards` resolves the round's Pass 1 from
 pool-level rows in the boundary transaction and takes the application from the
-per-pool precompute (`boundaryStakeRewardApplication`). A finished round is
+per-pool precompute (`BoundaryStakeRewardApplication`). A finished round is
 accepted from its fingerprints; an unfinished one is completed from its cursor
 inside the boundary transaction, reusing every chunk the background run
 committed. A precompute with no cursor is accepted after the full verification
-of `precomputedStakeRewardApplication`, which re-derives every pool and member
+of `PrecomputedStakeRewardApplication`, which re-derives every pool and member
 reward from the frozen inputs. The boundary then re-reads registration only for
 the credentials whose `Spendable` flag can be stale -- those with a
 registration or deregistration certificate between the round's pots capture
@@ -24281,7 +24309,7 @@ they commit with it. A store migrated from a release that wrote them after
 the boundary committed can hold a snapshot's rows only in part; the set marks
 such a snapshot (`dingo:stake-reward:stake-inputs-pending` through the
 ledger's `LedgerDB`, an `S` row of kind 2 in the set). Every reward-path
-reader of `reward_stake_input` calls `ensureRewardStakeInputsReady` first: a
+reader of `reward_stake_input` calls `EnsureRewardStakeInputsReady` first: a
 marked snapshot is completed from the historical reconstruction the retention
 path uses, checked against the snapshot's persisted pool inputs, and its mark
 cleared in the same transaction. The Blockfrost stake readers run read-only

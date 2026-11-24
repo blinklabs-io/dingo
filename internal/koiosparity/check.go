@@ -352,7 +352,7 @@ func IsPreStakingEpoch(network string, epoch uint64) bool {
 // (ledger/snapshot/rotation.go's saveSnapshotInTxn, called with
 // epoch=evt.NewEpoch), while the same row's DelegatedStake/DelegatorCount are
 // the "go" stake distribution reward_calculation.go's
-// stakeRewardEpochsForNewEpoch actually consumes one epoch later, at
+// StakeRewardEpochsForNewEpoch actually consumes one epoch later, at
 // epochs.snapshot = epochs.performance - 1 (performance being the true,
 // unambiguous calendar epoch whose blocks are being measured — the same
 // epoch Koios reports the corresponding pool_history/epoch_info row under).

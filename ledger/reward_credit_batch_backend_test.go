@@ -780,7 +780,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		} else {
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.precomputeStakeRewards(txn, 4, 200, 1_200)
+				return ls.engine().PrecomputeStakeRewards(txn, 4, 200, 1_200)
 			}))
 		}
 		for _, index := range deregistered {
@@ -790,7 +790,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		}
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+			return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 		}))
 		settleRewardCredits(t, ls)
 		return ledgerDBDigest(t, ls)
@@ -967,7 +967,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(ls.ledgerDB(), nil, 3)
+	cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
@@ -1050,13 +1050,13 @@ func testRewardPrecomputeWriteRacesRollback(
 	var wantMember uint64
 	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-		want, ok, err := ls.calculateStakeRewardApplication(
+		want, ok, err := ls.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		for _, output := range want.accountOutputs {
+		for _, output := range want.AccountOutputs {
 			if string(output.StakingKey) == string(member) {
 				wantMember += uint64(output.Amount)
 			}
@@ -1067,7 +1067,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		"control: the surviving chain pays member")
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 	}))
 	settleRewardCredits(t, ls)
 	account, err := seedDB(t, db).GetAccountByCredential(

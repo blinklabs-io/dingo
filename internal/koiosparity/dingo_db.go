@@ -173,7 +173,7 @@ type DingoPoolEpochData struct {
 	// decimal string) at the stake epoch (K-1) — reward_pool_output and the
 	// reward_pool_input row it was computed alongside always share the same
 	// Epoch value in Dingo's schema (see reward_calculation.go's
-	// stakeRewardEpochsForNewEpoch: both are read/written at
+	// StakeRewardEpochsForNewEpoch: both are read/written at
 	// epochs.snapshot).
 	MemberRewardTotal string
 	// PoolUnspendable is reward_pool_output.unspendable at the stake epoch:
@@ -194,7 +194,7 @@ type DingoPoolEpochData struct {
 	// SpendableMemberRewardTotal is the sum of reward_account_output.amount
 	// over the stake epoch's member rows the ledger actually credits —
 	// spendable and not guarded by CIP-0163 expiry, the same pair
-	// applyStakeRewards tests before crediting. It is compared with the sum of
+	// ApplyStakeRewards tests before crediting. It is compared with the sum of
 	// Koios's per-account member reward rows for the pool (CompareMemberRewards),
 	// not with pool_history.member_rewards, which is a cached total that can
 	// include rewards the ledger forfeited.
@@ -579,7 +579,7 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 //     active-stake/reward-calculation basis for K. reward_pool_input's
 //     DelegatedStake/DelegatorCount/Margin/FixedCost and
 //     reward_pool_output's MemberRewardTotal are all read at this epoch — reward_calculation.go's
-//     stakeRewardEpochsForNewEpoch computes both from the same
+//     StakeRewardEpochsForNewEpoch computes both from the same
 //     epochs.snapshot value, so input and output always share one Epoch.
 //   - paramEpoch (K+1): reward_pool_input's BlocksProduced is captured onto
 //     the row for the epoch *after* the one it describes — see
@@ -957,7 +957,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // a pool's members, which reward_pool_output's own member_reward_total is not
 // (see DingoPoolEpochData). It is the Dingo side of CompareMemberRewards.
 //
-// The predicate matches what the ledger actually credits: applyStakeRewards
+// The predicate matches what the ledger actually credits: ApplyStakeRewards
 // (ledger/reward_calculation.go) skips a reward that is not spendable and one
 // whose reward account is guarded by CIP-0163 expiry, so both are excluded
 // from the sum — but not from the presence test, which asks only whether the

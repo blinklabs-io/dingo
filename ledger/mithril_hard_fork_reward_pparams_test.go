@@ -247,7 +247,7 @@ func rewardParamsFor(
 	var view rewardParamsView
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, params, err := ls.rewardParameters(
+		_, params, err := ls.engine().RewardParameters(
 			txn, performanceEpoch, calculationEpoch, pots,
 		)
 		if err != nil {

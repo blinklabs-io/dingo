@@ -283,7 +283,7 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // section; the exact same offset applies here since reward_account_output
 // and reward_pool_output share one Epoch stamp, both written from
 // app.epochs.snapshot in ledger/reward_calculation.go's
-// saveStakeRewardOutputs).
+// SaveStakeRewardOutputs).
 //
 // The union — not just Koios's own list — is what lets a Dingo-only account
 // (one Dingo computed a reward for that Koios's /account_list has not yet

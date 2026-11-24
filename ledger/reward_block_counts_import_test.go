@@ -20,6 +20,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // The imported counts are not an approximation: for the same epoch they
@@ -33,10 +35,10 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 	observed := stakeRewardApplicationForTest(t, false)
 	imported := stakeRewardApplicationForTest(t, true)
 
-	require.Len(t, observed.poolOutputs, 1)
-	require.Len(t, imported.poolOutputs, len(observed.poolOutputs))
-	for i, want := range observed.poolOutputs {
-		got := imported.poolOutputs[i]
+	require.Len(t, observed.PoolOutputs, 1)
+	require.Len(t, imported.PoolOutputs, len(observed.PoolOutputs))
+	for i, want := range observed.PoolOutputs {
+		got := imported.PoolOutputs[i]
 		assert.Equal(t, want.PoolKeyHash, got.PoolKeyHash)
 		assert.Equal(t, want.TotalReward, got.TotalReward)
 		assert.Equal(t, want.LeaderReward, got.LeaderReward)
@@ -46,16 +48,16 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 			got.ApparentPerformance.String(),
 		)
 	}
-	require.NotEmpty(t, observed.accountOutputs)
-	require.Len(t, imported.accountOutputs, len(observed.accountOutputs))
-	for i, want := range observed.accountOutputs {
-		got := imported.accountOutputs[i]
+	require.NotEmpty(t, observed.AccountOutputs)
+	require.Len(t, imported.AccountOutputs, len(observed.AccountOutputs))
+	for i, want := range observed.AccountOutputs {
+		got := imported.AccountOutputs[i]
 		assert.Equal(t, want.StakingKey, got.StakingKey)
 		assert.Equal(t, want.RewardType, got.RewardType)
 		assert.Equal(t, want.Amount, got.Amount)
 	}
-	assert.Positive(t, uint64(observed.poolOutputs[0].TotalReward))
-	assert.Equal(t, observed.effectiveRewards, imported.effectiveRewards)
+	assert.Positive(t, uint64(observed.PoolOutputs[0].TotalReward))
+	assert.Equal(t, observed.EffectiveRewards, imported.EffectiveRewards)
 }
 
 // stakeRewardApplicationForTest computes the epoch 4 reward round twice over
@@ -65,7 +67,7 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 func stakeRewardApplicationForTest(
 	t *testing.T,
 	fromImport bool,
-) *stakeRewardApplication {
+) *epochengine.StakeRewardApplication {
 	t.Helper()
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	if fromImport {
@@ -84,7 +86,7 @@ func stakeRewardApplicationForTest(
 	}
 	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,

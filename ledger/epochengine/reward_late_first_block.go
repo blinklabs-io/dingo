@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package epochengine
 
 import (
 	"context"
@@ -46,10 +46,10 @@ import (
 // carries into the next snapshot, so the next round's fee seed is
 // F(X) + carried(X) - seed rather than F(X).
 
-// lateFirstRewardBlock reports whether a first block at firstBlockSlot misses
+// LateFirstRewardBlock reports whether a first block at firstBlockSlot misses
 // the RUPD stability point of the epoch starting at epochStart. RUPD waits
 // while the slot is at or below start + window.
-func lateFirstRewardBlock(
+func LateFirstRewardBlock(
 	firstBlockSlot uint64,
 	epochStart uint64,
 	window uint64,
@@ -60,7 +60,7 @@ func lateFirstRewardBlock(
 	return firstBlockSlot > epochStart+window
 }
 
-// replaysPreviousStakeRewardRound reports whether the update applied at the
+// ReplaysPreviousStakeRewardRound reports whether the update applied at the
 // boundary into newEpoch is the one the boundary into newEpoch-1 applied,
 // because the first block of newEpoch-1 was late and the epoch before it had
 // blocks, so NEWEPOCH ran at that block. It reads persisted blocks, so a
@@ -69,18 +69,18 @@ func lateFirstRewardBlock(
 // Only rounds with a regular reward basis (newEpoch-1 >= 3) are replayed. A
 // node whose block store lacks the earlier epochs cannot tell, and keeps
 // the ordinary round.
-func (ls *LedgerState) replaysPreviousStakeRewardRound(
+func (e *Engine) ReplaysPreviousStakeRewardRound(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 ) (bool, error) {
 	if newEpoch < 4 {
 		return false, nil
 	}
-	window := ls.rewardUpdateStabilityWindow()
+	window := e.RewardUpdateStabilityWindow()
 	if window == 0 {
 		return false, nil
 	}
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	ended, err := ldb.GetEpoch(newEpoch-1, txn)
 	if err != nil {
 		return false, fmt.Errorf("get epoch %d: %w", newEpoch-1, err)
@@ -102,7 +102,7 @@ func (ls *LedgerState) replaysPreviousStakeRewardRound(
 	if err != nil || !found {
 		return false, err
 	}
-	if !lateFirstRewardBlock(first, ended.StartSlot, window) {
+	if !LateFirstRewardBlock(first, ended.StartSlot, window) {
 		return false, nil
 	}
 	_, found, err = firstBlockInSlotRange(
@@ -137,15 +137,15 @@ func firstBlockInSlotRange(
 	return block.Slot, true, nil
 }
 
-// replayedStakeRewardFees returns the fee total the boundary into a replayed
+// ReplayedStakeRewardFees returns the fee total the boundary into a replayed
 // round's epoch carries forward: the fees collected in the ended epoch plus
 // the fees already carried, less the fee seed the replayed update removes.
-func replayedStakeRewardFees(
+func ReplayedStakeRewardFees(
 	endedEpochFees uint64,
 	carriedFees uint64,
 	seedFees uint64,
 ) (uint64, error) {
-	total, overflow := addRewardUint64(endedEpochFees, carriedFees)
+	total, overflow := AddRewardUint64(endedEpochFees, carriedFees)
 	if overflow {
 		return 0, errors.New("replayed reward fee carry overflow")
 	}
@@ -161,13 +161,13 @@ func replayedStakeRewardFees(
 // applyReplayedStakeRewardRound applies, at the boundary into newEpoch, the
 // round the boundary into newEpoch-1 applied, against the pots as they stand
 // at this boundary.
-func (ls *LedgerState) applyReplayedStakeRewardRound(
+func (e *Engine) applyReplayedStakeRewardRound(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	baseline, err := ldb.GetRewardAdaPots(newEpoch-1, txn)
 	if err != nil {
 		return fmt.Errorf(
@@ -175,26 +175,26 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 		)
 	}
 	if baseline == nil {
-		return ls.requiredStakeRewardBasisUnavailable(
+		return e.RequiredStakeRewardBasisUnavailable(
 			true, newEpoch, "missing ADA pots", "pots_epoch", newEpoch-1,
 		)
 	}
 	// The round being replayed is that of the boundary into newEpoch-1. When
 	// that is the first Shelley round its performance epoch is Byron and it
 	// has no pool performance; cardano-ledger rebuilds the same update.
-	byronPerformance, err := ls.rewardPerformanceEpochIsByron(txn, newEpoch-1)
+	byronPerformance, err := e.rewardPerformanceEpochIsByron(txn, newEpoch-1)
 	if err != nil {
 		return err
 	}
-	var app *stakeRewardApplication
+	var app *StakeRewardApplication
 	if byronPerformance {
-		app, err = ls.firstShelleyStakeRewardApplication(txn, newEpoch-1)
+		app, err = e.firstShelleyStakeRewardApplication(txn, newEpoch-1)
 		if err != nil {
 			return err
 		}
 	} else {
 		var ok bool
-		app, ok, err = ls.calculateStakeRewardApplication(ctx,
+		app, ok, err = e.CalculateStakeRewardApplication(ctx,
 			txn, newEpoch-1, boundarySlot, boundarySlot, true,
 		)
 		if err != nil {
@@ -205,24 +205,24 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 		}
 	}
 	baselineCopy := *baseline
-	app.replayBaseline = &baselineCopy
-	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+	app.ReplayBaseline = &baselineCopy
+	return e.ApplyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
-// carriedRewardFees returns the fee total saveRewardAdaPotsForEpoch records
+// carriedRewardFees returns the fee total SaveRewardAdaPotsForEpoch records
 // for newEpoch. It is the ended epoch's own fees except at a boundary that
 // replays a round, where the fees carried from the previous boundary, less
 // the replayed round's fee seed, are added.
-func (ls *LedgerState) carriedRewardFees(
+func (e *Engine) carriedRewardFees(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	endedEpochFees uint64,
 ) (uint64, error) {
-	replay, err := ls.replaysPreviousStakeRewardRound(txn, newEpoch)
+	replay, err := e.ReplaysPreviousStakeRewardRound(txn, newEpoch)
 	if err != nil || !replay {
 		return endedEpochFees, err
 	}
-	ldb := ls.ledgerDB()
+	ldb := e.ledgerDB()
 	carried, err := ldb.GetRewardAdaPots(newEpoch-1, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -241,7 +241,7 @@ func (ls *LedgerState) carriedRewardFees(
 			newEpoch,
 		)
 	}
-	return replayedStakeRewardFees(
+	return ReplayedStakeRewardFees(
 		endedEpochFees, uint64(carried.Fees), uint64(seed.Fees),
 	)
 }
