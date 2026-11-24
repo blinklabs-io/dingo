@@ -975,13 +975,14 @@ func registerCardanoTools(
 
 		var epochNum, blockCount int
 		var rawNonce []byte
-		blocksNote := retainedWindowNote
+		var blocksNote string
 		if stateDB != nil {
 			read, err := epochSummaryFromLedger(qCtx, stateDB, input.Epoch)
 			if err != nil {
 				return nil, nil, err
 			}
 			epochNum, rawNonce, blockCount = read.epoch, read.nonce, read.blockCount
+			blocksNote = retainedWindowNote
 			if reads.epochBlocks != nil {
 				blockCount, err = reads.epochBlocks(
 					qCtx, read.startSlot, read.startSlot+read.length-1,

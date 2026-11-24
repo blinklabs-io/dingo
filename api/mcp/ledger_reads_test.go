@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -415,6 +416,9 @@ func TestLedgerStateToolsReadThroughLedgerDB(t *testing.T) {
 		)
 		got := res.Content[0].(*mcp.TextContent).Text
 		require.Equal(t, tc.want, rec.taken(), tc.name)
+		// Only the ledger's count is limited to its retained window, so only
+		// it carries the caveat; the counts themselves must agree.
+		got = strings.Replace(got, retainedWindowNote, "", 1)
 		require.Equal(
 			t, callTool(t, viaSQL, tc.tool, tc.args, false), got, tc.name,
 		)
