@@ -8454,22 +8454,6 @@ JOIN applied_transaction a ON a.tx_id = t.id
 WHERE t.hash = decode($1, 'hex');
 ```
 
-### `GetExistingTransactionHashes`
-
-Answers which of the given hashes have a transaction record, reading only the
-`hash` column and loading no associations. Hashes are bound in chunks of the
-dialect's parameter limit (999 on SQLite), all inside the caller's read
-transaction; `Database.GetExistingTransactionHashes` opens one context-bound
-read transaction for the whole set. The result is unordered. UTxO RPC
-`WaitForTx` uses it to find already-committed references.
-
-```sql
--- Postgres: one chunk
-SELECT hash
-FROM "transaction"
-WHERE hash IN (decode($1, 'hex'), decode($2, 'hex'));
-```
-
 ### `SumTransactionFeesInSlotRange`
 
 Fees use the inclusive execution-slot range: valid transactions contribute

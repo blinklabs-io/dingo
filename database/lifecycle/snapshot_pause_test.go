@@ -333,8 +333,7 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	db := newHookedDB(t, nil, hooks)
 	dir := snapshotTestDir(t, "snap")
 	// The pause limit is far beyond the wait below, so only the failed
-	// backup can cancel its peer in time. The wait still allows for opening
-	// and closing the stores on a loaded machine.
+	// backup can cancel its peer in time.
 	result := make(chan error, 1)
 	go func() {
 		_, err := snapshotAt(
