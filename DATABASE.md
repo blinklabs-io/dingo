@@ -73,6 +73,11 @@ resolvable during rewind and copying; the migration does not create a new
 ImmutableDB when none was recorded. The storage host retains provider ownership
 across migration and normal ledger startup.
 
+Serve preflight keeps the configured health listener live and not ready while
+database checks and legacy migrations run. The configured debug listener is
+also available for diagnostics. Both listeners close before normal node startup
+takes over their addresses.
+
 The `chainstate/consensus_provider_identity` block-store value
 (`database.ConsensusProviderIdentityKey`) binds a database to the
 versioned consensus semantics that created it. A database with no stored tip and

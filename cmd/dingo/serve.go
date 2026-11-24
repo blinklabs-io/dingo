@@ -44,6 +44,50 @@ func serveRun(
 	}
 	applyDebugProfilingRates(logger, os.Stderr, cfg)
 
+	probe, err := bindHealthProbe(cfg)
+	if err != nil {
+		return err
+	}
+	if err := runServePreflight(cmd.Context(), cfg, logger, probe); err != nil {
+		return err
+	}
+
+	// Run node. The node runs Mithril catch-up itself under mithril.enabled;
+	// nodemithril supplies the mithril package it cannot import.
+	if err := node.Run(
+		cmd.Context(), cfg, logger,
+		dingo.WithMithrilCatchUp(nodemithril.New),
+		dingo.WithMithrilLedgerReimport(nodemithril.NewReimporter),
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runServePreflight(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	probe *boundHealthProbe,
+) error {
+	server := serveHealthProbe(logger, "startup", probe)
+	var debugServer *debugPprofServer
+	// Release both listeners before the node binds its runtime listeners.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if err := errors.Join(debugServer.Shutdown(shutdownCtx), server.Shutdown(shutdownCtx)); err != nil {
+			logger.Warn("stopping preflight listeners", "error", err)
+		}
+	}()
+	var err error
+	debugServer, err = startDebugPprofServer(logger, cfg, "startup")
+	if err != nil {
+		return err
+	}
 	// Check for an in-progress sync. If the "sync_status" key in
 	// the sync_state table holds a non-empty value, a previous sync
 	// did not complete. The user must finish (or re-run) the sync
@@ -60,20 +104,11 @@ func serveRun(
 		return err
 	}
 	if err := repairPendingMithrilRewardState(
-		cmd.Context(), cfg, logger,
+		ctx, cfg, logger,
 	); err != nil {
 		return err
 	}
 
-	// Run node. The node runs Mithril catch-up itself under mithril.enabled;
-	// nodemithril supplies the mithril package it cannot import.
-	if err := node.Run(
-		cmd.Context(), cfg, logger,
-		dingo.WithMithrilCatchUp(nodemithril.New),
-		dingo.WithMithrilLedgerReimport(nodemithril.NewReimporter),
-	); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -230,7 +265,8 @@ func mithrilRewardRepairConfig(cfg *config.Config) (*config.Config, error) {
 		cfg.Mithril.Backend != mithril.BackendV2 {
 		return nil, fmt.Errorf(
 			"mithril reward-state repair requires backend %q; configured backend is %q",
-			mithril.BackendV2, cfg.Mithril.Backend,
+			mithril.BackendV2,
+			cfg.Mithril.Backend,
 		)
 	}
 	repairCfg := *cfg
@@ -386,7 +422,12 @@ func openConfiguredDatabase(
 			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
-			MigrateReleased: nodestorage.MigrateReleased(cfg, dbConfig, nil, logger),
+			MigrateReleased: nodestorage.MigrateReleased(
+				cfg,
+				dbConfig,
+				nil,
+				logger,
+			),
 		},
 	)
 }

@@ -255,3 +255,31 @@ func TestMithrilSyncStartsNoMetricsListenerWhenDisabled(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported Mithril backend")
 	require.NotContains(t, logs.String(), "serving prometheus metrics")
 }
+
+func TestServePreflightStartsAndReleasesHealthProbe(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := &config.Config{
+		BindAddr:     "127.0.0.1",
+		HealthPort:   12799,
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+	}
+	cfg.Plugins.Storage.Blob.Provider = "missing-provider"
+	probe := heldHealthProbe(t, cfg)
+	err := runServePreflight(t.Context(), cfg, logger, probe)
+	require.ErrorContains(t, err, "resolve blob storage")
+	require.Contains(
+		t,
+		logs.String(),
+		"serving health probes on "+probe.listener.Addr().String(),
+	)
+	err = probe.listener.(*net.TCPListener).SetDeadline(time.Now())
+	require.ErrorIs(
+		t,
+		err,
+		net.ErrClosed,
+		"preflight must release the listener for node startup",
+	)
+}
