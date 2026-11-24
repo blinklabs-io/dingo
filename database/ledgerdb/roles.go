@@ -1788,8 +1788,7 @@ type ChainStore interface {
 	// DeleteSyncState removes a sync state key.
 	DeleteSyncState(key string, txn Txn) error
 	// EnsureBlockInventory creates the retained-block inventory when it is
-	// absent. It is safe to call during commit-timestamp recovery and is a
-	// no-op after the inventory has been initialized.
+	// absent. It is a no-op after the inventory has been initialized.
 	EnsureBlockInventory() error
 	// GetDeferredHeaderMarkerValue returns a copy of a marker's opaque payload.
 	// found is false when no marker exists for key.

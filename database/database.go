@@ -190,8 +190,7 @@ type Database struct {
 	// can open both read views as of the same logical commit boundary. Only
 	// Txns holding the metadata store's single write
 	// connection participate (see acquireCommitBarrier) — a blob-only Txn
-	// never touches that connection and never writes the commit timestamp
-	// this guards, so it does not take part. Txn construction holds the
+	// never touches that connection, so it does not take part. Txn construction holds the
 	// read side (many concurrent read-write Txns proceed normally);
 	// PauseCommits/PauseCommitsContext hold the write side.
 	//
@@ -205,8 +204,7 @@ type Database struct {
 	commitBarrier cancellableBarrier
 
 	// commitPhase covers only the commit step of a Txn that holds the shared
-	// side of commitBarrier: the commit timestamp update and both store
-	// commits. NewReadSnapshotContext takes its exclusive side instead of
+	// side of commitBarrier: both store commits. NewReadSnapshotContext takes its exclusive side instead of
 	// commitBarrier's, because a consistent pair of read views needs only that
 	// no commit lands between opening them. Uncommitted writes are invisible to
 	// both views, so waiting for every open read-write Txn to finish -- a

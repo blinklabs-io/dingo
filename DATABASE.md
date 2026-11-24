@@ -589,16 +589,6 @@ the currently installed store without a pin, for callers that only need to
 identify, wrap, or ask a whole-store question of it; it must be used within the
 call that obtained it.
 
-Partial-commit recovery depends on the same "never closes" rule. When a commit
-returns `types.ErrPartialCommit` the blob transaction has committed and the
-metadata has not; the transaction releases its pin as it finishes, and the
-recovery that trims the blob store back to the metadata tip runs later, from
-the caller, against the store installed at that point. No pin spans that gap,
-because recovery is caller-scheduled and unbounded and holding one would block
-`drain` indefinitely. The replaced store must therefore stay open and reachable
-until recovery has run, which is what wrapping rather than retiring it
-achieves.
-
 The Badger provider threads the host's stop context through its close path.
 On-disk Badger configuration rejects compression with a zero-byte block cache
 before the store opens, because Badger requires a block cache for compressed
@@ -1216,7 +1206,7 @@ Use the Go APIs when code runs inside Dingo:
   interrupt enumeration.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob
   transactions. A write commit commits the blob transaction first, flushes
-  it, then commits metadata. No commit timestamp is written to either store. `Txn.BlobStore()` returns
+  it, then commits metadata. `Txn.BlobStore()` returns
   the blob store the transaction was opened on — the store its `Blob()` handle
   belongs to, and the one every blob call inside the transaction must use.
   Acquired LocalStateQuery views anchor their live ledger-set snapshot before
@@ -1268,7 +1258,7 @@ see "Node settings" below.
   their SQL ports are completed.
 - `blob.BlobStore` in `database/plugin/blob/store.go` is the blob-facing
   interface. It provides raw `Get`/`Set`/`Delete`/iteration plus block, UTxO,
-  transaction, signed-URL, tombstone, and commit-timestamp methods.
+  transaction, signed-URL, and tombstone methods.
 - `types.Txn`, `types.BlobIterator`, `types.BlockMetadata`, and blob key helpers
   live in `database/types/`.
 
@@ -1736,7 +1726,7 @@ histogram (label `result`: `ok`, `failed`, or `exceeded`) on the database's
 latter is also the temporary disk a snapshot needs.
 `lifecycle.WithMaxCommitPause(d)` (a `ManifestOption`, so it flows through
 `SnapshotToCloud` unchanged) bounds the hold: the clock starts once the barrier
-is acquired and covers the tip, commit-timestamp and gate reads as well as both
+is acquired and covers the tip and gate reads as well as both
 backups, and when that work is still running at `d` they are cancelled, the
 barrier is released, the partial snapshot directory is removed, and `Snapshot`
 returns an error wrapping `lifecycle.ErrCommitPauseExceeded`. On timeout or
@@ -2295,9 +2285,9 @@ rollback that wrote no record, and at ledger start, so a stop between the
 clear and the delete leaves bodies the next start removes. Mithril import
 completion removes the record (`Database.ClearImportedChainState`).
 
-Metadata-only replay and partial-commit recovery resolve the blocks from the
-ledger's applied points through the published ledger tip, not from the primary
-chain suffix. They enqueue Undo only after the truncation commits, while the
+Metadata-only replay resolves the blocks from the ledger's applied points
+through the published ledger tip, not from the primary chain suffix. It
+enqueues Undo only after the truncation commits, while the
 transaction event mutex still excludes a later Apply. A deeper multi-window
 rollback merges its blocks into the pending record rather than replacing the
 earlier ones. If a reconciliation rewind is refused before changing the chain,
@@ -6936,14 +6926,8 @@ unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
 hour, so the memtable may not rotate for hours. Without the sync barrier an
 unclean host shutdown leaves a durable metadata tip pointing at blocks the blob
 store discarded, which is the inverse of the invariant the rest of the system is
-built on: startup reconciliation can trim a blob store that is *ahead* of the
-metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks missing
-*beneath* it. Recovery walks applied-block nonce history back to the newest
-point still indexed on the selected primary chain, then rolls both stores back
-to that common ancestor. A raw blob tip is not an authoritative target because
-it may belong to another fork. That rollback can be arbitrarily deep and, on a
-Mithril-bootstrapped node, can reach the `mithril_ledger_slot` trust boundary,
-past which no rollback is possible at all.
+built on: blocks *ahead* of the metadata tip are indexed again, but blocks
+missing *beneath* it cannot be rebuilt.
 
 Each SQLite connection in the read and write pools also sets
 `journal_size_limit=67108864` (64 MiB).
@@ -7160,8 +7144,7 @@ identically for consistency and as a future comparison point.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
 blob transaction is committed while metadata is not — the same inconsistency a
-failed metadata commit leaves, and the same recovery (trim the blob store back
-to the metadata tip) applies.
+failed metadata commit leaves.
 
 Every terminal path out of `Txn.Commit` — including that failed-`Sync` partial
 commit — releases the commit barrier hold exactly once, via `Txn.finishLocked`.
@@ -7944,8 +7927,7 @@ rolled-back UTxO must not stay in the live set because its blob is stuck.
 
 The consequence is that a failed blob delete strands an object permanently. It
 is not the same orphan the durability contract above describes: those sit
-*beyond* the metadata tip and startup reconciliation trims them
-(`cleanupOrphanedBlobs`). These sit *beneath* the tip with no row pointing at
+*beyond* the metadata tip, where their blocks are indexed again. These sit *beneath* the tip with no row pointing at
 them, so nothing can name them again and no sweep reclaims them. They are
 unreachable, not merely unreferenced, and they consume disk until the store is
 rebuilt from scratch.

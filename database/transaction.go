@@ -2094,8 +2094,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 		// Stage only what this transaction can still hold. Past its budget
 		// the store rejects every further staged write, including the
-		// commit timestamp Txn.Commit puts into this same transaction, so
-		// an unbounded stage costs the caller its whole commit rather than
+		// rollback's own writes after this set, so an unbounded stage costs the caller its whole commit rather than
 		// just the tail of this set. What is left
 		// unstaged is counted with the deletes that failed and reported
 		// through ErrBlobDeleteIncomplete below: the metadata naming these

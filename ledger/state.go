@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,7 +34,6 @@ import (
 	rtrace "runtime/trace"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -362,15 +360,12 @@ func (ls *LedgerState) SubmitAsyncDBOperation(
 
 // SubmitAsyncDBTxn submits a database transaction operation for execution on the worker pool.
 // This method blocks waiting for the result and must be called after Start() and before Close().
-// If a partial commit occurs (blob committed but metadata failed), this method will attempt
-// to trigger database recovery to restore consistency.
 func (ls *LedgerState) SubmitAsyncDBTxn(
 	ctx context.Context,
 	opFunc func(txn ledgerdb.Txn) error,
 	readWrite bool,
 ) error {
-	err := ls.submitDBTxnOperation(ctx, opFunc, readWrite, "")
-	return ls.handleDBTxnResult(ctx, err)
+	return ls.submitDBTxnOperation(ctx, opFunc, readWrite, "")
 }
 
 // submitDBTxnOperation runs opFunc in a transaction on the database worker.
@@ -398,56 +393,6 @@ func (ls *LedgerState) submitDBTxnOperation(
 		}
 		return nil
 	})
-}
-
-func (ls *LedgerState) handleDBTxnResult(ctx context.Context, err error) error {
-	// Check for partial commit and trigger recovery if needed.
-	// Guard against recursive recovery: if we're already in recovery and another
-	// PartialCommitError occurs, don't attempt recovery again to prevent unbounded recursion.
-	var partialCommitErr database.PartialCommitError
-	if err != nil && errors.As(err, &partialCommitErr) {
-		ls.Lock()
-		alreadyInRecovery := ls.inRecovery
-		if !alreadyInRecovery {
-			ls.inRecovery = true
-		}
-		ls.Unlock()
-
-		if alreadyInRecovery {
-			ls.config.Logger.Error(
-				"partial commit detected during recovery, skipping nested recovery: " + err.Error(),
-			)
-			return err
-		}
-
-		defer func() {
-			ls.Lock()
-			ls.inRecovery = false
-			ls.Unlock()
-		}()
-
-		ls.config.Logger.Error(
-			"partial commit detected, attempting recovery: " + err.Error(),
-		)
-		// Attempt to recover from the partial commit state
-		if recoveryErr := ls.RecoverCommitTimestampConflict(context.WithoutCancel(ctx)); recoveryErr != nil {
-			ls.config.Logger.Error(
-				"failed to recover from partial commit: " + recoveryErr.Error(),
-			)
-			// Return both errors joined to preserve error chain for errors.Is checks
-			return errors.Join(err, recoveryErr)
-		}
-		ls.config.Logger.Info("successfully recovered from partial commit")
-		// Return an error so callers know the operation failed and should retry.
-		// Recovery restored consistency but did NOT complete the original transaction.
-		// Wrap the underlying metadata error (not PartialCommitError) so callers
-		// won't match errors.Is(err, types.ErrPartialCommit) and attempt recovery again.
-		return fmt.Errorf(
-			"transaction failed, recovered from partial commit: %w",
-			partialCommitErr.MetadataErr,
-		)
-	}
-	return err
 }
 
 // blockApplyCandidatePoint returns the last block that the block-apply
@@ -788,7 +733,7 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 	region string,
 	opFunc func(txn ledgerdb.Txn) error,
 ) error {
-	err := func() error {
+	return func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 
@@ -817,10 +762,6 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 			return opFunc(txn)
 		}, true, region)
 	}()
-	// Partial-commit recovery can itself rewind the primary chain, so it must
-	// run after releasing transactionEventMutex rather than recursively trying
-	// to acquire it from rollbackPrimaryChainInSecurityParamWindows.
-	return ls.handleDBTxnResult(ctx, err)
 }
 
 func (ls *LedgerState) lifecycleContext() context.Context {
@@ -2079,7 +2020,6 @@ type LedgerState struct {
 	closeMu                         sync.Mutex
 	closeDone                       chan struct{}
 	closeErr                        error
-	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery               *atTipRecoveryAttempt
 	atTipRecoveryFloor              *atTipRecoveryFloor
 	lastHeaderValidationFailure     *headerValidationError
@@ -2361,13 +2301,6 @@ type LedgerState struct {
 	// window between that snapshot and the later, transactionEventMutex-
 	// held undo-block resolution, without relying on scheduler timing.
 	beforeReconciliationUndoSnapshot func()
-	// beforeCommitRecoveryMutationBarrier is a test-only sequencing hook, nil
-	// in production. It runs after recovery samples the chain tip and before it
-	// enters the chain mutation barrier.
-	beforeCommitRecoveryMutationBarrier func()
-	// beforeCommitRecoveryCleanup is a test-only sequencing hook, nil in
-	// production. It runs after the chain rewind and before orphan cleanup.
-	beforeCommitRecoveryCleanup func() error
 
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
@@ -3472,369 +3405,6 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	}
 	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
 	return nil
-}
-
-func (ls *LedgerState) RecoverCommitTimestampConflict(
-	ctx context.Context,
-) error {
-	var committedRollbackErr error
-	if err := ls.ledgerDB().EnsureBlockInventory(); err != nil {
-		return fmt.Errorf("initialize block inventory for recovery: %w", err)
-	}
-	// Load current ledger tip
-	tmpTip, err := ls.ledgerDB().GetTip(nil)
-	if err != nil {
-		return fmt.Errorf("failed to get tip: %w", err)
-	}
-	containsTip, err := ls.primaryChainContainsPoint(ctx, tmpTip.Point)
-	if err != nil {
-		return fmt.Errorf("check ledger tip on primary chain: %w", err)
-	}
-	if !containsTip {
-		ancestor, found, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
-			ctx,
-			tmpTip.Point,
-			containsTip,
-			true,
-		)
-		if ancestorErr != nil {
-			return fmt.Errorf(
-				"find common primary-chain ancestor for ledger tip: %w",
-				ancestorErr,
-			)
-		}
-		if !found {
-			return fmt.Errorf(
-				"ledger tip %d/%s is not on primary chain and no common ancestor was found",
-				tmpTip.Point.Slot,
-				hex.EncodeToString(tmpTip.Point.Hash),
-			)
-		}
-		// Roll back metadata to the newest applied block that is still on the
-		// selected chain. The raw chain tip may already belong to another fork.
-		// Note: We do NOT hold ls.Lock() here because rollback() calls
-		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
-		// that re-acquires ls.Lock(), causing a deadlock. The rollback
-		// method handles its own locking for in-memory state updates.
-		ls.RLock()
-		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
-		ls.RUnlock()
-		if publishedAtAncestor {
-			// Recovery may start before the durable tip has been published in
-			// memory. Force the metadata repair when the selected ancestor is
-			// already the in-memory tip (notably origin).
-			err = ls.withRollbackBoundary(func() error {
-				return ls.rollbackAppliedStateWithUndo(ctx, ancestor, true)
-			})
-		} else {
-			err = ls.rollback(ctx, ancestor)
-		}
-		if err != nil {
-			wrappedErr := fmt.Errorf(
-				"failed to rollback ledger: %w",
-				err,
-			)
-			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
-				return wrappedErr
-			}
-			// The metadata truncate committed even though an in-memory reload
-			// or a post-commit repair failed. Continue through durable marker
-			// reconciliation before returning the original failure, so the
-			// next supervised start is not stranded behind a stale legacy
-			// classification for rows the committed rollback removed.
-			committedRollbackErr = wrappedErr
-		}
-	}
-	// Get the current tip after potential rollback for orphan cleanup.
-	// This ensures we use the post-rollback tip, not the stale tmpTip.
-	currentTip, err := ls.ledgerDB().GetTip(nil)
-	if err != nil {
-		return errors.Join(committedRollbackErr, fmt.Errorf(
-			"failed to get current tip for orphan cleanup: %w",
-			err,
-		))
-	}
-	// Clean up orphaned blobs that may exist beyond the metadata tip.
-	// This handles the case where blob committed but metadata failed.
-	cleaned, cleanupErr := ls.rewindPrimaryChainForOrphanCleanup(
-		ctx,
-		currentTip.Point,
-	)
-	if cleanupErr != nil {
-		return errors.Join(committedRollbackErr, cleanupErr)
-	}
-	if !cleaned {
-		ls.config.Logger.Warn(
-			"skipping orphaned blob cleanup: rewind exceeds the security parameter",
-			"tip_slot",
-			currentTip.Point.Slot,
-		)
-	}
-	return committedRollbackErr
-}
-
-// rewindPrimaryChainForOrphanCleanup rewinds the primary chain to the
-// metadata tip before cleanupOrphanedBlobs deletes the blocks above it. The
-// chain manager loads its tip from the newest stored block before recovery
-// runs, so deleting those blocks underneath it leaves the chain naming a block
-// that no longer exists, and every later add or iteration fails. Rewinding
-// through the manager deletes the same blocks and moves its tip with them.
-//
-// It reports false without an error only when the configured security parameter
-// refuses the rewind before any block is removed. Every other rewind or cleanup
-// failure is returned so startup or live recovery stops on an inconsistent
-// chain rather than continuing with a partially repaired store.
-func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
-	ctx context.Context,
-	tip ocommon.Point,
-) (bool, error) {
-	if ls.chain == nil || ls.config.ChainManager == nil {
-		return false, errors.New(
-			"recover orphaned blobs: primary chain manager is unavailable",
-		)
-	}
-	ls.chainsyncBlockfetchMutex.Lock()
-	priorGeneration := ls.chainRollbackGeneration.Load()
-	ls.chainRollbackGeneration.Add(1)
-	priorAudit, auditGeneration := ls.takeContinuationAuditForRewind()
-	tipBeforeRewind := ls.chain.Tip().Point
-	if ls.beforeCommitRecoveryMutationBarrier != nil {
-		ls.beforeCommitRecoveryMutationBarrier()
-	}
-	if tipBeforeRewind.Slot < tip.Slot {
-		ls.chainRollbackGeneration.Store(priorGeneration)
-		ls.settleAuditAfterRewind(
-			priorAudit,
-			auditGeneration,
-			false,
-			tip,
-		)
-		ls.chainsyncBlockfetchMutex.Unlock()
-		return false, fmt.Errorf(
-			"recover orphaned blobs: primary chain tip %d is behind metadata tip %d",
-			tipBeforeRewind.Slot,
-			tip.Slot,
-		)
-	}
-	cleanup := func() error {
-		if ls.beforeCommitRecoveryCleanup != nil {
-			if err := ls.beforeCommitRecoveryCleanup(); err != nil {
-				return err
-			}
-		}
-		return ls.cleanupOrphanedBlobs(tip.Slot)
-	}
-	var rewindErr error
-	if ls.config.ChainManager.SecurityParamConfigured() {
-		_, rewindErr = ls.chain.RollbackDeferredThen(ctx, tip, cleanup)
-	} else {
-		_, rewindErr = ls.chain.RollbackUnboundedDeferredThen(ctx, tip, cleanup)
-	}
-	tipAfterRewind := ls.chain.Tip().Point
-	chainRegressed := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
-	safeRefusal := errors.Is(
-		rewindErr,
-		chain.ErrRollbackExceedsSecurityParam,
-	) &&
-		!chainRegressed
-	truncated := chainRegressed || (rewindErr != nil && !safeRefusal)
-	if safeRefusal {
-		ls.chainRollbackGeneration.Store(priorGeneration)
-	}
-	// A prior audit whose fork point remains on the retained prefix still
-	// describes this chain. Re-arm it at the recovery target so the existing
-	// carry-forward rules keep only producers the rewind did not remove.
-	if rewindErr == nil && truncated && priorAudit != nil &&
-		(priorAudit.forkPoint.Slot < tip.Slot ||
-			pointMatches(priorAudit.forkPoint, tip)) {
-		restored := false
-		ls.continuationAuditMutex.Lock()
-		if ls.continuationAudit.Load() == nil &&
-			ls.continuationAuditGen == auditGeneration {
-			ls.publishContinuationAudit(priorAudit)
-			restored = true
-		}
-		ls.continuationAuditMutex.Unlock()
-		if restored {
-			ls.armContinuationAudit(ctx, tip, "commit timestamp recovery")
-		}
-	}
-	ls.settleAuditAfterRewind(
-		priorAudit,
-		auditGeneration,
-		truncated,
-		tip,
-	)
-	ls.chainsyncBlockfetchMutex.Unlock()
-	// RollbackDeferredThen queues chain events while the blockfetch mutex is
-	// held. Publish only after releasing it so a backpressured subscriber cannot
-	// deadlock the chainsync drain.
-	ls.chain.PublishPendingChainUpdates()
-	if safeRefusal {
-		return false, nil
-	}
-	if rewindErr != nil {
-		return false, fmt.Errorf(
-			"rewind primary chain and clean orphaned blobs: %w",
-			rewindErr,
-		)
-	}
-	return true, nil
-}
-
-// orphanedBlock holds information needed to delete an orphaned block from blob store.
-type orphanedBlock struct {
-	slot uint64
-	hash []byte
-	id   uint64
-}
-
-// cleanupOrphanedBlobs removes blob blocks beyond the metadata tip.
-// Called during recovery when commit timestamp mismatch is detected.
-// This handles the case where blob committed successfully but metadata failed,
-// leaving orphaned blocks in the blob store.
-func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	// Pin rather than reading the installed store: this runs a scan, a
-	// separate write transaction, and a commit against one store, so it has
-	// to keep that store alive for the whole operation rather than sample
-	// whichever is installed at each step.
-	blobStore, releaseBlob := ls.db.PinBlob()
-	defer releaseBlob()
-	if blobStore == nil {
-		return nil // No blob store configured
-	}
-
-	ls.config.Logger.Info(
-		"starting orphaned blob cleanup",
-		"tip_slot", tipSlot,
-	)
-
-	// Phase 1: Scan for orphaned blocks (read-only transaction)
-	orphans, err := ls.scanOrphanedBlobs(blobStore, tipSlot)
-	if err != nil {
-		return err
-	}
-
-	if len(orphans) == 0 {
-		ls.config.Logger.Info("no orphaned blobs found")
-		return nil
-	}
-
-	// Phase 2: Delete orphaned blocks (read-write transaction)
-	writeTxn := blobStore.NewTransaction(true)
-	defer writeTxn.Rollback() //nolint:errcheck
-	deleted := 0
-
-	for _, orphan := range orphans {
-		// An orphan is above the metadata tip, which promotion never passes;
-		// a blob at or below the immutable tip is not one.
-		if err := ls.db.CheckImmutableSlot(orphan.slot); err != nil {
-			return fmt.Errorf("orphaned blob cleanup: %w", err)
-		}
-		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
-			return fmt.Errorf(
-				"delete orphaned block at slot %d (%s): %w",
-				orphan.slot,
-				hex.EncodeToString(orphan.hash),
-				err,
-			)
-		}
-		deleted++
-	}
-
-	if err := writeTxn.Commit(); err != nil {
-		return fmt.Errorf("failed to commit orphan cleanup: %w", err)
-	}
-
-	ls.config.Logger.Info(
-		"orphaned blob cleanup complete",
-		"scanned", len(orphans),
-		"deleted", deleted,
-	)
-	return nil
-}
-
-// scanOrphanedBlobs scans the blob store for blocks beyond the given tip slot.
-// Returns a slice of orphaned blocks that should be deleted.
-func (ls *LedgerState) scanOrphanedBlobs(
-	blobStore interface {
-		NewTransaction(readWrite bool) types.Txn
-		NewIterator(txn types.Txn, opts types.BlobIteratorOptions) types.BlobIterator
-		GetBlock(txn types.Txn, slot uint64, hash []byte) ([]byte, types.BlockMetadata, error)
-	},
-	tipSlot uint64,
-) ([]orphanedBlock, error) {
-	var orphans []orphanedBlock
-
-	readTxn := blobStore.NewTransaction(false)
-	defer readTxn.Rollback() //nolint:errcheck
-
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
-	}
-	it := blobStore.NewIterator(readTxn, iterOpts)
-	if it == nil {
-		return nil, errors.New("failed to create blob iterator")
-	}
-	defer it.Close()
-
-	// Build seek key for slot > tipSlot (tipSlot + 1)
-	seekSlot := tipSlot + 1
-	seekKey := make([]byte, 0, 10) // "bp" + 8 bytes for slot
-	seekKey = append(seekKey, []byte(types.BlockBlobKeyPrefix)...)
-	slotBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(slotBytes, seekSlot)
-	seekKey = append(seekKey, slotBytes...)
-
-	for it.Seek(seekKey); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil {
-			continue
-		}
-		// Skip metadata keys (suffix "_metadata")
-		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		// Parse slot from key: prefix (2 bytes) + slot (8 bytes) + hash (32 bytes)
-		if len(key) < 10 {
-			continue
-		}
-		blockSlot := binary.BigEndian.Uint64(key[2:10])
-		// Double-check slot is beyond tip (should be guaranteed by seek)
-		if blockSlot <= tipSlot {
-			continue
-		}
-		// Extract hash (remaining bytes after prefix + slot)
-		blockHash := make([]byte, len(key)-10)
-		copy(blockHash, key[10:])
-
-		// Get block metadata to retrieve the block ID
-		_, metadata, err := blobStore.GetBlock(readTxn, blockSlot, blockHash)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"failed to get orphaned block metadata",
-				"slot", blockSlot,
-				"error", err,
-			)
-			continue
-		}
-
-		orphans = append(orphans, orphanedBlock{
-			slot: blockSlot,
-			hash: blockHash,
-			id:   metadata.ID,
-		})
-	}
-
-	if err := it.Err(); err != nil {
-		return nil, fmt.Errorf("iterator error during orphan scan: %w", err)
-	}
-
-	return orphans, nil
 }
 
 func (ls *LedgerState) Chain() *chain.Chain {
@@ -11033,8 +10603,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// syntheticV2CostModel is a parameter, captured under the same
 				// RLock as pparams/prevEraPParams
 				// (ledgerProcessBlocksFromSource's snapshotSyntheticV2CostModel),
-				// not read live from ls here: a concurrent rollback
-				// (RecoverCommitTimestampConflict) can mutate
+				// not read live from ls here: a concurrent rollback can mutate
 				// ls.syntheticV2CostModel between that capture and this
 				// point, which would otherwise let this disagree with the
 				// already-snapshotted pp.

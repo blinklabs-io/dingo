@@ -1203,8 +1203,8 @@ func (t *Txn) Commit() error {
 	dispatchAfterUnlock := false
 	commitPhaseHeld := false
 	defer func() {
-		// A provider may panic while updating the commit timestamp or
-		// committing either store. Release both synchronization primitives
+		// A provider may panic while writing the tip or committing either
+		// store. Release both synchronization primitives
 		// before that panic reaches Txn.Do's recovery handler, so its Rollback
 		// can reacquire t.lock and finish the underlying transactions. Do not
 		// mark the transaction finished here: the recovery rollback still owns

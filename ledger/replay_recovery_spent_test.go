@@ -29,6 +29,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -212,5 +213,12 @@ func TestReplayRecoverySpentInputReadsTheLiveUtxoSet(t *testing.T) {
 				assert.Equal(t, chainTip, ls.chain.Tip())
 			}
 		})
+	}
+}
+
+func rawBlockTip(b chain.RawBlock) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(b.Slot, b.Hash),
+		BlockNumber: b.BlockNumber,
 	}
 }

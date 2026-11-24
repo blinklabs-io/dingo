@@ -1015,9 +1015,9 @@ as the record of what an older rolled-back block applied: a transaction it
 applied is undone only at that block, and a certifying block's parent is
 resolved from the set before the block store, so a rollback replayed after the
 chain and metadata dropped those blocks undoes the same transactions once.
-Rollbacks that leave the primary chain in place, replay recovery's metadata
-rewind and partial-commit recovery, publish their undo after the metadata
-truncation and keep the outbox until it is delivered.
+Rollbacks that leave the primary chain in place, such as replay recovery's
+metadata rewind, publish their undo after the metadata truncation and keep the
+outbox until it is delivered.
 
 When a certified endorser block in the rollback set cannot be resolved, the
 ledger publishes a `LedgerErrorEvent` and omits that endorser block's undo
@@ -1040,11 +1040,10 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
-Replay recovery with a resolved producer and runtime partial-commit recovery
-can rewind ledger metadata without first rewinding the primary chain. Those
-paths use the ledger's applied-point record, bounded by the published ledger
+Replay recovery with a resolved producer can rewind ledger metadata without
+first rewinding the primary chain. It uses the ledger's applied-point record, bounded by the published ledger
 tip, to resolve the blocks being discarded; the active chain suffix may be
-ahead or may already belong to a replacement fork. They hold the same
+ahead or may already belong to a replacement fork. It holds the same
 `transactionEventMutex` while capturing that applied range, enqueueing its
 Undo events, and committing the metadata truncation. An unapplied chain block
 therefore produces no Undo, and a later Apply cannot overtake the recovery.
@@ -3880,23 +3879,13 @@ tip is rolled back to it from its journal (`Set.Reconcile`). An IndexerDB
 reads the ledger's block store but keeps its own tip in its metadata store.
 
 That asymmetry is deliberate, because only one direction is recoverable.
-A blob store ahead of the metadata tip holds orphaned blocks that startup
-trims (`LedgerState.cleanupOrphanedBlobs`). The chain manager has already
-loaded its tip from the newest stored block by then, so recovery first rewinds
-the primary chain to the metadata tip through the chain manager
-(`rewindPrimaryChainForOrphanCleanup`). The rewind and orphan cleanup share the
-chain mutation barrier, so blockfetch and forging cannot append a block between
-them that cleanup would then delete. Rollback events publish only after the
-blockfetch lock is released. A rewind refused for exceeding K skips cleanup and
-leaves the chain as a forward extension the ledger replays; any other rewind or
-cleanup error stops recovery. A continuation-audit window is retained when its
-fork point survives the rewind and discarded when that point is truncated. A
-blob store behind the metadata tip is missing blocks the ledger has already
+A block store ahead of the ledger tip holds blocks the ledger applies again. A
+block store behind the ledger tip is missing blocks the ledger has already
 applied, and nothing local can rebuild them. Reconciliation walks the durable
 applied-block nonce history back to the newest point still on the selected
 primary chain and rolls both stores back to that common ancestor. It never
 treats a lower raw chain tip as a rollback target merely because its slot is
-below the metadata tip: that tip may already belong to a competing fork. The
+below the ledger tip: that tip may already belong to a competing fork. The
 rollback depth is set by however far the stores and forks drifted, and on a
 Mithril-bootstrapped node can reach the `mithril_ledger_slot` trust boundary,
 past which rollback is refused outright and the database must be discarded.
@@ -4199,9 +4188,9 @@ SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
 unless the blob store is explicitly flushed between the two commits. See
 DATABASE.md, "Cross-Store Durability Contract", for the per-store settings and
 the cost of the barrier. If either the metadata commit or the sync fails after
-the blob commit succeeded, the result is a `PartialCommitError`, which
-`SubmitAsyncDBTxn` answers by running `RecoverCommitTimestampConflict` once
-(guarded against recursion) before failing the operation so the caller retries.
+the blob commit succeeded, the result is a `PartialCommitError`. The ledger's
+database opens no metadata store, so its commits are blob-only and never
+produce one.
 
 ### Storage Modes
 
@@ -4969,8 +4958,7 @@ the active `.dingo-namespaces/<id>/` objects share that legacy prefix.
   still mutate the
   blob store while a `Snapshot`'s pause is in effect — safe because badger's own
   `Backup` is independently MVCC-consistent as of whenever it runs, so it does
-  not depend on blob writes being paused the way the cross-store
-  commit-timestamp check depends on metadata writes being paused.
+  not depend on blob writes being paused the way the metadata backup does.
   `PauseCommitsContext`, not the older non-cancellable `PauseCommits`, is what
   `Snapshot` calls, so a caller can give up on a snapshot stuck waiting behind a
   long-running write transaction instead of blocking indefinitely. S3 and GCS
@@ -21867,8 +21855,7 @@ releases the commit barrier), and `Txn.BlobStore()` returns the store it
 pinned: the store and the `types.Txn` handle opened on it therefore always come
 from the same installation, which re-reading `Blob()` mid-transaction would not
 guarantee. Blob work that runs outside a transaction — the blob-store identity
-mint, `lifecycle.Snapshot`'s backup call, and
-`LedgerState.cleanupOrphanedBlobs` — brackets itself with `Database.PinBlob`
+mint and `lifecycle.Snapshot`'s backup call — brackets itself with `Database.PinBlob`
 and the release func it returns. `BlobBlockIterator` holds its pin for the
 lifetime of a batch rather than a call: it scans a batch of block keys from one
 store and reads each block's CBOR back in a later `NextRaw`, and a replacement
@@ -21892,16 +21879,6 @@ returns: a second installation of the same store counts its pins separately.
 `Blob()` deliberately hands back an unpinned reference for callers that only
 identify, wrap, or ask a whole-store question of the current store; its result
 must be used within the call that obtained it.
-
-"Never closes" also covers partial-commit recovery. When `Txn.Commit` returns
-`types.ErrPartialCommit` the blob transaction has committed and the metadata
-has not, and the transaction releases its pin as it finishes; the recovery that
-trims the blob store back to the metadata tip runs afterwards, from
-`LedgerState.RecoverCommitTimestampConflict`, against the store installed at
-that point. No pin spans that gap on purpose — recovery is caller-scheduled and
-unbounded, so a pin held for it would block drain indefinitely. The replaced
-store staying open, reachable through the wrapper installed over it, is what
-keeps recovery correct.
 
 `LedgerState` publishes its read-mostly state through two copy-on-write
 snapshots. The consensus snapshot groups the current epoch, era, current and
@@ -25581,7 +25558,7 @@ mutable fields. `ledgerProcessBlocksFromSource` reads
 capture `snapshotPParams`/`snapshotPrevEraPParams`, and passes the result
 into `ledgerProcessBlock` as an explicit parameter rather than letting
 `ledgerProcessBlock` read the live field itself — a concurrent rollback
-(`RecoverCommitTimestampConflict`) mutates `ls.syntheticV2CostModel` outside
+mutates `ls.syntheticV2CostModel` outside
 that lock, so a live read inside `ledgerProcessBlock` could pair the wrong
 marker with the already-snapshotted `pparams` it validates against.
 

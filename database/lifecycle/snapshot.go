@@ -60,8 +60,8 @@ const (
 // calls run concurrently (not sequentially: see the comment further down
 // on why neither exposes a way to separate "capture a consistent point"
 // from "stream/copy it"), so without synchronization a commit landing
-// during either one's own window would write its commit timestamp to one
-// store's backup and not the other's, and the restored copy would fail
+// during either one's own window would land in one store's backup and not
+// the other's, and the restored copy would fail
 // its cross-store consistency check. Snapshot closes that window with
 // Database.PauseCommitsContext, which blocks new read-write Txns from
 // being constructed (not reads, and not a quiesce — nothing is torn down
@@ -236,7 +236,7 @@ func Snapshot(
 
 	// Everything read or backed up between PauseCommits and resume()
 	// describes the same set of committed writes: no new commit can land
-	// in this window, so the tip/commitTimestamp read here matches
+	// in this window, so the tip read here matches
 	// exactly what the two backup calls capture.
 	//
 	// The two backups run concurrently, not sequentially: badger's Backup
