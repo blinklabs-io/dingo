@@ -27,6 +27,20 @@ func (s *Store) LoadTxIndex(
 	return s.loadFamily(TxIndexTag, txIndexKey, "transaction index", feed)
 }
 
+// TxHashesChangedAfter lists the hash of every transaction whose index row
+// changed after slot, as far back as the rollback journal reaches.
+func (s *Store) TxHashesChangedAfter(slot uint64) ([][]byte, error) {
+	keys, err := s.RowKeysChangedAfter([]byte{TxIndexTag}, slot)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k[1:])
+	}
+	return out, nil
+}
+
 // TxIndexLoaded reports whether the store holds the transaction index up to
 // its tip.
 func (s *Store) TxIndexLoaded() (bool, error) {

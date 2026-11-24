@@ -88,5 +88,11 @@ func (c truncateConfig) bindUtxoSetSources(db *database.Database) error {
 		)
 	}
 	db.SetPParamsSource(pparams)
+	if _, ok := c.utxoSet.(TruncateTxIndex); !ok {
+		return fmt.Errorf(
+			"%w: the set does not index transactions",
+			ErrTruncateNeedsUtxoSet,
+		)
+	}
 	return nil
 }

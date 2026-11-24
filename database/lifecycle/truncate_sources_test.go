@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -270,4 +271,69 @@ func TestTruncateRollsTheSetsProtocolParametersBack(t *testing.T) {
 	listed, err := db.ListPParamsForEra(6, nil)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
+}
+
+// applyBlockWithTx applies block id with one output, and indexes the
+// transaction hash produced in it.
+func applyBlockWithTx(
+	t *testing.T,
+	store *badgerutxo.Store,
+	id uint64,
+	hash []byte,
+) {
+	t.Helper()
+	p := blockPoint(id)
+	_, err := store.ApplyLedgerBatch(&p, badgerutxo.LedgerBatch{
+		Changes: []badgerutxo.Change{{
+			Point: p,
+			Added: []badgerutxo.Output{{
+				Ref:  badgerutxo.NewRef(bytes.Repeat([]byte{byte(id)}, 32), 0),
+				Cbor: []byte{0x80, byte(id)},
+			}},
+		}},
+		Rows: []badgerutxo.RowPut{{
+			Slot:  p.Slot,
+			Key:   badgerutxo.TxIndexKey(hash),
+			Value: []byte{byte(id)},
+		}},
+	})
+	require.NoError(t, err)
+}
+
+// An offline truncate removes the offsets of the transactions the set
+// indexed after the target, which the set's rollback would otherwise stop
+// naming, and keeps those at or below it.
+func TestTruncateRemovesTheTruncatedTransactionOffsets(t *testing.T) {
+	t.Parallel()
+	db, blocks := praosChain(t, 5)
+	store := openUtxoSetStore(t, t.TempDir())
+	require.NoError(t, store.LoadNonces([]badgerutxo.Nonce{nonceAt(3, true)}))
+	kept := bytes.Repeat([]byte{0xb2}, 32)
+	truncated := bytes.Repeat([]byte{0xb4}, 32)
+	applyBlocks(t, store, 1, 1)
+	applyBlockWithTx(t, store, 2, kept)
+	applyBlocks(t, store, 3, 3)
+	applyBlockWithTx(t, store, 4, truncated)
+	applyBlocks(t, store, 5, 5)
+	blob := db.BlobTxn(true)
+	for _, hash := range [][]byte{kept, truncated} {
+		require.NoError(t, blob.BlobStore().SetTx(blob.Blob(), hash, []byte{1}))
+	}
+	require.NoError(t, blob.Commit())
+
+	_, err := lifecycle.Truncate(
+		context.Background(), db, blocks[2], 0,
+		lifecycle.WithTruncateUtxoSet(
+			dblifecycle.TruncateUtxoSet{Store: store},
+		))
+
+	require.NoError(t, err)
+	requireSetAt(t, store, 3)
+	read := db.BlobTxn(false)
+	defer read.Release()
+	_, err = read.BlobStore().GetTx(read.Blob(), truncated)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound,
+		"the truncated transaction's offset is left behind")
+	_, err = read.BlobStore().GetTx(read.Blob(), kept)
+	require.NoError(t, err)
 }

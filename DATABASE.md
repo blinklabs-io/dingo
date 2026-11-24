@@ -2555,7 +2555,13 @@ whose cloud mirror still exists — see `ARCHITECTURE.md`'s Bark section.
   Leios pins certified above it (see "LeiosDB"), the history-expiry cursor,
   and `chainstate/tip`. It issues
   no SQL statement. `ledger.LedgerState.rollback` and `lifecycle.Truncate` of
-  a database whose ledger state has moved call it.
+  a database whose ledger state has moved call it. The ledger's rollback finds
+  the transactions through the set it named with `SetLiveUtxoSource`, before
+  its own staged rollback commits. An offline `lifecycle.Truncate` has no such
+  binding and rolls the set back before this call, so it removes those
+  offsets itself first, from the set's index (`TruncateTxIndex`): the
+  rollback forgets the transactions it drops, and a stop between the two
+  repeats the deletes.
 - `Database.RollbackMetadataAfterSlot` reverts the metadata rows above the
   point and leaves the tip: the IndexerDB's rollback of its own rows
   (`internal/node.Backfill.RollbackTo`).
@@ -3956,7 +3962,8 @@ On a database with no metadata store:
 - `lifecycle.Truncate` installs the set it was given (`WithTruncateUtxoSet`)
   as those sources before anything else, and refuses with
   `lifecycle.ErrTruncateNeedsUtxoSet` (wrapping `ErrTruncateNotStarted`) when
-  no set was opened or the set cannot serve them.
+  no set was opened or the set cannot serve them or does not index
+  transactions.
 - A staged transaction (`NewStagedTxn`) commits only what its callers stage
   for the set; it holds no store of its own.
 
@@ -4031,7 +4038,7 @@ rebuilt from it, as a set that is not authoritative always is.
 |---|---|
 | `Snapshot` with `WithUtxoSetBackup` | Streams a Badger backup of the set to `utxoset.bak` concurrently with the blob and metadata backups, inside the same commit pause. The manifest records `utxoSetBytes` and `utxoSetSha256`, and `payloadFiles` then lists the file, so the digest check, cloud upload and cloud download cover it. A manifest without the digest has no set payload. |
 | `Restore` | Loads `utxoset.bak` into `ledger/utxo` of the staging directory, after the blob and metadata restores and before validation, so the existing atomic activation and rollback cover it. A snapshot without the payload restores a data directory with no set, which the next start rebuilds, or, when the set is the only copy, stops with an error saying the set has no journal point to resume from. |
-| `Truncate` with `WithTruncateUtxoSet` | Before any mutation, on a database with no metadata store, binds the set to the nonce, epoch and protocol parameter reads (see "Ledger state in the LedgerDB"), refusing with `ErrTruncateNeedsUtxoSet` when it cannot, and refuses a target the set cannot be rolled back to (`journal floor` in the error, `ErrTruncateNotStarted`). The first step of the mutation, also run when a pending truncate resumes, rolls the set back to the target; a set at or behind the target is left to startup. |
+| `Truncate` with `WithTruncateUtxoSet` | Before any mutation, on a database with no metadata store, binds the set to the nonce, epoch and protocol parameter reads (see "Ledger state in the LedgerDB"), refusing with `ErrTruncateNeedsUtxoSet` when it cannot, and refuses a target the set cannot be rolled back to (`journal floor` in the error, `ErrTruncateNotStarted`). The first step of the mutation, also run when a pending truncate resumes, deletes the blob offsets of the transactions the set indexed after the target; the second rolls the set back to the target, and a set at or behind the target is left to startup. |
 
 #### Checkpoints and recovery when the journal cannot help
 

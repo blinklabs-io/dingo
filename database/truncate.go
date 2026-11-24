@@ -105,8 +105,9 @@ const (
 
 // TruncateAfterSlot moves the ledger's database back to point: it removes
 // the block-store state recorded for blocks after point.Slot (the offsets of
-// the transactions the LedgerDB indexed, Leios certification markers and
-// pins, the history-expiry cursor), sets the tip to point and returns the
+// the transactions the LedgerDB indexed, when SetLiveUtxoSource named it,
+// Leios certification markers and pins, the history-expiry cursor), sets the
+// tip to point and returns the
 // resulting tip and block nonce. The ledger state itself is in the LedgerDB,
 // whose own rollback the caller stages on the same transaction; this issues
 // no SQL statement.

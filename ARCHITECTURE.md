@@ -3829,7 +3829,9 @@ from the `EpochSource` it installs, as it reads protocol parameters from the
 `PParamsSource`; the set keeps the two synthetic PlutusV2 markers and drops
 them in its own rollback across the epoch that confirmed real data.
 `lifecycle.Truncate` installs the opened set as those sources itself and
-refuses without one (`lifecycle.ErrTruncateNeedsUtxoSet`). The MCP raw-SQL
+refuses without one (`lifecycle.ErrTruncateNeedsUtxoSet`); it deletes the
+offsets of the transactions the set indexed above the target before it rolls
+the set back, since the rollback forgets them. The MCP raw-SQL
 tools query the IndexerDB, and a node without one has none to query.
 `stagingLedgerDB` overrides each `LedgerDB` method a running node reads ledger
 state through, and a method it leaves to the store must be classified

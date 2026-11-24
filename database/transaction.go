@@ -2094,9 +2094,9 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 		// Stage only what this transaction can still hold. Past its budget
 		// the store rejects every further staged write, including the
-		// rollback's own writes after this set, so an unbounded stage costs the caller its whole commit rather than
-		// just the tail of this set. What is left
-		// unstaged is counted with the deletes that failed and reported
+		// rollback's own writes after this set, so an unbounded stage costs
+		// the caller its whole commit rather than just the tail of this set.
+		// What is left unstaged is counted with the deletes that failed and reported
 		// through ErrBlobDeleteIncomplete below: the metadata naming these
 		// objects goes away either way, so both are orphans rather than
 		// silently dropped work.
@@ -2167,6 +2167,14 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	}
 
 	return nil
+}
+
+// DeleteTransactionOffsets removes the offset entries of the transactions
+// with hashes, committing a blob transaction per batch. A delete that fails
+// leaves an unreachable object and is reported through
+// ErrBlobDeleteIncomplete once every batch has run.
+func (d *Database) DeleteTransactionOffsets(hashes [][]byte) error {
+	return deleteTxBlobs(d, hashes, nil)
 }
 
 // TransactionsDeleteRolledback deletes transaction offset blobs and metadata

@@ -194,15 +194,5 @@ func (s *Set) EachTxIndexEntry(fn func(ledger.TxIndexEntry) error) error {
 // transaction the index gained after slot, as far back as the rollback
 // journal reaches.
 func (s *Set) TxHashesAfterSlot(_ types.Txn, slot uint64) ([][]byte, error) {
-	keys, err := s.store.RowKeysChangedAfter(
-		[]byte{badgerutxo.TxIndexTag}, slot,
-	)
-	if err != nil {
-		return nil, err
-	}
-	out := make([][]byte, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, k[1:])
-	}
-	return out, nil
+	return s.store.TxHashesChangedAfter(slot)
 }

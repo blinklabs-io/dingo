@@ -849,6 +849,14 @@ func finishPendingTruncate(
 	batchSize int,
 	cfg truncateConfig,
 ) (uint64, error) {
+	// The set's journal is what names the truncated transactions, and its
+	// rollback forgets them, so their offsets go first. A stop between the
+	// two repeats the deletes, which find nothing left.
+	if err := cfg.deleteTruncatedTxOffsets(
+		db, max(pending.MithrilFloor, pending.TargetSlot),
+	); err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
+	}
 	if err := cfg.rollBackUtxoSet(ctx, db, ocommon.Point{
 		Slot: pending.TargetSlot,
 		Hash: pending.TargetHash,
@@ -1077,6 +1085,14 @@ type TruncateUtxoSet interface {
 	RollbackTo(point ocommon.Point) error
 }
 
+// TruncateTxIndex is a live UTxO set that indexes the transactions the
+// ledger applied, whose offsets the ledger's database keeps.
+type TruncateTxIndex interface {
+	// TxHashesAfterSlot lists the hash of every transaction the set indexed
+	// after slot.
+	TxHashesAfterSlot(slot uint64) ([][]byte, error)
+}
+
 // TruncateCheckpoints is a live UTxO set that keeps checkpoints of itself.
 // Truncate uses them for a target below the set's journal: the set is left as
 // it is, and the next start restores the newest checkpoint at or below the
@@ -1202,6 +1218,37 @@ func (c truncateConfig) checkUtxoSet(
 			"it; the earliest reachable slot is %d",
 		target.Slot, floor.Slot, tip.Slot, earliest,
 	)
+}
+
+// deleteTruncatedTxOffsets removes the offsets of the transactions the set
+// indexed after slot. A blob delete failure leaves unreachable objects, which
+// are counted and logged, and does not stop the truncate.
+func (c truncateConfig) deleteTruncatedTxOffsets(
+	db *database.Database,
+	slot uint64,
+) error {
+	index, ok := c.utxoSet.(TruncateTxIndex)
+	if !ok {
+		return nil
+	}
+	hashes, err := index.TxHashesAfterSlot(slot)
+	if err != nil {
+		return fmt.Errorf(
+			"list the transactions indexed after slot %d: %w", slot, err,
+		)
+	}
+	if err := db.DeleteTransactionOffsets(hashes); err != nil {
+		if !errors.Is(err, database.ErrBlobDeleteIncomplete) {
+			return err
+		}
+		db.Logger().Error(
+			"truncated transaction blob delete left unreachable objects",
+			"error", err,
+			"slot", slot,
+			"transactions", len(hashes),
+		)
+	}
+	return nil
 }
 
 // rollBackUtxoSet rolls the set back to point from its journal when it is
