@@ -54,63 +54,6 @@ type RewardInputRepairReport struct {
 	ChangedRows   int    `json:"changed_rows"`
 }
 
-// RepairRewardStakeInputs completes one authoritative basis from an imported
-// snapshot. The caller must hold an offline database lock and own the transaction.
-// Every retained pool total must reconcile before existing rows may be upserted.
-func RepairRewardStakeInputs[T any](
-	store RewardInputRepairStore[T],
-	txn T,
-	state *RawLedgerState,
-	epoch uint64,
-	apply bool,
-) (*RewardInputRepairReport, error) {
-	if state == nil || state.Tip == nil || epoch > state.Epoch ||
-		state.Epoch-epoch > 2 {
-		return nil, errors.New("epoch outside snapshot window")
-	}
-	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	if err != nil {
-		return nil, err
-	}
-	selected := &snapshots.Mark
-	if state.Epoch-epoch == 1 {
-		selected = &snapshots.Set
-	}
-	if state.Epoch-epoch == 2 {
-		selected = &snapshots.Go
-	}
-	retained, err := store.GetRewardSnapshot(epoch, "mark", txn)
-	if err != nil {
-		return nil, err
-	}
-	if retained == nil || !retained.Authoritative {
-		return nil, errors.New("authoritative snapshot required")
-	}
-	params, err := authoritativeRewardInputPoolParams(
-		store,
-		txn,
-		selected,
-		retained,
-	)
-	if err != nil {
-		return nil, err
-	}
-	bundle := deriveRewardInputs(
-		selected,
-		params,
-		epoch,
-		retained.CapturedSlot,
-		retained.BoundarySlot,
-	)
-	if bundle == nil {
-		return nil, errors.New("reward input basis could not be derived")
-	}
-	if err := bundle.validate(); err != nil {
-		return nil, err
-	}
-	return repairRewardStakeInputBundle(store, txn, bundle, retained, apply)
-}
-
 func repairRewardStakeInputBundle[T any](
 	store RewardInputRepairStore[T],
 	txn T,
