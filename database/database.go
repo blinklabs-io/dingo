@@ -135,6 +135,9 @@ type Database struct {
 	// block body left, and cleared whenever one is kept, so a rollback that
 	// kept none does not scan for them.
 	rolledBackBlocksReleased atomic.Bool
+	// rolledBackBlockHold keeps rolled-back bodies from release; see
+	// SetRolledBackBlockHold.
+	rolledBackBlockHold atomic.Pointer[RolledBackBlockHold]
 	// nonceSource serves rollback nonce reads when there is no metadata store;
 	// see SetNonceSource.
 	nonceSource atomic.Pointer[NonceSource]
@@ -670,6 +673,9 @@ func New(
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
 	db.cborCache.SetLogger(configCopy.Logger)
+	if setter, ok := db.metadata.(types.PayloadResolverSetter); ok {
+		setter.SetPayloadResolver(db)
+	}
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)

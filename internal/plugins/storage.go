@@ -342,6 +342,7 @@ func OpenIndexerDatabase(
 		}
 		return nil, fmt.Errorf("open indexer database: %w", err)
 	}
+	db.ShareLeiosDB(consensus)
 	return db, nil
 }
 

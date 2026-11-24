@@ -142,28 +142,12 @@ func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 		prunerFreq = time.Hour
 	}
 	return historyexpiry.PrunerConfig{
-		LedgerState:  n.ledgerState,
-		DB:           n.db,
-		Logger:       n.config.logger,
-		Frequency:    prunerFreq,
-		Ceiling:      n.historyExpiryCeiling,
-		BeforeExpire: n.materializeIndexerBlockUtxos,
+		LedgerState: n.ledgerState,
+		DB:          n.db,
+		Logger:      n.config.logger,
+		Frequency:   prunerFreq,
+		Ceiling:     n.historyExpiryCeiling,
 	}
-}
-
-// materializeIndexerBlockUtxos rewrites the IndexerDB's UTxO entries that are
-// offsets into a block about to expire as raw CBOR. The ledger's own expiry
-// materializes nothing: the live UTxO set holds its outputs.
-func (n *Node) materializeIndexerBlockUtxos(
-	ctx context.Context,
-	slot uint64,
-	hash []byte,
-) error {
-	if n.indexerDB == nil {
-		return nil
-	}
-	_, err := n.indexerDB.MaterializeBlockUtxos(ctx, slot, hash)
-	return err
 }
 
 // historyExpiryCeiling keeps history expiry behind the IndexerDB writer,

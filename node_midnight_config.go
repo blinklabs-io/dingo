@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -63,6 +64,12 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 			block models.Block,
 		) ([]lcommon.Transaction, error) {
 			return n.ledgerState.BlockTransactions(ctx, block)
+		},
+		BlockPayloads: func(
+			ctx context.Context,
+			block models.Block,
+		) (types.PayloadLocator, error) {
+			return n.ledgerState.CertifiedClosurePayloads(ctx, block)
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(

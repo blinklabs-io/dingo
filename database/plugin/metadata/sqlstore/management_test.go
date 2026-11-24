@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -273,11 +274,35 @@ func newManagementTestStore(t *testing.T) *Store {
 		MigrationLocker: migrations.NewProcessLocker(),
 	})
 	require.NoError(t, err)
+	store.SetPayloadResolver(testutil.NewPayloadArchive())
 	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() {
 		require.NoError(t, store.Close())
 	})
 	return store
+}
+
+// testLocate returns the locate function of the archive a test store
+// resolves payloads from, so a payload written through it reads back.
+func testLocate(store *Store) func([]byte) ([]byte, error) {
+	return store.payloads.(*testutil.PayloadArchive).LocatePayload
+}
+
+// bindTestPayloads makes writes through the given transactions and
+// accumulators locate their payloads in an archive the store reads them back
+// from, installing the archive when the store has none.
+func bindTestPayloads(t testing.TB, store *Store, targets ...any) {
+	t.Helper()
+	archive, ok := store.payloads.(*testutil.PayloadArchive)
+	if !ok {
+		archive = testutil.NewPayloadArchive()
+		store.SetPayloadResolver(archive)
+	}
+	for _, target := range targets {
+		setter, ok := target.(types.PayloadLocatorSetter)
+		require.True(t, ok, "%T takes a payload locator", target)
+		setter.SetPayloadLocator(archive)
+	}
 }
 
 func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {

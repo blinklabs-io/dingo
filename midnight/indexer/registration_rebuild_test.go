@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -196,7 +197,13 @@ func TestRegistrationRebuildValidatesAndReplaysCanonicalHistory(t *testing.T) {
 		"SELECT full_datum, block_number, output_index FROM midnight_registrations WHERE tx_hash = ?",
 		validHashBytes(t, correctHash),
 	).Scan(&restoredDatum, &restoredBlock, &restoredOutput))
-	require.Equal(t, datum, restoredDatum)
+	offset, err := types.DecodeCborOffset(restoredDatum)
+	require.NoError(t, err)
+	require.Equal(
+		t, datum,
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+		"the registration row names the datum in the block it was indexed from",
+	)
 	require.Zero(t, restoredBlock)
 	require.Zero(t, restoredOutput)
 	registrationCheckpoint, err := store.GetBackfillCheckpoint(midnightRegistrationCheckpointPhase, nil)

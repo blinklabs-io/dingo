@@ -1264,7 +1264,8 @@ hold that store's records against collection.
 Success clears the record only after the ledger rollback committed, cache
 reload, durable-floor enforcement, and an ordered-lane delivery barrier, and
 deletes the `rb` bodies after the clear (`Database.ReleaseRolledBackBlocks`,
-which runs only while no intent is pending). Startup replays the undo from the
+which runs only while no intent is pending and keeps the bodies an IndexerDB
+still names until its writer rolls back past them). Startup replays the undo from the
 kept bodies while holding the transaction-event mutex, finishes the chain
 rewind if necessary, and then completes the ledger rollback. The three stops
 this ordering has to survive:
@@ -4012,6 +4013,21 @@ after the ledger database is recovered and before the ledger starts. The writer
 starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
 fires, and stops before the IndexerDB closes, which precedes the ledger
 database closing the blob store.
+
+The IndexerDB keeps no copy of a payload its blocks carry. Its datum, script,
+metadata, label, protocol-parameter-update and Midnight datum columns hold
+`DOFF` offsets (DATABASE.md, "Payload columns"). The writer binds each block's
+`BlockIngestionResult.Payloads` locator to the metadata transaction or
+accumulator before it writes the block's transactions, and
+`database.New` installs the database as the metadata store's payload resolver,
+so readers get the same bytes by reading the block stores. Two node-tracked
+positions keep those blocks readable while a row names them. The history
+expiry `Ceiling` is the IndexerDB tip: no block expires before the writer has
+indexed it. `node_indexer.go` also installs the IndexerDB tip as the ledger
+database's rolled-back-block hold, and the writer's `Moved` callback has the
+ledger release the bodies a rollback abandoned (`LedgerState.ReleaseRolledBackBlocks`)
+once the writer has rolled back past them; until then the payload resolver
+reads an abandoned block from its retained body.
 Failed passes retry with exponential backoff from one to thirty seconds,
 without requiring another ledger event. Wakes interrupt the retry delay and
 successful passes return to waiting for events.
@@ -4673,9 +4689,8 @@ fallback:
   starting from a durable cursor in `sync_state` so each round costs the newly
   eligible blocks rather than every earlier tombstone. With an IndexerDB its
   `Ceiling` keeps it below the IndexerDB tip, so the writer reads every body
-  before it is expired, and its `BeforeExpire` rewrites the IndexerDB's own
-  offset entries into the block as raw CBOR
-  (`Database.MaterializeBlockUtxos`). `Database.PruneBlock` materializes any
+  before it is expired and no block an IndexerDB row's payload offset names
+  expires before the writer has indexed it. `Database.PruneBlock` materializes any
   UTxO CBOR still stored as block offsets (the ledger's database, whose
   outputs the live UTxO set holds, stores none) before replacing the block CBOR value with an
   expired-history marker, leaving block indexes and metadata intact. Startup
@@ -4815,7 +4830,7 @@ Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic | 4 bytes | "DOFF" prefix to identify offset storage |
+| Magic | 4 bytes | "DOFF" for a block, "DLEB" for an endorser block's transaction list in the LeiosDB, "DEXP" for a payload whose block expired with no archive configured (slot and hash only) |
 | BlockSlot | 8 bytes | Block slot number |
 | BlockHash | 32 bytes | Block hash |
 | ByteOffset | 4 bytes | Offset within block CBOR |

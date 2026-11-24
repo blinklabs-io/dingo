@@ -20,6 +20,8 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -32,7 +34,8 @@ import (
 // metadata endpoint gives the same outcome for each key order on every call.
 func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapter(t)
+	archive, _ := fixtureArchives.Load(raw)
 
 	// Label 721 maps integer 1 and text "1", which collide in JSON; label 1
 	// is the representable text "a". The indefinite-length form re-encodes
@@ -78,6 +81,10 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 		txBuilder.WithMetadata(metadataCbor)
 		tx, err := txBuilder.Build()
 		require.NoError(t, err)
+		txn := db.Transaction(t.Context(), true)
+		txn.Metadata().(types.PayloadLocatorSetter).SetPayloadLocator(
+			archive.(*testutil.PayloadArchive),
+		)
 		require.NoError(t, db.SetTransactionMetadataOnly(
 			t.Context(),
 			tx,
@@ -87,8 +94,9 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 			},
 			0,
 			nil,
-			nil, 0,
+			txn, 0,
 		))
+		require.NoError(t, txn.Commit())
 	}
 
 	for pass := range 8 {

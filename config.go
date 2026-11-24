@@ -2756,6 +2756,9 @@ type IndexerWriterDeps struct {
 	SlotTime                   func(uint64) (time.Time, error)
 	MaxReadyLagBlocks          uint64
 	DelegatorInactivityEnabled bool
+	// Moved, when set, is called after each pass in which the writer moved
+	// its tip, forward or back. It must not block.
+	Moved func()
 }
 
 // IndexerWriterFactory builds the writer of a split layout. It is a seam

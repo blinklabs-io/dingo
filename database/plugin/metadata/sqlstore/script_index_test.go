@@ -149,6 +149,7 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 		store := newAPIModeSQLiteStore(t, nil)
 		txn := store.Transaction(context.Background())
 		t.Cleanup(func() { _ = txn.Rollback() })
+		bindTestPayloads(t, store, txn)
 		tx, point := referenceScriptTx(t, 0x31, script)
 		require.NoError(
 			t,
@@ -173,6 +174,7 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 		store := newMigratedSQLiteStore(t)
 		txn := store.Transaction(context.Background())
 		t.Cleanup(func() { _ = txn.Rollback() })
+		bindTestPayloads(t, store, txn)
 		tx, point := referenceScriptTx(t, 0x32, script)
 		require.NoError(
 			t,
@@ -187,6 +189,7 @@ func TestGetScriptReferenceUtxos(t *testing.T) {
 	store := newAPIModeSQLiteStore(t, nil)
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
+	bindTestPayloads(t, store, txn)
 	script := lcommon.PlutusV2Script{0x41, 0x09}
 	other := lcommon.PlutusV2Script{0x41, 0x0a}
 	for _, seed := range []byte{0x41, 0x42, 0x43} {
@@ -320,6 +323,8 @@ func TestSetTransactionIndexesRedeemerScripts(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 
+	bindTestPayloads(t, store, txn)
+
 	// The inputs are listed in the transaction body's canonical order, which
 	// the redeemer's spend index points into.
 	inputs := []lcommon.TransactionInput{lockedInput, keyInput, missingInput}
@@ -396,6 +401,8 @@ func TestSetTransactionIndexesRedeemerScriptsUsesSortedInputs(t *testing.T) {
 
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
+
+	bindTestPayloads(t, store, txn)
 
 	tx, point := redeemerTx(t, redeemerTxOptions{
 		seed:   0x62,

@@ -482,6 +482,7 @@ func (d *Database) SetTransactionWithOpts(
 	// rather than wedging the pipeline with ErrUtxoConflict on a
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
+	bindPayloadLocator(txn.Metadata(), offsets)
 	setTxErr := error(nil)
 	if opts.LedgerContextSlot != nil {
 		if !opts.SkipConsumedInputRecovery {
@@ -526,6 +527,16 @@ func (d *Database) SetTransactionWithOpts(
 	}
 
 	return nil
+}
+
+// bindPayloadLocator tells the metadata transaction which block the next
+// transaction it writes was decoded from, so the payload columns record
+// offsets into that block.
+func bindPayloadLocator(metadataTxn types.Txn, offsets *BlockIngestionResult) {
+	if setter, ok := metadataTxn.(types.PayloadLocatorSetter); ok &&
+		offsets != nil {
+		setter.SetPayloadLocator(offsets.Payloads)
+	}
 }
 
 // SetTransactionMetadataOnly records transaction metadata, certificates, and

@@ -92,6 +92,9 @@ type transactionBatchAccumulator struct {
 	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
 	// attached one; nil on the per-row path.
 	overlay *utxoOverlay
+	// locator names payloads by their position in the block of the
+	// transaction being applied; see SetPayloadLocator.
+	locator types.PayloadLocator
 }
 
 type poolOpCertSequenceKey struct {
@@ -1135,6 +1138,24 @@ func (s *Store) setTransactionWithAccumulator(
 		}
 	}
 	batchedAccumulator, _ := accumulator.(*transactionBatchAccumulator)
+	locate := payloadLocate(payloadLocatorFor(txn, batchedAccumulator))
+	if metadataValue != nil {
+		var err error
+		if metadataValue, err = locate(metadataValue); err != nil {
+			return fmt.Errorf("locate transaction metadata: %w", err)
+		}
+		for i := range metadataLabels {
+			metadataLabels[i].CborValue, err = locate(
+				metadataLabels[i].CborValue,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"locate metadata label %d: %w",
+					metadataLabels[i].Label, err,
+				)
+			}
+		}
+	}
 	if batchedAccumulator != nil && txn == nil {
 		defer batchedAccumulator.resetStatement()
 	}
@@ -1382,7 +1403,7 @@ func (s *Store) setTransactionWithAccumulator(
 						producedModels[i].ID = uint(output.id)
 					}
 					phase.next(ctx, "dingo.sqlstore.tx.api_details")
-					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
+					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew, locate); err != nil {
 						return err
 					}
 					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
@@ -1443,6 +1464,7 @@ func (s *Store) setTransactionWithAccumulator(
 				producedModels,
 				&staged,
 				transactionIsNew,
+				locate,
 			); err != nil {
 				return err
 			}

@@ -119,6 +119,12 @@ type Config struct {
 	// transactions, which is correct for every pre-Leios era.
 	BlockTransactions func(context.Context, models.Block) ([]lcommon.Transaction, error)
 	blockDecoder      func(models.Block) ([]lcommon.Transaction, error)
+	// BlockPayloads returns where the datums of the transactions
+	// BlockTransactions yields for a block are stored, when that is not the
+	// block's own CBOR, as for a certifying Leios ranking block, whose
+	// transactions live in its closure's endorser block. Nil, or a nil
+	// locator, means the block's own CBOR.
+	BlockPayloads func(context.Context, models.Block) (types.PayloadLocator, error)
 	// closureRetryInterval is how often a block deferred for an unavailable
 	// certified closure is retried when no later event retries it. Zero uses
 	// defaultClosureRetryInterval.
@@ -152,6 +158,9 @@ type cNightUTxO struct {
 // registrationUTxO holds the inline datum of a registration output.
 type registrationUTxO struct {
 	FullDatum []byte
+	// FullDatumOffset is the CBOR offset of FullDatum in the block that
+	// created the output, which a later deregistration row records.
+	FullDatumOffset []byte
 }
 
 // candidateKey uniquely identifies a UTxO at the committee-candidate address.
@@ -168,6 +177,10 @@ type CandidateEntry struct {
 	TxHash      []byte `cbor:"1,keyasint"`
 	OutputIndex uint32 `cbor:"2,keyasint"`
 	Datum       []byte `cbor:"3,keyasint"`
+	// DatumOffset is the CBOR offset of Datum in its block. The indexer sets
+	// it when it writes a snapshot, which records only the offset; readers
+	// decode the snapshot with Datum resolved and DatumOffset empty.
+	DatumOffset []byte `cbor:"4,keyasint,omitempty"`
 }
 
 // DecodeEpochCandidatesCbor decodes a MidnightEpochCandidates.CandidatesCbor
@@ -282,10 +295,15 @@ type Indexer struct {
 	// governance state
 	candidates       map[candidateKey][]byte
 	lastAriadneDatum []byte
-	currentEpoch     uint64
-	hasCurrentEpoch  bool
-	snapshotEpoch    uint64
-	hasSnapshotEpoch bool
+	// candidateOffsets and lastAriadneOffset hold the CBOR offsets of the
+	// datums above, which rows written after the block that created them
+	// record instead of a copy.
+	candidateOffsets  map[candidateKey][]byte
+	lastAriadneOffset []byte
+	currentEpoch      uint64
+	hasCurrentEpoch   bool
+	snapshotEpoch     uint64
+	hasSnapshotEpoch  bool
 }
 
 // New creates and initialises a new Indexer. It parses the configured policy
@@ -299,6 +317,8 @@ func New(cfg Config) (*Indexer, error) {
 		cNightUTxOs: make(map[utxoKey]cNightUTxO),
 		regUTxOs:    make(map[utxoKey]registrationUTxO),
 		candidates:  make(map[candidateKey][]byte),
+
+		candidateOffsets: make(map[candidateKey][]byte),
 	}
 
 	if cfg.CNightPolicyID != "" && cfg.CNightAssetName != "" {
@@ -480,7 +500,10 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 				TxHash: hex.EncodeToString(r.TxHash),
 				Index:  r.OutputIndex,
 			}
-			idx.regUTxOs[key] = registrationUTxO{FullDatum: r.FullDatum}
+			idx.regUTxOs[key] = registrationUTxO{
+				FullDatum:       r.FullDatum,
+				FullDatumOffset: r.FullDatumOffset,
+			}
 		}
 	}
 
@@ -504,6 +527,7 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 			}
 			key := candidateKey{TxHash: txHash, OutputIndex: utxo.OutputIdx}
 			idx.candidates[key] = bytes.Clone(utxo.Datum)
+			idx.candidateOffsets[key] = bytes.Clone(utxo.DatumOffset)
 		}
 	}
 
@@ -516,6 +540,7 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 		}
 		if latest != nil {
 			idx.lastAriadneDatum = latest.Datum
+			idx.lastAriadneOffset = latest.DatumOffset
 		}
 	}
 
@@ -739,6 +764,46 @@ func (idx *Indexer) replayCanonicalRegistrationHistory(tip *models.Block) (uint6
 	return last.Slot, nil
 }
 
+// bindPayloads makes the writes of txn record their datums as offsets into
+// block. A block with no body binds nothing, so a write of a datum through
+// txn fails unless the transaction already names a block.
+func (idx *Indexer) bindPayloads(txn types.Txn, block models.Block) error {
+	setter, ok := txn.(types.PayloadLocatorSetter)
+	if !ok {
+		return nil
+	}
+	var locator types.PayloadLocator
+	var err error
+	if idx.config.BlockPayloads != nil {
+		locator, err = idx.config.BlockPayloads(context.Background(), block)
+	}
+	if err == nil && locator == nil && len(block.Cbor) != 0 {
+		locator, err = types.NewBlockPayloadLocator(
+			block.Slot, block.Hash, block.Cbor,
+		)
+	}
+	if err == nil && locator == nil {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"midnight indexer: locate payloads of block %d: %w",
+			block.Number, err,
+		)
+	}
+	setter.SetPayloadLocator(locator)
+	return nil
+}
+
+// locateDatum returns the offset of datum in the block txn writes.
+func locateDatum(txn types.Txn, datum []byte) ([]byte, error) {
+	source, ok := txn.(types.PayloadLocatorSource)
+	if !ok || source.PayloadLocator() == nil {
+		return nil, types.ErrPayloadLocatorRequired
+	}
+	return source.PayloadLocator().LocatePayload(datum)
+}
+
 // processRegistrationBlock replays only the registration UTxO lifecycle.
 // Historical rebuilds must not touch other Midnight tables or their in-memory
 // state while replacing registration policy-derived rows.
@@ -752,6 +817,9 @@ func (idx *Indexer) processRegistrationBlock(
 		return errors.New("midnight indexer: registration rebuild transaction returned nil")
 	}
 	defer txn.Rollback() //nolint:errcheck
+	if err := idx.bindPayloads(txn, block); err != nil {
+		return err
+	}
 	journal := newMapJournal[utxoKey, registrationUTxO]()
 	committed := false
 	defer func() {
@@ -775,8 +843,9 @@ func (idx *Indexer) processRegistrationBlock(
 				continue
 			}
 			row := &models.MidnightDeregistration{
-				FullDatum: registration.FullDatum,
-				TxHash:    txHash, UtxoTxHash: inputHash, UtxoIndex: input.Index(),
+				FullDatum:       registration.FullDatum,
+				FullDatumOffset: registration.FullDatumOffset,
+				TxHash:          txHash, UtxoTxHash: inputHash, UtxoIndex: input.Index(),
 				BlockNumber: block.Number, BlockHash: block.Hash,
 				TxIndex: uint32(txIndex), BlockTimestampMs: timestampMs,
 			}
@@ -815,7 +884,10 @@ func (idx *Indexer) processRegistrationBlock(
 			key := utxoKey{TxHash: hex.EncodeToString(txHash), Index: outIndex}
 			idx.mu.Lock()
 			journal.record(idx.regUTxOs, key)
-			idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCBOR}
+			idx.regUTxOs[key] = registrationUTxO{
+				FullDatum:       datumCBOR,
+				FullDatumOffset: row.FullDatumOffset,
+			}
 			idx.mu.Unlock()
 		}
 	}
@@ -1376,7 +1448,10 @@ func (idx *Indexer) rollbackBlock(block models.Block) error {
 				idx.regUTxOs[utxoKey{
 					TxHash: hex.EncodeToString(d.UtxoTxHash),
 					Index:  d.UtxoIndex,
-				}] = registrationUTxO{FullDatum: d.FullDatum}
+				}] = registrationUTxO{
+					FullDatum:       d.FullDatum,
+					FullDatumOffset: d.FullDatumOffset,
+				}
 			}
 			for _, r := range regs {
 				delete(idx.regUTxOs, utxoKey{
@@ -1498,8 +1573,9 @@ func (idx *Indexer) rollbackAriadne(
 			err = md.UpsertMidnightAriadneParams(
 				txn,
 				&models.MidnightAriadneParams{
-					Epoch: entry.Epoch,
-					Datum: bytes.Clone(entry.PreviousDatum),
+					Epoch:       entry.Epoch,
+					Datum:       bytes.Clone(entry.PreviousDatum),
+					DatumOffset: entry.PreviousDatumOffset,
 				},
 			)
 		} else {
@@ -1523,8 +1599,10 @@ func (idx *Indexer) rollbackAriadne(
 	return func() {
 		if latest == nil {
 			idx.lastAriadneDatum = nil
+			idx.lastAriadneOffset = nil
 		} else {
 			idx.lastAriadneDatum = bytes.Clone(latest.Datum)
+			idx.lastAriadneOffset = latest.DatumOffset
 		}
 	}, nil
 }
@@ -1543,6 +1621,7 @@ func (idx *Indexer) rollbackCandidateSpends(
 		return nil, fmt.Errorf("load candidate spend journal: %w", err)
 	}
 	restore := make(map[candidateKey][]byte, len(removals))
+	restoreOffsets := make(map[candidateKey][]byte, len(removals))
 	for _, removal := range removals {
 		txHash, err := lcommon.NewBlake2b256Checked(removal.TxHash)
 		if err != nil {
@@ -1554,11 +1633,15 @@ func (idx *Indexer) rollbackCandidateSpends(
 		}
 		key := candidateKey{TxHash: txHash, OutputIndex: removal.OutputIndex}
 		restore[key] = bytes.Clone(removal.Datum)
+		restoreOffsets[key] = removal.DatumOffset
 	}
 	if err := md.DeleteMidnightCandidateRemovalsByBlock(txn, blockNumber); err != nil {
 		return nil, fmt.Errorf("delete candidate spend journal: %w", err)
 	}
-	return func() { maps.Copy(idx.candidates, restore) }, nil
+	return func() {
+		maps.Copy(idx.candidates, restore)
+		maps.Copy(idx.candidateOffsets, restoreOffsets)
+	}, nil
 }
 
 // rollbackEpochTransition consumes the persisted epoch-transition journal
@@ -1597,6 +1680,7 @@ func (idx *Indexer) removeCandidateCreates(txs []lcommon.Transaction) {
 				copy(key.TxHash[:], txHashBytes)
 				key.OutputIndex = uint32(outIdx) //nolint:gosec
 				delete(idx.candidates, key)
+				delete(idx.candidateOffsets, key)
 			}
 		}
 	}
@@ -1657,13 +1741,15 @@ type blockMutationJournal struct {
 	regUTxOs    *mapJournal[utxoKey, registrationUTxO]
 	candidates  *mapJournal[candidateKey, []byte]
 
+	candidateOffsets *mapJournal[candidateKey, []byte]
 	// Scalars mutated at most a handful of times per block; recording the
 	// single pre-block value is already O(1).
-	lastAriadneDatumBefore []byte
-	currentEpochBefore     uint64
-	hasCurrentEpochBefore  bool
-	snapshotEpochBefore    uint64
-	hasSnapshotEpochBefore bool
+	lastAriadneDatumBefore  []byte
+	lastAriadneOffsetBefore []byte
+	currentEpochBefore      uint64
+	hasCurrentEpochBefore   bool
+	snapshotEpochBefore     uint64
+	hasSnapshotEpochBefore  bool
 }
 
 // newBlockMutationJournal starts a journal for the block about to be
@@ -1673,14 +1759,16 @@ func (idx *Indexer) newBlockMutationJournal() *blockMutationJournal {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	j := &blockMutationJournal{
-		cNightUTxOs:            newMapJournal[utxoKey, cNightUTxO](),
-		regUTxOs:               newMapJournal[utxoKey, registrationUTxO](),
-		candidates:             newMapJournal[candidateKey, []byte](),
-		lastAriadneDatumBefore: idx.lastAriadneDatum,
-		currentEpochBefore:     idx.currentEpoch,
-		hasCurrentEpochBefore:  idx.hasCurrentEpoch,
-		snapshotEpochBefore:    idx.snapshotEpoch,
-		hasSnapshotEpochBefore: idx.hasSnapshotEpoch,
+		cNightUTxOs:             newMapJournal[utxoKey, cNightUTxO](),
+		regUTxOs:                newMapJournal[utxoKey, registrationUTxO](),
+		candidates:              newMapJournal[candidateKey, []byte](),
+		candidateOffsets:        newMapJournal[candidateKey, []byte](),
+		lastAriadneDatumBefore:  idx.lastAriadneDatum,
+		lastAriadneOffsetBefore: idx.lastAriadneOffset,
+		currentEpochBefore:      idx.currentEpoch,
+		hasCurrentEpochBefore:   idx.hasCurrentEpoch,
+		snapshotEpochBefore:     idx.snapshotEpoch,
+		hasSnapshotEpochBefore:  idx.hasSnapshotEpoch,
 	}
 	return j
 }
@@ -1694,8 +1782,10 @@ func (idx *Indexer) undoBlockMutations(j *blockMutationJournal) {
 	j.cNightUTxOs.undo(idx.cNightUTxOs)
 	j.regUTxOs.undo(idx.regUTxOs)
 	j.candidates.undo(idx.candidates)
+	j.candidateOffsets.undo(idx.candidateOffsets)
 
 	idx.lastAriadneDatum = j.lastAriadneDatumBefore
+	idx.lastAriadneOffset = j.lastAriadneOffsetBefore
 	idx.currentEpoch = j.currentEpochBefore
 	idx.hasCurrentEpoch = j.hasCurrentEpochBefore
 	idx.snapshotEpoch = j.snapshotEpochBefore
@@ -1723,6 +1813,9 @@ func (idx *Indexer) processBlock(
 	// Start/Stop-scoped context is a separate change.
 	txn := idx.config.Metadata.Transaction(context.Background())
 	defer txn.Rollback() //nolint:errcheck
+	if err := idx.bindPayloads(txn, block); err != nil {
+		return err
+	}
 
 	// processTx/processOutput (and the epoch-advance/pruning steps below)
 	// mutate idx's in-memory tracked-UTxO and governance state as they go,
@@ -1919,6 +2012,7 @@ func (idx *Indexer) processTx(
 		if isReg {
 			row := &models.MidnightDeregistration{
 				FullDatum:        reg.FullDatum,
+				FullDatumOffset:  reg.FullDatumOffset,
 				TxHash:           txHashBytes,
 				UtxoTxHash:       inpHashBytes,
 				UtxoIndex:        inpIdx,
@@ -1943,7 +2037,7 @@ func (idx *Indexer) processTx(
 		// Always attempt to remove from candidate set (no-op if not tracked).
 		if len(idx.candidateAddrBytes) > 0 {
 			idx.mu.Lock()
-			candidateKey, datum, removed := idx.removeCandidate(
+			candidateKey, datum, datumOffset, removed := idx.removeCandidate(
 				journal,
 				inpHashBytes,
 				inpIdx,
@@ -1957,6 +2051,7 @@ func (idx *Indexer) processTx(
 						TxHash:      candidateKey.TxHash[:],
 						OutputIndex: candidateKey.OutputIndex,
 						Datum:       datum,
+						DatumOffset: datumOffset,
 					},
 				); err != nil {
 					return fmt.Errorf(
@@ -2151,7 +2246,10 @@ func (idx *Indexer) processOutput(
 					counts["registration"]++
 					idx.mu.Lock()
 					journal.regUTxOs.record(idx.regUTxOs, key)
-					idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCbor}
+					idx.regUTxOs[key] = registrationUTxO{
+						FullDatum:       datumCbor,
+						FullDatumOffset: row.FullDatumOffset,
+					}
 					idx.mu.Unlock()
 				}
 			}
@@ -2238,12 +2336,13 @@ func (idx *Indexer) processOutput(
 					txHashHex, outIdx, govEpoch, err,
 				)
 			}
+			params := &models.MidnightAriadneParams{
+				Epoch: govEpoch,
+				Datum: datumCbor,
+			}
 			if err := idx.config.Metadata.UpsertMidnightAriadneParams(
 				txn,
-				&models.MidnightAriadneParams{
-					Epoch: govEpoch,
-					Datum: datumCbor,
-				},
+				params,
 			); err != nil {
 				return fmt.Errorf(
 					"write ariadne params tx=%s output=%d epoch=%d: %w",
@@ -2252,6 +2351,7 @@ func (idx *Indexer) processOutput(
 			} else {
 				idx.mu.Lock()
 				idx.lastAriadneDatum = datumCbor
+				idx.lastAriadneOffset = params.DatumOffset
 				idx.mu.Unlock()
 			}
 		}
@@ -2286,9 +2386,22 @@ func (idx *Indexer) processOutput(
 		var ckey candidateKey
 		copy(ckey.TxHash[:], txHashBytes)
 		ckey.OutputIndex = outIdx
+		var datumOffset []byte
+		if len(datumCbor) > 0 {
+			var err error
+			datumOffset, err = locateDatum(txn, datumCbor)
+			if err != nil {
+				return fmt.Errorf(
+					"locate candidate datum tx=%s output=%d block=%d: %w",
+					txHashHex, outIdx, block.Number, err,
+				)
+			}
+		}
 		idx.mu.Lock()
 		journal.candidates.record(idx.candidates, ckey)
+		journal.candidateOffsets.record(idx.candidateOffsets, ckey)
 		idx.candidates[ckey] = bytes.Clone(datumCbor)
+		idx.candidateOffsets[ckey] = datumOffset
 		idx.mu.Unlock()
 	}
 
@@ -2314,6 +2427,7 @@ func (idx *Indexer) recordAriadneRollback(
 	if existing != nil {
 		entry.PreviousExists = true
 		entry.PreviousDatum = bytes.Clone(existing.Datum)
+		entry.PreviousDatumOffset = existing.DatumOffset
 	}
 	return idx.config.Metadata.CreateMidnightAriadneRollback(txn, entry)
 }
@@ -2393,6 +2507,7 @@ func (idx *Indexer) snapshotEpochLocked(
 			TxHash:      hashCopy,
 			OutputIndex: k.OutputIndex,
 			Datum:       datum,
+			DatumOffset: idx.candidateOffsets[k],
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -2440,17 +2555,20 @@ func (idx *Indexer) removeCandidate(
 	journal *blockMutationJournal,
 	txHashBytes []byte,
 	outputIndex uint32,
-) (candidateKey, []byte, bool) {
+) (candidateKey, []byte, []byte, bool) {
 	var key candidateKey
 	copy(key.TxHash[:], txHashBytes)
 	key.OutputIndex = outputIndex
 	datum, ok := idx.candidates[key]
 	if !ok {
-		return key, nil, false
+		return key, nil, nil, false
 	}
 	journal.candidates.record(idx.candidates, key)
+	journal.candidateOffsets.record(idx.candidateOffsets, key)
+	offset := idx.candidateOffsets[key]
 	delete(idx.candidates, key)
-	return key, bytes.Clone(datum), true
+	delete(idx.candidateOffsets, key)
+	return key, bytes.Clone(datum), offset, true
 }
 
 // outputHasPolicy reports whether output carries any asset under policyID.

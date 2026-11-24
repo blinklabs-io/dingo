@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -87,8 +86,19 @@ func pad32(prefix string) string {
 }
 
 type testStore struct {
-	*sqlstore.Store
+	*dbtest.PayloadStore
 	raw *sql.DB
+}
+
+// resolve returns the bytes a payload column's offset names.
+func (s *testStore) resolve(t *testing.T, column []byte) []byte {
+	t.Helper()
+	if len(column) == 0 {
+		return column
+	}
+	payload, err := s.Archive.ResolvePayload(column)
+	require.NoError(t, err)
+	return payload
 }
 
 // setupTestStore creates a file-backed SQLite store so tests can use the
@@ -122,7 +132,7 @@ func setupTestStore(t *testing.T) *testStore {
 		require.NoError(t, raw.Close())
 		require.NoError(t, store.Close())
 	})
-	return &testStore{Store: store, raw: raw}
+	return &testStore{PayloadStore: dbtest.NewPayloadStore(store), raw: raw}
 }
 
 // setupIndexer creates a test Indexer backed by the given store.
@@ -214,6 +224,7 @@ FROM midnight_governance_datums`
 			&item.Datum,
 			&item.BlockNumber,
 		))
+		item.Datum = store.resolve(t, item.Datum)
 		ret = append(ret, item)
 	}
 	require.NoError(t, rows.Err())
@@ -235,6 +246,7 @@ ORDER BY epoch`)
 	for rows.Next() {
 		var item models.MidnightAriadneParams
 		require.NoError(t, rows.Scan(&item.ID, &item.Epoch, &item.Datum))
+		item.Datum = store.resolve(t, item.Datum)
 		ret = append(ret, item)
 	}
 	require.NoError(t, rows.Err())

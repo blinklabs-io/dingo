@@ -27,6 +27,7 @@ import (
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	fxcbor "github.com/fxamacker/cbor/v2"
 )
 
 func (s *Store) FindMidnightAssetCreatesFrom(
@@ -74,7 +75,7 @@ func (s *Store) FindMidnightRegistrationsFrom(
 	limit int,
 	txn types.Txn,
 ) ([]models.MidnightRegistration, error) {
-	return findMidnightPage(
+	rows, err := findMidnightPage(
 		s,
 		txn,
 		"midnight_registrations",
@@ -85,6 +86,43 @@ func (s *Store) FindMidnightRegistrationsFrom(
 		limit,
 		scanMidnightRegistration,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return rows, s.resolveRegistrations(rows)
+}
+
+// resolveRegistrations replaces each row's stored offset with the datum it
+// names, keeping the offset in FullDatumOffset.
+func (s *Store) resolveRegistrations(
+	rows []models.MidnightRegistration,
+) error {
+	for i := range rows {
+		var err error
+		rows[i].FullDatumOffset, rows[i].FullDatum, err = s.readPayload(
+			rows[i].FullDatum,
+		)
+		if err != nil {
+			return fmt.Errorf("read Midnight registration datum: %w", err)
+		}
+	}
+	return nil
+}
+
+// resolveDeregistrations is resolveRegistrations for deregistration rows.
+func (s *Store) resolveDeregistrations(
+	rows []models.MidnightDeregistration,
+) error {
+	for i := range rows {
+		var err error
+		rows[i].FullDatumOffset, rows[i].FullDatum, err = s.readPayload(
+			rows[i].FullDatum,
+		)
+		if err != nil {
+			return fmt.Errorf("read Midnight deregistration datum: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ResetMidnightRegistrationState(txn types.Txn) error {
@@ -117,7 +155,7 @@ func (s *Store) FindMidnightDeregistrationsFrom(
 	limit int,
 	txn types.Txn,
 ) ([]models.MidnightDeregistration, error) {
-	return findMidnightPage(
+	rows, err := findMidnightPage(
 		s,
 		txn,
 		"midnight_deregistrations",
@@ -128,6 +166,10 @@ func (s *Store) FindMidnightDeregistrationsFrom(
 		limit,
 		scanMidnightDeregistration,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return rows, s.resolveDeregistrations(rows)
 }
 
 func (s *Store) GetMidnightCandidates(
@@ -176,7 +218,17 @@ WHERE utxo.deleted_slot = 0 AND `+predicates[0]),
 		}
 		ret = append(ret, utxo)
 	}
-	return ret, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range ret {
+		var err error
+		ret[i].DatumOffset, ret[i].Datum, err = s.readPayload(ret[i].Datum)
+		if err != nil {
+			return nil, fmt.Errorf("read Midnight candidate datum: %w", err)
+		}
+	}
+	return ret, nil
 }
 
 func (s *Store) CreateMidnightAssetCreate(
@@ -231,6 +283,10 @@ func (s *Store) CreateMidnightRegistration(
 		return err
 	}
 	q := s.operationalQueries(db)
+	row.FullDatumOffset, err = payloadOffset(txn, row.FullDatumOffset, row.FullDatum)
+	if err != nil {
+		return fmt.Errorf("locate Midnight registration datum: %w", err)
+	}
 	params, err := midnightRegistrationParams(row)
 	if err != nil {
 		return err
@@ -251,6 +307,10 @@ func (s *Store) CreateMidnightDeregistration(
 		return err
 	}
 	q := s.operationalQueries(db)
+	row.FullDatumOffset, err = payloadOffset(txn, row.FullDatumOffset, row.FullDatum)
+	if err != nil {
+		return fmt.Errorf("locate Midnight deregistration datum: %w", err)
+	}
 	params, err := midnightDeregistrationParams(row)
 	if err != nil {
 		return err
@@ -284,7 +344,8 @@ func (s *Store) FindUnspentMidnightRegistrations() (
 	if err != nil {
 		return nil, err
 	}
-	return mapMidnightRegistrations(rows), nil
+	ret := mapMidnightRegistrations(rows)
+	return ret, s.resolveRegistrations(ret)
 }
 
 func (s *Store) DeleteMidnightAssetCreatesByBlock(
@@ -419,13 +480,17 @@ func (s *Store) InsertMidnightGovernanceDatum(
 	if err != nil {
 		return err
 	}
+	datum.DatumOffset, err = payloadOffset(txn, datum.DatumOffset, datum.Datum)
+	if err != nil {
+		return fmt.Errorf("locate Midnight governance datum: %w", err)
+	}
 	id, err := q.InsertMidnightGovernanceDatum(
 		ctx,
 		sqlitequery.InsertMidnightGovernanceDatumParams{
 			DatumType:   datum.DatumType,
 			TxHash:      datum.TxHash,
 			OutputIndex: outputIndex,
-			Datum:       datum.Datum,
+			Datum:       datum.DatumOffset,
 			BlockNumber: blockNumber,
 		},
 	)
@@ -476,6 +541,10 @@ func (s *Store) GetLatestMidnightGovernanceDatum(
 		return nil, err
 	}
 	ret := midnightGovernanceDatumFromSQLite(row)
+	ret.DatumOffset, ret.Datum, err = s.readPayload(row.Datum)
+	if err != nil {
+		return nil, fmt.Errorf("read Midnight governance datum: %w", err)
+	}
 	return &ret, nil
 }
 
@@ -547,11 +616,15 @@ func (s *Store) UpsertMidnightAriadneParams(
 	if err != nil {
 		return err
 	}
+	params.DatumOffset, err = payloadOffset(txn, params.DatumOffset, params.Datum)
+	if err != nil {
+		return fmt.Errorf("locate Midnight Ariadne datum: %w", err)
+	}
 	id, err := q.UpsertMidnightAriadneParams(
 		ctx,
 		sqlitequery.UpsertMidnightAriadneParamsParams{
 			Epoch: epoch,
-			Datum: params.Datum,
+			Datum: params.DatumOffset,
 		},
 	)
 	if err == nil {
@@ -596,13 +669,19 @@ func (s *Store) CreateMidnightAriadneRollback(
 	if err != nil {
 		return err
 	}
+	rollback.PreviousDatumOffset, err = payloadOffset(
+		txn, rollback.PreviousDatumOffset, rollback.PreviousDatum,
+	)
+	if err != nil {
+		return fmt.Errorf("locate Midnight Ariadne rollback datum: %w", err)
+	}
 	id, err := q.CreateMidnightAriadneRollback(
 		ctx,
 		sqlitequery.CreateMidnightAriadneRollbackParams{
 			BlockNumber:    blockNumber,
 			Epoch:          epoch,
 			PreviousExists: rollback.PreviousExists,
-			PreviousDatum:  rollback.PreviousDatum,
+			PreviousDatum:  rollback.PreviousDatumOffset,
 		},
 	)
 	return applyIgnoredInsertID(&rollback.ID, id, err)
@@ -630,12 +709,17 @@ func (s *Store) FindMidnightAriadneRollbacksByBlock(
 	}
 	ret := make([]models.MidnightAriadneRollback, 0, len(rows))
 	for _, row := range rows {
+		offset, datum, err := s.readPayload(row.PreviousDatum)
+		if err != nil {
+			return nil, fmt.Errorf("read Midnight Ariadne rollback datum: %w", err)
+		}
 		ret = append(ret, models.MidnightAriadneRollback{
-			ID:             uint(row.ID),
-			BlockNumber:    uint64(row.BlockNumber),
-			Epoch:          uint64(row.Epoch),
-			PreviousExists: row.PreviousExists,
-			PreviousDatum:  row.PreviousDatum,
+			ID:                  uint(row.ID),
+			BlockNumber:         uint64(row.BlockNumber),
+			Epoch:               uint64(row.Epoch),
+			PreviousExists:      row.PreviousExists,
+			PreviousDatum:       datum,
+			PreviousDatumOffset: offset,
 		})
 	}
 	return ret, nil
@@ -697,13 +781,17 @@ func (s *Store) CreateMidnightCandidateRemoval(
 	if err != nil {
 		return err
 	}
+	removal.DatumOffset, err = payloadOffset(txn, removal.DatumOffset, removal.Datum)
+	if err != nil {
+		return fmt.Errorf("locate Midnight candidate removal datum: %w", err)
+	}
 	return s.operationalQueries(db).CreateMidnightCandidateRemoval(
 		ctx,
 		sqlitequery.CreateMidnightCandidateRemovalParams{
 			BlockNumber: blockNumber,
 			TxHash:      removal.TxHash,
 			OutputIndex: int64(removal.OutputIndex),
-			Datum:       removal.Datum,
+			Datum:       removal.DatumOffset,
 		},
 	)
 }
@@ -739,11 +827,16 @@ func (s *Store) FindMidnightCandidateRemovalsByBlock(
 				row.OutputIndex,
 			)
 		}
+		offset, datum, err := s.readPayload(row.Datum)
+		if err != nil {
+			return nil, fmt.Errorf("read Midnight candidate removal datum: %w", err)
+		}
 		ret = append(ret, models.MidnightCandidateRemoval{
 			BlockNumber: storedBlock,
 			TxHash:      row.TxHash,
 			OutputIndex: uint32(row.OutputIndex), //nolint:gosec
-			Datum:       row.Datum,
+			Datum:       datum,
+			DatumOffset: offset,
 		})
 	}
 	return ret, nil
@@ -919,12 +1012,16 @@ func (s *Store) UpsertMidnightEpochCandidates(
 	if err != nil {
 		return err
 	}
+	stored, err := encodeCandidateOffsets(txn, epochCandidates.CandidatesCbor)
+	if err != nil {
+		return err
+	}
 	id, err := q.UpsertMidnightEpochCandidates(
 		ctx,
 		sqlitequery.UpsertMidnightEpochCandidatesParams{
 			Epoch:          epoch,
 			BlockNumber:    blockNumber,
-			CandidatesCbor: epochCandidates.CandidatesCbor,
+			CandidatesCbor: stored,
 		},
 	)
 	if err == nil {
@@ -972,11 +1069,15 @@ func (s *Store) GetMidnightEpochCandidatesByEpoch(
 	if err != nil {
 		return nil, err
 	}
+	candidates, err := s.decodeCandidateOffsets(row.CandidatesCbor)
+	if err != nil {
+		return nil, err
+	}
 	return &models.MidnightEpochCandidates{
 		ID:             uint(row.ID),
 		Epoch:          uint64(row.Epoch),
 		BlockNumber:    uint64(row.BlockNumber),
-		CandidatesCbor: row.CandidatesCbor,
+		CandidatesCbor: candidates,
 	}, nil
 }
 
@@ -1141,10 +1242,15 @@ func (s *Store) getMidnightAriadneParams(
 	if err != nil {
 		return nil, err
 	}
+	offset, datum, err := s.readPayload(row.Datum)
+	if err != nil {
+		return nil, fmt.Errorf("read Midnight Ariadne datum: %w", err)
+	}
 	return &models.MidnightAriadneParams{
-		ID:    uint(row.ID),
-		Epoch: uint64(row.Epoch),
-		Datum: row.Datum,
+		ID:          uint(row.ID),
+		Epoch:       uint64(row.Epoch),
+		Datum:       datum,
+		DatumOffset: offset,
 	}, nil
 }
 
@@ -1274,7 +1380,7 @@ func midnightRegistrationParams(
 		return sqlitequery.CreateMidnightRegistrationParams{}, err
 	}
 	return sqlitequery.CreateMidnightRegistrationParams{
-		FullDatum:        row.FullDatum,
+		FullDatum:        row.FullDatumOffset,
 		TxHash:           row.TxHash,
 		OutputIndex:      outputIndex,
 		BlockNumber:      blockNumber,
@@ -1304,7 +1410,7 @@ func midnightDeregistrationParams(
 		return sqlitequery.CreateMidnightDeregistrationParams{}, err
 	}
 	return sqlitequery.CreateMidnightDeregistrationParams{
-		FullDatum:        row.FullDatum,
+		FullDatum:        row.FullDatumOffset,
 		TxHash:           row.TxHash,
 		UtxoTxHash:       row.UtxoTxHash,
 		UtxoIndex:        utxoIndex,
@@ -1403,7 +1509,6 @@ func midnightGovernanceDatumFromSQLite(
 		DatumType:   row.DatumType,
 		TxHash:      row.TxHash,
 		OutputIndex: uint32(row.OutputIndex),
-		Datum:       row.Datum,
 		BlockNumber: uint64(row.BlockNumber),
 	}
 }
@@ -1602,4 +1707,85 @@ func bindPlaceholders(count int) string {
 		return ""
 	}
 	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+// candidateOffsetEntry is one element of the epoch-candidate snapshot as the
+// column stores it: the candidate's output and the offset of its datum.
+type candidateOffsetEntry struct {
+	TxHash      []byte `cbor:"1,keyasint"`
+	OutputIndex uint32 `cbor:"2,keyasint"`
+	DatumOffset []byte `cbor:"4,keyasint"`
+}
+
+// candidateDatumEntry is one element of the snapshot as readers decode it: the
+// candidate's output and its datum.
+type candidateDatumEntry struct {
+	TxHash      []byte `cbor:"1,keyasint"`
+	OutputIndex uint32 `cbor:"2,keyasint"`
+	Datum       []byte `cbor:"3,keyasint"`
+}
+
+// candidateWriteEntry is one element of the snapshot a writer hands over: the
+// datum and, when the writer already holds it, the datum's offset.
+type candidateWriteEntry struct {
+	TxHash      []byte `cbor:"1,keyasint"`
+	OutputIndex uint32 `cbor:"2,keyasint"`
+	Datum       []byte `cbor:"3,keyasint"`
+	DatumOffset []byte `cbor:"4,keyasint,omitempty"`
+}
+
+// encodeCandidateOffsets turns a snapshot whose entries carry datums into the
+// stored form, which carries only each datum's offset.
+func encodeCandidateOffsets(txn types.Txn, snapshot []byte) ([]byte, error) {
+	if len(snapshot) == 0 {
+		return snapshot, nil
+	}
+	var entries []candidateWriteEntry
+	if err := fxcbor.Unmarshal(snapshot, &entries); err != nil {
+		return nil, fmt.Errorf("decode Midnight epoch candidates: %w", err)
+	}
+	stored := make([]candidateOffsetEntry, 0, len(entries))
+	for _, entry := range entries {
+		offset, err := payloadOffset(txn, entry.DatumOffset, entry.Datum)
+		if err != nil {
+			return nil, fmt.Errorf("locate Midnight candidate datum: %w", err)
+		}
+		stored = append(stored, candidateOffsetEntry{
+			TxHash:      entry.TxHash,
+			OutputIndex: entry.OutputIndex,
+			DatumOffset: offset,
+		})
+	}
+	if entries == nil {
+		stored = nil
+	}
+	return fxcbor.Marshal(stored)
+}
+
+// decodeCandidateOffsets turns the stored snapshot back into the form
+// readers decode, with each datum read from its block.
+func (s *Store) decodeCandidateOffsets(stored []byte) ([]byte, error) {
+	if len(stored) == 0 {
+		return stored, nil
+	}
+	var entries []candidateOffsetEntry
+	if err := fxcbor.Unmarshal(stored, &entries); err != nil {
+		return nil, fmt.Errorf("decode Midnight epoch candidates: %w", err)
+	}
+	resolved := make([]candidateDatumEntry, 0, len(entries))
+	for _, entry := range entries {
+		datum, err := s.resolvePayload(entry.DatumOffset)
+		if err != nil {
+			return nil, fmt.Errorf("read Midnight candidate datum: %w", err)
+		}
+		resolved = append(resolved, candidateDatumEntry{
+			TxHash:      entry.TxHash,
+			OutputIndex: entry.OutputIndex,
+			Datum:       datum,
+		})
+	}
+	if entries == nil {
+		resolved = nil
+	}
+	return fxcbor.Marshal(resolved)
 }

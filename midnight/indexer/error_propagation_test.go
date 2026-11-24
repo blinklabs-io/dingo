@@ -15,6 +15,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -68,7 +69,10 @@ func TestLiveTimestampFailurePreservesCheckpoint(t *testing.T) {
 	h.idx.config.SlotTimer = timestampFunc(func(uint64) (time.Time, error) {
 		return time.Time{}, failure
 	})
-	blk := models.Block{Slot: 10, Number: 1, Type: blockType, Cbor: cbor}
+	blk := models.Block{
+		Slot: 10, Number: 1, Type: blockType, Cbor: cbor,
+		Hash: bytes.Repeat([]byte{0x0a}, 32),
+	}
 	h.idx.handleBlockEvent(event.Event{Data: ledger.BlockEvent{
 		Action: ledger.BlockActionApply, Block: blk,
 	}})

@@ -114,6 +114,7 @@ type Node struct {
 	db                     *database.Database
 	indexerDB              *database.Database
 	indexerStore           *indexerdb.Store
+	releasingBlocks        atomic.Bool
 	indexerWriter          IndexerWriter
 	indexerWakeSub         event.EventSubscriberId
 	indexerFactsSub        event.EventSubscriberId

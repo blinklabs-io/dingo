@@ -17,6 +17,8 @@ package utxoset_test
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -198,7 +200,13 @@ func TestRebuildReloadsPParamUpdates(t *testing.T) {
 	tip := ocommon.NewPoint(5, bytes.Repeat([]byte{5}, 32))
 	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
 	stored := bytes.Repeat([]byte{0xa1}, 28)
-	require.NoError(t, db.SetPParamUpdate(stored, []byte{0xa0}, 3, 0, nil))
+	archive := testutil.NewPayloadArchive()
+	db.Metadata().(types.PayloadResolverSetter).SetPayloadResolver(archive)
+	txn := db.Transaction(t.Context(), true)
+	defer txn.Rollback() //nolint:errcheck
+	txn.Metadata().(types.PayloadLocatorSetter).SetPayloadLocator(archive)
+	require.NoError(t, db.SetPParamUpdate(stored, []byte{0xa0}, 3, 0, txn))
+	require.NoError(t, txn.Commit())
 	ldb := dbadapter.New(db)
 
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})

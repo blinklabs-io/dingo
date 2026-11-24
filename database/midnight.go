@@ -15,7 +15,6 @@
 package database
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -35,26 +34,6 @@ func (d *Database) GetMidnightCandidates(
 		return nil, err
 	}
 	return d.metadata.GetMidnightCandidates(addr, nil)
-}
-
-// InsertMidnightGovernanceDatum inserts a new governance datum row.
-// Always inserts — never overwrites — so the latest datum is found by
-// querying with ORDER BY block_number DESC.
-func (d *Database) InsertMidnightGovernanceDatum(
-	ctx context.Context,
-	datum *models.MidnightGovernanceDatum,
-) error {
-	if err := d.requireStore("InsertMidnightGovernanceDatum"); err != nil {
-		return err
-	}
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.InsertMidnightGovernanceDatum(
-			txn.Metadata(), datum,
-		); err != nil {
-			return fmt.Errorf("insert midnight governance datum: %w", err)
-		}
-		return nil
-	})
 }
 
 // GetLatestMidnightGovernanceDatum returns the newest datum of datumType at or
@@ -80,26 +59,6 @@ func (d *Database) GetLatestMidnightAriadneParams() (*models.MidnightAriadnePara
 		return nil, err
 	}
 	return d.metadata.GetLatestMidnightAriadneParams(nil)
-}
-
-// UpsertMidnightAriadneParams inserts or updates the Ariadne params row for
-// the given epoch. If a row for that epoch already exists, its datum is
-// updated with the new value.
-func (d *Database) UpsertMidnightAriadneParams(
-	ctx context.Context,
-	params *models.MidnightAriadneParams,
-) error {
-	if err := d.requireStore("UpsertMidnightAriadneParams"); err != nil {
-		return err
-	}
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.UpsertMidnightAriadneParams(
-			txn.Metadata(), params,
-		); err != nil {
-			return fmt.Errorf("upsert midnight ariadne params: %w", err)
-		}
-		return nil
-	})
 }
 
 // GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
@@ -136,23 +95,4 @@ func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 		txHashes,
 		nil,
 	)
-}
-
-// UpsertMidnightEpochCandidates inserts or replaces the committee-candidate
-// snapshot for the given epoch.
-func (d *Database) UpsertMidnightEpochCandidates(
-	ctx context.Context,
-	ec *models.MidnightEpochCandidates,
-) error {
-	if err := d.requireStore("UpsertMidnightEpochCandidates"); err != nil {
-		return err
-	}
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.UpsertMidnightEpochCandidates(
-			txn.Metadata(), ec,
-		); err != nil {
-			return fmt.Errorf("upsert midnight epoch candidates: %w", err)
-		}
-		return nil
-	})
 }

@@ -185,6 +185,18 @@ func (ls *LedgerState) releaseRolledBackBlocks(ctx context.Context) {
 	}
 }
 
+// ReleaseRolledBackBlocks deletes the rolled-back bodies that no rollback
+// intent names and no hold keeps. It runs under the rollback boundary, so it
+// never overlaps a rollback that is retaining bodies.
+func (ls *LedgerState) ReleaseRolledBackBlocks(ctx context.Context) {
+	_ = ls.withRollbackBoundary(func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		ls.releaseRolledBackBlocks(ctx)
+		return nil
+	})
+}
+
 // ensureRollbackIntent records the undo payload for a rollback to point.
 //
 // A nil rollbackBlocks means "resolve the payload from the chain", which is

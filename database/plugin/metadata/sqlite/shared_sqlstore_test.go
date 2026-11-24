@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	"math/big"
 	"strings"
 	"sync"
@@ -2182,6 +2183,8 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
 		return store, writeDB
 	}()
+	archive := testutil.NewPayloadArchive()
+	store.SetPayloadResolver(archive)
 	txHash := lcommon.Blake2b256{0xe7}
 	metadataValue := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
 		Key: lcommon.MetaInt{Value: big.NewInt(721)},
@@ -2190,10 +2193,14 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 			{Key: lcommon.MetaText{Value: "1"}, Value: lcommon.MetaText{Value: "text"}},
 		}},
 	}}}
+	txn := store.Transaction(t.Context())
+	defer txn.Rollback() //nolint:errcheck
+	txn.(types.PayloadLocatorSetter).SetPayloadLocator(archive)
 	require.NoError(t, store.SetTransaction(
 		&mockTransaction{hash: txHash, metadata: metadataValue},
-		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil, 0,
+		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, txn, 0,
 	))
+	require.NoError(t, txn.Commit())
 	var jsonValue sql.NullString
 	var cborValue []byte
 	require.NoError(t, raw.QueryRow(`
@@ -2202,7 +2209,9 @@ FROM transaction_metadata_label AS l
 JOIN "transaction" AS tx ON tx.id = l.transaction_id
 WHERE tx.hash = ? AND l.label = ?`, txHash.Bytes(), "721").Scan(&jsonValue, &cborValue))
 	require.False(t, jsonValue.Valid)
-	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(cborValue))
+	label, err := archive.ResolvePayload(cborValue)
+	require.NoError(t, err)
+	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(label))
 }
 
 // TestSharedSQLStoreWithdrawalWitnessGate covers: the
@@ -3211,8 +3220,17 @@ func TestSharedSQLStorePoolRetirementAndDepositAtSlot(t *testing.T) {
 func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
+	archive := testutil.NewPayloadArchive()
+	store.SetPayloadResolver(archive)
+	candidates, err := fxcbor.Marshal([]struct {
+		TxHash      []byte `cbor:"1,keyasint"`
+		OutputIndex uint32 `cbor:"2,keyasint"`
+		Datum       []byte `cbor:"3,keyasint"`
+	}{{TxHash: []byte("candidate-a"), OutputIndex: 0, Datum: []byte("datum-c")}})
+	require.NoError(t, err)
 
 	txn := store.Transaction(t.Context())
+	txn.(types.PayloadLocatorSetter).SetPayloadLocator(archive)
 	for _, row := range []*models.MidnightAssetCreate{
 		{
 			Address: []byte("address-a"), Quantity: 10,
@@ -3294,7 +3312,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NoError(t, store.UpsertMidnightEpochCandidates(
 		txn,
 		&models.MidnightEpochCandidates{
-			Epoch: 2, BlockNumber: 12, CandidatesCbor: []byte("candidates"),
+			Epoch: 2, BlockNumber: 12, CandidatesCbor: candidates,
 		},
 	))
 	require.NoError(t, store.InsertMidnightCommitteeCandidateRegistration(
@@ -3306,7 +3324,6 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	var err error
 	gotUnspentAssets, err := store.FindUnspentMidnightAssetCreates()
 	require.NoError(t, err)
 	gotUnspentRegistrations, err := store.FindUnspentMidnightRegistrations()
@@ -3381,7 +3398,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NotNil(t, gotCandidates)
 	require.Equal(t, uint64(2), gotCandidates.Epoch)
 	require.Equal(t, uint64(12), gotCandidates.BlockNumber)
-	require.Equal(t, []byte("candidates"), gotCandidates.CandidatesCbor)
+	require.Equal(t, candidates, gotCandidates.CandidatesCbor)
 	require.Len(t, gotRegistrations, 1)
 	deletedCreateTxHashes := make([]string, len(gotDeletedCreates))
 	for i, create := range gotDeletedCreates {

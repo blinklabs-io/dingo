@@ -82,10 +82,14 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 
 ## Non-obvious invariants
 
-- CBOR offsets: UTxOs/txs store 52-byte `CborOffset` refs (magic `"DOFF"` +
-  slot + hash + offset + length), not full CBOR. Resolved via `TieredCborCache`
+- CBOR offsets: UTxOs, transactions and the IndexerDB's payload columns
+  (datums, scripts, metadata) store 52-byte `CborOffset` refs (magic `"DOFF"`
+  + slot + hash + offset + length), not full CBOR. `"DLEB"` names an endorser
+  block's transaction list in the LeiosDB; `"DEXP"` marks a payload whose
+  block expired with no archive configured. Resolved via `TieredCborCache`
   (hot → block LRU → cold blob extract). See `database/cbor_offset.go`,
-  `database/cbor_cache.go`, `database/block_indexer.go`.
+  `database/types/cbor_offset.go`, `database/cbor_cache.go`,
+  `database/block_indexer.go`.
 - gouroboros types embedding `DecodeStoreCbor` (blocks, tx bodies, etc.) return
   the original decoded bytes verbatim from `MarshalCBOR()` whenever `Cbor()` is
   non-nil — mutating a decoded struct's fields and re-marshaling silently

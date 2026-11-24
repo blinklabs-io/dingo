@@ -69,7 +69,23 @@ func paymentAddress() []byte {
 	return append([]byte{0x60}, bytes.Repeat([]byte{0x11}, 28)...)
 }
 
+// Payloads are the datum, script and metadata the first transaction of a
+// scenario built by NewWithPayloads carries in its witness set and auxiliary
+// data.
+var (
+	PayloadDatum  = []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	PayloadScript = []byte{0x01, 0x02, 0x03, 0x04}
+)
+
 func rawTx(spendTxID []byte, amount uint64) (cbor.RawMessage, error) {
+	return buildRawTx(spendTxID, amount, false)
+}
+
+func buildRawTx(
+	spendTxID []byte,
+	amount uint64,
+	payloads bool,
+) (cbor.RawMessage, error) {
 	fee := uint64(200_000)
 	body, err := cbor.Encode(map[uint]any{
 		0: cbor.Tag{Number: 258, Content: []any{[]any{spendTxID, uint64(0)}}},
@@ -79,16 +95,30 @@ func rawTx(spendTxID []byte, amount uint64) (cbor.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	witnesses := map[uint]any{}
+	var aux any
+	if payloads {
+		witnesses[4] = []cbor.RawMessage{PayloadDatum}
+		witnesses[6] = [][]byte{PayloadScript}
+		aux = map[uint]any{674: "closure"}
+	}
 	tx, err := cbor.Encode(
-		[]any{cbor.RawMessage(body), map[uint]any{}, nil, true},
+		[]any{cbor.RawMessage(body), witnesses, aux, true},
 	)
 	return cbor.RawMessage(tx), err
 }
 
 // New builds the scenario.
-func New() (*Scenario, error) {
+func New() (*Scenario, error) { return build(false) }
+
+// NewWithPayloads builds the scenario with a datum, a Plutus V2 script and
+// metadata on the closure's first transaction, which live only in the endorser
+// block's transaction list.
+func NewWithPayloads() (*Scenario, error) { return build(true) }
+
+func build(payloads bool) (*Scenario, error) {
 	s := &Scenario{SeedTxID: bytes.Repeat([]byte{0x71}, 32)}
-	first, err := rawTx(s.SeedTxID, seedAmount)
+	first, err := buildRawTx(s.SeedTxID, seedAmount, payloads)
 	if err != nil {
 		return nil, err
 	}

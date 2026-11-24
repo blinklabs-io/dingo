@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -54,6 +55,13 @@ const (
 	migrateStepRenamed = "renamed"
 	migrateStepLatched = "latched"
 )
+
+// ArchiveStore wraps a blob store with the archive fallback cfg configures.
+// Package bark sets it; storageadopt cannot import bark, which imports it.
+var ArchiveStore func(
+	cfg *config.Config,
+	upstream blob.BlobStore,
+) (blob.BlobStore, error)
 
 // MigrateToSplit adopts an API database in place. The caller must recover
 // interrupted restores before adopting active storage.
@@ -532,6 +540,27 @@ func (m *splitMigration) prepareCopy(
 	}
 	if err := m.copyOffsetEntries(ctx, source, idx); err != nil {
 		return err
+	}
+	// The released store holds copies of the payloads it indexed; the
+	// IndexerDB reads them from the blocks instead.
+	if m.cfg.BarkBaseUrl != "" {
+		// A block that expired locally is fetched from the archive to
+		// compute its offsets, and reads of those rows proxy the same fetch.
+		if ArchiveStore == nil {
+			return errors.New("an archive is configured but no archive store is linked")
+		}
+		archived, err := ArchiveStore(m.cfg, idx.Blob())
+		if err != nil {
+			return fmt.Errorf("create archive blob store: %w", err)
+		}
+		idx.SetBlobStore(archived)
+	}
+	m.logger.Info(
+		"converting the copied payload columns to block offsets",
+		"component", "indexer",
+	)
+	if err := idx.MigratePayloadOffsets(ctx); err != nil {
+		return fmt.Errorf("convert payload columns to block offsets: %w", err)
 	}
 	// Snapshots whose stake inputs the ledger is still writing are the
 	// writer's to copy once they finish; the copy holds them only in part.

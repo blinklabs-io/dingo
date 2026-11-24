@@ -56,6 +56,9 @@ func newClosureDeferralFixture(
 	f.spend.ID, f.spend.Number, f.spend.Slot =
 		2, f.create.Number+1, f.create.Slot+1
 	f.spend.Hash = []byte("deferral-spend-block")
+	// The transactions come from BlockTransactions, not from the bodies, so
+	// the blocks name no payloads of their own.
+	f.create.Cbor, f.spend.Cbor = nil, nil
 
 	createHash := pad32("fb000001")
 	createTx := buildTx(t, createHash,

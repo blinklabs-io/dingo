@@ -40,6 +40,9 @@ func testPParamUpdateOrdering(t *testing.T, store *Store) {
 		epoch   uint64
 	}
 	insert := func(r row) {
+		txn := store.Transaction(t.Context())
+		defer txn.Rollback() //nolint:errcheck
+		bindTestPayloads(t, store, txn)
 		require.NoError(t, store.SetPParamUpdate(
 			[]byte{
 				r.genesis,
@@ -47,8 +50,9 @@ func testPParamUpdateOrdering(t *testing.T, store *Store) {
 			[]byte{0xa1, 0x00, r.genesis},
 			r.slot,
 			r.epoch,
-			nil,
+			txn,
 		))
+		require.NoError(t, txn.Commit())
 	}
 	for _, r := range []row{
 		{genesis: 4, slot: 200, epoch: 2},

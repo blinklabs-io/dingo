@@ -84,6 +84,7 @@ func applyPlainOverlayChain(
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	if enabled {
 		got, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
@@ -217,6 +218,7 @@ func TestLeiosRetainedUtxoOverlayRollsBack(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	got, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
@@ -280,6 +282,7 @@ func TestLeiosRetainedUtxoOverlayFallsBackForSpentInput(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
@@ -309,6 +312,7 @@ func BenchmarkLeiosRetainedUtxoOverlay(b *testing.B) {
 			for b.Loop() {
 				txn := store.Transaction(context.Background())
 				acc := store.NewLeiosClosureBatchAccumulator()
+				bindTestPayloads(b, store, acc)
 				if enabled {
 					got, err := store.EnableLeiosClosureUtxoOverlay(
 						acc,
@@ -402,6 +406,7 @@ func TestLeiosRetainedUtxoOverlayRejectsExternalMutation(t *testing.T) {
 			txn := store.Transaction(context.Background())
 			defer func() { _ = txn.Rollback() }()
 			acc := store.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, store, acc)
 			defer acc.Reset()
 			enabled, err := store.EnableLeiosClosureUtxoOverlay(
 				acc,
@@ -468,6 +473,7 @@ func TestLeiosRetainedUtxoOverlayRejectsPointerInput(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
@@ -497,6 +503,7 @@ func TestLeiosRetainedUtxoOverlayClosureBound(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
@@ -530,6 +537,7 @@ func TestLeiosRetainedUtxoOverlayOutputByteBound(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	secondSize, err := lcommon.TransactionOutputCborSize(
 		transactions[1].Outputs()[0],
@@ -573,6 +581,7 @@ func TestLeiosRetainedUtxoOverlayCTEReadBarrier(t *testing.T) {
 			txn := store.Transaction(t.Context())
 			defer func() { _ = txn.Rollback() }()
 			acc := store.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, store, acc)
 			defer acc.Reset()
 			enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, txs)
 			require.NoError(t, err)

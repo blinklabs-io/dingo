@@ -125,6 +125,7 @@ func TestBatchedWitnessRowsAreFlushedAsOneMultiRowInsert(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for seed := byte(1); seed <= 3; seed++ {
@@ -159,6 +160,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfSameTransaction(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for range 2 {
@@ -180,6 +182,7 @@ func TestBatchedWitnessRowsReplaceFlushedRowsOfSameTransaction(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for range 2 {
@@ -200,6 +203,7 @@ func TestBatchAccumulatorResetDropsQueuedWitnessRows(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	tx, point := witnessTx(t, 5, 2)
@@ -287,6 +291,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	immediate := newAPIModeSQLiteStore(t, nil)
 	immediateTxn := immediate.Transaction(context.Background())
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
+	bindTestPayloads(t, immediate, immediateTxn)
 	tx, point := allShapesWitnessTx(t, 11)
 	require.NoError(t, immediate.SetTransaction(
 		tx, point, 0, nil, true, immediateTxn, 0,
@@ -297,6 +302,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	for range 2 {
 		tx, point := allShapesWitnessTx(t, 11)
@@ -723,6 +729,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	immediate := newAPIModeSQLiteStore(t, nil)
 	immediateTxn := immediate.Transaction(context.Background())
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
+	bindTestPayloads(t, immediate, immediateTxn)
 	tx, point := apiDetailTx(t, 21)
 	require.NoError(t, immediate.SetTransaction(
 		tx, point, 0, nil, true, immediateTxn, 0,
@@ -736,6 +743,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	for range 2 {
 		tx, point := apiDetailTx(t, 21)
@@ -756,6 +764,7 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	type assetRef struct {
@@ -863,6 +872,7 @@ func TestSetTransactionBatchedCoalescesStakeDeltas(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	stakingKey := lcommon.NewBlake2b224([]byte("stake-key"))
@@ -978,6 +988,7 @@ func TestBatchedRowsOfFailedWriteAreNotQueued(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	tx, point := apiDetailTx(t, 23)
@@ -1236,6 +1247,7 @@ func TestBatchedRowsRestoreQueueOnCallerRollback(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	retained, point := witnessTx(t, 7, 2)
 	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, nil, 0))
@@ -1252,6 +1264,7 @@ func TestBatchedRowsRestoreQueueOnSavepointRollback(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
@@ -1269,6 +1282,7 @@ func TestBatchedRowsResetOnRollbackBeforeFirstSavepointBinding(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })

@@ -333,6 +333,37 @@ func LoadCertifiedClosure(
 	}, nil
 }
 
+// PayloadLocator names the datums, scripts and metadata of the closure's
+// transactions by their position in the endorser block's transaction list,
+// which the LeiosDB keeps for a certified endorser block.
+func (c *CertifiedClosure) PayloadLocator() (types.PayloadLocator, error) {
+	backing, err := database.LeiosEndorserBacking(c.transactions)
+	if err != nil {
+		return nil, err
+	}
+	return types.NewEndorserPayloadLocator(
+		c.EndorserBlockSlot, c.EndorserBlockHash.Bytes(), backing,
+	)
+}
+
+// CertifiedClosurePayloads returns the payload locator of the closure block
+// certifies, or nil when it certifies none and its own CBOR holds its
+// payloads.
+func (ls *LedgerState) CertifiedClosurePayloads(
+	ctx context.Context,
+	block models.Block,
+) (types.PayloadLocator, error) {
+	decoded, err := block.Decode()
+	if err != nil {
+		return nil, fmt.Errorf("decode block %x: %w", block.Hash, err)
+	}
+	closure, err := ls.loadCertifiedClosure(ctx, decoded)
+	if err != nil || closure == nil {
+		return nil, err
+	}
+	return closure.PayloadLocator()
+}
+
 // RawTransactions returns the closure's transactions as delivered, in
 // manifest order.
 func (c *CertifiedClosure) RawTransactions() []cbor.RawMessage {
