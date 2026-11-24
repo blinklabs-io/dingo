@@ -20,7 +20,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -52,7 +53,7 @@ func TestDijkstraStateManagerAppliesChildBodyOutputsAndDeposits(t *testing.T) {
 				accountKey: 5,
 			},
 		},
-		&dijkstra.DijkstraProtocolParameters{},
+		testutil.CompleteRats(&dijkstra.DijkstraProtocolParameters{}),
 	))
 
 	outputAddress := append([]byte{0x60}, bytes.Repeat([]byte{0x24}, 28)...)
@@ -88,24 +89,15 @@ func TestDijkstraStateManagerAppliesChildBodyOutputsAndDeposits(t *testing.T) {
 
 	require.NoError(t, manager.ApplyTransaction(tx, 10))
 
-	childUtxo, err := manager.db.UtxoByRef(
-		context.Background(),
-		childHash.Bytes(),
-		0,
-		nil,
-	)
+	set := manager.backend.set
+	_, childHeld, err := set.Get(childHash.Bytes(), 0)
 	require.NoError(t, err)
-	require.NotNil(t, childUtxo)
-	rootUtxoExists, err := manager.db.UtxoExists(
-		context.Background(),
-		rootHash.Bytes(),
-		0,
-		nil,
-	)
+	require.True(t, childHeld)
+	_, rootHeld, err := set.Get(rootHash.Bytes(), 0)
 	require.NoError(t, err)
-	require.False(t, rootUtxoExists)
+	require.False(t, rootHeld)
 
-	account, err := manager.db.GetAccountByCredential(
+	account, err := manager.ldb.GetAccountByCredential(
 		context.Background(),
 		uint8(common.CredentialTypeAddrKeyHash),
 		stakeCredential[:],
@@ -120,21 +112,16 @@ func TestDijkstraStateManagerAppliesChildBodyOutputsAndDeposits(t *testing.T) {
 		manager.govState.RewardAccountBalances[accountKey],
 	)
 
-	childTxRow, err := manager.db.Metadata().GetTransactionByHash(
-		childHash.Bytes(), nil,
+	childTxRow, err := manager.ldb.GetTransactionByHash(
+		context.Background(), childHash.Bytes(), nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, childTxRow)
-	rootTxRow, err := manager.db.Metadata().GetTransactionByHash(
-		rootHash.Bytes(), nil,
+	rootTxRow, err := manager.ldb.GetTransactionByHash(
+		context.Background(), rootHash.Bytes(), nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, rootTxRow)
-	_, err = manager.db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	rootUtxo, err := manager.db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	require.Nil(t, rootUtxo)
 }
 
 func TestDijkstraStateManagerEnactsDijkstraParameterChange(t *testing.T) {
@@ -143,12 +130,12 @@ func TestDijkstraStateManagerEnactsDijkstraParameterChange(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, manager.Close()) }()
 
-	pparams := &dijkstra.DijkstraProtocolParameters{
+	pparams := testutil.CompleteRats(&dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			MinFeeA: 1,
 		},
-	}
-	manager.protocolParams = pparams
+	})
+	seedParams(t, manager, pparams)
 	manager.currentEpoch = 42
 	newMinFeeA := uint(1234)
 	action := &dijkstra.DijkstraParameterChangeGovAction{
@@ -172,16 +159,19 @@ func TestDijkstraStateManagerEnactsDijkstraParameterChange(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		manager.db.SetGovernanceProposal(context.Background(), proposal, nil),
+		manager.ldb.SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 
 	proposalID := hex.EncodeToString(proposalHash) + "#0"
-	txn := manager.db.Transaction(context.Background(), true)
+	txn := manager.begin()
 	defer txn.Release()
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return manager.persistEnactment(txn, proposalID, 2000)
-	}))
+	require.NoError(t, manager.persistEnactment(txn, proposalID, 2000))
+	require.NoError(t, manager.commit(txn))
 	updated, ok := manager.protocolParams.(*dijkstra.DijkstraProtocolParameters)
-	require.True(t, ok, "Dijkstra parameter enactment must retain Dijkstra parameters")
+	require.True(
+		t,
+		ok,
+		"Dijkstra parameter enactment must retain Dijkstra parameters",
+	)
 	require.Equal(t, newMinFeeA, updated.MinFeeA)
 }

@@ -46,7 +46,6 @@ func (s *Store) GetAccountsByCredentialAtSlot(
 			derived, err := deriveAccountStateAtSlot(
 				ctx,
 				db,
-				s.poolsDrained(),
 				account.CredentialTag,
 				account.StakingKey,
 				account.CreatedSlot,

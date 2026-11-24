@@ -29,9 +29,12 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -256,6 +259,7 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
+	set := livesettest.OpenLedgerDB(t, db)
 	for _, committeeSize := range []uint16{17, 23} {
 		poolThreshold := testLeiosPParamRat()
 		drepThreshold := testLeiosPParamRat()
@@ -295,14 +299,18 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 		}
 		raw, marshalErr := pp.MarshalCBOR()
 		require.NoError(t, marshalErr)
-		require.NoError(t, db.SetPParams(
-			raw,
-			uint64(committeeSize),
-			uint64(committeeSize),
-			uint(gdijkstra.EraIdDijkstra),
-			nil,
-		))
+		require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+			PParams: []models.PParams{{
+				Cbor:      raw,
+				AddedSlot: uint64(committeeSize),
+				Epoch:     uint64(committeeSize),
+				EraId:     uint(gdijkstra.EraIdDijkstra),
+			}},
+		}))
 	}
+	// A node's ledger gives its database the set's protocol parameters; this
+	// one has no ledger.
+	db.SetPParamsSource(set)
 	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 

@@ -95,19 +95,6 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     updated_slot = excluded.updated_slot,
     calculation_version = excluded.calculation_version`
 
-// SetRewardLiveStakeDrained records that the live-stake family is drained
-// (or not): every maintenance path of reward_live_stake then does nothing and
-// RewardLiveStakeNeedsBackfill reports false.
-func (s *Store) SetRewardLiveStakeDrained(drained bool) {
-	s.rewardLiveStakeDrained.Store(drained)
-}
-
-// ErrRewardLiveStakeDrained is returned by the batched rebuilds, which carry
-// a caller's checkpoint state, once the live-stake family is drained.
-var ErrRewardLiveStakeDrained = errors.New(
-	"reward_live_stake is drained from the metadata store",
-)
-
 func (s *Store) refreshRewardLiveStakeAggregate(
 	ctx context.Context,
 	db queryer,
@@ -129,7 +116,7 @@ func (s *Store) refreshRewardLiveStakeAggregateNetOfPending(
 	slot uint64,
 	pending int64,
 ) error {
-	if len(ref.Key) == 0 || s.liveStakeMaintenanceStopped() {
+	if len(ref.Key) == 0 {
 		return nil
 	}
 	utxoStake, err := s.sumCredentialUtxoStake(ctx, db, ref)
@@ -333,7 +320,7 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 	slot uint64,
 	delta int64,
 ) error {
-	if len(ref.Key) == 0 || s.liveStakeMaintenanceStopped() {
+	if len(ref.Key) == 0 {
 		return nil
 	}
 	prior, err := s.priorLiveStake(ctx, db, ref)
@@ -350,14 +337,6 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 		utxoStake, err = s.sumCredentialUtxoStake(ctx, db, ref)
 		if err != nil {
 			return fmt.Errorf("sum reward live stake UTxOs: %w", err)
-		}
-		// Utxo rows already include this write's outputs and spends; the
-		// live set does not yet, so its sum takes the write's own change.
-		if preWrite, _ := ctx.Value(liveUtxoPreWriteKey{}).(bool); preWrite {
-			utxoStake, err = applyUtxoStakeDelta(utxoStake, delta, ref)
-			if err != nil {
-				return err
-			}
 		}
 	}
 	return s.applyRewardLiveStakeAggregateWithPrior(
@@ -991,9 +970,6 @@ func (s *Store) rebuildRewardLiveStake(
 	txn types.Txn,
 	fromRunningTotals bool,
 ) error {
-	if s.rewardLiveStakeDrained.Load() {
-		return nil
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1117,9 +1093,6 @@ func (s *Store) rebuildRewardLiveStakeInBatches(
 	runTxn func(func(types.Txn) error) error,
 	afterBatch func(int64) error,
 ) error {
-	if s.rewardLiveStakeDrained.Load() {
-		return ErrRewardLiveStakeDrained
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1679,9 +1652,6 @@ func (u *rewardLiveStakeUpserter) Close() error {
 func (s *Store) RewardLiveStakeNeedsBackfill(
 	txn types.Txn,
 ) (bool, error) {
-	if s.rewardLiveStakeDrained.Load() {
-		return false, nil
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -1837,9 +1807,6 @@ func (s *Store) GetPostSnapshotRewardCredits(
 	slot uint64,
 	txn types.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -1907,9 +1874,6 @@ func (s *Store) GetPostSnapshotRewardCreditEvents(
 	slot uint64,
 	txn types.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -1974,9 +1938,6 @@ func (s *Store) GetLiveStakeInputsForPools(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}

@@ -16,17 +16,15 @@ package database
 
 import (
 	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // PParamsSource answers the protocol parameter, update proposal and sync
-// marker reads of a database whose pparams-updates family is drained, from
-// the live UTxO set. Its rows are the committed ones, in the order written,
+// marker reads of a database with no metadata store, from the live UTxO
+// set. Its rows are the committed ones, in the order written,
 // without row IDs.
 type PParamsSource interface {
 	PParamsLoaded() (bool, error)
@@ -40,27 +38,27 @@ type PParamsSource interface {
 	SyncMarker(name string) (string, bool, error)
 }
 
-// ErrNoPParamsSource is returned by a read of drained protocol parameters
-// when no PParamsSource was installed.
+// ErrNoPParamsSource is returned by a protocol parameter read of a database
+// with no metadata store when no PParamsSource was installed.
 var ErrNoPParamsSource = errors.New(
-	"protocol parameters are drained from the metadata store and no source is installed",
+	"the database keeps no protocol parameters and no source is installed",
 )
 
 // ErrPParamsSourceNotLoaded is returned when the installed PParamsSource does
-// not hold every row of the drained family.
+// not hold every protocol parameter row.
 var ErrPParamsSourceNotLoaded = errors.New(
-	"the source of drained protocol parameters does not hold them all",
+	"the protocol parameter source does not hold them all",
 )
 
-// SetPParamsSource installs the source reads of a drained pparams-updates
-// family come from.
+// SetPParamsSource installs the source the protocol parameter reads of a
+// database with no metadata store come from.
 func (d *Database) SetPParamsSource(src PParamsSource) {
 	d.pparamsSourceLoaded.Store(false)
 	d.pparamsSource.Store(&src)
 }
 
-func (d *Database) pparamsDrained() bool {
-	return d.FamilyDrained(nodesettings.FamilyPParamsUpdates)
+func (d *Database) pparamsFromSource() bool {
+	return d.metadata == nil
 }
 
 func (d *Database) pparamsSourceOrErr() (PParamsSource, error) {
@@ -94,7 +92,7 @@ func IsPParamsSyncMarker(key string) bool {
 		key == SyntheticV2CostModelClearedEpochSyncKey
 }
 
-func (d *Database) drainedSyncMarker(key string) (string, error) {
+func (d *Database) pparamsSourceSyncMarker(key string) (string, error) {
 	src, err := d.pparamsSourceOrErr()
 	if err != nil {
 		return "", err
@@ -103,10 +101,10 @@ func (d *Database) drainedSyncMarker(key string) (string, error) {
 	return v, err
 }
 
-// drainedPParamRows is the metadata store's GetPParams over the source: the
+// sourcePParamRows is the metadata store's GetPParams over the source: the
 // row of era with the latest epoch at or before epoch, and of that epoch's
 // rows the last written; none when era has no such row.
-func (d *Database) drainedPParamRows(
+func (d *Database) sourcePParamRows(
 	epoch uint64,
 	era uint,
 ) ([]models.PParams, error) {
@@ -132,7 +130,7 @@ func (d *Database) drainedPParamRows(
 	return []models.PParams{*best}, nil
 }
 
-func (d *Database) drainedListPParamsForEra(
+func (d *Database) sourceListPParamsForEra(
 	era uint,
 ) ([]models.PParams, error) {
 	src, err := d.pparamsSourceOrErr()
@@ -149,7 +147,7 @@ func (d *Database) drainedListPParamsForEra(
 	return rows, nil
 }
 
-func (d *Database) drainedListPParamUpdates() ([]models.PParamUpdate, error) {
+func (d *Database) sourceListPParamUpdates() ([]models.PParamUpdate, error) {
 	src, err := d.pparamsSourceOrErr()
 	if err != nil {
 		return nil, err
@@ -165,12 +163,12 @@ func (d *Database) drainedListPParamUpdates() ([]models.PParamUpdate, error) {
 	return rows, err
 }
 
-// drainedPParamUpdates is the metadata store's GetPParamUpdates over the
+// sourcePParamUpdates is the metadata store's GetPParamUpdates over the
 // source: the proposals targeting epoch or the epoch before it, newest first.
-func (d *Database) drainedPParamUpdates(
+func (d *Database) sourcePParamUpdates(
 	epoch uint64,
 ) ([]models.PParamUpdate, error) {
-	rows, err := d.drainedListPParamUpdates()
+	rows, err := d.sourceListPParamUpdates()
 	if err != nil {
 		return nil, err
 	}
@@ -186,13 +184,13 @@ func (d *Database) drainedPParamUpdates(
 }
 
 // getPParamUpdates reads the proposals for epoch from the metadata store, or
-// from the source once the family is drained.
+// from the source when there is no metadata store.
 func (d *Database) getPParamUpdates(
 	epoch uint64,
 	txn types.Txn,
 ) ([]models.PParamUpdate, error) {
-	if d.pparamsDrained() {
-		return d.drainedPParamUpdates(epoch)
+	if d.pparamsFromSource() {
+		return d.sourcePParamUpdates(epoch)
 	}
 	return d.metadata.GetPParamUpdates(epoch, txn)
 }
@@ -209,8 +207,11 @@ func (d *Database) GetPParamUpdates(
 // ListPParamUpdates returns every stored protocol parameter update proposal,
 // oldest first.
 func (d *Database) ListPParamUpdates(txn *Txn) ([]models.PParamUpdate, error) {
-	if d.pparamsDrained() {
-		return d.drainedListPParamUpdates()
+	if d.pparamsFromSource() {
+		return d.sourceListPParamUpdates()
+	}
+	if err := d.requireStore("ListPParamUpdates"); err != nil {
+		return nil, err
 	}
 	return d.metadata.ListPParamUpdates(metadataOf(txn))
 }
@@ -221,8 +222,11 @@ func (d *Database) ListPParamsForEra(
 	era uint,
 	txn *Txn,
 ) ([]models.PParams, error) {
-	if d.pparamsDrained() {
-		return d.drainedListPParamsForEra(era)
+	if d.pparamsFromSource() {
+		return d.sourceListPParamsForEra(era)
+	}
+	if err := d.requireStore("ListPParamsForEra"); err != nil {
+		return nil, err
 	}
 	return d.metadata.ListPParamsForEra(era, metadataOf(txn))
 }
@@ -234,8 +238,11 @@ func (d *Database) GetPParamRows(
 	era uint,
 	txn *Txn,
 ) ([]models.PParams, error) {
-	if d.pparamsDrained() {
-		return d.drainedPParamRows(epoch, era)
+	if d.pparamsFromSource() {
+		return d.sourcePParamRows(epoch, era)
+	}
+	if err := d.requireStore("GetPParamRows"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetPParams(epoch, era, metadataOf(txn))
 }
@@ -245,11 +252,4 @@ func metadataOf(txn *Txn) types.Txn {
 		return nil
 	}
 	return txn.Metadata()
-}
-
-func drainedPParamsSyncError(key string) error {
-	return fmt.Errorf(
-		"%w: %s is kept by the live UTxO set",
-		ErrFamilyDrained, key,
-	)
 }

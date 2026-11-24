@@ -780,7 +780,7 @@ func TestStreamCatchUpNoBootstrapMarker(t *testing.T) {
 	for _, key := range []string{
 		mithrilLedgerSlotSyncKey, mithrilLedgerHashSyncKey,
 	} {
-		val, err := db.GetSyncState(key, nil)
+		val, err := db.GetChainState(key, nil)
 		require.NoError(t, err)
 		assert.Empty(t, val, key)
 	}

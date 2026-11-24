@@ -41,6 +41,7 @@ func TestReconcileRewindsAChunkedBatchStoppedBeforeItsTip(t *testing.T) {
 	set, err := Open(Config{Dir: t.TempDir(), Only: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
+	require.NoError(t, set.store.LoadMissingFamiliesEmpty())
 	for slot := uint64(1); slot <= 3; slot++ {
 		tip := chunkTestPoint(slot)
 		_, err := set.store.Apply(tip, []badgerutxo.Output{{

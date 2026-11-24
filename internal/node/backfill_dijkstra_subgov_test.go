@@ -39,7 +39,7 @@ func TestBackfillProcessBlockTxsBatchedFlushesDijkstraGovernanceLevels(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(
 		db,
 		nil,
@@ -75,7 +75,7 @@ func TestBackfillProcessBlockTxsBatchedFlushesDijkstraGovernanceLevels(
 		Slot: 1000,
 		Hash: bytes.Repeat([]byte{0x34}, 32),
 	}
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot:   point.Slot,
 		Hash:   point.Hash,
 		Number: 1,

@@ -361,3 +361,26 @@ func TestLedgerDeltaReadsCandidateConsensusForUnpublishedEpoch(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// TestForkCandidateInstallRestampsStaleHeaderGeneration checks that a header
+// carrying the generation published before the rollback leaves the install
+// authorized by the current one, and that an unstamped header stays so.
+func TestForkCandidateInstallRestampsStaleHeaderGeneration(t *testing.T) {
+	t.Parallel()
+
+	fixture := newForkCandidateFixture(t, 432000)
+	ls := fixture.ls
+	stale := ls.loadConsensusSnapshot().generation
+	ls.Lock()
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	current := ls.CurrentHeaderCryptoVerificationGeneration()
+	require.NotEqual(t, stale, current)
+
+	got := ls.restampForkHeaderAfterRollback(ChainsyncEvent{
+		HeaderCryptoVerificationGeneration: stale,
+	})
+	assert.Equal(t, current, got.HeaderCryptoVerificationGeneration)
+	got = ls.restampForkHeaderAfterRollback(ChainsyncEvent{})
+	assert.Zero(t, got.HeaderCryptoVerificationGeneration)
+}

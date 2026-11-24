@@ -184,9 +184,6 @@ type Store struct {
 	// liveUtxo, when set, holds the live UTxO set: the store writes no utxo
 	// rows and resolves inputs through it. Set before the first write.
 	liveUtxo types.LiveUtxoSource
-	// rewardLiveStakeDrained is set once the live-stake family is drained:
-	// reward_live_stake holds no rows and no path may read or write it.
-	rewardLiveStakeDrained atomic.Bool
 
 	// committeeAuthRetentionSlots is the configured rollback window for
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
@@ -243,11 +240,6 @@ type Store struct {
 	// Test hook runs after a prune has selected its horizon. Production leaves
 	// it nil.
 	committeeAuthPruneLocked func()
-	// drained is the mask of ledger-state families whose rows were deleted,
-	// pushed in by SetDrainedFamilies. A write or rollback delete that names a
-	// drained family's table must not run: the rows would reappear beside a
-	// set that no longer matches them.
-	drained atomic.Uint64
 	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
 	// reward credits and before its pool reads. Production leaves it nil.
 	liveStakePendingTotalsRead func()
@@ -1565,27 +1557,6 @@ func (s *Store) SetBulkLoadPragmas() error {
 	s.bulkMode = true
 	s.bulkRestorePending = false
 	return nil
-}
-
-// SetCatchUpPragmas applies the backend's crash-safe catch-up tuning to the
-// write connection. Unlike SetBulkLoadPragmas it leaves durability alone and
-// does not enter bulk mode, so checkpoints and planner maintenance carry on.
-// RestoreNormalPragmas undoes it. Backends without a SQLite write pool are
-// left untouched.
-func (s *Store) SetCatchUpPragmas() error {
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	if s.closed.Load() {
-		return errors.New("sqlstore: store is closed")
-	}
-	if s.dialect.Name() != "sqlite" {
-		return nil
-	}
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	return s.dialect.SetCatchUpMode(context.Background(), s.writeDB)
 }
 
 // RestoreNormalPragmas restores safe backend defaults.

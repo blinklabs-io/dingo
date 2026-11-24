@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -252,27 +251,6 @@ func TestRegistrationHistoryRollsBackAcrossReRegistrations(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, all)
 
-}
-
-// TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration pins
-// the set result when a registration exists only in metadata.
-func TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
-	t.Parallel()
-	h := newRegistrationHarness(t)
-	cred := bytes.Repeat([]byte{0x7d}, 28)
-	require.NoError(t, h.scenario.DB.Metadata().ImportDrep(
-		&models.Drep{CredentialTag: 0, Credential: cred, AddedSlot: 5, Active: true},
-		&models.RegistrationDrep{
-			CredentialTag: 0, DrepCredential: cred, AddedSlot: 5,
-			DepositAmount: types.Uint64(123),
-		},
-		nil,
-	))
-	reached, _ := h.scenario.HideStoreReads("GetDrepLastRegistrationDeposit")
-	got, err := h.scenario.LedgerDB().GetDrepLastRegistrationDeposit(t.Context(), 0, cred, nil)
-	require.NoError(t, err)
-	require.Nil(t, got)
-	require.Zero(t, reached(), "registration history read reached the metadata store")
 }
 
 // TestRegistrationHistoryIsVisibleInsideAnOpenTransaction requires reads in a

@@ -47,7 +47,7 @@ const RewardStateRepairActiveKey = "mithril_reward_repair_active"
 // setImmutableImportMarker records num as the highest immutable file number
 // imported by a Mithril sync.
 func setImmutableImportMarker(db *database.Database, num uint64) error {
-	if err := db.SetSyncState(
+	if err := db.SetChainState(
 		syncKeyImmutableMax, strconv.FormatUint(num, 10), nil,
 	); err != nil {
 		return fmt.Errorf("setting mithril immutable import marker: %w", err)
@@ -79,7 +79,7 @@ func setStreamImportMarker(db *database.Database, num uint64) error {
 			return err
 		}
 		if !bootstrapped {
-			if err := db.SetSyncState(
+			if err := db.SetChainState(
 				syncKeyImmutableStreamOnly, "1", nil,
 			); err != nil {
 				return fmt.Errorf(
@@ -116,7 +116,7 @@ func WasBootstrapped(db *database.Database) (bool, error) {
 		return false, err
 	}
 	if ok {
-		streamOnly, err := db.GetSyncState(syncKeyImmutableStreamOnly, nil)
+		streamOnly, err := db.GetChainState(syncKeyImmutableStreamOnly, nil)
 		if err != nil {
 			return false, fmt.Errorf(
 				"reading mithril stream-only marker flag: %w", err,
@@ -128,7 +128,7 @@ func WasBootstrapped(db *database.Database) (bool, error) {
 	}
 	// Legacy fallback: the durable trust boundary written by every completed
 	// Mithril import before the immutable-import marker was introduced.
-	val, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	val, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	if err != nil {
 		return false, fmt.Errorf(
 			"reading mithril ledger-slot boundary: %w", err,
@@ -140,7 +140,7 @@ func WasBootstrapped(db *database.Database) (bool, error) {
 // RewardStateRepairPending reports whether startup must reconcile a legacy
 // imported reward state before serving the database.
 func RewardStateRepairPending(db *database.Database) (bool, error) {
-	value, err := db.GetSyncState(RewardStateRepairPendingKey, nil)
+	value, err := db.GetChainState(RewardStateRepairPendingKey, nil)
 	if err != nil {
 		return false, fmt.Errorf(
 			"reading Mithril reward repair marker: %w", err,
@@ -152,7 +152,7 @@ func RewardStateRepairPending(db *database.Database) (bool, error) {
 // RewardStateRepairActive reports whether an interrupted reward-state repair
 // is the operation represented by the current in-progress sync status.
 func RewardStateRepairActive(db *database.Database) (bool, error) {
-	value, err := db.GetSyncState(RewardStateRepairActiveKey, nil)
+	value, err := db.GetChainState(RewardStateRepairActiveKey, nil)
 	if err != nil {
 		return false, fmt.Errorf(
 			"reading Mithril reward repair activity marker: %w", err,
@@ -167,7 +167,7 @@ func RewardStateRepairActive(db *database.Database) (bool, error) {
 func getImmutableImportMarker(
 	db *database.Database,
 ) (num uint64, ok bool, err error) {
-	val, err := db.GetSyncState(syncKeyImmutableMax, nil)
+	val, err := db.GetChainState(syncKeyImmutableMax, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf(
 			"reading mithril immutable import marker: %w", err,
@@ -198,7 +198,7 @@ const syncKeyCatchUpActive = "mithril_catchup_active"
 // setCatchUpActive records that a catch-up import has started mutating the
 // database.
 func setCatchUpActive(db *database.Database) error {
-	if err := db.SetSyncState(syncKeyCatchUpActive, "1", nil); err != nil {
+	if err := db.SetChainState(syncKeyCatchUpActive, "1", nil); err != nil {
 		return fmt.Errorf("marking mithril catch-up active: %w", err)
 	}
 	return nil
@@ -207,7 +207,7 @@ func setCatchUpActive(db *database.Database) error {
 // getCatchUpActive reports whether an interrupted catch-up import was mutating
 // this database.
 func getCatchUpActive(db *database.Database) (bool, error) {
-	val, err := db.GetSyncState(syncKeyCatchUpActive, nil)
+	val, err := db.GetChainState(syncKeyCatchUpActive, nil)
 	if err != nil {
 		return false, fmt.Errorf(
 			"reading mithril catch-up active flag: %w", err,
@@ -225,7 +225,7 @@ func getCatchUpActive(db *database.Database) (bool, error) {
 const syncKeyImmutableRetired = "mithril_immutable_retired_below"
 
 func setImmutableRetiredBelow(db *database.Database, num uint64) error {
-	if err := db.SetSyncState(
+	if err := db.SetChainState(
 		syncKeyImmutableRetired, strconv.FormatUint(num, 10), nil,
 	); err != nil {
 		return fmt.Errorf("recording retired immutable chunks: %w", err)
@@ -236,7 +236,7 @@ func setImmutableRetiredBelow(db *database.Database, num uint64) error {
 func getImmutableRetiredBelow(
 	db *database.Database,
 ) (num uint64, ok bool, err error) {
-	val, err := db.GetSyncState(syncKeyImmutableRetired, nil)
+	val, err := db.GetChainState(syncKeyImmutableRetired, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf(
 			"reading retired immutable chunk marker: %w", err,

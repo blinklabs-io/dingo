@@ -60,6 +60,7 @@ var (
 	_ database.NonceSource          = TruncateUtxoSet{}
 	_ database.EpochSource          = TruncateUtxoSet{}
 	_ database.PParamsSource        = TruncateUtxoSet{}
+	_ lifecycle.TruncateTxIndex     = TruncateUtxoSet{}
 )
 
 // Tip implements lifecycle.TruncateUtxoSet.
@@ -81,6 +82,11 @@ func (s TruncateUtxoSet) CanRollbackTo(point ocommon.Point) (bool, error) {
 func (s TruncateUtxoSet) RollbackTo(point ocommon.Point) error {
 	_, err := s.Store.Rollback(point)
 	return err
+}
+
+// TxHashesAfterSlot implements lifecycle.TruncateTxIndex.
+func (s TruncateUtxoSet) TxHashesAfterSlot(slot uint64) ([][]byte, error) {
+	return s.Store.TxHashesChangedAfter(slot)
 }
 
 // CheckpointPoints implements lifecycle.TruncateCheckpoints.

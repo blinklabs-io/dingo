@@ -255,20 +255,6 @@ func TestTxnAfterCommitPanicIsContained(t *testing.T) {
 		"registration after a panicking drain must still dispatch")
 }
 
-// timestampFailingBlobStore fails SetCommitTimestamp, which is what
-// Commit's updateCommitTimestamp step calls before either store commits.
-type timestampFailingBlobStore struct {
-	*mockBlobStore
-	err error
-}
-
-func (s *timestampFailingBlobStore) SetCommitTimestamp(
-	int64,
-	types.Txn,
-) error {
-	return s.err
-}
-
 // commitFailingMetadata is a metadata store whose write transactions fail
 // to commit. Only the handful of methods Txn.Commit reaches are
 // implemented; the embedded nil interface would panic on anything else,
@@ -285,13 +271,6 @@ func (m *commitFailingMetadata) Transaction(context.Context) types.Txn {
 
 func (m *commitFailingMetadata) ReadTransaction(context.Context) types.Txn {
 	return &commitFailingTxn{}
-}
-
-func (m *commitFailingMetadata) SetCommitTimestamp(
-	int64,
-	types.Txn,
-) error {
-	return nil
 }
 
 // newStubBarrierDB builds a Database over stub stores whose commits succeed,
@@ -502,26 +481,6 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
 				txn.Release()
-				return txn
-			},
-		},
-		{
-			name: "commit timestamp failure",
-			newDB: func(t *testing.T) *Database {
-				return newStubBarrierDB(&timestampFailingBlobStore{
-					mockBlobStore: &mockBlobStore{},
-					err:           injected,
-				})
-			},
-			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(context.Background(), true)
-				err := txn.Commit()
-				require.ErrorIs(t, err, injected)
-				require.ErrorContains(
-					t,
-					err,
-					"failed to update commit timestamp",
-				)
 				return txn
 			},
 		},
@@ -827,7 +786,7 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 		metadataTxn: backend,
 		readWrite:   true,
 	}
-	acquireCommitBarrier(t.Context(), txn, true)
+	acquireCommitBarrier(t.Context(), txn)
 
 	err := txn.Do(func(*Txn) error { return nil })
 	require.ErrorIs(t, err, ErrTxnPanic,
@@ -854,7 +813,7 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 		next := &Txn{db: db, readWrite: true}
-		acquireCommitBarrier(t.Context(), next, true)
+		acquireCommitBarrier(t.Context(), next)
 		close(writerOpened)
 		<-writerRelease
 		_ = next.Rollback()
@@ -927,7 +886,7 @@ func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 		metadataTxn: &panicCommitAndRollbackTxn{},
 		readWrite:   true,
 	}
-	acquireCommitBarrier(t.Context(), txn, true)
+	acquireCommitBarrier(t.Context(), txn)
 
 	var err error
 	require.NotPanics(t, func() {
@@ -955,7 +914,7 @@ func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 	go func() {
 		defer close(writerDone)
 		next := &Txn{db: db, readWrite: true}
-		acquireCommitBarrier(t.Context(), next, true)
+		acquireCommitBarrier(t.Context(), next)
 		close(writerOpened)
 		_ = next.Rollback()
 	}()
@@ -1198,7 +1157,7 @@ func BenchmarkBlobSync(b *testing.B) {
 // newSyncBarrierTestDB builds a Database pairing the given blob store with a
 // real in-memory sqlite metadata store, which is the combination the
 // combined-commit durability barrier applies to. The parameter is the
-// interface so a case can inject a store whose Sync or SetCommitTimestamp
+// interface so a case can inject a store whose Sync
 // fails without changing the shared mockBlobStore.
 func newSyncBarrierTestDB(
 	t *testing.T,
@@ -1222,6 +1181,12 @@ func newSyncBarrierTestDB(
 		require.NoError(t, db.Close())
 	})
 	return db
+}
+
+// setSyncBarrierTip writes the test tip to the metadata tip row through
+// txn: the metadata write these commit-order tests follow.
+func setSyncBarrierTip(db *Database, txn *Txn) error {
+	return db.Metadata().SetTip(syncBarrierTestTip(), txn.Metadata())
 }
 
 func syncBarrierTestTip() ochainsync.Tip {
@@ -1249,7 +1214,7 @@ func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
 	db := newSyncBarrierTestDB(t, store)
 
 	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, setSyncBarrierTip(db, txn))
 	require.NoError(t, txn.Commit())
 
 	require.Equal(
@@ -1265,7 +1230,7 @@ func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
 		"sync must run after the blob commit, so the commit it makes durable is included",
 	)
 
-	tip, err := db.GetTip(nil)
+	tip, err := db.Metadata().GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, syncBarrierTestTip().Point.Slot, tip.Point.Slot)
 }
@@ -1292,17 +1257,14 @@ func TestCommitSurvivesCancellationDuringBlobSync(t *testing.T) {
 	db := newSyncBarrierTestDB(t, store)
 	txn := db.Transaction(ctx, true)
 	defer txn.Release()
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, setSyncBarrierTip(db, txn))
 	require.NoError(t, txn.Commit())
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
 	require.Equal(t, 1, store.txns[0].commitCount)
 	require.Equal(t, 1, store.syncCount)
-	tip, err := db.GetTip(nil)
+	tip, err := db.Metadata().GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, syncBarrierTestTip(), tip)
-	metadataTimestamp, err := db.Metadata().GetCommitTimestamp(t.Context())
-	require.NoError(t, err)
-	require.Positive(t, metadataTimestamp)
 }
 
 func TestCommitRejectsCancellationBeforeBlobCommit(t *testing.T) {
@@ -1314,12 +1276,12 @@ func TestCommitRejectsCancellationBeforeBlobCommit(t *testing.T) {
 	db := newSyncBarrierTestDB(t, store)
 	txn := db.Transaction(ctx, true)
 	defer txn.Release()
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, setSyncBarrierTip(db, txn))
 	cancel()
 	require.ErrorIs(t, txn.Commit(), context.Canceled)
 	require.Zero(t, store.txns[0].commitCount)
 	require.Zero(t, store.syncCount)
-	tip, err := db.GetTip(nil)
+	tip, err := db.Metadata().GetTip(nil)
 	require.NoError(t, err)
 	require.Zero(t, tip.Point.Slot)
 	requireCommitBarrierFree(t, db)
@@ -1343,10 +1305,10 @@ func TestWriteTransactionOperationsHonorCancellation(t *testing.T) {
 			defer cancel()
 			txn := open(ctx, db)
 			defer txn.Release()
-			require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+			require.NoError(t, setSyncBarrierTip(db, txn))
 			cancel()
 			require.Eventually(t, func() bool {
-				err := db.SetTip(syncBarrierTestTip(), txn)
+				err := setSyncBarrierTip(db, txn)
 				return errors.Is(err, context.Canceled) ||
 					errors.Is(err, sql.ErrTxDone)
 			}, 5*time.Second, time.Millisecond)
@@ -1367,7 +1329,7 @@ func TestWriteTransactionPreservesExpiredDeadline(t *testing.T) {
 	defer txn.Release()
 	require.ErrorIs(
 		t,
-		db.SetTip(syncBarrierTestTip(), txn),
+		setSyncBarrierTip(db, txn),
 		context.DeadlineExceeded,
 	)
 	require.ErrorIs(t, txn.Commit(), context.DeadlineExceeded)
@@ -1398,7 +1360,7 @@ func TestCommitDoesNotSyncMetadataOnlyTransaction(t *testing.T) {
 	db := newSyncBarrierTestDB(t, store)
 
 	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, setSyncBarrierTip(db, txn))
 	require.NoError(t, txn.Commit())
 
 	require.Zero(
@@ -1422,7 +1384,7 @@ func TestCommitFailedBlobSyncDoesNotCommitMetadata(t *testing.T) {
 	db := newSyncBarrierTestDB(t, store)
 
 	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, setSyncBarrierTip(db, txn))
 
 	err := txn.Commit()
 	require.Error(t, err)
@@ -1435,7 +1397,7 @@ func TestCommitFailedBlobSyncDoesNotCommitMetadata(t *testing.T) {
 		"a committed blob with an un-synced tip should route through partial-commit recovery",
 	)
 
-	tip, err := db.GetTip(nil)
+	tip, err := db.Metadata().GetTip(nil)
 	require.NoError(t, err)
 	require.NotEqual(
 		t,
@@ -1443,4 +1405,19 @@ func TestCommitFailedBlobSyncDoesNotCommitMetadata(t *testing.T) {
 		tip.Point.Slot,
 		"metadata tip must not advance when the blob store could not be synced",
 	)
+}
+
+// A staged transaction on a database with no metadata store commits only what
+// its callers staged through AfterCommit: it has no store of its own to
+// commit, and that is not a failure.
+func TestStagedTxnCommitsWithNoStore(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	db := &Database{logger: logger, config: &Config{Logger: logger}}
+	txn := NewStagedTxn(t.Context(), db)
+	committed := false
+	txn.AfterCommit(func() { committed = true })
+	require.NoError(t, txn.Commit())
+	require.True(t, committed, "the staged changes are committed")
+	requireCommitBarrierFree(t, db)
 }

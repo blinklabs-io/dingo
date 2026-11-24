@@ -279,9 +279,9 @@ func (ls *LedgerState) rewardEpochFeesFor(
 		if view.FeesKnown {
 			return view.Fees, nil
 		}
-		return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+	return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published

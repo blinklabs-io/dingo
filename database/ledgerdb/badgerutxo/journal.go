@@ -490,6 +490,23 @@ func visitJournalAfter(
 	return ErrPointNotInJournal
 }
 
+// RollbackReaches reports whether the journal reaches back to point: false
+// when Rollback(point) would return ErrRollbackBeyondJournal. A point that is
+// ahead of the tip, or that the retained lineage does not hold, is not one
+// the journal is too short for.
+func (s *Store) RollbackReaches(point ocommon.Point) (bool, error) {
+	err := s.view(func(txn *badger.Txn) error {
+		return rollbackReaches(txn, point)
+	})
+	switch {
+	case err == nil, errors.Is(err, ErrPointNotInJournal):
+		return true, nil
+	case errors.Is(err, ErrRollbackBeyondJournal):
+		return false, nil
+	}
+	return false, err
+}
+
 // Rollback undoes, newest first, every journaled batch after point in the
 // retained lineage, then records point as the tip, and returns the net change.
 // Each batch is undone in its own transaction that also moves the tip back to the

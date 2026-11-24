@@ -26,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -400,11 +399,6 @@ func registerExtendedCardanoTools(
 					proposalStatusName(statusFilter),
 				)
 			} else {
-				if err := limits.refuseDrainedFamilies(
-					nodesettings.FamilyGovernance,
-				); err != nil {
-					return nil, nil, err
-				}
 				proposal, err = proposalDetailFromSQL(
 					ctxTimeout, db, txHashBytes, actionIdx, whereClause,
 				)
@@ -449,11 +443,6 @@ func registerExtendedCardanoTools(
 				ctxTimeout, stateDB, proposalStatusName(statusFilter), limit,
 			)
 		} else {
-			if err := limits.refuseDrainedFamilies(
-				nodesettings.FamilyGovernance,
-			); err != nil {
-				return nil, nil, err
-			}
 			proposals, err = proposalListFromSQL(
 				ctxTimeout, db, whereClause, limit,
 			)

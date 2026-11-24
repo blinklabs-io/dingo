@@ -349,15 +349,19 @@ func TestDijkstraBatchApplyConsumesAndCreatesEveryLevel(t *testing.T) {
 	require.True(t, h.utxoLive(t, tx.Hash().Bytes(), 0))
 	require.False(t, h.utxoLive(t, tx.Hash().Bytes(), 1))
 
-	// Only the enclosing body pays a fee.
-	for idx := range 2 {
-		child, err := h.db.Metadata().GetTransactionByHash(childBodyID(tx, idx), nil)
+	// Only the enclosing body pays into the fee pot: the levels are applied
+	// children first, the enclosing body last.
+	levels := TransactionLevelsForApply(tx)
+	require.Len(t, levels, 3)
+	for i, level := range levels {
+		fee, err := h.ls.transactionFeePot(nil, level)
 		require.NoError(t, err)
-		require.Zero(t, child.Fee)
+		want := uint64(0)
+		if i == len(levels)-1 {
+			want = 7
+		}
+		require.Equal(t, want, fee, "level %d", i)
 	}
-	top, err := h.db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
-	require.NoError(t, err)
-	require.Equal(t, dbtypes.Uint64(7), top.Fee)
 }
 
 func TestDijkstraPhase2InvalidBatchAppliesOnlyCollateral(t *testing.T) {

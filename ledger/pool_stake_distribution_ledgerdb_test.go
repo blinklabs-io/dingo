@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A bounded pool stake distribution is read from the LedgerDB set: the
-// snapshot rows it reports exist nowhere in the metadata store.
+// A bounded pool stake distribution is read from the LedgerDB set, the only
+// store of the snapshot rows it reports.
 func TestPoolStakeDistributionBoundedReadsLedgerDB(t *testing.T) {
 	t.Parallel()
 
@@ -40,11 +40,7 @@ func TestPoolStakeDistributionBoundedReadsLedgerDB(t *testing.T) {
 	)
 	ls := newPoolDistr2Ledger(t, db)
 
-	sqlRows, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
-		snapshotEpoch, snapshotTypeMark, nil,
-	)
-	require.NoError(t, err)
-	require.Empty(t, sqlRows)
+	require.Nil(t, db.Metadata(), "the snapshot rows have no SQL home")
 
 	dist, err := ls.PoolStakeDistributionBounded(
 		t.Context(), nil, QueryPoint{}, nil, 2,

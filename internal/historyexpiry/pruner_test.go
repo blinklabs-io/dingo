@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -412,4 +413,55 @@ func TestPrunerStopsAtCeiling(t *testing.T) {
 	require.True(t, blockIsExpired(t, db, 5, read))
 	require.False(t, blockIsExpired(t, db, 7, unread),
 		"a block above the ceiling stays readable")
+}
+
+// The ledger's outputs live in the live UTxO set, so expiring one of its
+// blocks reads nothing from a metadata store.
+func TestPruneBlockOfTheLedgerReadsNoSQL(t *testing.T) {
+	t.Parallel()
+	guard := &dbtest.SQLRefusal{}
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config:         &database.Config{DataDir: t.TempDir()},
+		StatementGuard: guard,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	require.NoError(t, db.SetLiveUtxoSource(set))
+	hash := insertTestBlock(t, db, 9, 0x09)
+	guard.Arm()
+
+	_, err = db.PruneBlock(context.Background(), 9, hash)
+	require.NoError(t, err)
+	require.True(t, blockIsExpired(t, db, 9, hash))
+}
+
+// BeforeExpire runs before its block expires, with the block still readable,
+// and a block whose BeforeExpire fails is not expired.
+func TestPrunerRunsBeforeExpireFirst(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := insertTestBlock(t, db, 5, 0x05)
+	second := insertTestBlock(t, db, 7, 0x07)
+
+	pruner := newTestPruner(db, 100, 5)
+	var seen []uint64
+	pruner.config.BeforeExpire = func(
+		_ context.Context, slot uint64, hash []byte,
+	) error {
+		require.False(t, blockIsExpired(t, db, slot, hash),
+			"BeforeExpire ran after its block expired")
+		seen = append(seen, slot)
+		if slot == 7 {
+			return errors.New("refuse")
+		}
+		return nil
+	}
+	pruner.prune(t.Context())
+	require.Equal(t, []uint64{5, 7}, seen)
+	require.True(t, blockIsExpired(t, db, 5, first))
+	require.False(t, blockIsExpired(t, db, 7, second),
+		"a block whose BeforeExpire failed was expired")
 }

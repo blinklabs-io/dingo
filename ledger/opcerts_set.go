@@ -21,7 +21,6 @@ import (
 	"math"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -202,7 +201,7 @@ func (ls *LedgerState) stageOpCert(
 	if r == nil {
 		// The set is the only copy, so a counter it cannot stage would be
 		// lost.
-		err := drainedUnserved(nodesettings.FamilyOpCerts)
+		err := ledgerStateUnserved(nodesettings.FamilyOpCerts)
 		ls.failAccountStaging(txn, err)
 		return err
 	}
@@ -252,21 +251,6 @@ func (s stagingLedgerDB) UpdatePoolOpCertSequence(
 	pkh lcommon.PoolKeyHash,
 	sequence uint64,
 	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	if err := s.ls.stageOpCert(txn, pkh, sequence, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		return err
-	}
-	s.ls.stageBlockMinted(txn, pkh, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	return nil
-}
-
-func (s stagingLedgerDB) UpdatePoolOpCertSequenceBatched(
-	ctx context.Context,
-	pkh lcommon.PoolKeyHash,
-	sequence uint64,
-	slot uint64,
-	acc database.BatchAccumulator,
 	txn ledgerdb.Txn,
 ) error {
 	if err := s.ls.stageOpCert(txn, pkh, sequence, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context

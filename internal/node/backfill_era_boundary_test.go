@@ -61,7 +61,7 @@ func TestBackfillJudgesPreviousEraBlockByItsEraParameters(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 
 			prev := mockledger.NewMockConwayProtocolParams()

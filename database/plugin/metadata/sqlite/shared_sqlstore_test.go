@@ -1791,9 +1791,9 @@ SELECT hash, id FROM "transaction" WHERE id >= ? AND id < ?`,
 		_, err := db.Exec(statement, from, to)
 		require.NoError(t, err)
 	}
-	// Mirror node.RunPlannerStats, which Mithril runs immediately before
-	// backfill: the plan asserted below has to be the plan the planner picks
-	// with statistics present, not the one it picks in their absence.
+	// Collect statistics first: the plan asserted below has to be the plan
+	// the planner picks with statistics present, not the one it picks in
+	// their absence.
 	_, err = db.Exec("ANALYZE")
 	require.NoError(t, err)
 }

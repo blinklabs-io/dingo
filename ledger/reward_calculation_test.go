@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -478,20 +479,6 @@ func seedRetentionReconstructionFixture(
 				Active:     true,
 			}),
 			"create account %d",
-			i,
-		)
-		// The output as its block leaves it: live in the set, and a row of
-		// the store's UTxO index, which the consumed-UTxO sweep prunes.
-		require.NoError(
-			t,
-			db.CreateUtxo(context.Background(), nil, &models.Utxo{
-				TxId:       bytes.Repeat([]byte{byte(0x10 + i)}, 32),
-				OutputIdx:  0,
-				StakingKey: key,
-				Amount:     types.Uint64(20_000_000),
-				AddedSlot:  0,
-			}),
-			"create utxo %d",
 			i,
 		)
 		seedTestStakedOutput(
@@ -6829,19 +6816,41 @@ func newRewardCalculationTestLedger(
 }
 
 // newLoadedRewardCalculationTestLedger is newRewardCalculationTestLedger over
-// a database that load fills before the LedgerDB set opens: the state an
-// import or an earlier release left in the metadata store, which the set
-// takes over as it opens, as a node starting on that database does.
+// a database that load fills through its LedgerDB set, which the seeding
+// helpers open.
 func newLoadedRewardCalculationTestLedger(
 	t testing.TB,
 	load func(db *database.Database),
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	cfg := newRewardCalculationTestNodeConfig(t)
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
+	return newRewardCalculationTestLedgerOn(t, db, load)
+}
+
+// newReleasedRewardCalculationTestLedger is newRewardCalculationTestLedger
+// over the ledger's database of a data directory whose v0.94.2 metadata store
+// load fills, after that state moved into the LedgerDB set.
+func newReleasedRewardCalculationTestLedger(
+	t testing.TB,
+	load func(db *database.Database),
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db := fxReleasedLedgerDB(t, t.TempDir(), load)
+	return newRewardCalculationTestLedgerOn(
+		t, db, func(*database.Database) {},
+	)
+}
+
+func newRewardCalculationTestLedgerOn(
+	t testing.TB,
+	db *database.Database,
+	load func(db *database.Database),
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	cfg := newRewardCalculationTestNodeConfig(t)
 	load(db)
 	ls := &LedgerState{
 		db:         db,
@@ -7905,19 +7914,25 @@ func newEpochBoundaryBenchFixture(
 			dataDir, os.DirFS(filepath.Join(template, "data")),
 		))
 	}
-	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
-	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	f := &epochBoundaryBenchFixture{
-		db:      db,
 		shape:   shape,
 		pparams: epochBoundaryBenchPParams(),
 		epochs:  epochBoundaryBenchEpochs(),
 		phases:  &epochBoundaryPhaseRecorder{},
 	}
-	if templateDir == "" {
-		f.seed(tb)
-	}
+	f.db = fxReleasedLedgerDB(tb, dataDir, func(released *database.Database) {
+		if templateDir == "" {
+			f.db = released
+			f.seed(tb)
+		}
+		fxStoreUtxoRowBodies(tb, released)
+	})
+	closing := f.db
+	tb.Cleanup(func() {
+		db := closing
+		closing = nil
+		_ = dbtest.CloseDatabase(db)
+	})
 	f.wire(tb)
 	return f
 }
@@ -7939,7 +7954,9 @@ func epochBoundaryBenchTemplate(
 	dataDir := filepath.Join(dir, "data")
 	require.NoError(tb, os.RemoveAll(dataDir))
 	require.NoError(tb, os.MkdirAll(dataDir, 0o755))
-	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
+	db, err := dbtest.NewReleasedDatabase(
+		tb, &database.Config{DataDir: dataDir},
+	)
 	require.NoError(tb, err)
 	f := &epochBoundaryBenchFixture{
 		db:      db,
@@ -7952,6 +7969,9 @@ func epochBoundaryBenchTemplate(
 	require.NoError(tb, os.WriteFile(ready, []byte(want), 0o644))
 }
 
+// seed writes the fixture's ledger state into a v0.94.2 database's metadata
+// store, which the migration moves into the set: the row volume seedBulk
+// writes has no set writer.
 func (f *epochBoundaryBenchFixture) seed(tb testing.TB) {
 	tb.Helper()
 	start := time.Now()
@@ -7963,6 +7983,53 @@ func (f *epochBoundaryBenchFixture) seed(tb testing.TB) {
 		"seeded: bulk %.1fs, governance %.1fs",
 		bulk.Sub(start).Seconds(), time.Since(bulk).Seconds(),
 	)
+}
+
+// fxStoreUtxoRowBodies gives every live UTxO row of db's metadata store a
+// Shelley output paying the row's amount to its staking key, the body the
+// set needs to take the row over.
+func fxStoreUtxoRowBodies(tb testing.TB, db *database.Database) {
+	tb.Helper()
+	var rows []models.Utxo
+	require.NoError(tb, db.IterateLiveUtxoRefs(
+		tb.Context(), nil, func(u *models.Utxo) error {
+			rows = append(rows, models.Utxo{
+				TxId:       bytes.Clone(u.TxId),
+				OutputIdx:  u.OutputIdx,
+				StakingKey: bytes.Clone(u.StakingKey),
+				Amount:     u.Amount,
+			})
+			return nil
+		},
+	))
+	require.NoError(tb, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, r := range rows {
+			addrType := lcommon.AddressTypeKeyNone
+			if len(r.StakingKey) > 0 {
+				addrType = lcommon.AddressTypeKeyKey
+			}
+			addr, err := lcommon.NewAddressFromParts(
+				uint8(addrType), lcommon.AddressNetworkTestnet,
+				bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize),
+				r.StakingKey,
+			)
+			if err != nil {
+				return err
+			}
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr, OutputAmount: uint64(r.Amount),
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(
+				txn.Blob(), r.TxId, r.OutputIdx, encoded,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 }
 
 func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
@@ -8053,16 +8120,16 @@ func (f *epochBoundaryBenchFixture) seedEpochs(tb testing.TB) {
 	require.NoError(tb, err)
 	for epoch := uint64(0); epoch <= epochBoundaryBenchEndedEpoch; epoch++ {
 		e := f.epochs[epoch]
-		require.NoError(tb, seedDB(tb, f.db).SetEpoch(
+		require.NoError(tb, dbadapter.New(f.db).SetEpoch(
 			e.StartSlot, epoch, e.Nonce, e.EvolvingNonce, e.CandidateNonce,
 			e.LastEpochBlockNonce, e.EraId, e.SlotLength, e.LengthInSlots,
 			nil,
 		))
-		require.NoError(tb, seedDB(tb, f.db).SetPParams(
+		require.NoError(tb, dbadapter.New(f.db).SetPParams(
 			pparamsCbor, e.StartSlot, epoch, eras.ConwayEraDesc.Id, nil,
 		))
 	}
-	require.NoError(tb, seedDB(tb, f.db).SetNetworkState(
+	require.NoError(tb, dbadapter.New(f.db).SetNetworkState(
 		epochBoundaryBenchTreasury,
 		epochBoundaryBenchReserves,
 		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
@@ -8359,15 +8426,15 @@ VALUES (?, ?, ?, ?, '0', ?)`,
 		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
 	)
 	require.NoError(tb, err)
-	_, err = tx.Exec(
-		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-		make([]byte, 32),
-		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)-1,
-		10_000_000,
-	)
-	require.NoError(tb, err)
 	dbtest.RefreshPoolCurrentState(tb, tx)
 	require.NoError(tb, tx.Commit())
+	require.NoError(tb, f.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)-1,
+			make([]byte, 32),
+		),
+		BlockNumber: 10_000_000,
+	}, nil))
 }
 
 func (f *epochBoundaryBenchFixture) seedGovernance(tb testing.TB) {
@@ -8417,8 +8484,8 @@ VALUES (?, ?, ?, 1)`,
 			AddedSlot:    1,
 		})
 	}
-	require.NoError(tb, seedDB(tb, f.db).SetCommitteeMembers(context.Background(), members, nil))
-	require.NoError(tb, seedDB(tb, f.db).SetCommitteeQuorum(context.Background(), big.NewRat(2, 3), 1, nil))
+	require.NoError(tb, dbadapter.New(f.db).SetCommitteeMembers(context.Background(), members, nil))
+	require.NoError(tb, dbadapter.New(f.db).SetCommitteeQuorum(context.Background(), big.NewRat(2, 3), 1, nil))
 
 	for i := range shape.proposals {
 		returnKey := epochBoundaryBenchHash(0x30, uint64(i)*997+1)
@@ -8464,9 +8531,9 @@ VALUES (?, ?, ?, 1)`,
 				epochBoundaryBenchEndedEpoch,
 			) + 100,
 		}
-		require.NoError(tb, seedDB(tb, f.db).SetGovernanceProposal(context.Background(), proposal, nil))
+		require.NoError(tb, dbadapter.New(f.db).SetGovernanceProposal(context.Background(), proposal, nil))
 		vote := func(voterType uint8, cred []byte, choice uint8) {
-			require.NoError(tb, seedDB(tb, f.db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			require.NoError(tb, dbadapter.New(f.db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 				ProposalID:      proposal.ID,
 				VoterType:       voterType,
 				VoterCredential: cred,
@@ -8967,60 +9034,79 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 	copy(poolID[:], poolKey)
 	copy(otherPoolID[:], otherPoolKey)
 
-	ls, _ := newLoadedRewardCalculationTestLedger(t, func(db *database.Database) {
-		meta := db.Metadata()
-		require.NoError(t, seedDB(t, db).SetEpoch(
-			epochStartSlot,
-			performanceEpoch,
-			nil, nil, nil, nil,
-			eras.ShelleyEraDesc.Id,
-			1,
-			epochLength,
-			nil,
-		))
-		require.NoError(t, seedDB(t, db).SetSyncState(
-			mithrilLedgerSlotSyncKey,
-			strconv.FormatUint(anchorSlot, 10),
-			nil,
-		))
-		// Blocks this node applied itself, all strictly above the anchor.
-		for _, slot := range []uint64{160, 170} {
-			require.NoError(t, fxMintBlock(t, db, context.Background(), poolID, slot, slot, nil))
-		}
-		require.NoError(t, fxMintBlock(t, db, context.Background(), otherPoolID, 180, 180, nil))
-		// Blocks the snapshot reports for the same epoch, minted at or below the
-		// anchor. retiredPoolKey is not one of the pools asked about, but its
-		// blocks still belong to the epoch total that every pool's beta divides by.
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
-					Epoch:          performanceEpoch,
-					PoolKeyHash:    poolKey,
-					BlocksProduced: 5,
-					CapturedSlot:   anchorSlot,
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: anchorSlot}, nil,
+			))
+			// Blocks the snapshot reports for the epoch, minted at or below the
+			// anchor. retiredPoolKey is not one of the pools asked about, but its
+			// blocks still belong to the epoch total that every pool's beta divides by.
+			fxImportRewardBlocks(
+				t,
+				db,
+				anchorSlot,
+				[]models.ImportedPoolBlockCount{
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    poolKey,
+						BlocksProduced: 5,
+						CapturedSlot:   anchorSlot,
+					},
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    otherPoolKey,
+						BlocksProduced: 3,
+						CapturedSlot:   anchorSlot,
+					},
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    retiredPoolKey,
+						BlocksProduced: 2,
+						CapturedSlot:   anchorSlot,
+					},
 				},
-				{
-					Epoch:          performanceEpoch,
-					PoolKeyHash:    otherPoolKey,
-					BlocksProduced: 3,
-					CapturedSlot:   anchorSlot,
-				},
-				{
-					Epoch:          performanceEpoch,
-					PoolKeyHash:    retiredPoolKey,
-					BlocksProduced: 2,
-					CapturedSlot:   anchorSlot,
-				},
-			},
-			nil,
-		))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(
-			performanceEpoch,
-			5+3+2,
-			anchorSlot,
-			nil,
-		))
-	})
+				map[uint64]uint64{performanceEpoch: 5 + 3 + 2},
+			)
+			// Blocks this node applied itself, all strictly above the anchor.
+			for _, slot := range []uint64{160, 170} {
+				require.NoError(
+					t,
+					fxMintBlock(
+						t,
+						db,
+						context.Background(),
+						poolID,
+						slot,
+						slot,
+						nil,
+					),
+				)
+			}
+			require.NoError(
+				t,
+				fxMintBlock(
+					t,
+					db,
+					context.Background(),
+					otherPoolID,
+					180,
+					180,
+					nil,
+				),
+			)
+		},
+	)
 
 	counts, total, known, err := ls.rewardBlockCounts(
 		ls.ledgerDB(),
@@ -9052,23 +9138,25 @@ func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 	)
 	poolKey := rewardCalcHash(0x84)
 
-	ls, _ := newLoadedRewardCalculationTestLedger(t, func(db *database.Database) {
-		require.NoError(t, seedDB(t, db).SetEpoch(
-			epochStartSlot,
-			performanceEpoch,
-			nil, nil, nil, nil,
-			eras.ShelleyEraDesc.Id,
-			1,
-			epochLength,
-			nil,
-		))
-		// The anchor sits past the end of the epoch, so none of it is observable.
-		require.NoError(t, seedDB(t, db).SetSyncState(
-			mithrilLedgerSlotSyncKey,
-			strconv.FormatUint(epochStartSlot+epochLength, 10),
-			nil,
-		))
-	})
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			// The anchor sits past the end of the epoch, so none of it is observable.
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: epochStartSlot + epochLength}, nil,
+			))
+			fxImportRewardBlocks(t, db, epochStartSlot+epochLength, nil, nil)
+		},
+	)
 
 	_, _, known, err := ls.rewardBlockCounts(
 		ls.ledgerDB(),
@@ -9132,41 +9220,37 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], poolKey)
 
-	ls, _ := newLoadedRewardCalculationTestLedger(t, func(db *database.Database) {
-		meta := db.Metadata()
-		require.NoError(t, seedDB(t, db).SetEpoch(
-			epochStartSlot,
-			performanceEpoch,
-			nil, nil, nil, nil,
-			eras.ShelleyEraDesc.Id,
-			1,
-			epochLength,
-			nil,
-		))
-		require.NoError(t, seedDB(t, db).SetSyncState(
-			mithrilLedgerSlotSyncKey,
-			strconv.FormatUint(epochStartSlot-1, 10),
-			nil,
-		))
-		require.NoError(t, fxMintBlock(t, db, context.Background(), poolID, 1, 120, nil))
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: epochStartSlot - 1}, nil,
+			))
+			fxImportRewardBlocks(
+				t, db, epochStartSlot-1,
+				[]models.ImportedPoolBlockCount{{
 					Epoch:          performanceEpoch,
 					PoolKeyHash:    poolKey,
 					BlocksProduced: 7,
 					CapturedSlot:   epochStartSlot - 1,
-				},
-			},
-			nil,
-		))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(
-			performanceEpoch,
-			7,
-			epochStartSlot-1,
-			nil,
-		))
-	})
+				}},
+				map[uint64]uint64{performanceEpoch: 7},
+			)
+			require.NoError(
+				t,
+				fxMintBlock(t, db, context.Background(), poolID, 1, 120, nil),
+			)
+		},
+	)
 
 	counts, total, known, err := ls.rewardBlockCounts(
 		ls.ledgerDB(),
@@ -9196,11 +9280,10 @@ func TestStakeRewardRoundRejectsHiddenBlockCounts(t *testing.T) {
 				0, 1, nil, nil, nil, nil,
 				eras.ShelleyEraDesc.Id, 1, 100, nil,
 			))
-			require.NoError(t, seedDB(t, db).SetSyncState(
-				mithrilLedgerSlotSyncKey,
-				"199",
-				nil,
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: 199}, nil,
 			))
+			fxImportRewardBlocks(t, db, 199, nil, nil)
 		},
 	)
 	var logs bytes.Buffer
@@ -9271,10 +9354,8 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 		BoundarySlot:    0,
 		ProtocolVersion: 7,
 	}, nil))
-	require.NoError(t, seedDB(t, db).SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		"50",
-		nil,
+	require.NoError(t, db.SetImportedLedgerStateBoundary(
+		ocommon.Point{Slot: 50}, nil,
 	))
 
 	txn := db.Transaction(context.Background(), false)
@@ -9602,27 +9683,15 @@ func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 			ImportedEpochFees: &importedFees,
 		}, nil))
 
-		// A transaction at the anchor slot itself: excluded, because the
-		// imported amount already accounts for fees up to and including the
-		// anchor block. Sum range is (CapturedSlot, epochEnd].
-		rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-			[]byte("pre-anchor-backfill-tx"), []byte("pre-anchor-block"),
-			anchorSlot, strconv.FormatUint(preAnchorBackfillFee, 10),
-		)
+		// The anchor block's fees, which the node applied before the import
+		// replaced its reward blocks: excluded, because the imported amount
+		// already accounts for fees up to and including the anchor block.
+		fxSeedEpochFee(t, db, endedEpoch, anchorSlot, preAnchorBackfillFee)
+		fxImportRewardBlocks(t, db, anchorSlot, nil, nil)
 		// A transaction after the anchor: included.
-		rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-			[]byte("post-anchor-tx"), []byte("post-anchor-block"),
-			anchorSlot+30, strconv.FormatUint(postAnchorFee, 10),
-		)
-	})
+		fxSeedEpochFee(t, db, endedEpoch, anchorSlot+30, postAnchorFee)
+	},
+	)
 
 	ended := models.Epoch{
 		EpochId:       endedEpoch,
@@ -9682,38 +9751,43 @@ func TestSaveRewardAdaPotsForEpochImportedAnchorAtEpochEdges(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ls, db := newLoadedRewardCalculationTestLedger(t, func(db *database.Database) {
-				require.NoError(t, seedDB(t, db).SetEpoch(
-					epochStartSlot, endedEpoch, nil, nil, nil, nil,
-					eras.ShelleyEraDesc.Id, 1, epochLengthInSlots, nil,
-				))
-				importedFees := types.Uint64(importedPreAnchor)
-				require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
-					Epoch:             endedEpoch,
-					CapturedSlot:      tc.anchorSlot,
-					ImportedEpochFees: &importedFees,
-				}, nil))
-				// A backfilled copy of the anchor block's transaction, already
-				// counted in ImportedEpochFees.
-				rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-					[]byte("anchor-tx"), []byte("anchor-block"),
-					tc.anchorSlot, strconv.FormatUint(anchorBlockFee, 10),
-				)
-				if tc.laterSlot != 0 {
-					rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-						[]byte("later-tx"), []byte("later-block"),
-						tc.laterSlot, strconv.FormatUint(laterFee, 10),
+			ls, db := newLoadedRewardCalculationTestLedger(
+				t,
+				func(db *database.Database) {
+					require.NoError(t, seedDB(t, db).SetEpoch(
+						epochStartSlot, endedEpoch, nil, nil, nil, nil,
+						eras.ShelleyEraDesc.Id, 1, epochLengthInSlots, nil,
+					))
+					importedFees := types.Uint64(importedPreAnchor)
+					require.NoError(
+						t,
+						seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
+							Epoch:             endedEpoch,
+							CapturedSlot:      tc.anchorSlot,
+							ImportedEpochFees: &importedFees,
+						}, nil),
 					)
-				}
-			})
+					// The anchor block's fees, already counted in
+					// ImportedEpochFees, which the import replaces.
+					fxSeedEpochFee(
+						t,
+						db,
+						endedEpoch,
+						tc.anchorSlot,
+						anchorBlockFee,
+					)
+					fxImportRewardBlocks(t, db, tc.anchorSlot, nil, nil)
+					if tc.laterSlot != 0 {
+						fxSeedEpochFee(
+							t,
+							db,
+							endedEpoch,
+							tc.laterSlot,
+							laterFee,
+						)
+					}
+				},
+			)
 			ended := models.Epoch{
 				EpochId:       endedEpoch,
 				StartSlot:     epochStartSlot,
@@ -10715,19 +10789,21 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// What a ledger-state import leaves in the metadata store,
-			// which the set takes over as it opens.
-			ls, db := newLoadedRewardCalculationTestLedger(
+			// What a v0.94.2 ledger-state import left in the metadata
+			// store, which the set takes over as it opens: the release
+			// recorded a failed basis there, and no later one writes it.
+			ls, db := newReleasedRewardCalculationTestLedger(
 				t, func(db *database.Database) {
+					released := dbadapter.New(db)
 					for _, epoch := range []uint64{
 						rewardSnapshotEpoch, potsEpoch,
 					} {
-						require.NoError(t, seedDB(t, db).SetEpoch(
+						require.NoError(t, released.SetEpoch(
 							epoch*100, epoch, nil, nil, nil, nil,
 							eras.ShelleyEraDesc.Id, 1, 100, nil,
 						))
 					}
-					require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
+					require.NoError(t, released.SaveRewardAdaPots(
 						&models.RewardAdaPots{
 							Epoch:        potsEpoch,
 							CapturedSlot: 300,
@@ -11020,9 +11096,10 @@ func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 				0, 1, nil, nil, nil, nil,
 				eras.ShelleyEraDesc.Id, 1, 100, nil,
 			))
-			require.NoError(t, seedDB(t, db).SetSyncState(
-				mithrilLedgerSlotSyncKey, "199", nil,
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: 199}, nil,
 			))
+			fxImportRewardBlocks(t, db, 199, nil, nil)
 		},
 	)
 	txn := db.Transaction(context.Background(), false)

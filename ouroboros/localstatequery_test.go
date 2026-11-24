@@ -254,12 +254,9 @@ func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 // fails VerifyPointOnChain too, and no other test Acquires a point that is
 // genuinely still on-chain but past a query-type-specific retention floor.
 // This Acquires slot 1 of a real two-block chain (on-chain, so
-// VerifyPointOnChain alone would accept it)
-// after marking the durable consumed-UTxO prune floor
-// (database.ConsumedUtxoPruneFloorSyncKey) at slot 2 --
-// checkUtxoRetentionWindow (ledger/queries.go), reached only through
-// VerifyPointQueryable, rejects it with ErrHistoricalStateUnavailable, which
-// this handler maps to the graceful AcquireFailurePointTooOld. Calling
+// VerifyPointOnChain alone would accept it) that the ledger holds no history
+// for -- VerifyPointQueryable refuses it with ErrHistoricalStateUnavailable,
+// which this handler maps to the graceful AcquireFailurePointTooOld. Calling
 // VerifyPointOnChain instead of VerifyPointQueryable at this call site makes
 // this test fail with a nil error.
 func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
@@ -279,9 +276,6 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
-	require.NoError(t, db.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey, "2", nil,
-	))
 
 	pointHash := bytes.Repeat([]byte{1}, 32)
 	connID := ouroboros.ConnectionId{}
@@ -834,63 +828,6 @@ func TestLocalstatequeryImmutableTipReportsDepthKPoint(t *testing.T) {
 		ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32)),
 		got,
 	)
-}
-
-func TestLocalstatequeryDisconnectCancelsBlockedAcquire(t *testing.T) {
-	t.Parallel()
-
-	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
-	limit := db.Metadata().(interface{ ReadSnapshotLimit() int }).
-		ReadSnapshotLimit()
-	held := make([]*ledger.QueryView, 0, limit)
-	for range limit {
-		view, err := o.ledgerState.AcquireQueryView(
-			t.Context(),
-			ledger.QueryPoint{},
-		)
-		require.NoError(t, err)
-		held = append(held, view)
-	}
-	t.Cleanup(func() {
-		for _, view := range held {
-			view.Close()
-		}
-	})
-
-	owner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
-	ctx := olocalstatequery.CallbackContext{
-		ConnectionId: ouroboros.ConnectionId{},
-		Server:       owner,
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- o.localstatequeryServerAcquire(
-			ctx,
-			olocalstatequery.AcquireVolatileTip{},
-			false,
-		)
-	}()
-	testutil.WaitForCondition(t, func() bool {
-		o.localstatequeryAcquireMutex.Lock()
-		defer o.localstatequeryAcquireMutex.Unlock()
-		return o.localstatequeryAcquisitions[ctx.ConnectionId] != nil
-	}, testutil.AsyncWait, "Acquire did not reach snapshot admission")
-
-	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, owner)
-	held[len(held)-1].Close()
-	held = held[:len(held)-1]
-	require.Error(t, testutil.RequireReceive(
-		t,
-		done,
-		testutil.AsyncWait,
-		"Acquire did not stop after disconnect",
-	))
-	o.localstatequeryAcquireMutex.Lock()
-	_, acquiring := o.localstatequeryAcquisitions[ctx.ConnectionId]
-	_, session := o.localstatequerySessions[ctx.ConnectionId]
-	o.localstatequeryAcquireMutex.Unlock()
-	require.False(t, acquiring)
-	require.False(t, session)
 }
 
 func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {

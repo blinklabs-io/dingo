@@ -25,8 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ledgerDBDigest exports every fact table from the LedgerDB set as sorted
-// text rows, so two ledgers' state can be compared by value. The SQL store
+// ledgerDBDigest exports every fact table and the transaction index from the
+// LedgerDB set as sorted text rows, so two ledgers' state can be compared by
+// value. The SQL store
 // holds no ledger state, so its dump says nothing about it.
 func ledgerDBDigest(t *testing.T, ls *LedgerState) string {
 	t.Helper()
@@ -53,6 +54,18 @@ func ledgerDBDigest(t *testing.T, ls *LedgerState) string {
 		}
 		sort.Strings(lines)
 		fmt.Fprintf(&out, "## %s\n%s\n", table.Name, strings.Join(lines, "\n"))
+	}
+	// The transaction index is no fact table: no IndexerDB copies it.
+	if index, ok := ls.config.UtxoSet.(TxIndexReader); ok {
+		var lines []string
+		require.NoError(t, index.EachTxIndexEntry(func(e TxIndexEntry) error {
+			lines = append(lines, fmt.Sprintf(
+				"hash=%x|block=%x|slot=%d|index=%d|era=%d|valid=%t",
+				e.Hash, e.BlockHash, e.Slot, e.BlockIndex, e.Type, e.Valid,
+			))
+			return nil
+		}))
+		fmt.Fprintf(&out, "## tx_index\n%s\n", strings.Join(lines, "\n"))
 	}
 	return out.String()
 }

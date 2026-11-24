@@ -44,7 +44,8 @@ func TestMigratedStoreDeliversRatificationAtItsBoundary(t *testing.T) {
 	})
 	left, err := s.db.Metadata().GetSyncState(pendingRatificationSyncKey, nil)
 	require.NoError(t, err)
-	require.Empty(t, left, "the migration left the record in sync_state")
+	require.Equal(t, string(stale), left,
+		"the migration leaves its source as it is")
 	rec, err := loadPendingRatification(s.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Nil(t, rec,

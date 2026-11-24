@@ -81,7 +81,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, srcStore.Start(context.Background()))
 
 	txn := srcStore.Transaction(t.Context())
-	require.NoError(t, srcStore.SetCommitTimestamp(4242, txn))
+	require.NoError(t, srcStore.SetSyncState("backup_probe", "4242", txn))
 	require.NoError(t, txn.Commit())
 
 	dumpPath := filepath.Join(t.TempDir(), "backup.sql")
@@ -100,9 +100,9 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
+	restoredTimestamp, err := dstStore.GetSyncState("backup_probe", nil)
 	require.NoError(t, err)
-	require.Equal(t, int64(4242), restoredTimestamp)
+	require.Equal(t, "4242", restoredTimestamp)
 }
 
 // TestBackupRejectsExistingDestinationIntegration validates that a second
@@ -179,7 +179,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = srcStore.Close() })
 	require.NoError(t, srcStore.Start(context.Background()))
 	txn := srcStore.Transaction(t.Context())
-	require.NoError(t, srcStore.SetCommitTimestamp(777, txn))
+	require.NoError(t, srcStore.SetSyncState("backup_probe", "777", txn))
 	require.NoError(t, txn.Commit())
 	dumpPath := filepath.Join(t.TempDir(), "backup.sql")
 	require.NoError(t, srcStore.BackupTo(context.Background(), dumpPath))
@@ -198,9 +198,9 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
+	restoredTimestamp, err := dstStore.GetSyncState("backup_probe", nil)
 	require.NoError(t, err)
-	require.Equal(t, int64(777), restoredTimestamp)
+	require.Equal(t, "777", restoredTimestamp)
 }
 
 // TestResetRefusesWhenTargetHasData guards a real gap: Reset used to drop
@@ -223,17 +223,17 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.NoError(t, store.Start(context.Background()))
 
 	txn := store.Transaction(t.Context())
-	require.NoError(t, store.SetCommitTimestamp(999, txn))
+	require.NoError(t, store.SetSyncState("backup_probe", "999", txn))
 	require.NoError(t, txn.Commit())
 
 	err = store.Reset(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
+	restoredTimestamp, err := store.GetSyncState("backup_probe", nil)
 	require.NoError(t, err)
 	require.Equal(
-		t, int64(999), restoredTimestamp,
+		t, "999", restoredTimestamp,
 		"a refused Reset must not have touched the existing data",
 	)
 }

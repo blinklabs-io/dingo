@@ -18,47 +18,11 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
-
-// governanceTables are the SQL tables of the governance family.
-var governanceTables = []string{
-	"governance_proposal", "governance_proposal_order",
-	"governance_proposal_drop", "governance_proposal_ratification_history",
-	"governance_vote", "governance_vote_history",
-}
-
-// govEntries returns the governance drain entry over a harness.
-func govEntries(
-	set *utxoset.Set,
-	db *database.Database,
-) []statedrain.Entry {
-	src := drainTestSource{set: set, db: db}
-	var entries []statedrain.Entry
-	for _, e := range statedrain.Graduated(src) {
-		if e.Family == nodesettings.FamilyGovernance {
-			entries = append(entries, e)
-		}
-	}
-	return entries
-}
-
-func requireNoGovernanceRows(t *testing.T, db *database.Database) {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	for _, table := range governanceTables {
-		require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-	}
-}
 
 // With the set failed, the LedgerDB fails every read and write rather than
 // answer from the empty SQL tables.
@@ -76,23 +40,23 @@ func TestDrainedGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
 	ldb := scenario.LedgerDB()
 	hash := bytes.Repeat([]byte{0x77}, 32)
 	_, err = ldb.GetGovernanceProposal(ctx, hash, 0, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGovernanceProposalSet(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveGovernanceProposals(ctx, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetRatifiedGovernanceProposals(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetLastEnactedGovernanceProposal(ctx, []uint8{1}, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGovernanceVotes(ctx, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetAllGovernanceProposals(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetAllGovernanceVotes(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGovernanceProposalsRefundedAt(1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGovernanceVotesAtSlot(ctx, 1, 10, nil)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 	txn := ldb.Begin(ctx, true)
@@ -102,38 +66,14 @@ func TestDrainedGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
 		ldb.SetGovernanceProposal(ctx, &models.GovernanceProposal{
 			TxHash: hash, AnchorURL: "u",
 		}, txn),
-		ledger.ErrDrainedFamilyUnserved,
+		ledger.ErrLedgerStateUnserved,
 	)
 	require.ErrorIs(t, ldb.SetGovernanceVote(ctx, &models.GovernanceVote{
 		ProposalID: 1, VoterCredential: hash[:28],
-	}, txn), ledger.ErrDrainedFamilyUnserved)
+	}, txn), ledger.ErrLedgerStateUnserved)
 	require.ErrorIs(t, ldb.ClearGovernanceProposalRatification(
 		ctx, hash, 0, 5, txn,
-	), ledger.ErrDrainedFamilyUnserved)
+	), ledger.ErrLedgerStateUnserved)
 	_, err = ldb.DeleteGovernanceVotesForDrep(ctx, 0, hash[:28], 1, 5, txn)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-}
-
-// A read transaction pinned before a later commit, as the deferred
-// ratification job pins its own, reads the votes of its snapshot from the set
-// once the family is drained, and the drained tables are never read.
-func TestDrainedGovernancePinnedReadsSeeTheirSnapshot(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	guard := statedrain.NewTripGuard()
-	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, guard,
-	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(scenario.DB),
-	))
-	require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{scenario.DB, scenario.DrainFamilies},
-		Set:   drainTestSource{set: set, db: scenario.DB}, Guard: guard,
-	}, govEntries(set, scenario.DB)))
-
-	require.Empty(t, guard.Trips(), "a drained table was read or written")
-	requireNoGovernanceRows(t, scenario.DB)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }

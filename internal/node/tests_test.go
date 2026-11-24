@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -38,13 +37,6 @@ import (
 // key the rollback's delete of a transaction's identity row is checked
 // against.
 const rollbackCascadeIndex = "idx_utxo_spent_at_tx_id"
-
-func cancelDeferredIndexRepairContext(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	return ctx
-}
 
 // seedClearedMarkerWithMissingCriticalIndex leaves the database in the state
 // two Mithril-bootstrapped preview nodes were found in: a critical manifest
@@ -81,38 +73,19 @@ func seedClearedMarkerWithMissingCriticalIndex(
 	return raw
 }
 
-func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok)
-	require.NoError(t, manager.DropDeferredIndexes())
-
-	err := RepairDeferredIndexes(
-		cancelDeferredIndexRepairContext(t),
-		db,
-		slog.New(slog.DiscardHandler),
-	)
-	require.ErrorIs(t, err, context.Canceled)
-
-	pending, err := manager.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(t, pending, "a cancelled full rebuild must remain resumable")
-}
-
 func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	db := newFileTestDB(t)
+	db := newIndexerTestDB(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	rebuilder := WithDeferredIndexes(
+	rebuilder := NewDeferredIndexRebuilder(
 		ctx,
 		db,
 		slog.New(slog.DiscardHandler),
 	)
+	rebuilder.Drop()
 	cancel()
 
 	require.ErrorIs(t, rebuilder.BuildCritical(), context.Canceled)
@@ -122,80 +95,6 @@ func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
 		MissingCriticalDeferredIndexes()
 	require.NoError(t, err)
 	require.NotEmpty(t, missing)
-}
-
-func TestWithDeferredIndexesHonoursCancellationBeforeDrop(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	WithDeferredIndexes(ctx, db, slog.New(slog.DiscardHandler))
-
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok)
-	pending, err := manager.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.False(t, pending)
-	missing, err := manager.(metadata.MissingDeferredIndexLister).
-		MissingDeferredIndexes()
-	require.NoError(t, err)
-	require.Empty(t, missing)
-}
-
-// requireNoPendingMarker asserts the repair did not invent a bulk-load cycle:
-// the marker means "a drop/rebuild is outstanding", and setting it on a
-// database with a complete manifest would send the next startup through a
-// rebuild it does not need.
-func requireNoPendingMarker(t *testing.T, raw *sql.DB) {
-	t.Helper()
-	var count int
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM sync_state WHERE sync_key = ?",
-		deferred.SyncStateKey,
-	).Scan(&count))
-	require.Zero(
-		t,
-		count,
-		"repairing a missing index must not mark a rebuild pending",
-	)
-}
-
-// TestRepairDeferredIndexesFinishesPendingCycle keeps the marker's existing
-// meaning intact: when a cycle really was interrupted, the core-mode repair
-// still rebuilds the whole manifest and clears it.
-func TestRepairDeferredIndexesFinishesPendingCycle(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	lazy := dbtest.LazyManifestIndex(t)
-	for _, name := range []string{rollbackCascadeIndex, lazy} {
-		_, err = raw.Exec("DROP INDEX IF EXISTS " + name)
-		require.NoError(t, err)
-	}
-	_, err = raw.Exec(
-		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
-		 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
-		deferred.SyncStateKey,
-		deferred.SyncStateValue,
-	)
-	require.NoError(t, err)
-
-	require.NoError(t, RepairDeferredIndexes(
-		t.Context(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-
-	require.True(t, dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex))
-	require.True(
-		t,
-		dbtest.MetadataIndexExists(t, raw, lazy),
-		"a pending cycle must still finish the lazy remainder",
-	)
-	requireNoPendingMarker(t, raw)
 }
 
 // namedMissingManager is a DeferredIndexManager that also lists its missing
@@ -293,34 +192,6 @@ func TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 	require.Empty(t, buf.String())
 }
 
-// TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore runs the same
-// path against the SQLite store, so the listing is exercised through
-// MissingCriticalDeferredIndexes and the real catalog rather than a fake.
-func TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	require.NoError(t, RepairDeferredIndexes(t.Context(), db, logger))
-
-	require.True(t, dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex))
-	require.Contains(
-		t,
-		buf.String(),
-		"rebuilding missing critical deferred metadata indexes",
-	)
-	require.Contains(
-		t,
-		buf.String(),
-		rollbackCascadeIndex,
-		"the operator must be told which index the wait is for",
-	)
-	requireNoPendingMarker(t, raw)
-}
-
 // namedMissingAllManager answers the full-manifest lister and records the log
 // as BuildDeferredIndexes sees it, so the ordering assertion below reads the
 // same "before the build" evidence its critical-subset sibling does.
@@ -393,36 +264,6 @@ func TestEnsureAllDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 	require.NoError(t, ensureAllDeferredIndexes(t.Context(), manager, logger))
 
 	require.Empty(t, buf.String())
-}
-
-// TestRepairDeferredIndexesAnnouncesLazyRebuild drives the real store through
-// the startup repair path and requires the lazy entry it rebuilds to be named
-// in the log, not rebuilt silently.
-func TestRepairDeferredIndexesAnnouncesLazyRebuild(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	lazy := dbtest.LazyManifestIndex(t)
-	_, err = raw.Exec("DROP INDEX IF EXISTS " + lazy)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		"DELETE FROM sync_state WHERE sync_key = ?", deferred.SyncStateKey,
-	)
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	require.NoError(t, RepairDeferredIndexes(
-		t.Context(),
-		db,
-		slog.New(slog.NewTextHandler(&buf, nil)),
-	))
-
-	require.Contains(t, buf.String(), "rebuilding missing deferred metadata")
-	require.Contains(t, buf.String(), lazy)
-	require.True(t, dbtest.MetadataIndexExists(t, raw, lazy))
-	requireNoPendingMarker(t, raw)
 }
 
 // TestBuildDingoConfigWiresForgeEBCaps follows the composition path the
@@ -671,38 +512,6 @@ func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
 		)
 		require.Equal(t, enabled, built.PlannerStatsRefreshEnabled())
 	}
-}
-
-// TestRepairDeferredIndexesRestoresCatchUpIndexes covers serve's core-mode
-// startup after a process died inside a held Mithril catch-up: the catch-up
-// droppable and lazy entries are missing behind the marker, and the repair
-// that runs before the node starts rebuilds both and clears it.
-func TestRepairDeferredIndexesRestoresCatchUpIndexes(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	manager, ok := db.Metadata().(metadata.CatchUpIndexManager)
-	require.True(t, ok)
-	require.NoError(t, manager.DropCatchUpIndexesContext(t.Context()))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	droppable := deferred.CatchUpDroppableManifest()
-	require.NotEmpty(t, droppable)
-	for _, index := range droppable {
-		require.False(t, dbtest.MetadataIndexExists(t, raw, index.Name))
-	}
-
-	require.NoError(t, RepairDeferredIndexes(
-		t.Context(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-
-	for _, index := range deferred.Manifest {
-		require.True(t, dbtest.MetadataIndexExists(t, raw, index.Name),
-			index.Name)
-	}
-	requireNoPendingMarker(t, raw)
 }
 
 // TestBuildDingoConfigCarriesDefaultedMempoolCapacity follows the path the

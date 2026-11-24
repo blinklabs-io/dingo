@@ -20,8 +20,6 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 // DelegatorInactivityActivatedSyncKey names the durable marker guarding the
@@ -32,7 +30,7 @@ import (
 // ledger.LedgerState.activateDelegatorInactivityIfNeeded); a store the set
 // has not taken the accounts family from holds it in sync_state, which this
 // package reads and clears during a rollback or truncate of that store.
-const DelegatorInactivityActivatedSyncKey = statedrain.DelegatorInactivitySyncKey
+const DelegatorInactivityActivatedSyncKey = "delegator_inactivity_activated"
 
 // DelegatorInactivityActivationEpoch reads the durable CIP-0163 activation
 // marker and reports the activation epoch A, whether activation has
@@ -115,7 +113,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 	// recompute: the set journals each account's expiration, the activation epoch and the
 	// credentials the activation stamped, and its rollback restores them.
 	if !delegatorInactivityEnabled ||
-		d.FamilyDrained(nodesettings.FamilyAccounts) {
+		d.metadata == nil {
 		return nil
 	}
 	rollbackEpoch, err := EpochBySlot(d, rollbackSlot, txn)

@@ -86,15 +86,21 @@ func TestBackfillDijkstraBatchUtxoEffects(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			childIn, topIn, collateral := backfillTestRef(0xe1), backfillTestRef(0xe2), backfillTestRef(0xe3)
+			// The IndexerDB keeps the address of every output it stores.
+			inputAddr, err := lcommon.NewAddressFromBytes(
+				append([]byte{0x60}, bytes.Repeat([]byte{0x42}, 28)...),
+			)
+			require.NoError(t, err)
 			require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 				for _, id := range [][]byte{childIn, topIn, collateral} {
 					if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 						TxId:       id,
 						OutputIdx:  0,
 						PaymentKey: bytes.Repeat([]byte{0x42}, 28),
+						Address:    []byte(inputAddr.String()),
 						AddedSlot:  1,
 						Amount:     dbtypes.Uint64(5_000_000),
 					}); err != nil {

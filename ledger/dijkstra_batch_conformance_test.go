@@ -149,7 +149,9 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 		{hash: batch.Hash().Bytes(), index: 1},
 		{hash: plain.Hash().Bytes(), index: 2},
 	} {
-		stored, err := db.Metadata().GetTransactionByHash(want.hash, nil)
+		stored, err := ls.ledgerDB().GetTransactionByHash(
+			context.Background(), want.hash, nil,
+		)
 		require.NoError(t, err)
 		require.NotNil(t, stored)
 		require.Equal(t, want.index, stored.BlockIndex)
@@ -224,9 +226,14 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// The session stages its writes and always rolls them back.
-	stored, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(
+		context.Background(), childHash.Bytes(), nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, stored)
+	output, err := ls.UtxoByRef(childHash.Bytes(), 0)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound)
+	require.Nil(t, output)
 }
 
 func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
@@ -285,13 +292,19 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 			}),
 	)
 
-	child, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	for _, hash := range [][]byte{childHash.Bytes(), parentHash.Bytes()} {
+		indexed, err := ls.ledgerDB().GetTransactionByHash(
+			context.Background(), hash, nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, indexed, "transaction %x is indexed", hash)
+	}
+	child, err := ls.UtxoByRef(childHash.Bytes(), 0)
 	require.NoError(t, err)
-	require.Len(t, child.Outputs, 1)
-	require.Equal(t, childHash.Bytes(), child.Outputs[0].TxId)
-	parent, err := db.Metadata().GetTransactionByHash(parentHash.Bytes(), nil)
-	require.NoError(t, err)
-	require.Empty(t, parent.Outputs)
+	require.Equal(t, childHash.Bytes(), child.TxId)
+	_, err = ls.UtxoByRef(parentHash.Bytes(), 0)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"the enclosing body produces no output")
 }
 
 func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {

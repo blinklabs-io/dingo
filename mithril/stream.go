@@ -488,7 +488,7 @@ func runStreamOnce(
 			"tip_immutable", start,
 		)
 		if start == 0 {
-			err = cfg.DB.DeleteSyncState(syncKeyImmutableMax, nil)
+			err = cfg.DB.DeleteChainState(syncKeyImmutableMax, nil)
 		} else {
 			err = setImmutableImportMarker(cfg.DB, start-1)
 		}

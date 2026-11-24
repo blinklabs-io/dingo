@@ -67,7 +67,9 @@ func (s *plannerStartupStore) OptimizePlannerStatsContext(
 
 func TestNodePlannerStartupOrdering(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []StorageMode{StorageModeAPI, StorageModeCore} {
+	// Only the IndexerDB keeps planner statistics, so only an api node
+	// runs a startup pass.
+	for _, mode := range []StorageMode{StorageModeAPI} {
 		t.Run(string(mode), func(t *testing.T) {
 			t.Parallel()
 			cardanoCfg := newNodeTestCardanoNodeCfg(t)
@@ -108,14 +110,6 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 			guard := &plannerStartupGuard{
 				entered: make(chan error, 1), release: make(chan struct{}),
 				inspect: func() error {
-					if !mode.IsAPI() {
-						if n.wallClockLedger.Load() != nil {
-							return fmt.Errorf(
-								"core ledger started before planner pass",
-							)
-						}
-						return nil
-					}
 					client := &http.Client{Timeout: 5 * time.Second}
 					req, err := http.NewRequestWithContext(t.Context(),
 						http.MethodGet,

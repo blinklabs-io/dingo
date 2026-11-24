@@ -97,12 +97,19 @@ func TestMidnightIndexerFatalCallbackPreservesCause(t *testing.T) {
 func TestMidnightIndexerConfigFollowsReplacedStorage(t *testing.T) {
 	t.Parallel()
 
-	n := &Node{db: newMidnightConfigDatabase(t, 1)}
+	reopen := func(slot uint64) (*database.Database, *database.Database) {
+		db := newMidnightConfigDatabase(t, slot)
+		idx, err := dbtest.NewIndexerDatabase(t, db, dbtest.IndexerOptions{})
+		require.NoError(t, err)
+		return db, idx
+	}
+	n := &Node{}
+	n.db, n.indexerDB = reopen(1)
 	before := n.midnightIndexerConfig()
-	require.Same(t, n.db.Metadata(), before.Metadata)
+	require.Same(t, n.indexerDB.Metadata(), before.Metadata)
 
-	n.db = newMidnightConfigDatabase(t, 2)
+	n.db, n.indexerDB = reopen(2)
 	after := n.midnightIndexerConfig()
-	require.Same(t, n.db.Metadata(), after.Metadata)
+	require.Same(t, n.indexerDB.Metadata(), after.Metadata)
 	require.NotSame(t, before.Metadata, after.Metadata)
 }

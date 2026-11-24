@@ -75,17 +75,17 @@ func TestPParamsReadsRefuseAFailedSet(t *testing.T) {
 	ls.utxoSetFailed.Store(true)
 
 	_, err = ldb.GetPParams(0, era, decode, nil)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved, "pparamsReader")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "pparamsReader")
 	_, err = ldb.ListPParamsForEra(era, nil)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved, "pparamsReader")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "pparamsReader")
 	_, err = ldb.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved, "syncMarkerView")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "syncMarkerView")
 	_, err = src.PParamsForEra(era)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved, "drainedPParamsSource")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "drainedPParamsSource")
 	require.ErrorIs(
-		t, src.PParamUpdates(noUpdate), ErrDrainedFamilyUnserved,
+		t, src.PParamUpdates(noUpdate), ErrLedgerStateUnserved,
 		"drainedPParamsSource",
 	)
 	_, _, err = src.SyncMarker(database.SyntheticV2CostModelSyncKey)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved, "drainedPParamsSource")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "drainedPParamsSource")
 }

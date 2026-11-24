@@ -132,8 +132,7 @@ func fxApplyTx(
 	certDeposits map[int]uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	fxBlock(t, ls, point, func(_ ledgerdb.LedgerDB, txn ledgerdb.Txn) error {
 		return ls.stageAccountTransaction(
 			txn, tx, point.Slot, index, point.Hash,
@@ -203,8 +202,7 @@ func fxStageTx(
 	protocolMajor uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	require.NoError(t, ls.stageAccountTransaction(
 		nil, tx, point.Slot, 0, point.Hash,
 		database.BatchedTxIngestOpts{ProtocolMajor: protocolMajor},

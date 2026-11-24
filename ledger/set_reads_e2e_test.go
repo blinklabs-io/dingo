@@ -208,7 +208,7 @@ func TestOpCertReadsFromTheLiveUtxoSet(t *testing.T) {
 		ctx, lcommon.PoolKeyHash(slots.Pool),
 		slots.Repeated, slots.Lowered, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	all, err := ldb.LatestPoolOpCertSequences(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]uint64{

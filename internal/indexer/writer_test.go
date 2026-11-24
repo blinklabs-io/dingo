@@ -205,7 +205,7 @@ func (s *syncRowIndexer) RollbackTo(
 
 func newTestStore(t *testing.T) *indexerdb.Store {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{})
+	db, err := dbtest.NewDatabase(t, &database.Config{Role: database.RoleIndexer})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(db, db, 10)
 	require.NoError(t, err)

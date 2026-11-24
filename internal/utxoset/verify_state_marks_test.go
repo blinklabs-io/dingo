@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -41,7 +40,7 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 		pendingRatify   = `{"epoch":7,"boundary_slot":700,"id":3}`
 	)
 	ctx := t.Context()
-	db := ledgerAt(t, slotPoint(800))
+	db := releasedAt(t, slotPoint(800))
 	meta := db.Metadata()
 	require.NoError(t, db.SetEpoch(
 		500, activationEpoch, nil, nil, nil, nil, 6, 1000, 100, nil,
@@ -58,8 +57,8 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 	}))
 	for key, value := range map[string]string{
 		database.DelegatorInactivityActivatedSyncKey: "5",
-		statedrain.RewardStakeInputsPendingSyncKey:   pendingInputs,
-		statedrain.PendingRatificationSyncKey:        pendingRatify,
+		models.RewardStakeInputsPendingKey:           pendingInputs,
+		database.PendingRatificationSyncKey:          pendingRatify,
 	} {
 		require.NoError(t, meta.SetSyncState(key, value, nil))
 	}
@@ -103,14 +102,14 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 			family: nodesettings.FamilyRewardInputs,
 			differ: func() {
 				setState(
-					statedrain.RewardStakeInputsPendingSyncKey,
+					models.RewardStakeInputsPendingKey,
 					`{"entries":[{"epoch":7,"boundary_slot":700},`+
 						`{"epoch":8,"boundary_slot":800}]}`,
 				)
 			},
 			restore: func() {
 				setState(
-					statedrain.RewardStakeInputsPendingSyncKey, pendingInputs,
+					models.RewardStakeInputsPendingKey, pendingInputs,
 				)
 			},
 			reports: "pending stake inputs differ",
@@ -120,13 +119,13 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 			family: nodesettings.FamilyRewardInputs,
 			differ: func() {
 				setState(
-					statedrain.RewardStakeInputsPendingSyncKey,
+					models.RewardStakeInputsPendingKey,
 					`{"entries":[]}`,
 				)
 			},
 			restore: func() {
 				setState(
-					statedrain.RewardStakeInputsPendingSyncKey, pendingInputs,
+					models.RewardStakeInputsPendingKey, pendingInputs,
 				)
 			},
 			reports: "pending stake inputs differ",
@@ -165,12 +164,12 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 			family: nodesettings.FamilyGovernance,
 			differ: func() {
 				setState(
-					statedrain.PendingRatificationSyncKey,
+					database.PendingRatificationSyncKey,
 					`{"epoch":7,"boundary_slot":700,"id":4}`,
 				)
 			},
 			restore: func() {
-				setState(statedrain.PendingRatificationSyncKey, pendingRatify)
+				setState(database.PendingRatificationSyncKey, pendingRatify)
 			},
 			reports: "pending ratification record differs",
 		},
@@ -179,11 +178,11 @@ func TestVerifyFamilyComparesTheStateMarks(t *testing.T) {
 			family: nodesettings.FamilyGovernance,
 			differ: func() {
 				require.NoError(t, meta.DeleteSyncState(
-					statedrain.PendingRatificationSyncKey, nil,
+					database.PendingRatificationSyncKey, nil,
 				))
 			},
 			restore: func() {
-				setState(statedrain.PendingRatificationSyncKey, pendingRatify)
+				setState(database.PendingRatificationSyncKey, pendingRatify)
 			},
 			reports: "pending ratification record differs",
 		},

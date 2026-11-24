@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
@@ -43,8 +42,7 @@ type scanFixture struct {
 
 func newScanFixture(t *testing.T) *scanFixture {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	db := newIndexerDB(t)
 	payment := bytes.Repeat([]byte{0x46}, lcommon.AddressHashSize)
 	exact, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone, 0, payment, nil,
@@ -98,6 +96,7 @@ func (f *scanFixture) add(
 			if err := f.db.CreateUtxo(t.Context(), txn, &models.Utxo{
 				TxId: txID, OutputIdx: outputIdx, PaymentKey: f.payment,
 				StakingKey: stake, AddedSlot: slot, Amount: 1_000_000,
+				Address: []byte(addr.String()),
 			}); err != nil {
 				return err
 			}

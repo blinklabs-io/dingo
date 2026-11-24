@@ -176,7 +176,7 @@ func newSeededGenesisStore(
 	f zeroGenesisFixture,
 ) (*database.Database, *sql.DB) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: mode,
 	})
@@ -435,7 +435,7 @@ func TestRepairZeroValueByronGenesisKeepsOutputAtSharedReference(t *testing.T) {
 				shared := shelleyAtByronAddress(
 					t, f.nodeCfg, f.zeroByron[0], coin,
 				)
-				db, err := dbtest.NewDatabase(t, &database.Config{
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 					DataDir:     t.TempDir(),
 					StorageMode: mode,
 				})

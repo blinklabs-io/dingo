@@ -366,6 +366,7 @@ func (ls *LedgerState) finishForkCandidate(candidate *forkCandidate) {
 	}
 	tipPoint := tail[len(tail)-1].Point
 	for _, header := range tail {
+		header = ls.restampForkHeaderAfterRollback(header)
 		if err := ls.addForkPathHeader(
 			header, tipPoint, header.HeaderCryptoVerificationGeneration,
 		); err != nil {
@@ -394,10 +395,15 @@ func (ls *LedgerState) installForkCandidate(
 	candidate *forkCandidate,
 	pending *pendingPublishes,
 ) ([]ChainsyncEvent, error) {
+	var tipPoint ocommon.Point
+	if len(candidate.path) > 0 {
+		tipPoint = candidate.path[len(candidate.path)-1].Point
+	}
 	for i, forkEvent := range candidate.path {
+		forkEvent = ls.restampForkHeaderAfterRollback(forkEvent)
 		if err := ls.addForkPathHeader(
 			forkEvent,
-			candidate.path[len(candidate.path)-1].Point,
+			tipPoint,
 			forkEvent.HeaderCryptoVerificationGeneration,
 		); err != nil {
 			return nil, fmt.Errorf(
@@ -741,4 +747,19 @@ func (ls *LedgerState) tickForkCandidateEpoch(
 	}
 	return result.NewCurrentEpoch, result.NewCurrentEra,
 		result.NewCurrentPParams, prevPParams, synthetic, nil
+}
+
+// restampForkHeaderAfterRollback gives a fork header the authorization
+// generation the rollback published. Candidate validation verified the header
+// against the candidate's own state, which is stronger than re-checking it
+// against the rolled-back state, so the stale verdict is replaced rather than
+// recomputed. A header that carries no verdict stays unstamped.
+func (ls *LedgerState) restampForkHeaderAfterRollback(
+	forkEvent ChainsyncEvent,
+) ChainsyncEvent {
+	if forkEvent.HeaderCryptoVerificationGeneration != 0 {
+		forkEvent.HeaderCryptoVerificationGeneration =
+			ls.CurrentHeaderCryptoVerificationGeneration()
+	}
+	return forkEvent
 }

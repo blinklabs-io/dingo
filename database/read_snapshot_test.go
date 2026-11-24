@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -70,9 +71,35 @@ func (s *orderedSnapshotMetadata) GetTip(
 	return s.tip, s.tipErr
 }
 
+// orderedSnapshotBlob serves the ledger tip the snapshot is anchored at.
 type orderedSnapshotBlob struct {
 	blob.BlobStore
 	events *[]string
+	tip    ochainsync.Tip
+	tipErr error
+}
+
+func (s *orderedSnapshotBlob) Get(types.Txn, []byte) ([]byte, error) {
+	*s.events = append(*s.events, "blob tip")
+	if s.tipErr != nil {
+		return nil, s.tipErr
+	}
+	value, err := encodeTip(s.tip)
+	return []byte(value), err
+}
+
+// failingTipBlob fails the tip read of every snapshot opened on it.
+type failingTipBlob struct {
+	blob.BlobStore
+	err error
+}
+
+func (s *failingTipBlob) NewTransaction(bool) types.Txn {
+	return &commitFailingTxn{}
+}
+
+func (s *failingTipBlob) Get(types.Txn, []byte) ([]byte, error) {
+	return nil, s.err
 }
 
 func (s *orderedSnapshotBlob) NewTransaction(bool) types.Txn {
@@ -101,8 +128,10 @@ func TestNewReadSnapshotContextAnchorsMetadataBeforeBlob(t *testing.T) {
 	events := []string{}
 	wantTip := ochainsync.Tip{BlockNumber: 42}
 	db := &Database{
-		metadata: &orderedSnapshotMetadata{events: &events, tip: wantTip},
-		blobRef:  newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
+		metadata: &orderedSnapshotMetadata{events: &events},
+		blobRef: newBlobStoreRef(
+			&orderedSnapshotBlob{events: &events, tip: wantTip},
+		),
 	}
 
 	txn, tip, err := NewReadSnapshotContext(t.Context(), db)
@@ -111,7 +140,7 @@ func TestNewReadSnapshotContextAnchorsMetadataBeforeBlob(t *testing.T) {
 	require.Equal(t, wantTip, tip)
 	require.Equal(
 		t,
-		[]string{"metadata transaction", "metadata tip", "blob transaction"},
+		[]string{"metadata transaction", "blob transaction", "blob tip"},
 		events,
 	)
 	requireCommitBarrierFree(t, db)
@@ -124,20 +153,19 @@ func TestNewReadSnapshotContextReleasesBarrierOnAnchorError(t *testing.T) {
 	anchorErr := errors.New("tip unavailable")
 	events := []string{}
 	db := &Database{
-		metadata: &orderedSnapshotMetadata{
-			events: &events,
-			tipErr: anchorErr,
-		},
-		blobRef: newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
+		metadata: &orderedSnapshotMetadata{events: &events},
+		blobRef: newBlobStoreRef(
+			&orderedSnapshotBlob{events: &events, tipErr: anchorErr},
+		),
 	}
 
 	txn, _, err := NewReadSnapshotContext(t.Context(), db)
 	require.Nil(t, txn)
 	require.ErrorIs(t, err, anchorErr)
-	require.ErrorContains(t, err, "anchor metadata read snapshot")
+	require.ErrorContains(t, err, "anchor read snapshot")
 	require.Equal(
 		t,
-		[]string{"metadata transaction", "metadata tip"},
+		[]string{"metadata transaction", "blob transaction", "blob tip"},
 		events,
 	)
 	requireCommitBarrierFree(t, db)
@@ -152,9 +180,10 @@ func TestNewReadSnapshotContextJoinsAnchorAndRollbackErrors(t *testing.T) {
 	db := &Database{
 		metadata: &anchorRollbackMetadata{
 			txn: &anchorRollbackTxn{
-				anchorErr: anchorErr, rollbackErr: rollbackErr,
+				rollbackErr: rollbackErr,
 			},
 		},
+		blobRef: newBlobStoreRef(&failingTipBlob{err: anchorErr}),
 	}
 
 	txn, _, err := NewReadSnapshotContext(t.Context(), db)
@@ -235,13 +264,6 @@ func (s *destructiveReadSnapshotMetadata) GetTip(
 	return ochainsync.Tip{}, nil
 }
 
-func (*destructiveReadSnapshotMetadata) SetCommitTimestamp(
-	int64,
-	types.Txn,
-) error {
-	return nil
-}
-
 // destructiveReadSnapshotBlob deletes the referenced CBOR when a read-write
 // transaction commits. beforeCommit runs at the start of that blob commit,
 // after the commit timestamp is written and before metadata commits;
@@ -280,21 +302,18 @@ func (s *destructiveReadSnapshotBlob) NewTransaction(
 	return &destructiveReadSnapshotTxn{blobCBORPresent: present}
 }
 
-func (*destructiveReadSnapshotBlob) SetCommitTimestamp(
-	int64,
-	types.Txn,
-) error {
-	return nil
-}
-
 func (*destructiveReadSnapshotBlob) Sync() error {
 	return nil
 }
 
 func (*destructiveReadSnapshotBlob) Get(
 	txn types.Txn,
-	_ []byte,
+	key []byte,
 ) ([]byte, error) {
+	// The store holds no tip; every other key is the CBOR under test.
+	if bytes.Equal(key, chainStateBlobKey(LedgerTipKey)) {
+		return nil, types.ErrBlobKeyNotFound
+	}
 	snapshot, ok := txn.(*destructiveReadSnapshotTxn)
 	if !ok {
 		return nil, types.ErrTxnWrongType
@@ -369,9 +388,9 @@ func requireDestructiveSnapshotView(
 			types.ErrBlobKeyNotFound,
 			"the destructive commit must be visible in the blob snapshot",
 		)
-		require.Zero(
+		require.False(
 			t,
-			result.tip.BlockNumber,
+			metadataViewReferencesCBOR(t, result.txn),
 			"metadata snapshot retained a reference to CBOR deleted before the blob snapshot opened",
 		)
 		return
@@ -381,7 +400,16 @@ func requireDestructiveSnapshotView(
 		blobErr,
 		"blob snapshot saw a commit its metadata snapshot predates",
 	)
-	require.Equal(t, uint64(42), result.tip.BlockNumber)
+	require.True(t, metadataViewReferencesCBOR(t, result.txn))
+}
+
+// metadataViewReferencesCBOR reports whether the snapshot's metadata view
+// was opened before the destructive commit removed the reference.
+func metadataViewReferencesCBOR(t *testing.T, txn *Txn) bool {
+	t.Helper()
+	snapshot, ok := txn.Metadata().(*destructiveReadSnapshotTxn)
+	require.True(t, ok)
+	return snapshot.metadataReferencesCBOR
 }
 
 // testReadSnapshotDoesNotStraddleDestructiveCommit runs both orders in which
@@ -597,7 +625,7 @@ func TestReadSnapshotAnchorBlocksAConcurrentCommit(t *testing.T) {
 		blobRef:  newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
 	}
 	writer := &Txn{db: db, readWrite: true, metadataTxn: &commitFailingTxn{}}
-	require.NoError(t, acquireCommitBarrier(t.Context(), writer, true))
+	require.NoError(t, acquireCommitBarrier(t.Context(), writer))
 	t.Cleanup(writer.Release)
 	committed := make(chan error, 1)
 	anchored := false

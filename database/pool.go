@@ -33,6 +33,9 @@ func (d *Database) RestorePoolStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("RestorePoolStateAtSlot"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.RestorePoolStateAtSlot(
 			slot,
@@ -55,7 +58,7 @@ func (d *Database) GetPool(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Pool, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -72,6 +75,9 @@ func (d *Database) GetPool(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPool"); err != nil {
+		return nil, err
 	}
 	ret, err := d.metadata.GetPool(pkh, includeInactive, txn.Metadata())
 	if err != nil {
@@ -93,8 +99,8 @@ func (d *Database) ImportPool(
 	pool *models.Pool,
 	reg *models.PoolRegistration,
 ) error {
-	if d.poolsDrained() {
-		return drainedWrite(nodesettings.FamilyPoolsHistory)
+	if d.poolsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPoolsHistory)
 	}
 	if txn != nil {
 		if txn.Metadata() == nil {
@@ -121,7 +127,7 @@ func (d *Database) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if err := d.checkNotDrained(nodesettings.FamilyOpCerts); err != nil {
+	if err := d.checkMetadataStore(nodesettings.FamilyOpCerts); err != nil {
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -148,7 +154,7 @@ func (d *Database) UpdatePoolOpCertSequenceBatched(
 	acc BatchAccumulator,
 	txn *Txn,
 ) error {
-	if err := d.checkNotDrained(nodesettings.FamilyOpCerts); err != nil {
+	if err := d.checkMetadataStore(nodesettings.FamilyOpCerts); err != nil {
 		return err
 	}
 	if txn == nil || txn.Metadata() == nil {
@@ -176,6 +182,9 @@ func (d *Database) LatestPoolOpCertSequence(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("LatestPoolOpCertSequence"); err != nil {
+		return 0, false, err
+	}
 	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
 }
 
@@ -190,6 +199,9 @@ func (d *Database) LatestPoolOpCertSequenceAfter(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("LatestPoolOpCertSequenceAfter"); err != nil {
+		return 0, false, err
 	}
 	return d.metadata.LatestPoolOpCertSequenceAfter(
 		pkh,
@@ -210,6 +222,9 @@ func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("LatestPoolOpCertSequenceAtOrBefore"); err != nil {
+		return 0, false, err
 	}
 	return d.metadata.LatestPoolOpCertSequenceAtOrBefore(
 		pkh,
@@ -234,6 +249,9 @@ func (d *Database) LatestPoolOpCertSequenceInRange(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("LatestPoolOpCertSequenceInRange"); err != nil {
+		return 0, false, err
+	}
 	return d.metadata.LatestPoolOpCertSequenceInRange(
 		pkh,
 		startSlot,
@@ -255,6 +273,9 @@ func (d *Database) PoolOpCertSequencesExistAtSlot(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("PoolOpCertSequencesExistAtSlot"); err != nil {
+		return false, err
+	}
 	return d.metadata.PoolOpCertSequencesExistAtSlot(slot, txn.Metadata())
 }
 
@@ -270,6 +291,9 @@ func (d *Database) LatestPoolOpCertSequences(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("LatestPoolOpCertSequences"); err != nil {
+		return nil, err
+	}
 	return d.metadata.LatestPoolOpCertSequences(txn.Metadata())
 }
 
@@ -282,6 +306,9 @@ func (d *Database) LatestPoolOpCertCounters(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("LatestPoolOpCertCounters"); err != nil {
+		return nil, err
 	}
 	return d.metadata.LatestPoolOpCertCounters(txn.Metadata())
 }
@@ -296,6 +323,9 @@ func (d *Database) LatestPoolOpCertSequencesAtOrBefore(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("LatestPoolOpCertSequencesAtOrBefore"); err != nil {
+		return nil, err
 	}
 	return d.metadata.LatestPoolOpCertSequencesAtOrBefore(
 		slot,
@@ -312,7 +342,7 @@ func (d *Database) GetPools(
 	if len(pkhs) == 0 {
 		return []models.Pool{}, nil
 	}
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -322,6 +352,9 @@ func (d *Database) GetPools(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPools"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetPools(pkhs, txn.Metadata())
 }
@@ -336,7 +369,7 @@ func (d *Database) GetPoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -346,6 +379,9 @@ func (d *Database) GetPoolByVrfKeyHash(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPoolByVrfKeyHash"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetPoolByVrfKeyHash(
 		vrfKeyHash,
@@ -362,7 +398,7 @@ func (d *Database) GetFuturePoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -372,6 +408,9 @@ func (d *Database) GetFuturePoolByVrfKeyHash(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetFuturePoolByVrfKeyHash"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetFuturePoolByVrfKeyHash(
 		vrfKeyHash,
@@ -388,7 +427,7 @@ func (d *Database) GetPoolByLeiosKey(
 	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -398,6 +437,9 @@ func (d *Database) GetPoolByLeiosKey(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPoolByLeiosKey"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetPoolByLeiosKey(
 		publicKey,
@@ -414,7 +456,7 @@ func (d *Database) GetFuturePoolByLeiosKey(
 	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -424,6 +466,9 @@ func (d *Database) GetFuturePoolByLeiosKey(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetFuturePoolByLeiosKey"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetFuturePoolByLeiosKey(
 		publicKey,
@@ -438,7 +483,7 @@ func (d *Database) GetActivePoolRelays(
 	ctx context.Context,
 	txn *Txn,
 ) ([]models.PoolRegistrationRelay, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -448,6 +493,9 @@ func (d *Database) GetActivePoolRelays(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetActivePoolRelays"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
 }
@@ -464,6 +512,9 @@ func (d *Database) GetStakeByPools(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetStakeByPools"); err != nil {
+		return nil, nil, err
+	}
 	return d.metadata.GetStakeByPools(poolKeyHashes, txn.Metadata())
 }
 
@@ -474,7 +525,7 @@ func (d *Database) GetActivePoolKeyHashes(
 	ctx context.Context,
 	txn *Txn,
 ) ([][]byte, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -484,6 +535,9 @@ func (d *Database) GetActivePoolKeyHashes(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetActivePoolKeyHashes"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
 }
@@ -497,12 +551,15 @@ func (d *Database) GetActivePoolKeyHashesOrdered(
 	ctx context.Context,
 	txn *Txn,
 ) ([][]byte, error) {
-	if d.poolsDrained() {
-		return nil, drainedWrite(nodesettings.FamilyPoolsHistory)
+	if d.poolsFromSource() {
+		return nil, errNoMetadataStore(nodesettings.FamilyPoolsHistory)
 	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetActivePoolKeyHashesOrdered"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetActivePoolKeyHashesOrdered(txn.Metadata())
 }
@@ -514,12 +571,15 @@ func (d *Database) GetPoolCertificateHistory(
 	pkh lcommon.PoolKeyHash,
 	txn *Txn,
 ) ([][]byte, [][]byte, error) {
-	if d.poolsDrained() {
-		return nil, nil, drainedWrite(nodesettings.FamilyPoolsHistory)
+	if d.poolsFromSource() {
+		return nil, nil, errNoMetadataStore(nodesettings.FamilyPoolsHistory)
 	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPoolCertificateHistory"); err != nil {
+		return nil, nil, err
 	}
 	return d.metadata.GetPoolCertificateHistory(pkh, txn.Metadata())
 }

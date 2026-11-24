@@ -179,19 +179,23 @@ func TestPoolKeySourceSendsTheAgentProfileAtAdmission(t *testing.T) {
 	require.Equal(t, "pool-b", next(secondProfiles))
 }
 
-func TestPoolKeySourceCarriesTheAgentProfile(t *testing.T) {
+func TestPoolKeySourceCarriesAgentPolicy(t *testing.T) {
 	t.Parallel()
 	keys := producerKeysFromPool(BlockProducerPool{
 		ShelleyKESAgentAddress: "kes-agent.example:3443",
 		ShelleyKESAgentProfile: "pool-a",
+		ShelleyKESAgentShared:  true,
 	})
 	require.Equal(t, "pool-a", keys.agentProfile)
+	require.True(t, keys.agentShared)
 
 	// The single-pool option reaches the first pool's key source.
 	n := &Node{config: NewConfig(
 		WithShelleyKESAgentRemote("kes-agent.example:3443", "", "", ""),
 		WithShelleyKESAgentPlaintext(true),
 		WithShelleyKESAgentProfile("pool-b"),
+		WithShelleyKESAgentShared(true),
 	)}
 	require.Equal(t, "pool-b", n.primaryKeySource().keys.agentProfile)
+	require.True(t, n.primaryKeySource().keys.agentShared)
 }

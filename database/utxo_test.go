@@ -78,15 +78,25 @@ func exactAddressTestPointer(
 	return addr
 }
 
+// openTestDBWithStorageMode opens an IndexerDB, the only database that keeps
+// the SQL UTxO and address index these tests read, in mode.
 func openTestDBWithStorageMode(t *testing.T, mode string) *Database {
 	t.Helper()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     t.TempDir(),
 		StorageMode: mode,
+		Role:        RoleIndexer,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	// testing keeps a finished test's cleanups reachable until the run
+	// ends; dropping the reference lets the closed database be collected.
+	closing := db
+	t.Cleanup(func() {
+		open := closing
+		closing = nil
+		require.NoError(t, open.Close())
+	})
 	return db
 }
 
@@ -329,7 +339,7 @@ UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = (SELECT id FROM "transaction
 }
 
 func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -355,6 +365,21 @@ func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 	complete, err := db.GetSyncState(utxoAddressBackfillSyncKey, nil)
 	require.NoError(t, err)
 	require.NotEqual(t, "true", complete)
+}
+
+func TestOpenBackfillsUtxoAddressesInIndexer(t *testing.T) {
+	t.Parallel()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:     t.TempDir(),
+		Role:        RoleIndexer,
+		StorageMode: types.StorageModeAPI,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	complete, err := db.GetSyncState(utxoAddressBackfillSyncKey, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "true", complete)
+	require.NoError(t, db.Close())
 }
 
 func TestBackfillUtxoAddressesSkipsCompletedMarker(t *testing.T) {
@@ -408,7 +433,7 @@ func TestAPIModeAssetUtxoRequiresAddressIdentity(t *testing.T) {
 }
 
 func TestCoreModeAssetUtxoSkipsAddressIdentity(t *testing.T) {
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 	newUtxo := func(txID byte) models.Utxo {
 		return models.Utxo{
@@ -699,7 +724,7 @@ VALUES (?, 1, 0, '1', 0, FALSE)`,
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
@@ -908,7 +933,7 @@ func TestUtxosWithHistoryLoadsCborAndPreservesExactAddressIdentity(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xbc}, lcommon.AddressHashSize)
@@ -992,7 +1017,7 @@ func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			db := openTestDB(t)
+			db := openTestDBWithStorageMode(t, types.StorageModeCore)
 			raw := rawSQLiteMetadataFixture(t, db)
 
 			payment := bytes.Repeat(
@@ -1060,7 +1085,7 @@ func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
 func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xbe}, lcommon.AddressHashSize)
@@ -1144,7 +1169,7 @@ INSERT INTO utxo (
 func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	const total = 250
@@ -1232,7 +1257,7 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 
 	payment := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1263,7 +1288,7 @@ func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 
 	payment := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1291,7 +1316,7 @@ func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 func TestUtxosByAddressWithOrderingKeysetDirections(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 	payment := bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1364,7 +1389,7 @@ func TestUtxosByAddressWithOrderingKeysetDirections(t *testing.T) {
 func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 
 	_, err := db.UtxosByAddressWithOrdering(
 		context.Background(),
@@ -1389,7 +1414,7 @@ func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
 func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	stakeKey := bytes.Repeat([]byte{0x81}, lcommon.AddressHashSize)
@@ -1461,7 +1486,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedExcludesPointerSiblings(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
@@ -1521,7 +1546,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedCrossesBatchBoundary(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0x71}, lcommon.AddressHashSize)
@@ -1614,7 +1639,7 @@ INSERT INTO utxo (
 func TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0x9a}, lcommon.AddressHashSize)
@@ -1685,7 +1710,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak(t *testing
 func TestMatchingUtxoRefsByAddressWithOrderingBoundedCandidateLimit(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 	payment := bytes.Repeat([]byte{0x9b}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1759,7 +1784,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedCandidateLimit(t *testing.T
 func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0x4d}, lcommon.AddressHashSize)
@@ -1851,7 +1876,7 @@ func seedManyUtxoAddressesAndAssertRoundTrip(
 	newAddr func(i int) lcommon.Address,
 ) {
 	t.Helper()
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	zeroHash := lcommon.NewBlake2b224(nil)
@@ -1971,7 +1996,7 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 
 	const patternCount = 1_000
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 	zeroPayment := bytes.Repeat([]byte{0x00}, lcommon.AddressHashSize)
 	zeroHash := lcommon.NewBlake2b224(nil)
@@ -2020,7 +2045,7 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 // proves the replacement, ResolveUtxoCborWithRecovery, actually performs the
 // same recovery loadCbor did rather than only wrapping the bare resolve.
 func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2098,7 +2123,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	t *testing.T,
 ) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2175,7 +2200,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 	t *testing.T,
 ) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2260,7 +2285,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair(
 	t *testing.T,
 ) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2346,7 +2371,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 	t *testing.T,
 ) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2446,7 +2471,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTxn(
 	t *testing.T,
 ) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2514,7 +2539,7 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 // decide whether to still omit a row after actually trying recovery, versus
 // the pre-fix behavior of omitting on the bare ErrBlobKeyNotFound alone.
 func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2541,7 +2566,7 @@ func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
 // The test installs an empty store after the read and checks the repair stays
 // in the originally pinned store.
 func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2764,36 +2789,6 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = (SELECT id FROM "transaction
 	}
 }
 
-// TestUtxosDeleteSpentInBatchFloor pins that removing a batch's spent rows
-// raises the consumed-UTxO prune floor to the batch's slot and never lowers
-// it, and that the delete refuses to run outside the caller's transaction.
-func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
-	require.ErrorIs(t,
-		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
-	require.NoError(t, db.UtxosDeleteSpentInBatch(nil, 10, nil),
-		"an empty batch needs no transaction")
-
-	apply := func(slot uint64) {
-		txn := db.Transaction(context.Background(), true)
-		require.NoError(t, txn.Do(func(txn *Txn) error {
-			return db.UtxosDeleteSpentInBatch(ids, slot, txn)
-		}))
-	}
-	floor := func() uint64 {
-		value, err := db.ConsumedUtxoPruneFloor(nil)
-		require.NoError(t, err)
-		return value
-	}
-	apply(50)
-	require.Equal(t, uint64(50), floor())
-	apply(20)
-	require.Equal(t, uint64(50), floor(), "the floor must not move down")
-}
-
 // TestFilterUtxosByAddressPatternsExactSetMatchesLinear pins the keyed
 // exact-address lookup to the pattern contract, including a mixed filter
 // that must still use the linear matcher.
@@ -2845,7 +2840,7 @@ func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
 func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openTestDBWithStorageMode(t, types.StorageModeCore)
 	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)

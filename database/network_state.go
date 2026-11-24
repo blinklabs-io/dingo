@@ -17,9 +17,6 @@ package database
 import (
 	"context"
 	"fmt"
-
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 // DeleteNetworkStateAfterSlot removes network state records added
@@ -29,6 +26,9 @@ func (d *Database) DeleteNetworkStateAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteNetworkStateAfterSlot"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeleteNetworkStateAfterSlot(
 			slot,
@@ -44,26 +44,15 @@ func (d *Database) DeleteNetworkStateAfterSlot(
 	})
 }
 
-// setKeptSyncFamilies names, for each sync_state key that stands for ledger
-// state the LedgerDB set takes over with a family, that family.
-var setKeptSyncFamilies = map[string]nodesettings.Family{
-	statedrain.RewardStakeInputsPendingSyncKey: nodesettings.FamilyRewardInputs,
-	statedrain.PendingRatificationSyncKey:      nodesettings.FamilyGovernance,
-	statedrain.DelegatorInactivitySyncKey:      nodesettings.FamilyAccounts,
-}
-
-// refuseSetKeptSyncState returns ErrFamilyDrained for a sync_state key whose
-// state the LedgerDB set keeps once it has taken the family: the metadata
-// store holds no value to read, and one written here would be read by
-// nothing.
-func (d *Database) refuseSetKeptSyncState(key string) error {
-	f, ok := setKeptSyncFamilies[key]
-	if !ok || !d.FamilyDrained(f) {
+// refuseSyncStateWithoutMetadata returns an error wrapping
+// ErrNoMetadataStore for a sync_state key on a database that keeps no
+// metadata store: its chain state is the block store's and its ledger state
+// the LedgerDB's.
+func (d *Database) refuseSyncStateWithoutMetadata(key string) error {
+	if d.metadata != nil {
 		return nil
 	}
-	return fmt.Errorf(
-		"%w: %s is kept by the LedgerDB set", ErrFamilyDrained, key,
-	)
+	return fmt.Errorf("%w: sync state %s", ErrNoMetadataStore, key)
 }
 
 // GetSyncState retrieves a sync state value by key.
@@ -76,11 +65,15 @@ func (d *Database) GetSyncState(
 		val string
 		err error
 	)
-	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+	if refused := d.refuseBlockStoreChainState(key); refused != nil {
 		return "", refused
 	}
-	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
-		val, err = d.drainedSyncMarker(key)
+	if IsPParamsSyncMarker(key) && d.metadata == nil {
+		val, err = d.pparamsSourceSyncMarker(key)
+	} else if refused := d.refuseSyncStateWithoutMetadata(
+		key,
+	); refused != nil {
+		return "", refused
 	} else if txn == nil {
 		val, err = d.metadata.GetSyncState(key, nil)
 	} else {
@@ -109,6 +102,12 @@ func (d *Database) GetSyncStateBounded(
 		val string
 		err error
 	)
+	if refused := d.refuseBlockStoreChainState(key); refused != nil {
+		return "", refused
+	}
+	if refused := d.refuseSyncStateWithoutMetadata(key); refused != nil {
+		return "", refused
+	}
 	if txn == nil {
 		val, err = d.metadata.GetSyncStateBounded(key, maxBytes, nil)
 	} else {
@@ -130,10 +129,10 @@ func (d *Database) SetSyncState(
 	key, value string,
 	txn *Txn,
 ) error {
-	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
-		return drainedPParamsSyncError(key)
+	if refused := d.refuseBlockStoreChainState(key); refused != nil {
+		return refused
 	}
-	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+	if refused := d.refuseSyncStateWithoutMetadata(key); refused != nil {
 		return refused
 	}
 	var err error
@@ -158,10 +157,10 @@ func (d *Database) DeleteSyncState(
 	key string,
 	txn *Txn,
 ) error {
-	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
-		return drainedPParamsSyncError(key)
+	if refused := d.refuseBlockStoreChainState(key); refused != nil {
+		return refused
 	}
-	if refused := d.refuseSetKeptSyncState(key); refused != nil {
+	if refused := d.refuseSyncStateWithoutMetadata(key); refused != nil {
 		return refused
 	}
 	var err error
@@ -190,6 +189,9 @@ func (d *Database) ListSyncStateKeysByPrefix(
 		keys []string
 		err  error
 	)
+	if refused := d.refuseSyncStateWithoutMetadata(prefix); refused != nil {
+		return nil, refused
+	}
 	if txn == nil {
 		keys, err = d.metadata.ListSyncStateKeysByPrefix(prefix, nil)
 	} else {

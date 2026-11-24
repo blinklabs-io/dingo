@@ -25,9 +25,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -63,114 +65,13 @@ func seedCip163Certificate(
 	))
 }
 
-// TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint
-// guards the actual bug behind this fix: database/lifecycle.Truncate
-// (the offline and live CIP-0135 disaster-recovery truncate path) used to
-// call database.TruncateAfterSlot directly, bypassing the CIP-0163
-// pre/post hooks ledger.LedgerState.rollback applies for a normal
-// (security-parameter-bounded) rollback -- so a delegation witness in a
-// truncated-away block could leave expiration_epoch renewed past what the
-// surviving chain actually witnessed, producing incorrect stake/reward/
-// DRep calculations after any offline or live truncate on a CIP-0163-
-// enabled network.
-func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		inactivity = uint64(90)
-		// 100 slots per epoch: epoch 0 = [0,100), epoch 1 = [100,200), ...
-		epochLength = uint64(100)
-	)
-	db := newTestDB(t)
-	for epoch := range uint64(3) {
-		require.NoError(t, db.SetEpoch(
-			epoch*epochLength, epoch,
-			nil, nil, nil, nil,
-			1, 1000, uint(epochLength),
-			nil,
-		))
-	}
-
-	cred := bytes.Repeat([]byte{0x07}, 28)
-
-	require.NoError(
-		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
-			StakingKey:      cred,
-			CredentialTag:   0,
-			Active:          true,
-			AddedSlot:       50,
-			CreatedSlot:     50,
-			ExpirationEpoch: 1 + inactivity, // as block application would stamp it
-		}),
-	)
-
-	// Surviving registration witness at slot 50 (epoch 0).
-	survivingBlock := testBlock(1, 0xA1)
-	survivingBlock.Slot = 50
-	require.NoError(t, db.BlockCreate(survivingBlock, nil))
-	seedCip163Certificate(t, db, 50, &lcommon.StakeRegistrationCertificate{
-		StakeCredential: lcommon.Credential{
-			CredType:   0,
-			Credential: lcommon.NewBlake2b224(cred),
-		},
-	})
-
-	// To-be-truncated-away delegation witness at slot 150 (epoch 1), which
-	// renews the expiration to a value the surviving chain never actually
-	// witnessed.
-	truncatedBlock := testBlock(2, 0xA2)
-	truncatedBlock.Slot = 150
-	truncatedBlock.PrevHash = survivingBlock.Hash
-	require.NoError(t, db.BlockCreate(truncatedBlock, nil))
-	seedCip163Certificate(t, db, 150, &lcommon.StakeDelegationCertificate{
-		StakeCredential: &lcommon.Credential{
-			CredType:   0,
-			Credential: lcommon.NewBlake2b224(cred),
-		},
-		PoolKeyHash: lcommon.NewBlake2b224(bytes.Repeat([]byte{0x0A}, 28)),
-	})
-
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: truncatedBlock.Slot,
-			Hash: truncatedBlock.Hash,
-		},
-		BlockNumber: truncatedBlock.Number,
-	}, nil))
-
-	// Truncate to the surviving block, discarding the slot-150 witness --
-	// with delegatorInactivityEnabled=true, matching a CIP-0163-enabled
-	// network.
-	_, err := lifecycle.Truncate(
-		context.Background(), db, survivingBlock, 0, true, inactivity,
-	)
-	require.NoError(t, err)
-
-	acct, err := db.GetAccountByCredential(
-		context.Background(),
-		0,
-		cred,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(
-		t, uint64(0)+inactivity, acct.ExpirationEpoch,
-		"expiration must be recomputed from the surviving epoch-0 witness "+
-			"(0+inactivity), not left at the truncated-away epoch-1 "+
-			"witness's stamp (1+inactivity) or the CIP-0163 hooks being "+
-			"skipped entirely (leaving it unchanged)",
-	)
-}
-
-func TestTruncateRemovesMidnightRollbackStateAfterTarget(t *testing.T) {
+func TestTruncateMidnightJournalsRemovesStateAfterTarget(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 3)
-	store := f.db.Metadata()
+	idx, err := dbtest.NewIndexerDatabase(t, f.db, dbtest.IndexerOptions{})
+	require.NoError(t, err)
+	store := idx.Metadata()
 	for _, block := range f.blocks[1:] {
 		require.NoError(t, store.CreateMidnightAriadneRollback(nil,
 			&models.MidnightAriadneRollback{
@@ -202,10 +103,11 @@ func TestTruncateRemovesMidnightRollbackStateAfterTarget(t *testing.T) {
 		Completed: true,
 	}, nil))
 
-	_, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[1], 0, false, 0,
-	)
-	require.NoError(t, err)
+	require.NoError(t, lifecycle.TruncateMidnightJournals(
+		t.Context(), idx,
+		ocommon.NewPoint(f.blocks[1].Slot, f.blocks[1].Hash),
+		f.blocks[1].Number,
+	))
 
 	rollbacksAtTarget, err := store.FindMidnightAriadneRollbacksByBlock(
 		nil, f.blocks[1].Number,
@@ -263,12 +165,40 @@ func buildTestChain(t *testing.T, n uint64) *chainFixture {
 		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
 		BlockNumber: last.Number,
 	}, nil))
-	return &chainFixture{db: db, blocks: blocks}
+	store, set := utxoSetFor(t, blocks)
+	return &chainFixture{db: db, blocks: blocks, store: store, set: set}
 }
 
 type chainFixture struct {
 	db     *database.Database
 	blocks []models.Block
+	// store is the live UTxO set, holding one output per block, and set is
+	// the option that has Truncate roll it back with db.
+	store *badgerutxo.Store
+	set   lifecycle.TruncateOption
+}
+
+// utxoSetFor opens a live UTxO set that applied blocks, one output each.
+func utxoSetFor(
+	t *testing.T,
+	blocks []models.Block,
+) (*badgerutxo.Store, lifecycle.TruncateOption) {
+	t.Helper()
+	store := openUtxoSetStore(t, t.TempDir())
+	for _, b := range blocks {
+		_, err := store.Apply(
+			ocommon.NewPoint(b.Slot, b.Hash),
+			[]badgerutxo.Output{{
+				Ref:  badgerutxo.NewRef(b.Hash, 0),
+				Cbor: []byte{0x80, byte(b.ID)},
+			}},
+			nil,
+		)
+		require.NoError(t, err)
+	}
+	return store, lifecycle.WithTruncateUtxoSet(
+		dblifecycle.TruncateUtxoSet{Store: store},
+	)
 }
 
 // buildSparseTestChain creates blocks at the given, deliberately
@@ -291,7 +221,8 @@ func buildSparseTestChain(t *testing.T, ids []uint64) *chainFixture {
 		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
 		BlockNumber: last.Number,
 	}, nil))
-	return &chainFixture{db: db, blocks: blocks}
+	store, set := utxoSetFor(t, blocks)
+	return &chainFixture{db: db, blocks: blocks, store: store, set: set}
 }
 
 // TestTruncateReportsActualDeletedCountForSparseIndex verifies that
@@ -312,10 +243,8 @@ func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
 		context.Background(),
 		f.db,
 		target,
-		0,
-		false,
-		0,
-	)
+		0, f.set)
+
 	require.NoError(t, err)
 	require.Equal(
 		t, uint64(3), blocksRemoved,
@@ -342,8 +271,8 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	target := f.blocks[2] // truncate to block 3, removing 4 and 5
 
 	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(), f.db, target, 0, false, 0,
-	)
+		context.Background(), f.db, target, 0, f.set)
+
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), blocksRemoved)
 
@@ -363,8 +292,8 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	// Truncating again to the same (now current) target is a no-op, not
 	// an error, and reports zero blocks removed.
 	blocksRemoved, err = lifecycle.Truncate(
-		context.Background(), f.db, target, 0, false, 0,
-	)
+		context.Background(), f.db, target, 0, f.set)
+
 	require.NoError(t, err)
 	require.Zero(t, blocksRemoved)
 }
@@ -375,18 +304,18 @@ func TestTruncateLowersHistoryExpiryCursor(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 5)
-	require.NoError(t, f.db.SetSyncState(
-		database.HistoryExpiryCursorSyncKey,
+	require.NoError(t, f.db.SetChainState(
+		database.HistoryExpiryCursorKey,
 		strconv.FormatUint(f.blocks[4].Slot, 10),
 		nil,
 	))
 
 	_, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[2], 0, false, 0,
-	)
+		context.Background(), f.db, f.blocks[2], 0, f.set)
+
 	require.NoError(t, err)
 
-	got, err := f.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	got, err := f.db.GetChainState(database.HistoryExpiryCursorKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, strconv.FormatUint(f.blocks[2].Slot, 10), got)
 }
@@ -413,10 +342,8 @@ func TestTruncateRemovesBlobTailAheadOfMetadataTip(t *testing.T) {
 		context.Background(),
 		f.db,
 		target,
-		0,
-		false,
-		0,
-	)
+		0, f.set)
+
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), blocksRemoved)
 
@@ -451,10 +378,8 @@ func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
 		context.Background(),
 		f.db,
 		f.blocks[3],
-		0,
-		false,
-		0,
-	)
+		0, f.set)
+
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
 	for _, block := range f.blocks {
@@ -496,7 +421,8 @@ func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
 		BlockNumber: block3.Number,
 	}, nil))
 
-	_, err := lifecycle.Truncate(context.Background(), db, block1, 0, false, 0)
+	_, set := utxoSetFor(t, []models.Block{block1, block2, block3})
+	_, err := lifecycle.Truncate(context.Background(), db, block1, 0, set)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 	require.ErrorContains(t, err, "same slot")
@@ -515,9 +441,8 @@ func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
 		db,
 		block2,
 		0,
-		false,
-		0,
-	)
+		set)
+
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), blocksRemoved)
 }
@@ -529,7 +454,7 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	boundarySlot := f.blocks[3].Slot
-	require.NoError(t, f.db.SetSyncState(
+	require.NoError(t, f.db.SetChainState(
 		"mithril_ledger_slot", strconv.FormatUint(boundarySlot, 10), nil,
 	))
 
@@ -538,16 +463,14 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 		context.Background(),
 		f.db,
 		f.blocks[2],
-		0,
-		false,
-		0,
-	)
+		0, f.set)
+
 	require.Error(t, err)
 
 	// blocks[3] is exactly at the boundary and must be allowed.
 	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[3], 0, false, 0,
-	)
+		context.Background(), f.db, f.blocks[3], 0, f.set)
+
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), blocksRemoved)
 }
@@ -560,22 +483,14 @@ func TestTruncateRejectsIncompleteMithrilSync(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 5)
-	importedTxID := bytes.Repeat([]byte{0x61}, 32)
-	require.NoError(t, f.db.CreateUtxo(
-		context.Background(), nil,
-		&models.Utxo{TxId: importedTxID, AddedSlot: f.blocks[4].Slot},
-	))
-	require.NoError(t, f.db.SetSyncState("sync_status", "in_progress", nil))
+	require.NoError(t, f.db.SetChainState("sync_status", "in_progress", nil))
 
 	_, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[2], 0, false, 0,
-	)
+		context.Background(), f.db, f.blocks[2], 0, f.set)
+
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-	exists, err := f.db.UtxoExists(
-		context.Background(), importedTxID, 0, nil,
-	)
-	require.NoError(t, err)
-	require.True(t, exists, "a refused truncate must keep imported outputs")
+	// The set holds the outputs every block above the target added.
+	requireSetAt(t, f.store, 5)
 	_, err = database.BlockByHash(
 		context.Background(), f.db, f.blocks[4].Hash,
 	)
@@ -590,29 +505,40 @@ func TestTruncateRefusesResumeAfterMithrilBoundaryRises(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
-	importedTxID := bytes.Repeat([]byte{0x62}, 32)
-	require.NoError(t, f.db.CreateUtxo(
-		context.Background(), nil,
-		&models.Utxo{TxId: importedTxID, AddedSlot: f.blocks[4].Slot},
-	))
-	require.NoError(t, f.db.SetSyncState(
+	// An import above the interrupted truncate's target writes its outputs.
+	imported := f.blocks[4]
+	_, err = f.store.Apply(
+		ocommon.NewPoint(imported.Slot, imported.Hash),
+		[]badgerutxo.Output{{
+			Ref:  badgerutxo.NewRef(bytes.Repeat([]byte{0x62}, 32), 0),
+			Cbor: []byte{0x80, 0x62},
+		}},
+		nil,
+	)
+	require.NoError(t, err)
+	setTip, _, err := f.store.Tip()
+	require.NoError(t, err)
+	setCount, err := f.store.Count()
+	require.NoError(t, err)
+	require.NoError(t, f.db.SetChainState(
 		"mithril_ledger_slot",
 		strconv.FormatUint(f.blocks[4].Slot, 10),
 		nil,
 	))
 
 	_, err = lifecycle.Truncate(
-		context.Background(), f.db, models.Block{}, 1, false, 0,
-	)
+		context.Background(), f.db, models.Block{}, 1, f.set)
+
 	require.ErrorContains(t, err, "above the pending truncate")
-	exists, err := f.db.UtxoExists(
-		context.Background(), importedTxID, 0, nil,
-	)
+	gotTip, _, err := f.store.Tip()
 	require.NoError(t, err)
-	require.True(t, exists, "a refused resume must keep imported outputs")
+	require.Equal(t, setTip, gotTip, "a refused resume must keep the set")
+	gotCount, err := f.store.Count()
+	require.NoError(t, err)
+	require.Equal(t, setCount, gotCount, "a refused resume must keep outputs")
 	pending, err := lifecycle.GetPendingTruncate(f.db)
 	require.NoError(t, err)
 	require.NotNil(t, pending, "a refused resume must keep the marker")
@@ -625,13 +551,13 @@ func TestTruncateRefusesResumeDuringMithrilSync(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
-	require.NoError(t, f.db.SetSyncState("sync_status", "in_progress", nil))
+	require.NoError(t, f.db.SetChainState("sync_status", "in_progress", nil))
 
 	_, err = lifecycle.Truncate(
-		context.Background(), f.db, models.Block{}, 1, false, 0,
-	)
+		context.Background(), f.db, models.Block{}, 1, f.set)
+
 	require.ErrorContains(t, err, "in progress")
 	pending, err := lifecycle.GetPendingTruncate(f.db)
 	require.NoError(t, err)
@@ -656,7 +582,7 @@ func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 	// pre-mutation check existed.
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
 
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
 	pending, err := lifecycle.GetPendingTruncate(f.db)
@@ -678,10 +604,8 @@ func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 		context.Background(),
 		f.db,
 		models.Block{},
-		1,
-		false,
-		0,
-	)
+		1, f.set)
+
 	require.NoError(t, err)
 
 	pending, err = lifecycle.GetPendingTruncate(f.db)
@@ -696,14 +620,6 @@ func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 	}
 }
 
-// pendingTruncateSyncKey mirrors the unexported constant of the same name
-// in truncate.go -- reproduced here the same way
-// TestTruncateRejectsTargetBeforeMithrilBoundary reproduces
-// "mithril_ledger_slot", so this external test package can write a raw
-// (possibly corrupted) marker value directly, the same way a bit-flipped
-// or truncated on-disk value could occur in practice.
-const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
-
 // TestGetPendingTruncateRejectsMarkerWithCorruptedTipID verifies that changing
 // the deletion upper bound in an otherwise valid durable marker is detected.
 func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
@@ -711,18 +627,18 @@ func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
-	marker, err := f.db.GetSyncState(pendingTruncateSyncKey, nil)
+	marker, err := f.db.GetChainState(database.PendingTruncateKey, nil)
 	require.NoError(t, err)
 	var pending lifecycle.PendingTruncate
 	require.NoError(t, json.Unmarshal([]byte(marker), &pending))
 	pending.TipID--
 	corruptedMarker, err := json.Marshal(pending)
 	require.NoError(t, err)
-	require.NoError(t, f.db.SetSyncState(
-		pendingTruncateSyncKey,
+	require.NoError(t, f.db.SetChainState(
+		database.PendingTruncateKey,
 		string(corruptedMarker),
 		nil,
 	))
@@ -746,7 +662,7 @@ func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
 	pending, err := lifecycle.GetPendingTruncate(f.db)
@@ -761,10 +677,8 @@ func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
 		context.Background(),
 		f.db,
 		models.Block{},
-		1,
-		false,
-		0,
-	)
+		1, f.set)
+
 	require.Error(t, err)
 	require.ErrorContains(t, err, "does not match newer current blob tip")
 
@@ -795,7 +709,7 @@ func TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete(
 	f := buildTestChain(t, 5)
 	target := f.blocks[1]
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, target, 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, target, 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
 	tip := f.blocks[4]
@@ -817,10 +731,8 @@ func TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete(
 		context.Background(),
 		f.db,
 		models.Block{},
-		1,
-		false,
-		0,
-	)
+		1, f.set)
+
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), blocksRemoved)
 
@@ -850,7 +762,7 @@ func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
 	}, nil))
 
 	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
 	require.ErrorIs(t, err, context.Canceled)
 
 	pending, err := lifecycle.GetPendingTruncate(f.db)
@@ -859,8 +771,8 @@ func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
 	require.Equal(t, f.blocks[4].ID, pending.TipID)
 
 	_, err = lifecycle.Truncate(
-		context.Background(), f.db, models.Block{}, 1, false, 0,
-	)
+		context.Background(), f.db, models.Block{}, 1, f.set)
+
 	require.NoError(t, err)
 	tip, err := f.db.GetTip(nil)
 	require.NoError(t, err)
@@ -883,7 +795,7 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 0, false, 0)
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 0, f.set)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 	require.ErrorIs(t, err, context.Canceled)
@@ -895,208 +807,6 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 		pending,
 		"a pre-cancelled Truncate must not record a pending marker",
 	)
-}
-
-// TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget covers the interaction
-// between CIP-0135 truncate and the consumed-UTxO prune floor.
-//
-// The floor records how deep the consumed-UTxO sweep hard-deleted spent rows,
-// and ledger.LedgerState.rollback refuses any target below it. Truncate is
-// deliberately refuses to go deeper, because a floor left above the new tip
-// identifies UTxOs that cannot be restored. A truncate at or above the floor
-// leaves the floor in place.
-func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
-	const sweptSlot uint64 = 35
-
-	sweptTxId := bytes.Repeat([]byte{0x3B}, 32)
-
-	requireSweptUtxoAbsent := func(t *testing.T, f *chainFixture) {
-		t.Helper()
-		utxo, err := f.db.Metadata().GetUtxoIncludingSpent(sweptTxId, 0, nil)
-		require.NoError(t, err)
-		require.Nil(
-			t,
-			utxo,
-			"the swept row was hard-deleted; a truncate must not "+
-				"re-materialize it, since nothing can restore its contents",
-		)
-	}
-
-	newFixtureWithFloor := func(t *testing.T) *chainFixture {
-		t.Helper()
-		f := buildTestChain(t, 5)
-		txn := f.db.MetadataTxn(context.Background(), true)
-		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:        sweptTxId,
-				OutputIdx:   0,
-				AddedSlot:   10,
-				DeletedSlot: 30,
-				Amount:      types.Uint64(1),
-			})
-		}))
-		pruned, err := f.db.UtxosDeleteConsumed(
-			context.Background(),
-			sweptSlot,
-			100,
-			nil,
-		)
-		require.NoError(t, err)
-		require.Equal(t, 1, pruned)
-		requireSweptUtxoAbsent(t, f)
-		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-		require.NoError(t, err)
-		require.Equal(t, sweptSlot, floor)
-		return f
-	}
-
-	t.Run("target below the floor is rejected", func(t *testing.T) {
-		f := newFixtureWithFloor(t)
-		// blocks[1] is at slot 20, below the swept slot.
-		_, err := lifecycle.Truncate(
-			context.Background(), f.db, f.blocks[1], 0, false, 0,
-		)
-		require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-		require.NoError(t, err)
-		require.Equal(
-			t,
-			sweptSlot,
-			floor,
-			"a rejected truncate must preserve the prune floor",
-		)
-		requireSweptUtxoAbsent(t, f)
-	})
-
-	t.Run("target above the floor keeps it", func(t *testing.T) {
-		f := newFixtureWithFloor(t)
-		// blocks[3] is at slot 40, above the swept slot.
-		_, err := lifecycle.Truncate(
-			context.Background(), f.db, f.blocks[3], 0, false, 0,
-		)
-		require.NoError(t, err)
-		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
-		require.NoError(t, err)
-		require.Equal(
-			t,
-			sweptSlot,
-			floor,
-			"a truncate that does not cross the floor must leave it intact",
-		)
-		requireSweptUtxoAbsent(t, f)
-	})
-}
-
-// TestTruncateRejectsTargetBeforeConsumedUtxoRetentionFloor reproduces the
-// same defect class fixed for block_nonce retention
-// (TestTruncateAfterSlotRejectsTargetWithPrunedNonce), found by auditing
-// TruncateAfterSlot's other retention-window interactions.
-//
-// During normal operation, ledger.LedgerState's cleanupConsumedUtxos
-// periodically hard-deletes spent UTxO rows once their DeletedSlot falls
-// at-or-behind a floor it durably records in sync_state
-// (database.ConsumedUtxoPruneFloorSyncKey). TruncateAfterSlot's doc comment
-// promises that "UTxOs spent after point.Slot are restored as unspent" --
-// but a spent UTxO whose row has already been hard-deleted by that cleanup
-// cannot be restored: UtxosUnspend's bulk UPDATE simply matches zero rows
-// for it, and TruncateAfterSlot returns success anyway. A disaster-recovery
-// truncate (database/lifecycle.Truncate, which unlike the security-
-// parameter-bounded live ledger rollback may target a point far older than
-// the retention window) can hit this silently, permanently losing UTxOs
-// the surviving chain still needs and corrupting balances/validation with
-// no error at truncate time to explain why.
-//
-// This test does not need real cleanup to run: it writes the durable
-// marker directly (exactly as persistConsumedUtxoPruneFloor would) to
-// simulate "cleanup already pruned everything at or below this slot," then
-// shows Truncate must refuse a target older than that marker.
-func TestTruncateRejectsTargetBeforeConsumedUtxoRetentionFloor(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	floorSlot := f.blocks[3].Slot
-	require.NoError(t, f.db.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(floorSlot, 10),
-		nil,
-	))
-
-	// blocks[2] is strictly before the floor: a UTxO consumed between its
-	// slot and the floor may already be physically gone. Before the fix,
-	// this silently succeeded (returning a Tip whose live UTxO set was
-	// missing whatever cleanup had already deleted); it must now be
-	// refused before any mutation happens.
-	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		f.blocks[2],
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err,
-		"Truncate must reject a target older than the consumed-UTxO "+
-			"retention floor instead of silently proceeding -- routine "+
-			"cleanup may have already hard-deleted UTxOs TruncateAfterSlot "+
-			"promises to restore as unspent")
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-	require.Contains(t, err.Error(), "consumed-UTxO retention floor")
-	require.Equal(t, uint64(0), blocksRemoved)
-
-	// Nothing was mutated: the tip and every block must be untouched.
-	tip, tipErr := f.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
-
-	// blocks[3] is exactly at the floor and must be allowed (mirrors
-	// TestTruncateRejectsTargetBeforeMithrilBoundary's boundary case).
-	blocksRemoved, err = lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[3], 0, false, 0,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), blocksRemoved)
-}
-
-// TestTruncateAllowsDeepTargetInApiStorageMode verifies the consumed-UTxO
-// retention floor check does not apply in API storage mode, where
-// cleanupConsumedUtxos never hard-deletes spent rows at all (they are
-// retained indefinitely for historical queries) -- so a floor marker
-// existing at all in that mode would be surprising, but even if present it
-// must not block an otherwise-valid deep truncate.
-func TestTruncateAllowsDeepTargetInApiStorageMode(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     t.TempDir(),
-		StorageMode: types.StorageModeAPI,
-	})
-	require.NoError(t, err)
-
-	blocks := make([]models.Block, 0, 5)
-	for id := uint64(1); id <= 5; id++ {
-		block := testBlock(id, byte(id))
-		require.NoError(t, db.BlockCreate(block, nil))
-		blocks = append(blocks, block)
-	}
-	last := blocks[len(blocks)-1]
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
-		BlockNumber: last.Number,
-	}, nil))
-
-	// A floor deeper than every block in the chain: if the check applied
-	// here, every target below it (all of them) would be refused.
-	require.NoError(t, db.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(last.Slot+1000, 10),
-		nil,
-	))
-
-	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(), db, blocks[2], 0, false, 0,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), blocksRemoved)
 }
 
 // The resolvers only read, so every case shares one chain: a dense one for the
@@ -1176,8 +886,8 @@ func TestTruncateRejectsInvalidTargets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := lifecycle.Truncate(
-				context.Background(), f.db, tc.target, 0, false, 0,
-			)
+				context.Background(), f.db, tc.target, 0, f.set)
+
 			require.Error(t, err)
 			if !tc.aheadOfTip {
 				require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
@@ -1197,6 +907,45 @@ func withSlot(b models.Block, slot uint64) models.Block {
 	return b
 }
 
+// The marker is cleared after the rewind commits, so a stop between the two
+// leaves it over a truncate that already finished. Resuming it must complete
+// without changing the truncated chain.
+func TestTruncateResumesAMarkerLeftAfterTheRewindCommitted(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, f.set)
+	require.ErrorIs(t, err, context.Canceled)
+	marker, err := f.db.GetChainState(database.PendingTruncateKey, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, marker)
+
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, models.Block{}, 1, f.set)
+
+	require.NoError(t, err)
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.Nil(t, pending, "a finished truncate cleared its marker")
+
+	require.NoError(t, f.db.SetChainState(
+		database.PendingTruncateKey, marker, nil,
+	))
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, models.Block{}, 1, f.set)
+
+	require.NoError(t, err)
+	pending, err = lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.Nil(t, pending)
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].Slot, tip.Point.Slot)
+	_, err = f.db.BlockByIndex(f.blocks[1].ID, nil)
+	require.NoError(t, err)
+}
+
 // A pending-truncate marker is only trusted when it names a real block, so
 // both malformed shapes are rejected against one chain.
 func TestGetPendingTruncateRejectsInvalidMarker(t *testing.T) {
@@ -1214,7 +963,9 @@ func TestGetPendingTruncateRejectsInvalidMarker(t *testing.T) {
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
-			require.NoError(t, f.db.SetSyncState(pendingTruncateSyncKey, marker, nil))
+			require.NoError(t, f.db.SetChainState(
+				database.PendingTruncateKey, marker, nil,
+			))
 			pending, err := lifecycle.GetPendingTruncate(f.db)
 			require.Error(t, err)
 			require.Nil(t, pending)
@@ -1243,18 +994,18 @@ func TestTruncateLowersRollbackHighWater(t *testing.T) {
 			t.Parallel()
 			f := buildTestChain(t, 5)
 			if tc.seed != "" {
-				require.NoError(t, f.db.SetSyncState(
-					database.RollbackHighWaterSyncKey, tc.seed, nil,
+				require.NoError(t, f.db.SetChainState(
+					database.RollbackHighWaterKey, tc.seed, nil,
 				))
 			}
 
 			_, err := lifecycle.Truncate(
-				context.Background(), f.db, f.blocks[2], 0, false, 0,
-			)
+				context.Background(), f.db, f.blocks[2], 0, f.set)
+
 			require.NoError(t, err)
 
-			got, err := f.db.GetSyncState(
-				database.RollbackHighWaterSyncKey, nil,
+			got, err := f.db.GetChainState(
+				database.RollbackHighWaterKey, nil,
 			)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)

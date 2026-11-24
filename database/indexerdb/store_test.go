@@ -75,38 +75,31 @@ func TestTipRoundTrip(t *testing.T) {
 
 func TestSetTipWritesTheIndexerMetadataTipRow(t *testing.T) {
 	t.Parallel()
-	for _, role := range []string{database.RoleIndexer, ""} {
-		db, err := dbtest.NewDatabase(t, &database.Config{
-			DataDir:     t.TempDir(),
-			StorageMode: types.StorageModeAPI,
-			Role:        role,
-		})
-		require.NoError(t, err)
-		s, err := NewStore(db, db, 10)
-		require.NoError(t, err)
-		want := Tip{
-			Slot:        4242,
-			BlockNumber: 77,
-			Hash:        bytes.Repeat([]byte{0xde}, 32),
-		}
-		txn := db.Transaction(t.Context(), true)
-		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return s.SetTip(want, txn)
-		}))
-		got, err := db.GetTip(nil)
-		require.NoError(t, err)
-		if role == database.RoleIndexer {
-			require.Equal(t, want.Slot, got.Point.Slot)
-			require.Equal(t, want.Hash, got.Point.Hash)
-			require.Equal(t, want.BlockNumber, got.BlockNumber)
-		} else {
-			// The ledger's tip row is not the IndexerDB's to write.
-			require.Zero(t, got.BlockNumber)
-		}
-		indexed, err := s.Tip(nil)
-		require.NoError(t, err)
-		require.Equal(t, want, indexed)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeAPI,
+		Role:        database.RoleIndexer,
+	})
+	require.NoError(t, err)
+	s, err := NewStore(db, db, 10)
+	require.NoError(t, err)
+	want := Tip{
+		Slot:        4242,
+		BlockNumber: 77,
+		Hash:        bytes.Repeat([]byte{0xde}, 32),
 	}
+	txn := db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return s.SetTip(want, txn)
+	}))
+	got, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, want.Slot, got.Point.Slot)
+	require.Equal(t, want.Hash, got.Point.Hash)
+	require.Equal(t, want.BlockNumber, got.BlockNumber)
+	indexed, err := s.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, want, indexed)
 }
 
 func TestSetTipRefusesNoTransaction(t *testing.T) {

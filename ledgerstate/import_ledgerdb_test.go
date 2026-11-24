@@ -19,12 +19,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -59,49 +56,20 @@ func setRows(t *testing.T, set *utxoset.Set, dir string) []string {
 	return rows
 }
 
-// sqlLedgerRows counts the rows of every SQL table a ledger-state family
-// owns.
-func sqlLedgerRows(t *testing.T, db *database.Database) map[string]int {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	out := map[string]int{}
-	for _, f := range nodesettings.Families() {
-		for _, table := range statedrain.TableNames(f) {
-			var n int
-			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*) FROM "+table,
-			).Scan(&n))
-			if n > 0 {
-				out[table] = n
-			}
-		}
-	}
-	return out
-}
-
 // TestImportWritesEveryFamilyToTheLedgerDB requires an import to leave the
 // whole ledger state in the LedgerDB set, every family loaded and the import
-// finished, and none of it in the metadata store's ledger-state tables.
+// finished.
 func TestImportWritesEveryFamilyToTheLedgerDB(t *testing.T) {
 	t.Parallel()
 	db := newFixtureDB(t)
 	set := openFixtureSet(t)
-	// The schema seeds some singleton rows; the import must add none.
-	before := sqlLedgerRows(t, db)
 	require.NoError(t, importLedgerStateForTest(
 		t.Context(), richConfig(t, db, fixtureAnchorSlot, true, false, set),
 	))
-
-	require.Equal(t, before, sqlLedgerRows(t, db),
-		"the import must write no ledger state to the metadata store")
 	_, pending, err := set.ImportPending()
 	require.NoError(t, err)
 	require.False(t, pending)
 	for _, f := range nodesettings.Families() {
-		if statedrain.Tables(f) == nil {
-			continue
-		}
 		loaded, err := ledger.FamilyLoaded(f, set)
 		require.NoError(t, err, f.String())
 		require.True(t, loaded, "family %s", f)

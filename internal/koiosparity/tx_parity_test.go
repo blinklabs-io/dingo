@@ -712,7 +712,7 @@ func TestCacheTxInfoIgnoresRowsWithoutReferenceInputs(t *testing.T) {
 func TestDatabaseSourceTransactionSampleAPIModeWalksEpochBlocks(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: types.StorageModeAPI,
 	})
@@ -851,7 +851,7 @@ func sampleStoredTxParityBlock(
 ) []DingoTransaction {
 	t.Helper()
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: types.StorageModeAPI,
 	})
@@ -944,7 +944,7 @@ func storeTxParityBlock(
 	).ComputeOffsets(blockCbor, block)
 	require.NoError(t, err)
 	point := ocommon.NewPoint(txParityBlockSlot, hash)
-	acc := historyDB.NewValidatedBlockBatchAccumulator()
+	acc := historyDB.NewBatchAccumulator()
 	require.NotNil(t, acc)
 	txn := historyDB.Transaction(ctx, true)
 	for i, tx := range txs {

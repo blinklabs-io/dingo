@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -86,25 +85,12 @@ func newParameterChangeFixture(
 	require.NoError(t, err)
 
 	inputTxID := bytes.Repeat([]byte{0x94}, lcommon.Blake2b256Size)
-	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
-			TxId:       inputTxID,
-			OutputIdx:  0,
-			PaymentKey: paymentHash.Bytes(),
-			AddedSlot:  1,
-			Amount:     dbtypes.Uint64(parameterChangeInputValue),
-		}); err != nil {
-			return err
-		}
-		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-			OutputAddress: address,
-			OutputAmount:  parameterChangeInputValue,
-		})
-		if err != nil {
-			return err
-		}
-		return db.Blob().SetUtxo(txn.Blob(), inputTxID, 0, encoded)
-	}))
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  parameterChangeInputValue,
+	})
+	require.NoError(t, err)
+	fxSeedOutput(t, db, inputTxID, 0, 1, encoded)
 
 	rewardAccount := append(
 		[]byte{0xe0},

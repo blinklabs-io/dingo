@@ -140,6 +140,12 @@ func (m *splitMigration) migrateServer(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	stores.Metadata, err = internalplugins.ResolveMetadata(
+		ctx, sourceHost, sourceSelections, deps,
+	)
+	if err != nil {
+		return err
+	}
 	sourceCfg := m.databaseConfig("api", "")
 	sourceCfg.Role = database.RoleIndexer
 	source, err := database.New(ctx, sourceCfg, stores)

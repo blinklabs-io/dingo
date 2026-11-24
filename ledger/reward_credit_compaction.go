@@ -151,9 +151,8 @@ func (ls *LedgerState) compactRewardCreditChunk(
 	if ls.rewardCreditCompactionHook != nil {
 		ls.rewardCreditCompactionHook()
 	}
-	// Every write commit restamps the commit timestamps, and this job runs
-	// at start and after each credited round, so it opens a write
-	// transaction only when a round is due.
+	// This job runs at start and after each credited round, so it opens a
+	// write transaction only when a round is due.
 	due, err := ls.rewardCreditRoundDue(ctx)
 	if err != nil || !due {
 		return true, err

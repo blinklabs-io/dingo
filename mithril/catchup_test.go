@@ -25,8 +25,9 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -121,7 +122,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Number:   2,
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -148,7 +149,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		block, err := database.BlockByHash(context.Background(), db, wrongHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot)
-		status, err := db.GetSyncState("sync_status", nil)
+		status, err := db.GetChainState("sync_status", nil)
 		require.NoError(t, err)
 		require.Empty(t, status)
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -178,23 +179,22 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
-		require.NoError(t, db.SetEpoch(
-			1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
-			uint(shelley.EraShelley.Id), 1, 432000, nil,
-		))
-		require.NoError(t, db.Metadata().SaveRewardAdaPots(
-			&models.RewardAdaPots{
-				Epoch: 99, Treasury: 10, Reserves: 20,
-				Fees: 30, Rewards: 40, CapturedSlot: 1050,
-			}, nil,
-		))
 		require.NoError(t, dbtest.CloseDatabase(db))
+		// The set applied a block after the selected state.
+		set := newSyncTestSet(t)
+		statePoint := ocommon.NewPoint(1000, anchorHash)
+		seedRewardRepairSet(t, set, statePoint, nil, nil,
+			[]rewardRepairSetCommit{{
+				point:   ocommon.NewPoint(1050, bytes.Repeat([]byte{0x67}, 32)),
+				created: bytes.Repeat([]byte{0x68}, 32),
+			}},
+		)
 
 		result, err := Sync(context.Background(), SyncConfig{
-			UtxoSet:                 newSyncTestSet(t),
+			UtxoSet:                 set,
 			Network:                 "preprod",
 			DataDir:                 dataDir,
 			Backend:                 BackendV2,
@@ -222,15 +222,8 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
-		pots, err := db.Metadata().GetRewardAdaPots(99, nil)
-		require.NoError(t, err)
-		require.Nil(t, pots,
-			"repair must remove reward pots derived beyond the selected state")
-		epoch, err := db.GetEpoch(99, nil)
-		require.NoError(t, err)
-		require.Nil(t, epoch,
-			"repair must remove epoch state derived beyond the selected state")
 		require.NoError(t, dbtest.CloseDatabase(db))
+		requireSetHoldsOnlyState(t, set, statePoint)
 	})
 
 	t.Run("legacy reward repair preserves a verified local tail", func(t *testing.T) {
@@ -266,26 +259,25 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey, "1000", nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
-		require.NoError(t, db.SetEpoch(
-			1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
-			uint(shelley.EraShelley.Id), 1, 432000, nil,
-		))
-		require.NoError(t, db.Metadata().SaveRewardAdaPots(
-			&models.RewardAdaPots{
-				Epoch: 99, Treasury: 10, Reserves: 20,
-				Fees: 30, Rewards: 40, CapturedSlot: 1050,
-			}, nil,
-		))
 		require.NoError(t, dbtest.CloseDatabase(db))
+		// The set applied the local tail after the selected state.
+		set := newSyncTestSet(t)
+		statePoint := ocommon.NewPoint(1000, anchorHash)
+		seedRewardRepairSet(t, set, statePoint, nil, nil,
+			[]rewardRepairSetCommit{{
+				point:   ocommon.NewPoint(1100, localTailHash),
+				created: bytes.Repeat([]byte{0x69}, 32),
+			}},
+		)
 
 		result, err := Sync(context.Background(), SyncConfig{
-			UtxoSet:                 newSyncTestSet(t),
+			UtxoSet:                 set,
 			Network:                 "preprod",
 			DataDir:                 dataDir,
 			Backend:                 BackendV2,
@@ -322,15 +314,8 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.Len(t, recent, 1)
 		require.EqualValues(t, 1100, recent[0].Slot,
 			"the retained blob tail must remain the node's replay frontier")
-		pots, err := db.Metadata().GetRewardAdaPots(99, nil)
-		require.NoError(t, err)
-		require.Nil(t, pots,
-			"reward pots derived from the preserved tail must be discarded")
-		epoch, err := db.GetEpoch(99, nil)
-		require.NoError(t, err)
-		require.Nil(t, epoch,
-			"epoch state derived from the preserved tail must be discarded")
 		require.NoError(t, dbtest.CloseDatabase(db))
+		requireSetHoldsOnlyState(t, set, statePoint)
 	})
 
 	t.Run("legacy reward repair refuses to rewind the stable ledger anchor", func(t *testing.T) {
@@ -358,13 +343,13 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey, "1050", nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerHashSyncKey, hex.EncodeToString(stableHash), nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -394,10 +379,10 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			_, err := database.BlockByHash(context.Background(), db, hash)
 			require.NoError(t, err, "the database must remain untouched before the trust check")
 		}
-		status, err := db.GetSyncState("sync_status", nil)
+		status, err := db.GetChainState("sync_status", nil)
 		require.NoError(t, err)
 		require.Empty(t, status)
-		stableSlot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+		stableSlot, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 		require.NoError(t, err)
 		require.Equal(t, "1050", stableSlot)
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -427,13 +412,13 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairActiveKey, "1", nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			"sync_status", syncStatusInProgress, nil,
 		))
 		require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
@@ -445,9 +430,19 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			CertificateHash:     fixture.artifact.CertificateHash,
 		}))
 		require.NoError(t, dbtest.CloseDatabase(db))
+		// The interrupted run stopped before its catch-up load, so the set
+		// still holds the block it applied after the pinned state.
+		set := newSyncTestSet(t)
+		statePoint := ocommon.NewPoint(1000, anchorHash)
+		seedRewardRepairSet(t, set, statePoint, nil, nil,
+			[]rewardRepairSetCommit{{
+				point:   ocommon.NewPoint(1050, bytes.Repeat([]byte{0x6b}, 32)),
+				created: bytes.Repeat([]byte{0x6c}, 32),
+			}},
+		)
 
 		result, err := Sync(context.Background(), SyncConfig{
-			UtxoSet:                 newSyncTestSet(t),
+			UtxoSet:                 set,
 			Network:                 "preprod",
 			DataDir:                 dataDir,
 			Backend:                 BackendV2,
@@ -472,6 +467,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, pending)
 		require.NoError(t, dbtest.CloseDatabase(db))
+		requireSetHoldsOnlyState(t, set, statePoint)
 	})
 }
 
@@ -550,52 +546,42 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 			require.NoError(t, db.BlockCreate(block, nil))
 		}
 	}
-	utxoTxn := db.Transaction(t.Context(), true)
-	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
-		TxId: txID, AddedSlot: 900, Amount: 42,
-	}))
-	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
-		utxoTxn.Metadata(),
-		[]types.UtxoKey{{TxId: txID, OutputIdx: 0}},
-		1000,
-	))
-	require.NoError(t, utxoTxn.Commit())
-	spent, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, spent)
-	require.EqualValues(t, 1000, spent.DeletedSlot,
-		"fixture must model a snapshot-live output spent at the certified tip")
+	// The set holds the snapshot's output and applied the blocks after the
+	// state: the certified block spends that output and adds another, and the
+	// local tail adds more.
+	set := newSyncTestSet(t)
+	statePoint := ocommon.NewPoint(999, stateHash)
+	aboveState := []rewardRepairSetCommit{{
+		point:   ocommon.NewPoint(1000, certifiedHash),
+		spent:   []models.UtxoId{{Hash: txID, Idx: 0}},
+		created: bytes.Repeat([]byte{0x63}, 32),
+	}}
+	if withLocalTail {
+		aboveState = append(aboveState, rewardRepairSetCommit{
+			point:   ocommon.NewPoint(block1050.Slot, block1050.Hash),
+			created: bytes.Repeat([]byte{0x64}, 32),
+		}, rewardRepairSetCommit{
+			point:   ocommon.NewPoint(block1100.Slot, block1100.Hash),
+			created: bytes.Repeat([]byte{0x65}, 32),
+		})
+	}
+	seedRewardRepairSet(
+		t, set, statePoint, txID, txOutCBOR, aboveState,
+	)
 	require.NoError(t, setImmutableImportMarker(db, 0))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey, "999", nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerHashSyncKey, hex.EncodeToString(stateHash), nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		RewardStateRepairPendingKey, "1", nil,
-	))
-	require.NoError(t, db.SetEpoch(
-		1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
-		uint(shelley.EraShelley.Id), 1, 432000, nil,
-	))
-	if !withLocalTail {
-		require.NoError(t, db.SetEpoch(
-			950, 98, []byte{1}, []byte{2}, []byte{3}, nil,
-			uint(shelley.EraShelley.Id), 1, 432000, nil,
-		))
-	}
-	require.NoError(t, db.Metadata().SaveRewardAdaPots(
-		&models.RewardAdaPots{
-			Epoch: 99, Treasury: 10, Reserves: 20,
-			Fees: 30, Rewards: 40, CapturedSlot: 1050,
-		}, nil,
 	))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	result, err := Sync(context.Background(), SyncConfig{
-		UtxoSet:                 newSyncTestSet(t),
+		UtxoSet:                 set,
 		Network:                 "preprod",
 		DataDir:                 dataDir,
 		Backend:                 BackendV2,
@@ -625,19 +611,9 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 		require.EqualValues(t, 1100, retained.Slot,
 			"canonical blocks after the selected state must remain for replay")
 	}
-	pots, err := db.Metadata().GetRewardAdaPots(99, nil)
-	require.NoError(t, err)
-	require.Nil(t, pots,
-		"reward pots after a state below the certified tip must be removed")
-	epoch, err := db.GetEpoch(99, nil)
-	require.NoError(t, err)
-	require.Nil(t, epoch,
-		"epochs after a state below the certified tip must be removed")
-	utxo, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, utxo)
-	require.Zero(t, utxo.DeletedSlot,
-		"repair below the certified tip must unspend snapshot-live outputs")
+	requireSetHoldsOnlyState(
+		t, set, statePoint, models.UtxoId{Hash: txID, Idx: 0},
+	)
 }
 
 func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
@@ -700,37 +676,31 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	} {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
-	utxoTxn := db.Transaction(t.Context(), true)
-	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
-		TxId:      txID,
-		AddedSlot: 1100,
-	}))
-	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
-		utxoTxn.Metadata(),
-		[]types.UtxoKey{{TxId: txID, OutputIdx: 0}},
-		1200,
-	))
-	require.NoError(t, utxoTxn.Commit())
-	spent, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, spent)
-	require.EqualValues(t, 1200, spent.DeletedSlot,
-		"fixture must model the snapshot output spent by a later local block")
+	// The set applied a block after the state that spent the snapshot's
+	// output.
+	set := newSyncTestSet(t)
+	statePoint := ocommon.NewPoint(block1100.Slot, block1100.Hash)
+	seedRewardRepairSet(
+		t, set, statePoint, txID, txOutCBOR,
+		[]rewardRepairSetCommit{{
+			point: ocommon.NewPoint(1200, bytes.Repeat([]byte{0x66}, 32)),
+			spent: []models.UtxoId{{Hash: txID, Idx: 0}},
+		}},
+	)
 	require.NoError(t, setImmutableImportMarker(db, 0))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey, "1000", nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerHashSyncKey, hex.EncodeToString(certifiedHash), nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		RewardStateRepairPendingKey, "1", nil,
 	))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	_, err = Sync(context.Background(), SyncConfig{
-		UtxoSet: newSyncTestSet(t),
+		UtxoSet: set,
 		Network: "preprod",
 		DataDir: dataDir,
 		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
@@ -748,22 +718,9 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	db, err = dbtest.NewDatabase(t, &database.Config{
-		DataDir:     dataDir,
-		StorageMode: "core",
-		Logger:      discard,
-	})
-	require.NoError(t, err)
-	defer dbtest.CloseDatabase(db)
-	utxo, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, utxo)
-	require.Zero(t, utxo.DeletedSlot,
-		"Sync must restore snapshot-live outputs spent after its ledger state")
-	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
-	require.NoError(t, err)
-	require.True(t, exists,
-		"ordinary replay must see the snapshot output as live")
+	requireSetHoldsOnlyState(
+		t, set, statePoint, models.UtxoId{Hash: txID, Idx: 0},
+	)
 }
 
 // TestSyncRewardRepairKeepsSignedChunkPastLocalTip covers a reward repair
@@ -816,13 +773,13 @@ func TestSyncRewardRepairKeepsSignedChunkPastLocalTip(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 	require.NoError(t, setImmutableImportMarker(db, 0))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerSlotSyncKey, "1000", nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerHashSyncKey, hex.EncodeToString(certifiedHash), nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		RewardStateRepairPendingKey, "1", nil,
 	))
 	require.NoError(t, dbtest.CloseDatabase(db))
@@ -859,6 +816,103 @@ func TestSyncRewardRepairKeepsSignedChunkPastLocalTip(t *testing.T) {
 	}
 }
 
+// TestSyncRewardRepairWaitsForAStateItsSetReaches covers a reward repair
+// whose LedgerDB set was built past the selected state with no journal back
+// to it, as the v0.94.2 migration leaves one. The repair must wait for a later
+// artifact before it writes anything, not stop the node on every resume.
+func TestSyncRewardRepairWaitsForAStateItsSetReaches(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber: 0,
+		validImmutable:      true,
+		validLedgerState:    true,
+	})
+	_, anchorHash := validImmutableFiles(t, 1000)
+	localTailHash := bytes.Repeat([]byte{0xcc}, 32)
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	for _, block := range []models.Block{
+		{
+			Slot: 1000, Hash: anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32), Cbor: []byte{0x80},
+			Number: 2, Type: uint(shelley.BlockTypeShelley),
+		},
+		{
+			Slot: 1100, Hash: localTailHash, PrevHash: anchorHash,
+			Cbor: []byte{0x80}, Number: 3,
+			Type: uint(shelley.BlockTypeShelley),
+		},
+	} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	require.NoError(t, setImmutableImportMarker(db, 0))
+	require.NoError(t, db.SetChainState(
+		mithrilLedgerSlotSyncKey, "1000", nil,
+	))
+	require.NoError(t, db.SetChainState(
+		RewardStateRepairPendingKey, "1", nil,
+	))
+	closing := db
+	db = nil
+	require.NoError(t, dbtest.CloseDatabase(closing))
+
+	setTip := ocommon.NewPoint(1100, localTailHash)
+	set := newSyncTestSet(t)
+	require.NoError(t, set.LoadUtxoSet(setTip,
+		func(put func([]byte, uint32, []byte) error) error {
+			return put(bytes.Repeat([]byte{0x6a}, 32), 0, []byte{0x80})
+		},
+	))
+	require.NoError(t, set.FinishImport())
+
+	_, err = Sync(context.Background(), SyncConfig{
+		UtxoSet:                 set,
+		Network:                 "preprod",
+		DataDir:                 dataDir,
+		Backend:                 BackendV2,
+		PinnedDigest:            "original-bootstrap-pin",
+		AggregatorURL:           fixture.server.URL,
+		AllowInsecureHTTP:       true,
+		StoragePlugins:          testStoragePlugins(),
+		DatabaseWorkers:         1,
+		Logger:                  discard,
+		RepairLegacyRewardState: true,
+	})
+	require.ErrorIs(t, err, ErrRewardStateRepairWaitingForSnapshot)
+
+	tip, ok, err := set.Tip()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, setTip, tip, "the set is untouched")
+	n, err := set.Count()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n, "the set is untouched")
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closing := db
+		db = nil
+		require.NoError(t, dbtest.CloseDatabase(closing))
+	})
+	status, err := db.GetChainState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "nothing marks the database mid-repair")
+	pending, err := RewardStateRepairPending(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+}
+
 func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) {
 	t.Parallel()
 
@@ -879,7 +933,7 @@ func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) 
 	for _, block := range []models.Block{canonical, sibling, localTip} {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "1000", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "1000", nil))
 
 	preserved, err := verifyRewardRepairLocalTail(
 		context.Background(),
@@ -959,10 +1013,10 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 			Logger:      discard,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			"sync_status", syncStatusInProgress, nil,
 		))
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -1007,19 +1061,19 @@ func TestDecideCatchUp(t *testing.T) {
 	) {
 		t.Helper()
 		if status == "" {
-			require.NoError(t, db.DeleteSyncState("sync_status", nil))
+			require.NoError(t, db.DeleteChainState("sync_status", nil))
 		} else {
-			require.NoError(t, db.SetSyncState("sync_status", status, nil))
+			require.NoError(t, db.SetChainState("sync_status", status, nil))
 		}
 		if hasMarker {
 			require.NoError(t, setImmutableImportMarker(db, marker))
 		} else {
-			require.NoError(t, db.DeleteSyncState(syncKeyImmutableMax, nil))
+			require.NoError(t, db.DeleteChainState(syncKeyImmutableMax, nil))
 		}
-		require.NoError(t, db.DeleteSyncState(
+		require.NoError(t, db.DeleteChainState(
 			RewardStateRepairPendingKey, nil,
 		))
-		require.NoError(t, db.DeleteSyncState(syncKeyCatchUpActive, nil))
+		require.NoError(t, db.DeleteChainState(syncKeyCatchUpActive, nil))
 	}
 	modeOf := func(t *testing.T) syncMode {
 		t.Helper()
@@ -1433,4 +1487,88 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "diverges")
 	})
+}
+
+type rewardRepairSetCommit struct {
+	point   ocommon.Point
+	spent   []models.UtxoId
+	created []byte
+}
+
+// seedRewardRepairSet leaves set as a node's LedgerDB set that holds the
+// output txID#0, when txID is set, at state and then applied commits, each
+// its own journaled block with a block nonce.
+func seedRewardRepairSet(
+	t *testing.T,
+	set *utxoset.Set,
+	state ocommon.Point,
+	txID, outCBOR []byte,
+	commits []rewardRepairSetCommit,
+) {
+	t.Helper()
+	if outCBOR == nil {
+		outCBOR = []byte{0x80}
+	}
+	require.NoError(t, set.LoadUtxoSet(
+		ocommon.NewPoint(state.Slot-1, bytes.Repeat([]byte{0x5f}, 32)),
+		func(put func([]byte, uint32, []byte) error) error {
+			if txID == nil {
+				return nil
+			}
+			return put(txID, 0, outCBOR)
+		},
+	))
+	require.NoError(t, set.FinishImport())
+	commits = append([]rewardRepairSetCommit{{point: state}}, commits...)
+	for _, c := range commits {
+		tip := c.point
+		evt := dledger.UtxoEvent{Point: tip, Removed: c.spent}
+		if c.created != nil {
+			evt.Added = []dledger.UtxoOutput{{
+				Ref: models.UtxoId{Hash: c.created}, Cbor: outCBOR,
+			}}
+		}
+		require.NoError(t, set.ApplyLedgerChanges(&tip, dledger.LedgerChanges{
+			Utxo: []dledger.UtxoEvent{evt},
+			Nonces: []models.BlockNonce{{
+				Slot: tip.Slot, Hash: tip.Hash,
+				Nonce: bytes.Repeat([]byte{byte(tip.Slot)}, 32),
+			}},
+		}))
+	}
+	tip, ok, err := set.Tip()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Greater(t, tip.Slot, state.Slot,
+		"fixture must leave the set past the state")
+}
+
+// requireSetHoldsOnlyState requires set to hold exactly the artifact's state
+// at state: that tip, the artifact's outputs live, and no block nonce
+// recorded after the state's slot.
+func requireSetHoldsOnlyState(
+	t *testing.T,
+	set *utxoset.Set,
+	state ocommon.Point,
+	live ...models.UtxoId,
+) {
+	t.Helper()
+	tip, ok, err := set.Tip()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, state.Slot, tip.Slot)
+	require.Equal(t, state.Hash, tip.Hash)
+	n, err := set.Count()
+	require.NoError(t, err)
+	require.EqualValues(t, len(live), n,
+		"the set holds only the artifact's outputs")
+	for _, ref := range live {
+		_, found, err := set.Get(ref.Hash, ref.Idx)
+		require.NoError(t, err)
+		require.True(t, found,
+			"an artifact output spent after the state is live again")
+	}
+	above, err := set.BlockNoncesInSlotRange(state.Slot+1, ^uint64(0))
+	require.NoError(t, err)
+	require.Empty(t, above, "no block nonce is recorded above the state")
 }

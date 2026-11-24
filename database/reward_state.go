@@ -16,10 +16,10 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -129,11 +129,6 @@ func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
 
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.
-//
-// A drained reward-blocks-fees family has no imported block count rows, and a
-// drained reward-inputs family none of the pots, snapshot, seed failure, pool
-// and stake input rows, and a drained reward-outputs family none of the pool
-// and account outputs or credited rounds, so their deletes are skipped.
 func (d *Database) DeleteRewardStateAfterSlot(
 	slot uint64,
 	txn *Txn,
@@ -142,21 +137,10 @@ func (d *Database) DeleteRewardStateAfterSlot(
 	if txn != nil {
 		store, meta = txn.db.metadata, txn.Metadata()
 	}
-	var err error
-	skips := types.RewardStateSkips{
-		BlockCounts: d.FamilyDrained(nodesettings.FamilyRewardBlocksFees),
-		Inputs:      d.FamilyDrained(nodesettings.FamilyRewardInputs),
-		Outputs:     d.FamilyDrained(nodesettings.FamilyRewardOutputs),
+	if store == nil {
+		return fmt.Errorf("%w: DeleteRewardStateAfterSlot", ErrNoMetadataStore)
 	}
-	if skips != (types.RewardStateSkips{}) {
-		skipper, ok := store.(metadata.RewardStateRollbackSkipper)
-		if !ok {
-			return ErrCannotDrain
-		}
-		err = skipper.DeleteRewardStateAfterSlotSkipping(slot, skips, meta)
-	} else {
-		err = store.DeleteRewardStateAfterSlot(slot, meta)
-	}
+	err := store.DeleteRewardStateAfterSlot(slot, meta)
 	if err != nil && txn != nil {
 		return fmt.Errorf("delete reward state after slot %d: %w", slot, err)
 	}
@@ -179,6 +163,9 @@ func (d *Database) GetRewardAccountOutputsByCredential(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetRewardAccountOutputsByCredential"); err != nil {
+		return nil, err
 	}
 	rows, err := d.metadata.GetRewardAccountOutputsByCredential(
 		credentialTag,
@@ -209,6 +196,9 @@ func (d *Database) CountRewardAccountOutputsByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("CountRewardAccountOutputsByCredential"); err != nil {
+		return 0, err
+	}
 	count, err := d.metadata.CountRewardAccountOutputsByCredential(
 		credentialTag,
 		stakingKey,
@@ -224,8 +214,7 @@ func (d *Database) CountRewardAccountOutputsByCredential(
 }
 
 // DeleteRewardAccountOutputsBeforeEpoch prunes the reward account outputs
-// below epoch and leaves the stake inputs, for a database whose reward-inputs
-// family is drained.
+// below epoch and leaves the stake inputs.
 func (d *Database) DeleteRewardAccountOutputsBeforeEpoch(
 	ctx context.Context,
 	epoch uint64,
@@ -237,7 +226,7 @@ func (d *Database) DeleteRewardAccountOutputsBeforeEpoch(
 	}
 	pruner, ok := store.(metadata.RewardOutputPruner)
 	if !ok {
-		return ErrCannotDrain
+		return errors.New("the metadata store cannot prune reward outputs alone")
 	}
 	return pruner.DeleteRewardAccountOutputsBeforeEpoch(ctx, epoch, meta)
 }

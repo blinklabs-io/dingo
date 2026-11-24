@@ -451,11 +451,10 @@ type ImportConfig struct {
 	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
 	rewardCreditFoldBatchSize int
 	// UtxoSet is the live UTxO set, the only copy of it, and is required. It
-	// receives the snapshot's UTxO set: the import marks the database
-	// (database.UtxoSetOnlySyncKey), writes no utxo rows or output CBOR to
-	// the metadata and blob stores, and reads UTxO stake from the set. A
-	// Reconcile import keeps the set's older ledger-state families when the
-	// set is also a CatchUpLoader.
+	// receives the snapshot's UTxO set: the import writes no utxo rows or
+	// output CBOR to the metadata and blob stores, and reads UTxO stake from
+	// the set. A Reconcile import keeps the set's older ledger-state families
+	// when the set is also a CatchUpLoader.
 	UtxoSet UtxoSetLoader
 	// LedgerDB is the LedgerDB the import writes the snapshot's ledger state
 	// through, over UtxoSet. It is required.
@@ -557,6 +556,9 @@ type CatchUpLoader interface {
 		point ocommon.Point,
 		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
 	) error
+	// CatchUpReaches reports whether LoadUtxoSetCatchUp can load a snapshot
+	// at point, without changing the set.
+	CatchUpReaches(point ocommon.Point) (bool, error)
 }
 
 func requiredImportEraParams(
@@ -762,11 +764,6 @@ func ImportLedgerState(
 		return errors.New(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
-	}
-	// Marked only once the snapshot is known valid: the mark pins the
-	// database to the live UTxO set.
-	if err := markUtxoSetOnlyImport(ctx, cfg); err != nil {
-		return err
 	}
 	if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
 		return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
@@ -1145,9 +1142,8 @@ func setCheckpoint(_ context.Context, cfg ImportConfig, phase string) error {
 	if cfg.ImportKey == "" {
 		return nil
 	}
-	if err := cfg.Database.Metadata().SetImportCheckpoint(
-		&models.ImportCheckpoint{ImportKey: cfg.ImportKey, Phase: phase},
-		nil,
+	if err := cfg.Database.SetImportCheckpoint(
+		cfg.ImportKey, phase,
 	); err != nil {
 		return fmt.Errorf("saving checkpoint for phase %q: %w", phase, err)
 	}
@@ -1335,38 +1331,6 @@ func loadUtxoSet(
 		"component", "ledgerstate",
 		"count", total,
 	)
-	return nil
-}
-
-// markUtxoSetOnlyImport records that the database keeps its UTxO set only in
-// the live UTxO set, unless it already does. An unmarked database must hold
-// no live utxo rows; a snapshot restore may already have stored its blocks.
-func markUtxoSetOnlyImport(ctx context.Context, cfg ImportConfig) error {
-	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	if marked != "" {
-		return nil
-	}
-	errHasRows := errors.New("has utxo rows")
-	err = cfg.Database.IterateLiveUtxos(
-		ctx, nil,
-		func(*models.Utxo) error { return errHasRows },
-	)
-	if err != nil && !errors.Is(err, errHasRows) {
-		return fmt.Errorf("look for utxo rows: %w", err)
-	}
-	if err != nil {
-		return errors.New(
-			"a live-UTxO-set-only import needs a database without a metadata UTxO set",
-		)
-	}
-	if err := cfg.Database.SetSyncState(
-		database.UtxoSetOnlySyncKey, "1", nil,
-	); err != nil {
-		return fmt.Errorf("record UTxO set mode: %w", err)
-	}
 	return nil
 }
 

@@ -98,7 +98,8 @@ func seedAPIStore(
 				Slot: b.SlotNumber(), Hash: b.Hash().Bytes(),
 			}
 		}
-		require.NoError(t, db.SetTip(ochainsync.Tip{
+		// A released store keeps the ledger tip in its metadata store.
+		require.NoError(t, db.Metadata().SetTip(ochainsync.Tip{
 			Point: last, BlockNumber: uint64(numBlocks),
 		}, nil))
 	}
@@ -154,7 +155,7 @@ func requireSplitStores(
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close(context.Background()) })
-	gates, err := rt.Database.Metadata().GetNodeSettingsGates(t.Context())
+	gates, err := rt.Database.NodeSettingsGates(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 	require.Equal(t, "split", gates["indexer_layout"])

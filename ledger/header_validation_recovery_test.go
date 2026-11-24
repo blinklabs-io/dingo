@@ -142,7 +142,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -230,7 +230,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -323,7 +323,7 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -415,7 +415,7 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -567,7 +567,7 @@ func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 		Point:       makeTestPoint(ledgerTipBlock),
 		BlockNumber: ledgerTipBlock.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -679,7 +679,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 		Point:       makeTestPoint(boundary),
 		BlockNumber: boundary.Number,
 	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	fxSetLedgerTip(t, db, ledgerTip)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
@@ -881,7 +881,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 				Point:       makeTestPoint(blocks[2]),
 				BlockNumber: blocks[2].Number,
 			}
-			require.NoError(t, db.SetTip(ledgerTip, nil))
+			fxSetLedgerTip(t, db, ledgerTip)
 
 			bus := newTestEventBus(t, nil)
 			t.Cleanup(bus.Close)

@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -202,7 +201,6 @@ func newWrappedBlobTestDB(
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
 	require.NoError(t, chunkfile.RegisterProvider(host))
-	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
@@ -211,17 +209,10 @@ func newWrappedBlobTestDB(
 	)
 	require.NoError(t, err)
 
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
 	db, err := database.New(
 		context.Background(),
 		config,
-		database.Stores{Blob: wrap(realBlob), Metadata: metadataStore},
+		database.Stores{Blob: wrap(realBlob)},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -564,13 +555,6 @@ func (c *cloudLikeBlobStore) NewIterator(
 	opts types.BlobIteratorOptions,
 ) types.BlobIterator {
 	return c.BlobStore.NewIterator(unwrapCloudLikeTxn(txn), opts)
-}
-
-func (c *cloudLikeBlobStore) SetCommitTimestamp(
-	ts int64,
-	txn types.Txn,
-) error {
-	return c.BlobStore.SetCommitTimestamp(ts, unwrapCloudLikeTxn(txn))
 }
 
 func (c *cloudLikeBlobStore) SetBlock(
@@ -916,20 +900,83 @@ func TestDeleteBlocksAfterLeavesBlocksUntouched(t *testing.T) {
 	})
 	t.Run("cancellation mid-batch rolls the batch back", func(t *testing.T) {
 		ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 1}
-		blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+			ctx,
+			db,
+			0,
+			numBlocks,
+			0,
+		)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Zero(
 			t, blocksDeleted,
 			"a rolled-back batch must not be counted as deleted",
 		)
-		requireAllPresent(t, "the whole batch must roll back once cancellation is noticed")
+		requireAllPresent(
+			t,
+			"the whole batch must roll back once cancellation is noticed",
+		)
 	})
 	t.Run("already canceled context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+			ctx,
+			db,
+			0,
+			numBlocks,
+			0,
+		)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Zero(t, blocksDeleted)
 		requireAllPresent(t, "the context was canceled before any work")
 	})
+}
+
+// A truncate that runs while a rollback intent is pending deletes blocks the
+// interrupted rollback still has to tell subscribers about. The bodies the
+// intent names stay readable as rolled-back blocks; every other deleted block
+// is gone.
+func TestDeleteBlocksAfterKeepsBodiesAPendingRollbackIntentNames(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := make([]models.Block, 6)
+	for id := uint64(1); id <= 5; id++ {
+		blocks[id] = testBlock(id, byte(id))
+		blocks[id].Cbor = []byte{0x81, byte(id)}
+		require.NoError(t, db.BlockCreate(blocks[id], nil))
+	}
+	named := func(b models.Block) database.RollbackIntentBlock {
+		return database.RollbackIntentBlock{
+			Hash: b.Hash, ID: b.ID, Slot: b.Slot, Number: b.Number,
+			Type: b.Type,
+		}
+	}
+	require.NoError(t, db.SetRollbackIntent(database.RollbackIntent{
+		Point: ocommon.Point{Slot: blocks[3].Slot, Hash: blocks[3].Hash},
+		Blocks: []database.RollbackIntentBlock{
+			named(blocks[5]), named(blocks[4]),
+		},
+	}))
+
+	deleted, err := lifecycle.DeleteBlocksAfter(
+		context.Background(), db, 2, 5, 0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), deleted)
+
+	for id := uint64(3); id <= 5; id++ {
+		_, err := db.BlockByIndex(id, nil)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+	}
+	for id := uint64(4); id <= 5; id++ {
+		body, found, err := db.RolledBackBlock(blocks[id].Slot, blocks[id].Hash)
+		require.NoError(t, err)
+		require.Truef(t, found, "block %d named by the intent was lost", id)
+		require.Equal(t, blocks[id].Cbor, body)
+	}
+	_, found, err := db.RolledBackBlock(blocks[3].Slot, blocks[3].Hash)
+	require.NoError(t, err)
+	require.False(t, found, "a block no intent names was kept")
 }

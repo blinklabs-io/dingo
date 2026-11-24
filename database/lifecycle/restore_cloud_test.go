@@ -59,7 +59,7 @@ func restoreFrom(
 	return target, err
 }
 
-// A restore fetches the manifest, then only the two backup files it declares,
+// A restore fetches the manifest, then only the backup files it declares,
 // each bounded by the size the manifest declares; other objects under the
 // prefix are never requested.
 func TestRestoreFromCloudFetchesOnlyDeclaredObjects(t *testing.T) {
@@ -84,10 +84,10 @@ func TestRestoreFromCloudFetchesOnlyDeclaredObjects(t *testing.T) {
 	require.Equal(t, []string{
 		lifecycle.ManifestFileName,
 		lifecycle.BlobBackupFileName,
-		lifecycle.MetadataBackupFileName,
+		lifecycle.UtxoSetBackupFileName,
 	}, names)
 	require.Equal(t, m.BlobBytes, sizes[lifecycle.BlobBackupFileName])
-	require.Equal(t, m.MetadataBytes, sizes[lifecycle.MetadataBackupFileName])
+	require.Equal(t, m.UtxoSetBytes, sizes[lifecycle.UtxoSetBackupFileName])
 }
 
 // A payload edited in place, or cut short, is refused before the target is
@@ -101,8 +101,8 @@ func TestRestoreRejectsTamperedOrTruncatedPayload(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "tampered metadata",
-			file: lifecycle.MetadataBackupFileName,
+			name: "tampered set",
+			file: lifecycle.UtxoSetBackupFileName,
 			mutate: func(b []byte) []byte {
 				b[len(b)/2] ^= 0xFF
 				return b

@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -80,9 +79,9 @@ func requireUtxoWholeMap(
 	return ret
 }
 
-// seedBabbageUtxo inserts a Utxo metadata row plus a raw-CBOR blob entry for
-// a Babbage-format output at addr, so the iterator's loadCbor path resolves
-// a real decoded output on each row.
+// seedBabbageUtxo makes a Babbage-format output at addr live in db's
+// LedgerDB set, with its body in the blob store, so a read resolves a real
+// decoded output.
 func seedBabbageUtxo(
 	t *testing.T,
 	db *database.Database,
@@ -100,20 +99,30 @@ func seedBabbageUtxo(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	address, err := addr.Bytes()
+	fxSeedOutput(t, db, txId, outputIdx, 100, cborBytes)
+	return txId
+}
+
+// seedBabbageUtxoCbor stores the body seedBabbageUtxo's output has, for a
+// test that commits the output's lifecycle to the set itself.
+func seedBabbageUtxoCbor(
+	t *testing.T,
+	db *database.Database,
+	txIdSeed byte,
+	outputIdx uint32,
+	addr lcommon.Address,
+	amount uint64,
+) []byte {
+	t.Helper()
+	cborBytes, err := cbor.Encode(&babbage.BabbageTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: amount},
+	})
 	require.NoError(t, err)
-	txn := db.Transaction(context.Background(), true)
-	defer txn.Release()
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      txId,
-		OutputIdx: outputIdx,
-		AddedSlot: 100,
-		Address:   address,
+	txId := bytes.Repeat([]byte{txIdSeed}, 32)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txId, outputIdx, cborBytes)
 	}))
-	blob := db.Blob()
-	require.NotNil(t, blob)
-	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, outputIdx, cborBytes))
-	require.NoError(t, txn.Commit())
 	return txId
 }
 
@@ -308,15 +317,7 @@ func TestQueryShelleyUtxoWhole_ByronOutputUsesShelleyEncoding(t *testing.T) {
 	)
 	require.NoError(t, err)
 	txID := bytes.Repeat([]byte{0xB1}, 32)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      txID,
-		OutputIdx: 0,
-		AddedSlot: 100,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txID, 0, byronOut))
-	require.NoError(t, txn.Commit())
-	txn.Release()
+	fxSeedOutput(t, db, txID, 0, 100, byronOut)
 
 	ls := newPoolDistr2Ledger(t, db)
 	result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
@@ -601,16 +602,10 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 	txIdOld := seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
 
 	newCbor := queryTestOutputCBOR(t, db, txIdOld, 0)
-	txn := db.Transaction(context.Background(), true)
 	txIdNew := bytes.Repeat([]byte{0xB2}, 32)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      txIdNew,
-		OutputIdx: 0,
-		AddedSlot: 500,
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txIdNew, 0, newCbor)
 	}))
-	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txIdNew, 0, newCbor))
-	require.NoError(t, txn.Commit())
-	txn.Release()
 
 	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
 		100: {{Added: []UtxoOutput{{
@@ -667,13 +662,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 	)
 	require.NoError(t, err)
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
-	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC1, 0, addr, 5_000_000)
 
 	ls := newPoolDistr2Ledger(t, db)
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)

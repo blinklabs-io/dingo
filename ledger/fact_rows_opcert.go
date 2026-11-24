@@ -28,8 +28,7 @@ var _ metadata.AnchorOpCertSource = (*LedgerState)(nil)
 // AnchorOpCertCounters returns the op-cert counters a snapshot import
 // established at anchor: the counter of each pool whose latest observation as
 // of anchor is at anchor itself, since an import writes them there and no
-// block is applied at or below it. When the op-cert family is drained they
-// come from the live UTxO set, which keeps each pool's observations only from
+// block is applied at or below it. They come from the live UTxO set, which keeps each pool's observations only from
 // its load and within its journal; a pool whose observation at the anchor it
 // no longer holds is left out and logged, as the metadata store it replaced
 // would have held it.
@@ -39,7 +38,7 @@ func (ls *LedgerState) AnchorOpCertCounters(
 ) ([]metadata.OpCertCounter, error) {
 	r := ls.opCertReader(nil)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyOpCerts)
+		return nil, ledgerStateUnserved(nodesettings.FamilyOpCerts)
 	}
 	pools, err := ls.opCertPools(r, nil)
 	if err != nil {

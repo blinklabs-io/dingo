@@ -25,8 +25,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/ledger"
 )
 
@@ -59,7 +57,7 @@ func stateMarkRows(lc ledger.LedgerChanges) []badgerutxo.RowPut {
 // keeps the family a read asked it for, so it has no rows of it for a state
 // mark load to take over.
 func storeKeepsNone(err error) bool {
-	return errors.Is(err, nodesettings.ErrFamilyDrained)
+	return errors.Is(err, database.ErrNoMetadataStore)
 }
 
 // ensureInactivity loads the epoch the delegator inactivity activation ran
@@ -161,7 +159,7 @@ func (s *Set) ensureRatifyPending(
 	}
 	txn := ldb.Begin(ctx, false)
 	defer txn.Release()
-	raw, err := ldb.GetSyncState(statedrain.PendingRatificationSyncKey, txn)
+	raw, err := ldb.GetSyncState(database.PendingRatificationSyncKey, txn)
 	if err != nil && !storeKeepsNone(err) {
 		return fmt.Errorf("utxoset: read the pending ratification: %w", err)
 	}

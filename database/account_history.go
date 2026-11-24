@@ -37,6 +37,9 @@ func (d *Database) GetAccountDelegationHistoryByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetAccountDelegationHistoryByCredential"); err != nil {
+		return nil, err
+	}
 	rows, err := d.certificateStore().GetAccountDelegationHistoryByCredential(
 		credentialTag,
 		stakeKey,
@@ -66,6 +69,9 @@ func (d *Database) CountAccountDelegationHistoryByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("CountAccountDelegationHistoryByCredential"); err != nil {
+		return 0, err
+	}
 	count, err := d.certificateStore().
 		CountAccountDelegationHistoryByCredential(
 			credentialTag,
@@ -92,8 +98,8 @@ func (d *Database) GetAccountRegistrationHistoryByCredential(
 	order string,
 	txn *Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -127,8 +133,8 @@ func (d *Database) GetLatestAccountRegistrationAtOrBefore(
 	slot uint64,
 	txn *Txn,
 ) (*models.AccountRegistrationHistoryRow, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -158,8 +164,8 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
 	if txn == nil {
@@ -189,8 +195,8 @@ func (d *Database) GetAccountImportRegistrationByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (*models.AccountImportRegistration, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -219,8 +225,8 @@ func (d *Database) GetAccountWithdrawalHistoryByCredential(
 	order string,
 	txn *Txn,
 ) ([]models.AccountWithdrawalHistoryRow, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -252,8 +258,8 @@ func (d *Database) CountAccountWithdrawalHistoryByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
 	if txn == nil {
@@ -292,6 +298,9 @@ func (d *Database) GetAddressTransactionsByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetAddressTransactionsByCredential"); err != nil {
+		return nil, err
+	}
 	rows, err := d.transactionStore().GetAddressTransactionsByCredential(
 		credentialTag,
 		stakeKey,
@@ -326,6 +335,9 @@ func (d *Database) CountAddressTransactionsByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("CountAddressTransactionsByCredential"); err != nil {
+		return 0, err
+	}
 	count, err := d.transactionStore().CountAddressTransactionsByCredential(
 		credentialTag,
 		stakeKey,
@@ -353,6 +365,9 @@ func (d *Database) GetAccountSumsByCredential(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetAccountSumsByCredential"); err != nil {
+		return models.AccountSums{}, err
 	}
 	sums, err := d.metadata.GetAccountSumsByCredential(
 		credentialTag,
