@@ -243,6 +243,7 @@ func newExpiryRunNode(
 		}),
 		WithUtxorpcPort(0),
 		WithBlockfrostPort(0),
+		WithMeshPort(0),
 		WithMidnightConfig(MidnightConfig{Port: 0}),
 		WithShutdownTimeout(5 * time.Second),
 	}
