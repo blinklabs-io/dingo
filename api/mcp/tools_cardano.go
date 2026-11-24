@@ -199,8 +199,8 @@ func registerCardanoTools(
 				"- **Software**: Dingo (pure-Go Cardano node implementation by Blink Labs)\n"+
 				"- **Configured Network**: `%s`\n"+
 				"- **Block Header Protocol Minor Identifier**: `69` in the low byte of the protocol minor field (identifies Dingo-forged blocks on-chain without altering ledger protocol major version; with CIP-0203 enabled the upper bits carry an optional release-version payload)\n"+
-				"- **Block Production**: Enabled via `--block-producer` with VRF, KES, and OpCert; tracks slots in SQLite `sync_state` (`forge_fence:<pool_id>`) and `pool_opcert_sequence`\n"+
-				"- **Storage Modes**: `core` (Badger block blob store + SQLite WAL metadata) and `api` (PostgreSQL / indexed store)\n"+
+				"- **Block Production**: Enabled via `--block-producer` with VRF, KES, and OpCert; records the last forged slot as block-store chain state (`forge_fence:<pool_id>`) and operational certificate counters in the LedgerDB\n"+
+				"- **Storage Modes**: `core` (block store, ImmutableDB and LedgerDB; no SQL store) and `api` (core plus an IndexerDB on SQLite, PostgreSQL or MySQL)\n"+
 				"- **Mithril Bootstrap**: Supported for rapid certified state synchronisation\n\n"+
 				"### Available MCP Documentation Resources\n"+
 				"- `dingo://docs/identity`: How Dingo identifies itself to peers and on-chain via protocol minor version 69\n"+
