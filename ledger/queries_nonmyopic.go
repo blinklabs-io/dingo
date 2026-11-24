@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -278,7 +279,7 @@ func (ls *LedgerState) nonMyopicState(
 	if err != nil {
 		return nil, err
 	}
-	params, err := rewardParametersFromPParams(
+	params, err := epochengine.RewardParametersFromPParams(
 		pparams,
 		ls.config.CardanoNodeConfig,
 		uint64(epochRow.LengthInSlots),
@@ -287,8 +288,8 @@ func (ls *LedgerState) nonMyopicState(
 		return nil, err
 	}
 	if pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters); ok {
-		params.MinPoolMargin = cloneCBORRat(pp.MinPoolMargin)
-		params.PledgeLeverage = cloneCBORRat(pp.MaxPledgeLeverage)
+		params.MinPoolMargin = epochengine.CloneCBORRat(pp.MinPoolMargin)
+		params.PledgeLeverage = epochengine.CloneCBORRat(pp.MaxPledgeLeverage)
 		params.PledgeLeverageEnabled = params.PledgeLeverage != nil
 	}
 	var minPoolCost uint64
@@ -342,8 +343,8 @@ func (ls *LedgerState) nonMyopicState(
 	for _, item := range likelihoods {
 		performance[string(item.PoolKeyHash)] = item.PerformanceEstimate
 	}
-	defaultPerformance, err := rewardPerformanceEstimate(
-		make([]float32, rewardLikelihoodSampleCount),
+	defaultPerformance, err := epochengine.RewardPerformanceEstimate(
+		make([]float32, epochengine.RewardLikelihoodSampleCount),
 	)
 	if err != nil {
 		return nil, err

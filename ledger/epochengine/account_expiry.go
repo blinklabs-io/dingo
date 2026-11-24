@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package epochengine
 
-// accountExpiredAtEpoch reports whether a reward account with the given stored
+// AccountExpiredAtEpoch reports whether a reward account with the given stored
 // ExpirationEpoch is expired at currentEpoch, per CIP-0163: expired iff a
 // concrete expiration was set (non-zero) and it is strictly before the current
 // epoch. A zero ExpirationEpoch means "unset" and is never expired.
-func accountExpiredAtEpoch(expirationEpoch, currentEpoch uint64) bool {
+func AccountExpiredAtEpoch(expirationEpoch, currentEpoch uint64) bool {
 	return expirationEpoch != 0 && expirationEpoch < currentEpoch
 }

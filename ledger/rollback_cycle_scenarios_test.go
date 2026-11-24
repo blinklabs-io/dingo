@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -559,9 +560,9 @@ func (s *govDiffScenario) seedRewardRound(
 	blocks int,
 ) {
 	t.Helper()
-	epochs, ok := stakeRewardEpochsForApplication(epoch.EpochId + 1)
+	epochs, ok := epochengine.StakeRewardEpochsForApplication(epoch.EpochId + 1)
 	require.True(t, ok)
-	perf, err := seedDB(t, s.db).GetEpoch(epochs.performance, nil)
+	perf, err := seedDB(t, s.db).GetEpoch(epochs.Performance, nil)
 	require.NoError(t, err)
 	require.NotNil(t, perf)
 	var poolID lcommon.PoolKeyHash
@@ -577,7 +578,7 @@ func (s *govDiffScenario) seedRewardRound(
 	}
 	captured, boundary := epoch.StartSlot, epoch.StartSlot
 	require.NoError(t, seedDB(t, s.db).SaveRewardSnapshot(&models.RewardSnapshot{
-		Epoch:            epochs.snapshot,
+		Epoch:            epochs.Snapshot,
 		SnapshotType:     "mark",
 		TotalActiveStake: 60_000_000,
 		TotalPoolCount:   1,
@@ -587,7 +588,7 @@ func (s *govDiffScenario) seedRewardRound(
 		ProtocolVersion:  10,
 	}, nil))
 	require.NoError(t, seedDB(t, s.db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
-		Epoch:                      epochs.snapshot,
+		Epoch:                      epochs.Snapshot,
 		PoolKeyHash:                rp.key,
 		RewardAccount:              rp.owner,
 		RewardAccountCredentialTag: 0,
@@ -602,12 +603,12 @@ func (s *govDiffScenario) seedRewardRound(
 	}}, nil))
 	require.NoError(t, seedDB(t, s.db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
-			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
+			Epoch: epochs.Snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
 			Stake: 10_000_000, Owner: true, Registered: true,
 			CapturedSlot: captured, BoundarySlot: boundary,
 		},
 		{
-			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.member,
+			Epoch: epochs.Snapshot, PoolKeyHash: rp.key, StakingKey: rp.member,
 			Stake: 50_000_000, Registered: true,
 			CapturedSlot: captured, BoundarySlot: boundary,
 		},

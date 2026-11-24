@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // SyncMarkerReader serves the protocol parameter sync markers from a live
@@ -177,7 +178,7 @@ func (s stagingLedgerDB) GetSyncState(
 		return s.getCursor(key, txn)
 	}
 	switch {
-	case key == rewardStakeInputsPendingKey:
+	case key == epochengine.RewardStakeInputsPendingKey:
 		return s.getPendingStakeInputs(txn)
 	case key == pendingRatificationSyncKey:
 		return s.ratifyPendingState(txn)
@@ -198,7 +199,7 @@ func (s stagingLedgerDB) SetSyncState(
 		return nil
 	}
 	switch {
-	case key == rewardStakeInputsPendingKey:
+	case key == epochengine.RewardStakeInputsPendingKey:
 		return s.setPendingStakeInputs(value, txn)
 	case key == pendingRatificationSyncKey:
 		s.setRatifyPending(value, txn)
@@ -224,7 +225,7 @@ func (s stagingLedgerDB) DeleteSyncState(
 		return s.deleteCursor(key, txn)
 	}
 	switch {
-	case key == rewardStakeInputsPendingKey:
+	case key == epochengine.RewardStakeInputsPendingKey:
 		return s.setPendingStakeInputs("", txn)
 	case key == pendingRatificationSyncKey:
 		return s.deleteRatifyPending(txn)

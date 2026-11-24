@@ -1639,7 +1639,7 @@ const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
 // Counting them as blocks credits every pool holding a certified counter with
 // a block it never minted and inflates the epoch's block total by the size of
 // the pool set, which reaches pool reward performance
-// (ledger/reward_calculation.go), the reward_pool_input rows seeded at the
+// (ledger/epochengine/reward_calculation.go), the reward_pool_input rows seeded at the
 // epoch boundary (ledger/snapshot/rotation.go), and Blockfrost's
 // blocks_minted. The boundary is the same discriminator
 // LedgerState.latestOpCertCounterForValidation already uses to tell an

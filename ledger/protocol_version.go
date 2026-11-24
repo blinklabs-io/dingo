@@ -15,99 +15,20 @@
 package ledger
 
 import (
-	"errors"
-	"fmt"
-	"reflect"
-
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
-// Compile-time check: allegra.AllegraProtocolParameters is
-// currently a type alias for shelley.ShelleyProtocolParameters
-// in gouroboros, so the Shelley case in GetProtocolVersion
-// handles Allegra as well. If this alias is ever changed to a
-// distinct type, this assignment will fail to compile,
-// reminding us to add an explicit Allegra case.
-var _ *shelley.ShelleyProtocolParameters = (*allegra.AllegraProtocolParameters)(
-	nil,
-)
+// ProtocolVersion is the major and minor protocol version of a parameter set.
+type ProtocolVersion = epochengine.ProtocolVersion
 
-// ProtocolVersion represents the major and minor protocol
-// version numbers used in Cardano protocol parameters.
-type ProtocolVersion struct {
-	Major uint
-	Minor uint
-}
-
-// GetProtocolVersion extracts the protocol version from
-// protocol parameters. This works across all eras by type-
-// switching on the concrete pparams type.
-// Returns an error if the pparams type is not recognized or
-// nil.
+// GetProtocolVersion extracts the protocol version from protocol parameters
+// of any era. It returns an error for nil or unrecognized parameters.
 func GetProtocolVersion(
 	pparams lcommon.ProtocolParameters,
 ) (ProtocolVersion, error) {
-	if pparams == nil {
-		return ProtocolVersion{}, errors.New("protocol parameters are nil")
-	}
-	value := reflect.ValueOf(pparams)
-	if value.Kind() == reflect.Pointer && value.IsNil() {
-		return ProtocolVersion{}, fmt.Errorf(
-			"protocol parameters are a nil %T pointer",
-			pparams,
-		)
-	}
-	switch pp := pparams.(type) {
-	case *shelley.ShelleyProtocolParameters:
-		// Also covers Allegra (protocol version 3):
-		// allegra.AllegraProtocolParameters is a type alias
-		// (=) for shelley.ShelleyProtocolParameters in
-		// gouroboros, so both resolve to this case. The
-		// compile-time assertion above guards against the
-		// alias being changed to a distinct type.
-		return ProtocolVersion{
-			Major: pp.ProtocolMajor,
-			Minor: pp.ProtocolMinor,
-		}, nil
-	case *mary.MaryProtocolParameters:
-		return ProtocolVersion{
-			Major: pp.ProtocolMajor,
-			Minor: pp.ProtocolMinor,
-		}, nil
-	case *alonzo.AlonzoProtocolParameters:
-		return ProtocolVersion{
-			Major: pp.ProtocolMajor,
-			Minor: pp.ProtocolMinor,
-		}, nil
-	case *babbage.BabbageProtocolParameters:
-		return ProtocolVersion{
-			Major: pp.ProtocolMajor,
-			Minor: pp.ProtocolMinor,
-		}, nil
-	case *conway.ConwayProtocolParameters:
-		return ProtocolVersion{
-			Major: pp.ProtocolVersion.Major,
-			Minor: pp.ProtocolVersion.Minor,
-		}, nil
-	case *dijkstra.DijkstraProtocolParameters:
-		return ProtocolVersion{
-			Major: pp.ProtocolVersion.Major,
-			Minor: pp.ProtocolVersion.Minor,
-		}, nil
-	default:
-		return ProtocolVersion{}, fmt.Errorf(
-			"unsupported protocol parameters type: %T",
-			pparams,
-		)
-	}
+	return epochengine.GetProtocolVersion(pparams)
 }
 
 // EraForVersion returns the era ID for a given protocol major version,

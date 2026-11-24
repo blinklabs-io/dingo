@@ -716,7 +716,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			if out == nil || out.RewardType != rewardTypeMember {
 				continue
 			}
-			// applyStakeRewards credits a reward only when it is spendable
+			// ApplyStakeRewards credits a reward only when it is spendable
 			// and not guarded by CIP-0163 expiry; anything else was computed
 			// and withheld, and Koios never reports it.
 			if !out.Spendable || out.Guarded {

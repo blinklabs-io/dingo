@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -164,7 +165,7 @@ func TestExtraEntropyFromPParamsStopsAtPraos(t *testing.T) {
 		require.Equal(
 			t,
 			tc.want,
-			extraEntropyFromPParams(tc.params),
+			epochengine.ExtraEntropyFromPParams(tc.params),
 			tc.name,
 		)
 	}
@@ -184,7 +185,7 @@ func TestAssembleEpochNonceNeutralCandidateReturnsEntropy(t *testing.T) {
 	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 	neutral := make([]byte, lcommon.Blake2b256Size)
 
-	got, err := assembleEpochNonce(neutral, nil, entropy)
+	got, err := epochengine.AssembleEpochNonce(neutral, nil, entropy)
 	require.NoError(t, err)
 	require.Equal(
 		t,

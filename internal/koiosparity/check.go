@@ -352,7 +352,7 @@ func IsPreStakingEpoch(network string, epoch uint64) bool {
 // (ledger/snapshot/rotation.go's saveSnapshotInTxn, called with
 // epoch=evt.NewEpoch), while the same row's DelegatedStake/DelegatorCount are
 // the "go" stake distribution reward_calculation.go's
-// stakeRewardEpochsForNewEpoch actually consumes one epoch later, at
+// StakeRewardEpochsForNewEpoch actually consumes one epoch later, at
 // epochs.snapshot = epochs.performance - 1 (performance being the true,
 // unambiguous calendar epoch whose blocks are being measured — the same
 // epoch Koios reports the corresponding pool_history/epoch_info row under).
@@ -1239,7 +1239,7 @@ func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
 // stakeEpoch is the Dingo epoch reward_account_output rows for Koios
 // reporting epoch `epoch` actually live under — the same koiosStakeEpoch
 // (K-1) offset reward_pool_output already uses, since both are written from
-// app.epochs.snapshot in the same ledger/reward_calculation.go call (see
+// app.epochs.snapshot in the same ledger/epochengine/reward_calculation.go call (see
 // koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
 // section).
 func compareEpochAccounts(
@@ -1433,7 +1433,7 @@ func compareEpochAccounts(
 // ledger actually credited.
 //
 // reward_account_output records every reward the calculation produced,
-// credited or not. The ledger's own application (ledger/reward_calculation.go)
+// credited or not. The ledger's own application (ledger/epochengine/reward_calculation.go)
 // skips a reward that is not spendable and one whose reward account is guarded
 // by CIP-0163 expiry, so neither ever reaches an account balance and Koios
 // never reports either. Comparing them makes Dingo look like it paid a reward

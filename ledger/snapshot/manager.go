@@ -702,7 +702,7 @@ func (m *Manager) handleEpochTransition(
 //
 // Splitting the capture is what fixes that without subtracting those credits
 // back out: the stake read happens at the reference SNAP point (after
-// applyStakeRewards and applyMIRCerts, before applyPoolRetirements), while the
+// ApplyStakeRewards and ApplyMIRCerts, before ApplyPoolRetirements), while the
 // write stays at the end where the new epoch row, its nonce and the
 // post-enactment protocol version exist. Both phases run in the one rollover
 // transaction, so a rollback or replay of the boundary re-executes the same

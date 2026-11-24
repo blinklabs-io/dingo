@@ -8704,7 +8704,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 
 		// The delayed reward calculation reads the ADA pots row for epoch
 		// newEpoch-1, so the boundary into epoch 1 reads epoch 0's. Every
-		// later epoch's row is written by saveRewardAdaPotsForEpoch at its
+		// later epoch's row is written by SaveRewardAdaPotsForEpoch at its
 		// own rollover; epoch 0 has no rollover, so its row is the same
 		// slot-0 baseline written above. Fees are 0 because no epoch
 		// precedes epoch 0.
@@ -9337,282 +9337,6 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 	}
 }
 
-// calculateEpochNonce computes the epoch nonce for epoch N+1, the
-// end-of-epoch evolving nonce, and the lastEpochBlockNonce to carry
-// into epoch N+1.
-//
-// The Ouroboros Praos formula is:
-//
-//	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N)
-//
-// where lastEpochBlockNonce(N) is the hash of the last block in epoch N.
-// If epoch N has no blocks, the consensus state carries the previous
-// lastEpochBlockNonce forward.
-//
-// The ⭒ operator has NeutralNonce as identity:
-//
-//	x ⭒ NeutralNonce = x
-//
-// For the very first epoch transition (0→1), lastEpochBlockNonce
-// is nil (NeutralNonce), so epochNonce = candidateNonce.
-//
-// newEpochPParams are the protocol parameters epoch N+1 will run under, i.e.
-// the result of this boundary's own parameter enactment. Their extraEntropy is
-// the third term of the cardano-ledger TICKN assembly:
-//
-//	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N) ⭒ extraEntropy
-//
-// It is read from the enacted parameters rather than the ending epoch's
-// because TICKN is driven by a ledger view forecast to the new epoch, which
-// applies the boundary's parameter update first (TICKF /
-// validatingTickTransitionFORECAST). Mainnet set a non-neutral extraEntropy
-// for exactly one epoch, 259, whose eta0 is the value the update enacted at
-// that boundary carried.
-//
-// Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
-// The caller must store candidateNonce as the new epoch's CandidateNonce
-// and labNonce as the new epoch's LastEpochBlockNonce so an empty next
-// epoch can carry it forward.
-func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
-	txn ledgerdb.Txn,
-	epochStartSlot uint64,
-	currentEra eras.EraDesc,
-	currentEpoch models.Epoch,
-	newEpochPParams lcommon.ProtocolParameters,
-) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce exists in Byron. At a Byron-to-Shelley boundary the caller
-	// applies the transition before rollover, so currentEra is Shelley and the
-	// empty source-epoch nonce takes the genesis-nonce initialization below.
-	if currentEra.Id == 0 {
-		return nil, nil, nil, nil, nil
-	}
-	if ls.config.CardanoNodeConfig == nil {
-		return nil, nil, nil, nil, errors.New("CardanoNodeConfig is nil")
-	}
-	if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-		return nil, nil, nil, nil, errors.New(
-			"could not get Shelley genesis hash",
-		)
-	}
-	genesisHashBytes, err := hex.DecodeString(
-		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf(
-			"decode genesis hash: %w", err,
-		)
-	}
-
-	// For the initial epoch creation (no blocks yet), the epoch nonce and
-	// initial evolving/candidate nonces are all the genesis nonce, and the
-	// carried lastEpochBlockNonce is Neutral (nil). At genesis cardano-ledger
-	// initializes praosStateLastEpochBlockNonce to NeutralNonce, so the FIRST
-	// from-genesis epoch boundary takes the identity branch: eta = candidate ⭒
-	// NeutralNonce = candidate. Devnet confirms cardano's epoch-1 epochNonce ==
-	// its candidate (identity). Do NOT seed this with the genesis nonce — that
-	// combines instead of using identity and diverges at the first boundary.
-	// The Mithril path never takes this branch (bootstrap epoch imports
-	// a non-nil lastEpochBlockNonce).
-	if len(currentEpoch.Nonce) == 0 {
-		return genesisHashBytes, genesisHashBytes, genesisHashBytes, nil, nil
-	}
-
-	// In Ouroboros Praos, the evolving nonce carries across epoch
-	// boundaries without resetting (PrtclState is never reset).
-	// For migration compatibility (epochs stored before this
-	// field existed), fall back to genesis hash.
-	prevEvolvingNonce := currentEpoch.EvolvingNonce
-	if len(prevEvolvingNonce) == 0 {
-		prevEvolvingNonce = genesisHashBytes
-	}
-
-	// The candidate nonce also carries across epochs independently
-	// of the evolving nonce. When 4k/f >= epochLength (e.g., short
-	// devnet epochs), the candidate is never updated by any block
-	// and stays at its carried value. Fall back to genesis hash
-	// for epochs stored before this field existed.
-	prevCandidateNonce := currentEpoch.CandidateNonce
-	if len(prevCandidateNonce) == 0 {
-		prevCandidateNonce = genesisHashBytes
-	}
-
-	// When importing from a snapshot, currentEpoch may carry tip-time
-	// nonce state (evolving/candidate already advanced through the
-	// imported tip slot). In that case, continue accumulation from the
-	// next slot rather than replaying from epoch start.
-	computeStartSlot := currentEpoch.StartSlot
-	computeEpochLength := uint64(currentEpoch.LengthInSlots)
-	epochEndSlot := currentEpoch.StartSlot +
-		uint64(currentEpoch.LengthInSlots)
-	ls.RLock()
-	tipSlot := ls.currentTip.Point.Slot
-	tipBlockNonceCopy := append([]byte(nil), ls.currentTipBlockNonce...)
-	ls.RUnlock()
-	if tipSlot >= currentEpoch.StartSlot &&
-		tipSlot < epochEndSlot &&
-		len(currentEpoch.CandidateNonce) == 32 &&
-		len(currentEpoch.EvolvingNonce) == 32 &&
-		len(tipBlockNonceCopy) == 32 &&
-		bytes.Equal(currentEpoch.EvolvingNonce, tipBlockNonceCopy) {
-		if nextSlot := tipSlot + 1; nextSlot < epochEndSlot {
-			computeStartSlot = nextSlot
-			computeEpochLength = epochEndSlot - nextSlot
-		} else {
-			// Tip already at/after epoch end: no additional blocks to fold.
-			computeEpochLength = 0
-		}
-	} else if len(currentEpoch.EvolvingNonce) == 32 {
-		// Resume fallback: if epoch nonce state was checkpointed at an
-		// earlier slot (snapshot import), locate that anchor by matching
-		// stored block nonces and continue from the following slot.
-		// If no anchor is found, fall through to the defaults which
-		// compute from epoch start — this is always correct (just
-		// slower) and handles genesis sync where the epoch's
-		// EvolvingNonce was set at creation and never updated.
-		nonceRows, nonceErr := ls.blockNoncesInSlotRange(
-			currentEpoch.StartSlot,
-			epochEndSlot,
-			txn,
-		)
-		if nonceErr != nil {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"fetch block nonces in epoch range: %w",
-				nonceErr,
-			)
-		}
-		for _, row := range nonceRows {
-			if len(row.Nonce) == 32 &&
-				bytes.Equal(currentEpoch.EvolvingNonce, row.Nonce) {
-				if row.Slot+1 < epochEndSlot {
-					computeStartSlot = row.Slot + 1
-					computeEpochLength = epochEndSlot -
-						computeStartSlot
-				} else {
-					computeEpochLength = 0
-				}
-				break
-			}
-		}
-	}
-
-	// Compute candidateNonce (frozen at stability window cutoff)
-	// and evolvingNonce (after all blocks) from the remaining
-	// current-epoch blocks. Each block's VRF output is accumulated
-	// via the Nonce semigroup (⭒) starting from prevEvolvingNonce.
-	// The stability window depends on the SOURCE epoch's era — the
-	// one being closed — not the era we are transitioning into. The
-	// 3k/f window covers Shelley, Allegra, Mary, Alonzo, and Babbage
-	// (Babbage runs Praos but retains the smaller window for
-	// backwards compatibility); 4k/f kicks in at Conway. The two
-	// formulas only disagree at the Babbage→Conway boundary, but the
-	// source-vs-target distinction matters for every transition: currentEra
-	// describes the successor epoch here, so the source epoch ID must come from
-	// currentEpoch.EraId when selecting the nonce window
-	// and produce an epoch nonce that diverges from peers. The
-	// observed symptom at Alonzo→Babbage was every header in the new
-	// Praos epoch VRF-failing; the same shape repeats at
-	// Babbage→Conway when this rule is broken.
-	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
-		ctx,
-		txn,
-		currentEpoch.EraId,
-		prevEvolvingNonce,
-		prevCandidateNonce,
-		computeStartSlot,
-		computeEpochLength,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf(
-			"compute candidate nonce: %w", err,
-		)
-	}
-
-	// The epoch nonce mixes the frozen candidate with the nonce derived from
-	// the last block of the PREVIOUS epoch. In cardano-ledger this is
-	// praosStateLastEpochBlockNonce: the value CARRIED in the closing epoch's
-	// state (set at the prior epoch boundary) — i.e. the hash of the last block
-	// of the epoch *before* the one closing here — NOT the last block of the
-	// closing epoch itself. Using the closing epoch's own last block shifts the
-	// lab by one epoch and diverges eta from the network, so every leader-VRF
-	// check in the new epoch fails:
-	//   epochNonce(N+1) = candidateNonce(N) ⭒ currentEpoch(N).LastEpochBlockNonce
-	labForEta := cloneNonce(currentEpoch.LastEpochBlockNonce)
-
-	// The carried lab for the NEXT boundary is stored on the new epoch record:
-	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
-	// the epoch being closed (a one-block Praos lag), NOT the last block's own
-	// hash. See epochLabNonce.
-	labNonceToSave, err := ls.epochLabNonce(
-		ctx,
-		txn,
-		currentEpoch.StartSlot,
-		epochEndSlot,
-		currentEpoch.LastEpochBlockNonce,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, err
-	}
-
-	extraEntropy := extraEntropyFromPParams(newEpochPParams)
-
-	// If nil/empty, it's NeutralNonce (identity): result is
-	// just candidateNonce.
-	if len(labForEta) == 0 && len(extraEntropy) == 0 {
-		// NeutralNonce is the identity element of ⭒:
-		//   candidateNonce ⭒ NeutralNonce = candidateNonce
-		// So the epoch nonce is just the candidate nonce.
-		ls.config.Logger.Debug(
-			"epoch nonce computed (NeutralNonce, using candidateNonce)",
-			"component", "ledger",
-			"epoch_start_slot", epochStartSlot,
-			"candidate_nonce",
-			hex.EncodeToString(candidateNonce),
-			"lab_nonce_to_save",
-			hex.EncodeToString(labNonceToSave),
-			"epoch_nonce",
-			hex.EncodeToString(candidateNonce),
-			"evolving_nonce",
-			hex.EncodeToString(evolvingNonce),
-		)
-		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
-	}
-
-	// candidateNonce ⭒ labForEta ⭒ extraEntropy
-	if len(candidateNonce) < 32 ||
-		(len(labForEta) > 0 && len(labForEta) < 32) {
-		return nil, nil, nil, nil, fmt.Errorf(
-			"epoch nonce requires 32-byte inputs: "+
-				"candidateNonce=%d, labForEta=%d",
-			len(candidateNonce),
-			len(labForEta),
-		)
-	}
-	result, err := assembleEpochNonce(
-		candidateNonce,
-		labForEta,
-		extraEntropy,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf(
-			"calculate epoch nonce: %w", err,
-		)
-	}
-	ls.config.Logger.Debug(
-		"epoch nonce computed",
-		"component", "ledger",
-		"epoch_start_slot", epochStartSlot,
-		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"lab_for_eta",
-		hex.EncodeToString(labForEta),
-		"lab_nonce_to_save",
-		hex.EncodeToString(labNonceToSave),
-		"epoch_nonce", hex.EncodeToString(result),
-		"evolving_nonce", hex.EncodeToString(evolvingNonce),
-		"extra_entropy", hex.EncodeToString(extraEntropy),
-	)
-	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
-}
-
 // processEpochRollover processes an epoch rollover and returns the result without
 // mutating LedgerState. This allows callers to capture the computed state in a
 // transaction and apply it to in-memory state after the transaction commits.
@@ -9622,49 +9346,6 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 //   - currentEra: current era descriptor (read-only input)
 //   - currentPParams: current protocol parameters (read-only input)
 //
-// applyEpochDonations moves the treasury donations accumulated during the
-// ended epoch into the treasury at the epoch boundary. The donation rows are
-// left in place (keyed by slot) so a rollback past the boundary drops both the
-// donation rows and the boundary NetworkState row, and re-applying the
-// boundary re-derives the same total. It writes the updated treasury at the
-// boundary slot, the same slot governance treasury-withdrawal enactment uses,
-// so the row reflects withdrawals first and donations second.
-func (ls *LedgerState) applyEpochDonations(
-	txn ledgerdb.Txn,
-	endedEpoch uint64,
-	boundarySlot uint64,
-) error {
-	donations, err := ls.ledgerDB().SumNetworkDonationsForEpoch(
-		endedEpoch, txn,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"sum donations for epoch %d: %w", endedEpoch, err,
-		)
-	}
-	if donations == 0 {
-		return nil
-	}
-	state, err := ls.ledgerDB().GetNetworkState(txn)
-	if err != nil {
-		return fmt.Errorf("get network state: %w", err)
-	}
-	var treasury, reserves uint64
-	if state != nil {
-		treasury = uint64(state.Treasury)
-		reserves = uint64(state.Reserves)
-	}
-	if err := ls.ledgerDB().SetNetworkState(
-		treasury+donations,
-		reserves,
-		boundarySlot,
-		txn,
-	); err != nil {
-		return fmt.Errorf("set network state with donations: %w", err)
-	}
-	return nil
-}
-
 // cloneProtocolParametersForEra returns an independently owned protocol-
 // parameter value using the active era's CBOR decoder.
 func cloneProtocolParametersForEra(
@@ -10010,7 +9691,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
+		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.engine().CalculateEpochNonce(ctx,
 			txn,
 			0,
 			currentEra,
@@ -10107,7 +9788,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err != nil {
 			return nil, fmt.Errorf("calculate jumped epoch length: %w", err)
 		}
-		nonce, evolvingNonce, candidateNonce, labNonce, err := ls.calculateEpochNonce(
+		nonce, evolvingNonce, candidateNonce, labNonce, err := ls.engine().CalculateEpochNonce(
 			ctx,
 			txn,
 			epochStartSlot,
@@ -10181,12 +9862,12 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	//      precedes every Shelley rule, and a later rule that moves reserves
 	//      at the same boundary (a two-era boundary's pv3 AVVM return) builds
 	//      on the translated value instead of being overwritten by it.
-	//   1. applyStakeRewards             — apply the delayed reward update
+	//   1. ApplyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
 	//      before governance reads the treasury. Reference: applyRUpd, the
 	//      first step of NEWEPOCH.
-	//   2. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//   2. ApplyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
 	//      Reference: the MIR rule, which Shelley's NEWEPOCH embeds between
@@ -10196,7 +9877,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	//   4. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
 	//      voting path; produces newPParams from on-chain pparam-update
 	//      proposals.
-	//   5. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//   5. ApplyPoolRetirements          — embedded Shelley POOLREAP: refund
 	//      deposits of pools whose retirement epoch is the new epoch. Runs
 	//      after SNAP and before enactment, so its deposits are outside the
 	//      mark snapshot but any deposit landing in the treasury is visible
@@ -10210,7 +9891,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	//      the now-final pparams.
 	//  10. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
-	//  11. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//  11. SaveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
 	//      (reserves/treasury/fees) after all boundary pot mutations so the
 	//      next delayed reward calculation has its pot inputs.
 	//
@@ -10234,13 +9915,13 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 
 	if err := timePhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
-			applyUpdate, err := ls.shouldApplyStakeRewardUpdate(
+			applyUpdate, err := ls.engine().ShouldApplyStakeRewardUpdate(
 				txn, currentEpoch,
 			)
 			if err != nil || !applyUpdate {
 				return err
 			}
-			return ls.applyStakeRewards(ctx,
+			return ls.engine().ApplyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 				validationOnly,
 			)
@@ -10261,7 +9942,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// capture below.
 	if err := timePhase(
 		currentEpoch.EpochId+1, "mir", func() error {
-			return ls.applyMIRCerts(ctx,
+			return ls.engine().ApplyMIRCerts(ctx,
 				txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
 			)
 		},
@@ -10400,7 +10081,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// governance.ProcessEpoch below.
 	if err := timePhase(
 		currentEpoch.EpochId+1, "pool_reap", func() error {
-			return ls.applyPoolRetirements(ctx,
+			return ls.engine().ApplyPoolRetirements(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -10432,7 +10113,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
-	// applyEpochDonations credits these after governance; RATIFY still
+	// ApplyEpochDonations credits these after governance; RATIFY still
 	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
 	pendingDonations, err := ls.ledgerDB().SumNetworkDonationsForEpoch(
 		currentEpoch.EpochId, txn,
@@ -10540,7 +10221,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// the RATIFY pass already counted them through PendingTreasuryDonations.
 	if err := timePhase(
 		currentEpoch.EpochId+1, "donations", func() error {
-			return ls.applyEpochDonations(
+			return ls.engine().ApplyEpochDonations(
 				txn, currentEpoch.EpochId, epochStartSlot,
 			)
 		},
@@ -10692,7 +10373,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// must observe the fully settled pots for the ended epoch.
 	if err := timePhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
-			return ls.saveRewardAdaPotsForEpoch(txn,
+			return ls.engine().SaveRewardAdaPotsForEpoch(txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,
 				epochStartSlot,
@@ -10714,7 +10395,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// result.NewCurrentPParams above and persisted by the enactment steps that
 	// precede this point. That is the set whose extraEntropy the new epoch's
 	// nonce mixes.
-	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
+	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.engine().CalculateEpochNonce(ctx,
 		txn,
 		epochStartSlot,
 		currentEra,

@@ -2310,7 +2310,7 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 // primitive for an absolute reward-balance set (only
 // Database.Add*AccountRewardByCredential, which credits a delta and can't
 // express a decrease). Real reward calculation
-// (ledger/chainsync.go's applyStakeRewards) is explicitly out of scope for
+// (ledger/epochengine/reward_calculation.go's ApplyStakeRewards) is explicitly out of scope for
 // this harness. Balances therefore stay in the govState mirror, matching
 // how the upstream harness already treats them as synthetic validation
 // input rather than application state.
