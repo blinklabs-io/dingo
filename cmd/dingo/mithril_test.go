@@ -54,7 +54,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Gate off: no-op, no database access.
-	require.NoError(t, checkMithrilInactivityCompat(t.Context(), 
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(),
 		&config.Config{DelegatorInactivityEnabled: false},
 		logger,
 	))
@@ -186,5 +186,8 @@ func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
 	require.True(t, ran, "the split layout must not stop mithril sync")
 
 	require.Equal(t, "split", mithrilSyncIndexerLayout(cfg))
-	require.Empty(t, mithrilSyncIndexerLayout(&config.Config{StorageMode: "core"}))
+	require.Empty(
+		t,
+		mithrilSyncIndexerLayout(&config.Config{StorageMode: "core"}),
+	)
 }
