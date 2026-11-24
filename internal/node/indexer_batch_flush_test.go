@@ -16,7 +16,9 @@ package node
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -150,21 +152,15 @@ func TestIndexerWriterFlushesCoalescedStakeDeltas(t *testing.T) {
 
 	db := indexTransactionBlocks(t, txs)
 
-	var (
-		utxoStake uint64
-		found     bool
-	)
-	require.NoError(t, db.EachRewardLiveStake(nil,
-		func(row *models.RewardLiveStake) error {
-			if string(row.StakingKey) != string(stakingKey.Bytes()) {
-				return nil
-			}
-			utxoStake, found = uint64(row.UtxoStake), true
-			return nil
-		},
-	))
-	require.True(t, found, "no live stake row for the paid credential")
-	require.Equal(t, uint64(9_000_000), utxoStake)
+	raw := openRaw(t, filepath.Join(db.Config().DataDir, "metadata.sqlite"))
+	var utxoStake sql.NullString
+	err = raw.QueryRow(
+		`SELECT utxo_stake FROM reward_live_stake WHERE staking_key = ?`,
+		stakingKey.Bytes(),
+	).Scan(&utxoStake)
+	require.NoError(t, err, "no live stake row for the paid credential")
+	require.True(t, utxoStake.Valid)
+	require.Equal(t, "9000000", utxoStake.String)
 }
 
 // The writer's transaction metadata rows wait in the batch until it is
