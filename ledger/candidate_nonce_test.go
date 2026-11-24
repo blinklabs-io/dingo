@@ -129,6 +129,7 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	var candidate, evolving []byte
 	require.NoError(
@@ -225,6 +226,7 @@ func TestComputeCandidateNonceAsOf_SlowPathFoldsOnlyTipChain(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	tip := ocommon.Point{Slot: tipSlot, Hash: tipHash}
 	var candidate, evolving []byte
@@ -265,6 +267,7 @@ func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	prevEvolving := bytes.Repeat([]byte{0x61}, 32)
 	prevCandidate := bytes.Repeat([]byte{0x62}, 32)
 
@@ -378,8 +381,9 @@ func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
 		Slot: 100, Hash: hash, PrevHash: bytes.Repeat([]byte{0x72}, 32),
 		Cbor: []byte{0x80}, Number: 1, Type: byron.BlockTypeByronMain,
 	}, nil))
-	require.NoError(t, db.SetBlockNonce(hash, 100, []byte{0x01}, false, nil))
+	require.NoError(t, seedBlockNonce(t, db, hash, 100, []byte{0x01}, false, nil))
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	err := db.Transaction(context.Background(), false).
 		Do(func(txn *database.Txn) error {
 			_, _, err := ls.computeCandidateNonceFast(context.Background(), txn,

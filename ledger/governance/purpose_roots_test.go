@@ -30,7 +30,7 @@ import (
 
 func markMithrilBootstrapped(t *testing.T, db *database.Database) {
 	t.Helper()
-	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "150", nil))
+	require.NoError(t, db.SetChainState("mithril_ledger_slot", "150", nil))
 }
 
 func purposeRootsProcessEpoch(

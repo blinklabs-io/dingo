@@ -131,6 +131,9 @@ func (m *splitMigration) databaseConfig(
 ) *database.Config {
 	cfg := m.cfg
 	return &database.Config{
+		// Adoption runs before the ledger state moves out of the metadata
+		// store, so it opens the v0.94.2 database as that move's source.
+		Role:           database.RoleReleased,
 		DataDir:        cfg.DatabasePath,
 		Logger:         m.logger,
 		StorageMode:    storageMode,
@@ -295,7 +298,7 @@ func (m *splitMigration) migrate(ctx context.Context) (err error) {
 			"completing the interrupted migration to the split layout",
 			"component", "indexer", "indexer_dir", indexerDir,
 		)
-		return m.latchConsensus(ctx, db, closeSource, epoch, ledgerTip.Slot)
+		return m.latchConsensus(ctx, db, closeSource)
 	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return readErr
 	}
@@ -364,7 +367,7 @@ func (m *splitMigration) copyAndPublish(
 	if err := m.step(migrateStepRenamed); err != nil {
 		return err
 	}
-	return m.latchConsensus(ctx, db, closeSource, epoch, ledgerTip.Slot)
+	return m.latchConsensus(ctx, db, closeSource)
 }
 
 // latchConsensus latches the split layout in the consensus store, closes it
@@ -374,12 +377,10 @@ func (m *splitMigration) latchConsensus(
 	ctx context.Context,
 	db *database.Database,
 	closeSource func() error,
-	epoch, slot uint64,
 ) error {
-	if err := db.Metadata().SetNodeSettingsGates(
+	if err := db.SetNodeSettingsGates(
 		ctx,
 		nodesettings.Values{"indexer_layout": config.IndexerLayoutSplit},
-		epoch, slot,
 	); err != nil {
 		return fmt.Errorf("latch the split layout: %w", err)
 	}
@@ -534,7 +535,7 @@ func (m *splitMigration) prepareCopy(
 	}
 	// Snapshots whose stake inputs the ledger is still writing are the
 	// writer's to copy once they finish; the copy holds them only in part.
-	pending, err := source.Metadata().GetSyncState(
+	pending, err := source.GetSyncState(
 		models.RewardStakeInputsPendingKey, nil,
 	)
 	if err != nil {

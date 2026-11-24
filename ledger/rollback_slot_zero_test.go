@@ -68,7 +68,7 @@ func newSlotZeroRollbackLedger(
 	}))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -77,16 +77,20 @@ func newSlotZeroRollbackLedger(
 	ls.metrics.init(prometheus.NewRegistry())
 
 	nonce0 := bytes.Repeat([]byte{0xa0}, 32)
-	require.NoError(t, db.SetBlockNonce(hash0, 0, nonce0, true, nil))
-	require.NoError(t, db.SetBlockNonce(
-		hash1, 20, bytes.Repeat([]byte{0xa1}, 32), false, nil,
-	))
+	// Byron blocks carry no Praos nonce.
+	if block0Type != byron.BlockTypeByronEbb {
+		require.NoError(t, seedBlockNonce(t, db, hash0, 0, nonce0, true, nil))
+		require.NoError(t, seedBlockNonce(t, db,
+			hash1, 20, bytes.Repeat([]byte{0xa1}, 32), false, nil,
+		))
+	}
 	tip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(20, hash1),
 		BlockNumber: 1,
 	}
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.currentTip = tip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = bytes.Repeat([]byte{0xa1}, 32)
 	ls.publishSnapshotsLocked()
 	return ls, ochainsync.Tip{
@@ -125,10 +129,6 @@ func TestRollbackToByronSlotZeroBlockHasNoTipNonce(t *testing.T) {
 	t.Parallel()
 
 	ls, tip0, _ := newSlotZeroRollbackLedger(t, byron.BlockTypeByronEbb)
-	// Byron blocks store no nonce row.
-	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(
-		ocommon.NewPointOrigin(), nil,
-	))
 	require.NoError(t, ls.rollback(context.Background(), tip0.Point))
 	require.Empty(t, ls.currentTipBlockNonce)
 	require.Equal(t, tip0.Point, ls.currentTip.Point)
@@ -140,6 +140,7 @@ func TestLoadTipReadsNonceForSlotZeroBlock(t *testing.T) {
 
 	ls, tip0, nonce0 := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
 	require.NoError(t, ls.db.SetTip(tip0, nil))
+	fxRollback(t, ls, tip0.Point)
 	ls.currentTipBlockNonce = nil
 	require.NoError(t, ls.loadTip(context.Background()))
 	require.Equal(t, nonce0, ls.currentTipBlockNonce)
@@ -283,7 +284,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 		LengthInSlots: 1_000,
 		EraId:         eras.ConwayEraDesc.Id,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId, nil, nil, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots, nil,
 	))
@@ -291,7 +292,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -324,7 +325,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 
 	apply(block0, block1)
 	require.Equal(t, point1, ls.currentTip.Point)
-	nonce0, err := db.GetBlockNonce(point0, nil)
+	nonce0, err := seedDB(t, db).GetBlockNonce(point0, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, nonce0)
 
@@ -339,7 +340,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 	fromGenesis, err := eras.CalculateEtaVConway(nodeConfig, nil, block1)
 	require.NoError(t, err)
 	require.NotEqual(t, fromGenesis, want)
-	got, err := db.GetBlockNonce(point1, nil)
+	got, err := seedDB(t, db).GetBlockNonce(point1, nil)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }

@@ -295,6 +295,11 @@ type Utxo struct {
 	// it equals TransactionID. Unique: a transaction has at most one
 	// collateral return output.
 	CollateralReturnForTxID *uint
+	// BlockIndex is the producing transaction's position in its block when
+	// the writer knows it. It is not stored on the row: it lets the address
+	// index row take its page position when written instead of by a second
+	// statement.
+	BlockIndex *uint32 `json:"-"`
 	// TxId is the hash of the producing transaction.
 	TxId       []byte
 	PaymentKey []byte

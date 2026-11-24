@@ -531,3 +531,16 @@ func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
 		})
 	}
 }
+
+func TestUtxoAddressPrefixIndexDropTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+	mysql, err := cachedMySQLRegistry()
+	require.NoError(t, err)
+	migration := mysql[73]
+	require.Equal(t, utxoAddressPrefixIndexDropSchemaRelease, migration.Name)
+	require.Equal(
+		t,
+		[]string{"DROP INDEX `idx_utxo_address_address` ON `utxo_address`"},
+		migration.SQL["mysql"].Expand,
+	)
+}

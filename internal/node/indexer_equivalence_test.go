@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
@@ -98,7 +97,7 @@ func equivalenceParts(
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(idxDB, idxDB, 10)
 	require.NoError(t, err)
-	facts, err := indexer.NewFactsOver(consensus, ls, idxDB)
+	facts, err := indexer.NewMetadataFacts(ls, idxDB)
 	require.NoError(t, err)
 	bf := NewBackfill(
 		idxDB, nodeCfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -244,24 +243,6 @@ func dumpNamedTables(
 	return out
 }
 
-// likelihoodTables are the reward-likelihood tables, which the consensus store
-// owns and the IndexerDB receives as ledger facts.
-var likelihoodTables = []string{
-	"reward_likelihood_state", "reward_pool_likelihood",
-}
-
-// dumpConsensusLikelihood dumps the likelihood tables of the consensus store
-// itself. The IndexerDB dumps are compared with each other everywhere else,
-// which cannot notice a table the writer never copies.
-func dumpConsensusLikelihood(
-	t *testing.T,
-	consensus *database.Database,
-) map[string][]string {
-	t.Helper()
-	raw := openRaw(t, filepath.Join(consensus.DataDir(), "metadata.sqlite"))
-	return dumpNamedTables(t, raw, likelihoodTables)
-}
-
 func requireSameTables(t *testing.T, want, got map[string][]string) {
 	t.Helper()
 	var names []string
@@ -326,13 +307,8 @@ func firstN(s []string, n int) []string {
 func TestIndexerWriterRollbackMatchesAFreshIndex(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	consensus := newEquivalenceDB(t)
-	dir := copyImmutableChunkPrefix(t, equivalenceChunks)
-	require.NoError(t, LoadWithDB(
-		ctx, equivalenceLoadConfig(), logger, dir, consensus,
-	))
+	consensus := chainStoreTemplate.openEquivalence(t)
 	ls, _ := openFactLedger(t, consensus)
 
 	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
@@ -350,12 +326,6 @@ func TestIndexerWriterRollbackMatchesAFreshIndex(t *testing.T) {
 	require.Equal(t, ledgerTip.Point.Hash, tip.Hash)
 
 	want := dumpTables(t, idxRaw)
-	liveLikelihood := dumpConsensusLikelihood(t, consensus)
-	for _, n := range likelihoodTables {
-		require.NotEmpty(t, liveLikelihood[n],
-			"the loaded chain must hold %s rows, or the copy checks nothing", n)
-	}
-	requireSameTables(t, liveLikelihood, want)
 	for _, n := range slices.Sorted(maps.Keys(want)) {
 		if len(want[n]) > 0 {
 			t.Logf("compared %s: %d rows", n, len(want[n]))
@@ -497,14 +467,9 @@ func openFactLedger(
 	})
 	require.NoError(t, err)
 	require.NoError(t, (nodestorage.Reconcile{
-		DB:      consensus,
-		Set:     set,
-		DataDir: consensus.DataDir(),
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			ls.SetDrainedFamilies(mask)
-			set.SetDrainedFamilies(mask)
-		},
+		DB:     consensus,
+		Set:    set,
+		Logger: logger,
 		Resume: ls.ResumeUtxoSetFrom,
 	}).Run(ctx))
 	require.NoError(t, ls.Start(ctx))

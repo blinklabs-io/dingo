@@ -206,12 +206,16 @@ func tryStoreBlockFirstTx(
 func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 	t.Parallel()
 
-	db := newUtxoStorageTestDB(t)
+	// Only a v0.94.2 database keeps the SQL UTxO rows this lookup reads.
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
 	iter := newUtxoStorageTestIterator(t)
 	block, blockCbor := nextProducingBlock(t, db, iter)
 
 	txn := db.Transaction(context.Background(), true)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
 		produced := tx.Produced()
 
@@ -283,7 +287,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 					DataDir: tmpDir,
 					Logger:  logger,
 				}
-				db, err := dbtest.NewDatabase(t, dbConfig)
+				db, err := dbtest.NewReleasedDatabase(t, dbConfig)
 				require.NoError(t, err)
 				defer dbtest.CloseDatabase(db)
 

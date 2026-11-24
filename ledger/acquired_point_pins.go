@@ -18,22 +18,12 @@ import (
 	"sync"
 )
 
-// acquiredPointMaxUtxoHoldWindows bounds how far an acquired point may hold
-// consumed-UTxO cleanup behind its normal floor, in stability windows. Without
-// it a client that acquires a point and never releases or disconnects would
-// stop spent-UTxO pruning for good. It mirrors poolSnapshotRetentionMaxDepth,
-// the equivalent backstop for pool-stake snapshots, which already caps how far
-// any pin may hold those back: a point older than the backstop stops being
-// protected, and queries against it degrade to the retention rejection they
-// would have hit with no pin at all.
-const acquiredPointMaxUtxoHoldWindows uint64 = 4
-
 // acquiredPointPins records the slots of currently acquired LocalStateQuery
 // points, so the pruning paths can retain what those points still need.
 //
 // The mutex closes the race between verifying an acquired point and
-// recording it. Pruning reads the oldest pin,
-// caps its floor at it, and announces that floor all under mu, then releases
+// recording it. Pruning reads the pins,
+// caps its floor at them, and announces that floor all under mu, then releases
 // mu and only afterwards deletes. Acquire registers its pin under the same mu
 // before verifying. So either the pin lands first and the prune retains its
 // data, or the prune announces first and the later verify sees the announced
@@ -55,7 +45,6 @@ type acquiredPointPins struct {
 	// Floors announced by the pruning paths, monotonic. Each is published
 	// under mu before the corresponding delete, so a verify that runs after
 	// its own pin was registered can never miss one.
-	utxoFloorSlot          uint64
 	poolSnapshotFloorEpoch uint64
 }
 
@@ -85,43 +74,6 @@ func (ls *LedgerState) PinAcquiredPoint(slot uint64) (release func()) {
 			p.mu.Unlock()
 		})
 	}
-}
-
-// oldestPinnedSlotLocked returns the lowest acquired slot. p.mu must be held.
-func (p *acquiredPointPins) oldestPinnedSlotLocked() (uint64, bool) {
-	var (
-		oldest uint64
-		found  bool
-	)
-	for _, slot := range p.pins {
-		if !found || slot < oldest {
-			oldest = slot
-			found = true
-		}
-	}
-	return oldest, found
-}
-
-// capUtxoPruneFloor lowers floor to the oldest acquired point, clamps it back
-// up to the hold backstop, and announces the result. It returns the floor the
-// caller may prune below. The caller must delete only after this returns.
-func (ls *LedgerState) capUtxoPruneFloor(
-	floor, stabilityWindow uint64,
-) uint64 {
-	var backstop uint64
-	if hold := stabilityWindow * acquiredPointMaxUtxoHoldWindows; floor > hold {
-		backstop = floor - hold
-	}
-	p := &ls.acquiredPins
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if oldest, ok := p.oldestPinnedSlotLocked(); ok && oldest < floor {
-		floor = max(oldest, backstop)
-	}
-	if floor > p.utxoFloorSlot {
-		p.utxoFloorSlot = floor
-	}
-	return floor
 }
 
 // capPoolSnapshotPruneBeforeWith lowers before -- the epoch below which pool-stake
@@ -158,17 +110,15 @@ func (ls *LedgerState) capPoolSnapshotPruneBeforeWith(
 	return before
 }
 
-// announcedPruneFloors returns the floors the pruning paths have announced.
-// A verify reads these after registering its own pin, which is what makes the
-// check race-free: any prune it does not see here had not yet announced when
-// the pin landed, and so will see the pin and retain the point.
-func (ls *LedgerState) announcedPruneFloors() (
-	utxoFloorSlot, poolSnapshotFloorEpoch uint64,
-) {
+// announcedPoolSnapshotPruneFloor returns the floor pool-snapshot pruning
+// has announced. A verify reads it after registering its own pin, which is
+// what makes the check race-free: any prune it does not see here had not yet
+// announced when the pin landed, and so will see the pin and retain the point.
+func (ls *LedgerState) announcedPoolSnapshotPruneFloor() uint64 {
 	p := &ls.acquiredPins
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.utxoFloorSlot, p.poolSnapshotFloorEpoch
+	return p.poolSnapshotFloorEpoch
 }
 
 // AcquiredPointPinCountForTesting reports how many acquired-point pins are

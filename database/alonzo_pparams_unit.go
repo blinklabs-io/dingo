@@ -27,24 +27,19 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 )
 
-// ErrAlonzoPParamsUnitDrained is returned when the Alonzo parameter unit
-// marker is still the legacy one although the protocol parameter rows are
-// drained from the metadata store: the rows to repair or to count are gone.
-var ErrAlonzoPParamsUnitDrained = errors.New(
-	"alonzo protocol-parameter unit marker is legacy and the protocol " +
-		"parameters are drained from the metadata store, so the repair cannot " +
+// ErrAlonzoPParamsUnitNoRows is returned when the Alonzo parameter unit
+// marker is still the per-byte one on a database with no metadata store: the
+// protocol parameters are LedgerDB records, so there are no rows to repair or
+// to count. The v0.94.2 migration repairs them before it moves them.
+var ErrAlonzoPParamsUnitNoRows = errors.New(
+	"alonzo protocol-parameter unit marker is the per-byte one and the " +
+		"protocol parameters have no metadata rows, so the repair cannot " +
 		"read the rows it rewrites",
 )
 
-// refuseDrainedAlonzoUnit reads the latch, which a database that has just
-// opened has not loaded, and refuses to inspect rows a drain deleted.
-func (d *Database) refuseDrainedAlonzoUnit(ctx context.Context) error {
-	mask, err := d.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	if mask.Has(nodesettings.FamilyPParamsUpdates) {
-		return ErrAlonzoPParamsUnitDrained
+func (d *Database) refuseAlonzoUnitWithoutRows() error {
+	if d.metadata == nil {
+		return ErrAlonzoPParamsUnitNoRows
 	}
 	return nil
 }
@@ -54,7 +49,7 @@ type alonzoPParamsEraStore interface {
 }
 
 func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
-	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
+	gates, err := d.persistedGateValues(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -107,17 +102,17 @@ func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
 }
 
 // ReconcileAlonzoPParamsUnitAfterRecovery repairs a conservative v20
-// classification only when commit-timestamp recovery removed every persisted
-// Alonzo protocol-parameter row. The migration must initially treat any such
+// classification only when a rollback removed every persisted Alonzo
+// protocol-parameter row. The migration must initially treat any such
 // row as legacy because releases before gouroboros v0.205.7 stored a lossy
-// per-byte value. Once recovery has rolled all of those rows back, however,
+// per-byte value. Once all of those rows are rolled back, however,
 // there is no incompatible value left to protect and a genesis replay can
 // safely persist the corrected per-word representation.
 //
 // Missing and unknown markers are never inferred here. They remain hard
 // failures in checkAlonzoPParamsUnit rather than being silently blessed.
 func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) error {
-	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
+	gates, err := d.persistedGateValues(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -128,7 +123,7 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) 
 		nodesettings.AlonzoPParamsUnitLegacyByteV0 {
 		return nil
 	}
-	if err := d.refuseDrainedAlonzoUnit(ctx); err != nil {
+	if err := d.refuseAlonzoUnitWithoutRows(); err != nil {
 		return err
 	}
 	store, ok := d.Metadata().(alonzoPParamsEraStore)
@@ -154,13 +149,10 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) 
 	if hasAlonzo {
 		return nil
 	}
-	epoch, slot := d.currentEpochSlot(ctx)
-	if err := d.Metadata().SetNodeSettingsGates(ctx,
+	if err := d.writeGateRows(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},
-		epoch,
-		slot,
 	); err != nil {
 		return fmt.Errorf(
 			"record recovered Alonzo protocol-parameter unit: %w",
@@ -215,7 +207,7 @@ func (e errAlonzoPParamsUnitUnrepairable) Error() string {
 // reason the repair could not be applied, and any other error is a store
 // failure. It never returns (false, nil).
 func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
-	if err := d.refuseDrainedAlonzoUnit(ctx); err != nil {
+	if err := d.refuseAlonzoUnitWithoutRows(); err != nil {
 		return false, err
 	}
 	word := d.config.AlonzoLovelacePerUtxoWord
@@ -336,13 +328,10 @@ func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
 			return false, err
 		}
 	}
-	epoch, slot := d.currentEpochSlot(ctx)
-	if err := d.Metadata().SetNodeSettingsGates(ctx,
+	if err := d.writeGateRows(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},
-		epoch,
-		slot,
 	); err != nil {
 		return false, fmt.Errorf(
 			"record repaired Alonzo protocol-parameter unit: %w",

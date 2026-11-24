@@ -20,11 +20,13 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -75,6 +77,7 @@ func newVerifiedAncestryFixtureAt(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	OpenLiveSetForTest(t, db)
 	manager, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
@@ -127,6 +130,7 @@ func newVerifiedAncestryFixtureAt(
 		},
 	}
 	f.ls.slotsPerKESPeriod.Store(slotsPerKES)
+	fxAttachLedgerDB(t, f.ls)
 	f.ls.config.PeerHeaderLookupFunc = func(
 		conn ouroboros.ConnectionId, hash []byte,
 	) (ChainsyncEvent, []byte, bool) {
@@ -364,4 +368,35 @@ func TestVerifiedPeerAncestryCanceledCryptoDoesNotInspectHeader(t *testing.T) {
 	)
 	require.ErrorIs(t, err, context.Canceled,
 		"a canceled repair must stop before inspecting another signed header")
+}
+
+// TestVerifiedPeerAncestryWaitsForPeerVerificationLock requires the ancestry
+// proof to serialize with every other peer-relative header check on the same
+// connection, because both rewrite one fork-path cache entry.
+func TestVerifiedPeerAncestryWaitsForPeerVerificationLock(t *testing.T) {
+	t.Parallel()
+	f := newVerifiedAncestryFixture(t, tamperNone, nil)
+	conn := ouroboros.ConnectionId{}
+	mu := f.ls.peerHeaderVerificationLock(conn)
+	mu.Lock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			mu.Unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.ls.VerifyPeerHeaderAncestry(
+			t.Context(), conn, f.blocks[4].Header(),
+			ancestryTip(f.blocks[0]), 5,
+		)
+		done <- err
+	}()
+	testutil.RequireNoReceive(t, done, 200*time.Millisecond,
+		"ancestry verification must wait for the peer verification lock")
+	mu.Unlock()
+	unlocked = true
+	require.NoError(t, testutil.RequireReceive(t, done, testutil.AsyncWait,
+		"ancestry verification must finish once the lock is released"))
 }

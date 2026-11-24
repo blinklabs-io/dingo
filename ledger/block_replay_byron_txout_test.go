@@ -95,17 +95,7 @@ func seedByronTxOut(
 		map[uint]any{0: addrBytes, 1: uint64(10_000_000)},
 	)
 	require.NoError(t, err)
-	require.NoError(
-		t,
-		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
-				TxId: txId, OutputIdx: 0, AddedSlot: 1,
-			}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
-		}),
-	)
+	fxSeedOutput(t, db, txId, 0, 1, encoded)
 }
 
 // byronReplayTxCbor returns a signed, balanced V1 script spend whose output
@@ -471,7 +461,7 @@ func TestLedgerReplayRejectsByronTxOutInPlutusV1ContextBeforeStateMutation(
 				}
 				before := make([]*models.Utxo, 0, len(inputIds))
 				for _, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(t.Context(), id, 0, nil)
+					utxo, err := ls.UtxoByRef(id, 0)
 					require.NoError(t, err)
 					before = append(before, utxo)
 				}
@@ -489,7 +479,7 @@ func TestLedgerReplayRejectsByronTxOutInPlutusV1ContextBeforeStateMutation(
 				require.ErrorContains(t, err, "Byron TxOut")
 				require.Equal(t, ochainsync.Tip{}, tip)
 				for i, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(t.Context(), id, 0, nil)
+					utxo, err := ls.UtxoByRef(id, 0)
 					require.NoError(t, err)
 					require.Equal(t, before[i], utxo)
 				}

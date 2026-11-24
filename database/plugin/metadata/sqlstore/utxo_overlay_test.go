@@ -788,8 +788,7 @@ func TestReadsOverlayTables(t *testing.T) {
 // the output indexes once per key, the spend mark and the delete find rows by
 // primary key, and the live-stake prefetches probe the unique credential
 // indexes of reward_live_stake and account. No plan may use a deleted_slot
-// index or scan utxo, with no statistics, with statistics, and with the
-// catch-up indexes dropped.
+// index or scan utxo, with no statistics or with statistics.
 func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	// Not t.Parallel: the stages rewrite this store's statistics and
@@ -826,9 +825,6 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 		{"analyzed", func() {
 			_, err := conn.ExecContext(ctx, "ANALYZE")
 			require.NoError(t, err)
-		}},
-		{"catchup_indexes_dropped", func() {
-			require.NoError(t, store.DropCatchUpIndexesContext(ctx))
 		}},
 	}
 	for _, stage := range stages {

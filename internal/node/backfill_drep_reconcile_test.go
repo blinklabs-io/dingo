@@ -33,7 +33,7 @@ func TestBackfillRestoresPV10ReverseDelegationsAtSnapshotAnchor(t *testing.T) {
 	for _, major := range []uint{9, 10, 11} {
 		t.Run(fmt.Sprintf("PV%d", major), func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			store := db.Metadata()
 			ctx := context.Background()
 			old := bytes.Repeat([]byte{0xb1}, 28)
@@ -187,7 +187,7 @@ func TestBackfillDRepReconciliationRejectsDanglingSnapshotAtomically(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	store := db.Metadata()
 	ctx := context.Background()
 	old := bytes.Repeat([]byte{0xd1}, 28)
@@ -290,7 +290,7 @@ func TestBackfillDRepReconciliationRejectsUnknownProtocolAtomically(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	store := db.Metadata()
 	ctx := context.Background()
 	old := bytes.Repeat([]byte{0xd1}, 28)
@@ -372,7 +372,7 @@ func TestBackfillDRepReconciliationAllowsReplayOnlyDanglingTargets(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	ctx := context.Background()
 	stake := bytes.Repeat([]byte{0xe1}, 28)
 	target := bytes.Repeat([]byte{0xe2}, 28)

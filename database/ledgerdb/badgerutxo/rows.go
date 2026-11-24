@@ -199,6 +199,7 @@ func (s *Store) tombstonedPrefixes(slot uint64) ([][]byte, error) {
 	var prefixes [][]byte
 	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{StateJournalTag}
 		it := txn.NewIterator(opts)
 		defer it.Close()
@@ -300,34 +301,60 @@ func rowUndoCost(k, v []byte) cost {
 	}
 }
 
+// rowsCursor carries the state journal position between the transactions of one
+// rollback. below is the key of the last entry a committed transaction undid;
+// undone is the one the open transaction has undone, which the caller moves to
+// below once the transaction commits.
+type rowsCursor struct{ below, undone []byte }
+
 // rollbackRows restores every row changed after slot to its state before
-// that change, newest change first, and drops those journal entries.
-func rollbackRows(txn *badger.Txn, slot uint64) error {
-	_, err := rollbackRowsWithin(txn, slot, math.MaxInt64, math.MaxInt64)
-	return err
+// that change, newest change first, and drops those journal entries. below
+// and the returned key are rollbackRowsWithin's.
+func rollbackRows(
+	txn *badger.Txn,
+	slot uint64,
+	below []byte,
+) ([]byte, error) {
+	_, last, err := rollbackRowsWithin(
+		txn, slot, below, math.MaxInt64, math.MaxInt64,
+	)
+	return last, err
 }
 
 // rollbackRowsWithin is rollbackRows for as many of the entries, newest first,
 // as fit the budget, and at least one. It reports whether entries after slot
-// remain.
+// remain, and the key of the last entry it undid.
+//
+// below, when not nil, is the key of an entry that the caller has deleted and
+// that was the newest then; the scan starts there instead of at the top of the
+// journal, which would walk every entry deleted since. The caller must pass
+// nil when an entry newer than below may exist.
 func rollbackRowsWithin(
 	txn *badger.Txn,
 	slot uint64,
+	below []byte,
 	maxEntries, maxBytes int64,
-) (bool, error) {
+) (more bool, last []byte, err error) {
 	type entry struct{ key, value []byte }
 	entries := make([]entry, 0)
-	more := false
-	err := func() error {
+	err = func() error {
 		opts := badger.DefaultIteratorOptions
+		// Each value is copied below, so prefetching would only start a
+		// goroutine per item.
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{StateJournalTag}
 		opts.Reverse = true
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		var used cost
 		first := slotKey(StateJournalTag, slot+1)
-		it.Seek(append([]byte{StateJournalTag},
-			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+		if below != nil {
+			it.Seek(below)
+		} else {
+			topSeeks.Add(1)
+			it.Seek(append([]byte{StateJournalTag},
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+		}
 		for ; it.Valid(); it.Next() {
 			k := it.Item().Key()
 			if bytes.Compare(k, first) < 0 {
@@ -348,28 +375,31 @@ func rollbackRowsWithin(
 		return nil
 	}()
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	for _, e := range entries {
 		if len(e.key) < 10 || len(e.value) < 1 {
-			return false, errors.New(
+			return false, nil, errors.New(
 				"badgerutxo: malformed state journal entry",
 			)
 		}
 		if e.value[0] == tombstoneMark {
 			if err := deletePrefixKeys(txn, e.key[9:]); err != nil {
-				return false, err
+				return false, nil, err
 			}
 		} else if err := setRow(
 			txn, e.key[9:], e.value[1:], e.value[0] == 1,
 		); err != nil {
-			return false, err
+			return false, nil, err
 		}
 		if err := txn.Delete(e.key); err != nil {
-			return false, err
+			return false, nil, err
 		}
 	}
-	return more, nil
+	if len(entries) > 0 {
+		last = entries[len(entries)-1].key
+	}
+	return more, last, nil
 }
 
 // rowsAfterExceed reports whether undoing the entries after slot takes more
@@ -380,6 +410,7 @@ func rowsAfterExceed(
 	maxEntries, maxBytes int64,
 ) (bool, error) {
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Prefix = []byte{StateJournalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
@@ -641,7 +672,108 @@ func (s *Store) RowKeysChangedAfter(
 // order.
 func (s *Store) Rows(prefix []byte, fn func(k, v []byte) error) error {
 	return s.view(func(txn *badger.Txn) error {
-		return eachPrefix(txn, prefix, fn)
+		return eachPrefix(txn, prefix, func(k, v []byte) error {
+			s.rangeRowsVisited.Add(1)
+			return fn(k, v)
+		})
+	})
+}
+
+// EdgeRows returns the first and the last row under prefix, in key order,
+// and false when there is none. It copies the values of those two rows only.
+func (s *Store) EdgeRows(
+	prefix []byte,
+) (firstK, firstV, lastK, lastV []byte, found bool, err error) {
+	end := KeyAfter(prefix)
+	if end == nil {
+		return nil, nil, nil, nil, false, errors.New(
+			"badgerutxo: no key follows the prefix",
+		)
+	}
+	err = s.view(func(txn *badger.Txn) error {
+		edge := func(reverse bool) (k, v []byte, ok bool, err error) {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			opts.PrefetchValues = false
+			opts.Reverse = reverse
+			if reverse {
+				// A reverse seek lands on end itself when that key exists,
+				// and an iterator bounded by prefix reports it invalid
+				// without a way to step past it. Bound this one by the
+				// bytes end shares with prefix, which every key between the
+				// range and end carries, and step over end explicitly.
+				opts.Prefix = end[:len(end)-1]
+			}
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			if reverse {
+				it.Seek(end)
+				if it.Valid() && bytes.Equal(it.Item().Key(), end) {
+					it.Next()
+				}
+			} else {
+				it.Rewind()
+			}
+			s.rangeRowsVisited.Add(1)
+			if !it.ValidForPrefix(prefix) {
+				return nil, nil, false, nil
+			}
+			v, err = it.Item().ValueCopy(nil)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			return it.Item().KeyCopy(nil), v, true, nil
+		}
+		var ok bool
+		firstK, firstV, ok, err = edge(false)
+		if err != nil || !ok {
+			return err
+		}
+		lastK, lastV, ok, err = edge(true)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New(
+				"badgerutxo: no last row under a prefix with a first row",
+			)
+		}
+		found = true
+		return nil
+	})
+	return firstK, firstV, lastK, lastV, found, err
+}
+
+// EachDistinctEpoch calls fn with each distinct epoch among the keys under
+// tag, whose keys lead with the epoch as eight big-endian bytes, in order. It
+// reads keys only and seeks past each epoch's rows, so it steps once per
+// epoch however many rows an epoch holds.
+func (s *Store) EachDistinctEpoch(tag byte, fn func(epoch uint64) error) error {
+	return s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte{tag}
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		for it.Valid() {
+			s.rangeRowsVisited.Add(1)
+			k := it.Item().Key()
+			if len(k) < 9 {
+				it.Next()
+				continue
+			}
+			epoch := binary.BigEndian.Uint64(k[1:9])
+			if err := fn(epoch); err != nil {
+				return err
+			}
+			next := KeyAfter(k[:9])
+			if next == nil {
+				return nil
+			}
+			it.Seek(next)
+		}
+		return nil
 	})
 }
 
@@ -726,8 +858,9 @@ func (s *Store) EachRowFrom(
 	})
 }
 
-// RangeRowsVisited returns how many rows RowsInRange and EachRowAfter have
-// stepped over since the store opened, including the one that ended a range. It exists to show
+// RangeRowsVisited returns how many rows Rows, RowsInRange and EachRowAfter
+// have stepped over, and how many epochs EachDistinctEpoch has listed, since
+// the store opened, including the row that ended a range. It exists to show
 // that a ranged read does not touch the rows outside its range.
 func (s *Store) RangeRowsVisited() uint64 {
 	return s.rangeRowsVisited.Load()
@@ -1211,7 +1344,20 @@ func (s *Store) loadFamily(
 	feed func(put func(k, v []byte) error) error,
 	invalidate ...[]byte,
 ) error {
-	if err := s.dropPrefix([]byte{tag}); err != nil {
+	return s.writeFamily(s.dropPrefix, tag, marker, name, feed, invalidate...)
+}
+
+// writeFamily replaces the rows under tag with the ones feed supplies, after
+// drop removes the held ones, and marks the family loaded.
+func (s *Store) writeFamily(
+	drop func(prefixes ...[]byte) error,
+	tag byte,
+	marker []byte,
+	name string,
+	feed func(put func(k, v []byte) error) error,
+	invalidate ...[]byte,
+) error {
+	if err := drop([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
 	}
 	if len(invalidate) > 0 {
@@ -1376,4 +1522,37 @@ func (s *Store) LastKeyAtOrBelow(prefix, limit []byte) ([]byte, bool, error) {
 		return nil
 	})
 	return out, out != nil, err
+}
+
+// DistinctUint64Keys returns, in order, the distinct big-endian uint64 values
+// that immediately follow prefix in its keys. It reads one key per distinct
+// value and seeks past the rest, so its cost follows the number of distinct
+// values rather than the number of rows under prefix, and it reads no values.
+func (s *Store) DistinctUint64Keys(prefix []byte) ([]uint64, error) {
+	var out []uint64
+	err := s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		seek := bytes.Clone(prefix)
+		for it.Seek(seek); it.Valid(); it.Seek(seek) {
+			k := it.Item().Key()
+			s.rangeRowsVisited.Add(1)
+			if len(k) < len(prefix)+8 {
+				return fmt.Errorf(
+					"badgerutxo: key %x under prefix %x has no uint64", k, prefix,
+				)
+			}
+			v := binary.BigEndian.Uint64(k[len(prefix) : len(prefix)+8])
+			out = append(out, v)
+			if v == math.MaxUint64 {
+				break
+			}
+			seek = binary.BigEndian.AppendUint64(bytes.Clone(prefix), v+1)
+		}
+		return nil
+	})
+	return out, err
 }

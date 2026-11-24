@@ -34,14 +34,10 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// mithrilLedgerSlotSyncKey mirrors the sync-state key written by the ledger
-// and mithril packages when a Mithril snapshot is imported: blocks at or
-// below this slot are Mithril-verified, so the node is not expected to have
-// complete pre-boundary UTxO history. Duplicated here (rather than imported)
-// because the database package cannot depend on ledger, which depends on it.
-const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
-
-const importedLedgerStateHashSyncKey = "mithril_ledger_hash"
+// mithrilLedgerSlotSyncKey is the sync_state key an IndexerDB records its
+// copy of the imported ledger-state boundary slot under, and the row a v0.94.2
+// database held the boundary in.
+const mithrilLedgerSlotSyncKey = ImportedLedgerStateSlotKey
 
 type metadataOnlyTransaction struct {
 	lcommon.Transaction
@@ -114,8 +110,8 @@ func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 }
 
 // ImportedLedgerStateBoundarySlot returns the boundary of ledger state loaded
-// without replaying the blocks below it. The persisted key keeps its legacy
-// Mithril name for database compatibility, but the boundary applies to every
+// without replaying the blocks below it. The stored name says Mithril because
+// released databases hold it under that name; the boundary applies to every
 // ledger-state loader.
 func (d *Database) ImportedLedgerStateBoundarySlot(txn *Txn) uint64 {
 	return d.MithrilTrustBoundarySlot(txn)
@@ -131,13 +127,27 @@ func (d *Database) ImportedLedgerStateBoundarySlot(txn *Txn) uint64 {
 // ever imported" for a caller enforcing a safety check, or the check is
 // defeated exactly when it matters most.
 //
-// That includes a recorded empty value. GetSyncState reports an absent key
-// as the empty string, so an empty return alone cannot tell "no snapshot was
-// ever imported" from "a boundary row exists and holds nothing"; only the
-// second is malformed, and the two are separated here by asking the
-// sync_state keyspace whether the row exists at all. The extra query runs
-// only on that path.
+// That includes a recorded empty value: "no snapshot was ever imported" and
+// "a boundary is recorded and holds nothing" are different answers, and only
+// the second is malformed. The ledger's database asks the block store whether
+// the value exists; an IndexerDB, whose GetSyncState reports an absent key as
+// the empty string, asks its sync_state keyspace, on that path only.
 func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	if !d.isIndexer() {
+		val, recorded, err := d.LookupChainState(ImportedLedgerStateSlotKey)
+		if err != nil {
+			return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+		}
+		if !recorded {
+			return 0, nil
+		}
+		if val == "" {
+			return 0, errors.New(
+				"parse Mithril trust boundary: empty value",
+			)
+		}
+		return parseMithrilTrustBoundary(val)
+	}
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
@@ -167,11 +177,15 @@ func (d *Database) ImportedLedgerStateBoundarySlotStrict(
 
 // SetImportedLedgerStateBoundary records the point at which a ledger state was
 // loaded without replaying earlier blocks. All ledger-state loaders use this
-// boundary; the storage keys retain their legacy names for compatibility.
+// boundary. The ledger's database keeps it with the blocks it describes; txn
+// carries the write when it holds a blob handle.
 func (d *Database) SetImportedLedgerStateBoundary(
 	point ocommon.Point,
 	txn *Txn,
 ) error {
+	if !d.isIndexer() {
+		return d.setImportedLedgerStateBoundary(point, txn)
+	}
 	if err := d.SetSyncState(
 		mithrilLedgerSlotSyncKey,
 		strconv.FormatUint(point.Slot, 10),
@@ -180,13 +194,13 @@ func (d *Database) SetImportedLedgerStateBoundary(
 		return fmt.Errorf("record imported ledger-state slot: %w", err)
 	}
 	if len(point.Hash) == 0 {
-		if err := d.DeleteSyncState(importedLedgerStateHashSyncKey, txn); err != nil {
+		if err := d.DeleteSyncState(ImportedLedgerStateHashKey, txn); err != nil {
 			return fmt.Errorf("clear imported ledger-state hash: %w", err)
 		}
 		return nil
 	}
 	if err := d.SetSyncState(
-		importedLedgerStateHashSyncKey,
+		ImportedLedgerStateHashKey,
 		hex.EncodeToString(point.Hash),
 		txn,
 	); err != nil {
@@ -200,6 +214,16 @@ func (d *Database) SetImportedLedgerStateBoundary(
 // it anyway. An absent key and a key recorded with an empty value both come
 // back as 0 with no error.
 func (d *Database) mithrilTrustBoundarySlot(txn *Txn) (uint64, error) {
+	if !d.isIndexer() {
+		val, err := d.GetChainState(ImportedLedgerStateSlotKey, nil)
+		if err != nil {
+			return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+		}
+		if val == "" {
+			return 0, nil
+		}
+		return parseMithrilTrustBoundary(val)
+	}
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
 		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
@@ -441,6 +465,14 @@ func (d *Database) SetTransactionWithOpts(
 		}
 	}
 
+	// The ledger's database keeps no metadata store: the live UTxO set and the
+	// LedgerDB hold the transaction's effects.
+	if txn.Metadata() == nil {
+		if owned {
+			return txn.Commit()
+		}
+		return nil
+	}
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
@@ -479,7 +511,7 @@ func (d *Database) SetTransactionWithOpts(
 		)
 	}
 
-	if len(pparamUpdates) > 0 && tx.IsValid() && !d.pparamsDrained() {
+	if len(pparamUpdates) > 0 && tx.IsValid() && !d.pparamsFromSource() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
@@ -523,6 +555,9 @@ func (d *Database) SetTransactionMetadataOnly(
 	metadataTxn := txn.Metadata()
 	if metadataTxn == nil {
 		return types.ErrNilTxn
+	}
+	if err := d.requireStore("SetTransactionMetadataOnly"); err != nil {
+		return err
 	}
 	if err := d.transactionStore().SetTransaction(
 		metadataOnlyTransaction{Transaction: tx},
@@ -628,6 +663,9 @@ func (d *Database) SetGapBlockTransaction(
 		}
 	}
 
+	if err := d.requireStore("SetGapBlockTransaction"); err != nil {
+		return err
+	}
 	if err := d.transactionStore().SetGapBlockTransaction(
 		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
 	); err != nil {
@@ -891,9 +929,9 @@ func (d *Database) refuseOffPrimaryChainClosure(
 	txn *Txn,
 	input lcommon.TransactionInput,
 ) error {
-	producerTx, err := d.metadata.GetTransactionByHash(
+	producerTx, found, err := d.appliedTransaction(
+		txn,
 		ledgerInputIDBytes(input),
-		txn.Metadata(),
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -902,7 +940,7 @@ func (d *Database) refuseOffPrimaryChainClosure(
 			err,
 		)
 	}
-	if producerTx == nil || len(producerTx.BlockHash) == 0 {
+	if !found || len(producerTx.BlockHash) == 0 {
 		return ErrUtxoNotFound
 	}
 	block, err := BlockByPointTxn(
@@ -1216,6 +1254,9 @@ func (d *Database) SetGenesisTransaction(
 			}
 		}
 
+		if txn.Metadata() == nil {
+			continue
+		}
 		// Build model for metadata store
 		model, err := models.UtxoLedgerToModel(utxo, 0)
 		if err != nil {
@@ -1229,7 +1270,14 @@ func (d *Database) SetGenesisTransaction(
 		utxoModels[i] = model
 	}
 
-	// Store transaction in metadata
+	// The ledger's database keeps no metadata store: the live UTxO set holds
+	// the outputs and the transaction index.
+	if txn.Metadata() == nil {
+		if owned {
+			return txn.Commit()
+		}
+		return nil
+	}
 	if err := d.transactionStore().SetGenesisTransaction(
 		txHash,
 		blockHash,
@@ -1282,6 +1330,9 @@ func (d *Database) SetGenesisStakingWithDeposits(
 	blockHash []byte,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("SetGenesisStakingWithDeposits"); err != nil {
+		return err
+	}
 	if txn == nil {
 		if err := d.metadata.SetGenesisStakingWithDeposits(
 			pools,
@@ -1316,6 +1367,9 @@ func (d *Database) SetGenesisGovernance(
 	blockHash []byte,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("SetGenesisGovernance"); err != nil {
+		return err
+	}
 	if txn == nil {
 		if err := d.metadata.SetGenesisGovernance(
 			initialDReps,
@@ -1338,6 +1392,29 @@ func (d *Database) SetGenesisGovernance(
 	return nil
 }
 
+// appliedTransaction returns where the transaction with hash was applied on
+// the chain, and false when it was not: from the LedgerDB's transaction
+// index when it holds one, else from the metadata store's transaction row.
+func (d *Database) appliedTransaction(
+	txn *Txn,
+	hash []byte,
+) (types.TxLocation, bool, error) {
+	if d.txIndex != nil {
+		return d.txIndex.TxLocation(txn.Metadata(), hash)
+	}
+	row, err := d.metadata.GetTransactionByHash(hash, txn.Metadata())
+	if err != nil || row == nil {
+		return types.TxLocation{}, false, err
+	}
+	return types.TxLocation{
+		BlockHash:  row.BlockHash,
+		Slot:       row.Slot,
+		BlockIndex: row.BlockIndex,
+		Type:       uint8(row.Type), //nolint:gosec // era ids fit a byte
+		Valid:      row.Valid,
+	}, true, nil
+}
+
 func (d *Database) GetTransactionByHash(
 	ctx context.Context,
 	hash []byte,
@@ -1350,7 +1427,30 @@ func (d *Database) GetTransactionByHash(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetTransactionByHash"); err != nil {
+		return nil, err
+	}
 	return d.transactionStore().GetTransactionByHash(hash, txn.Metadata())
+}
+
+// GetTransactionSlotByHash returns the slot of the applied transaction with
+// hash. Identity-only transaction rows are not applied transactions.
+func (d *Database) GetTransactionSlotByHash(
+	ctx context.Context,
+	hash []byte,
+	txn *Txn,
+) (uint64, bool, error) {
+	if len(hash) == 0 {
+		return 0, false, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.transactionStore().GetTransactionSlotByHash(
+		hash,
+		txn.Metadata(),
+	)
 }
 
 // GetTransactionMetadataByHash returns only the stored metadata blob for the
@@ -1368,6 +1468,9 @@ func (d *Database) GetTransactionMetadataByHash(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetTransactionMetadataByHash"); err != nil {
+		return nil, err
+	}
 	return d.transactionStore().
 		GetTransactionMetadataByHash(hash, txn.Metadata())
 }
@@ -1384,6 +1487,9 @@ func (d *Database) GetTransactionsByHashes(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetTransactionsByHashes"); err != nil {
+		return nil, err
 	}
 	txs, err := d.transactionStore().GetTransactionsByHashes(
 		hashes,
@@ -1407,6 +1513,9 @@ func (d *Database) GetExistingTransactionHashes(
 	}
 	txn := d.TransactionContext(ctx, false)
 	defer txn.Release()
+	if err := d.requireStore("GetExistingTransactionHashes"); err != nil {
+		return nil, err
+	}
 	found, err := d.transactionStore().GetExistingTransactionHashes(
 		hashes,
 		txn.Metadata(),
@@ -1430,6 +1539,9 @@ func (d *Database) GetTransactionsByBlockHash(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetTransactionsByBlockHash"); err != nil {
+		return nil, err
 	}
 	txs, err := d.transactionStore().GetTransactionsByBlockHash(
 		blockHash,
@@ -1641,47 +1753,6 @@ func transactionContainsExactAddress(
 	return false, nil
 }
 
-// GetTransactionsByAddressKeys returns transactions for a payment/staking
-// credential tuple with pagination and explicit order (asc|desc).
-func (d *Database) GetTransactionsByAddressKeys(
-	ctx context.Context,
-	paymentKey []byte,
-	credentialTag uint8,
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn *Txn,
-) ([]models.Transaction, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	txs, err := d.transactionStore().GetTransactionsByAddress(
-		paymentKey,
-		credentialTag,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		nil,
-		nil,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get txs by address payment=%x staking=%x limit=%d offset=%d order=%s: %w",
-			paymentKey,
-			stakingKey,
-			limit,
-			offset,
-			order,
-			err,
-		)
-	}
-	return txs, nil
-}
-
 // CountTransactionsByAddress returns the total number of
 // transactions involving a given address within the inclusive
 // (slot, block index) range [from, to]. A nil bound is open.
@@ -1731,36 +1802,6 @@ func (d *Database) HasTransactionsByAddress(
 	return len(txs) > 0, nil
 }
 
-// CountTransactionsByAddressKeys returns the total number
-// of transactions for a payment/staking credential tuple.
-func (d *Database) CountTransactionsByAddressKeys(
-	ctx context.Context,
-	paymentKey []byte,
-	credentialTag uint8,
-	stakingKey []byte,
-	txn *Txn,
-) (int, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	count, err := d.transactionStore().CountTransactionsByAddress(
-		paymentKey,
-		credentialTag,
-		stakingKey,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count txs by address payment=%x staking=%x: %w",
-			paymentKey,
-			stakingKey,
-			err,
-		)
-	}
-	return count, nil
-}
-
 // CountTransactionsByPaymentCred returns the total number of transactions
 // involving a payment credential across every address that carries it,
 // regardless of staking part. paymentScript selects a script credential
@@ -1774,6 +1815,9 @@ func (d *Database) CountTransactionsByPaymentCred(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("CountTransactionsByPaymentCred"); err != nil {
+		return 0, err
 	}
 	count, err := d.transactionStore().CountTransactionsByPaymentCred(
 		paymentKey,
@@ -1803,6 +1847,9 @@ func (d *Database) GetAddressesByCredential(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetAddressesByCredential"); err != nil {
+		return nil, err
 	}
 	addresses, err := d.transactionStore().GetAddressesByCredential(
 		credentialTag,
@@ -1836,6 +1883,9 @@ func (d *Database) CountAddressesByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("CountAddressesByCredential"); err != nil {
+		return 0, err
+	}
 	count, err := d.transactionStore().CountAddressesByCredential(
 		credentialTag,
 		stakingKey,
@@ -1866,6 +1916,9 @@ func (d *Database) GetTransactionsByMetadataLabel(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetTransactionsByMetadataLabel"); err != nil {
+		return nil, err
+	}
 	txs, err := d.transactionStore().GetTransactionsByMetadataLabel(
 		label,
 		limit,
@@ -1886,6 +1939,55 @@ func (d *Database) GetTransactionsByMetadataLabel(
 	return txs, nil
 }
 
+// ListMetadataLabelCounts returns the transaction metadata labels in use with
+// their transaction counts, in numeric label order (highest first when
+// descending).
+func (d *Database) ListMetadataLabelCounts(
+	ctx context.Context,
+	limit int,
+	offset int,
+	descending bool,
+	txn *Txn,
+) ([]models.MetadataLabelCount, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	if err := d.requireStore("ListMetadataLabelCounts"); err != nil {
+		return nil, err
+	}
+	labels, err := d.transactionStore().ListMetadataLabelCounts(
+		limit,
+		offset,
+		descending,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list metadata label counts: %w", err)
+	}
+	return labels, nil
+}
+
+// CountMetadataLabels returns the number of distinct transaction metadata
+// labels in use.
+func (d *Database) CountMetadataLabels(
+	ctx context.Context,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	if err := d.requireStore("CountMetadataLabels"); err != nil {
+		return 0, err
+	}
+	count, err := d.transactionStore().CountMetadataLabels(txn.Metadata())
+	if err != nil {
+		return 0, fmt.Errorf("count metadata labels: %w", err)
+	}
+	return count, nil
+}
+
 // CountTransactionsByMetadataLabel returns the total number of transactions
 // that include metadata for a given label key.
 func (d *Database) CountTransactionsByMetadataLabel(
@@ -1896,6 +1998,9 @@ func (d *Database) CountTransactionsByMetadataLabel(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("CountTransactionsByMetadataLabel"); err != nil {
+		return 0, err
 	}
 	count, err := d.transactionStore().CountTransactionsByMetadataLabel(
 		label,
@@ -1918,6 +2023,9 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteTransactionMetadataLabelsAfterSlot"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 			slot,
@@ -1986,10 +2094,9 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 		// Stage only what this transaction can still hold. Past its budget
 		// the store rejects every further staged write, including the
-		// commit timestamp Txn.Commit puts into this same transaction, so
-		// an unbounded stage costs the caller its whole commit rather than
-		// just the tail of this set. What is left
-		// unstaged is counted with the deletes that failed and reported
+		// rollback's own writes after this set, so an unbounded stage costs
+		// the caller its whole commit rather than just the tail of this set.
+		// What is left unstaged is counted with the deletes that failed and reported
 		// through ErrBlobDeleteIncomplete below: the metadata naming these
 		// objects goes away either way, so both are orphans rather than
 		// silently dropped work.
@@ -2062,6 +2169,14 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	return nil
 }
 
+// DeleteTransactionOffsets removes the offset entries of the transactions
+// with hashes, committing a blob transaction per batch. A delete that fails
+// leaves an unreachable object and is reported through
+// ErrBlobDeleteIncomplete once every batch has run.
+func (d *Database) DeleteTransactionOffsets(hashes [][]byte) error {
+	return deleteTxBlobs(d, hashes, nil)
+}
+
 // TransactionsDeleteRolledback deletes transaction offset blobs and metadata
 // for transactions added after the given slot. This is used during rollback
 // to clean up both blob storage and metadata for rolled-back transactions.
@@ -2081,6 +2196,9 @@ func (d *Database) TransactionsDeleteRolledback(
 		}()
 	}
 	// Get transaction hashes that will be deleted
+	if err := d.requireStore("TransactionsDeleteRolledback"); err != nil {
+		return err
+	}
 	txHashes, err := d.transactionStore().GetTransactionHashesAfterSlot(
 		slot,
 		txn.Metadata(),
@@ -2091,6 +2209,18 @@ func (d *Database) TransactionsDeleteRolledback(
 			slot,
 			err,
 		)
+	}
+
+	if d.txIndex != nil {
+		// The metadata store keeps no rows for the transactions the ledger
+		// applied, so the LedgerDB names the ones this rollback drops.
+		indexed, err := d.txIndex.TxHashesAfterSlot(txn.Metadata(), slot)
+		if err != nil {
+			return fmt.Errorf(
+				"list indexed transactions after slot %d: %w", slot, err,
+			)
+		}
+		txHashes = append(txHashes, indexed...)
 	}
 
 	// Delete blob data first (best effort)

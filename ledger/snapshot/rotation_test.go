@@ -42,7 +42,7 @@ func setupTestDBWithStorageMode(
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     tmpDir,
 		StorageMode: storageMode,
 	})
@@ -683,7 +683,7 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 		TotalPools:     1,
 	}
 	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
-	saved, err := mgr.saveSnapshot(
+	err := mgr.saveSnapshot(
 		context.Background(),
 		8,
 		models.PoolStakeSnapshotTypeMark,
@@ -696,10 +696,8 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 		},
 		false,
 		false,
-		false,
 	)
 	require.NoError(t, err)
-	require.True(t, saved)
 
 	newPublic := bytes.Repeat([]byte{0x52}, 96)
 	newProof := bytes.Repeat([]byte{0x62}, 48)
@@ -812,7 +810,7 @@ func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
 				event.NewEventBus(nil, nil),
 				nil,
 			)
-			saved, err := mgr.saveSnapshot(
+			err := mgr.saveSnapshot(
 				context.Background(),
 				8,
 				models.PoolStakeSnapshotTypeMark,
@@ -826,10 +824,8 @@ func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
 				},
 				false,
 				false,
-				false,
 			)
 			require.NoError(t, err)
-			require.True(t, saved)
 
 			stored, err := db.Metadata().GetPoolStakeSnapshot(
 				8,
@@ -898,7 +894,7 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 		TotalPools:     1,
 	}
 	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
-	saved, err := mgr.saveSnapshot(
+	err := mgr.saveSnapshot(
 		context.Background(),
 		8,
 		models.PoolStakeSnapshotTypeMark,
@@ -911,10 +907,8 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 		},
 		false,
 		false,
-		false,
 	)
 	require.NoError(t, err)
-	require.True(t, saved)
 
 	stored, err := db.Metadata().GetPoolStakeSnapshot(
 		8,

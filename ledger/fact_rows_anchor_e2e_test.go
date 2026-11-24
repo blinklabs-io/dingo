@@ -15,17 +15,13 @@
 package ledger_test
 
 import (
+	"bytes"
 	"fmt"
-	"math"
 	"slices"
+	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -83,69 +79,33 @@ func anchorStateLines(
 // metadata store served them.
 func TestDrainedSetServesTheImportedAnchorStateTheStoreServes(t *testing.T) {
 	t.Parallel()
-	run := func(drain bool) []string {
-		var lines []string
-		out, _ := allGraduatedRun(t, drain, func(h *p5Harness) func() []string {
-			ref := h.refs[0]
-			h.scenario.Credit(ref, 40)
-			lines = anchorStateLines(t, h.scenario.AnchorState)
-			return func() []string { return nil }
-		})
-		require.NotNil(t, out)
-		return lines
+	var lines []string
+	out, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
+		ref := h.refs[0]
+		h.scenario.Credit(ref, 40)
+		lines = anchorStateLines(t, h.scenario.AnchorState)
+		return func() []string { return nil }
+	})
+	require.NotNil(t, out)
+	// The scenario's credit is 40 from each of two sources; a repeat of the
+	// first source is not credited again.
+	require.Equal(t, 2, countPrefixed(lines, "journal "),
+		"the journal has both credits: %v", lines)
+	require.Equal(t, 1, countPrefixed(lines, fmt.Sprintf(
+		"account 0/%x pool=", bytes.Repeat([]byte{0x71}, 28),
+	)), "the credited account is served: %v", lines)
+	require.Equal(t, 2, countPrefixed(lines, "account "),
+		"the harness imported two accounts: %v", lines)
+}
+
+func countPrefixed(lines []string, prefix string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
 	}
-	want := run(false)
-	require.NotEmpty(t, want)
-	require.True(t, slices.ContainsFunc(want, func(l string) bool {
-		return len(l) > 8 && l[:8] == "journal "
-	}), "the journal has the credit")
-	require.True(t, slices.ContainsFunc(want, func(l string) bool {
-		return len(l) > 8 && l[:8] == "account "
-	}), "the harness imported accounts")
-	require.Equal(t, want, run(true))
-}
-
-// lostJournalLedgerDB is a LedgerDB whose reward journal the metadata store
-// had drained before the set first loaded it.
-type lostJournalLedgerDB struct {
-	ledgerdb.LedgerDB
-}
-
-func (lostJournalLedgerDB) EachRewardJournalRow(
-	ledgerdb.Txn,
-	func(ledgerdb.RewardJournalRow) error,
-) error {
-	return database.ErrFamilyDrained
-}
-
-// A set that loaded after the metadata store drained the reward journal holds
-// none of its history, so exporting the credits, and taking over an import's
-// balances, fail naming the cause instead of answering with no rows.
-func TestDrainedSetRefusesTheRewardJournalItLostBeforeLoadingIt(t *testing.T) {
-	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, statedrain.NewTripGuard(),
-	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), lostJournalLedgerDB{dbadapter.New(s.DB)},
-	))
-	s.InstallDrainedSources()
-	s.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
-
-	_, _, err = s.ReadFactRows(
-		metadata.AccountRewardCreditTable, 0, math.MaxInt64, 0, 10,
-	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-	require.ErrorContains(t, err, "reward journal was drained before the set held it")
-
-	err = s.AnchorState.AnchorStateReady(t.Context())
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-	require.ErrorContains(t, err, "reward journal was drained before the set held it")
+	return n
 }
 
 // lostDelegationsSet is a set whose import baselines were written before it
@@ -167,22 +127,18 @@ func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, lostDelegationsSet{set},
-		statedrain.NewTripGuard(),
+		t, set, nil,
 	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(s.DB),
-	))
 	s.InstallDrainedSources()
-	s.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
+	s.WrapSet(func(ledger.UtxoSetWriter) ledger.UtxoSetWriter {
+		return lostDelegationsSet{set}
+	})
 
 	err = s.AnchorState.AnchorStateReady(t.Context())
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	require.ErrorContains(t, err, "delegations they record")
 	_, _, err = s.AnchorState.AnchorImportedAccounts(t.Context(), 0, nil, 10)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
 // A pinned view of the anchor state reads the ledger at the point it was
@@ -191,60 +147,10 @@ func TestDrainedSetRefusesImportedAccountsWhoseDelegationsItLost(t *testing.T) {
 // anchor. The live source moves with the credit.
 func TestAnchorStateViewReadsOnePointWhileTheLedgerMoves(t *testing.T) {
 	t.Parallel()
-	for name, drain := range map[string]bool{"store": false, "set": true} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			allGraduatedRun(t, drain, func(h *p5Harness) func() []string {
-				ref := h.refs[0]
-				h.scenario.Credit(ref, 40)
-				before := anchorStateLines(t, h.scenario.AnchorState)
-
-				viewer, ok := h.scenario.AnchorState.(metadata.AnchorStateViewer)
-				require.True(t, ok)
-				view, release, err := viewer.AnchorStateView(t.Context())
-				require.NoError(t, err)
-				defer release()
-
-				ldb := h.scenario.LedgerDB()
-				txn := ldb.Begin(t.Context(), true)
-				require.NoError(t, ldb.AddPostSnapshotAccountRewardByCredential(
-					t.Context(), ref.Tag, ref.Key, 7,
-					h.scenario.CurrentPoint().Slot, []byte{0x41}, txn,
-				))
-				require.NoError(t, txn.Commit())
-				require.NotEqual(t, before, anchorStateLines(t, h.scenario.AnchorState),
-					"the live source sees the later credit")
-				require.Equal(t, before, anchorStateLines(t, view),
-					"the view still reads the point it was taken at")
-				return func() []string { return nil }
-			})
-		})
-	}
-}
-
-// A pinned view keeps the source it was taken over: the accounts family
-// draining while the copy pages through it must not switch the view from the
-// metadata store's account ids to the set's credentials.
-func TestAnchorStateViewKeepsItsSourceWhenTheFamilyDrainsMidCopy(t *testing.T) {
-	t.Parallel()
-	allGraduatedRun(t, false, func(h *p5Harness) func() []string {
-		page := func(
-			src metadata.AnchorStateSource, cursor []byte,
-		) ([]metadata.ImportedAccount, []byte) {
-			accounts, next, err := src.AnchorImportedAccounts(t.Context(), 0, cursor, 1)
-			require.NoError(t, err)
-			return accounts, next
-		}
-		var want []metadata.ImportedAccount
-		for cursor := []byte(nil); ; {
-			accounts, next := page(h.scenario.AnchorState, cursor)
-			want = append(want, accounts...)
-			if next == nil {
-				break
-			}
-			cursor = next
-		}
-		require.Greater(t, len(want), 1, "the copy needs more than one page")
+	releasedFactsRun(t, func(h *p5Harness) func() []string {
+		ref := h.refs[0]
+		h.scenario.Credit(ref, 40)
+		before := anchorStateLines(t, h.scenario.AnchorState)
 
 		viewer, ok := h.scenario.AnchorState.(metadata.AnchorStateViewer)
 		require.True(t, ok)
@@ -252,17 +158,17 @@ func TestAnchorStateViewKeepsItsSourceWhenTheFamilyDrainsMidCopy(t *testing.T) {
 		require.NoError(t, err)
 		defer release()
 
-		var got []metadata.ImportedAccount
-		accounts, cursor := page(view, nil)
-		got = append(got, accounts...)
-		h.scenario.DrainFamilies(
-			nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-		)
-		for cursor != nil {
-			accounts, cursor = page(view, cursor)
-			got = append(got, accounts...)
-		}
-		require.Equal(t, want, got)
+		ldb := h.scenario.LedgerDB()
+		txn := ldb.Begin(t.Context(), true)
+		require.NoError(t, ldb.AddPostSnapshotAccountRewardByCredential(
+			t.Context(), ref.Tag, ref.Key, 7,
+			h.scenario.CurrentPoint().Slot, []byte{0x41}, txn,
+		))
+		require.NoError(t, txn.Commit())
+		require.NotEqual(t, before, anchorStateLines(t, h.scenario.AnchorState),
+			"the live source sees the later credit")
+		require.Equal(t, before, anchorStateLines(t, view),
+			"the view still reads the point it was taken at")
 		return func() []string { return nil }
 	})
 }

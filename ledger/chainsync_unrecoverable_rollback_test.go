@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -192,7 +191,7 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 		event.ChainsyncResyncReasonRollbackLoop,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
@@ -238,7 +237,7 @@ func TestProtocolConstrainedRollbackProgressDoesNotAccumulate(t *testing.T) {
 	for _, reason := range []string{
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
@@ -312,7 +311,7 @@ func TestReportUnrecoverableRollbackClearsProgressBeforeFuturePointReturn(t *tes
 
 	fixture.ls.reportUnrecoverableRollbackIfStuck(
 		point,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		fixture.connId,
 	)
 	_, tracked := fixture.ls.unrecoverableRollbacks[key]
@@ -418,7 +417,7 @@ func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
 var protocolConstrainedRollbackReasons = []string{
 	event.ChainsyncResyncReasonRollbackExceedsK,
 	event.ChainsyncResyncReasonRollbackExceedsMithril,
-	event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 }
 
 // A protocol-constrained refusal of a point that is off our primary chain is
@@ -543,7 +542,7 @@ func TestRollbackTargetOnLocalChainReusesTrackerClassification(t *testing.T) {
 	for range 3 {
 		fixture.ls.reportUnrecoverableRollbackIfStuck(
 			fixture.ancestorTip.Point,
-			event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 			fixture.connId,
 		)
 		require.True(t, fixture.ls.rollbackTargetOnLocalChain(fixture.ancestorTip.Point))
@@ -619,7 +618,7 @@ func TestHistoricalPointOnPrimaryChainExpiredSkipsArchive(t *testing.T) {
 // included, and at ERROR when the target is off it.
 func TestHandleEventChainsyncRollbackPruneFloorLogLevel(t *testing.T) {
 	t.Parallel()
-	const rejection = "chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain"
+	const rejection = "chainsync rollback is below the live UTxO set journal, rejecting peer chain"
 	testCases := []struct {
 		name        string
 		expire      bool
@@ -641,11 +640,7 @@ func TestHandleEventChainsyncRollbackPruneFloorLogLevel(t *testing.T) {
 			fixture.ls.config.EventBus = bus
 			var logBuf bytes.Buffer
 			fixture.ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-			require.NoError(t, fixture.ls.db.SetSyncState(
-				database.ConsumedUtxoPruneFloorSyncKey,
-				strconv.FormatUint(fixture.currentTip.Point.Slot, 10),
-				nil,
-			))
+			fxEmptyJournal(t, fixture.ls)
 			target := fixture.ancestorTip.Point
 			if tc.offChain {
 				target = ocommon.NewPoint(target.Slot, testHashBytes("prune-floor-off-chain"))

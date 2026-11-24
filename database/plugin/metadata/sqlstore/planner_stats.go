@@ -61,8 +61,8 @@ func newPlannerStatsMetrics(
 			prometheus.CounterOpts{
 				Name: sqlMetricNamePrefix + "planner_stats_runs_total",
 				Help: "Incremental planner-statistics runs by trigger " +
-					"(startup, epoch, periodic) and result (changed, unchanged, " +
-					"skipped, error).",
+					"(startup, epoch, periodic, anchor) and result " +
+					"(changed, unchanged, skipped, error).",
 			}, []string{"trigger", "result"},
 		)),
 		duration: registerOrReuse(reg, prometheus.NewHistogramVec(
@@ -128,14 +128,14 @@ func (m sqlitePlannerStatsMetrics) observe(
 }
 
 // OptimizePlannerStatsContext runs the backend's incremental planner
-// statistics maintenance (PRAGMA optimize on SQLite). When the stored
+// statistics maintenance (a bounded ANALYZE on SQLite). When the stored
 // statistics changed it then refreshes the read pool and the cached hot
 // statements so no connection keeps planning with the old numbers. Backends
 // without an incremental form report Supported=false and are left alone.
 //
-// The run is a single statement on the write connection and so pauses
-// writers for its duration; it never runs inside a transaction. It is
-// skipped while a bulk load owns the database.
+// The run holds one write connection for its duration and so pauses
+// writers; it never runs inside a transaction. It is skipped while a bulk
+// load owns the database.
 func (s *Store) OptimizePlannerStatsContext(
 	ctx context.Context,
 	trigger string,
@@ -162,7 +162,17 @@ func (s *Store) OptimizePlannerStatsContext(
 	if err != nil {
 		return s.plannerStatsFailed(trigger, started, result, err)
 	}
-	supported, err := s.dialect.OptimizePlannerStats(ctx, s.writeDB)
+	// One connection for the whole pass: SQLite's optimize sets and restores
+	// a per-connection limit around ANALYZE, which a pooled writeDB (the
+	// in-memory topology) would otherwise spread over several connections.
+	conn, err := s.writeDB.Conn(ctx)
+	if err != nil {
+		return s.plannerStatsFailed(trigger, started, result, err)
+	}
+	supported, err := s.dialect.OptimizePlannerStats(ctx, conn)
+	if cerr := conn.Close(); err == nil {
+		err = cerr
+	}
 	if !supported {
 		return result, err
 	}
@@ -189,23 +199,6 @@ func (s *Store) OptimizePlannerStatsContext(
 	}
 	s.plannerStats.observe(trigger, outcome, result.Duration)
 	return result, nil
-}
-
-// HasPlannerStats reports whether sqlite_stat1 holds any rows. Backends
-// without an incremental form report false, so callers keep their full
-// refresh.
-func (s *Store) HasPlannerStats(ctx context.Context) (bool, error) {
-	if s.closed.Load() || !s.ready.Load() {
-		return false, errors.New("sqlstore: store is not ready")
-	}
-	if !s.dialect.HasIncrementalPlannerStats() {
-		return false, nil
-	}
-	_, rows, err := s.plannerStatsFingerprint(ctx)
-	if err != nil {
-		return false, err
-	}
-	return rows > 0, nil
 }
 
 func (s *Store) plannerStatsFailed(

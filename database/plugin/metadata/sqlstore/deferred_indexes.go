@@ -29,9 +29,6 @@ import (
 var (
 	_ metadata.DeferredIndexManager                      = (*Store)(nil)
 	_ metadata.ContextDeferredIndexDropper               = (*Store)(nil)
-	_ metadata.LazyDeferredIndexDropper                  = (*Store)(nil)
-	_ metadata.CatchUpIndexManager                       = (*Store)(nil)
-	_ metadata.CatchUpPragmaTuner                        = (*Store)(nil)
 	_ metadata.MissingCriticalDeferredIndexLister        = (*Store)(nil)
 	_ metadata.ContextMissingCriticalDeferredIndexLister = (*Store)(nil)
 	_ metadata.MissingDeferredIndexLister                = (*Store)(nil)
@@ -79,29 +76,6 @@ func (s *Store) DropDeferredIndexes() error {
 // DropDeferredIndexesContext is DropDeferredIndexes bound to ctx.
 func (s *Store) DropDeferredIndexesContext(ctx context.Context) error {
 	return s.dropDeferredIndexes(ctx, deferred.Manifest)
-}
-
-// DropLazyDeferredIndexesContext records the recovery marker and drops only
-// the non-critical manifest entries, in one transaction.
-func (s *Store) DropLazyDeferredIndexesContext(ctx context.Context) error {
-	return s.dropDeferredIndexes(ctx, deferred.LazyManifest())
-}
-
-// DropCatchUpIndexesContext records the recovery marker and drops the lazy
-// and catch-up droppable manifest entries, in one transaction.
-func (s *Store) DropCatchUpIndexesContext(ctx context.Context) error {
-	return s.dropDeferredIndexes(
-		ctx,
-		append(deferred.LazyManifest(), deferred.CatchUpDroppableManifest()...),
-	)
-}
-
-// BuildCatchUpIndexesContext rebuilds any missing catch-up droppable entry and
-// leaves the recovery marker for the full rebuild to clear.
-func (s *Store) BuildCatchUpIndexesContext(ctx context.Context) error {
-	return s.buildDeferredIndexes(
-		ctx, deferred.CatchUpDroppableManifest(), false,
-	)
 }
 
 func (s *Store) dropDeferredIndexes(
@@ -247,8 +221,9 @@ func (s *Store) buildDeferredIndexesWithProgress(
 	after func(string, time.Duration),
 ) error {
 	if s.dialect.Name() == "sqlite" {
-		// SQLite runs wal_autocheckpoint at commit, so one transaction around
-		// all CREATE INDEX statements would defer it until the rebuild ends.
+		// The WAL checkpointer can only backfill committed frames, so one
+		// transaction around all CREATE INDEX statements would keep every
+		// index build in the WAL until the rebuild ends.
 		var missing []deferred.Index
 		err := s.withDeferredIndexWriteContext(
 			buildCtx,

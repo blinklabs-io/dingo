@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -50,46 +49,6 @@ func (s *Store) rewardUpgradeTableExists(
 	return exists, err
 }
 
-// rewardInputsDrainedInTx reports whether the persisted drain latch, or a
-// begun drain marker, covers the reward-inputs family. The store has not
-// learned the latch yet when its migrations run.
-func (s *Store) rewardInputsDrainedInTx(
-	ctx context.Context,
-	tx *sql.Tx,
-) (bool, error) {
-	family := nodesettings.FamilyRewardInputs
-	gate, err := s.rewardUpgradeTableExists(ctx, tx, "node_settings_gate")
-	if err != nil || !gate {
-		return false, err
-	}
-	var value string
-	err = tx.QueryRowContext(
-		ctx,
-		s.dialect.Rebind("SELECT value FROM node_settings_gate WHERE name = ?"),
-		nodesettings.LedgerStateDrainedGateName,
-	).Scan(&value)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, fmt.Errorf("read ledger-state latch: %w", err)
-	}
-	mask, err := nodesettings.DecodeFamilyMask(value)
-	if err != nil {
-		return false, err
-	}
-	if mask.Has(family) {
-		return true, nil
-	}
-	var begun int
-	err = tx.QueryRowContext(
-		ctx,
-		s.dialect.Rebind("SELECT COUNT(*) FROM sync_state WHERE sync_key = ?"),
-		"ledger.state_drain."+family.String(),
-	).Scan(&begun)
-	if err != nil {
-		return false, fmt.Errorf("read drain marker: %w", err)
-	}
-	return begun > 0, nil
-}
-
 // preflightRewardStakeUpgrade certifies only the unchanged Conway-and-earlier
 // accounting case. Refusal rolls back every certification before schema changes
 // can make the database unreadable by the binary that wrote its snapshots.
@@ -108,15 +67,6 @@ func (s *Store) preflightRewardStakeUpgrade(
 		if err != nil {
 			return fmt.Errorf("inspect reward stake provenance tables: %w", err)
 		}
-	}
-	if tables["reward_snapshot"] {
-		// A drained reward-inputs family holds no rows here, and a read of
-		// its table would trip the drained-table statement guard.
-		drained, err := s.rewardInputsDrainedInTx(ctx, tx)
-		if err != nil {
-			return err
-		}
-		tables["reward_snapshot"] = !drained
 	}
 	if !tables["pool_stake_snapshot"] && !tables["reward_snapshot"] {
 		return nil

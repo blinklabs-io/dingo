@@ -101,19 +101,18 @@ func runSetOnlyMithrilBootstrap(
 	// applied, the ledger state in the live UTxO set, and the anchor
 	// recorded.
 	splitDir := loadParityChain(t, chainDir)
-	consensus := openRaw(t, filepath.Join(splitDir, "metadata.sqlite"))
+	dbConfig, selections, deps := storeConfig(splitDir)
+	runtime, err := internalplugins.OpenDatabase(
+		t.Context(), dbConfig, selections, deps,
+	)
+	require.NoError(t, err)
 	for key, value := range map[string]string{
 		"mithril_ledger_slot": strconv.FormatUint(anchorTip.Point.Slot, 10),
 		"mithril_ledger_hash": hex.EncodeToString(anchorTip.Point.Hash),
 	} {
-		_, err := consensus.Exec(
-			`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
-			ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
-			key, value,
-		)
-		require.NoError(t, err)
+		require.NoError(t, runtime.Database.SetChainState(key, value, nil))
 	}
-	require.NoError(t, consensus.Close())
+	require.NoError(t, runtime.Close(t.Context()))
 
 	split := startParityNode(t, "split", splitDir, cardanoCfg, warnLogger(t))
 	wantHash := hex.EncodeToString(wantTip.Point.Hash)

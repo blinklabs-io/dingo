@@ -28,11 +28,9 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
-	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -151,10 +149,7 @@ func TestAdoptedServerStoreRollsBackBelowItsAdoptedTip(t *testing.T) {
 			require.NoError(t, err)
 			deps, err := m.dependencies("core")
 			require.NoError(t, err)
-			stores, err := internalplugins.ResolveStorage(
-				ctx, host, m.selections(), deps,
-			)
-			require.NoError(t, err)
+			stores := resolveReleasedStores(t, host, m.selections(), deps)
 			consensus, err := database.New(
 				ctx, m.databaseConfig("core", config.IndexerLayoutSplit), stores,
 			)
@@ -202,20 +197,21 @@ func TestAdoptedServerStoreRollsBackBelowItsAdoptedTip(t *testing.T) {
 			// A start that stops between the revert and the move: no set
 			// is open, so the run stops where the UTxO rows would move. The
 			// start after it does not revert a second window.
-			require.ErrorContains(t, nodestorage.Reconcile{
-				DB: consensus, RewindBlocks: k,
-			}.Run(ctx), "is not open")
-			require.NoError(t, (nodestorage.Reconcile{
-				DB:      consensus,
-				Set:     set,
-				DataDir: dir,
-				Logger:  logger,
-				Publish: func(mask nodesettings.FamilyMask) {
-					ls.SetDrainedFamilies(mask)
-					set.SetDrainedFamilies(mask)
+			move := nodestorage.ReleasedMigration{
+				UtxoSet: nodestorage.UtxoSetConfig{
+					DataDir:           dir,
+					CardanoNodeConfig: nodeCfg,
 				},
-				Resume:       ls.ResumeUtxoSetFrom,
+				Logger:       logger,
 				RewindBlocks: k,
+			}
+			require.ErrorContains(t, move.Move(ctx, consensus, nil), "is not open")
+			require.NoError(t, move.Move(ctx, consensus, set))
+			require.NoError(t, (nodestorage.Reconcile{
+				DB:     consensus,
+				Set:    set,
+				Logger: logger,
+				Resume: ls.ResumeUtxoSetFrom,
 			}).Run(ctx))
 			reverted, err := consensus.GetTip(nil)
 			require.NoError(t, err)

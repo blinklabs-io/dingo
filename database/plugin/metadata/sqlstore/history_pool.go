@@ -121,9 +121,6 @@ func (s *Store) GetPoolDelegators(
 	order string,
 	txn types.Txn,
 ) ([]models.PoolDelegatorRow, int, error) {
-	if err := s.refuseDrained("reward_live_stake"); err != nil {
-		return nil, 0, err
-	}
 	ret := []models.PoolDelegatorRow{}
 	if len(poolKeyHash) == 0 {
 		return ret, 0, nil
@@ -197,9 +194,6 @@ func (s *Store) GetPoolCertificateEvents(
 	order string,
 	txn types.Txn,
 ) ([]models.PoolCertificateEvent, int, error) {
-	if err := s.refuseDrained("pool_registration"); err != nil {
-		return nil, 0, err
-	}
 	ret := []models.PoolCertificateEvent{}
 	if len(poolKeyHash) == 0 {
 		return ret, 0, nil

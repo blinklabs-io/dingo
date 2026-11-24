@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +27,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,9 +37,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -1388,6 +1387,9 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 		DataDir: "",
 	})
 	require.NoError(t, err)
+	// The set is open before the fixture seeds it, so the seeds are
+	// LedgerDB state rather than rows of an earlier release's store.
+	OpenLiveSetForTest(t, db)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	// Seed genesis snapshot (epoch 0, "mark") for the pool so leader
@@ -1437,6 +1439,7 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// The test block's slot is in [1, 200]. Ensure epoch 0 covers it.
@@ -1692,7 +1695,7 @@ func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
 	require.NoError(t, txn.Rollback())
 
 	require.True(t, deferredMarkerPersisted(t, ls, point))
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	require.True(t, required, "rolled-back apply must leave the check pending")
 }
@@ -2185,6 +2188,7 @@ func newEligibilityTestLedgerOnDB(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls
 }
@@ -2275,7 +2279,7 @@ func TestVerifyBlockHeaderStateDefersSizeLimitAcrossEpoch(t *testing.T) {
 
 // stakeSnapshotCountingStore counts GetPoolStakeSnapshot reads.
 type stakeSnapshotCountingStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	reads atomic.Int64
 }
 
@@ -2283,16 +2287,16 @@ func (s *stakeSnapshotCountingStore) GetPoolStakeSnapshot(
 	epoch uint64,
 	snapshotType string,
 	poolKeyHash []byte,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (*models.PoolStakeSnapshot, error) {
 	s.reads.Add(1)
-	return s.MetadataStore.GetPoolStakeSnapshot(
+	return s.LedgerDB.GetPoolStakeSnapshot(
 		epoch, snapshotType, poolKeyHash, txn,
 	)
 }
 
 type deferredFloorWriteGateStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	firstFloorWrite  chan string
 	secondFloorWrite chan string
 	releaseFirst     <-chan struct{}
@@ -2300,40 +2304,37 @@ type deferredFloorWriteGateStore struct {
 	floorWrites      int
 }
 
-func (s *deferredFloorWriteGateStore) SetSyncState(
-	key string,
-	value string,
-	txn types.Txn,
+func (s *deferredFloorWriteGateStore) SetDeferredHeaderFloor(
+	slot uint64,
 ) error {
-	if key == deferredHeaderValidationFloorSyncStateKey {
-		s.mu.Lock()
-		write := s.floorWrites
-		s.floorWrites++
-		s.mu.Unlock()
-		switch write {
-		case 0:
-			s.firstFloorWrite <- value
-			<-s.releaseFirst
-		case 1:
-			s.secondFloorWrite <- value
-		}
+	value := strconv.FormatUint(slot, 10)
+	s.mu.Lock()
+	write := s.floorWrites
+	s.floorWrites++
+	s.mu.Unlock()
+	switch write {
+	case 0:
+		s.firstFloorWrite <- value
+		<-s.releaseFirst
+	case 1:
+		s.secondFloorWrite <- value
 	}
-	return s.MetadataStore.SetSyncState(key, value, txn)
+	return s.LedgerDB.SetDeferredHeaderFloor(slot)
 }
 
 type malformedVrfKeyHashStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	cutoffHash           []byte
 	earliestHash         []byte
 	malformedCurrentPool bool
 }
 
-func (s *malformedVrfKeyHashStore) GetPool(
+func (s *malformedVrfKeyHashStore) GetPoolVrfState(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
-	includeInactive bool,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	pool, err := s.MetadataStore.GetPool(pkh, includeInactive, txn)
+	pool, err := s.LedgerDB.GetPoolVrfState(ctx, pkh, txn)
 	if err != nil || pool == nil || !s.malformedCurrentPool {
 		return pool, err
 	}
@@ -2344,7 +2345,7 @@ func (s *malformedVrfKeyHashStore) GetPool(
 func (s *malformedVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
 	_ []byte,
 	_ uint64,
-	_ types.Txn,
+	_ ledgerdb.Txn,
 ) ([]byte, bool, error) {
 	if s.cutoffHash == nil {
 		return nil, false, nil
@@ -2355,7 +2356,7 @@ func (s *malformedVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
 func (s *malformedVrfKeyHashStore) GetPoolEarliestVrfKeyHashAtSlot(
 	_ []byte,
 	_ uint64,
-	_ types.Txn,
+	_ ledgerdb.Txn,
 ) ([]byte, bool, error) {
 	if s.earliestHash == nil {
 		return nil, false, nil
@@ -2372,16 +2373,13 @@ func TestVerifyBlockHeaderStateReadsElectingSnapshotOnce(t *testing.T) {
 
 	tb := createTestBlock(t, [32]byte{68}, 0, tamperNone)
 	counter := &stakeSnapshotCountingStore{}
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(store metadata.MetadataStore) metadata.MetadataStore {
-			counter.MetadataStore = store
-			return counter
-		},
+	db, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
 	)
 	require.NoError(t, err)
 	ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+	counter.LedgerDB = ls.ledgerDB()
+	ls.ldb = counter
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedBlockPoolRegistration(t, db, tb.block)
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
@@ -2390,9 +2388,9 @@ func TestVerifyBlockHeaderStateReadsElectingSnapshotOnce(t *testing.T) {
 	assert.Equal(t, int64(1), counter.reads.Load())
 }
 
-// failingStateStore fails one metadata read with a storage error.
+// failingStateStore fails one ledger-state read with a storage error.
 type failingStateStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	fail string
 }
 
@@ -2402,12 +2400,12 @@ func (s *failingStateStore) GetPoolStakeSnapshot(
 	epoch uint64,
 	snapshotType string,
 	poolKeyHash []byte,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (*models.PoolStakeSnapshot, error) {
 	if s.fail == "GetPoolStakeSnapshot" {
 		return nil, errInjectedStorage
 	}
-	return s.MetadataStore.GetPoolStakeSnapshot(
+	return s.LedgerDB.GetPoolStakeSnapshot(
 		epoch, snapshotType, poolKeyHash, txn,
 	)
 }
@@ -2415,23 +2413,23 @@ func (s *failingStateStore) GetPoolStakeSnapshot(
 func (s *failingStateStore) GetTotalActiveStake(
 	epoch uint64,
 	snapshotType string,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if s.fail == "GetTotalActiveStake" {
 		return 0, errInjectedStorage
 	}
-	return s.MetadataStore.GetTotalActiveStake(epoch, snapshotType, txn)
+	return s.LedgerDB.GetTotalActiveStake(epoch, snapshotType, txn)
 }
 
-func (s *failingStateStore) GetPool(
+func (s *failingStateStore) GetPoolVrfState(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
-	includeInactive bool,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	if s.fail == "GetPool" {
+	if s.fail == "GetPoolVrfState" {
 		return nil, errInjectedStorage
 	}
-	return s.MetadataStore.GetPool(pkh, includeInactive, txn)
+	return s.LedgerDB.GetPoolVrfState(ctx, pkh, txn)
 }
 
 // TestHeaderStateStorageFailureDoesNotBlamePeer pins that a storage read
@@ -2443,24 +2441,19 @@ func TestHeaderStateStorageFailureDoesNotBlamePeer(t *testing.T) {
 	for _, method := range []string{
 		"GetPoolStakeSnapshot",
 		"GetTotalActiveStake",
-		"GetPool",
+		"GetPoolVrfState",
 	} {
 		t.Run(method, func(t *testing.T) {
 			t.Parallel()
 			tb := createTestBlock(t, [32]byte{69}, 0, tamperNone)
 			store := &failingStateStore{}
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(
-				t,
-				dbtest.Options{
-					Config: &database.Config{DataDir: t.TempDir()},
-				},
-				func(inner metadata.MetadataStore) metadata.MetadataStore {
-					store.MetadataStore = inner
-					return store
-				},
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
 			)
 			require.NoError(t, err)
 			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			store.LedgerDB = ls.ledgerDB()
+			ls.ldb = store
 			poolKeyHash := tb.block.IssuerVkey().Hash()
 			seedBlockPoolRegistration(t, db, tb.block)
 			seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
@@ -2492,19 +2485,14 @@ func TestMalformedVrfKeyMetadataDoesNotBlamePeer(t *testing.T) {
 				cutoffHash:   tc.cutoffHash,
 				earliestHash: tc.earliestHash,
 			}
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(
-				t,
-				dbtest.Options{
-					Config: &database.Config{DataDir: t.TempDir()},
-				},
-				func(inner metadata.MetadataStore) metadata.MetadataStore {
-					store.MetadataStore = inner
-					return store
-				},
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
 			)
 			require.NoError(t, err)
 			tb := createTestBlock(t, [32]byte{69}, 0, tamperNone)
 			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			store.LedgerDB = ls.ledgerDB()
+			ls.ldb = store
 			epochCache := []models.Epoch{{
 				EpochId:       5,
 				StartSlot:     1_000,
@@ -2549,19 +2537,14 @@ func TestMalformedCurrentPoolVrfKeyDoesNotBlamePeer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := &malformedVrfKeyHashStore{malformedCurrentPool: true}
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(
-				t,
-				dbtest.Options{
-					Config: &database.Config{DataDir: t.TempDir()},
-				},
-				func(inner metadata.MetadataStore) metadata.MetadataStore {
-					store.MetadataStore = inner
-					return store
-				},
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
 			)
 			require.NoError(t, err)
 			tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			store.LedgerDB = ls.ledgerDB()
+			ls.ldb = store
 			poolKeyHash := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
 			seedBlockPoolRegistration(t, db, tb.block)
 
@@ -2817,6 +2800,7 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// The epoch-2 update is already part of historical metadata even though
@@ -2827,7 +2811,7 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 	}
 	nextPParamsCbor, err := cbor.Encode(nextPParams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		nextPParamsCbor,
 		172_800,
 		2,
@@ -2881,7 +2865,7 @@ func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
 	}
 	previousPParamsCbor, err := cbor.Encode(previousPParams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		previousPParamsCbor,
 		0,
 		0,
@@ -2920,6 +2904,7 @@ func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	block := &mockBoundaryAlonzoBlock{
@@ -2954,7 +2939,7 @@ func TestGenesisOverlayBoundaryBlockUsesBoundaryEpochPredecessorPParams(
 			Decentralization: &cbor.Rat{Rat: tc.d},
 		})
 		require.NoError(t, encodeErr)
-		require.NoError(t, db.SetPParams(
+		require.NoError(t, seedDB(t, db).SetPParams(
 			encoded,
 			86_400*tc.epoch,
 			tc.epoch,
@@ -2984,6 +2969,7 @@ func TestGenesisOverlayBoundaryBlockUsesBoundaryEpochPredecessorPParams(
 			EraId:         eras.BabbageEraDesc.Id,
 		}},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	block := &mockBoundaryAlonzoBlock{
@@ -3328,7 +3314,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateWaitsForStabilityWindow(
 	const certSlot = uint64(0)
 	require.Less(t, tb.block.SlotNumber(), uint64(1_000),
 		"the test block must fall inside the stability window")
-	seedGenesisDelegation(t, db, models.GenesisDelegation{
+	fxGenesisDelegation(t, db, models.GenesisDelegation{
 		GenesisHash:         bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
 		GenesisDelegateHash: delegateHash.Bytes(),
 		VrfKeyHash:          vrfHash.Bytes(),
@@ -3469,17 +3455,14 @@ func seedPoolStakeSnapshotOfTypeAtSlot(
 	capturedSlot uint64,
 ) {
 	t.Helper()
-	err := db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     snapshotType,
-			PoolKeyHash:      poolKeyHash,
-			TotalStake:       types.Uint64(totalStake),
-			StakeDenominator: types.Uint64(stakeDenominator),
-			CapturedSlot:     capturedSlot,
-		},
-		nil,
-	)
+	err := fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:            epoch,
+		SnapshotType:     snapshotType,
+		PoolKeyHash:      poolKeyHash,
+		TotalStake:       types.Uint64(totalStake),
+		StakeDenominator: types.Uint64(stakeDenominator),
+		CapturedSlot:     capturedSlot,
+	})
 	require.NoError(t, err)
 }
 
@@ -3495,18 +3478,15 @@ func seedPoolStakeSnapshotWithVrfKeyAtSlot(
 	capturedSlot uint64,
 ) {
 	t.Helper()
-	err := db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     snapshotType,
-			PoolKeyHash:      poolKeyHash,
-			VrfKeyHash:       vrfKeyHash,
-			TotalStake:       types.Uint64(totalStake),
-			StakeDenominator: types.Uint64(stakeDenominator),
-			CapturedSlot:     capturedSlot,
-		},
-		nil,
-	)
+	err := fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:            epoch,
+		SnapshotType:     snapshotType,
+		PoolKeyHash:      poolKeyHash,
+		VrfKeyHash:       vrfKeyHash,
+		TotalStake:       types.Uint64(totalStake),
+		StakeDenominator: types.Uint64(stakeDenominator),
+		CapturedSlot:     capturedSlot,
+	})
 	require.NoError(t, err)
 }
 
@@ -3517,7 +3497,7 @@ func seedEligibilityEpochs(
 ) {
 	t.Helper()
 	for _, epoch := range epochs {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch.StartSlot,
 			epoch.EpochId,
 			epoch.Nonce,
@@ -3542,51 +3522,43 @@ func seedLiveDelegatedPoolStake(
 ) {
 	t.Helper()
 	margin := &types.Rat{Rat: big.NewRat(1, 100)}
-	err := db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash:   poolKeyHash,
-			VrfKeyHash:    make([]byte, 32),
-			Pledge:        types.Uint64(1_000_000),
-			Cost:          types.Uint64(340_000_000),
-			Margin:        margin,
-			RewardAccount: make([]byte, 28),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:   poolKeyHash,
-			VrfKeyHash:    make([]byte, 32),
-			AddedSlot:     slot,
-			Pledge:        types.Uint64(1_000_000),
-			Cost:          types.Uint64(340_000_000),
-			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
-			RewardAccount: make([]byte, 28),
-		},
-		nil,
-	)
+	err := fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash:   poolKeyHash,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        types.Uint64(1_000_000),
+		Cost:          types.Uint64(340_000_000),
+		Margin:        margin,
+		RewardAccount: make([]byte, 28),
+	}, &models.PoolRegistration{
+		PoolKeyHash:   poolKeyHash,
+		VrfKeyHash:    make([]byte, 32),
+		AddedSlot:     slot,
+		Pledge:        types.Uint64(1_000_000),
+		Cost:          types.Uint64(340_000_000),
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		RewardAccount: make([]byte, 28),
+	})
 	require.NoError(t, err)
 
 	stakingKey := make([]byte, 28)
 	copy(stakingKey, poolKeyHash)
 	stakingKey[27] ^= discriminator
-	err = db.Metadata().CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       poolKeyHash,
-		AddedSlot:  slot,
-		Active:     true,
-	})
-	require.NoError(t, err)
-
 	txId := make([]byte, 32)
 	copy(txId, poolKeyHash)
 	txId[28] = discriminator
 	txId[31] = discriminator + 1
-	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  uint32(discriminator),
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(totalStake),
-		AddedSlot:  slot,
-	})
-	require.NoError(t, err)
+	require.NoError(t, seedCreateAccount(
+		t, db, t.Context(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       poolKeyHash,
+			AddedSlot:  slot,
+			Active:     true,
+		},
+	))
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, db), txId, uint32(discriminator), stakingKey,
+		totalStake,
+	)
 }
 
 func captureLiveMarkSnapshot(
@@ -3602,39 +3574,36 @@ func captureLiveMarkSnapshot(
 	eventBus := newTestEventBus(t, logger)
 	t.Cleanup(eventBus.Close)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	mgr := ledgersnapshot.NewManager(dbadapter.New(db), eventBus, logger)
-	require.NoError(t, mgr.Start(ctx))
-	t.Cleanup(func() {
-		cancel()
-		require.NoError(t, mgr.Stop())
-	})
-
+	// The mark is captured by the epoch boundary itself, in the boundary's
+	// transaction: computed at the SNAP point and written at its end.
+	mgr := ledgersnapshot.NewManager(seedDB(t, db), eventBus, logger)
 	epochEvent := event.EpochTransitionEvent{
 		PreviousEpoch: newEpoch - 1,
 		NewEpoch:      newEpoch,
 		BoundarySlot:  boundarySlot,
 		SnapshotSlot:  snapshotSlot,
 	}
-	eventBus.Publish(
-		event.EpochTransitionEventType,
-		event.NewEvent(event.EpochTransitionEventType, epochEvent),
-	)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), txn, epochEvent,
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), txn, epochEvent,
+	))
+	require.NoError(t, txn.Commit())
 
-	testutil.WaitForCondition(t, func() bool {
-		snapshot, err := db.Metadata().GetPoolStakeSnapshot(
-			newEpoch,
-			models.PoolStakeSnapshotTypeMark,
-			poolKeyHash,
-			nil,
-		)
-		return err == nil &&
-			snapshot != nil &&
-			snapshot.CapturedSlot == snapshotSlot
-	}, testutil.AsyncWait, "live mark snapshot should be captured")
+	snapshot, err := seedDB(t, db).GetPoolStakeSnapshot(
+		newEpoch,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot, "live mark snapshot should be captured")
+	require.Equal(t, snapshotSlot, snapshot.CapturedSlot)
 }
 
-// seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)
+// seedPoolRegistration registers a pool so that seedDB(t, db).GetPool(poolKeyHash)
 // returns a *models.Pool whose VrfKeyHash equals vrfKeyHash. It mirrors
 // seedPoolStakeSnapshot by persisting through the metadata store interface:
 // ImportPool upserts the Pool row (whose denormalized VrfKeyHash is what
@@ -3649,18 +3618,14 @@ func seedPoolRegistration(
 	vrfKeyHash []byte,
 ) {
 	t.Helper()
-	err := db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: poolKeyHash,
-			VrfKeyHash:  vrfKeyHash,
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: poolKeyHash,
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   1,
-		},
-		nil,
-	)
+	err := fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		VrfKeyHash:  vrfKeyHash,
+	}, &models.PoolRegistration{
+		PoolKeyHash: poolKeyHash,
+		VrfKeyHash:  vrfKeyHash,
+		AddedSlot:   1,
+	})
 	require.NoError(t, err)
 }
 
@@ -4122,7 +4087,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 		0,
 		importedCaptureSlot,
 	)
-	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+	snapshot, err := seedDB(t, db).GetPoolStakeSnapshot(
 		4,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash[:],
@@ -4192,7 +4157,7 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandard
 		0,
 		reconstructedCaptureSlot,
 	)
-	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+	snapshot, err := seedDB(t, db).GetPoolStakeSnapshot(
 		4,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash[:],
@@ -4429,7 +4394,7 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	captureLiveMarkSnapshot(
 		t, db, snapshotEpoch, boundarySlot, snapshotSlot, poolKeyHash[:],
 	)
-	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+	snapshot, err := seedDB(t, db).GetPoolStakeSnapshot(
 		snapshotEpoch,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash[:],
@@ -4460,6 +4425,9 @@ func newCoeffGuardLedger(
 		DataDir: "",
 	})
 	require.NoError(t, err)
+	// The set is open before the fixture seeds it, so the seeds are
+	// LedgerDB state rather than rows of an earlier release's store.
+	OpenLiveSetForTest(t, db)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
@@ -4483,6 +4451,7 @@ func newCoeffGuardLedger(
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls
 }
@@ -4585,7 +4554,7 @@ func seedZeroTotalActiveStakeSummary(
 	t.Helper()
 	require.NoError(
 		t,
-		db.Metadata().SaveEpochSummary(epochSummary(epoch, 0), nil),
+		seedDB(t, db).SaveEpochSummary(epochSummary(epoch, 0), nil),
 	)
 }
 
@@ -4784,24 +4753,23 @@ func seedLiveStakeCredential(
 ) {
 	t.Helper()
 	require.Len(t, stakingKey, 28)
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       poolKeyHash,
-		AddedSlot:  slot,
-		Active:     true,
-	}))
+	ls := seedLedgerOf(t, db)
+	require.NoError(t, seedCreateAccount(
+		t, db, t.Context(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       poolKeyHash,
+			AddedSlot:  slot,
+			Active:     true,
+		},
+	))
 
 	txId := make([]byte, 32)
 	copy(txId, stakingKey)
 	txId[28] = discriminator
 	txId[31] = discriminator + 1
-	require.NoError(t, db.Metadata().CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  uint32(discriminator),
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(totalStake),
-		AddedSlot:  slot,
-	}))
+	seedTestStakedOutput(
+		t, ls, txId, uint32(discriminator), stakingKey, totalStake,
+	)
 }
 
 // eligibilityDenominatorFixture is the shared shape for the mark-snapshot
@@ -4814,7 +4782,6 @@ func seedLiveStakeCredential(
 type eligibilityDenominatorFixture struct {
 	ls            *LedgerState
 	db            *database.Database
-	raw           *sql.DB
 	block         *testBlockResult
 	producer      []byte
 	snapshotEpoch uint64
@@ -4830,8 +4797,6 @@ func newEligibilityDenominatorFixture(
 	t.Helper()
 	tb := createTestBlock(t, [32]byte{seed}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	ls.epochCache = []models.Epoch{
 		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
@@ -4849,7 +4814,6 @@ func newEligibilityDenominatorFixture(
 	f := &eligibilityDenominatorFixture{
 		ls:            ls,
 		db:            db,
-		raw:           raw,
 		block:         tb,
 		producer:      producer[:],
 		snapshotEpoch: 4,
@@ -4872,7 +4836,7 @@ func (f *eligibilityDenominatorFixture) capture(t *testing.T) {
 	captureLiveMarkSnapshot(
 		t, f.db, f.snapshotEpoch, f.boundarySlot, f.snapshotSlot, f.producer,
 	)
-	snapshot, err := f.db.Metadata().GetPoolStakeSnapshot(
+	snapshot, err := seedDB(t, f.db).GetPoolStakeSnapshot(
 		f.snapshotEpoch,
 		models.PoolStakeSnapshotTypeMark,
 		f.producer,
@@ -4890,7 +4854,7 @@ func (f *eligibilityDenominatorFixture) totalActiveStake(
 	t *testing.T,
 ) uint64 {
 	t.Helper()
-	total, err := f.db.Metadata().GetTotalActiveStake(
+	total, err := seedDB(t, f.db).GetTotalActiveStake(
 		f.snapshotEpoch,
 		models.PoolStakeSnapshotTypeMark,
 		nil,
@@ -4967,14 +4931,14 @@ func TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation(
 	// The reward account is left unregistered so the deposit refund cannot
 	// land in an account that feeds the denominator.
 	reaped := eligibilityCred28(0x72)
-	seedRetiringPool(
-		t, f.raw, reaped, eligibilityCred28(0x73), 500, 100, 3, 200,
+	fxRetiringPool(
+		t, f.db, reaped, eligibilityCred28(0x73), 500, 100, 3, 200,
 	)
 	// The delegator that POOLREAP must detach.
 	seedLiveStakeCredential(
 		t, f.db, eligibilityCred28(0x74), reaped, staleStake, 150, 3,
 	)
-	require.NoError(t, f.db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	require.NoError(t, seedDB(t, f.db).SetNetworkState(1_000, 5_000, 50, nil))
 
 	// The epoch-3 boundary: POOLREAP reaps the pool and must clear the
 	// delegation with it.
@@ -4983,18 +4947,16 @@ func TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation(
 	// The pool re-registers after the reap and is active again at the
 	// snapshot slot, so nothing but a cleared delegation keeps its former
 	// delegator out of the mark total.
-	var poolID int64
-	require.NoError(t, f.raw.QueryRow(
-		`SELECT id FROM pool WHERE pool_key_hash = ?`, reaped,
-	).Scan(&poolID))
-	_, err := f.raw.Exec(`
-INSERT INTO pool_registration (
-    pool_id, pool_key_hash, reward_account, deposit_amount, added_slot
-) VALUES (?, ?, ?, ?, ?)`,
-		poolID, reaped, eligibilityCred28(0x73), "500", 320,
-	)
-	require.NoError(t, err)
-	active, err := f.db.Metadata().GetActivePoolKeyHashesAtSlot(
+	require.NoError(t, fxImportPool(
+		t, f.db, t.Context(), nil,
+		&models.Pool{PoolKeyHash: reaped},
+		&models.PoolRegistration{
+			PoolKeyHash:   reaped,
+			RewardAccount: eligibilityCred28(0x73),
+			AddedSlot:     320,
+		},
+	))
+	active, err := seedDB(t, f.db).GetActivePoolKeyHashesAtSlot(
 		f.snapshotSlot, nil,
 	)
 	require.NoError(t, err)
@@ -5210,7 +5172,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
 		{
 			EpochId:       11,
@@ -5278,9 +5240,9 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 				close(pruneReached)
 				poolTxn := ls.db.Transaction(context.Background(), true) // blocks until apply releases it
 				defer func() { _ = poolTxn.Rollback() }()
-				return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
+				return ls.ledgerDB().DeletePoolStakeSnapshotsBeforeEpoch(
 					before,
-					poolTxn.Metadata(),
+					poolTxn,
 				)
 			},
 		)
@@ -5330,7 +5292,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		seedPoolStakeSnapshot(t, db, epoch, dummyPool, 1_000_000_000)
 	}
 	deleteBelow := func(before uint64) error {
-		return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(before, nil)
+		return seedDB(t, db).DeletePoolStakeSnapshotsBeforeEpoch(before, nil)
 	}
 
 	// Unmappable: the guard must hand prune boundary 0 (retain everything).
@@ -5350,7 +5312,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		"unmappable deferred slot must force retain-all",
 	)
 	for epoch := uint64(0); epoch <= 28; epoch++ {
-		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snaps, err := seedDB(t, db).GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)
 		require.NoError(t, err)
@@ -5404,7 +5366,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		"mappable deferred slot pins at StakeSnapshotEpoch(22)=21",
 	)
 	for epoch := range uint64(21) {
-		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snaps, err := seedDB(t, db).GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)
 		require.NoError(t, err)
@@ -5416,7 +5378,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		)
 	}
 	for epoch := uint64(21); epoch <= 28; epoch++ {
-		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snaps, err := seedDB(t, db).GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)
 		require.NoError(t, err)
@@ -5435,11 +5397,7 @@ func deferredMarkerCount(t *testing.T, db *database.Database) int {
 	t.Helper()
 	keys, err := db.ListDeferredHeaderMarkers()
 	require.NoError(t, err)
-	legacy, err := db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix, nil,
-	)
-	require.NoError(t, err)
-	return len(keys) + len(legacy)
+	return len(keys)
 }
 
 // TestBoundDeferredHeaderValidationWhileAppliedTipStalls drives deferred
@@ -5517,13 +5475,8 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 		secondFloorWrite: make(chan string, 1),
 		releaseFirst:     releaseFirst,
 	}
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			store.MetadataStore = inner
-			return store
-		},
+	db, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
 	)
 	require.NoError(t, err)
 	ls := newEligibilityTestLedgerOnDB(
@@ -5531,6 +5484,8 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 		make([]byte, 32),
 		db,
 	)
+	store.LedgerDB = ls.ledgerDB()
+	ls.ldb = store
 	t.Cleanup(release)
 	ls.maxDeferredHeaderMarkers = markerCap
 	for _, slot := range []uint64{0, 50, 60, 70, 80} {
@@ -5593,12 +5548,10 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 		"second bound should finish after the first bound",
 	))
 
-	storedFloor, err := db.GetSyncState(
-		deferredHeaderValidationFloorSyncStateKey,
-		nil,
-	)
+	storedFloor, found, err := db.DeferredHeaderFloor()
 	require.NoError(t, err)
-	require.Equal(t, "51", storedFloor)
+	require.True(t, found)
+	require.Equal(t, uint64(51), storedFloor)
 	ls.deferredHeaderValidationMu.Lock()
 	inMemoryFloor := ls.deferredHeaderValidationFloor
 	ls.deferredHeaderValidationMu.Unlock()
@@ -5611,10 +5564,10 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, restarted)
 	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
 	required, _, err := restarted.deferredHeaderValidationRequired(
 		newlyDeferred,
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, required)
@@ -5649,7 +5602,7 @@ func TestRepopulateDeferredHeaderValidationEnforcesMarkerCap(t *testing.T) {
 	require.LessOrEqual(t, count, markerCap)
 	require.Equal(t, 3, deferredMarkerCount(t, db))
 	require.Equal(t, uint64(3), floor)
-	required, _, err := ls.deferredHeaderValidationRequired(points[1], nil)
+	required, _, err := ls.deferredHeaderValidationRequired(points[1])
 	require.NoError(t, err)
 	require.True(t, required, "evicted slot must be covered by the floor")
 }
@@ -6162,37 +6115,6 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 	)
 }
 
-// TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker pins
-// the ordering the failed-delete path relies on. A delete error is logged and
-// returns before the readmission re-test, which is safe only if the error
-// leaves the blob marker in place; removing the blob marker before the legacy
-// sync_state read would drop the durable pin of a point re-deferred during the
-// call, and after a restart its stateful check would be skipped.
-func TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-
-	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(point))
-
-	// Closing the metadata store makes the legacy sync_state read fail while
-	// the blob store stays usable.
-	require.NoError(t, db.Metadata().Close())
-
-	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
-		headerValidationPointKey(point),
-	))
-	assert.True(
-		t,
-		deferredMarkerPersisted(t, ls, point),
-		"a failed delete must leave the blob marker in place",
-	)
-}
-
 // TestGenesisOverlayUnresolvablePParamsDefers pins the classification of an
 // overlay decision the node cannot make from its own state. A nil pparams
 // result means the snapshot, the persisted row and the era forecast all
@@ -6277,6 +6199,9 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	// The set is open before the fixture's blocks: it takes over only the
+	// nonces at or below the tip a database already holds.
+	OpenLiveSetForTest(t, db)
 	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
@@ -6333,17 +6258,17 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 				}, txn); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtSnap, snapTipSlot, importedNonce, true, txn,
 				); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
 				)
 			}),
@@ -6370,6 +6295,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// Header verification path.
@@ -6603,6 +6529,7 @@ func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	targetSlot := epochStart + emptyEpochs*epochLength + 1
@@ -6643,7 +6570,7 @@ func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
 	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 	published, _ := maryPParamsWithExtraEntropy(t, entropy)
 	_, neutralCbor := maryPParamsWithExtraEntropy(t, nil)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		neutralCbor, 1, firstEpoch, eras.MaryEraDesc.Id, nil,
 	))
 
@@ -6677,6 +6604,7 @@ func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	got, _, _, _, err := ls.computeEpochNonceForSlot(
@@ -6734,6 +6662,9 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	// The set is open before the fixture's blocks: it takes over only the
+	// nonces at or below the tip a database already holds.
+	OpenLiveSetForTest(t, db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -6776,11 +6707,11 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 				}, txn); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
 			}),
 	)
@@ -6806,6 +6737,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
@@ -6929,6 +6861,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
@@ -7007,6 +6940,9 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	// The set is open before the fixture's blocks: it takes over only the
+	// nonces at or below the tip a database already holds.
+	OpenLiveSetForTest(t, db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -7045,18 +6981,18 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 				}, txn); err != nil {
 					return err
 				}
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtPreCut, preCutSlot, frozenCandidate, false, txn); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
 			}),
 	)
 
 	// Parameters in effect for the ending epoch: no extra entropy yet.
 	_, baseCbor := maryPParamsWithExtraEntropy(t, nil)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		baseCbor, epochStart, prevEpochID, eras.MaryEraDesc.Id, nil,
 	))
 
@@ -7070,9 +7006,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 		13: entropyNonce,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		[]byte{0x01}, updateCbor, epochStart+1, prevEpochID, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, []byte{0x01}, updateCbor, epochStart+1, prevEpochID))
 
 	prevEpoch := models.Epoch{
 		EpochId:             prevEpochID,
@@ -7095,6 +7029,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	nonce, _, candidate, _, err := ls.computeEpochNonceForSlot(
@@ -7150,6 +7085,9 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	// The set is open before the fixture's blocks: it takes over only the
+	// nonces at or below the tip a database already holds.
+	OpenLiveSetForTest(t, db)
 	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
@@ -7218,12 +7156,12 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 					return err
 				}
 				// importTip checkpoint at the snapshot tip = imported evolving.
-				if err := db.SetBlockNonce(
+				if err := seedBlockNonce(t, db,
 					hashAtSnap, snapTipSlot, importedEvolving, true, txn,
 				); err != nil {
 					return err
 				}
-				return db.SetBlockNonce(
+				return seedBlockNonce(t, db,
 					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
 				)
 			}),
@@ -7250,6 +7188,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	// Header-verification (eager) path.
@@ -7448,6 +7387,7 @@ func TestPeerHeaderForkPathDefersAtHistoryLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	ls := &LedgerState{db: db, chain: manager.PrimaryChain()}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 	limit := ls.peerHeaderHistoryLimit()
 	require.Positive(t, limit)
@@ -7647,6 +7587,9 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	const targetEpochStart = uint64(2_000)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
+	// The set is open before the fixture's blocks: it takes over only the
+	// nonces at or below the tip a database already holds.
+	OpenLiveSetForTest(t, db)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -7654,7 +7597,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		t,
 		cm.PrimaryChain().AddLocalBlock(context.Background(), anchor.block),
 	)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash,
 		anchorPoint.Slot,
 		anchorNonce,
@@ -7708,6 +7651,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	peerLookup := func(peerHeader *testBlockResult) PeerHeaderLookupFunc {
 		point := ocommon.NewPoint(
 			peerHeader.block.SlotNumber(),
@@ -7735,7 +7679,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 	ls.publishSnapshotsLocked()
 	require.True(t, ls.chain.HoldsPoint(context.Background(), anchorPoint))
-	storedAnchorNonce, err := ls.db.GetBlockNonce(anchorPoint, nil)
+	storedAnchorNonce, err := seedDB(t, ls.db).GetBlockNonce(anchorPoint, nil)
 	require.NoError(t, err)
 	require.Equal(t, anchorNonce, storedAnchorNonce)
 	foldedForkNonce, err := ls.foldHeaderEtaV(
@@ -7883,7 +7827,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	// A second context change can leave the source nonce and folded header
 	// hashes intact while invalidating the ancestor's stake state. The old
 	// nonce prefix must not skip that ancestor's current-context check.
-	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+	require.NoError(t, seedDB(t, db).DeletePoolStakeSnapshotsForEpoch(
 		4,
 		models.PoolStakeSnapshotTypeMark,
 		nil,
@@ -7928,7 +7872,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
 		ouroboros.ConnectionId{}, target.block.Header(),
 	))
-	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+	require.NoError(t, seedDB(t, db).DeletePoolStakeSnapshotsForEpoch(
 		4,
 		models.PoolStakeSnapshotTypeMark,
 		nil,
@@ -7962,7 +7906,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		lateAnchor.block.Header(),
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		lateAnchor.block.Hash().Bytes(),
 		lateAnchor.block.SlotNumber(),
 		lateAnchorEvolvingNonce,
@@ -8182,7 +8126,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.ErrorContains(t, unverifiedErr, "VRF")
 
 	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
-	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+	require.NoError(t, seedDB(t, db).DeletePoolStakeSnapshotsForEpoch(
 		5,
 		models.PoolStakeSnapshotTypeMark,
 		nil,
@@ -8555,7 +8499,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.ErrorContains(t, racedErr, "VRF")
 	require.False(t, IsHeaderVerificationWithheld(racedErr))
 	require.False(t, IsHeaderVerificationDeferred(racedErr))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		queuedAncestor.block.Hash().Bytes(),
 		queuedAncestor.block.SlotNumber(),
 		localNonce,
@@ -8678,7 +8622,7 @@ func TestValidatePeerChainSelectionHeaderCryptoRejectsUnverifiedSameEpochAncesto
 		anchor.block,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash,
 		anchorPoint.Slot,
 		anchorNonce,
@@ -8713,6 +8657,7 @@ func TestValidatePeerChainSelectionHeaderCryptoRejectsUnverifiedSameEpochAncesto
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 	ls.publishSnapshotsLocked()
 
@@ -8817,8 +8762,9 @@ func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
 			},
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
-	byronNonce, err := db.GetBlockNonce(
+	byronNonce, err := seedDB(t, db).GetBlockNonce(
 		ocommon.NewPoint(byronBlock.SlotNumber(), byronBlock.Hash().Bytes()),
 		nil,
 	)
@@ -9075,7 +9021,7 @@ func prunedSnapshotFixtureWithRegistration(
 	pool := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, pool[:], 1_000_000_000)
 	if withSummary {
-		require.NoError(t, db.Metadata().SaveEpochSummary(&models.EpochSummary{
+		require.NoError(t, seedDB(t, db).SaveEpochSummary(&models.EpochSummary{
 			Epoch:            4,
 			TotalActiveStake: types.Uint64(1_000_000_000),
 			TotalPoolCount:   1,
@@ -9087,7 +9033,7 @@ func prunedSnapshotFixtureWithRegistration(
 	}
 	require.NoError(
 		t,
-		db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
+		seedDB(t, db).DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
 	)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -9291,22 +9237,19 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.NotEmpty(t, vrfKey)
+	// A pool the set holds a certificate of, but no registration: nothing
+	// binds the header VRF key to it.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		"INSERT INTO pool (pool_key_hash, vrf_key_hash) VALUES (?, ?)",
-		poolKeyHash[:],
-		lcommon.Blake2b256Hash(vrfKey).Bytes(),
-	)
-	require.NoError(t, err)
+	fxSeed(t, db, LedgerChanges{PoolEvents: []PoolEventChange{{
+		Pool:  poolKeyHash.Bytes(),
+		Event: PoolEvent{Slot: 1, RetiringEpoch: 9},
+	}}})
 
 	err = ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block))
 	require.Error(
 		t,
 		err,
-		"a denormalized pool row without a registration must not bind "+
-			"the header VRF key",
+		"a pool without a registration must not bind the header VRF key",
 	)
 	assert.Contains(t, err.Error(), "registered VRF key hash unavailable")
 }
@@ -9341,28 +9284,21 @@ func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
 	require.NoError(t, err)
 	require.True(t, ok)
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: poolKeyHash[:],
-			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: poolKeyHash[:],
-			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
-			AddedSlot:   blockSlot,
-		},
-		nil,
-	))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        4,
-			SnapshotType: models.PoolStakeSnapshotTypeMark,
-			PoolKeyHash:  poolKeyHash[:],
-			TotalStake:   1,
-			CapturedSlot: blockSlot,
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: poolKeyHash[:],
+		VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	}, &models.PoolRegistration{
+		PoolKeyHash: poolKeyHash[:],
+		VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+		AddedSlot:   blockSlot,
+	}))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        4,
+		SnapshotType: models.PoolStakeSnapshotTypeMark,
+		PoolKeyHash:  poolKeyHash[:],
+		TotalStake:   1,
+		CapturedSlot: blockSlot,
+	}))
 
 	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, 5),
 		"a pool whose only registration lands inside the captured epoch is "+
@@ -9464,7 +9400,7 @@ func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 		lcommon.Blake2b256Hash(vrfKey).Bytes(),
 	)
 
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,
 		0,
 		nil,
@@ -9476,7 +9412,7 @@ func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 		1_000,
 		nil,
 	))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		2_000,
 		2,
 		nil,
@@ -9496,19 +9432,17 @@ func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 		BlockNumber: 2,
 	}, nil))
 
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var poolID uint
-	require.NoError(t, raw.QueryRow(
-		"SELECT id FROM pool WHERE pool_key_hash = ?",
-		poolKeyHash[:],
-	).Scan(&poolID))
-	_, err = raw.Exec(`
-INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
-VALUES (?, ?, 2, 2)`,
-		poolID, poolKeyHash[:],
+	// The pool's retirement certificate at slot 2, for epoch 2, which the
+	// tip has reached.
+	fxSeed(t, db, LedgerChanges{PoolEvents: []PoolEventChange{{
+		Pool:  poolKeyHash.Bytes(),
+		Event: PoolEvent{Slot: 2, RetiringEpoch: 2},
+	}}})
+	_, err = seedDB(t, db).GetPool(
+		t.Context(), lcommon.PoolKeyHash(poolKeyHash), false, nil,
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, models.ErrPoolNotFound,
+		"the fixture's pool must have retired")
 
 	require.NoError(
 		t,
@@ -9539,18 +9473,14 @@ func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
 	require.NotEqual(t, registeredVrfHash, staleVrfHash)
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	err = db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: poolKeyHash[:],
-			VrfKeyHash:  staleVrfHash,
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: poolKeyHash[:],
-			VrfKeyHash:  registeredVrfHash,
-			AddedSlot:   1,
-		},
-		nil,
-	)
+	err = fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: poolKeyHash[:],
+		VrfKeyHash:  staleVrfHash,
+	}, &models.PoolRegistration{
+		PoolKeyHash: poolKeyHash[:],
+		VrfKeyHash:  registeredVrfHash,
+		AddedSlot:   1,
+	})
 	require.NoError(t, err)
 
 	require.NoError(
@@ -9574,11 +9504,11 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// TestDeferredHeaderMarkerLegacySyncStateStillHonoured covers a marker an
-// earlier version wrote to sync_state: it must still force the apply-time
-// check, repopulate into the in-memory set, and be removed once the check
-// passes.
-func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
+// TestDeferredHeaderMarkerWithoutSourceStillHonoured covers a marker with the
+// one-byte payload a database from an earlier version carries: it must force
+// the apply-time check, repopulate into the in-memory set, and be removed once
+// the check passes.
+func TestDeferredHeaderMarkerWithoutSourceStillHonoured(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
@@ -9588,10 +9518,8 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	seedBlockPoolRegistration(t, db, tb.block)
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
-	require.NoError(t, db.SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		nil,
+	require.NoError(t, db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	))
 	require.NoError(t, ls.repopulateDeferredHeaderValidation())
 	ls.deferredHeaderValidationMu.Lock()
@@ -9600,9 +9528,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	require.True(t, restored)
 	require.True(t, ls.consumeDeferredHeaderValidation(point))
 
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
-	require.True(t, required, "legacy sync_state marker must still gate apply")
+	require.True(t, required, "the marker must gate apply")
 
 	require.NoError(
 		t,
@@ -9616,12 +9544,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 				)
 			}),
 	)
-	value, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		nil,
-	)
+	held, err := db.HasDeferredHeaderMarker(headerValidationPointKey(point))
 	require.NoError(t, err)
-	require.Empty(t, value, "legacy marker must be removed after apply")
+	require.False(t, held, "the marker must be removed after apply")
 }
 
 // TestGenesisOverlayForecastsNextEpochInEraUpdate reproduces the preview
@@ -9673,17 +9598,14 @@ func TestGenesisOverlayForecastsNextEpochInEraUpdate(t *testing.T) {
 	}
 	initialCbor, err := cbor.Encode(initialPParams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		initialCbor, 0, 0, eras.AlonzoEraDesc.Id, nil,
 	))
 	// {12: 0/1}: the decentralization update every preview genesis delegate
 	// submitted at slot 86600.
 	update, err := hex.DecodeString("a10cd81e820001")
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
-		update, 86_600, 1, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size), update, 86_600, 1))
 
 	ls := &LedgerState{
 		db:             db,
@@ -9698,6 +9620,7 @@ func TestGenesisOverlayForecastsNextEpochInEraUpdate(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	block := &mockBoundaryAlonzoBlock{
@@ -9751,16 +9674,13 @@ func TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch(t *testing.T) {
 	}
 	initialCbor, err := cbor.Encode(initialPParams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		initialCbor, 0, 0, eras.AlonzoEraDesc.Id, nil,
 	))
 	// {12: 0/1}, submitted in epoch 2 for the boundary into epoch 3.
 	update, err := hex.DecodeString("a10cd81e820001")
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
-		bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
-		update, 2*86_400+200, 2, nil,
-	))
+	require.NoError(t, fxSeedPParamUpdate(t, db, bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size), update, 2*86_400+200, 2))
 
 	ls := &LedgerState{
 		db:             db,
@@ -9775,6 +9695,7 @@ func TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.publishSnapshotsLocked()
 
 	block := &mockBoundaryAlonzoBlock{
@@ -9872,6 +9793,9 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
+	// The set is open before the fixture seeds it, so the seeds are
+	// LedgerDB state rather than rows of an earlier release's store.
+	OpenLiveSetForTest(t, db)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	manager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -9888,7 +9812,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 		require.True(t, ok)
 		require.NoError(
 			t,
-			db.UpdatePoolOpCertSequence(
+			seedDB(t, db).UpdatePoolOpCertSequence(
 				context.Background(),
 				poolKeyHash,
 				opCert.IssueNumber,
@@ -9905,7 +9829,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 		anchor.block,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash,
 		anchorPoint.Slot,
 		anchorNonce,
@@ -9949,6 +9873,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 			),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 	parentPoint := ocommon.NewPoint(
 		forkParent.block.SlotNumber(),
@@ -10047,6 +9972,7 @@ func TestValidatePeerForkOpCertCountersAllowsQueuedLinearChild(
 		2,
 	)
 	ls := &LedgerState{db: db, chain: manager.PrimaryChain()}
+	fxAttachLedgerDB(t, ls)
 	require.NoError(t, ls.validatePeerForkOpCertCounters(
 		context.Background(),
 		ouroboros.ConnectionId{},

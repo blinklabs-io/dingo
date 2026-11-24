@@ -47,19 +47,19 @@ func TestReconcileRecoversADrainedSetFromItsJournal(t *testing.T) {
 	const applied = 8
 	forkTip := ocommon.NewPoint(5, bytes.Repeat([]byte{0xee}, 32))
 	for _, tc := range []struct {
-		name      string
-		cfg       utxoset.Config
-		drained   bool
-		ledgerTip ocommon.Point
-		chainTo   uint64
-		wantAsked []uint64
-		wantSlot  uint64
+		name       string
+		cfg        utxoset.Config
+		ledgerOnly bool
+		ledgerTip  ocommon.Point
+		chainTo    uint64
+		wantAsked  []uint64
+		wantSlot   uint64
 	}{
 		{
-			name:      "behind on a fork the chain left, drained",
-			drained:   true,
-			ledgerTip: slotPoint(10),
-			chainTo:   5,
+			name:       "behind on a fork the chain left, drained",
+			ledgerOnly: true,
+			ledgerTip:  slotPoint(10),
+			chainTo:    5,
 			// The set's own tip is asked first by Reconcile, then the
 			// journal points newest first.
 			wantAsked: []uint64{applied, 7, 6, 5},
@@ -85,8 +85,11 @@ func TestReconcileRecoversADrainedSetFromItsJournal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openRecoverySet(t, tc.cfg)
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
-			set.SetDrainedFamilies(drainedMask(tc.drained))
+			if tc.ledgerOnly {
+				set.ServeLedgerOnly()
+			}
 			db := ledgerAt(t, tc.ledgerTip)
 			var asked []uint64
 			err := set.Reconcile(
@@ -112,7 +115,7 @@ func TestReconcileNamesWhatIsMissingWhenTheJournalHoldsNoBase(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{Only: true})
 	applySlots(t, set, 6)
-	set.SetDrainedFamilies(drainedMask(true))
+	set.ServeLedgerOnly()
 	db := ledgerAt(t, slotPoint(9))
 	var asked []uint64
 	err := set.Reconcile(
@@ -162,14 +165,14 @@ func setFormatMark(t *testing.T, dir string, version byte) {
 func TestReconcileNamesTheMissingLayoutMigration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		cfg     utxoset.Config
-		drained bool
-		wantErr bool
+		name       string
+		cfg        utxoset.Config
+		ledgerOnly bool
+		wantErr    bool
 	}{
 		{"drained", utxoset.Config{}, true, true},
 		{"only", utxoset.Config{Only: true}, false, true},
-		{"rebuildable", utxoset.Config{}, false, false},
+		{"released source", utxoset.Config{}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -178,6 +181,7 @@ func TestReconcileNamesTheMissingLayoutMigration(t *testing.T) {
 			cfg.Dir = dir
 			set, err := utxoset.Open(cfg)
 			require.NoError(t, err)
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, 3)
 			require.NoError(t, set.Close())
 			setFormatMark(t, dir, 1)
@@ -185,9 +189,16 @@ func TestReconcileNamesTheMissingLayoutMigration(t *testing.T) {
 			set, err = utxoset.Open(cfg)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			set.SetDrainedFamilies(drainedMask(tc.drained))
-			db := ledgerAt(t, slotPoint(3))
-			err = set.Reconcile(t.Context(), dbadapter.New(db), neverResume)
+			if tc.ledgerOnly {
+				set.ServeLedgerOnly()
+			}
+			if tc.wantErr {
+				db := ledgerAt(t, slotPoint(3))
+				err = set.Reconcile(t.Context(), dbadapter.New(db), neverResume)
+			} else {
+				db := releasedAt(t, slotPoint(3))
+				err = set.ReconcileReleased(t.Context(), dbadapter.New(db))
+			}
 			n, countErr := set.Count()
 			require.NoError(t, countErr)
 			if !tc.wantErr {

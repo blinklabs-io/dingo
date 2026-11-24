@@ -201,7 +201,11 @@ func (b *Blockfrost) buildMux() *routeMux {
 	// "{$}" the pattern would act as a subtree match and
 	// silently catch every unimplemented route.
 	mux.HandleFunc("GET /{$}", b.handleRoot)
+	mux.HandleFunc("GET /api/v0/{$}", b.handleRoot)
 	mux.HandleFunc("GET /health", b.handleHealth)
+	mux.HandleFunc("GET /api/v0/health", b.handleHealth)
+	mux.HandleFunc("GET /health/clock", b.handleHealthClock)
+	mux.HandleFunc("GET /api/v0/health/clock", b.handleHealthClock)
 	mux.HandleFunc(
 		"GET /api/v0/blocks/latest",
 		b.handleLatestBlock,
@@ -415,8 +419,16 @@ func (b *Blockfrost) buildMux() *routeMux {
 		b.handleAddressAssetUTXOs,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/metadata/txs/labels",
+		b.handleMetadataLabels,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/metadata/txs/labels/{label}",
 		b.handleMetadataTransactions,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/utils/addresses/xpub/{xpub}/{role}/{index}",
+		b.handleXpubAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/metadata/txs/labels/{label}/cbor",

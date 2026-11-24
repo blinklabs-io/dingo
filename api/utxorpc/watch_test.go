@@ -113,6 +113,8 @@ func requireWatchTxIdle(
 }
 
 func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
+	t.Parallel()
+
 	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	start := findEmptyFixtureRun(t, scan, 2)
 	blocks := scan[:start+2]
@@ -195,6 +197,8 @@ func requireWatchTxUndos(
 }
 
 func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
+	t.Parallel()
+
 	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	start := findEmptyFixtureRun(t, scan, 4)
 	require.GreaterOrEqual(t, start, 3)
@@ -263,6 +267,8 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 }
 
 func TestConnect_WatchTx_RollbackPanicBecomesStreamError(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv(watchTxRollbackPanicChild) == "1" {
 		runWatchTxRollbackPanicChild(t)
 		return

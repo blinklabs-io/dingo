@@ -52,6 +52,7 @@ func drepStateQueryDeposits(
 	seedImportedDrep(t, db, late, lateDeposit, 200, true)
 
 	ls := &LedgerState{db: db}
+	attachTestLiveSet(t, ls)
 	ls.currentPParams = &conway.ConwayProtocolParameters{
 		DRepDeposit: currentDeposit,
 	}

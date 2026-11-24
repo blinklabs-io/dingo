@@ -91,6 +91,31 @@ func TestPauseCommitsBlocksNewReadWriteTxns(t *testing.T) {
 	require.NoError(t, txn.Commit())
 }
 
+// A staged transaction, which commits the ledger's writes to the live UTxO
+// set, holds the commit barrier on a database with no metadata store, so a
+// snapshot's pause waits for it and the set is not written while paused.
+func TestPauseCommitsWaitsForAStagedTxnOnTheLedgersDatabase(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	require.Nil(t, db.Metadata())
+	txn := NewStagedTxn(context.Background(), db)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	resume, err := db.PauseCommitsContext(ctx)
+	if err == nil {
+		resume()
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"a pause must wait for an open staged transaction")
+
+	require.NoError(t, txn.Rollback())
+	resume, err = db.PauseCommitsContext(context.Background())
+	require.NoError(t, err)
+	resume()
+}
+
 // TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits guards against a real
 // deadlock this package used to have: deleteUtxoBlobs and deleteTxBlobs
 // open batched, blob-only Txns (NewBlobOnlyTxn) while the caller's outer

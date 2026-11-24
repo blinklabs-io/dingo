@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,9 +160,6 @@ func testConsensusCopyCarriesCoreModeState(
 		`INSERT INTO move_instantaneous_rewards(pot,certificate_id,added_slot,other_pot) VALUES(0,0,999,'0')`,
 	)
 	require.NoError(t, err)
-	before, err := dest.GetCommitTimestamp(ctx)
-	require.NoError(t, err)
-	require.Equal(t, int64(9876), before)
 	require.NoError(t, dest.FinishConsensusSettingsCopy(ctx, 4, 1234))
 	settings, err := dest.GetNodeSettings(ctx)
 	require.NoError(t, err)
@@ -171,23 +167,9 @@ func testConsensusCopyCarriesCoreModeState(
 	original, err := source.GetNodeSettings(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "api", original.StorageMode)
-	gates, err := dest.GetNodeSettingsGates(ctx)
-	require.NoError(t, err)
-	require.NotContains(
-		t, gates, nodesettings.LedgerStateDrainedGateName,
-		"the families are still in SQL, for the node to move",
-	)
 	complete, err := dest.GetSyncState(CoreCopyCompleteKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "1", complete)
-	after, err := dest.GetCommitTimestamp(ctx)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		before,
-		after,
-		"migration latches must not advance the ledger commit timestamp",
-	)
 }
 
 func TestConsensusCopyBatchAndCursorAreAtomic(t *testing.T) {

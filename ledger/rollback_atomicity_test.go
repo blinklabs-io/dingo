@@ -19,57 +19,29 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-// tipWriteFailingMetadataStore fails the final step of
-// database.TruncateAfterSlot -- writing the rolled-back tip -- with an error
-// the caller would otherwise read as "the rollback was refused and nothing
-// changed". Everything else, including the blob-side block deletion the chain
-// truncation performs, keeps working, so the injected failure lands exactly
-// where the ledger rollback runs: after chain.RollbackDeferred has already
-// removed the abandoned blocks.
-type tipWriteFailingMetadataStore struct {
-	metadata.MetadataStore
-	err error
-}
-
-func (s tipWriteFailingMetadataStore) SetTip(
-	_ ochainsync.Tip,
-	_ dbtypes.Txn,
-) error {
-	return s.err
-}
-
-// failLedgerRollbackAfterChainTruncation points ls at a database whose ledger
-// truncation fails with err while leaving the chain manager's own database
-// untouched, so ls.chain.RollbackDeferred still succeeds.
+// failLedgerRollbackAfterChainTruncation fails the ledger's own truncation
+// with err, an error the caller would otherwise read as "the rollback was
+// refused and nothing changed". The chain truncation keeps working, so the
+// failure lands where the ledger rollback runs: after chain.RollbackDeferred
+// has removed the abandoned blocks.
 func failLedgerRollbackAfterChainTruncation(
 	t *testing.T,
 	ls *LedgerState,
 	err error,
 ) {
 	t.Helper()
-	base := ls.db
-	failing, newErr := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: tipWriteFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           err,
-			},
-		},
-	)
-	require.NoError(t, newErr)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point, uint64, ledgerdb.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, err
+	}
 }
 
 // TestRollbackChainAndStateDeferredReportsChainTruncationOnLedgerFailure pins
@@ -156,23 +128,6 @@ func TestHandleEventChainsyncRollbackFailsHardAfterChainTruncation(
 	)
 }
 
-// floorLookupFailingMetadataStore fails the durable-applied-floor lookup that
-// enforceDurableTipFloor runs. ls.rollback calls enforceDurableTipFloor from
-// two places -- the no-op branch it takes when the ledger tip already equals
-// the rollback point, and the tail of the full rollback, after the truncation
-// has committed and ls.currentTip has been published -- so this is how
-// ls.rollback fails with the ledger already sitting on the rollback point.
-type floorLookupFailingMetadataStore struct {
-	metadata.MetadataStore
-	err error
-}
-
-func (s floorLookupFailingMetadataStore) GetLatestBlockNonce(
-	_ dbtypes.Txn,
-) (models.BlockNonce, bool, error) {
-	return models.BlockNonce{}, false, s.err
-}
-
 // TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint is
 // the negative half of the sentinel's contract. ErrChainTruncatedLedgerRollbackFailed
 // means the chain truncated and the ledger did not, and the callers escalate on
@@ -191,21 +146,7 @@ func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
 	ls.publishSnapshotsLocked()
 
 	floorErr := models.ErrBlockNotFound
-	base := ls.db
-	failing, err := database.New(
-		context.Background(),
-		base.Config(),
-		database.Stores{
-			Blob: base.Blob(),
-			Metadata: floorLookupFailingMetadataStore{
-				MetadataStore: base.Metadata(),
-				err:           floorErr,
-			},
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, failing.Close()) })
-	ls.db = failing
+	fxFaultedLedger(t, ls, SetFaultsForTest{LatestBlockNonce: floorErr})
 
 	rbErr := ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	require.Error(t, rbErr)

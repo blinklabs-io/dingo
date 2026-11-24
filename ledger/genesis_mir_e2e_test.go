@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -205,7 +204,7 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		if reads == "set" {
 			delegs, mirs := h.scenario.CertHistoryInsideRollback()
 			require.Equal(t, 1, delegs, "a read inside the rollback sees it")
-			require.Equal(t, 4, mirs, "MIR certificates remain SQL-backed during a staged set rollback")
+			require.Zero(t, mirs, "a read inside the rollback sees it")
 		}
 		h.scenario.RollbackBeforeBoundary()
 
@@ -228,82 +227,5 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Empty(t, effects)
-	})
-}
-
-// TestGenesisDelegationAndMIRLoadFromTheMetadataStore requires a set from
-// before it kept them to load every delegation and MIR certificate from the
-// metadata store, as the set that followed the certificates holds them.
-func TestGenesisDelegationAndMIRLoadFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newGenesisMIRHarness(t, "metadata-visible")
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.GenesisMIRLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.GenesisMIRLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	want, err := h.set.GenesisDelegations()
-	require.NoError(t, err)
-	got, err := fresh.GenesisDelegations()
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	require.Equal(t, want, got, "the position of a delegation is exact")
-
-	wantMIR, err := h.set.MIRCerts()
-	require.NoError(t, err)
-	gotMIR, err := fresh.MIRCerts()
-	require.NoError(t, err)
-	require.Len(t, gotMIR, 4)
-	for i := range wantMIR {
-		require.Equal(t, wantMIR[i].Slot, gotMIR[i].Slot)
-		require.Equal(t, wantMIR[i].Pot, gotMIR[i].Pot)
-		require.Equal(t, wantMIR[i].OtherPot, gotMIR[i].OtherPot)
-		require.Len(t, gotMIR[i].Rewards, len(wantMIR[i].Rewards))
-		for j := range wantMIR[i].Rewards {
-			require.Equal(t, wantMIR[i].Rewards[j].Credential, gotMIR[i].Rewards[j].Credential)
-			require.Zero(t, wantMIR[i].Rewards[j].Amount.Cmp(gotMIR[i].Rewards[j].Amount))
-		}
-	}
-}
-
-// TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites requires set
-// reads to ignore certificates written directly to the metadata store.
-func TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites(t *testing.T) {
-	t.Parallel()
-	forEachGenesisMIRRead(t, func(t *testing.T, reads string) {
-		h := newGenesisMIRHarness(t, reads)
-		s := h.slots
-		raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
-		require.NoError(t, err)
-		// Written around the ledger's LedgerDB, so the set never sees them.
-		_, err = raw.Exec(`
-INSERT INTO genesis_delegation (
-    genesis_hash, genesis_delegate_hash, vrf_key_hash,
-    added_slot, block_index, cert_index, certificate_id
-) VALUES (?, ?, ?, ?, 0, 0, 999999)`,
-			s.Genesis, s.DelegateA, s.VrfA, s.DelegB+10)
-		require.NoError(t, err)
-		_, err = raw.Exec(`
-INSERT INTO move_instantaneous_rewards (pot, added_slot, other_pot)
-VALUES (0, ?, '7')`, s.DelegB+10)
-		require.NoError(t, err)
-
-		ldb := h.scenario.LedgerDB()
-		rows, err := ldb.GetGenesisDelegationsInSlotRange(s.DelegB+10, s.DelegB+10, nil)
-		require.NoError(t, err)
-		effects, err := ldb.GetMIRCertsInSlotRange(
-			t.Context(), s.DelegB+10, s.DelegB+11, nil,
-		)
-		require.NoError(t, err)
-		require.Empty(t, rows, "the read answers from the set")
-		require.Len(t, effects, 1)
-		require.Equal(t, s.DelegB+10, effects[0].AddedSlot)
-		require.Equal(t, uint64(7), effects[0].OtherPot)
 	})
 }

@@ -246,21 +246,21 @@ func (*swappingUploadDirDestination) DownloadFiles(
 func TestMirrorToCloudUploadDirReceivesVerifiedBytes(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db, set := newLedgerSnapshotSource(t)
 	dir := snapshotTestDir(t, "epoch-swap")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, dir,
 		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",
 		lifecycle.WithManifestKey(testTrustKey),
+		lifecycle.WithUtxoSetBackup(set),
 	)
 	require.NoError(t, err)
 	wantBlob, err := os.ReadFile(
 		filepath.Join(dir, lifecycle.BlobBackupFileName),
 	)
 	require.NoError(t, err)
-	wantMetadata, err := os.ReadFile(
-		filepath.Join(dir, lifecycle.MetadataBackupFileName),
+	wantSet, err := os.ReadFile(
+		filepath.Join(dir, lifecycle.UtxoSetBackupFileName),
 	)
 	require.NoError(t, err)
 	wantManifest, err := os.ReadFile(
@@ -283,9 +283,9 @@ func TestMirrorToCloudUploadDirReceivesVerifiedBytes(t *testing.T) {
 	))
 
 	require.Equal(t, map[string][]byte{
-		lifecycle.ManifestFileName:       wantManifest,
-		lifecycle.BlobBackupFileName:     wantBlob,
-		lifecycle.MetadataBackupFileName: wantMetadata,
+		lifecycle.ManifestFileName:      wantManifest,
+		lifecycle.BlobBackupFileName:    wantBlob,
+		lifecycle.UtxoSetBackupFileName: wantSet,
 	}, dest.uploaded)
 	siblings, err := os.ReadDir(filepath.Dir(dir))
 	require.NoError(t, err)

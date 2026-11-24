@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -80,7 +81,11 @@ func TestNewMCPServerUsesActiveSQLiteProvider(t *testing.T) {
 	nodeDB, err := dbtest.NewDatabaseWithOptions(
 		t,
 		dbtest.Options{
-			Config: &database.Config{DataDir: root},
+			Config: &database.Config{
+				DataDir:     root,
+				Role:        database.RoleIndexer,
+				StorageMode: types.StorageModeAPI,
+			},
 			Metadata: dbtest.StorageProvider{
 				Config: map[string]any{"dataDir": active},
 			},

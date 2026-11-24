@@ -839,9 +839,6 @@ func (s *Store) GetPoolStatus(
 	txn types.Txn,
 ) (models.PoolStatus, error) {
 	var status models.PoolStatus
-	if err := s.refuseDrained("pool"); err != nil {
-		return status, err
-	}
 	txn, end, err := s.readSnapshot(txn)
 	if err != nil {
 		return status, err

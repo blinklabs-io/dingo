@@ -65,7 +65,7 @@ VALUES (?, ?, ?, ?, ?)`), tx, idx, added, deleted, amount)
 		require.Equal(t, want, got, "page size %d", page)
 	}
 
-	later, err := store.LiveUtxoDigest(ctx, 51, nil)
+	later, err := store.LiveUtxoDigestWithOutputs(ctx, 51, nil, nil)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -76,7 +76,7 @@ VALUES (?, ?, ?, ?, ?)`), tx, idx, added, deleted, amount)
 	require.NotEqual(t, want.Digest, later.Digest)
 
 	insert(txs[0], 3, 10, 0, "8")
-	changed, err := store.LiveUtxoDigest(ctx, 50, nil)
+	changed, err := store.LiveUtxoDigestWithOutputs(ctx, 50, nil, nil)
 	require.NoError(t, err)
 	require.NotEqual(
 		t,
@@ -99,7 +99,7 @@ VALUES (?, 0, 10, 0, '1')`), tx)
 	resolver := func(out []byte) metadata.UtxoOutputResolver {
 		return func([]byte, uint32) ([]byte, error) { return out, nil }
 	}
-	base, err := store.LiveUtxoDigest(ctx, 50, nil)
+	base, err := store.LiveUtxoDigestWithOutputs(ctx, 50, nil, nil)
 	require.NoError(t, err)
 	first, err := store.LiveUtxoDigestWithOutputs(
 		ctx, 50, resolver([]byte{0x82, 1}), nil,

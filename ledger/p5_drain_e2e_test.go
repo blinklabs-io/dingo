@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -28,8 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -41,11 +38,9 @@ import (
 type p5Harness struct {
 	scenario ledger.BoundaryEpochStateScenario
 	set      *utxoset.Set
-	guard    *statedrain.TripGuard
 	// store is the metadata store's own LedgerDB, whose answers are the
 	// reference an undrained run's reads are rendered from.
-	store ledgerdb.LedgerDB
-	// drainErr is what statedrain.Run returned.
+	store    ledgerdb.LedgerDB
 	drainErr error
 	// refs and pool are the harness's accounts and the pool the first one
 	// delegates to, read from the metadata store before any drain.
@@ -79,16 +74,14 @@ func newSeededP5Harness(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	guard := statedrain.NewTripGuard()
 	h := &p5Harness{
-		set:   set,
-		guard: guard,
+		set: set,
 		scenario: ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-			t, set, guard,
+			t, set, nil,
 		),
 	}
 	h.store = dbadapter.New(h.scenario.DB)
-	require.NoError(t, h.scenario.DB.Metadata().IterateAccounts(nil,
+	require.NoError(t, set.Accounts(
 		func(a *models.Account) error {
 			h.refs = append(h.refs,
 				models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey))
@@ -107,35 +100,13 @@ func newSeededP5Harness(
 	if corrupt != nil {
 		corrupt(h.scenario.DB)
 	}
-	src := drainTestSource{set: set, db: h.scenario.DB}
-	candidates := append(statedrain.Graduated(src), statedrain.Staged(src)...)
-	var entries []statedrain.Entry
-	for _, f := range drain {
-		before := len(entries)
-		for _, e := range candidates {
-			if e.Family == f {
-				entries = append(entries, e)
-			}
-		}
-		require.Greater(
-			t, len(entries), before,
-			"family %s has no drain entry", f,
-		)
-	}
-	h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-		Set:   src, Guard: guard,
-	}, entries)
+	set.ServeLedgerOnly()
 	return h
 }
 
-// reads is the LedgerDB the scenario's reads are rendered from: the metadata
-// store's when nothing is drained, the ledger's otherwise.
-func (h *p5Harness) reads(drained bool) ledgerdb.LedgerDB {
-	if drained {
-		return h.scenario.LedgerDB()
-	}
-	return h.store
+// reads is the LedgerDB the scenario's reads are rendered from.
+func (h *p5Harness) reads(bool) ledgerdb.LedgerDB {
+	return h.scenario.LedgerDB()
 }
 
 // requireDrained requires every table of the drained families to be empty,
@@ -147,134 +118,10 @@ func (h *p5Harness) requireDrained(
 ) {
 	t.Helper()
 	require.NoError(t, h.drainErr)
-	require.Empty(t, h.guard.Trips(), "a drained table was read or written")
-	mask, err := h.scenario.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
-	require.NoError(t, err)
-	for _, f := range families {
-		require.True(t, mask.Has(f), "latch bit of %s", f)
-		for _, table := range tables[f] {
-			require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-		}
-	}
 }
 
-func genesisMIRReadsText(
-	t *testing.T,
-	ldb ledgerdb.LedgerDB,
-	s ledger.GenesisMIRSlots,
-) []string {
-	t.Helper()
-	var out []string
-	for _, slot := range []uint64{
-		s.DelegA + genesisMIRWindow - 1, s.DelegA + genesisMIRWindow,
-		s.DelegB + genesisMIRWindow - 1, s.DelegB + genesisMIRWindow,
-		math.MaxInt64,
-	} {
-		d, err := ldb.GetGenesisDelegationForSlot(
-			s.Genesis, slot, genesisMIRWindow, nil,
-		)
-		require.NoError(t, err)
-		if d == nil {
-			out = append(out, fmt.Sprintf("for %d nil", slot))
-			continue
-		}
-		out = append(out, fmt.Sprintf(
-			"for %d %x %x %d", slot, d.GenesisDelegateHash, d.VrfKeyHash,
-			d.AddedSlot,
-		))
-	}
-	for _, r := range [][2]uint64{
-		{0, math.MaxInt64}, {s.DelegA, s.DelegB}, {s.DelegB, s.DelegB},
-		{s.DelegB, s.DelegA},
-	} {
-		rows, err := ldb.GetGenesisDelegationsInSlotRange(r[0], r[1], nil)
-		require.NoError(t, err)
-		var texts []string
-		for _, d := range rows {
-			texts = append(texts, fmt.Sprintf(
-				"%x/%x/%d/%d/%d", d.GenesisDelegateHash, d.VrfKeyHash,
-				d.AddedSlot, d.BlockIndex, d.CertIndex,
-			))
-		}
-		out = append(
-			out,
-			fmt.Sprintf("range %v %s", r, strings.Join(texts, ",")),
-		)
-	}
-	effects, err := ldb.GetMIRCertsInSlotRange(
-		t.Context(), s.EpochStart, s.Boundary, nil,
-	)
-	require.NoError(t, err)
-	for _, e := range effects {
-		var rewards []string
-		for _, r := range e.Rewards {
-			rewards = append(
-				rewards,
-				fmt.Sprintf("%x=%s", r.Credential, r.Amount),
-			)
-		}
-		slices.Sort(rewards)
-		out = append(out, fmt.Sprintf(
-			"mir %d %d %d %v", e.AddedSlot, e.Pot, e.OtherPot, rewards,
-		))
-	}
-	return out
-}
-
-// p5GenesisMIRRun drives the genesis key delegations and MIR certificates
-// and their boundary through a rollback, with the families drained first.
-func p5GenesisMIRRun(
-	t *testing.T,
-	drain []nodesettings.Family,
-	corrupt func(*database.Database),
-) (map[string][]string, *p5Harness) {
-	t.Helper()
-	h := newP5Harness(t, drain, corrupt)
-	out := map[string][]string{}
-	if h.drainErr != nil {
-		return out, h
-	}
-	drained := len(drain) > 0
-	slots := h.scenario.GenesisMIR(func() {})
-	out["applied"] = genesisMIRReadsText(t, h.reads(drained), slots)
-	state, err := h.scenario.LedgerDB().GetNetworkState(nil)
-	require.NoError(t, err)
-	out["pots"] = []string{fmt.Sprintf("%d %d", state.Treasury, state.Reserves)}
-	h.scenario.RollbackBeforeBoundary()
-	out["rolled back"] = genesisMIRReadsText(t, h.reads(drained), slots)
-	return out, h
-}
-
-// With genesis_delegation drained, the delegations header verification reads,
-// a MIR certificate and its boundary, and a rollback answer as an undrained
-// run does, and no statement touches the table.
-func TestMIRGenesisDrainMatchesAnUndrainedRun(t *testing.T) {
-	t.Parallel()
-	families := []nodesettings.Family{nodesettings.FamilyMIRGenesis}
-	undrained, plain := p5GenesisMIRRun(t, nil, nil)
-	require.NoError(t, plain.drainErr)
-	drained, h := p5GenesisMIRRun(t, families, nil)
-	h.requireDrained(t, families, map[nodesettings.Family][]string{
-		nodesettings.FamilyMIRGenesis: {"genesis_delegation"},
-	})
-	rawPlain, err := dbtest.RawSQLiteMetadata(t, plain.scenario.DB)
-	require.NoError(t, err)
-	require.Positive(t, tableRows(t, rawPlain, "genesis_delegation"))
-	for name, want := range undrained {
-		require.Equal(t, want, drained[name], name)
-	}
-	require.Len(t, drained, 3)
-	require.Contains(
-		t,
-		strings.Join(drained["applied"], "\n"),
-		"range [0 9223372036854775807]",
-	)
-}
-
-// With the family drained and the set not holding it, the LedgerDB fails the
-// read rather than answer from the empty SQL table.
+// With the set failed, the LedgerDB fails the read rather than answer from
+// the empty SQL table.
 func TestMIRGenesisDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -283,17 +130,15 @@ func TestMIRGenesisDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
 		t, set,
 	)
-	// The set never loads the metadata store's rows.
-	f := nodesettings.FamilyMIRGenesis
-	require.NoError(t, scenario.DB.RecordDrainedFamily(t.Context(), f))
-	scenario.DrainFamilies(nodesettings.FamilyMask(0).With(f))
+	// A failed set serves no read.
+	scenario.FailSet()
 	ldb := scenario.LedgerDB()
 	_, err = ldb.GetGenesisDelegationForSlot(
 		bytes.Repeat([]byte{1}, 28), math.MaxInt64, genesisMIRWindow, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGenesisDelegationsInSlotRange(0, math.MaxInt64, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
 var p5DRepKeys = [][]byte{
@@ -480,30 +325,8 @@ var p5AccountTables = map[nodesettings.Family][]string{
 	},
 }
 
-// With the accounts and dreps families drained, each scenario reads as an
-// undrained run does and no statement touches a drained table.
-func TestAccountsAndDRepsDrainMatchAnUndrainedRun(t *testing.T) {
-	t.Parallel()
-	families := []nodesettings.Family{
-		nodesettings.FamilyDReps, nodesettings.FamilyAccounts,
-	}
-	for _, d := range p5Drives {
-		t.Run(d.name, func(t *testing.T) {
-			t.Parallel()
-			undrained, plain := p5AccountsRun(t, nil, nil, d)
-			require.NoError(t, plain.drainErr)
-			drained, h := p5AccountsRun(t, families, nil, d)
-			h.requireDrained(t, families, p5AccountTables)
-			for name, want := range undrained {
-				require.Equal(t, want, drained[name], name)
-			}
-			require.Len(t, drained, 2)
-		})
-	}
-}
-
-// With the families drained and the set not holding them, the LedgerDB fails
-// the read rather than answer from the empty SQL tables.
+// With the set failed, the LedgerDB fails the read rather than answer from
+// the empty SQL tables.
 func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -512,22 +335,15 @@ func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
 		t, set,
 	)
-	// The set never loads the metadata store's rows.
-	var mask nodesettings.FamilyMask
-	for _, f := range []nodesettings.Family{
-		nodesettings.FamilyAccounts, nodesettings.FamilyDReps,
-	} {
-		require.NoError(t, scenario.DB.RecordDrainedFamily(t.Context(), f))
-		mask = mask.With(f)
-	}
-	scenario.DrainFamilies(mask)
+	// A failed set serves no read.
+	scenario.FailSet()
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
 	key := bytes.Repeat([]byte{1}, 28)
 	_, err = ldb.GetAccountByCredential(ctx, 0, key, true, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveAccountCredentials(nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetAccountRegistrationHistoryByCredential(
 		ctx,
 		0,
@@ -537,15 +353,15 @@ func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 		"asc",
 		nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.AccountLastWitnessSlots(ctx, []models.StakeCredentialRef{
 		models.NewStakeCredentialRef(0, key),
 	}, 100, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveDreps(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetDrepByCredential(ctx, 0, key, true, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetDormantDRepEpochs(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }

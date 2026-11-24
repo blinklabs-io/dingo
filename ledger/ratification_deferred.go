@@ -31,11 +31,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// pendingRatificationSyncKey records a boundary whose RATIFY decision or mark
-// snapshot has not been written yet. The boundary transaction writes it;
-// whichever of the background job or the next boundary writes them deletes it
-// in the same transaction.
-const pendingRatificationSyncKey = "dingo:governance:ratify-pending"
+// pendingRatificationSyncKey names the record of a boundary whose RATIFY
+// decision or mark snapshot has not been written yet. The boundary
+// transaction writes it; whichever of the background job or the next boundary
+// writes them deletes it in the same transaction. The LedgerDB set keeps it,
+// journaled at the boundary's slot.
+const pendingRatificationSyncKey = database.PendingRatificationSyncKey
 
 type pendingRatificationRecord struct {
 	Epoch        uint64 `json:"epoch"`
@@ -74,13 +75,10 @@ func (j *ratificationJob) settle() {
 }
 
 func loadPendingRatification(
-	db *database.Database,
+	ldb ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 ) (*pendingRatificationRecord, error) {
-	raw, err := db.GetSyncState(
-		pendingRatificationSyncKey,
-		dbadapter.Unwrap(txn),
-	)
+	raw, err := ldb.GetSyncState(pendingRatificationSyncKey, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +130,7 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 		jobCtx, cancelJob := context.WithCancel(context.WithoutCancel(ctx))
 		stopClose := context.AfterFunc(ls.closeCtx(), cancelJob) //nolint:contextcheck // Ledger shutdown independently cancels the detached after-commit job.
 		snapshot := ls.ledgerDB().Begin(jobCtx, false)
-		pinned, err := loadPendingRatification(ls.db, snapshot)
+		pinned, err := loadPendingRatification(ls.ledgerDB(), snapshot)
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
 		}
@@ -269,7 +267,7 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 	job *ratificationJob,
 	validationOnly bool,
 ) error {
-	rec, err := loadPendingRatification(ls.db, txn)
+	rec, err := loadPendingRatification(ls.ledgerDB(), txn)
 	if err != nil {
 		return err
 	}
@@ -283,7 +281,7 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 			)
 		}
 		if !validationOnly {
-			if err := ls.takeDeferredRewardStakeInputs(ctx, txn); err != nil {
+			if err := ls.takeDeferredRewardStakeInputs(txn); err != nil {
 				return fmt.Errorf(
 					"stage reward stake inputs for epoch %d: %w",
 					rec.Epoch, err,
@@ -315,7 +313,7 @@ func (ls *LedgerState) consumePendingRatificationWithOptions(
 	txn ledgerdb.Txn,
 	validationOnly bool,
 ) error {
-	rec, err := loadPendingRatification(ls.db, txn)
+	rec, err := loadPendingRatification(ls.ledgerDB(), txn)
 	if err != nil || rec == nil {
 		return err
 	}
@@ -434,29 +432,28 @@ func (ls *LedgerState) HoldEpochBoundaryJobForTesting(
 	return job.settle
 }
 
-// discardPendingRatificationAfterSlot deletes, in the rollback transaction, a
-// pending record whose boundary the rollback removes.
+// discardPendingRatificationAfterSlot drops, once the rollback transaction
+// commits, the job of a pending record whose boundary the rollback removes.
+// The record itself goes with the set's rollback, which journals it at the
+// boundary's slot.
 func (ls *LedgerState) discardPendingRatificationAfterSlot(
 	txn ledgerdb.Txn,
 	slot uint64,
-) error {
-	rec, err := loadPendingRatification(ls.db, txn)
-	if err != nil || rec == nil || rec.BoundarySlot <= slot {
-		return err
-	}
-	if err := ls.ledgerDB().DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
-		return err
+) {
+	ls.ratificationMu.Lock()
+	job := ls.ratificationJob
+	ls.ratificationMu.Unlock()
+	if job == nil || job.record.BoundarySlot <= slot {
+		return
 	}
 	txn.AfterCommit(func() {
 		ls.ratificationMu.Lock()
-		job := ls.ratificationJob
-		if job != nil && job.record == *rec {
+		if ls.ratificationJob == job {
 			ls.ratificationJob = nil
 			job.settle()
 		}
 		ls.ratificationMu.Unlock()
 	})
-	return nil
 }
 
 // retryRatificationApply writes a decided job a rollback kept from writing.
@@ -482,8 +479,8 @@ func (ls *LedgerState) retryRatificationApply(ctx context.Context) {
 // previous run never wrote. The snapshot it was deciding on is gone, and
 // deciding on later state would count votes and stake from after the
 // boundary. It records the rewind as a rollback intent, which start-up then
-// recovers; the intent's block and byte limits bound how far back it can
-// reach, and beyond them start-up fails rather than decide on the wrong state.
+// recovers; the intent's block limit bounds how far back it can reach, and
+// beyond it start-up fails rather than decide on the wrong state.
 func (ls *LedgerState) resumePendingRatification(ctx context.Context) error {
 	if err := ls.resumePendingRatificationIntent(ctx); err != nil {
 		return err
@@ -494,7 +491,7 @@ func (ls *LedgerState) resumePendingRatification(ctx context.Context) error {
 func (ls *LedgerState) resumePendingRatificationIntent(
 	ctx context.Context,
 ) error {
-	rec, err := loadPendingRatification(ls.db, nil)
+	rec, err := loadPendingRatification(ls.ledgerDB(), nil)
 	if err != nil || rec == nil {
 		return err
 	}

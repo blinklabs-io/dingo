@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -102,23 +101,9 @@ func newRequiredDatumFixture(
 		&f.spendTxId:      spendOutput,
 		&f.collateralTxId: collateralOutput,
 	} {
-		address := keyAddrBytes
-		if txId == &f.spendTxId {
-			address = scriptAddrBytes
-		}
 		encoded, err := cbor.Encode(output)
 		require.NoError(t, err)
-		require.NoError(
-			t,
-			f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-				if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId: *txId, OutputIdx: 0, AddedSlot: 1, Address: address,
-				}); err != nil {
-					return err
-				}
-				return f.db.Blob().SetUtxo(txn.Blob(), *txId, 0, encoded)
-			}),
-		)
+		fxSeedOutput(t, f.db, *txId, 0, 1, encoded)
 	}
 	return f
 }

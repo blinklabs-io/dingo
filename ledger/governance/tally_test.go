@@ -1063,11 +1063,13 @@ func TestTallyCCVotesNonVotingMembersAreNotCountedAsNo(t *testing.T) {
 	assert.Equal(t, big.NewRat(1, 2), tally.CCYesRatio())
 }
 
+// newTallyTestDB opens a v0.94.2 database: its SQL metadata store is the
+// LedgerDB the governance tests seed and read through dbadapter.
 func newTallyTestDB(
 	t *testing.T,
 ) (*database.Database, *tallyTestStore) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)

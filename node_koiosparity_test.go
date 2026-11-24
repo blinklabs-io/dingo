@@ -22,8 +22,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -104,13 +107,16 @@ func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
 		t, consensus, dbtest.IndexerOptions{},
 	)
 	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, consensus)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots)
-		VALUES (3, 1000, 5, 1000, 500)`,
-	)
-	require.NoError(t, err)
+	set := livesettest.OpenLedgerDB(t, consensus)
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Epochs: []models.Epoch{{
+			EpochId: 3, StartSlot: 1000, EraId: 5,
+			SlotLength: 1000, LengthInSlots: 500,
+		}},
+	}))
+	// A node's ledger gives its database the set's epochs; this one has no
+	// ledger.
+	consensus.SetEpochSource(set)
 
 	core, err := (&Node{db: consensus}).koiosParitySource()
 	require.NoError(t, err)

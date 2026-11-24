@@ -159,7 +159,9 @@ type Options struct {
 	InMemoryMetadata bool
 
 	// StatementGuard, when set, vets every SQL statement the metadata
-	// store's connections run.
+	// store's connections run. The ledger's database has no metadata store,
+	// so for it the guard vets every SQLite connection opened on a file in
+	// Config.DataDir, which it then needs.
 	StatementGuard metadata.StatementGuard
 
 	// WrapImmutable, when set, passes the resolved ImmutableDB provider
@@ -271,8 +273,9 @@ func newDatabaseWithOptions(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
+	ledgerRole := config.Role == ""
 	metadataConfig := opts.Metadata.Config
-	if metadataConfig == nil &&
+	if !ledgerRole && metadataConfig == nil &&
 		metadataName == "sqlite" &&
 		!opts.InMemoryMetadata {
 		// Seed a copy of the process's migrated template so the provider's
@@ -304,22 +307,34 @@ func newDatabaseWithOptions(
 			}
 		}
 	}
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, metadataName, metadataConfig,
-		metadata.ProviderDependencies{
-			DataDir: config.DataDir, StorageMode: config.StorageMode,
-			MaxConnections: opts.MaxConnections,
-			Logger:         config.Logger, PromRegistry: config.PromRegistry,
-			StatementGuard: opts.StatementGuard,
-		},
-	)
-	if err != nil {
-		_ = host.Stop(context.Background())
-		return nil, err
+	// The ledger's database keeps no metadata store.
+	var metadataStore metadata.MetadataStore
+	if ledgerRole && opts.StatementGuard != nil {
+		if err := guardLedgerDir(
+			tb, config.DataDir, opts.StatementGuard,
+		); err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
 	}
-	if wrap != nil {
-		metadataStore = wrap(metadataStore)
+	if !ledgerRole {
+		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
+			context.Background(), host,
+			plugin.CapabilityStorageMetadata, metadataName, metadataConfig,
+			metadata.ProviderDependencies{
+				DataDir: config.DataDir, StorageMode: config.StorageMode,
+				MaxConnections: opts.MaxConnections,
+				Logger:         config.Logger, PromRegistry: config.PromRegistry,
+				StatementGuard: opts.StatementGuard,
+			},
+		)
+		if err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
+		if wrap != nil {
+			metadataStore = wrap(metadataStore)
+		}
 	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		context.Background(), host,
@@ -349,8 +364,15 @@ func newDatabaseWithOptions(
 		return nil, err
 	}
 	databaseHosts.Store(db, host)
+	closing := db
 	tb.Cleanup(func() {
-		if closeErr := CloseDatabase(db); closeErr != nil {
+		// testing keeps a finished test's cleanup closures reachable until
+		// its parent returns, which for a top-level parallel test is the
+		// end of the run; dropping the reference lets the closed database
+		// be collected.
+		target := closing
+		closing = nil
+		if closeErr := CloseDatabase(target); closeErr != nil {
 			tb.Errorf("close test database runtime: %v", closeErr)
 		}
 	})

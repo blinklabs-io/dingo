@@ -104,17 +104,12 @@ type Set struct {
 	commits  uint64
 	only     bool
 	// migrating is set while an existing database with a metadata UTxO set
-	// moves to the set-only layout: the metadata store still holds the
+	// moves its ledger state into the set: the metadata store still holds the
 	// UTxO set, so the set can be rebuilt from it whatever only says.
 	migrating atomic.Bool
-	// sqlDrained is set once the metadata store has drained a ledger-state
-	// family: its rows can no longer rebuild the set, whatever Only says.
-	sqlDrained atomic.Bool
-	// mergeOverDrained is set while a merge loads the rows an import wrote
-	// to a metadata store that had drained the families: those rows carry
-	// none of the history the store lost, so the set's own rows are what the
-	// import's upserts would have found.
-	mergeOverDrained atomic.Bool
+	// noSQLSource is set by ServeLedgerOnly: no metadata store can rebuild
+	// the set, whatever Only says.
+	noSQLSource atomic.Bool
 	// ckptDir, ckptKeep and ckptMu describe where checkpoints are written;
 	// ckptWrite serializes writers.
 	ckptMu    sync.Mutex
@@ -140,11 +135,15 @@ type Set struct {
 	dir string
 	// rollBackAhead rolls a set ahead of the ledger back from its journal.
 	rollBackAhead bool
-	// merge notes the snapshot rows a merge loads; nil outside a merge.
-	merge *mergeState
 	// pruneJournal trims the rollback journal; a field so a test can fail
 	// it, which a healthy store never does right after a commit.
 	pruneJournal func(beforeSlot uint64) error
+	// holdMu guards holds and closing; holdIdle is signalled when holds
+	// reaches zero. See HoldOpen.
+	holdMu   sync.Mutex
+	holdIdle *sync.Cond
+	holds    int
+	closing  bool
 }
 
 // UpdateAnchor records the chain's immutable tip, the point k blocks behind
@@ -302,9 +301,51 @@ func Open(cfg Config) (*Set, error) {
 	return set, nil
 }
 
+// HoldOpen keeps the set open for a reader that runs outside the ledger's
+// commit path, such as a background job: Close waits for release before it
+// closes the store. ok is false once Close has begun, and the caller must
+// then not read the set, whose store panics on a read after it is closed.
+// The ledger's own Close stops its jobs first; the hold covers a set closed
+// under a ledger that was not. A hold is short and never taken while waiting
+// on something Close's caller holds.
+func (s *Set) HoldOpen() (release func(), ok bool) {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	if s.closing {
+		return nil, false
+	}
+	s.holds++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.holdMu.Lock()
+			defer s.holdMu.Unlock()
+			s.holds--
+			if s.holds == 0 && s.holdIdle != nil {
+				s.holdIdle.Broadcast()
+			}
+		})
+	}, true
+}
+
+// refuseHolds makes HoldOpen refuse and waits for every hold to be released.
+func (s *Set) refuseHolds() {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	s.closing = true
+	if s.holdIdle == nil {
+		s.holdIdle = sync.NewCond(&s.holdMu)
+	}
+	for s.holds > 0 {
+		s.holdIdle.Wait()
+	}
+}
+
 // Close closes the set and unregisters its metrics, so the set can be
-// opened again on the same registry.
+// opened again on the same registry. It first waits for every HoldOpen to be
+// released.
 func (s *Set) Close() error {
+	s.refuseHolds()
 	if s.unregister != nil {
 		s.unregister()
 		s.unregister = nil
@@ -404,6 +445,10 @@ func (s *Set) ApplyLedgerChanges(
 	if err != nil {
 		return fmt.Errorf("utxoset: %w", err)
 	}
+	boundaryRows, err := governanceBoundaryRows(lc)
+	if err != nil {
+		return err
+	}
 	// A store transaction holds a bounded number of writes, so a large
 	// reward write goes in after the commit's first chunk of it.
 	var moreRewards []badgerutxo.RowPut
@@ -429,6 +474,10 @@ func (s *Set) ApplyLedgerChanges(
 		if err != nil {
 			return err
 		}
+	}
+	txIndex, err := txIndexRows(lc)
+	if err != nil {
+		return err
 	}
 	last, err := s.store.ApplyLedgerBatch(tip, badgerutxo.LedgerBatch{
 		Changes:           batch,
@@ -458,6 +507,9 @@ func (s *Set) ApplyLedgerChanges(
 			delegations,
 			inputRows,
 			derivedRows,
+			boundaryRows,
+			stateMarkRows(lc),
+			txIndex,
 		),
 	})
 	if err != nil {
@@ -535,6 +587,11 @@ func (s *Set) JournalFloor() (ocommon.Point, bool, error) {
 // it is the set's tip or the tip before a journaled commit.
 func (s *Set) CanRollbackTo(point ocommon.Point) (bool, error) {
 	return s.store.HasJournalPoint(point)
+}
+
+// JournalReaches implements ledger.UtxoSetRollbacker.
+func (s *Set) JournalReaches(point ocommon.Point) (bool, error) {
+	return s.store.RollbackReaches(point)
 }
 
 // RollbackTo rolls the set back to point from its journal.
@@ -621,11 +678,19 @@ func (s *Set) RollbackPreview(point ocommon.Point) (ledger.UtxoEvent, error) {
 	return rollbackEvent(point, res), nil
 }
 
-// PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker.
+// PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker. A point the
+// journal does not reach, or does not hold, is also
+// ledger.ErrUtxoAsOfUnavailable, which a replay of a past boundary takes for a
+// boundary it cannot restore.
 func (s *Set) PreviewUtxoSetRollback(
 	point ocommon.Point,
 ) (ledger.UtxoEvent, error) {
-	return s.RollbackPreview(point)
+	evt, err := s.RollbackPreview(point)
+	if errors.Is(err, badgerutxo.ErrRollbackBeyondJournal) ||
+		errors.Is(err, badgerutxo.ErrPointNotInJournal) {
+		return evt, fmt.Errorf("%w: %w", ledger.ErrUtxoAsOfUnavailable, err)
+	}
+	return evt, err
 }
 
 // Rollback rolls the set back to point from its journal and returns the net
@@ -689,35 +754,62 @@ func (s *Set) Count() (uint64, error) {
 // after it are applied again. It reports whether it did.
 type ResumeFunc func(ctx context.Context, point ocommon.Point) (bool, error)
 
-// SetDrainedFamilies records the ledger-state families the metadata store has
-// drained. While any is set, Reconcile never rebuilds the set from the store:
-// a set behind the ledger resumes by replaying blocks or stops with an error,
-// and a failure mark that cannot be rewound stops the node. A family reload
-// reads the family's metadata tables, so it is refused only for a drained
-// family; a release that changes that family's layout must migrate the set's
-// rows in place, since a reload would read tables the drain emptied.
-func (s *Set) SetDrainedFamilies(drained nodesettings.FamilyMask) {
-	s.sqlDrained.Store(drained != 0)
-	s.store.RefuseLoadsFor(drained)
-}
-
-// SetMergeOverDrained records that the next ledger-state merge loads rows a
-// drained metadata store was given by an import.
-func (s *Set) SetMergeOverDrained(on bool) {
-	s.mergeOverDrained.Store(on)
+// ServeLedgerOnly records that the set is the ledger's only copy of its
+// state, with no metadata store behind it: Reconcile never rebuilds the set
+// from a store, so a set behind the ledger resumes by replaying blocks or
+// stops with an error, and a failure mark that cannot be rewound stops the
+// node. Family loads are refused, since a load would replace the set's rows
+// with a source's that holds none; a release that changes a family's layout
+// migrates the set's rows in place.
+func (s *Set) ServeLedgerOnly() {
+	s.noSQLSource.Store(true)
+	s.store.RefuseLoads()
 }
 
 // Reconcile makes the set equal to the ledger's live set before the ledger
 // applies anything. The set's tip is always a point at which it equalled the
 // ledger, so a set at the ledger tip is already equal. A set behind it is
 // handed to resume, which rolls the ledger back to the set's tip; when resume
-// is nil or declines, the set is rebuilt from the metadata store, unless
-// SetDrainedFamilies says the store has lost rows.
+// is nil or declines, the set recovers through its journal. The set is the
+// only copy of the ledger state, so ldb supplies only the ledger's tip. While
+// the ledger stands at origin the set holds no state: it starts empty, with
+// every family loaded empty.
 func (s *Set) Reconcile(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
 	resume ResumeFunc,
 ) error {
+	if err := s.beginReconcile(ctx); err != nil {
+		return err
+	}
+	if err := s.reconcileOutputs(ctx, ldb, resume); err != nil {
+		return err
+	}
+	return s.loadEmptyFamilies()
+}
+
+// ReconcileReleased brings the set to the ledger state of ldb, a v0.94.2
+// database whose metadata store holds it, for the migration that moves that
+// state into the set: a set that cannot be caught up to ldb's tip is rebuilt
+// from ldb's live outputs, and every family the set lacks is loaded from ldb.
+func (s *Set) ReconcileReleased(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+) error {
+	s.migrating.Store(true)
+	defer s.migrating.Store(false)
+	if err := s.beginReconcile(ctx); err != nil {
+		return err
+	}
+	if err := s.reconcileOutputs(ctx, ldb, nil); err != nil {
+		return err
+	}
+	return s.loadFamilies(ctx, ldb)
+}
+
+// beginReconcile finishes what a stopped checkpoint restore left and refuses
+// a set an import has not finished.
+func (s *Set) beginReconcile(ctx context.Context) error {
 	if dir, _ := s.checkpointDir(); dir != "" {
 		if err := removeTmpEntries(dir); err != nil {
 			return err
@@ -726,24 +818,49 @@ func (s *Set) Reconcile(
 	if err := s.finishPendingRestore(ctx); err != nil {
 		return err
 	}
-	if err := s.reconcileOutputs(ctx, ldb, resume); err != nil {
-		return err
+	if _, pending, err := s.store.ImportPending(); err != nil {
+		return fmt.Errorf("utxoset: read the import mark: %w", err)
+	} else if pending {
+		return badgerutxo.ErrImportPending
 	}
-	return s.LoadLedgerState(ctx, ldb)
+	return nil
 }
 
-// LoadLedgerState loads into the set the block nonces, epoch state, network
-// state, protocol parameters and accounts it lacks, from the metadata store. Reconcile calls it once the outputs agree
-// with the ledger.
+// LoadLedgerState loads into the set the ledger-state families it lacks, from
+// the metadata store of a v0.94.2 database that kept them there.
+// ReconcileReleased calls it once the outputs agree with that database.
 func (s *Set) LoadLedgerState(ctx context.Context, ldb ledgerdb.LedgerDB) error {
-	pending, err := s.store.MergePending()
-	if err != nil {
-		return fmt.Errorf("utxoset: read the merge mark: %w", err)
-	}
-	if pending {
-		return s.mergeLedgerState(ctx, ldb)
-	}
 	return s.loadFamilies(ctx, ldb)
+}
+
+// loadEmptyFamilies marks every family the set has not loaded as loaded
+// empty while the set stands at origin, before the ledger has written any
+// state. Past origin nothing outside the set holds the ledger state, so a
+// family the set lacks there is an error rather than something to load.
+func (s *Set) loadEmptyFamilies() error {
+	tip, ok, err := s.store.Tip()
+	if err != nil {
+		return fmt.Errorf("utxoset: read tip: %w", err)
+	}
+	if !ok || isOrigin(tip) {
+		if err := s.store.LoadMissingFamiliesEmpty(); err != nil {
+			return fmt.Errorf("utxoset: load empty ledger state: %w", err)
+		}
+		return nil
+	}
+	for _, family := range nodesettings.Families() {
+		loaded, err := ledger.FamilyLoaded(family, s)
+		if err != nil {
+			return fmt.Errorf("utxoset: read the %s markers: %w", family, err)
+		}
+		if !loaded {
+			return fmt.Errorf(
+				"utxoset: the live UTxO set at slot %d does not hold the %s ledger state",
+				tip.Slot, family,
+			)
+		}
+	}
+	return nil
 }
 
 func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
@@ -766,6 +883,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureAccounts(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureInactivity(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureAccountInactivityActivation(ctx, ldb); err != nil {
@@ -798,6 +918,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	if err := s.ensureDelegations(ctx, ldb); err != nil {
 		return err
 	}
+	if err := s.ensureTxIndex(ctx, ldb); err != nil {
+		return err
+	}
 	if err := s.ensureGenesisMIR(ctx, ldb); err != nil {
 		return err
 	}
@@ -826,6 +949,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureGovernance(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureRatifyPending(ctx, ldb); err != nil {
 		return err
 	}
 	return s.ensurePParamUpdates(ctx, ldb)
@@ -945,8 +1071,8 @@ func (s *Set) reconcileOutputs(
 		return fmt.Errorf("utxoset: read format: %w", err)
 	}
 	if stale {
-		if s.sqlDrained.Load() ||
-			(s.only && !s.migrating.Load() && !isOrigin(ledgerTip)) {
+		if s.noSQLSource.Load() ||
+			(!s.migrating.Load() && !isOrigin(ledgerTip)) {
 			return s.recoverUnreachable(ctx, resume, ledgerTip, s.layoutError())
 		}
 		return s.rebuild(ctx, ldb, resume, ledgerTip, ok, setTip)
@@ -1092,7 +1218,7 @@ func (s *Set) unrecoverable(
 	setTip ocommon.Point,
 	cause error,
 ) error {
-	if s.only || s.sqlDrained.Load() {
+	if !s.migrating.Load() || s.noSQLSource.Load() {
 		return s.recoverUnreachable(ctx, resume, ledgerTip, fmt.Errorf(
 			"utxoset: the live UTxO set cannot be rewound before the commit the ledger failed to apply, and no copy of the ledger state from before that commit is retained: %w",
 			cause,
@@ -1124,8 +1250,11 @@ func (s *Set) rebuild(
 	hadTip bool,
 	setTip ocommon.Point,
 ) error {
-	drained := s.sqlDrained.Load()
-	if drained || (s.only && !s.migrating.Load() && !isOrigin(ledgerTip)) {
+	noSource := s.noSQLSource.Load()
+	// Outside the migration the set is the only copy of every family, so
+	// only a ledger past origin needs a base.
+	if (s.migrating.Load() && noSource) ||
+		(!s.migrating.Load() && !isOrigin(ledgerTip)) {
 		recovered, err := s.recoverFromJournal(ctx, resume, ledgerTip)
 		if err != nil {
 			return err
@@ -1135,8 +1264,18 @@ func (s *Set) rebuild(
 		}
 		return s.recoverUnreachable(
 			ctx, resume, ledgerTip,
-			s.noBaseError(drained, hadTip, setTip, ledgerTip),
+			s.noBaseError(noSource, hadTip, setTip, ledgerTip),
 		)
+	}
+	if !s.migrating.Load() {
+		// At origin the ledger has applied nothing, so the set starts empty.
+		if err := s.store.Bootstrap(
+			ledgerTip,
+			func(func(badgerutxo.Output) error) error { return nil },
+		); err != nil {
+			return fmt.Errorf("utxoset: start empty: %w", err)
+		}
+		return nil
 	}
 	s.logger.Info("rebuilding the live UTxO set from the metadata store",
 		"had_tip", hadTip,
@@ -1277,7 +1416,7 @@ func (s *Set) layoutError() error {
 
 // noBaseError reports a set that no retained state can bring to the ledger.
 func (s *Set) noBaseError(
-	drained, hadTip bool,
+	noSource, hadTip bool,
 	setTip, ledgerTip ocommon.Point,
 ) error {
 	floor := "its tip"
@@ -1285,8 +1424,8 @@ func (s *Set) noBaseError(
 		floor = fmt.Sprintf("slot %d", p.Slot)
 	}
 	why := "the metadata store holds no UTxO set to rebuild it from"
-	if drained {
-		why = "the metadata store has drained ledger-state families, so no earlier copy of them is retained"
+	if noSource {
+		why = "no metadata store holds an earlier copy of the ledger state"
 	}
 	relation := "cannot be caught up to"
 	if hadTip && setTip.Slot > ledgerTip.Slot {
@@ -1427,4 +1566,11 @@ func (a asOfView) Close() { a.v.Close() }
 // EachSum implements ledger.UtxoSetSums.
 func (s *Set) EachSum(fn func(key []byte, lovelace uint64) error) error {
 	return s.store.EachSum(fn)
+}
+
+// Sync makes every change applied so far durable. Badger syncs its log only
+// on close otherwise, so a write elsewhere that records the set's contents
+// syncs the set first.
+func (s *Set) Sync() error {
+	return s.store.Sync()
 }

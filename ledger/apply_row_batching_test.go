@@ -21,13 +21,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -36,7 +34,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -347,9 +344,8 @@ func rowBatchingScenario(t *testing.T) (
 }
 
 type rowBatchingRun struct {
-	ls         *LedgerState
-	db         *database.Database
-	batchedTxs int
+	ls *LedgerState
+	db *database.Database
 }
 
 // runRowBatchingScenario applies blocks, grouped batchSize to a read result,
@@ -381,11 +377,48 @@ func runRowBatchingScenarioTolerating(
 	configure ...func(*LedgerState),
 ) *rowBatchingRun {
 	t.Helper()
+	return runRowBatchingScenarioOn(
+		t, blocks, storageMode, batching, batchSize, tolerateFailure, nil,
+		configure...,
+	)
+}
+
+// runRowBatchingScenarioOn is runRowBatchingScenarioTolerating with prepare
+// run on the fresh database before its ledger is built.
+func runRowBatchingScenarioOn(
+	t *testing.T,
+	blocks []gledger.Block,
+	storageMode string,
+	batching bool,
+	batchSize int,
+	tolerateFailure bool,
+	prepare func(*database.Database),
+	configure ...func(*LedgerState),
+) *rowBatchingRun {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
+	if prepare != nil {
+		prepare(db)
+	}
+	return runRowBatchingScenarioOnDB(
+		t, db, blocks, batching, batchSize, tolerateFailure, configure...,
+	)
+}
+
+func runRowBatchingScenarioOnDB(
+	t *testing.T,
+	db *database.Database,
+	blocks []gledger.Block,
+	batching bool,
+	batchSize int,
+	tolerateFailure bool,
+	configure ...func(*LedgerState),
+) *rowBatchingRun {
+	t.Helper()
 	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	for _, block := range blocks {
@@ -394,15 +427,14 @@ func runRowBatchingScenarioTolerating(
 	cfg := newTestShelleyGenesisCfg(t)
 	cfg.ShelleyGenesis().NetworkId = "Testnet"
 	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:                db,
-		UtxoSet:                 NewMemLiveSetForTest(),
-		ChainManager:            cm,
-		CardanoNodeConfig:       cfg,
-		Logger:                  testLogger(),
-		PromRegistry:            prometheus.NewRegistry(),
-		ManualBlockProcessing:   true,
-		TrustedReplay:           true,
-		ApplyRowBatchingEnabled: batching,
+		Database:              db,
+		UtxoSet:               OpenLiveSetForTest(t, db),
+		ChainManager:          cm,
+		CardanoNodeConfig:     cfg,
+		Logger:                testLogger(),
+		PromRegistry:          prometheus.NewRegistry(),
+		ManualBlockProcessing: true,
+		TrustedReplay:         true,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
@@ -410,8 +442,6 @@ func runRowBatchingScenarioTolerating(
 	for _, fn := range configure {
 		fn(ls)
 	}
-	var txs atomic.Int64
-	ls.afterBatchedTransactionWrite = func() { txs.Add(1) }
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = &conway.ConwayProtocolParameters{
@@ -449,7 +479,6 @@ func runRowBatchingScenarioTolerating(
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, blocks[len(blocks)-1].Hash().Bytes(), tip.Point.Hash)
-	run.batchedTxs = int(txs.Load())
 	return run
 }
 
@@ -577,133 +606,4 @@ func rowBatchingQueryOne[T any](
 	var v T
 	require.NoError(t, raw.QueryRow(query, args...).Scan(&v))
 	return v
-}
-
-// TestApplyRowBatchingSerialEquivalence applies the same unvalidated blocks
-// into two stores, with the setting off and on, and requires identical stored
-// state: tip, nonces, accounts, pools, DReps and governance. The setting
-// selects the batched path.
-func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
-	t.Parallel()
-
-	blocks, names := rowBatchingScenario(t)
-	totalTxs := len(names)
-	mode := types.StorageModeCore
-	for _, batchSize := range []int{len(blocks), 1} {
-		t.Run(fmt.Sprintf("batch%d", batchSize), func(t *testing.T) {
-			t.Parallel()
-			off := runRowBatchingScenario(t, blocks, mode, false, batchSize)
-			on := runRowBatchingScenario(t, blocks, mode, true, batchSize)
-			offAgain := runRowBatchingScenario(t, blocks, mode, false, batchSize)
-
-			require.Zero(t, off.batchedTxs,
-				"flag off must not use the batched path")
-			require.Equal(t, totalTxs, on.batchedTxs,
-				"flag on must write every transaction of the "+
-					"unvalidated blocks through the batched path")
-
-			offDigest := rowBatchingDigest(t, off.db)
-			require.Equal(t, offDigest, rowBatchingDigest(t, offAgain.db),
-				"the digest must be deterministic between identical runs")
-			require.Equal(t, offDigest, rowBatchingDigest(t, on.db),
-				"batched application changed the stored state")
-		})
-	}
-}
-
-// TestApplyRowBatchingSameChunkDependencies pins the stored effects of a
-// chunk in which a stake credential is registered, then delegated, and an
-// output produced earlier in the chunk is spent, with the batched path on.
-func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
-	t.Parallel()
-
-	blocks, names := rowBatchingScenario(t)
-	run := runRowBatchingScenario(
-		t, blocks, types.StorageModeCore, true, len(blocks),
-	)
-	require.Positive(t, run.batchedTxs)
-	raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-	require.NoError(t, err)
-
-	stake := rowBatchingKey(0x22)
-	active := rowBatchingQueryOne[bool](t, raw,
-		`SELECT active FROM account WHERE staking_key = ?`, stake)
-	require.True(t, active, "the registered credential is active")
-	pool := rowBatchingQueryOne[[]byte](t, raw,
-		`SELECT pool FROM account WHERE staking_key = ?`, stake)
-	require.Equal(t, rowBatchingKey(0x11), pool,
-		"the delegation must see the registration from the same chunk")
-	drep := rowBatchingQueryOne[[]byte](t, raw,
-		`SELECT drep FROM account WHERE staking_key = ?`, stake)
-	require.Equal(t, rowBatchingKey(0x33), drep)
-
-	require.False(t, outputLiveIn(t, run.ls, names["register"].hash, 0),
-		"the output produced earlier in the chunk is spent by its consumer")
-	require.False(t, outputLiveIn(t, run.ls, names["spend"].hash, 1))
-	require.True(t, outputLiveIn(t, run.ls, names["chain"].hash, 0))
-
-	pools := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM pool`)
-	require.Equal(t, 1, pools)
-	dreps := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM drep`)
-	require.Equal(t, 1, dreps)
-	proposals := rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM governance_proposal`)
-	require.Equal(t, 1, proposals)
-}
-
-// TestApplyRowBatchingSkipsValidatedDeltas pins that a delta handed back by a
-// validated block never reaches the batched path, in either storage mode,
-// while the same delta from an unvalidated block does.
-func TestApplyRowBatchingSkipsValidatedDeltas(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := rowBatchingScenario(t)
-	block := blocks[2]
-	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
-	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).
-		ComputeOffsets(block.Cbor(), block)
-	require.NoError(t, err)
-	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
-		for _, validated := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/validated=%t", mode, validated), func(t *testing.T) {
-				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{
-					DataDir:     t.TempDir(),
-					StorageMode: mode,
-				})
-				require.NoError(t, err)
-				t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-				ls := &LedgerState{
-					db:     db,
-					config: LedgerStateConfig{ApplyRowBatchingEnabled: true},
-				}
-				var batched atomic.Int64
-				ls.afterBatchedTransactionWrite = func() { batched.Add(1) }
-
-				delta := NewLedgerDelta(point, eras.ConwayEraDesc.Id, 3)
-				delta.Offsets = offsets
-				delta.addTransaction(block.Transactions()[0], 0)
-				delta.validated = validated
-				delta.stageApplyEvents = func([]TransactionEvent) {}
-				batch := NewLedgerDeltaBatch()
-				batch.addDelta(delta)
-				t.Cleanup(batch.Release)
-
-				require.NoError(t, db.Transaction(t.Context(), true).Do(
-					func(txn *database.Txn) error {
-						return batch.apply(t.Context(), ls, txn)
-					},
-				))
-				if validated {
-					require.Zero(t, batched.Load(),
-						"a validated block's delta must keep the per-transaction path")
-				} else {
-					require.Equal(t, int64(1), batched.Load(),
-						"an unvalidated block's delta takes the batched path")
-				}
-			})
-		}
-	}
 }

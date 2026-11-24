@@ -22,13 +22,20 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
 // applySlotsWithNonces applies one output and one block nonce per slot in
-// [from, to], each its own commit.
+// [from, to], each its own commit, to a set that holds every family.
 func applySlotsWithNonces(t *testing.T, set *utxoset.Set, from, to uint64) {
 	t.Helper()
+	if _, ok, err := set.Tip(); err == nil && !ok {
+		require.NoError(t, set.LoadUtxoSet(
+			slotPoint(0), catchUpFeed(),
+		))
+		require.NoError(t, set.FinishImport())
+	}
 	for slot := from; slot <= to; slot++ {
 		tip := slotPoint(slot)
 		require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
@@ -115,4 +122,40 @@ func TestCatchUpOfASetThatCannotReachTheSnapshotIsRefused(t *testing.T) {
 	n, err := set.Count()
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), n, "the set is untouched")
+}
+
+// TestCatchUpReachesOnlyWhatTheCatchUpLoadAccepts requires CatchUpReaches to
+// agree with LoadUtxoSetCatchUp: a point the journal holds, a point past the
+// tip, and no point the load refuses.
+func TestCatchUpReachesOnlyWhatTheCatchUpLoadAccepts(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	set.UpdateAnchor(slotPoint(12))
+	applySlotsWithNonces(t, set, 1, 12)
+	require.NoError(t, set.PruneJournalForTest(9))
+
+	onOtherChain := slotPoint(10)
+	onOtherChain.Hash = bytes.Repeat([]byte{0xfe}, 32)
+	for _, tc := range []struct {
+		name    string
+		point   func() ocommon.Point
+		reaches bool
+	}{
+		{"journaled point", func() ocommon.Point { return slotPoint(10) }, true},
+		{"past the tip", func() ocommon.Point { return slotPoint(20) }, true},
+		{"below the journal", func() ocommon.Point { return slotPoint(2) }, false},
+		{"another chain's point", func() ocommon.Point { return onOtherChain }, false},
+	} {
+		reaches, err := set.CatchUpReaches(tc.point())
+		require.NoError(t, err, tc.name)
+		require.Equal(t, tc.reaches, reaches, tc.name)
+	}
+	tip, _, err := set.Tip()
+	require.NoError(t, err)
+	require.Equal(t, uint64(12), tip.Slot, "the check changes nothing")
+
+	require.Error(t, set.LoadUtxoSetCatchUp(onOtherChain, catchUpFeed(0xa1)),
+		"the load refuses the point the check refuses")
 }

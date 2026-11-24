@@ -89,7 +89,7 @@ func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
 // TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins runs many
 // concurrent conditional inserts for the same name against a real
 // connection pool and asserts exactly one reports having inserted -- the
-// property commit_timestamp.go's evaluateAndPersistGates depends on to
+// property node_settings.go's evaluateAndPersistGates depends on to
 // detect a concurrent first-ever opener instead of racing an unconditional
 // upsert.
 func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
@@ -1159,7 +1159,7 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	txn := store.Transaction(ctx)
-	require.NoError(t, store.SetCommitTimestamp(42, txn))
+	require.NoError(t, store.SetSyncState("cancel_probe", "42", txn))
 
 	cancel()
 
@@ -1170,7 +1170,7 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 	// first attempt regardless of that goroutine's timing: dbFromTxn hands
 	// this statement the transaction's own now-canceled ctx directly.)
 	require.Eventually(t, func() bool {
-		return store.SetCommitTimestamp(43, txn) != nil
+		return store.SetSyncState("cancel_probe", "43", txn) != nil
 	}, 2*time.Second, 5*time.Millisecond,
 		"transaction must stop accepting writes once its ctx is canceled")
 
@@ -1186,9 +1186,9 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 
 	// Neither the successful first write nor anything else from the
 	// canceled transaction may be durably visible.
-	persisted, err := store.GetCommitTimestamp(context.Background())
+	persisted, err := store.GetSyncState("cancel_probe", nil)
 	require.NoError(t, err)
-	require.Zero(t, persisted)
+	require.Empty(t, persisted)
 }
 
 func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
@@ -1196,9 +1196,7 @@ func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
 	s := newManagementTestStore(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := s.GetCommitTimestamp(ctx)
-	require.ErrorIs(t, err, context.Canceled)
-	_, err = s.GetNodeSettings(ctx)
+	_, err := s.GetNodeSettings(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = s.GetNodeSettingsGates(ctx)
 	require.ErrorIs(t, err, context.Canceled)

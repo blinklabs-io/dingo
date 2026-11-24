@@ -53,11 +53,10 @@ func (fixedStakeLiveSource) EachLiveUtxoStake(
 	return nil
 }
 
-// TestSetGenesisTransactionLiveUtxoRefreshesStake requires a genesis output's
-// stake credential to reach reward_live_stake when the live UTxO set holds
-// the outputs: the metadata store writes no utxo row but must still know
-// which credentials the outputs touch.
-func TestSetGenesisTransactionLiveUtxoRefreshesStake(t *testing.T) {
+// A database whose ledger keeps the live UTxO set records nothing of a genesis
+// transaction in its metadata store: the LedgerDB holds the outputs, their
+// stake and the transaction's index entry.
+func TestSetGenesisTransactionWritesNoRowsUnderALiveUtxoSource(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
 	require.NoError(t, db.SetLiveUtxoSource(fixedStakeLiveSource{stake: 777}))
@@ -95,10 +94,97 @@ func TestSetGenesisTransactionLiveUtxoRefreshesStake(t *testing.T) {
 	require.NoError(t, err)
 
 	sqlDB := rawSQLiteMetadataFixture(t, db)
-	var stake string
-	require.NoError(t, sqlDB.QueryRow(
-		`SELECT utxo_stake FROM reward_live_stake WHERE staking_key = ?`,
-		stakeKey,
-	).Scan(&stake))
-	require.Equal(t, "777", stake)
+	for _, table := range []string{
+		`"transaction"`, "applied_transaction", "utxo", "reward_live_stake",
+	} {
+		var rows int
+		require.NoError(t, sqlDB.QueryRow(
+			"SELECT COUNT(*) FROM "+table,
+		).Scan(&rows))
+		require.Zero(t, rows, "rows in %s", table)
+	}
+}
+
+// A genesis transaction written in a transaction without a metadata store, as
+// every transaction of the ledger's database is, touches no metadata store:
+// the live UTxO set holds the outputs and the transaction index.
+func TestSetGenesisTransactionWithoutAMetadataTransactionWritesNoRows(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := openTestDB(t)
+	output := shelley.ShelleyTransactionOutput{OutputAmount: 777}
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x61}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	output.OutputAddress = addr
+	raw, err := cbor.Encode(&output)
+	require.NoError(t, err)
+	output.SetCbor(raw)
+	txHash := bytes.Repeat([]byte{0xa2}, 32)
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash)
+	input, err := shelley.NewShelleyTransactionInput(
+		lcommon.NewBlake2b256(txHash).String(), 0,
+	)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.Nil(t, txn.Metadata())
+	require.NoError(t, db.SetGenesisTransaction(
+		context.Background(),
+		txHash,
+		bytes.Repeat([]byte{0xb2}, 32),
+		[]lcommon.Utxo{{Id: input, Output: output}},
+		map[UtxoRef]CborOffset{{TxId: txHashArray, OutputIdx: 0}: {}},
+		txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	sqlDB := rawSQLiteMetadataFixture(t, db)
+	for _, table := range []string{`"transaction"`, "utxo"} {
+		var rows int
+		require.NoError(t, sqlDB.QueryRow(
+			"SELECT COUNT(*) FROM "+table,
+		).Scan(&rows))
+		require.Zero(t, rows, "rows in %s", table)
+	}
+}
+
+// A block's transaction written in a transaction without a metadata store, as
+// every transaction of the ledger's database is, touches no metadata store.
+func TestSetTransactionWithoutAMetadataTransactionWritesNoRows(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	candidate := findGapRollbackCandidateWithoutCertificates(t)
+	for _, block := range candidate.producerBlocks {
+		storeBlockOffsetsOnly(t, db, block)
+	}
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+	txn := db.BlobTxn(true)
+	require.Nil(t, txn.Metadata())
+	require.NoError(t, db.SetTransaction(
+		context.Background(),
+		candidate.consumerTx,
+		candidate.consumerPoint,
+		0,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.consumerBlock),
+		txn, 0,
+	))
+	require.NoError(t, txn.Commit())
+
+	sqlDB := rawSQLiteMetadataFixture(t, db)
+	for _, table := range []string{`"transaction"`, "utxo"} {
+		var rows int
+		require.NoError(t, sqlDB.QueryRow(
+			"SELECT COUNT(*) FROM "+table,
+		).Scan(&rows))
+		require.Zero(t, rows, "rows in %s", table)
+	}
 }

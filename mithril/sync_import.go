@@ -23,16 +23,12 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
-	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -62,21 +58,13 @@ func epochLengthFromConfig(
 }
 
 func updateMithrilReadyState(
-	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
 ) error {
-	// The clear below deletes every key outside the keep-list, which omits
-	// the drain markers.
-	if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
-		return err
-	}
-	tipTxn := db.MetadataTxn(ctx, false)
-	ledgerTip, err := db.GetTip(tipTxn)
-	tipTxn.Release()
+	ledgerTip, err := db.GetTip(nil)
 	if err != nil {
 		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}
@@ -101,36 +89,57 @@ func updateMithrilReadyState(
 		"blocks_loaded", blocksCopied,
 	)
 
-	txn := db.MetadataTxn(ctx, true)
-	if err := txn.Do(func(txn *database.Txn) error {
-		// A read-clear-restore cycle can overwrite a newer fence on
-		// backends that allow concurrent writers. Leave persistent rows
-		// untouched so a forger's advancing slot never enters that cycle.
-		keys, err := db.ListSyncStateKeysByPrefix("", txn)
-		if err != nil {
-			return fmt.Errorf("listing sync state: %w", err)
-		}
-		for _, key := range keys {
-			if key == deferred.SyncStateKey ||
-				key == metadata.PlannerStatsBackfillSyncKey ||
-				key == nodeconsensus.DatabaseIdentitySyncKey ||
-				key == database.UtxoSetOnlySyncKey ||
-				key == database.DrainedImportSyncKey ||
-				key == database.HistoryExpiryCursorSyncKey ||
-				strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
-				continue
+	// Chain state that describes the chain before the import, or the import
+	// itself, is transient.
+	if err := db.ClearImportedChainState(); err != nil {
+		return fmt.Errorf("clearing transient chain state: %w", err)
+	}
+	return completeImportProgress(
+		db, ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+	)
+}
+
+// importProgressKeys names every import progress value an import can leave
+// behind. Chain state has no listing by prefix, so completion clears them by
+// name; a value added to the group belongs here.
+var importProgressKeys = []string{
+	database.SyncStatusKey,
+	syncKeyPinnedArtifact,
+	syncKeySnapshotRestoreActive,
+	syncKeySnapshotImportKey,
+	syncKeyCatchUpActive,
+	syncKeyImmutableMax,
+	syncKeyImmutableStreamOnly,
+	syncKeyImmutableRetired,
+	RewardStateRepairPendingKey,
+	RewardStateRepairActiveKey,
+	database.LedgerReimportSyncKey,
+	database.LedgerReimportSwappedSyncKey,
+}
+
+// completeImportProgress clears the import's progress and records the point
+// its ledger state was loaded at, in one block-store transaction: a database
+// with the in-progress status cleared and no boundary would replay the chain
+// from genesis over imported state, and one with the boundary and the status
+// would be refused as unfinished although nothing remains to resume.
+func completeImportProgress(
+	db *database.Database,
+	boundary ocommon.Point,
+) error {
+	if err := db.FollowImportedLedgerStateBoundaryRow(boundary); err != nil {
+		return err
+	}
+	if err := db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, key := range importProgressKeys {
+			if err := db.DeleteChainState(key, txn); err != nil {
+				return fmt.Errorf("cleaning up import progress %q: %w", key, err)
 			}
-			if err := db.DeleteSyncState(key, txn); err != nil {
-				return fmt.Errorf("cleaning up sync state %q: %w", key, err)
-			}
 		}
-		return db.SetImportedLedgerStateBoundary(
-			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash), txn,
-		)
+		return db.SetImportedLedgerStateBoundary(boundary, txn)
 	}); err != nil {
 		return err
 	}
-	return nil
+	return db.SyncChainState()
 }
 
 // selectLedgerStateSnapshot searches result's ancillary tree for the newest
@@ -411,6 +420,13 @@ func importPreparedLedgerState(
 	// full import pass (so its snapshot key set is complete), so resume is
 	// disabled by leaving the import key empty.
 	importKey := importCheckpointKey(reconcile, result, state.Tip.Slot)
+	set, ok := utxoSet.(dledger.UtxoSetWriter)
+	if !ok {
+		return 0, nil, errors.New(
+			"the live UTxO set cannot take a ledger-state import",
+		)
+	}
+	ledgerDB := dledger.NewImportLedgerDB(db, set, logger)
 
 	// Import the ledger state
 	if err := ledgerstate.ImportLedgerState(
@@ -422,6 +438,7 @@ func importPreparedLedgerState(
 			ImportKey: importKey,
 			Reconcile: reconcile,
 			UtxoSet:   utxoSet,
+			LedgerDB:  ledgerDB,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),

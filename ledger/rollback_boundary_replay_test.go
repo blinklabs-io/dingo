@@ -120,63 +120,24 @@ func newBoundaryReplayHarnessWithDB(
 	db *database.Database,
 ) *boundaryReplayHarness {
 	t.Helper()
-	return newBoundaryReplayHarnessWithSet(t, db, nil)
+	return newBoundaryReplayHarnessSeeded(t, db, true, nil)
 }
 
-// newBoundaryReplayHarnessWithSet is newBoundaryReplayHarnessWithDB with set
-// attached before the snapshot manager is wired, so the manager writes
-// through the ledger's LedgerDB to it.
-func newBoundaryReplayHarnessWithSet(
+// newBoundaryReplayHarnessSeeded is newBoundaryReplayHarnessWithDB over a
+// database that also held, in SQL, the ledger state seed writes: the LedgerDB
+// set takes it over with the harness's own when it opens. ownStake gives the
+// harness's two delegators their staked outputs; a scenario that stakes them
+// itself passes false.
+func newBoundaryReplayHarnessSeeded(
 	t *testing.T,
 	db *database.Database,
-	set UtxoSetWriter,
+	ownStake bool,
+	seed func(),
 ) *boundaryReplayHarness {
 	t.Helper()
 
-	fixture := newChainsyncRollbackFixtureWithDB(t, db)
-	ls := fixture.ls
-	if set != nil {
-		// The set rolls back from its own journal, which reaches no further
-		// than the tip it held when its families were loaded, so it starts
-		// at the point the harness rolls back to.
-		require.NoError(t, set.ApplyUtxoChanges(&fixture.ancestorTip.Point, nil))
-		ls.config.UtxoSet = set
-	} else {
-		// A set that journals what it applies, so a rollback restores the
-		// outputs the harness adds.
-		ls.config.UtxoSet = NewMemLiveSetForTest()
-	}
-	h := &boundaryReplayHarness{t: t, fixture: fixture, ls: ls}
-	ls.installNonceSource()
-	ls.installEpochSource()
-	ls.installPoolSource()
-	if ls.keepsEpochState() {
-		// Every component that reads through the ledger's LedgerDB, the
-		// snapshot manager included, gets this one, so a test can later hide
-		// the metadata store's reads from all of them.
-		h.blind = &blindStore{
-			LedgerDB: dbadapter.New(ls.db),
-			denied:   map[string]bool{},
-		}
-		h.blind.off.Store(true)
-		ls.ldb = stagingLedgerDB{LedgerDB: h.blind, ls: ls}
-	}
-	ls.config.CardanoNodeConfig.ShelleyGenesisHash = "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
-
-	for epochID := uint64(0); epochID <= replayBoundaryEndedEra; epochID++ {
-		require.NoError(t, ls.db.SetEpoch(
-			epochID*uint64(replayBoundaryLength), epochID,
-			nil, nil, nil, nil,
-			eras.ShelleyEraDesc.Id, 1000, replayBoundaryLength, nil,
-		))
-	}
-	epochs, err := ls.db.GetEpochs(nil)
-	require.NoError(t, err)
-	require.Len(t, epochs, int(replayBoundaryNewEpoch))
-
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
-	ls.currentEra = eras.ShelleyEraDesc
-	ls.currentPParams = &shelley.ShelleyProtocolParameters{
+	pparams := &shelley.ShelleyProtocolParameters{
 		ProtocolMajor:    shelley.MinProtocolVersionShelley,
 		MinFeeA:          44,
 		NOpt:             1,
@@ -185,51 +146,97 @@ func newBoundaryReplayHarnessWithSet(
 		Tau:              rat(),
 		Decentralization: rat(),
 	}
+	poolHash := bytes.Repeat([]byte{0xd1}, 28)
+	ownerKey := bytes.Repeat([]byte{0x71}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
+	// The ledger's current block is the last of the ended epoch, so the
+	// boundary the harness applies follows it as on a real chain.
+	lastEndedSlot := replayBoundaryNewEpoch*uint64(replayBoundaryLength) - 1
+	fixture := newChainsyncRollbackFixtureAt(t, db, lastEndedSlot, func() {
+		for epochID := uint64(0); epochID <= replayBoundaryEndedEra; epochID++ {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochID*uint64(replayBoundaryLength), epochID,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id, 1000, replayBoundaryLength, nil,
+			))
+		}
+		epochs, err := seedDB(t, db).GetEpochs(nil)
+		require.NoError(t, err)
+		require.Len(t, epochs, int(replayBoundaryNewEpoch))
+		seedEmptyRewardBasisForRollover(
+			t, db, epochs[len(epochs)-1], pparams,
+		)
+		margin := &types.Rat{Rat: big.NewRat(1, 100)}
+		require.NoError(t, fxImportPool(t, db,
+			context.Background(), nil,
+			&models.Pool{
+				PoolKeyHash:   poolHash,
+				VrfKeyHash:    make([]byte, 32),
+				Pledge:        5_000_000,
+				Cost:          340_000_000,
+				Margin:        margin,
+				RewardAccount: ownerKey,
+			},
+			&models.PoolRegistration{
+				PoolKeyHash:   poolHash,
+				AddedSlot:     0,
+				Pledge:        5_000_000,
+				Cost:          340_000_000,
+				Margin:        margin,
+				VrfKeyHash:    make([]byte, 32),
+				RewardAccount: ownerKey,
+				Owners: []models.PoolRegistrationOwner{
+					{KeyHash: append([]byte(nil), ownerKey...)},
+				},
+			},
+		))
+		for _, key := range [][]byte{ownerKey, delegatorKey} {
+			require.NoError(t, seedCreateAccount(t, db,
+				context.Background(), nil, &models.Account{
+					StakingKey: key,
+					Pool:       poolHash,
+					AddedSlot:  0,
+					Active:     true,
+				},
+			))
+		}
+		if ownStake {
+			// Outputs the database held at the ancestor, so a rollback to
+			// it keeps them.
+			for i, key := range [][]byte{ownerKey, delegatorKey} {
+				seedReplayOutput(t, db, byte(0x10+i), key, 20_000_000)
+			}
+		}
+		if seed != nil {
+			seed()
+		}
+	})
+	ls := fixture.ls
+	h := &boundaryReplayHarness{t: t, fixture: fixture, ls: ls}
+	ls.installNonceSource()
+	ls.installEpochSource()
+	ls.installPoolSource()
+	// Every component that reads through the ledger's LedgerDB, the snapshot
+	// manager included, gets this one, so a test can later hide the metadata
+	// store's reads from all of them.
+	h.blind = &blindStore{
+		LedgerDB: dbadapter.New(ls.db),
+		denied:   map[string]bool{},
+	}
+	h.blind.off.Store(true)
+	ls.ldb = stagingLedgerDB{LedgerDB: h.blind, ls: ls}
+	ls.config.CardanoNodeConfig.ShelleyGenesisHash = "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+
+	epochs, err := ls.ledgerDB().GetEpochs(nil)
+	require.NoError(t, err)
+	require.Len(t, epochs, int(replayBoundaryNewEpoch))
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.currentPParams = pparams
 	ls.epochCache = epochs
 	ls.currentEpoch = epochs[len(epochs)-1]
 	ls.ledgerEpoch = ls.currentEpoch.EpochId
-	seedEmptyRewardBasisForRollover(
-		t, ls.db, ls.currentEpoch, ls.currentPParams,
-	)
 
-	h.poolHash = bytes.Repeat([]byte{0xd1}, 28)
-	ownerKey := bytes.Repeat([]byte{0x71}, 28)
-	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
-	margin := &types.Rat{Rat: big.NewRat(1, 100)}
-	require.NoError(t, ls.db.ImportPool(
-		context.Background(), nil,
-		&models.Pool{
-			PoolKeyHash:   h.poolHash,
-			VrfKeyHash:    make([]byte, 32),
-			Pledge:        5_000_000,
-			Cost:          340_000_000,
-			Margin:        margin,
-			RewardAccount: ownerKey,
-		},
-		&models.PoolRegistration{
-			PoolKeyHash:   h.poolHash,
-			AddedSlot:     0,
-			Pledge:        5_000_000,
-			Cost:          340_000_000,
-			Margin:        margin,
-			VrfKeyHash:    make([]byte, 32),
-			RewardAccount: ownerKey,
-			Owners: []models.PoolRegistrationOwner{
-				{KeyHash: append([]byte(nil), ownerKey...)},
-			},
-		},
-	))
-	for i, key := range [][]byte{ownerKey, delegatorKey} {
-		require.NoError(t, ls.db.CreateAccount(
-			context.Background(), nil, &models.Account{
-				StakingKey: key,
-				Pool:       h.poolHash,
-				AddedSlot:  0,
-				Active:     true,
-			},
-		))
-		h.addUtxo(byte(0x10+i), key, 20_000_000, 0)
-	}
+	h.poolHash = poolHash
 
 	mgr := snapshot.NewManager(ls.LedgerDB(), nil, nil)
 	ls.SetEpochBoundarySnapshotStakeHook(
@@ -271,9 +278,42 @@ func newBoundaryReplayHarnessWithSet(
 	return h
 }
 
+// replayStakedOutputCbor encodes an output of amount staked to stakingKey.
+func replayStakedOutputCbor(
+	t *testing.T,
+	stakingKey []byte,
+	amount uint64,
+) []byte {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize), stakingKey,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr, OutputAmount: amount,
+	})
+	require.NoError(t, err)
+	return encoded
+}
+
+// seedReplayOutput writes a live output of amount staked to stakingKey to
+// db's metadata store, which the LedgerDB set takes over when it opens.
+func seedReplayOutput(
+	t *testing.T,
+	db *database.Database,
+	id byte,
+	stakingKey []byte,
+	amount uint64,
+) {
+	t.Helper()
+	txID := bytes.Repeat([]byte{id}, 32)
+	encoded := replayStakedOutputCbor(t, stakingKey, amount)
+	fxSeedOutput(t, db, txID, 0, 0, encoded)
+}
+
 // addUtxo puts a live output of amount, staked to stakingKey and created at
-// slot, into the harness's in-memory live UTxO set. A scenario that attaches
-// a production set adds its stake itself.
+// slot, into the harness's LedgerDB set.
 func (h *boundaryReplayHarness) addUtxo(
 	id byte,
 	stakingKey []byte,
@@ -281,18 +321,7 @@ func (h *boundaryReplayHarness) addUtxo(
 	slot uint64,
 ) {
 	h.t.Helper()
-	if h.ls.keepsEpochState() {
-		return
-	}
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize), stakingKey,
-	)
-	require.NoError(h.t, err)
-	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-		OutputAddress: addr, OutputAmount: amount,
-	})
-	require.NoError(h.t, err)
+	encoded := replayStakedOutputCbor(h.t, stakingKey, amount)
 	require.NoError(h.t, h.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
 		Point: ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{id}, 32)},
 		Added: []UtxoOutput{{
@@ -300,10 +329,6 @@ func (h *boundaryReplayHarness) addUtxo(
 			Cbor: encoded,
 		}},
 	}}))
-	require.NoError(h.t, h.ls.db.RefreshRewardLiveStakeRefs(
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, stakingKey)},
-		slot, nil,
-	))
 }
 
 // applyBoundary runs the successor rollover the way ledgerProcessBlocks does:
@@ -314,28 +339,15 @@ func (h *boundaryReplayHarness) applyBoundary() boundaryReplayEffects {
 	return h.readEffects()
 }
 
-// applyBoundaryQuiet applies the rollover and publishes its result without
-// reading the metadata store back.
-func (h *boundaryReplayHarness) applyBoundaryQuiet() {
+// runBoundary runs the successor rollover in its own write transaction and
+// returns what it computed, or the error that rolled the transaction back.
+func (h *boundaryReplayHarness) runBoundary() (*EpochRolloverResult, error) {
 	h.t.Helper()
 	ls := h.ls
 	h.snapCalls = 0
-	if !ls.keepsEpochState() {
-		// Without a production set the store answers the boundary's stake
-		// reads from the live outputs, which are the set at the snapshot
-		// slot only while the stored tip is not past it. A boundary applies
-		// before the first block of its epoch, so the stored tip steps back
-		// to the fixture's last block below the boundary for the rollover.
-		stored, err := ls.db.GetTip(nil)
-		require.NoError(h.t, err)
-		if stored.Point.Slot >= h.next.StartSlot {
-			require.NoError(h.t, ls.db.SetTip(h.fixture.ancestorTip, nil))
-			defer func() { require.NoError(h.t, ls.db.SetTip(stored, nil)) }()
-		}
-	}
 	var result *EpochRolloverResult
 	txn := ls.db.Transaction(context.Background(), true)
-	require.NoError(h.t, txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *database.Txn) error {
 		var err error
 		result, err = ls.processEpochRolloverForTargetWithClassicPParamsContext(
 			context.Background(),
@@ -351,7 +363,20 @@ func (h *boundaryReplayHarness) applyBoundaryQuiet() {
 			nil,
 		)
 		return err
-	}))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// applyBoundaryQuiet applies the rollover and publishes its result without
+// reading the metadata store back.
+func (h *boundaryReplayHarness) applyBoundaryQuiet() {
+	h.t.Helper()
+	ls := h.ls
+	result, err := h.runBoundary()
+	require.NoError(h.t, err)
 	require.NotNil(h.t, result)
 	ls.Lock()
 	ls.epochCache = result.NewEpochCache
@@ -365,9 +390,9 @@ func (h *boundaryReplayHarness) applyBoundaryQuiet() {
 
 func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 	h.t.Helper()
-	meta := h.ls.db.Metadata()
+	meta := h.ls.ledgerDB()
 	var e boundaryReplayEffects
-	epoch, err := h.ls.db.GetEpoch(replayBoundaryNewEpoch, nil)
+	epoch, err := meta.GetEpoch(replayBoundaryNewEpoch, nil)
 	require.NoError(h.t, err)
 	if epoch != nil {
 		e.epoch = normalizeReplayEpoch(*epoch)
@@ -384,12 +409,6 @@ func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 	if e.rewardMark != nil {
 		e.rewardMark.ID = 0
 	}
-	// The boundary stages these rows for a background writer that starts
-	// after commit; reading before it finishes sees an empty set.
-	// A held-back writer never finishes, so waiting on it would hang.
-	if h.ls.deferredStakeInputsFailHook == nil {
-		h.ls.deferredStakeInputsWG.Wait()
-	}
 	inputs, err := meta.GetRewardStakeInputs(replayBoundaryNewEpoch, nil)
 	require.NoError(h.t, err)
 	e.stakeInputs = normalizeReplayStakeInputs(inputs)
@@ -398,7 +417,7 @@ func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 	if e.summary != nil {
 		e.summary.ID = 0
 	}
-	marks, err := h.ls.db.GetPoolStakeSnapshotsByEpoch(
+	marks, err := meta.GetPoolStakeSnapshotsByEpoch(
 		replayBoundaryNewEpoch, models.PoolStakeSnapshotTypeMark, nil,
 	)
 	require.NoError(h.t, err)
@@ -494,21 +513,21 @@ func TestRollbackAcrossEpochBoundaryReplaysEpochEffects(t *testing.T) {
 
 			h.rollbackBeforeBoundary()
 
-			epoch, err := h.ls.db.GetEpoch(replayBoundaryNewEpoch, nil)
+			epoch, err := seedDB(t, h.ls.db).GetEpoch(replayBoundaryNewEpoch, nil)
 			require.NoError(t, err)
 			require.Nil(t, epoch, "the rollback must delete epoch E's row")
-			pots, err := h.ls.db.Metadata().GetRewardAdaPots(
+			pots, err := seedDB(t, h.ls.db).GetRewardAdaPots(
 				replayBoundaryNewEpoch, nil,
 			)
 			require.NoError(t, err)
 			require.Nil(t, pots, "the rollback must delete epoch E's pots")
-			staleMarks, err := h.ls.db.GetPoolStakeSnapshotsByEpoch(
+			staleMarks, err := seedDB(t, h.ls.db).GetPoolStakeSnapshotsByEpoch(
 				replayBoundaryNewEpoch, models.PoolStakeSnapshotTypeMark, nil,
 			)
 			require.NoError(t, err)
 			require.Empty(t, staleMarks,
 				"the rollback must delete epoch E's mark snapshot rows")
-			staleSummary, err := h.ls.db.Metadata().GetEpochSummary(
+			staleSummary, err := seedDB(t, h.ls.db).GetEpochSummary(
 				replayBoundaryNewEpoch, nil,
 			)
 			require.NoError(t, err)
@@ -653,29 +672,84 @@ func TestRollbackAcrossEpochBoundaryRestoresEveryTable(t *testing.T) {
 	require.Empty(t, diffs)
 }
 
-// A boundary whose deferred reward_stake_input write has not finished leaves a
-// pending entry for its snapshot. Rolling the boundary back deletes the
-// snapshot, so the entry must go with it: nothing remains for it to describe
-// and RewardStakeInputsIncomplete would report the epoch as unfinished.
+// A snapshot whose reward_stake_input rows are marked incomplete keeps the
+// mark through a rollback that keeps its boundary and loses it with one that
+// rewinds the boundary: the rollback deletes the snapshot, so nothing remains
+// for the mark to describe and RewardStakeInputsIncomplete would report the
+// epoch as unfinished.
 func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 	t *testing.T,
 ) {
 	h := newBoundaryReplayHarness(t)
-	h.ls.deferredStakeInputsFailHook = func() error {
-		return errors.New("deferred write held back")
-	}
 	h.applyBoundary()
-
-	pending, err := loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
+	snapshot, err := h.ls.ledgerDB().GetRewardSnapshot(
+		replayBoundaryNewEpoch, "mark", nil,
+	)
 	require.NoError(t, err)
-	require.Len(t, pending.Entries, 1,
-		"the boundary must leave its snapshot's basis pending")
-	require.Equal(t, replayBoundaryNewEpoch, pending.Entries[0].Epoch)
+	require.NotNil(t, snapshot)
+	require.NoError(t, markRewardStakeInputsPending(
+		h.ls.ledgerDB(), nil, replayBoundaryNewEpoch, snapshot.BoundarySlot,
+	))
+
+	incomplete, err := h.ls.RewardStakeInputsIncompleteCommitted(
+		replayBoundaryNewEpoch, replayBoundaryNewEpoch+1,
+	)
+	require.NoError(t, err)
+	require.True(t, incomplete,
+		"the snapshot's basis must read as incomplete while marked")
 
 	h.rollbackBeforeBoundary()
 
-	pending, err = loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
+	pending, err := loadRewardStakeInputsPending(h.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending.Entries,
 		"the rollback deleted the snapshot the entry describes")
+}
+
+// The boundary's mark snapshot is captured once, inside the rollover
+// transaction. A capture that fails rolls the whole rollover back, and the
+// pipeline applies the boundary block again: that attempt must close the
+// epoch exactly as a boundary whose capture never failed does, with the
+// stake distribution the next epochs elect leaders and pay rewards from.
+func TestEpochBoundaryCompletesAfterItsMarkCaptureFailsOnce(t *testing.T) {
+	t.Parallel()
+
+	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
+	const stake = uint64(7_000_000)
+
+	control := newBoundaryReplayHarness(t)
+	control.addUtxo(0x33, delegatorKey, stake, control.next.StartSlot-1)
+	want := control.applyBoundary()
+	require.NotEmpty(t, want.markRows)
+	require.NotNil(t, want.rewardMark)
+
+	h := newBoundaryReplayHarness(t)
+	h.addUtxo(0x33, delegatorKey, stake, h.next.StartSlot-1)
+	before := h.readEffects()
+	errCapture := errors.New("mark capture interrupted")
+	failures := 1
+	h.ls.SetEpochBoundarySnapshotHook(
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
+			h.snapCalls++
+			err := h.mgr.CaptureEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			)
+			if err == nil && failures > 0 {
+				failures--
+				return errCapture
+			}
+			return err
+		},
+	)
+
+	result, err := h.runBoundary()
+	require.ErrorIs(t, err, errCapture)
+	require.Nil(t, result)
+	failed := h.readEffects()
+	failed.snapshotCalls = before.snapshotCalls
+	require.Equal(t, before, failed,
+		"a boundary whose capture failed must leave the ledger where it was")
+
+	got := h.applyBoundary()
+	require.Equal(t, want, got)
 }

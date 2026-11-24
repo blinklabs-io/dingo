@@ -333,16 +333,38 @@ func (ls *LedgerState) applyEndorserBlockWithReservation(
 	if err != nil {
 		return 0, 0, err
 	}
-	// Build the endorser-block blob and its offsets, then persist the blob
-	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
-	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
+	useTransactionBacking, err := ls.db.CanUseLeiosTransactionBacking(
+		ebSlot, ebHash[:],
+	)
+	if err != nil {
+		return 0, 0, &leiosEndorserBlockStorageError{
+			err: fmt.Errorf("inspect endorser block backing: %w", err),
+		}
+	}
+	var (
+		backing []byte
+		offsets *database.BlockIngestionResult
+	)
+	if useTransactionBacking {
+		// Encode the transaction list once and point every DOFF range at the
+		// exact bytes already present in that record.
+		backing, offsets, err = buildEndorserBlockTransactionBacking(
+			txs, bodyCbors, rawTxs, ebSlot, ebHash,
+		)
+	} else {
+		// An occurrence with historical standalone backing keeps its layout so
+		// offsets written by an older version remain valid after replay.
+		backing, offsets, err = buildEndorserBlockBlob(
+			txs, bodyCbors, ebSlot, ebHash,
+		)
+	}
 	if err != nil {
 		// The production provider bounds a complete closure well below the
 		// builder's uint32 offset limit. Its other error requires a decoded
 		// output to lack preserved CBOR and fail local re-encoding. Both are
 		// local construction failures, so keep them retryable rather than
 		// assigning a peer verdict.
-		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
+		return 0, 0, fmt.Errorf("build endorser block backing: %w", err)
 	}
 	applied, donation, err := ls.validateAndApplyEndorserBlockTransactions(
 		ctx,
@@ -358,14 +380,24 @@ func (ls *LedgerState) applyEndorserBlockWithReservation(
 	if err != nil {
 		return 0, 0, err
 	}
-	// The closure lives in the LeiosDB, so a dense Leios backlog cannot
+	// The backing lives in the LeiosDB, so a dense Leios backlog cannot
 	// overflow the shared 50-block chunk transaction with ErrTxnTooBig, and
 	// the offsets written below resolve into it through the offset resolver's
 	// LeiosDB fallback. It is written before the offsets that point at it.
 	// See DATABASE.md, "Leios endorser-block storage".
-	if err := ls.db.PutLeiosClosure(ebSlot, ebHash[:], blob); err != nil {
+	var backingErr error
+	if useTransactionBacking {
+		backingErr = ls.db.PutLeiosTransactionBacking(
+			ebSlot, ebHash[:], backing,
+		)
+	} else {
+		backingErr = ls.db.PutLeiosClosure(ebSlot, ebHash[:], backing)
+	}
+	if backingErr != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
-			err: fmt.Errorf("store endorser block blob: %w", err),
+			err: fmt.Errorf(
+				"store endorser block backing: %w", backingErr,
+			),
 		}
 	}
 	// The offsets of a dense endorser block exceed one blob transaction, so
@@ -415,24 +447,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		return 0, 0, err
 	}
 	snapshot := ls.txValidationSnapshot()
-	acc := ls.ledgerDB().NewLeiosClosureBatchAccumulator()
-	if acc != nil {
-		defer acc.Reset()
-	}
 	selected := make([]lcommon.Transaction, len(indexes))
 	for i, index := range indexes {
 		selected[i] = txs[index]
-	}
-	flush := func() error {
-		flushStart := time.Now()
-		err := ls.ledgerDB().FlushBatch(acc, txn)
-		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
-		if err != nil {
-			return &leiosEndorserBlockStorageError{
-				err: fmt.Errorf("flush endorser API details: %w", err),
-			}
-		}
-		return nil
 	}
 	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
@@ -442,21 +459,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		donation            uint64
 		expandedIndexOffset uint64
 	)
-	windowEnd := 0
-	for position, idx := range indexes {
-		if acc != nil && position == windowEnd {
-			n, err := ls.ledgerDB().PrepareLeiosClosureBatch(
-				acc,
-				txn,
-				selected[position:],
-			)
-			if err != nil {
-				return 0, 0, &leiosEndorserBlockStorageError{
-					err: fmt.Errorf("prepare endorser UTxO batch: %w", err),
-				}
-			}
-			windowEnd = position + n
-		}
+	for _, idx := range indexes {
 		tx := txs[idx]
 		if err := ls.loadLeiosSpentInputs(
 			ctx,
@@ -571,16 +574,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 		delta.addTransaction(tx, idx)
 		applyStart := time.Now()
-		if acc != nil {
-			err = delta.applyWithoutRecordingDonationsWithAccumulator(
-				ctx,
-				ls,
-				txn,
-				acc,
-			)
-		} else {
-			err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
-		}
+		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
@@ -601,11 +595,6 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 		for _, input := range tx.Consumed() {
 			consumed[utxoref.ForInput(input)] = struct{}{}
-		}
-	}
-	if acc != nil {
-		if err := flush(); err != nil {
-			return 0, 0, err
 		}
 	}
 	if len(applyEvents) > 0 {
@@ -748,6 +737,98 @@ func EndorserBlockOffsets(
 	return offsets, err
 }
 
+// EndorserBlockTransactionOffsets returns offsets into the encoded raw
+// transaction list that the ledger stores for an endorser block. Each range
+// resolves to bytes already present in rawTxs.
+func EndorserBlockTransactionOffsets(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	rawTxs []cbor.RawMessage,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+) (*database.BlockIngestionResult, error) {
+	_, offsets, err := buildEndorserBlockTransactionBacking(
+		txs, bodyCbors, rawTxs, ebSlot, ebHash,
+	)
+	return offsets, err
+}
+
+func buildEndorserBlockTransactionBacking(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	rawTxs []cbor.RawMessage,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+) ([]byte, *database.BlockIngestionResult, error) {
+	if len(txs) != len(rawTxs) {
+		return nil, nil, errors.New(
+			"endorser block transaction inputs have different lengths",
+		)
+	}
+	backing, err := cbor.Encode(rawTxs)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"encode endorser block transaction list: %w",
+			err,
+		)
+	}
+	rawBytes := 0
+	for _, raw := range rawTxs {
+		if len(raw) > len(backing)-rawBytes {
+			return nil, nil, errors.New(
+				"endorser transaction list length overflow",
+			)
+		}
+		rawBytes += len(raw)
+	}
+	base := len(backing) - rawBytes
+	bases := make([]int, len(rawTxs))
+	for i := range rawTxs {
+		raw := []byte(rawTxs[i])
+		if !bytes.Equal(backing[base:base+len(raw)], raw) {
+			return nil, nil, errors.New(
+				"encoded transaction list did not preserve raw bytes",
+			)
+		}
+		bases[i] = base
+		base += len(raw)
+	}
+	result, err := buildEndorserBlockOffsets(
+		txs,
+		bodyCbors,
+		ebSlot,
+		ebHash,
+		func(txIndex int, value []byte) (uint32, uint32, error) {
+			return endorserBackingRange(
+				[]byte(rawTxs[txIndex]), value, bases[txIndex],
+			)
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return backing, result, nil
+}
+
+func endorserBackingRange(
+	raw []byte,
+	value []byte,
+	base int,
+) (uint32, uint32, error) {
+	within := bytes.Index(raw, value)
+	if within < 0 {
+		return 0, 0, errors.New("exact CBOR bytes are absent from backing")
+	}
+	offset := base + within
+	if !fitsUint32(offset) || !fitsUint32(len(value)) {
+		return 0, 0, errors.New(
+			"endorser block backing offset out of uint32 range",
+		)
+	}
+	//nolint:gosec // bounds checked above
+	return uint32(offset), uint32(len(value)), nil
+}
+
 // buildEndorserBlockBlob lays out a standalone CBOR blob holding, for each
 // endorser transaction, its body CBOR followed by each produced output's CBOR,
 // recording the byte ranges as DOFF offsets keyed by (ebSlot, ebHash). The blob
@@ -759,27 +840,48 @@ func buildEndorserBlockBlob(
 	ebSlot uint64,
 	ebHash [lcommon.Blake2b256Size]byte,
 ) ([]byte, *database.BlockIngestionResult, error) {
+	var buf bytes.Buffer
+	result, err := buildEndorserBlockOffsets(
+		txs,
+		bodyCbors,
+		ebSlot,
+		ebHash,
+		func(_ int, value []byte) (uint32, uint32, error) {
+			off := buf.Len()
+			if !fitsUint32(off) || !fitsUint32(len(value)) {
+				return 0, 0, errors.New(
+					"endorser block blob offset out of uint32 range",
+				)
+			}
+			buf.Write(value)
+			//nolint:gosec // bounds checked above
+			return uint32(off), uint32(len(value)), nil
+		},
+	)
+	return buf.Bytes(), result, err
+}
+
+func buildEndorserBlockOffsets(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+	rangeFor func(int, []byte) (uint32, uint32, error),
+) (*database.BlockIngestionResult, error) {
+	if len(txs) != len(bodyCbors) {
+		return nil, errors.New(
+			"endorser block transaction inputs have different lengths",
+		)
+	}
 	if err := validateTransactionOutputIndexes(txs); err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"validate endorser block output indexes: %w",
 			err,
 		)
 	}
-	var buf bytes.Buffer
 	result := &database.BlockIngestionResult{
 		TxOffsets:   make(map[[32]byte]database.CborOffset, len(txs)),
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
-	}
-	writeRange := func(b []byte) (uint32, uint32, error) {
-		off := buf.Len()
-		if !fitsUint32(off) || !fitsUint32(len(b)) {
-			return 0, 0, errors.New(
-				"endorser block blob offset out of uint32 range",
-			)
-		}
-		buf.Write(b)
-		//nolint:gosec // bounds checked above
-		return uint32(off), uint32(len(b)), nil
 	}
 	for i, tx := range txs {
 		levels := TransactionLevelsForApply(tx)
@@ -793,9 +895,12 @@ func buildEndorserBlockBlob(
 			if levelIdx == len(levels)-1 {
 				bodyCbor = bodyCbors[i]
 			}
-			off, length, err := writeRange(bodyCbor)
+			off, length, err := rangeFor(i, bodyCbor)
 			if err != nil {
-				return nil, nil, err
+				return nil, fmt.Errorf(
+					"locate endorser transaction %d body %d: %w",
+					i, levelIdx, err,
+				)
 			}
 			var levelHash [32]byte
 			copy(levelHash[:], level.Hash().Bytes())
@@ -810,16 +915,19 @@ func buildEndorserBlockBlob(
 				if len(outCbor) == 0 {
 					enc, err := cbor.Encode(utxo.Output)
 					if err != nil {
-						return nil, nil, fmt.Errorf(
+						return nil, fmt.Errorf(
 							"encode endorser output: %w",
 							err,
 						)
 					}
 					outCbor = enc
 				}
-				off, length, err := writeRange(outCbor)
+				off, length, err := rangeFor(i, outCbor)
 				if err != nil {
-					return nil, nil, err
+					return nil, fmt.Errorf(
+						"locate endorser transaction %d output %d: %w",
+						i, utxo.Id.Index(), err,
+					)
 				}
 				result.UtxoOffsets[database.UtxoRef{
 					TxId:      levelHash,
@@ -833,7 +941,7 @@ func buildEndorserBlockBlob(
 			}
 		}
 	}
-	return buf.Bytes(), result, nil
+	return result, nil
 }
 
 // ensureReferencedEndorserBlocks gates delivery of a batch of blocks to

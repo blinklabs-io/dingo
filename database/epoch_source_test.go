@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
@@ -37,24 +36,21 @@ func (s fakeEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
 	return s.sw, nil
 }
 
-func newDrainedEpochsDatabase(t *testing.T) *database.Database {
+// newLedgerEpochsDatabase opens the ledger's database, whose epochs are
+// LedgerDB records it reads from the installed source.
+func newLedgerEpochsDatabase(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	// The metadata store keeps a row the source does not, so an answer from
-	// it would differ.
-	require.NoError(t, db.SetEpoch(0, 7, nil, nil, nil, nil, 1, 1, 100, nil))
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyEpochs,
-	))
+	require.Nil(t, db.Metadata())
 	return db
 }
 
-// A drained epochs family answers every epoch read from the installed source
+// The ledger's database answers every epoch read from the installed source
 // and fails closed without one.
-func TestDrainedEpochReadsComeFromTheSource(t *testing.T) {
+func TestEpochReadsComeFromTheSource(t *testing.T) {
 	t.Parallel()
-	db := newDrainedEpochsDatabase(t)
+	db := newLedgerEpochsDatabase(t)
 
 	_, err := db.GetEpochs(nil)
 	require.ErrorIs(t, err, database.ErrNoEpochSource)
@@ -79,7 +75,7 @@ func TestDrainedEpochReadsComeFromTheSource(t *testing.T) {
 	require.Equal(t, uint64(100), one.StartSlot)
 	missing, err := db.GetEpoch(7, nil)
 	require.NoError(t, err)
-	require.Nil(t, missing, "the SQL row of epoch 7 is not consulted")
+	require.Nil(t, missing, "the source holds no epoch 7")
 	for slot, want := range map[uint64]uint64{0: 1, 99: 1, 100: 2, 250: 3} {
 		got, err := db.GetEpochBySlot(slot, nil)
 		require.NoError(t, err)
@@ -94,28 +90,25 @@ func TestDrainedEpochReadsComeFromTheSource(t *testing.T) {
 	require.Len(t, byEra, 2)
 }
 
-// A write to a drained family is refused, so no SQL row reappears beside the
-// set.
-func TestDrainedEpochWritesAreRefused(t *testing.T) {
+// An epoch write to the ledger's database is refused, so no SQL row appears
+// beside the set.
+func TestEpochWritesAreRefused(t *testing.T) {
 	t.Parallel()
-	db := newDrainedEpochsDatabase(t)
+	db := newLedgerEpochsDatabase(t)
 	require.ErrorIs(
 		t,
 		db.SetEpoch(0, 8, nil, nil, nil, nil, 1, 1, 100, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 	require.ErrorIs(
-		t, db.DeleteEpochsAfterSlot(0, nil), database.ErrFamilyDrained,
+		t, db.DeleteEpochsAfterSlot(0, nil), database.ErrNoMetadataStore,
 	)
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyEraSwitch,
-	))
 	require.ErrorIs(
 		t,
 		db.SetMidEpochEraSwitch(database.MidEpochEraSwitch{}, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
-	key, err := db.GetSyncState(database.MidEpochEraSwitchSyncKey, nil)
-	require.NoError(t, err)
-	require.Empty(t, key)
+	// There is no sync_state for the refused switch to have reached.
+	_, err := db.GetSyncState(database.MidEpochEraSwitchSyncKey, nil)
+	require.ErrorIs(t, err, database.ErrNoMetadataStore)
 }

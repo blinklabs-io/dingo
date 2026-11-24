@@ -77,6 +77,7 @@ RUN apt-get update -y && \
     libssl3 \
     sqlite3 \
     postgresql-client-16 && \
+  apt-get purge -y --auto-remove gnupg && \
   rm -rf /var/lib/apt/lists/*
 ENV LD_LIBRARY_PATH="/usr/local/lib"
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"

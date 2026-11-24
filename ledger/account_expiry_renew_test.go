@@ -335,6 +335,7 @@ func newRenewTestLedger(
 			DelegatorInactivity:        inactivity,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	return ls, db
 }
 
@@ -350,13 +351,8 @@ func runRenew(
 	t.Helper()
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.renewWitnessedAccountExpirations(
-			context.Background(),
-			txn,
-			currentEpoch,
-			0,
-			txs,
-		)
+		ls.renewWitnessedAccountExpirations(txn, currentEpoch, 0, txs)
+		return nil
 	}))
 }
 
@@ -391,7 +387,7 @@ func TestRenewWitnessedAccountExpirationsGateOn(t *testing.T) {
 	cred := renewTestCred(0x01)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -400,7 +396,7 @@ func TestRenewWitnessedAccountExpirationsGateOn(t *testing.T) {
 
 	runRenew(t, ls, db, epoch, stakeDelegationTx(cred))
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -422,7 +418,7 @@ func TestRenewWitnessedAccountExpirationsGateOff(t *testing.T) {
 	cred := renewTestCred(0x01)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -431,7 +427,7 @@ func TestRenewWitnessedAccountExpirationsGateOff(t *testing.T) {
 
 	runRenew(t, ls, db, epoch, stakeDelegationTx(cred))
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -458,7 +454,7 @@ func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
 	cred := renewTestCred(0xAB)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -471,7 +467,7 @@ func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
 
 	runRenew(t, ls, db, epoch, tx)
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -493,7 +489,7 @@ func TestRenewWitnessedAccountExpirationsMissingRowIgnored(t *testing.T) {
 	cred := renewTestCred(0x07)
 	runRenew(t, ls, db, 5, stakeDelegationTx(cred))
 
-	_, err := db.GetAccountByCredential(
+	_, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,
@@ -514,7 +510,7 @@ func TestRenewWitnessedAccountExpirationsSkipsInvalidTx(t *testing.T) {
 	cred := renewTestCred(0x01)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    cred,
 			CredentialTag: 0,
 			Active:        true,
@@ -534,7 +530,7 @@ func TestRenewWitnessedAccountExpirationsSkipsInvalidTx(t *testing.T) {
 
 	runRenew(t, ls, db, 5, tx)
 
-	acct, err := db.GetAccountByCredential(
+	acct, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		cred,

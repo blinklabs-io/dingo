@@ -41,7 +41,7 @@ func committeeCredentialKey(credential common.Credential) string {
 }
 
 // LoadLedgerRulesInitialState seeds the common parsed state through Dingo's
-// real database-backed conformance provider, then imports the additional
+// LedgerDB import path, then imports the additional
 // governance state carried by the node-diversity ledger-rule fixtures.
 func (m *DingoStateManager) LoadLedgerRulesInitialState(
 	state *conformance.ParsedInitialState,
@@ -59,7 +59,7 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		m.unelectedCommitteeMembers[committeeCredentialKey(credential)] = struct{}{}
 	}
 
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 
 	if metadata.Treasury != nil || metadata.Reserves != nil {
@@ -70,19 +70,19 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		if metadata.Reserves != nil {
 			reserves = *metadata.Reserves
 		}
-		if err := m.db.Metadata().SetNetworkState(
+		if err := m.ldb.SetNetworkState(
 			treasury,
 			reserves,
 			0,
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf("seed protocol pots: %w", err)
 		}
 	}
 	if metadata.DormantDRepEpochs != nil {
-		if err := m.db.SetImportedDormantDRepEpochs(
-			context.Background(),
+		if err := m.ldb.SetImportedDormantDRepEpochs(
 			*metadata.DormantDRepEpochs,
+			0,
 			txn,
 		); err != nil {
 			return fmt.Errorf("seed dormant DRep epochs: %w", err)
@@ -126,7 +126,7 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		enactedSlot := uint64(0)
 		proposal.EnactedEpoch = &enactedEpoch
 		proposal.EnactedSlot = &enactedSlot
-		if err := m.db.SetGovernanceProposal(
+		if err := m.ldb.SetGovernanceProposal(
 			context.Background(),
 			&proposal,
 			txn,
@@ -135,7 +135,7 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		}
 	}
 	for id, actionCbor := range metadata.GovActionCbor {
-		proposal, err := m.db.GetGovernanceProposal(
+		proposal, err := m.ldb.GetGovernanceProposal(
 			context.Background(),
 			parseProposalTxHash(id),
 			parseProposalActionIdx(id),
@@ -149,7 +149,7 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 			)
 		}
 		proposal.GovActionCbor = append([]byte(nil), actionCbor...)
-		if err := m.db.SetGovernanceProposal(
+		if err := m.ldb.SetGovernanceProposal(
 			context.Background(),
 			proposal,
 			txn,
@@ -158,5 +158,5 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		}
 	}
 
-	return txn.Commit()
+	return m.commit(txn)
 }

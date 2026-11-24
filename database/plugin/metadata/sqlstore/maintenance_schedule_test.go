@@ -85,7 +85,12 @@ func newScheduledStoreWithLogger(
 		),
 	)
 	require.NoError(t, err)
-	cfg := Config{WriteDB: db, Dialect: SQLiteDialect(), Logger: logger}
+	cfg := Config{
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		Logger:            logger,
+		LazyHotStatements: true,
+	}
 	job.wire(&cfg, every, calls)
 	store, err := New(cfg)
 	require.NoError(t, err)

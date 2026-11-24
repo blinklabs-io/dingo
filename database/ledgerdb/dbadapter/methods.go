@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -37,19 +36,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-func (a Adapter) ConsumedUtxoPruneFloor(txn ledgerdb.Txn) (uint64, error) {
-	return a.db.ConsumedUtxoPruneFloor(dbTxn(txn))
-}
-
-func (a Adapter) CountUtxosConsumedUpTo(
-	ctx context.Context,
-	slot uint64,
-	limit int,
-) (int, error) {
-	return a.db.CountUtxosConsumedUpTo(ctx, slot, limit)
-}
-
 func (a Adapter) GetLiveUtxoLovelace(txn ledgerdb.Txn) (uint64, error) {
+	if err := a.requireStore("live UTxO lovelace"); err != nil {
+		return 0, err
+	}
 	return a.db.Metadata().GetLiveUtxoLovelace(metaTxn(txn))
 }
 
@@ -65,14 +55,14 @@ func (a Adapter) IterateAccounts(
 	txn ledgerdb.Txn,
 	fn func(*models.Account) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateAccounts(metaTxn(txn), fn)
 }
 
 func (a Adapter) ListPoolKeyHashes(txn ledgerdb.Txn) ([][]byte, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().ListPoolKeyHashes(metaTxn(txn))
@@ -82,7 +72,7 @@ func (a Adapter) IterateDreps(
 	txn ledgerdb.Txn,
 	fn func(*models.Drep) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateDreps(metaTxn(txn), fn)
@@ -92,7 +82,7 @@ func (a Adapter) IterateLiveDrepDelegators(
 	txn ledgerdb.Txn,
 	fn func(drep, stake models.StakeCredentialRef) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateLiveDrepDelegators(metaTxn(txn), fn)
@@ -102,7 +92,7 @@ func (a Adapter) IterateAccountImportBaselines(
 	txn ledgerdb.Txn,
 	fn func(models.AccountImportBaselineRow) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateAccountImportBaselines(metaTxn(txn), fn)
@@ -112,7 +102,7 @@ func (a Adapter) IterateAccountWitnessSlots(
 	txn ledgerdb.Txn,
 	fn func(ref models.StakeCredentialRef, slot uint64) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateAccountWitnessSlots(metaTxn(txn), fn)
@@ -122,16 +112,29 @@ func (a Adapter) IterateStakeDelegationEvents(
 	txn ledgerdb.Txn,
 	fn func(models.StakeDelegationEventRow) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateStakeDelegationEvents(metaTxn(txn), fn)
+}
+
+func (a Adapter) IterateAppliedTransactions(
+	txn ledgerdb.Txn,
+	fn func(models.AppliedTransaction) error,
+) error {
+	if err := a.requireStore("applied transactions"); err != nil {
+		return err
+	}
+	return a.db.Metadata().IterateAppliedTransactions(metaTxn(txn), fn)
 }
 
 func (a Adapter) IterateLeiosClosureUtxoEffects(
 	txn ledgerdb.Txn,
 	fn func(models.LeiosClosureUtxoEffect) error,
 ) error {
+	if err := a.requireStore("Leios closure UTxO effects"); err != nil {
+		return err
+	}
 	return a.db.Metadata().IterateLeiosClosureUtxoEffects(metaTxn(txn), fn)
 }
 
@@ -139,7 +142,7 @@ func (a Adapter) IterateAccountWitnessEffectiveSlots(
 	txn ledgerdb.Txn,
 	fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateAccountWitnessEffectiveSlots(metaTxn(txn), fn)
@@ -149,7 +152,7 @@ func (a Adapter) IterateAccountWithdrawalEffectiveSlots(
 	txn ledgerdb.Txn,
 	fn func(ref models.StakeCredentialRef, slot, effective uint64) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateAccountWithdrawalEffectiveSlots(metaTxn(txn), fn)
@@ -161,33 +164,6 @@ func (a Adapter) IterateLiveUtxos(
 	fn func(*models.Utxo) error,
 ) error {
 	return a.db.IterateLiveUtxos(ctx, dbTxn(txn), fn)
-}
-
-func (a Adapter) IterateUtxoRefsAsOf(
-	ctx context.Context,
-	atSlot uint64,
-	txn ledgerdb.Txn,
-	fn func(*models.Utxo) error,
-) error {
-	return a.db.IterateUtxoRefsAsOf(ctx, atSlot, dbTxn(txn), fn)
-}
-
-func (a Adapter) IterateUtxoRefsAsOfPaged(
-	ctx context.Context,
-	atSlot uint64,
-	pageSize int,
-	fn func(database.UtxoRef) error,
-) error {
-	return a.db.IterateUtxoRefsAsOfPaged(ctx, atSlot, pageSize, fn)
-}
-
-func (a Adapter) MarkUtxosDeletedAtSlot(
-	ctx context.Context,
-	txn ledgerdb.Txn,
-	refs []types.UtxoKey,
-	atSlot uint64,
-) error {
-	return a.db.MarkUtxosDeletedAtSlot(ctx, dbTxn(txn), refs, atSlot)
 }
 
 func (a Adapter) UtxoByRef(
@@ -226,31 +202,12 @@ func (a Adapter) UtxosByAddress(
 	return a.db.UtxosByAddress(ctx, addrs, maxResults, dbTxn(txn))
 }
 
-func (a Adapter) UtxosByAddressAsOf(
-	ctx context.Context,
-	addrs []ledger.Address,
-	atSlot uint64,
-	maxResults int,
-	txn ledgerdb.Txn,
-) ([]models.Utxo, error) {
-	return a.db.UtxosByAddressAsOf(ctx, addrs, atSlot, maxResults, dbTxn(txn))
-}
-
 func (a Adapter) UtxosByRefs(
 	ctx context.Context,
 	refs []models.UtxoId,
 	txn ledgerdb.Txn,
 ) ([]models.Utxo, error) {
 	return a.db.UtxosByRefs(ctx, refs, dbTxn(txn))
-}
-
-func (a Adapter) UtxosByRefsAsOf(
-	ctx context.Context,
-	refs []models.UtxoId,
-	atSlot uint64,
-	txn ledgerdb.Txn,
-) ([]models.Utxo, error) {
-	return a.db.UtxosByRefsAsOf(ctx, refs, atSlot, dbTxn(txn))
 }
 
 func (a Adapter) UtxosByRefsBounded(
@@ -260,31 +217,6 @@ func (a Adapter) UtxosByRefsBounded(
 	txn ledgerdb.Txn,
 ) ([]models.Utxo, error) {
 	return a.db.UtxosByRefsBounded(ctx, refs, maxBytes, dbTxn(txn))
-}
-
-func (a Adapter) UtxosDeleteConsumed(
-	ctx context.Context,
-	slot uint64,
-	limit int,
-	txn ledgerdb.Txn,
-) (int, error) {
-	return a.db.UtxosDeleteConsumed(ctx, slot, limit, dbTxn(txn))
-}
-
-func (a Adapter) UtxosDeleteSpentInBatch(
-	ids []models.UtxoId,
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.UtxosDeleteSpentInBatch(ids, slot, dbTxn(txn))
-}
-
-func (a Adapter) UtxosDropSpentInBatchBlobs(
-	ids []models.UtxoId,
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.UtxosDropSpentInBatchBlobs(ids, slot, dbTxn(txn))
 }
 
 func (a Adapter) AccountInactivityActivationMembership(
@@ -301,18 +233,10 @@ func (a Adapter) AccountLastWitnessSlots(
 	maxSlot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.AccountLastWitnessSlots(ctx, refs, maxSlot, dbTxn(txn))
-}
-
-func (a Adapter) AccountsWitnessedAfterSlot(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) ([]models.StakeCredentialRef, error) {
-	return a.db.AccountsWitnessedAfterSlot(ctx, slot, dbTxn(txn))
 }
 
 func (a Adapter) GetAccountByCredential(
@@ -322,7 +246,7 @@ func (a Adapter) GetAccountByCredential(
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (*models.Account, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetAccountByCredential(
@@ -340,7 +264,7 @@ func (a Adapter) GetAccountImportRegistrationByCredential(
 	stakeKey []byte,
 	txn ledgerdb.Txn,
 ) (*models.AccountImportRegistration, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetAccountImportRegistrationByCredential(
@@ -360,7 +284,7 @@ func (a Adapter) GetAccountRegistrationHistoryByCredential(
 	order string,
 	txn ledgerdb.Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetAccountRegistrationHistoryByCredential(
@@ -380,7 +304,7 @@ func (a Adapter) GetAccountsByCredential(
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (map[string]*models.Account, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetAccountsByCredential(ctx, refs, includeInactive, dbTxn(txn))
@@ -392,7 +316,7 @@ func (a Adapter) GetAccountsByCredentialAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]*models.Account, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetAccountsByCredentialAtSlot(ctx, refs, slot, dbTxn(txn))
@@ -401,7 +325,7 @@ func (a Adapter) GetAccountsByCredentialAtSlot(
 func (a Adapter) GetActiveAccountCredentials(
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetActiveAccountCredentials(metaTxn(txn))
@@ -413,7 +337,7 @@ func (a Adapter) GetGenesisDelegationForSlot(
 	stabilityWindow uint64,
 	txn ledgerdb.Txn,
 ) (*models.GenesisDelegation, error) {
-	if err := a.familyDrained(nodesettings.FamilyMIRGenesis); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyMIRGenesis); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -425,7 +349,7 @@ func (a Adapter) GetGenesisDelegationsInSlotRange(
 	uptoSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.GenesisDelegation, error) {
-	if err := a.familyDrained(nodesettings.FamilyMIRGenesis); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyMIRGenesis); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -439,7 +363,7 @@ func (a Adapter) GetLatestAccountRegistrationAtOrBefore(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (*models.AccountRegistrationHistoryRow, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetLatestAccountRegistrationAtOrBefore(
@@ -456,7 +380,7 @@ func (a Adapter) GetStakeCredentialsWithRegistrationEvents(
 	toSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -468,7 +392,7 @@ func (a Adapter) GetStakeRegistrationsByCredential(
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.GetStakeRegistrationsByCredential(
@@ -476,18 +400,6 @@ func (a Adapter) GetStakeRegistrationsByCredential(
 		stakingKey,
 		dbTxn(txn),
 	)
-}
-
-func (a Adapter) RenewAccountExpirations(
-	ctx context.Context,
-	refs []models.StakeCredentialRef,
-	expirationEpoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
-	return a.db.RenewAccountExpirations(ctx, refs, expirationEpoch, dbTxn(txn))
 }
 
 func (a Adapter) SetGenesisStakingWithDeposits(
@@ -498,28 +410,12 @@ func (a Adapter) SetGenesisStakingWithDeposits(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
 		keyDeposit,
 		poolDeposit,
 		blockHash,
-		dbTxn(txn),
-	)
-}
-
-func (a Adapter) StampAllActiveAccountExpirations(
-	ctx context.Context,
-	expirationEpoch uint64,
-	txn ledgerdb.Txn,
-) (int64, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return 0, err
-	}
-	return a.db.StampAllActiveAccountExpirations(
-		ctx,
-		expirationEpoch,
 		dbTxn(txn),
 	)
 }
@@ -533,7 +429,7 @@ func (a Adapter) AddAccountRewardByCredential(
 	sourceHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.AddAccountRewardByCredential(
@@ -552,7 +448,7 @@ func (a Adapter) AddAccountRewardsByCredential(
 	credits []models.AccountRewardCredit,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.AddAccountRewardsByCredential(ctx, credits, dbTxn(txn))
@@ -562,7 +458,7 @@ func (a Adapter) AddAppliedRewardCreditRound(
 	round models.RewardCreditRound,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().AddAppliedRewardCreditRound(round, metaTxn(txn))
@@ -577,7 +473,7 @@ func (a Adapter) AddPostSnapshotAccountRewardByCredential(
 	sourceHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.AddPostSnapshotAccountRewardByCredential(
@@ -591,34 +487,12 @@ func (a Adapter) AddPostSnapshotAccountRewardByCredential(
 	)
 }
 
-func (a Adapter) ClaimFallbackRewardSnapshot(
-	snapshot *models.RewardSnapshot,
-	txn ledgerdb.Txn,
-) (bool, error) {
-	if err := a.rewardInputsDrained(); err != nil {
-		return false, err
-	}
-	return a.db.Metadata().ClaimFallbackRewardSnapshot(snapshot, metaTxn(txn))
-}
-
-func (a Adapter) ClaimFallbackRewardSnapshotGuard(
-	epoch uint64,
-	snapshotType string,
-	txn ledgerdb.Txn,
-) (bool, uint, error) {
-	if err := a.rewardInputsDrained(); err != nil {
-		return false, 0, err
-	}
-	return a.db.Metadata().
-		ClaimFallbackRewardSnapshotGuard(epoch, snapshotType, metaTxn(txn))
-}
-
 func (a Adapter) ClaimPendingRewardCreditsForCredential(
 	credentialTag uint8,
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -630,7 +504,7 @@ func (a Adapter) ClaimUnfoldedRewardCredits(
 	limit int,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -641,7 +515,7 @@ func (a Adapter) DeleteRewardInputsForEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().DeleteRewardInputsForEpoch(epoch, metaTxn(txn))
@@ -651,7 +525,7 @@ func (a Adapter) DeleteRewardOutputsForEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().DeleteRewardOutputsForEpoch(epoch, metaTxn(txn))
@@ -662,19 +536,11 @@ func (a Adapter) DeleteRewardStakeInputBeforeEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().
 		DeleteRewardStakeInputBeforeEpoch(ctx, epoch, metaTxn(txn))
-}
-
-func (a Adapter) DeleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.DeleteRewardAccountOutputsBeforeEpoch(ctx, epoch, dbTxn(txn))
 }
 
 func (a Adapter) DeleteRewardStateBeforeEpoch(
@@ -682,10 +548,10 @@ func (a Adapter) DeleteRewardStateBeforeEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().
@@ -701,7 +567,7 @@ func (a Adapter) GetEpochBoundaryRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := a.accountReadsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -722,7 +588,7 @@ func (a Adapter) GetPendingRewardAccountOutputsForCredential(
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -733,7 +599,7 @@ func (a Adapter) IterateUnfoldedRewardAccountOutputs(
 	txn ledgerdb.Txn,
 	fn func(*models.RewardAccountOutput) error,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().IterateUnfoldedRewardAccountOutputs(metaTxn(txn), fn)
@@ -742,7 +608,7 @@ func (a Adapter) IterateUnfoldedRewardAccountOutputs(
 func (a Adapter) GetPendingRewardCreditRounds(
 	txn ledgerdb.Txn,
 ) ([]models.RewardCreditRound, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetPendingRewardCreditRounds(metaTxn(txn))
@@ -752,7 +618,7 @@ func (a Adapter) GetPostSnapshotRewardCredits(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := a.rewardCreditsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetPostSnapshotRewardCredits(slot, metaTxn(txn))
@@ -762,7 +628,7 @@ func (a Adapter) GetRewardAccountOutputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardAccountOutputs(epoch, metaTxn(txn))
@@ -774,7 +640,7 @@ func (a Adapter) GetRewardAccountOutputsForEligibility(
 	stakingKey []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardAccountOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -785,46 +651,17 @@ func (a Adapter) GetRewardAdaPots(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (*models.RewardAdaPots, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardAdaPots(epoch, metaTxn(txn))
-}
-
-func (a Adapter) SaveRewardLikelihoodState(
-	state *models.RewardLikelihoodState,
-	pools []*models.RewardPoolLikelihood,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.Metadata().SaveRewardLikelihoodState(state, pools, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardLikelihoodStateBeforeEpoch(
-	epoch uint64,
-	txn ledgerdb.Txn,
-) (*models.RewardLikelihoodState, error) {
-	return a.db.Metadata().GetRewardLikelihoodStateBeforeEpoch(epoch, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardLikelihoodStateAtSlot(
-	slot uint64,
-	txn ledgerdb.Txn,
-) (*models.RewardLikelihoodState, error) {
-	return a.db.Metadata().GetRewardLikelihoodStateAtSlot(slot, metaTxn(txn))
-}
-
-func (a Adapter) GetRewardPoolLikelihoods(
-	epoch uint64,
-	txn ledgerdb.Txn,
-) ([]*models.RewardPoolLikelihood, error) {
-	return a.db.Metadata().GetRewardPoolLikelihoods(epoch, metaTxn(txn))
 }
 
 func (a Adapter) GetRewardPoolInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardPoolInput, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardPoolInputs(epoch, metaTxn(txn))
@@ -834,7 +671,7 @@ func (a Adapter) GetRewardPoolOutputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardPoolOutput, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardPoolOutputs(epoch, metaTxn(txn))
@@ -845,7 +682,7 @@ func (a Adapter) GetRewardSeedFailure(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) (string, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return "", err
 	}
 	return a.db.Metadata().
@@ -860,7 +697,7 @@ func (a Adapter) GetRewardSeedFailureSlot(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) (string, uint64, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return "", 0, err
 	}
 	r, ok := a.db.Metadata().(metadata.RewardSeedFailureSlotReader)
@@ -877,7 +714,7 @@ func (a Adapter) GetRewardSnapshot(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) (*models.RewardSnapshot, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardSnapshot(epoch, snapshotType, metaTxn(txn))
@@ -887,7 +724,7 @@ func (a Adapter) GetRewardStakeInputs(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRewardStakeInputs(epoch, metaTxn(txn))
@@ -899,7 +736,7 @@ func (a Adapter) GetRewardStakeInputsInPoolKeyHashRange(
 	poolKeyHashHi []byte,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -910,14 +747,14 @@ func (a Adapter) HasAppliedRewardCreditRound(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return false, err
 	}
 	return a.db.Metadata().HasAppliedRewardCreditRound(epoch, metaTxn(txn))
 }
 
 func (a Adapter) HasPendingRewardCreditRounds(txn ledgerdb.Txn) (bool, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return false, err
 	}
 	return a.db.Metadata().HasPendingRewardCreditRounds(metaTxn(txn))
@@ -927,29 +764,18 @@ func (a Adapter) HasUnfoldedRewardCreditsThroughEpoch(
 	snapshotEpoch uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return false, err
 	}
 	return a.db.Metadata().
 		HasUnfoldedRewardCreditsThroughEpoch(snapshotEpoch, metaTxn(txn))
 }
 
-func (a Adapter) ReleaseFallbackRewardSnapshotGuard(
-	guardID uint,
-	txn ledgerdb.Txn,
-) error {
-	if err := a.rewardInputsDrained(); err != nil {
-		return err
-	}
-	return a.db.Metadata().
-		ReleaseFallbackRewardSnapshotGuard(guardID, metaTxn(txn))
-}
-
 func (a Adapter) SaveRewardAccountOutputs(
 	outputs []*models.RewardAccountOutput,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardAccountOutputs(outputs, metaTxn(txn))
@@ -959,7 +785,7 @@ func (a Adapter) SaveRewardAdaPots(
 	pots *models.RewardAdaPots,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardAdaPots(pots, metaTxn(txn))
@@ -969,7 +795,7 @@ func (a Adapter) SaveRewardPoolInputs(
 	inputs []*models.RewardPoolInput,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardPoolInputs(inputs, metaTxn(txn))
@@ -979,7 +805,7 @@ func (a Adapter) SaveRewardPoolOutputs(
 	outputs []*models.RewardPoolOutput,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardPoolOutputs(outputs, metaTxn(txn))
@@ -989,7 +815,7 @@ func (a Adapter) SaveRewardSnapshot(
 	snapshot *models.RewardSnapshot,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardSnapshot(snapshot, metaTxn(txn))
@@ -999,7 +825,7 @@ func (a Adapter) SaveRewardStakeInputs(
 	inputs []*models.RewardStakeInput,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardInputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveRewardStakeInputs(inputs, metaTxn(txn))
@@ -1008,7 +834,7 @@ func (a Adapter) SaveRewardStakeInputs(
 func (a Adapter) TakeRewardEligibilityRecheck(
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if err := a.rewardOutputsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardOutputs); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().TakeRewardEligibilityRecheck(metaTxn(txn))
@@ -1019,7 +845,7 @@ func (a Adapter) ClearDelegationsToRetiredPool(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	return a.db.Metadata().
@@ -1032,6 +858,9 @@ func (a Adapter) CountPoolBlocksInSlotRange(
 	endSlot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, uint64, error) {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
+		return nil, 0, err
+	}
 	return a.db.Metadata().
 		CountPoolBlocksInSlotRange(poolKeyHashes, startSlot, endSlot, metaTxn(txn))
 }
@@ -1040,6 +869,9 @@ func (a Adapter) DeletePoolStakeSnapshotsBeforeEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) error {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return err
+	}
 	return a.db.Metadata().
 		DeletePoolStakeSnapshotsBeforeEpoch(epoch, metaTxn(txn))
 }
@@ -1049,6 +881,9 @@ func (a Adapter) DeletePoolStakeSnapshotsForEpoch(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) error {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return err
+	}
 	return a.db.Metadata().
 		DeletePoolStakeSnapshotsForEpoch(epoch, snapshotType, metaTxn(txn))
 }
@@ -1057,7 +892,7 @@ func (a Adapter) GetActiveDelegatorCountsByPool(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1068,7 +903,7 @@ func (a Adapter) GetActiveDelegatorCredentialsByPool(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (map[string][]models.StakeCredentialRef, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1086,7 +921,7 @@ func (a Adapter) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetActivePoolKeyHashesAtSlot(slot, metaTxn(txn))
@@ -1102,6 +937,9 @@ func (a Adapter) GetActivePoolRelays(
 func (a Adapter) GetDelegatedPoolKeyHashes(
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().GetDelegatedPoolKeyHashes(metaTxn(txn))
 }
 
@@ -1110,7 +948,7 @@ func (a Adapter) GetEpochBoundaryActivePoolKeyHashes(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1122,7 +960,7 @@ func (a Adapter) GetEpochBoundaryDelegatedPoolKeyHashes(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if err := a.accountReadsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1138,7 +976,7 @@ func (a Adapter) GetEpochBoundaryStakeByPools(
 	inactivityPeriod uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	if err := a.accountReadsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, nil, err
 	}
 	return a.db.Metadata().
@@ -1186,6 +1024,9 @@ func (a Adapter) GetPoolStatus(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (models.PoolStatus, error) {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return models.PoolStatus{}, err
+	}
 	return a.db.Metadata().GetPoolStatus(pkh, metaTxn(txn))
 }
 
@@ -1194,6 +1035,9 @@ func (a Adapter) GetPoolBlockIssuersInSlotRange(
 	endSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolOpCertSequence, error) {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().
 		GetPoolBlockIssuersInSlotRange(startSlot, endSlot, metaTxn(txn))
 }
@@ -1220,7 +1064,7 @@ func (a Adapter) GetPoolDepositsHeld(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetPoolDepositsHeld(poolKeyHashes, metaTxn(txn))
@@ -1231,7 +1075,7 @@ func (a Adapter) GetPoolDepositsHeldAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1243,7 +1087,7 @@ func (a Adapter) GetPoolEarliestVrfKeyHashAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, false, err
 	}
 	return a.db.Metadata().
@@ -1262,7 +1106,7 @@ func (a Adapter) GetPoolRegistrationsAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistration, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1276,7 +1120,7 @@ func (a Adapter) GetPoolRegistrationsEffectiveForEpoch(
 	snapshotSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistration, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1288,7 +1132,7 @@ func (a Adapter) GetPoolVrfKeyHashAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, false, err
 	}
 	return a.db.Metadata().
@@ -1324,7 +1168,7 @@ func (a Adapter) GetRetiringPools(
 	currentEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetiringRow, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetRetiringPools(currentEpoch, metaTxn(txn))
@@ -1335,7 +1179,7 @@ func (a Adapter) GetRetiringPoolsAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetiringRow, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1424,30 +1268,12 @@ func (a Adapter) UpdatePoolOpCertSequence(
 	return a.db.UpdatePoolOpCertSequence(ctx, pkh, sequence, slot, dbTxn(txn))
 }
 
-func (a Adapter) UpdatePoolOpCertSequenceBatched(
-	ctx context.Context,
-	pkh lcommon.PoolKeyHash,
-	sequence uint64,
-	slot uint64,
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.UpdatePoolOpCertSequenceBatched(
-		ctx,
-		pkh,
-		sequence,
-		slot,
-		acc,
-		dbTxn(txn),
-	)
-}
-
 func (a Adapter) GetLiveStakeInputsForPools(
 	poolKeyHashes [][]byte,
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := a.accountReadsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -1461,6 +1287,9 @@ func (a Adapter) GetPointerStakeInputsForPools(
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
+	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().
 		GetPointerStakeInputsForPools(poolKeyHashes, slot, boundarySlot, expiryEpoch, metaTxn(txn))
 }
@@ -1471,6 +1300,9 @@ func (a Adapter) GetPoolStakeSnapshot(
 	poolKeyHash []byte,
 	txn ledgerdb.Txn,
 ) (*models.PoolStakeSnapshot, error) {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().
 		GetPoolStakeSnapshot(epoch, snapshotType, poolKeyHash, metaTxn(txn))
 }
@@ -1489,6 +1321,9 @@ func (a Adapter) GetPoolStakeSnapshotsByEpochBounded(
 	maxRows int,
 	txn ledgerdb.Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().
 		GetPoolStakeSnapshotsByEpochBounded(epoch, snapshotType, maxRows, metaTxn(txn))
 }
@@ -1499,6 +1334,9 @@ func (a Adapter) GetPoolStakeSnapshotsForPools(
 	poolKeyHashes [][]byte,
 	txn ledgerdb.Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().
 		GetPoolStakeSnapshotsForPools(epoch, snapshotType, poolKeyHashes, metaTxn(txn))
 }
@@ -1516,7 +1354,7 @@ func (a Adapter) GetTotalActiveStake(
 	snapshotType string,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	if err := a.summariesDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
 		return 0, err
 	}
 	return a.db.Metadata().
@@ -1527,6 +1365,9 @@ func (a Adapter) SavePoolStakeSnapshots(
 	snapshots []*models.PoolStakeSnapshot,
 	txn ledgerdb.Txn,
 ) error {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
+		return err
+	}
 	return a.db.Metadata().SavePoolStakeSnapshots(snapshots, metaTxn(txn))
 }
 
@@ -1535,7 +1376,7 @@ func (a Adapter) BumpDormantDRepExpiries(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return 0, err
 	}
 	return a.db.BumpDormantDRepExpiries(ctx, slot, dbTxn(txn))
@@ -1554,7 +1395,7 @@ func (a Adapter) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return 0, err
 	}
 	return a.db.ClearDanglingDRepDelegations(ctx, atSlot, dbTxn(txn))
@@ -1605,7 +1446,7 @@ func (a Adapter) GetActiveDreps(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.Drep, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return nil, err
 	}
 	return a.db.GetActiveDreps(ctx, dbTxn(txn))
@@ -1711,7 +1552,7 @@ func (a Adapter) GetDRepDelegators(
 	drepCredential []byte,
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return nil, err
 	}
 	return a.db.GetDRepDelegators(
@@ -1728,7 +1569,7 @@ func (a Adapter) GetDRepDelegatorsAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (map[string][]models.StakeCredentialRef, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return nil, err
 	}
 	return a.db.GetDRepDelegatorsAtSlot(ctx, dreps, slot, dbTxn(txn))
@@ -1782,7 +1623,7 @@ func (a Adapter) GetDormantDRepEpochs(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return 0, err
 	}
 	return a.db.GetDormantDRepEpochs(ctx, dbTxn(txn))
@@ -1795,7 +1636,7 @@ func (a Adapter) GetDrepByCredential(
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (*models.Drep, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return nil, err
 	}
 	return a.db.GetDrepByCredential(
@@ -1843,7 +1684,7 @@ func (a Adapter) GetDrepsAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.Drep, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return nil, err
 	}
 	return a.db.GetDrepsAtSlot(ctx, refs, slot, dbTxn(txn))
@@ -1877,17 +1718,6 @@ func (a Adapter) GetExpiredAwaitingDropGovernanceProposals(
 		epoch,
 		dbTxn(txn),
 	)
-}
-
-func (a Adapter) GetExpiredDReps(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) ([]*models.Drep, error) {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
-		return nil, err
-	}
-	return a.db.GetExpiredDReps(ctx, epoch, dbTxn(txn))
 }
 
 func (a Adapter) GetExpiredGovernanceProposalsAt(
@@ -1981,7 +1811,7 @@ func (a Adapter) InsertDrepIfAbsent(
 	active bool,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return err
 	}
 	return a.db.InsertDrepIfAbsent(
@@ -2033,7 +1863,7 @@ func (a Adapter) ResetDormantDRepEpochs(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return err
 	}
 	return a.db.ResetDormantDRepEpochs(ctx, slot, dbTxn(txn))
@@ -2077,7 +1907,6 @@ func (a Adapter) SetGenesisGovernance(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisGovernance(
 		initialDReps,
 		delegs,
@@ -2133,7 +1962,7 @@ func (a Adapter) UpdateDRepActivity(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return err
 	}
 	return a.db.UpdateDRepActivity(
@@ -2153,6 +1982,9 @@ func (a Adapter) AddNetworkDonation(
 	amount uint64,
 	txn ledgerdb.Txn,
 ) error {
+	if err := a.requireMetadata(nodesettings.FamilyNetworkDonations); err != nil {
+		return err
+	}
 	return a.db.Metadata().AddNetworkDonation(slot, epoch, amount, metaTxn(txn))
 }
 
@@ -2252,7 +2084,7 @@ func (a Adapter) GetEpochSummary(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {
-	if err := a.summariesDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetEpochSummary(epoch, metaTxn(txn))
@@ -2278,6 +2110,9 @@ func (a Adapter) GetLatestBlockNonce(
 func (a Adapter) GetNetworkState(
 	txn ledgerdb.Txn,
 ) (*models.NetworkState, error) {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().GetNetworkState(metaTxn(txn))
 }
 
@@ -2285,6 +2120,9 @@ func (a Adapter) GetNetworkStateAsOfSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (*models.NetworkState, error) {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().GetNetworkStateAsOfSlot(slot, metaTxn(txn))
 }
 
@@ -2325,17 +2163,11 @@ func (a Adapter) GetPParamUpdates(
 	return a.db.GetPParamUpdates(epoch, dbTxn(txn))
 }
 
-func (a Adapter) ReconcileAlonzoPParamsUnitAfterRecovery(
-	ctx context.Context,
-) error {
-	return a.db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx)
-}
-
 func (a Adapter) SaveEpochSummary(
 	summary *models.EpochSummary,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.summariesDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
 		return err
 	}
 	return a.db.Metadata().SaveEpochSummary(summary, metaTxn(txn))
@@ -2423,6 +2255,9 @@ func (a Adapter) SetNetworkState(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
+		return err
+	}
 	return a.db.Metadata().
 		SetNetworkState(treasury, reserves, slot, metaTxn(txn))
 }
@@ -2441,12 +2276,18 @@ func (a Adapter) SumNetworkDonationsForEpoch(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
+	if err := a.requireMetadata(nodesettings.FamilyNetworkDonations); err != nil {
+		return 0, err
+	}
 	return a.db.Metadata().SumNetworkDonationsForEpoch(epoch, metaTxn(txn))
 }
 
 func (a Adapter) ListNetworkDonations(
 	txn ledgerdb.Txn,
 ) ([]models.NetworkDonation, error) {
+	if err := a.requireMetadata(nodesettings.FamilyNetworkDonations); err != nil {
+		return nil, err
+	}
 	return a.db.Metadata().ListNetworkDonations(metaTxn(txn))
 }
 
@@ -2487,6 +2328,14 @@ func (a Adapter) BlockPointByIndex(
 	return a.db.BlockPointByIndex(blockIndex, dbTxn(txn))
 }
 
+func (a Adapter) DeferredHeaderFloor() (uint64, bool, error) {
+	return a.db.DeferredHeaderFloor()
+}
+
+func (a Adapter) SetDeferredHeaderFloor(slot uint64) error {
+	return a.db.SetDeferredHeaderFloor(slot)
+}
+
 func (a Adapter) DeleteDeferredHeaderMarker(key string) error {
 	return a.db.DeleteDeferredHeaderMarker(key)
 }
@@ -2506,7 +2355,7 @@ func (a Adapter) GetDeferredHeaderMarkerValue(
 }
 
 func (a Adapter) GetSyncState(key string, txn ledgerdb.Txn) (string, error) {
-	if err := a.rewardSyncKeyDrained(key); err != nil {
+	if err := a.requireRewardSyncKeyMetadata(key); err != nil {
 		return "", err
 	}
 	return a.db.GetSyncState(key, dbTxn(txn))
@@ -2533,6 +2382,10 @@ func (a Adapter) ListSyncStateKeysByPrefix(
 	txn ledgerdb.Txn,
 ) ([]string, error) {
 	return a.db.ListSyncStateKeysByPrefix(prefix, dbTxn(txn))
+}
+
+func (a Adapter) ImportedLedgerStateBoundaryHash() (string, error) {
+	return a.db.ImportedLedgerStateBoundaryHash()
 }
 
 func (a Adapter) ImportedLedgerStateBoundarySlotStrict(
@@ -2564,7 +2417,7 @@ func (a Adapter) SetSyncState(
 	value string,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.rewardSyncKeyDrained(key); err != nil {
+	if err := a.requireRewardSyncKeyMetadata(key); err != nil {
 		return err
 	}
 	return a.db.SetSyncState(key, value, dbTxn(txn))
@@ -2579,6 +2432,9 @@ func (a Adapter) SumTransactionFeesInSlotRange(
 	endSlot uint64,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
+		return 0, err
+	}
 	return a.db.Metadata().
 		SumTransactionFeesInSlotRange(startSlot, endSlot, metaTxn(txn))
 }
@@ -2610,40 +2466,6 @@ func (a Adapter) BlockBatchTxnContext(
 	return wrapTxn(a.db.BlockBatchTxnContext(ctx))
 }
 
-func (a Adapter) EnableBatchUtxoOverlay(
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-	inputs []models.UtxoId,
-	deleteOnSpend []models.UtxoId,
-	producers [][]byte,
-) (bool, error) {
-	return a.db.EnableBatchUtxoOverlay(
-		acc, dbTxn(txn), inputs, deleteOnSpend, producers,
-	)
-}
-
-func (a Adapter) FlushBatch(
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.FlushBatch(acc, dbTxn(txn))
-}
-
-func (a Adapter) FlushBatchStakeDeltas(
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.FlushBatchStakeDeltas(acc, dbTxn(txn))
-}
-
-func (a Adapter) NewBatchAccumulator() database.BatchAccumulator {
-	return a.db.NewBatchAccumulator()
-}
-
-func (a Adapter) NewValidatedBlockBatchAccumulator() database.BatchAccumulator {
-	return a.db.NewValidatedBlockBatchAccumulator()
-}
-
 func (a Adapter) PersistTransactionOffsets(
 	txn ledgerdb.Txn,
 	txs []lcommon.Transaction,
@@ -2651,34 +2473,6 @@ func (a Adapter) PersistTransactionOffsets(
 	afterBatch func() error,
 ) error {
 	return a.db.PersistTransactionOffsets(dbTxn(txn), txs, offsets, afterBatch)
-}
-
-func (a Adapter) SetTransactionBatchedWithOpts(
-	ctx context.Context,
-	tx lcommon.Transaction,
-	point common.Point,
-	idx uint32,
-	updateEpoch uint64,
-	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
-	certDeposits map[int]uint64,
-	offsets *database.BlockIngestionResult,
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-	opts database.BatchedTxIngestOpts,
-) error {
-	return a.db.SetTransactionBatchedWithOpts(
-		ctx,
-		tx,
-		point,
-		idx,
-		updateEpoch,
-		pparamUpdates,
-		certDeposits,
-		offsets,
-		acc,
-		dbTxn(txn),
-		opts,
-	)
 }
 
 func (a Adapter) SetTransactionWithOpts(
@@ -2715,6 +2509,14 @@ func (a Adapter) GetTransactionByHash(
 	return a.db.GetTransactionByHash(ctx, hash, dbTxn(txn))
 }
 
+func (a Adapter) GetTransactionSlotByHash(
+	ctx context.Context,
+	hash []byte,
+	txn ledgerdb.Txn,
+) (uint64, bool, error) {
+	return a.db.GetTransactionSlotByHash(ctx, hash, dbTxn(txn))
+}
+
 func (a Adapter) GetTransactionsByHashes(
 	ctx context.Context,
 	hashes [][]byte,
@@ -2749,18 +2551,6 @@ func (a Adapter) MaxLeiosEBSlot() (uint64, error) {
 
 func (a Adapter) MaxLeiosEBSlotContext(ctx context.Context) (uint64, error) {
 	return a.db.MaxLeiosEBSlotContext(ctx)
-}
-
-func (a Adapter) NewLeiosClosureBatchAccumulator() database.BatchAccumulator {
-	return a.db.NewLeiosClosureBatchAccumulator()
-}
-
-func (a Adapter) PrepareLeiosClosureBatch(
-	acc database.BatchAccumulator,
-	txn ledgerdb.Txn,
-	transactions []lcommon.Transaction,
-) (int, error) {
-	return a.db.PrepareLeiosClosureBatch(acc, dbTxn(txn), transactions)
 }
 
 func (a Adapter) SetLeiosEB(
@@ -2877,19 +2667,11 @@ func (a Adapter) GetAccountsActiveAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]struct{}, error) {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
 		GetAccountsActiveAtSlot(stakeCredentials, slot, metaTxn(txn))
-}
-
-func (a Adapter) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.RefreshRewardLiveStakeRefs(refs, slot, dbTxn(txn))
 }
 
 // EachRewardLiveStake lists the metadata store's reward_live_stake rows for
@@ -2901,13 +2683,6 @@ func (a Adapter) EachRewardLiveStake(
 	return a.db.EachRewardLiveStake(dbTxn(txn), fn)
 }
 
-func (a Adapter) RebuildRewardLiveStake(
-	slot uint64,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.RebuildRewardLiveStake(context.Background(), slot, dbTxn(txn))
-}
-
 func (a Adapter) MergeImportedPoolBlockCounts(
 	epoch uint64,
 	epochStartSlot uint64,
@@ -2915,7 +2690,7 @@ func (a Adapter) MergeImportedPoolBlockCounts(
 	totalBlocks uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, uint64, bool, error) {
-	if err := a.blockCountsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
 		return nil, 0, false, err
 	}
 	return database.MergeImportedPoolBlockCounts(
@@ -2935,7 +2710,7 @@ func (a Adapter) CountEpochPoolBlocks(
 	endSlot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, uint64, bool, error) {
-	if err := a.blockCountsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
 		return nil, 0, false, err
 	}
 	counts, total, err := a.db.Metadata().CountPoolBlocksInSlotRange(
@@ -2953,7 +2728,7 @@ func (a Adapter) GetImportedPoolBlockCounts(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, uint64, bool, error) {
-	if err := a.blockCountsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
 		return nil, 0, false, err
 	}
 	return a.db.Metadata().GetImportedPoolBlockCounts(epoch, metaTxn(txn))
@@ -2964,7 +2739,7 @@ func (a Adapter) GetImportedPoolBlockCounts(
 func (a Adapter) ImportedBlockRows(
 	txn ledgerdb.Txn,
 ) (map[uint64]ledgerdb.ImportedBlockRows, error) {
-	if err := a.blockCountsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyRewardBlocksFees); err != nil {
 		return nil, err
 	}
 	store, ok := a.db.Metadata().(metadata.FactRowStore)
@@ -3026,7 +2801,7 @@ func (a Adapter) DRepHistoryRows(
 	txn ledgerdb.Txn,
 ) (ledgerdb.DRepHistoryRows, error) {
 	var out ledgerdb.DRepHistoryRows
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyDReps); err != nil {
 		return out, err
 	}
 	store, ok := a.db.Metadata().(metadata.FactRowStore)
@@ -3124,7 +2899,7 @@ func (a Adapter) GetPParamsRows(
 func (a Adapter) GetLatestEpochSummary(
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {
-	if err := a.summariesDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilySummaries); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetLatestEpochSummary(metaTxn(txn))
@@ -3135,7 +2910,7 @@ func (a Adapter) GetPoolKeyHashesRetiredByEpoch(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if err := a.poolsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyPoolsHistory); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().
@@ -3146,10 +2921,8 @@ func (a Adapter) GetGovernanceProposalsRefundedAt(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	if a.db.FamilyDrained(nodesettings.FamilyGovernance) {
-		return nil, fmt.Errorf(
-			"%w: %s", database.ErrFamilyDrained, nodesettings.FamilyGovernance,
-		)
+	if err := a.requireMetadata(nodesettings.FamilyGovernance); err != nil {
+		return nil, err
 	}
 	return a.db.Metadata().GetGovernanceProposalsRefundedAt(epoch, metaTxn(txn))
 }
@@ -3158,96 +2931,44 @@ func (a Adapter) GetPostSnapshotRewardCreditEvents(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := a.rewardCreditsDrained(); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return nil, err
 	}
 	return a.db.Metadata().GetPostSnapshotRewardCreditEvents(slot, metaTxn(txn))
 }
 
-// summariesDrained refuses a read or write of the epoch summary rows once
-// the summaries family is drained: the metadata store holds none, so an
-// answer from it would be empty rather than wrong-looking.
-func (a Adapter) summariesDrained() error {
-	if a.db.FamilyDrained(nodesettings.FamilySummaries) {
-		return fmt.Errorf(
-			"%w: %s", database.ErrFamilyDrained, nodesettings.FamilySummaries,
-		)
+// requireMetadata refuses a read or write of the SQL rows of f on the
+// ledger's database, which keeps no metadata store: an answer would be empty
+// rather than true. The ledger's LedgerDB answers these from the set.
+func (a Adapter) requireMetadata(f nodesettings.Family) error {
+	if a.db.Metadata() == nil {
+		return fmt.Errorf("%w: %s", database.ErrNoMetadataStore, f)
 	}
 	return nil
 }
 
-// familyDrained refuses a read of the SQL rows of a drained family: the
-// metadata store holds none, so an answer would be empty rather than true.
-func (a Adapter) familyDrained(f nodesettings.Family) error {
-	if a.db.FamilyDrained(f) {
-		return fmt.Errorf("%w: %s", database.ErrFamilyDrained, f)
+// requireStore is requireMetadata for SQL rows no ledger-state family owns,
+// such as the transaction index a v0.94.2 store kept.
+func (a Adapter) requireStore(what string) error {
+	if a.db.Metadata() == nil {
+		return fmt.Errorf("%w: %s", database.ErrNoMetadataStore, what)
 	}
 	return nil
 }
 
-// poolsDrained refuses a read of the pool tables once the pools-history family
-// is drained; the ledger's LedgerDB answers these reads from the set.
-func (a Adapter) poolsDrained() error {
-	return a.familyDrained(nodesettings.FamilyPoolsHistory)
-}
-
-// blockCountsDrained refuses a read of the imported block counts once the
-// reward-blocks-fees family is drained: the metadata store holds none, so an
-// answer from it would read as "unknown" rather than fail.
-func (a Adapter) blockCountsDrained() error {
-	return a.familyDrained(nodesettings.FamilyRewardBlocksFees)
-}
-
-// rewardInputsDrained refuses a read or write of the reward snapshot inputs
-// once the reward-inputs family is drained: the metadata store holds none, so
-// an answer from it would read as "no snapshot" rather than fail.
-func (a Adapter) rewardInputsDrained() error {
-	return a.familyDrained(nodesettings.FamilyRewardInputs)
-}
-
-// rewardOutputsDrained refuses a read or write of the reward pool and account
-// outputs and the credited rounds once the reward-outputs family is drained:
-// the metadata store holds none, so an answer from it would read as "no
-// round" rather than fail.
-func (a Adapter) rewardOutputsDrained() error {
-	return a.familyDrained(nodesettings.FamilyRewardOutputs)
-}
-
-// rewardCreditsDrained refuses a read of the credits applied after the SNAP
-// point, which are account_reward_delta rows of the accounts family and are
-// summed with the credited rounds.
-func (a Adapter) rewardCreditsDrained() error {
-	return errors.Join(
-		a.familyDrained(nodesettings.FamilyAccounts),
-		a.rewardOutputsDrained(),
-	)
-}
-
-// accountReadsDrained refuses a stake read that joins the account tables, the
-// live stake aggregate and the credited rounds; the ledger's LedgerDB answers
-// these from the set.
-func (a Adapter) accountReadsDrained() error {
-	return errors.Join(
-		a.familyDrained(nodesettings.FamilyAccounts),
-		a.familyDrained(nodesettings.FamilyLiveStake),
-		a.rewardOutputsDrained(),
-	)
-}
-
-// rewardSyncKeyDrained refuses a read or write of a sync_state key a reward
-// family owns once it is drained: the precompute cursors and the eligibility
-// recheck belong to reward outputs, the pending stake-input record to reward
-// inputs.
-func (a Adapter) rewardSyncKeyDrained(key string) error {
+// requireRewardSyncKeyMetadata is requireMetadata for a sync_state key a
+// reward family owns: the precompute cursors and the eligibility recheck
+// belong to reward outputs, the pending stake-input record to reward inputs.
+func (a Adapter) requireRewardSyncKeyMetadata(key string) error {
 	if strings.HasPrefix(
 		key,
 		models.StakeRewardSourcePrefix+"precompute-cursor:",
 	) ||
 		key == models.RewardEligibilityRecheckKey {
-		return a.rewardOutputsDrained()
+		return a.requireMetadata(nodesettings.FamilyRewardOutputs)
 	}
 	if key == models.RewardStakeInputsPendingKey {
-		return a.rewardInputsDrained()
+		return a.requireMetadata(nodesettings.FamilyRewardInputs)
 	}
 	return nil
 }
@@ -3257,7 +2978,7 @@ func (a Adapter) EachRewardJournalRow(
 	txn ledgerdb.Txn,
 	fn func(ledgerdb.RewardJournalRow) error,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+	if err := a.requireMetadata(nodesettings.FamilyAccounts); err != nil {
 		return err
 	}
 	store, ok := a.db.Metadata().(metadata.FactRowStore)

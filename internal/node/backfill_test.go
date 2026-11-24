@@ -65,6 +65,38 @@ func newTestDB(t *testing.T) *database.Database {
 	return db
 }
 
+// indexerConsensus maps each IndexerDB newIndexerTestDB returns to the
+// ledger's database beside it, which owns the blocks the backfill reads.
+var indexerConsensus sync.Map
+
+// newIndexerTestDB returns an IndexerDB, the database the backfill indexes
+// and the deferred indexes are kept in, over an in-memory ledger database.
+func newIndexerTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	consensus := newTestDB(t)
+	db, err := dbtest.NewIndexerDatabase(t, consensus, dbtest.IndexerOptions{})
+	require.NoError(t, err)
+	indexerConsensus.Store(db, consensus)
+	// testing keeps a finished test's cleanups reachable until the run
+	// ends; dropping the reference lets the closed database be collected.
+	closing := db
+	t.Cleanup(func() {
+		key := closing
+		closing = nil
+		indexerConsensus.Delete(key)
+	})
+	return db
+}
+
+// consensusOf returns the ledger's database beside the IndexerDB db, where
+// a test stores the blocks the backfill reads.
+func consensusOf(t *testing.T, db *database.Database) *database.Database {
+	t.Helper()
+	consensus, ok := indexerConsensus.Load(db)
+	require.True(t, ok, "db is not an IndexerDB from newIndexerTestDB")
+	return consensus.(*database.Database)
+}
+
 func newFileTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -94,7 +126,7 @@ func addValidBackfillBlocksFrom(
 	blocks, err := testfixtures.GenerateConwayChainAt(1, startSlot, count)
 	require.NoError(t, err)
 	for _, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -227,7 +259,7 @@ func TestBackfillReadAheadPrefetchesConsumedInputsOfRealBlocks(t *testing.T) {
 func TestRunPrefetchesEachDecodedBlock(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	addValidBackfillBlocks(t, db, 3)
 	backfill := NewBackfill(
 		db,
@@ -251,7 +283,7 @@ func bindBackfillCheckpointIdentity(
 	cp *models.BackfillCheckpoint,
 ) {
 	t.Helper()
-	txn := db.BlobTxn(false)
+	txn := consensusOf(t, db).BlobTxn(false)
 	var (
 		point ocommon.Point
 		index uint64
@@ -272,7 +304,7 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
@@ -332,7 +364,7 @@ func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 	t *testing.T,
 ) {
 	t.Parallel()
-	testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(t, newTestDB)
+	testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(t, newIndexerTestDB)
 }
 
 func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
@@ -466,7 +498,7 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 
 	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
@@ -528,7 +560,7 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
 	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
@@ -703,7 +735,7 @@ func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 			require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 				CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
@@ -751,7 +783,7 @@ func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	drepOne := bytes.Repeat([]byte{0x71}, lcommon.Blake2b224Size)
 	drepTwo := bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size)
@@ -840,7 +872,7 @@ func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
 func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	drepCredential := bytes.Repeat([]byte{0x79}, lcommon.Blake2b224Size)
 	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
@@ -1027,13 +1059,7 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     "",
-		StorageMode: types.StorageModeAPI,
-		Logger:      slog.Default(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
@@ -1144,13 +1170,7 @@ func TestBackfillFlushesByteBatchWithinTransactionLevel(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     "",
-		StorageMode: types.StorageModeAPI,
-		Logger:      slog.Default(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
@@ -1266,13 +1286,7 @@ func TestBackfillKeepsSmallQueueInTransactionPastByteEstimate(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     "",
-		StorageMode: types.StorageModeAPI,
-		Logger:      slog.Default(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	backfill.batchTxnEstimatedBytes = DefaultBackfillBatchBytes
@@ -1360,7 +1374,7 @@ func TestBackfillKeepsSmallQueueInTransactionPastByteEstimate(t *testing.T) {
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	require.Error(t, bf.SetBatchSize(0))
@@ -1371,7 +1385,7 @@ func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
 func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// No checkpoint and no blocks => nothing to backfill
@@ -1383,7 +1397,7 @@ func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
 func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// Blocks present but no checkpoint => backfill is NOT needed.
@@ -1394,7 +1408,7 @@ func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
 	for i := range hash {
 		hash[i] = byte(i)
 	}
-	err := db.BlockCreate(models.Block{
+	err := consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 100,
 		Hash: hash,
 		Cbor: []byte{0x82, 0x01},
@@ -1410,7 +1424,7 @@ func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
 func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// Create an incomplete checkpoint
@@ -1435,7 +1449,7 @@ func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
 func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// Create a completed checkpoint
@@ -1460,7 +1474,7 @@ func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
 func TestRun_EmptyBlobStore(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// No blocks in blob store => Run should return nil immediately
@@ -1476,7 +1490,7 @@ func TestRun_EmptyBlobStore(t *testing.T) {
 func TestRun_AlreadyCompleted(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// Pre-create a completed checkpoint
@@ -1500,7 +1514,7 @@ func TestRun_AlreadyCompleted(t *testing.T) {
 func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	now := time.Now()
 	cp := &models.BackfillCheckpoint{
@@ -1528,7 +1542,7 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
@@ -1544,7 +1558,7 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	addValidBackfillBlocks(t, db, 2)
 	malformedHash := make([]byte, 32)
 	malformedHash[0] = 3
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 2,
 		Hash: malformedHash,
 		Cbor: []byte{0xff},
@@ -1570,12 +1584,12 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 func TestRun_RejectsMissingCanonicalBlockBody(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	addValidBackfillBlocks(t, db, 3)
 
 	middle, err := db.BlockByIndex(database.BlockInitialIndex+1, nil)
 	require.NoError(t, err)
-	txn := db.BlobTxn(true)
+	txn := consensusOf(t, db).BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return txn.BlobStore().Delete(
 			txn.Blob(),
@@ -1601,7 +1615,7 @@ func TestRun_RejectsMissingCanonicalBlockBody(t *testing.T) {
 func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 4)
 	require.NoError(t, err)
 	ids := []uint64{
@@ -1611,7 +1625,7 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 		1001,
 	}
 	for i, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     ids[i],
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -1635,7 +1649,7 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 	backwardKey := types.BlockBlobKey(
 		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
 	)
-	txn := db.BlobTxn(true)
+	txn := consensusOf(t, db).BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return txn.BlobStore().Set(
 			txn.Blob(), types.BlockBlobIndexKey(ids[2]), backwardKey,
@@ -1659,12 +1673,12 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 5)
 	require.NoError(t, err)
 	for _, i := range []int{0, 4, 2} {
 		block := blocks[i]
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -1694,12 +1708,12 @@ func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
 func TestRun_BoundedBackfillAuditsCanonicalTail(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
 	require.NoError(t, err)
 	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
 		block := blocks[blockOffset]
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     database.BlockInitialIndex + uint64(idOffset),
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -1730,7 +1744,7 @@ func TestRun_BoundedBackfillAuditsCanonicalTail(t *testing.T) {
 func TestRun_LegacyCheckpointWithoutIdentityReplaysFromStart(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	addValidBackfillBlocks(t, db, 3)
 	now := time.Now()
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -1765,7 +1779,7 @@ func TestRun_LegacyCheckpointWithoutIdentityReplaysFromStart(t *testing.T) {
 func TestRun_RejectsCheckpointIdentityMismatch(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	addValidBackfillBlocks(t, db, 2)
 	now := time.Now()
 	cp := &models.BackfillCheckpoint{
@@ -1796,12 +1810,12 @@ func TestRun_RejectsCheckpointIdentityMismatch(t *testing.T) {
 func TestRun_ResumeAuditsFirstCanonicalIndexAfterCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
 	require.NoError(t, err)
 	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
 		block := blocks[blockOffset]
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     database.BlockInitialIndex + uint64(idOffset),
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -1841,11 +1855,11 @@ func TestRun_ResumeAuditsFirstCanonicalIndexAfterCheckpoint(t *testing.T) {
 func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
 	require.NoError(t, err)
 	for i, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     database.BlockInitialIndex + uint64(i),
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -1858,7 +1872,7 @@ func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
 	precedingKey := types.BlockBlobKey(
 		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
 	)
-	txn := db.BlobTxn(true)
+	txn := consensusOf(t, db).BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return txn.BlobStore().Set(
 			txn.Blob(),
@@ -1886,12 +1900,12 @@ func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
 func TestRun_EndSlotBetweenCanonicalBlocksCompletes(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
 	require.NoError(t, err)
 	for _, i := range []int{0, 2} {
 		block := blocks[i]
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -1919,7 +1933,7 @@ func TestRun_EndSlotBetweenCanonicalBlocksCompletes(t *testing.T) {
 // replay then finds the journal row and skips the debit as well.
 func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
 	t.Parallel()
-	testRun_ResumeStopsAtRecordedMithrilAnchor(t, newTestDB)
+	testRun_ResumeStopsAtRecordedMithrilAnchor(t, newIndexerTestDB)
 }
 
 func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
@@ -1946,11 +1960,11 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
 			require.NoError(t, err)
 			for _, block := range blocks {
-				require.NoError(t, db.BlockCreate(models.Block{
+				require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 					Slot:   block.SlotNumber(),
 					Hash:   block.Hash().Bytes(),
 					Number: block.BlockNumber(),
@@ -2027,11 +2041,11 @@ func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
 			require.NoError(t, err)
 			for _, block := range blocks {
-				require.NoError(t, db.BlockCreate(models.Block{
+				require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 					Slot:   block.SlotNumber(),
 					Hash:   block.Hash().Bytes(),
 					Number: block.BlockNumber(),
@@ -2076,11 +2090,11 @@ func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
 
 func TestRun_FailedFreshBootstrapRetryEnablesConsumedInputRecovery(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
 	require.NoError(t, err)
 	for i, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     database.BlockInitialIndex + uint64(i),
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -2104,7 +2118,7 @@ func TestRun_FailedFreshBootstrapRetryEnablesConsumedInputRecovery(t *testing.T)
 		db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	bf.SetFreshDatabaseBootstrap(true)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		ID:     database.BlockInitialIndex,
 		Slot:   firstBlock.SlotNumber(),
 		Hash:   firstBlock.Hash().Bytes(),
@@ -2113,7 +2127,7 @@ func TestRun_FailedFreshBootstrapRetryEnablesConsumedInputRecovery(t *testing.T)
 		Type:   uint(firstBlock.Type()),
 	}, nil))
 	require.ErrorContains(t, bf.Run(context.Background()), "parsing block")
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		ID:     database.BlockInitialIndex,
 		Slot:   firstBlock.SlotNumber(),
 		Hash:   firstBlock.Hash().Bytes(),
@@ -2141,7 +2155,7 @@ func testRun_ResumeStopsAtRecordedMithrilAnchor(
 	require.Len(t, blocks, 2)
 	for _, block := range blocks {
 		require.NotEmpty(t, block.Transactions())
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -2204,7 +2218,7 @@ func testRun_ResumeStopsAtRecordedMithrilAnchor(
 // validate that cardano-node rejects.
 func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
 	t.Parallel()
-	testRun_RestoresSnapshotAccountDelegationAtAnchor(t, newTestDB)
+	testRun_RestoresSnapshotAccountDelegationAtAnchor(t, newIndexerTestDB)
 }
 
 func testRun_RestoresSnapshotAccountDelegationAtAnchor(
@@ -2356,7 +2370,7 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 // leaves 520 and 530.
 func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
 	t.Parallel()
-	testRun_KeepsSnapshotDRepExpiryAtAnchor(t, newTestDB)
+	testRun_KeepsSnapshotDRepExpiryAtAnchor(t, newIndexerTestDB)
 }
 
 func testRun_KeepsSnapshotDRepExpiryAtAnchor(
@@ -2549,7 +2563,7 @@ func testRun_KeepsSnapshotDRepExpiryAtAnchor(
 // inside its lifetime stays eligible for ratification.
 func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
 	t.Parallel()
-	testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t, newTestDB)
+	testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t, newIndexerTestDB)
 }
 
 func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
@@ -2721,7 +2735,7 @@ func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
 // write), and an anchor in an era's first epoch (the hard-fork write).
 func TestRun_KeepsImportedProtocolParameters(t *testing.T) {
 	t.Parallel()
-	testRun_KeepsImportedProtocolParameters(t, newTestDB)
+	testRun_KeepsImportedProtocolParameters(t, newIndexerTestDB)
 }
 
 func testRun_KeepsImportedProtocolParameters(
@@ -2811,7 +2825,7 @@ func testRun_KeepsImportedProtocolParameters(
 func TestStoredEpochPParamsIgnoresEraWithoutDecoder(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	require.NoError(t, db.SetPParams([]byte{0x80}, 0, 0, eras.ByronEraDesc.Id, nil))
 	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	pp, ok, err := bf.storedEpochPParams(0, eras.ByronEraDesc.Id, nil)
@@ -2825,7 +2839,7 @@ func TestStoredEpochPParamsIgnoresEraWithoutDecoder(t *testing.T) {
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	now := time.Now()
 	cp := &models.BackfillCheckpoint{
@@ -2866,7 +2880,7 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	now := time.Now()
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -2883,7 +2897,7 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 
 	hash := make([]byte, 32)
 	hash[0] = 1
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 0,
 		Hash: hash,
 		Cbor: []byte{0x82, 0x01},
@@ -2901,7 +2915,7 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	now := time.Now()
 	cp := &models.BackfillCheckpoint{
@@ -2917,7 +2931,7 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	addValidBackfillBlocks(t, db, 4)
 	hash := make([]byte, 32)
 	hash[0] = 5
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 4,
 		Hash: hash,
 		Cbor: []byte{0xff},
@@ -2947,7 +2961,7 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 
 	now := time.Now()
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -2966,7 +2980,7 @@ func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
 	addValidBackfillBlocks(t, db, 5)
 	hash := make([]byte, 32)
 	hash[0] = 6
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 5,
 		Hash: hash,
 		Cbor: []byte{0xff},
@@ -2991,13 +3005,13 @@ func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
 func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
 	require.NoError(t, err)
 	require.Len(t, blocks, 2)
 	for _, block := range blocks {
 		blockCbor := block.Cbor()
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -3043,17 +3057,45 @@ func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
 	assert.False(t, checkpoint.Completed)
 }
 
+// The IndexerDB reads the ledger's block store, where the ledger keeps the
+// mark for its own rows. The API backfill must not take that mark for the
+// IndexerDB's rows, or it would leave their offsets unwritten.
+func TestImmutableUtxoOffsetsMarkIsPerDatabase(t *testing.T) {
+	t.Parallel()
+
+	ledgerDB := newTestDB(t)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, ledgerDB, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, MarkImmutableUtxoOffsetsComplete(ledgerDB, 4242))
+	_, marked, err := ImmutableUtxoOffsetsTipSlot(indexerDB)
+	require.NoError(t, err)
+	require.False(t, marked, "the IndexerDB took the ledger's mark")
+
+	require.NoError(t, MarkImmutableUtxoOffsetsComplete(indexerDB, 7))
+	slot, marked, err := ImmutableUtxoOffsetsTipSlot(indexerDB)
+	require.NoError(t, err)
+	require.True(t, marked)
+	require.Equal(t, uint64(7), slot)
+	slot, marked, err = ImmutableUtxoOffsetsTipSlot(ledgerDB)
+	require.NoError(t, err)
+	require.True(t, marked)
+	require.Equal(t, uint64(4242), slot)
+}
+
 // TestBackfill_AutoDetectsImmutableUtxoOffsetsTip ensures that without an
 // explicit setter call, Run() picks up the sync-state marker and applies it
 // as the skip threshold. This is the path Mithril sync depends on.
 func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	require.NoError(t, db.SetSyncState(
-		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+		database.ImmutableUtxoOffsetsTipKey, "4242", nil,
 	))
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
@@ -3076,11 +3118,11 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	require.NoError(t, db.SetSyncState(
-		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+		database.ImmutableUtxoOffsetsTipKey, "4242", nil,
 	))
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
@@ -3112,11 +3154,11 @@ func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	require.NoError(t, db.SetSyncState(
-		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+		database.ImmutableUtxoOffsetsTipKey, "4242", nil,
 	))
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
@@ -3137,7 +3179,7 @@ func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
 func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
 	// Insert a block so tipSlot > 0 and Run reaches the
@@ -3146,7 +3188,7 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	for i := range hash {
 		hash[i] = byte(i)
 	}
-	err := db.BlockCreate(models.Block{
+	err := consensusOf(t, db).BlockCreate(models.Block{
 		Slot: 100,
 		Hash: hash,
 		Cbor: []byte{0x82, 0x01},
@@ -3172,7 +3214,7 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
@@ -3245,7 +3287,7 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 		Slot: 1000,
 		Hash: bytes.Repeat([]byte{0x26}, 32),
 	}
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot:   point.Slot,
 		Hash:   point.Hash,
 		Number: 1,
@@ -3307,7 +3349,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	stakeKey := bytes.Repeat([]byte{0x42}, 28)
 	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
@@ -3354,7 +3396,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	require.NoError(t, err)
 	block.SetCbor(blockCbor)
 	point := ocommon.Point{Slot: 1000, Hash: bytes.Repeat([]byte{0x26}, 32)}
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		Slot: point.Slot, Hash: point.Hash, Number: 1, Cbor: blockCbor,
 		Type: uint(block.Type()),
 	}, nil))
@@ -3402,7 +3444,7 @@ func TestRun_WritesBlockNoncesBelowEndSlot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			require.NoError(t, db.SetEpoch(
 				0, 0, nil, nil, nil, nil,
 				eras.ConwayEraDesc.Id, 1000, 100, nil,
@@ -3449,11 +3491,11 @@ func TestRun_WritesBlockNoncesBelowEndSlot(t *testing.T) {
 func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 2)
 	require.NoError(t, err)
 	ebbHash := bytes.Repeat([]byte{0xeb}, 32)
-	require.NoError(t, db.BlockCreate(models.Block{
+	require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 		ID:   database.BlockInitialIndex,
 		Slot: blocks[0].SlotNumber(),
 		Hash: ebbHash,
@@ -3461,7 +3503,7 @@ func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
 		Type: 0,
 	}, nil))
 	for i, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			ID:     database.BlockInitialIndex + 1 + uint64(i),
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
@@ -3499,11 +3541,11 @@ func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
 func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
 	require.NoError(t, err)
 	for _, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),
@@ -3529,11 +3571,11 @@ func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
 func TestRun_ConsumedInputRecoveryWindowFromMidChainCheckpoint(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(4)
 	require.NoError(t, err)
 	for _, block := range blocks {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 			Slot:   block.SlotNumber(),
 			Hash:   block.Hash().Bytes(),
 			Number: block.BlockNumber(),

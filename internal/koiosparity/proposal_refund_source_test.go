@@ -530,6 +530,7 @@ func refundPendingState(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
 			[]byte{0x01}, tipSlot, 1,
 		).Error)
+		setSourceTip(t, db, []byte{0x01}, tipSlot)
 	}
 	return db, registered
 }

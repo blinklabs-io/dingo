@@ -15,17 +15,13 @@
 package ledger
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
@@ -160,92 +156,5 @@ func TestHeaderVerificationDeferredCounter(t *testing.T) {
 		syncMetricValue(
 			t, reg, "dingo_ledger_header_verification_deferred_total",
 		),
-	)
-}
-
-// The sweep exports the floor it persisted and the rows it deleted.
-func TestConsumedUtxoSweepMetrics(t *testing.T) {
-	t.Parallel()
-
-	fixture := seedRetentionReconstructionFixture(t)
-	reg := prometheus.NewRegistry()
-	fixture.ls.metrics.init(reg)
-	require.NoError(
-		t,
-		fixture.db.MarkUtxosDeletedAtSlot(
-			context.Background(),
-			nil,
-			[]types.UtxoKey{
-				{TxId: bytes.Repeat([]byte{0x11}, 32), OutputIdx: 0},
-			},
-			150,
-		),
-	)
-	pruned, floor, err := fixture.ls.pruneConsumedUtxosUpTo(
-		context.Background(), 200, 50, 1000,
-	)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		float64(floor),
-		promtestutil.ToFloat64(fixture.ls.metrics.consumedUtxoPruneFloorSlot),
-	)
-	require.Equal(
-		t,
-		float64(pruned),
-		promtestutil.ToFloat64(fixture.ls.metrics.consumedUtxoSweepRowsDeleted),
-	)
-	require.Positive(t, pruned)
-}
-
-// A sweep whose candidate floor is below the durable one must export the
-// durable floor, so the gauge never decreases.
-func TestConsumedUtxoSweepMetricsExportDurableFloor(t *testing.T) {
-	t.Parallel()
-
-	fixture := seedRetentionReconstructionFixture(t)
-	reg := prometheus.NewRegistry()
-	fixture.ls.metrics.init(reg)
-	require.NoError(t, fixture.ls.persistConsumedUtxoPruneFloor(5000, nil))
-
-	_, floor, err := fixture.ls.pruneConsumedUtxosUpTo(
-		context.Background(), 200, 50, 1000,
-	)
-	require.NoError(t, err)
-	require.Less(t, floor, uint64(5000))
-	require.Equal(
-		t,
-		float64(5000),
-		promtestutil.ToFloat64(fixture.ls.metrics.consumedUtxoPruneFloorSlot),
-	)
-}
-
-// A sweep that could not read the durable floor back must leave the floor
-// gauge untouched while still counting its deleted rows.
-func TestConsumedUtxoSweepFloorReadFailureKeepsGauge(t *testing.T) {
-	t.Parallel()
-
-	m := &stateMetrics{}
-	m.init(prometheus.NewRegistry())
-	m.observeConsumedUtxoSweepAt(5000, nil, 0)
-
-	m.observeConsumedUtxoSweepAt(150, errors.New("read failed"), 3)
-	require.Equal(
-		t, float64(5000),
-		promtestutil.ToFloat64(m.consumedUtxoPruneFloorSlot),
-	)
-	require.Equal(
-		t, float64(3),
-		promtestutil.ToFloat64(m.consumedUtxoSweepRowsDeleted),
-	)
-
-	m.observeConsumedUtxoSweepAt(6000, nil, 2)
-	require.Equal(
-		t, float64(6000),
-		promtestutil.ToFloat64(m.consumedUtxoPruneFloorSlot),
-	)
-	require.Equal(
-		t, float64(5),
-		promtestutil.ToFloat64(m.consumedUtxoSweepRowsDeleted),
 	)
 }

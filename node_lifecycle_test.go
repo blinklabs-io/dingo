@@ -131,13 +131,13 @@ type liveNodeOption func(*liveNodeSeed)
 type liveNodeSeed struct {
 	livedIn bool
 	legacy  bool
+	host    *plugin.Host
 }
 
-// withLegacyStorageFixture leaves the database as a released version left it,
-// with its UTxO set and ledger state in the metadata store. The harness
-// neither moves it into the live UTxO set nor starts the ledger: the test
-// runs the startup sequence itself.
-func withLegacyStorageFixture(seed *liveNodeSeed) { seed.legacy = true }
+// withPluginHost runs the node on host instead of a fresh built-in one.
+func withPluginHost(host *plugin.Host) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.host = host }
+}
 
 // withLivedInUtxoSet seeds the live UTxO set as one a node holds after it
 // started on an empty database and applied the blocks one at a time: the
@@ -166,29 +166,34 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
-	cfg.UtxoSet = livesettest.New()
+	// The node's own set, loaded at the origin as a node's first start loads
+	// it, so its journal still reaches back to the first block.
+	tip, err := n.db.GetTip(nil)
+	require.NoError(t, err)
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{}, nil))
+	set := livesettest.OpenLedgerDBAt(t, cfg.Database, n.config.cfg.DatabasePath)
+	cfg.UtxoSet = set
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
 	require.NoError(t, seedLedger.Close())
-	epochs, err := n.db.GetEpochs(nil)
+	epochs, err := set.Epochs()
 	require.NoError(t, err)
 	require.Len(t, epochs, 1)
 	first := epochs[0]
+	later := make([]models.Epoch, 0, lastEpoch)
 	for id := uint64(1); id <= lastEpoch; id++ {
-		require.NoError(t, n.db.SetEpoch(
-			first.StartSlot+id*uint64(first.LengthInSlots),
-			id,
-			first.Nonce,
-			first.EvolvingNonce,
-			first.CandidateNonce,
-			first.LastEpochBlockNonce,
-			first.EraId,
-			first.SlotLength,
-			first.LengthInSlots,
-			nil,
-		))
+		e := first
+		e.ID = 0
+		e.EpochId = id
+		e.StartSlot = first.StartSlot + id*uint64(first.LengthInSlots)
+		later = append(later, e)
 	}
+	require.NoError(t, set.ApplyLedgerChanges(
+		nil, ledger.LedgerChanges{Epochs: later},
+	))
+	require.NoError(t, livesettest.CloseLedgerDB(cfg.Database))
+	require.NoError(t, n.db.SetTip(tip, nil))
 }
 
 // newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis
@@ -228,8 +233,12 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	pluginHost, err := internalplugins.NewHost()
-	require.NoError(t, err)
+	pluginHost := seed.host
+	if pluginHost == nil {
+		var err error
+		pluginHost, err = internalplugins.NewHost()
+		require.NoError(t, err)
+	}
 	storageSelections := internalplugins.StorageSelections{
 		Blob: plugin.Selection{Provider: "badger", Config: map[string]any{
 			"memTableSize": int64(8 << 20),
@@ -449,21 +458,12 @@ func loadLiveLifecycleTestBlocksAtBlock(
 	require.NoError(t, err)
 
 	var points []ocommon.Point
-	for i, block := range blocks {
+	for _, block := range blocks {
 		require.NoError(t, c.AddBlock(context.Background(), block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
 			Hash: block.Hash().Bytes(),
 		})
-		if i == 0 {
-			require.NoError(t, db.SetBlockNonce(
-				block.Hash().Bytes(),
-				block.SlotNumber(),
-				bytes.Repeat([]byte{0x5c}, 32),
-				true, // isCheckpoint
-				nil,
-			))
-		}
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
 	require.Len(t, points, numBlocks)
@@ -696,8 +696,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 // CIP-0163 delegator-inactivity expiry must keep that gate enabled, with its
 // exact configured window, after a live truncate rebuilds its LedgerState
 // and snapshot manager. The Limit on Patience settings must reach the rebuilt
-// chainsync state, and the rebuilt planner statistics manager must already
-// have optimized the replacement database handle.
+// chainsync state.
 func TestLiveTruncateReinitializationPreservesConfig(
 	t *testing.T,
 ) {
@@ -759,19 +758,6 @@ func TestLiveTruncateReinitializationPreservesConfig(
 	tc := n.chainsyncState.GetTrackedClient(conn)
 	require.NotNil(t, tc)
 	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
-
-	// The replacement handle may never have been analyzed, so the rebuilt
-	// planner statistics manager must run its startup pass on it and a
-	// further pass finds nothing to change.
-	require.NotNil(t, n.plannerStatsMgr)
-	result, err := n.plannerStatsMgr.RunStartup(context.Background())
-	require.NoError(t, err)
-	require.True(t, result.Supported)
-	require.False(
-		t,
-		result.Changed,
-		"the replacement handle must already have been optimized",
-	)
 }
 
 // genesisSelectionTestWindowSlots is the Genesis density window the test
@@ -1281,10 +1267,33 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	// Expire the operation context while deferred-index maintenance is still
-	// running, so its drain cannot be confirmed. The durable Badger provider
-	// still closes to completion afterward.
-	n.deferredIndexMaintenanceDone = make(chan struct{})
+	// A provider that returns at the deadline leaves its close unconfirmed.
+	// The durable Badger provider still closes to completion afterward.
+	require.NoError(t, plugin.Register[string, struct{}, struct{}](
+		n.pluginHost,
+		plugin.Descriptor{
+			Capability: plugin.CapabilityStorageBlob,
+			Name:       "test-stop-at-deadline",
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "test", plugin.Lifecycle{
+				StopFunc: func(ctx context.Context) error {
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(),
+		n.pluginHost,
+		plugin.CapabilityStorageBlob,
+		"test-stop-at-deadline",
+		nil,
+		struct{}{},
+	)
+	require.NoError(t, err)
 
 	// Capture the blob store's own completion signal before Truncate closes
 	// n.db out from under it: BlobStoreBadger.Closed() closes only once its
@@ -1307,7 +1316,7 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	defer cancel()
 
 	targetSlot := points[len(points)/2].Slot
-	_, err := n.Truncate(
+	_, err = n.Truncate(
 		shortCtx,
 		dblifecycle.TruncateTarget{Slot: &targetSlot},
 	)
@@ -1517,7 +1526,7 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	require.NoError(t, err)
 	_, err = lifecycle.Truncate(
 		&errAfterNChecks{Context: context.Background(), n: 3},
-		n.db, target, 1, false, 0,
+		n.db, target, 1,
 		setOpts...,
 	)
 	require.ErrorIs(t, err, context.Canceled)
@@ -1525,7 +1534,7 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	pending, err := lifecycle.GetPendingTruncate(n.db)
 	require.NoError(t, err)
 	require.NotNil(t, pending)
-	require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
+	require.NoError(t, n.db.SetChainState("sync_status", "in_progress", nil))
 
 	targetSlot := points[2].Slot
 	_, err = n.Truncate(
@@ -1540,95 +1549,9 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	require.NotErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 }
 
-// TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against
-// a real storage-lock leak: Truncate's tmpDB (opened purely
-// to resolve the truncate target) used to only be deferred-closed AFTER
-// checking database.New's error — but database.New can return a non-nil
-// *Database alongside a non-nil, recoverable CommitTimestampError (see
-// its own doc comment, "database is available for recovery, so return it
-// with error"), and an early return on that error before the defer
-// statement executes skips the deferred Close entirely. tmpDB's badger
-// directory lock would then still be held when reinitializeAndResume's
-// reinitializeCoreStorage tries to reopen that very same data directory a
-// moment later, turning what should be a gracefully recovered
-// CommitTimestampError into a hard lock-contention failure that brings
-// the whole node down instead of resuming it.
-//
-// This reproduces exactly that CommitTimestampError condition (metadata
-// commit timestamp set without a matching blob one, mirroring
-// TestCheckCommitTimestamp_MetadataOnly in the database package) via the
-// node's own already-open db handle, then invokes Truncate with a target
-// that is deliberately in range, so the corrupted commit timestamp is the
-// only thing that can classify the result as
-// lifecycle.ErrTruncateNotStarted (nothing on disk was touched, so resume
-// is expected to succeed). If tmpDB leaked its lock, reinitializeCoreStorage's
-// own reopen attempt fails with a lock error instead of gracefully
-// recovering the very same CommitTimestampError, and reinitializeAndResume
-// fails ("resume also failed"); with the fix, it must succeed and leave
-// the node fully usable.
-func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 10
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	// Nothing may commit between the corruption below and Truncate's tmpDB
-	// open: a both-store read-write commit rewrites BOTH commit timestamps
-	// to time.Now() (database.Txn.Commit's updateCommitTimestamp), which
-	// heals the injected mismatch, so the truncate below would really run
-	// and succeed instead of being classified ErrTruncateNotStarted. The
-	// helper leaves the ledger's startup work running (block processing,
-	// the database worker pool, the reward precompute), and Truncate only
-	// drains it later, inside its own quiesce -- so close the ledger state
-	// first, before the corruption lands. Truncate closes it again, which
-	// LedgerState.Close replays from its memoized result.
-	require.NoError(t, n.ledgerState.Close())
-
-	// Corrupt the on-disk commit timestamps via the node's own already-open
-	// db handle: set metadata's without touching blob's, so the NEXT fresh
-	// database.New against this same data directory (Truncate's tmpDB, and
-	// later reinitializeCoreStorage's reopen) observes a mismatch and
-	// returns a recoverable CommitTimestampError.
-	metaTxn := n.db.Metadata().Transaction(t.Context())
-	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
-
-	oldCtx := n.ctx
-	// The target itself is never actually validated: the corrupted commit
-	// timestamp above makes Truncate's tmpDB open fail before
-	// dblifecycle.ResolveTarget is ever reached, so any in-range target
-	// exercises the same path.
-	targetSlot := points[len(points)/2].Slot
-
-	_, err := n.Truncate(
-		context.Background(),
-		dblifecycle.TruncateTarget{Slot: &targetSlot},
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-	require.NotContains(
-		t, err.Error(), "resume also failed",
-		"a leaked tmpDB lock must not turn a recoverable CommitTimestampError "+
-			"into a failed resume",
-	)
-
-	// The node must have come back up fully usable, not been torn down.
-	require.Same(t, oldCtx, n.ctx)
-	require.NoError(t, n.ctx.Err())
-	require.NotNil(t, n.mempool)
-	require.NotNil(t, n.chainsyncState)
-	require.NotNil(t, n.connManager)
-	require.NotNil(t, n.peerGov)
-
-	tip, tipErr := n.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
-}
-
-// A live restore/truncate reinitialization follows its own commit-timestamp
-// recovery path. It must run the same deferred settings checks as ordinary
-// startup before resuming any component, including the Alonzo pparams
-// provenance gate added for gouroboros v0.205.7.
+// A live truncate reopens the database, which runs the same settings checks
+// as ordinary startup before resuming any component, including the Alonzo
+// protocol-parameter unit marker.
 func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	t.Parallel()
 
@@ -1642,17 +1565,12 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	))
 	require.NoError(
 		t,
-		n.db.Metadata().SetNodeSettingsGates(context.Background(),
+		n.db.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{
 				nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 			},
-			0,
-			0,
 		),
 	)
-	metaTxn := n.db.Metadata().Transaction(t.Context())
-	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
 
 	targetSlot := points[len(points)/2].Slot
 	_, err := n.Truncate(
@@ -1661,8 +1579,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "resume also failed")
-	require.ErrorContains(t, err, "legacy")
-	require.ErrorContains(t, err, "protocol parameters are drained")
+	require.ErrorIs(t, err, database.ErrAlonzoPParamsUnitNoRows)
 }
 
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore
@@ -1683,7 +1600,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	oldCtx := n.ctx
 	restoredManifest, err := n.Restore(context.Background(), snapshotDir)
 	require.NoError(t, err)
-	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
+	require.Equal(t, manifest.TipSlot, restoredManifest.TipSlot)
 
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
@@ -2636,7 +2553,6 @@ func TestLiveLifecycleRejectionsLeaveNodeIntact(t *testing.T) {
 // writes blocks and the tip directly, which no ledger commit journals.
 func seedLiveUtxoSetJournal(
 	t *testing.T,
-	db *database.Database,
 	dataDir string,
 	points []ocommon.Point,
 	livedIn bool,
@@ -2695,9 +2611,6 @@ func seedLiveUtxoSetJournal(
 		require.NoError(t, set.ApplyLedgerChanges(&p, changes))
 	}
 	require.NoError(t, set.Close())
-	require.NoError(
-		t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil),
-	)
 }
 
 // seedLiveUtxoSet gives the data directory the live UTxO set of a node that
@@ -2719,7 +2632,7 @@ func seedLiveUtxoSet(
 		loadLiveUtxoSetFamiliesAtOrigin(t, db, dataDir)
 		require.NoError(t, db.SetTip(tip, nil))
 	}
-	seedLiveUtxoSetJournal(t, db, dataDir, points, livedIn, epochLength)
+	seedLiveUtxoSetJournal(t, dataDir, points, livedIn, epochLength)
 }
 
 // loadLiveUtxoSetFamiliesAtOrigin does what a node's first start does on an

@@ -294,7 +294,7 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // answerable by every point-aware query type below -- not just that it is
 // still on this node's chain (verifyPointOnChain), but that it is not older
 // than the strictest per-query-type retention floor (the live UTxO journal
-// via liveUtxoView, consumed UTxO rows via checkUtxoRetentionWindow,
+// via liveUtxoView,
 // stake and pool distribution via PoolStakeDistribution's own recency check,
 // current protocol parameters
 // via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
@@ -379,9 +379,6 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if utxoView != nil {
 		utxoView.Close()
 	}
-	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
-		return err
-	}
 	if err := ls.verifyStakeDistributionRetentionOnly(txn, at); err != nil {
 		return err
 	}
@@ -447,16 +444,7 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
 		return nil
 	}
-	utxoFloor, poolFloor := ls.announcedPruneFloors()
-	if utxoFloor > 0 && at.Slot < utxoFloor {
-		return fmt.Errorf(
-			"%w: pinned slot %d is below the consumed-UTxO prune floor "+
-				"(slot %d) a concurrent cleanup has already announced",
-			ErrHistoricalStateUnavailable,
-			at.Slot,
-			utxoFloor,
-		)
-	}
+	poolFloor := ls.announcedPoolSnapshotPruneFloor()
 	if poolFloor > 0 {
 		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
 		if err != nil {
@@ -1306,14 +1294,13 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // ShelleyEpochNoQuery (queryShelleyEpochNo, unconditionally safe: epoch
 // records are never pruned and carry no other coupled state),
 // ShelleyUtxoByTxinQuery (queryShelleyUtxoByTxIn, resolving each requested
-// ref's per-row AddedSlot/DeletedSlot against at.Slot -- safe back to
-// checkUtxoRetentionWindow's retention floor, rejected with
-// ErrHistoricalStateUnavailable beyond it; the node-parity
+// ref in the live UTxO set's view of at -- safe back to the set's journal
+// floor, rejected with ErrUtxoAsOfUnavailable beyond it; the node-parity
 // incremental mode is the real caller this closes a gap for), and
 // ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same AddedSlot/DeletedSlot
 // predicate as ShelleyUtxoByTxinQuery applied to the whole table via
 // IterateUtxosAsOf instead of a bounded ref list, and the same
-// checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has no indexed
+// journal floor -- unlike a per-ref lookup this has no indexed
 // shortcut, so a pinned call costs a full-table scan; accepted deliberately,
 // since node-parity's periodic full checks were reporting a spurious UTxO
 // "divergence" on essentially every run that took long enough for the live tip
@@ -1372,10 +1359,12 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // registration and delegation rows, and delegations carry no per-point
 // history to read back.
 //
+// ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery rank pools
+// from the retained per-pool likelihood history and last boundary's reward
+// state. They answer at the acquired point when that history is complete and
+// fail with ErrQueryNotAnswered when it is not.
+//
 // Not answered, so the call fails with ErrQueryNotAnswered:
-// ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
-// rank pools by a performance estimate derived from a per-pool likelihood
-// history and the last boundary's reward pot, neither of which is tracked;
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which return
 // the whole epoch state in the ledger's encoding. Also not answered, with an
 // unsupported-query error: ShelleyStakePoolStateQuery on every network but
@@ -3278,10 +3267,8 @@ func stakeCredentialFromVote(
 // via UtxosByRefs). When pinned, each requested ref is answered as of
 // at.Slot instead of live-right-now: a ref is live at at.Slot when its
 // creating transaction is at-or-before at.Slot and it is either still
-// unspent or was spent strictly after at.Slot. The utxo table already
-// tracks both slots per row (AddedSlot, DeletedSlot -- see
-// database.UtxosByRefsAsOf), so this is a real, exact historical query,
-// not an approximation.
+// unspent or was spent strictly after at.Slot. The live UTxO set's view of
+// the point answers this exactly, not as an approximation.
 //
 // Before this existed, this handler ignored at entirely and always
 // answered from live state: node-parity's incremental mode proved
@@ -3293,10 +3280,8 @@ func stakeCredentialFromVote(
 // "missing" divergences for any UTxO consumed and recreated at the same
 // reference between an incremental check's per-block point and the next.
 //
-// checkUtxoRetentionWindow rejects at.Slot when it is older than this
-// node's spent-UTxO retention floor: see its doc comment for why answering
-// past that floor risks a silently wrong "absent" result instead of an
-// honest rejection.
+// A point the live UTxO set's journal no longer reaches is rejected with
+// ErrUtxoAsOfUnavailable rather than answered "absent".
 func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	txIns []ledger.ShelleyTransactionInput,
 	at QueryPoint,
@@ -3356,101 +3341,4 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
-}
-
-// checkUtxoRetentionWindow rejects a pinned UTxO query whose point is older
-// than this node's spent-UTxO retention floor -- see
-// queryShelleyUtxoByTxIn's doc comment for the correctness risk this
-// guards against.
-//
-// The floor mirrors what the periodic consumed-UTxO cleanup
-// (cleanupConsumedUtxos/UtxosDeleteConsumed in state.go) actually prunes:
-// in every storage mode except API, a spent row becomes eligible for
-// hard-deletion once its DeletedSlot falls at-or-behind
-// tipSlot-stabilityWindow. So for any ref that was live at at.Slot and
-// later spent at some slot D > at.Slot, the row is guaranteed to survive
-// exactly when at.Slot is itself no older than that same floor (D > at.Slot
-// >= floor implies D > floor, i.e. not yet eligible for pruning). A pin
-// older than the floor cannot make that guarantee -- D could fall between
-// at.Slot and the floor, in which case the row may already be gone and an
-// absent result would be silently wrong rather than an honest rejection.
-//
-// The floor is the larger (stricter) of two independent bounds, since
-// either alone can be wrong:
-//
-//   - A fresh estimate from the CURRENT tip and era's own window
-//     (calculateStabilityWindow). This is right in steady state, but can be
-//     too lenient right after the tip moves in a way cleanup's own
-//     historical floor didn't: a rollback lowering the tip, or an era
-//     transition changing the stability-window formula (Byron's small 2k
-//     vs every Shelley+ era's much larger 3k/f) -- see
-//     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
-//     This bound is skipped entirely (utxoPruningDeferredForCatchup) while
-//     this node is still catching up to a known upstream target, mirroring
-//     cleanupConsumedUtxos' own defer condition: cleanup never runs during
-//     catch-up, so nothing has actually been pruned yet, and computing
-//     this bound from the live tip anyway would be too STRICT rather than
-//     too lenient -- rejecting an Acquire the node had already promised was
-//     answerable, moments earlier, for a row that was never deleted (a
-//     from-genesis replay's tip advances far faster than real block
-//     cadence, so this window used to open within single-digit epochs of
-//     starting, tearing down the whole LocalStateQuery connection with no
-//     graceful per-query failure available; a residual
-//     race between Acquire and Query remains).
-//   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
-//     the highest slot cleanup has ever actually begun pruning up to. This
-//     is exactly right for what's already been pruned, but reads zero on a
-//     chain where cleanup has never run yet (nothing eligible existed), so
-//     it cannot stand alone either.
-//
-// A read error on the persisted floor fails the pin closed (rejected)
-// rather than silently skipping the check it exists to enforce.
-//
-// API storage mode never prunes spent rows at all (see
-// cleanupConsumedUtxos' identical check and PruneBlock's doc comment on
-// why their CBOR remains resolvable too), so no floor applies there.
-//
-// txn is used only to read the tip and the persisted floor, consistently
-// with the same point verifyPointOnChain already validated at against.
-func (ls *LedgerState) checkUtxoRetentionWindow(
-	txn ledgerdb.Txn,
-	at QueryPoint,
-) error {
-	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
-		return nil
-	}
-	tip, err := ls.ledgerDB().GetTip(txn)
-	if err != nil {
-		return err
-	}
-	var retentionFloor uint64
-	stabilityWindow := ls.calculateStabilityWindow()
-	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow &&
-		!ls.utxoPruningDeferredForCatchup(tip.Point.Slot, stabilityWindow) {
-		retentionFloor = tip.Point.Slot - stabilityWindow
-	}
-	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return err
-	}
-	if persistedFloor > retentionFloor {
-		retentionFloor = persistedFloor
-	}
-	if retentionFloor == 0 {
-		// Neither bound found anything eligible for pruning yet.
-		return nil
-	}
-	if at.Slot < retentionFloor {
-		return fmt.Errorf(
-			"%w: UTxO query pinned to slot %d is older than this "+
-				"node's spent-UTxO retention floor (slot %d, tip %d) -- "+
-				"a UTxO spent and pruned before that floor cannot be "+
-				"reliably reconstructed as of the pinned point",
-			ErrHistoricalStateUnavailable,
-			at.Slot,
-			retentionFloor,
-			tip.Point.Slot,
-		)
-	}
-	return nil
 }

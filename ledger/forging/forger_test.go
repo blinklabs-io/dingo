@@ -1772,6 +1772,154 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
 }
 
+func TestSharedKESSignerRequiresLiveUpstream(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		shared       bool
+		upstreamLive bool
+		wantForged   int
+	}{
+		{
+			name:       "solo producer without upstream",
+			wantForged: 1,
+		},
+		{
+			name:   "shared signer without upstream",
+			shared: true,
+		},
+		{
+			name:         "shared signer with upstream",
+			shared:       true,
+			upstreamLive: true,
+			wantForged:   1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			block := newForgerTestBlock(300, 2)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
+				Credentials:      setupTestCredentials(t),
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     builder,
+				BlockBroadcaster: &forgerTestBroadcaster{},
+				SlotClock: forgerTestSlotClock{
+					currentSlot:        300,
+					chainTipSlot:       100,
+					primaryTipExplicit: true,
+					primaryTipSlot:     100,
+					upstreamActive:     tc.upstreamLive,
+					slotsPerKESPeriod:  100,
+				},
+				SharedKESSigner: tc.shared,
+				PromRegistry:    prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(t, forger.checkAndForgeProduction(t.Context()))
+			require.Equal(t, tc.wantForged, builder.calls)
+			wantSkips := float64(1 - tc.wantForged)
+			require.Equal(t, wantSkips, testutil.ToFloat64(
+				forger.metrics.forgeStaleTipSkipSharedKESNoUpstream,
+			))
+			if wantSkips > 0 {
+				require.Contains(t, logs.String(),
+					`"reason":"shared_kes_no_upstream"`)
+			}
+		})
+	}
+}
+
+type sharedKESSlotAlreadySignedTestError struct{}
+
+func (sharedKESSlotAlreadySignedTestError) Error() string {
+	return "a different header was already signed for this slot"
+}
+
+func (sharedKESSlotAlreadySignedTestError) SharedKESSlotAlreadySigned() {}
+
+func TestSharedKESSignerAlreadySignedIsNotAForgeFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		shared       bool
+		buildErr     error
+		wantErr      bool
+		wantFailures float64
+		wantOutcome  string
+		wantSkipLog  bool
+	}{
+		{
+			name:        "shared signer already signed",
+			shared:      true,
+			buildErr:    sharedKESSlotAlreadySignedTestError{},
+			wantOutcome: forgeTimingOutcomeSharedKESYielded,
+			wantSkipLog: true,
+		},
+		{
+			name:         "unshared signer already signed",
+			buildErr:     sharedKESSlotAlreadySignedTestError{},
+			wantErr:      true,
+			wantFailures: 1,
+			wantOutcome:  forgeTimingOutcomeLost,
+		},
+		{
+			name:         "shared signer actual failure",
+			shared:       true,
+			buildErr:     errors.New("signer unavailable"),
+			wantErr:      true,
+			wantFailures: 1,
+			wantOutcome:  forgeTimingOutcomeLost,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			builder := &forgerTestBuilder{err: tc.buildErr}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
+				Credentials:      setupTestCredentials(t),
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     builder,
+				BlockBroadcaster: &forgerTestBroadcaster{},
+				SlotClock: forgerTestSlotClock{
+					currentSlot:        300,
+					chainTipSlot:       100,
+					primaryTipExplicit: true,
+					primaryTipSlot:     100,
+					upstreamActive:     true,
+					slotsPerKESPeriod:  100,
+				},
+				SharedKESSigner: tc.shared,
+				PromRegistry:    prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			err = forger.checkAndForgeProduction(t.Context())
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, 1, builder.calls)
+			require.Equal(t, tc.wantFailures,
+				testutil.ToFloat64(forger.metrics.forgeCouldNot))
+			require.Equal(t, tc.wantFailures,
+				testutil.ToFloat64(forger.metrics.forgeMissedLeaderSlots))
+			require.Equal(t, tc.wantSkipLog, strings.Contains(logs.String(),
+				"forge skip: shared KES signer already signed this slot"))
+			require.Contains(t, logs.String(), `"outcome":"`+tc.wantOutcome+`"`)
+		})
+	}
+}
+
 // TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins that a missing
 // corroborated target is not substituted with the wall clock or another
 // pipeline-stage value. A target-free peer-switch interval is not proof that
@@ -3237,6 +3385,7 @@ type forgerTestBuilder struct {
 	// onBuild, when set, runs at the moment a build entry point is
 	// invoked, so a test can observe state as of block assembly.
 	onBuild func()
+	err     error
 }
 
 func (b *forgerTestBuilder) noteBuild() {
@@ -3251,7 +3400,7 @@ func (b *forgerTestBuilder) BuildBlock(context.Context,
 ) (ledger.Block, []byte, error) {
 	b.calls++
 	b.noteBuild()
-	return b.block, b.cbor, nil
+	return b.block, b.cbor, b.err
 }
 
 func (b *forgerTestBuilder) BuildBlockWithLeios(ctx context.Context,
@@ -3262,7 +3411,7 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(ctx context.Context,
 	b.leiosCalls++
 	b.noteBuild()
 	b.leiosData = leiosData
-	return b.block, b.cbor, nil
+	return b.block, b.cbor, b.err
 }
 
 // BuildBlockOnContext makes forgerTestBuilder an AlternativeBlockBuilder, so
@@ -3279,7 +3428,7 @@ func (b *forgerTestBuilder) BuildBlockOnContext(ctx context.Context,
 	b.noteBuild()
 	b.blockCtx = blockCtx
 	b.leiosData = leiosData
-	return b.block, b.cbor, nil
+	return b.block, b.cbor, b.err
 }
 
 type forgerTestBroadcaster struct {

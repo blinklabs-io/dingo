@@ -65,3 +65,61 @@ func TestMergeConfigSourcesReadsSecretFiles(t *testing.T) {
 	require.Equal(t, "from-file", published.KoiosParity.APIKey)
 	require.Empty(t, published.KoiosParity.APIKeyFile)
 }
+
+func TestBlockPipelineDefaultsPreserveExplicitSources(t *testing.T) {
+	// Not t.Parallel: config merging publishes process-global configuration
+	// and the environment is process-global.
+	tests := []struct {
+		name  string
+		yaml  string
+		env   string
+		flags []string
+		want  bool
+	}{
+		{name: "core default", want: true},
+		{name: "api default", yaml: "storageMode: api\n"},
+		{name: "musashi default", yaml: "network: musashi\n"},
+		{name: "yaml false", yaml: "blockPipelineEnabled: false\n"},
+		{name: "environment false", env: "false"},
+		{
+			name:  "flag false",
+			flags: []string{"--block-pipeline-enabled=false"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previous := config.GetConfig()
+			t.Cleanup(func() { config.PublishConfig(previous) })
+			t.Setenv("HOME", t.TempDir())
+			for _, name := range []string{
+				"DINGO_BLOCK_PIPELINE_ENABLED",
+				"CARDANO_DINGO_BLOCK_PIPELINE_ENABLED",
+			} {
+				t.Setenv(name, "")
+				require.NoError(t, os.Unsetenv(name))
+			}
+			if tt.env != "" {
+				t.Setenv("DINGO_BLOCK_PIPELINE_ENABLED", tt.env)
+			}
+
+			configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+			require.NoError(
+				t,
+				os.WriteFile(configFile, []byte(tt.yaml), 0o600),
+			)
+			root := &cobra.Command{Use: "dingo"}
+			config.RegisterFlags(root)
+			require.NoError(t, root.ParseFlags(tt.flags))
+			cfg, err := mergeConfigSources(root, configFile)
+			require.NoError(t, err)
+			cfg.ApplyDefaults()
+			if cfg.BlockPipelineEnabled != tt.want {
+				t.Fatalf(
+					"block pipeline enabled = %t, want %t",
+					cfg.BlockPipelineEnabled,
+					tt.want,
+				)
+			}
+		})
+	}
+}

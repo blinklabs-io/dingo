@@ -21,14 +21,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -82,13 +76,6 @@ type externalIngestState struct {
 	pauses  int
 	// applyMu serializes ApplyTrustedBatch callers.
 	applyMu sync.Mutex
-	// unpruned counts the batches that moved the tip since the trusted
-	// consumed-UTxO cleanup last drained, pruneSlot is the tip slot the
-	// last of them committed, and prunedOnce records that the cleanup has
-	// drained in this process. All three are guarded by applyMu.
-	unpruned   int
-	pruneSlot  uint64
-	prunedOnce bool
 	// gen advances whenever an external ingest moves the ledger tip. The
 	// loop compares it against the value it loaded before its reader took
 	// a tip, to discard a read positioned at a tip that no longer exists.
@@ -97,34 +84,6 @@ type externalIngestState struct {
 	// apply helpers outside processBlocksFromSource treat it as
 	// TrustedReplay.
 	trusted atomic.Bool
-	// spends is the running call's intra-batch spend tracker, which names
-	// the outputs earlier block-apply transactions of the call committed.
-	spends atomic.Pointer[intraBatchSpends]
-	// overlayOff keeps the rest of a call on the per-row UTxO path after
-	// the batch UTxO overlay hit a write conflict.
-	overlayOff atomic.Bool
-	// overlayApplied and perRowApplied record how the current block-apply
-	// transaction's delta batches applied, for its beforeCommit.
-	overlayApplied atomic.Bool
-	perRowApplied  atomic.Bool
-}
-
-func (e *externalIngestState) recordApply(overlay bool) {
-	if overlay {
-		e.overlayApplied.Store(true)
-	} else {
-		e.perRowApplied.Store(true)
-	}
-}
-
-// takeOverlayOnly reports whether every delta batch of the transaction
-// being committed applied through the overlay, and clears the record. A
-// stale record left by a failed transaction errs toward the per-row delete,
-// which is correct after either path.
-func (e *externalIngestState) takeOverlayOnly() bool {
-	overlay := e.overlayApplied.Swap(false)
-	perRow := e.perRowApplied.Swap(false)
-	return overlay && !perRow
 }
 
 func (ls *LedgerState) chainIngestGate() chan struct{} {
@@ -187,115 +146,6 @@ func (ls *LedgerState) PauseChainIngest() (resume func()) {
 	return sync.OnceFunc(ls.resumeChainIngest)
 }
 
-// trustedPruneRetryDelay is how long DrainTrustedPrune waits before trying
-// again when another consumed-UTxO cleanup run holds the write connection.
-// Such a run deletes at most cleanupConsumedUtxoBatchSize rows.
-const trustedPruneRetryDelay = 100 * time.Millisecond
-
-// DrainTrustedPrune runs the consumed-UTxO cleanup that trusted batches still
-// owe, up to the tip the last of them committed, until nothing prunable is
-// left there or ctx ends. Unlike the cleanup a batch runs, it has no time
-// budget, and it waits out another cleanup run rather than skipping, so a
-// catch-up that calls it before resuming chain ingest leaves the backlog a
-// cleanup after every batch would leave. It returns ctx's error when ctx
-// ends first and the cleanup's error when it fails; the rows it did not
-// reach stay marked spent for the periodic cleanup.
-//
-// The node does not leave catch-up until the drain returns, so when cleanup
-// is owed it logs its start and its end, with the rows it deleted, at Info.
-func (ls *LedgerState) DrainTrustedPrune(ctx context.Context) error {
-	e := &ls.externalIngest
-	e.applyMu.Lock()
-	defer e.applyMu.Unlock()
-	if e.unpruned == 0 {
-		return nil
-	}
-	start := time.Now()
-	ls.config.Logger.Info(
-		"draining consumed UTxO cleanup owed by trusted batches",
-		"component", "ledger",
-		"batches", e.unpruned,
-	)
-	pruned, err := ls.drainTrustedPrune(ctx)
-	ls.config.Logger.Info(
-		"finished consumed UTxO cleanup owed by trusted batches",
-		"component", "ledger",
-		"pruned", pruned,
-		"duration", time.Since(start),
-		"complete", err == nil,
-	)
-	return err
-}
-
-// drainTrustedPrune is DrainTrustedPrune's loop. It returns the rows it
-// deleted. The caller holds applyMu.
-func (ls *LedgerState) drainTrustedPrune(ctx context.Context) (int, error) {
-	e := &ls.externalIngest
-	total := 0
-	for e.unpruned > 0 {
-		outcome, pruned, err := ls.pruneTrustedBacklog(ctx)
-		total += pruned
-		switch outcome {
-		case trustedPruneDrained:
-			return total, nil
-		case trustedPruneUnfinished:
-			continue
-		case trustedPruneSkipped:
-			timer := time.NewTimer(trustedPruneRetryDelay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return total, ctx.Err()
-			case <-timer.C:
-			}
-		case trustedPruneStopped:
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return total, ctxErr
-			}
-			return total, err
-		}
-	}
-	return total, nil
-}
-
-// pruneTrustedBacklog runs the trusted-batch cleanup up to the tip the last
-// trusted batch committed and, once it has drained every prunable row,
-// resets the count of batches owing one. A cleanup that skipped, failed or
-// ran out of budget leaves the count, so the next batch tries again, as it
-// did when every batch ran the cleanup. The caller holds applyMu.
-//
-// The cleanup must not reach past that tip even when the ledger tip has
-// moved on: a debt left by a skipped cleanup outlives the pause, and once the
-// live loop has applied blocks the tip is no longer below the certified
-// immutable tip, so pruning to it would raise the floor over a rollback
-// window.
-func (ls *LedgerState) pruneTrustedBacklog(
-	ctx context.Context,
-) (trustedPruneOutcome, int, error) {
-	e := &ls.externalIngest
-	outcome, pruned, err := ls.pruneConsumedUtxosAfterTrustedBatch(
-		ctx, e.pruneSlot,
-	)
-	if outcome == trustedPruneDrained {
-		e.unpruned = 0
-		e.prunedOnce = true
-	}
-	return outcome, pruned, err
-}
-
-// trustedPruneDue reports whether the batch that just committed should run
-// the trusted-batch cleanup. The first batch of a process always does, so a
-// backlog a stopped process left is pruned without waiting for a cadence it
-// never counted. The caller holds applyMu.
-func (ls *LedgerState) trustedPruneDue() bool {
-	e := &ls.externalIngest
-	every := trustedBatchPruneEvery
-	if ls.trustedPruneEvery > 0 {
-		every = ls.trustedPruneEvery
-	}
-	return !e.prunedOnce || e.unpruned >= every
-}
-
 func (ls *LedgerState) resumeChainIngest() {
 	e := &ls.externalIngest
 	e.pauseMu.Lock()
@@ -323,8 +173,7 @@ func (ls *LedgerState) resumeChainIngest() {
 // The blocks are stored in the primary chain first, in blob-only
 // transactions, because UTxO and transaction rows hold offsets into the
 // stored block CBOR. Their effects are then committed in one metadata
-// transaction, in which an output both created and spent by the batch is
-// removed before commit. An epoch boundary inside the batch is the exception:
+// transaction. An epoch boundary inside the batch is the exception:
 // the blocks before it, the epoch rollover and the blocks after it commit in
 // three transactions, as they do on every other apply path.
 //
@@ -333,12 +182,6 @@ func (ls *LedgerState) resumeChainIngest() {
 // recursively down to a single block, so a dense range is applied in smaller
 // commits instead of failing on every attempt. Nothing is skipped: a single
 // block Badger still refuses fails the call.
-//
-// After the first batch of a process, and then once every
-// trustedBatchPruneEvery committed batches, spent UTxO rows up to the tip are
-// hard-deleted with the routine consumed-UTxO cleanup (see
-// pruneConsumedUtxosAfterTrustedBatch); DrainTrustedPrune runs the cleanup
-// the batches since still owe. API storage mode keeps them.
 //
 // A failure after the blocks are stored leaves the ledger tip where it was.
 // Calling again with the same expected point and blocks reuses the stored
@@ -399,17 +242,7 @@ func (ls *LedgerState) ApplyTrustedBatch(
 			e.gen.Add(1)
 		}
 	}()
-	tip, err := ls.applyTrustedSplitting(ctx, expected, blocks)
-	if after := ls.ledgerTipPoint(); !pointMatches(after, before) {
-		e.unpruned++
-		e.pruneSlot = after.Slot
-	}
-	if err == nil && ls.trustedPruneDue() {
-		// A cleanup that does not drain is retried after the next batch,
-		// or by DrainTrustedPrune; the batch itself has committed.
-		_, _, _ = ls.pruneTrustedBacklog(ctx)
-	}
-	return tip, err
+	return ls.applyTrustedSplitting(ctx, expected, blocks)
 }
 
 // applyTrustedSplitting applies blocks, which extend expected, and on a
@@ -480,39 +313,8 @@ func (ls *LedgerState) applyTrustedBlocks(
 
 	e.trusted.Store(true)
 	defer e.trusted.Store(false)
-	// API storage mode keeps spent rows for historical queries, so only the
-	// other modes drop the outputs a batch creates and spends.
-	spends := newIntraBatchSpends(
-		ls.ledgerDB().StorageMode() != types.StorageModeAPI,
-	)
-	e.spends.Store(spends)
-	defer e.spends.Store(nil)
-	defer e.overlayOff.Store(false)
-	e.overlayApplied.Store(false)
-	e.perRowApplied.Store(false)
-	err := ls.applyTrustedSource(ctx, blocks, spends)
+	err := ls.applyTrustedSource(ctx, blocks)
 	tip := ls.ledgerTipPoint()
-	if err != nil && errors.Is(err, types.ErrBatchUtxoOverlayConflict) {
-		// Nothing of the failed transaction committed; earlier epoch
-		// sides may have. The conflict fires before beforeCommit, so
-		// spends still describes exactly what committed.
-		rest := blocksAfter(blocks, tip, expected)
-		ls.config.Logger.Warn(
-			"trusted batch UTxO overlay hit a write conflict; "+
-				"applying the batch on the per-row path",
-			"error", err,
-			"blocks", len(rest),
-			"tip_slot", tip.Slot,
-			"component", "ledger",
-		)
-		ls.metrics.incTrustedBatchOverlayFallbacks()
-		e.overlayOff.Store(true)
-		err = nil
-		if len(rest) > 0 {
-			err = ls.applyTrustedSource(ctx, rest, spends)
-			tip = ls.ledgerTipPoint()
-		}
-	}
 	if err != nil {
 		if errors.Is(err, errStaleChainIterator) {
 			return tip, fmt.Errorf("%w: %w", ErrStaleBatch, err)
@@ -537,7 +339,6 @@ func (ls *LedgerState) applyTrustedBlocks(
 func (ls *LedgerState) applyTrustedSource(
 	ctx context.Context,
 	blocks []ledger.Block,
-	spends *intraBatchSpends,
 ) error {
 	source := make(chan readChainResult, 1)
 	source <- readChainResult{blocks: blocks}
@@ -545,38 +346,13 @@ func (ls *LedgerState) applyTrustedSource(
 	return ls.processBlocksFromSource(ctx, source, blockSourceOptions{
 		trusted:   true,
 		chunkSize: len(blocks),
-		beforeCommit: func(txn ledgerdb.Txn, applied []ledger.Block) error {
-			if err := spends.removeFromTxn(
-				ls.db, ls.ledgerDB(), txn, applied,
-				ls.externalIngest.takeOverlayOnly(),
-			); err != nil {
-				return fmt.Errorf("drop outputs spent within batch: %w", err)
-			}
+		beforeCommit: func(_ ledgerdb.Txn, applied []ledger.Block) error {
 			if ls.trustedBatchBeforeCommit != nil {
 				return ls.trustedBatchBeforeCommit(applied)
 			}
 			return nil
 		},
 	})
-}
-
-// blocksAfter returns the blocks that follow tip, all of them when tip is
-// expected, or nil when tip is none of them.
-func blocksAfter(
-	blocks []ledger.Block,
-	tip, expected ocommon.Point,
-) []ledger.Block {
-	if pointMatches(tip, expected) {
-		return blocks
-	}
-	for i, b := range blocks {
-		if pointMatches(
-			tip, ocommon.NewPoint(b.SlotNumber(), b.Hash().Bytes()),
-		) {
-			return blocks[i+1:]
-		}
-	}
-	return nil
 }
 
 func (ls *LedgerState) ledgerTipPoint() ocommon.Point {
@@ -629,89 +405,4 @@ func (ls *LedgerState) storeTrustedBatchBlocks(
 		)
 	}
 	return ls.chain.AddBlocks(ctx, blocks[held:])
-}
-
-// intraBatchSpends tracks the outputs a trusted batch has produced so far, so
-// the transaction that applies a spend of one can remove its row before
-// commit.
-type intraBatchSpends struct {
-	enabled  bool
-	produced map[utxoref.Key]struct{}
-}
-
-func newIntraBatchSpends(enabled bool) *intraBatchSpends {
-	return &intraBatchSpends{
-		enabled:  enabled,
-		produced: make(map[utxoref.Key]struct{}),
-	}
-}
-
-// committedAmong returns the inputs that name outputs an earlier
-// block-apply transaction of the batch committed and nothing has spent yet.
-func (s *intraBatchSpends) committedAmong(
-	inputs []models.UtxoId,
-) []models.UtxoId {
-	if !s.enabled || len(s.produced) == 0 {
-		return nil
-	}
-	var ret []models.UtxoId
-	for _, input := range inputs {
-		key := utxoref.Key{Index: input.Idx}
-		copy(key.TxId[:], input.Hash)
-		if _, ok := s.produced[key]; ok {
-			ret = append(ret, input)
-		}
-	}
-	return ret
-}
-
-// removeFromTxn removes, inside txn, the rows of outputs produced earlier in
-// the batch and spent by the applied blocks. A transaction's inputs are taken
-// before its outputs, matching the order the ledger applies them. When the
-// transaction applied through a batch UTxO overlay, overlay is set: the
-// overlay already deleted or never wrote those rows, so only their blob keys
-// and the prune floor are left.
-func (s *intraBatchSpends) removeFromTxn(
-	db *database.Database,
-	ldb ledgerdb.LedgerDB,
-	txn ledgerdb.Txn,
-	applied []ledger.Block,
-	overlay bool,
-) error {
-	if !s.enabled || len(applied) == 0 {
-		return nil
-	}
-	_, protected, err := pendingRewardStakeInputHistoryFloor(ldb, txn)
-	if err != nil {
-		return err
-	}
-	// Intra-batch deletion advances the global history floor to the batch tip.
-	// Even deleting only newer outputs would invalidate the pending basis.
-	if protected {
-		return nil
-	}
-	var spent []models.UtxoId
-	for _, blk := range applied {
-		for _, tx := range blk.Transactions() {
-			for _, input := range tx.Consumed() {
-				key := utxoref.ForInput(input)
-				if _, ok := s.produced[key]; !ok {
-					continue
-				}
-				delete(s.produced, key)
-				spent = append(spent, models.UtxoId{
-					Hash: input.Id().Bytes(),
-					Idx:  input.Index(),
-				})
-			}
-			for _, utxo := range tx.Produced() {
-				s.produced[utxoref.ForUtxo(utxo)] = struct{}{}
-			}
-		}
-	}
-	slot := applied[len(applied)-1].SlotNumber()
-	if overlay {
-		return db.UtxosDropSpentInBatchBlobs(spent, slot, dbadapter.Unwrap(txn))
-	}
-	return db.UtxosDeleteSpentInBatch(spent, slot, dbadapter.Unwrap(txn))
 }

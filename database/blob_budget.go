@@ -23,16 +23,14 @@ import (
 // bulk blob delete staged in a caller's transaction leaves behind for the
 // rest of that transaction.
 //
-// A delete set is never the last thing to enter the transaction. Txn.Commit
-// writes a commit timestamp into the same blob transaction before committing
-// either store, and TruncateAfterSlot stages the UTxO and transaction delete
-// sets back to back. A loop that stages until the budget is gone therefore
-// does not produce a partial blob cleanup, which callers tolerate -- it
-// produces a transaction that can no longer accept even a 35-byte timestamp,
-// so the whole rollback commit fails. On the startup rollback path that
-// leaves a node failing identically on every start.
-// One entry would cover the timestamp; the margin
-// is larger so that ordinary growth in what a caller stages after its
+// A delete set is never the last thing to enter the transaction:
+// TruncateAfterSlot stages the UTxO and transaction delete sets back to back,
+// and the rollback writes more after them. A loop that stages until the
+// budget is gone therefore does not produce a partial blob cleanup, which
+// callers tolerate -- it produces a transaction that can no longer accept the
+// writes that follow, so the whole rollback commit fails. On the startup
+// rollback path that leaves a node failing identically on every start. The
+// margin is large so that ordinary growth in what a caller stages after its
 // deletes cannot silently consume it.
 const stagedBlobDeleteReserve = 1024
 

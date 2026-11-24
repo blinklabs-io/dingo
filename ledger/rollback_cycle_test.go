@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -115,7 +116,6 @@ func newRollbackCycle(
 		deferred:  deferred,
 		gap:       gap,
 	}
-	seedAccountCertificates(t, s, raw)
 	if deferred {
 		wireDeferredBoundarySnapshot(s.ls, s.snapshotMgr)
 	} else {
@@ -165,21 +165,20 @@ func (c *rollbackCycle) attachLedger(t *testing.T, boundaries int) {
 	old := s.ls
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          s.db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, s.db),
 		ChainManager:      cm,
 		CardanoNodeConfig: old.config.CardanoNodeConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	mirrorSeededUtxoRowsForTest(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentEra = old.currentEra
 	ls.currentEpoch = old.currentEpoch
 	ls.currentPParams = old.currentPParams
 	ls.ledgerEpoch = old.currentEpoch.EpochId
 	ls.ratifyAtBoundary = old.ratifyAtBoundary
-	epochs, err := s.db.GetEpochs(nil)
+	epochs, err := seedDB(t, s.db).GetEpochs(nil)
 	require.NoError(t, err)
 	ls.epochCache = epochs
 	s.ls = ls
@@ -203,12 +202,14 @@ func (c *rollbackCycle) setTip(t *testing.T, slot uint64) {
 	require.NotZero(t, number, "slot %d is not a chain block", slot)
 	point := rollbackPoint(slot)
 	tip := ochainsync.Tip{Point: point, BlockNumber: number}
+	// The set journals the tip, so a rollback to it finds the point.
+	fxTip(t, c.s.ls, point)
 	if !c.ledger {
 		require.NoError(t, c.s.db.SetTip(tip, nil))
 		return
 	}
 	nonce := testHashBytes("nonce-" + slotLabel(slot))
-	require.NoError(t, c.s.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, c.s.db,
 		point.Hash, point.Slot, nonce, false, nil,
 	))
 	require.NoError(t, c.s.db.SetTip(tip, nil))
@@ -242,11 +243,12 @@ func (c *rollbackCycle) chainSlots() []uint64 {
 type cycleResult struct {
 	epoch   models.Epoch
 	pparams lcommon.ProtocolParameters
-	// before is every table at the rollback target; first is every table after
-	// the boundary; changed names the tables the boundary changed.
+	// before is every metadata table at the rollback target and first every
+	// one after the boundary. changed reports whether the boundary changed
+	// the ledger state the rollback has to restore.
 	before  map[string][]string
 	first   map[string][]string
-	changed map[string]bool
+	changed bool
 	preDump govDiffEpochDump
 	dump    govDiffEpochDump
 }
@@ -283,7 +285,7 @@ func (c *rollbackCycle) run(
 	}
 	before := dumpComparableTables(t, c.raw)
 	preDump := s.dump(t, epoch.EpochId, pparams)
-	preEpochs, err := s.db.GetEpochs(nil)
+	preEpochs, err := seedDB(t, s.db).GetEpochs(nil)
 	require.NoError(t, err)
 	epochCacheLen := len(preEpochs)
 
@@ -310,7 +312,7 @@ func (c *rollbackCycle) run(
 	firstEpoch, firstPParams := apply(false)
 	first := s.dump(t, firstEpoch.EpochId, firstPParams)
 	firstTables := dumpComparableTables(t, c.raw)
-	changed := changedTables(before, firstTables)
+	changed := !reflect.DeepEqual(preDump, first)
 
 	if c.ledger {
 		require.NoError(t, s.ls.rollbackWithBlocksAndIntent(
@@ -321,9 +323,9 @@ func (c *rollbackCycle) run(
 		s.ls.ratificationWG.Wait()
 		s.ls.rewardPrecomputeWG.Wait()
 	} else {
-		require.NoError(t, s.db.RollbackMetadataAfterSlot(
-			context.Background(), ocommon.Point{Slot: target}, 0, nil,
-		))
+		// Ledger state lives in the set, which rolls back along its
+		// journal.
+		fxRollback(t, s.ls, rollbackPoint(target))
 		// The sweep leaves the tip to its caller.
 		c.setTip(t, target)
 	}

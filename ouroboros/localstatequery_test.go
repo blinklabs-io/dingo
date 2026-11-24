@@ -30,8 +30,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -41,51 +41,6 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
-
-type historyFloorSet struct {
-	*livesettest.Mem
-	floor uint64
-}
-
-func (s *historyFloorSet) SnapshotUtxoSet() (
-	ledger.UtxoSetWriter,
-	func(),
-	error,
-) {
-	set, release, err := s.Mem.SnapshotUtxoSet()
-	if err != nil {
-		return nil, nil, err
-	}
-	return &historyFloorSnapshot{
-		UtxoSetWriter: set,
-		history:       set.(ledger.UtxoSetHistory),
-		floor:         s.floor,
-	}, release, nil
-}
-
-func (s *historyFloorSet) UtxoSetAt(
-	point ocommon.Point,
-) (ledger.UtxoSetView, error) {
-	if point.Slot < s.floor {
-		return nil, ledger.ErrUtxoAsOfUnavailable
-	}
-	return s.Mem.UtxoSetAt(point)
-}
-
-type historyFloorSnapshot struct {
-	ledger.UtxoSetWriter
-	history ledger.UtxoSetHistory
-	floor   uint64
-}
-
-func (s *historyFloorSnapshot) UtxoSetAt(
-	point ocommon.Point,
-) (ledger.UtxoSetView, error) {
-	if point.Slot < s.floor {
-		return nil, ledger.ErrUtxoAsOfUnavailable
-	}
-	return s.history.UtxoSetAt(point)
-}
 
 func TestReleaseLocalStateQueryAcquiredPointOwnerKeepsReplacement(
 	t *testing.T,
@@ -198,12 +153,12 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	// HardForkCurrentEraQuery case, which needs an epoch record covering
 	// the acquired slot to resolve an era from --
 	// newTestLedgerStateWithChain seeds blocks only.
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	// GetAccountState needs a network_state row at or before the acquired
 	// slot; genesis sync writes this slot-0 baseline on a real node.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
@@ -299,12 +254,9 @@ func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 // fails VerifyPointOnChain too, and no other test Acquires a point that is
 // genuinely still on-chain but past a query-type-specific retention floor.
 // This Acquires slot 1 of a real two-block chain (on-chain, so
-// VerifyPointOnChain alone would accept it)
-// after marking the durable consumed-UTxO prune floor
-// (database.ConsumedUtxoPruneFloorSyncKey) at slot 2 --
-// checkUtxoRetentionWindow (ledger/queries.go), reached only through
-// VerifyPointQueryable, rejects it with ErrHistoricalStateUnavailable, which
-// this handler maps to the graceful AcquireFailurePointTooOld. Calling
+// VerifyPointOnChain alone would accept it) that the ledger holds no history
+// for -- VerifyPointQueryable refuses it with ErrHistoricalStateUnavailable,
+// which this handler maps to the graceful AcquireFailurePointTooOld. Calling
 // VerifyPointOnChain instead of VerifyPointQueryable at this call site makes
 // this test fail with a nil error.
 func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
@@ -324,9 +276,6 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
-	require.NoError(t, db.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey, "2", nil,
-	))
 
 	pointHash := bytes.Repeat([]byte{1}, 32)
 	connID := ouroboros.ConnectionId{}
@@ -365,9 +314,12 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 func TestLocalstatequeryProtocol_LiveSetHistoryTooOld(t *testing.T) {
 	t.Parallel()
 
-	set := &historyFloorSet{Mem: livesettest.New(), floor: 2}
+	// The set keeps no change before its tip at slot 3, so it cannot undo
+	// slot 2 to answer at slot 1, a block the block store still holds.
 	ls, db := newTestLedgerStateWithChainAtAndConfigAndSet(
-		t, 2, "", nil, set,
+		t, 3, "", nil, func(set *utxoset.Set) {
+			require.NoError(t, set.PruneHistory(3))
+		},
 	)
 	o := newOuroboros(OuroborosConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -375,14 +327,14 @@ func TestLocalstatequeryProtocol_LiveSetHistoryTooOld(t *testing.T) {
 	o.ledgerState = ls
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 
-	tipHash := bytes.Repeat([]byte{2}, 32)
+	tipHash := bytes.Repeat([]byte{3}, 32)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(2, tipHash),
+		Point: ocommon.NewPoint(3, tipHash),
 	}, nil))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	client := newLocalStateQueryTestClient(t, o)
 	oldPoint := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
@@ -561,12 +513,12 @@ func newPinTestOuroboros(t *testing.T) (*Ouroboros, ocommon.Point) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	// GetAccountState needs a network_state row at or before the acquired
 	// slot; genesis sync writes this slot-0 baseline on a real node.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 	o.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return o, ocommon.NewPoint(2, tipHash)
 }
@@ -813,10 +765,10 @@ func TestLocalstatequerySpecificPointReportsAcquiredPoint(t *testing.T) {
 
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
 	moveTestTip(t, db, 2)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	point := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
 	require.NoError(t, o.localstatequeryServerAcquire(
@@ -858,10 +810,10 @@ func TestLocalstatequeryImmutableTipReportsDepthKPoint(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.SetTipForTesting(tip)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	require.NoError(t, o.localstatequeryServerAcquire(
@@ -876,63 +828,6 @@ func TestLocalstatequeryImmutableTipReportsDepthKPoint(t *testing.T) {
 		ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32)),
 		got,
 	)
-}
-
-func TestLocalstatequeryDisconnectCancelsBlockedAcquire(t *testing.T) {
-	t.Parallel()
-
-	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
-	limit := db.Metadata().(interface{ ReadSnapshotLimit() int }).
-		ReadSnapshotLimit()
-	held := make([]*ledger.QueryView, 0, limit)
-	for range limit {
-		view, err := o.ledgerState.AcquireQueryView(
-			t.Context(),
-			ledger.QueryPoint{},
-		)
-		require.NoError(t, err)
-		held = append(held, view)
-	}
-	t.Cleanup(func() {
-		for _, view := range held {
-			view.Close()
-		}
-	})
-
-	owner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
-	ctx := olocalstatequery.CallbackContext{
-		ConnectionId: ouroboros.ConnectionId{},
-		Server:       owner,
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- o.localstatequeryServerAcquire(
-			ctx,
-			olocalstatequery.AcquireVolatileTip{},
-			false,
-		)
-	}()
-	testutil.WaitForCondition(t, func() bool {
-		o.localstatequeryAcquireMutex.Lock()
-		defer o.localstatequeryAcquireMutex.Unlock()
-		return o.localstatequeryAcquisitions[ctx.ConnectionId] != nil
-	}, testutil.AsyncWait, "Acquire did not reach snapshot admission")
-
-	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, owner)
-	held[len(held)-1].Close()
-	held = held[:len(held)-1]
-	require.Error(t, testutil.RequireReceive(
-		t,
-		done,
-		testutil.AsyncWait,
-		"Acquire did not stop after disconnect",
-	))
-	o.localstatequeryAcquireMutex.Lock()
-	_, acquiring := o.localstatequeryAcquisitions[ctx.ConnectionId]
-	_, session := o.localstatequerySessions[ctx.ConnectionId]
-	o.localstatequeryAcquireMutex.Unlock()
-	require.False(t, acquiring)
-	require.False(t, session)
 }
 
 func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {
@@ -1031,12 +926,13 @@ func TestLocalstatequeryDisconnectClosesSnapshot(t *testing.T) {
 // prepareReopenableChain gives the snapshot fixture the epoch and network
 // state rows a pinned point needs to pass Acquire's checks, which a view
 // reopened at that point runs again.
-func prepareReopenableChain(t *testing.T, db *database.Database) {
+func prepareReopenableChain(t *testing.T, o *Ouroboros) {
 	t.Helper()
-	require.NoError(t, db.SetEpoch(
+	ldb := o.ledgerState.LedgerDB()
+	require.NoError(t, ldb.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
 }
 
 // TestLocalstatequerySnapshotExpires proves a snapshot held past the
@@ -1051,7 +947,7 @@ func TestLocalstatequerySnapshotExpires(t *testing.T) {
 		Logger:                         slog.New(slog.NewJSONHandler(logs, nil)),
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	session := acquireSnapshotTestSession(t, o, ctx)
 	expired := session.view
@@ -1084,7 +980,7 @@ func TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip(
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	// The session acquires block 2, whose metadata names its parent, so the
 	// lab nonce needs no body decode; block 3 is the newer tip.
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -1139,7 +1035,7 @@ func TestLocalstatequerySpecificPointReopensAfterExpiry(t *testing.T) {
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
 	moveTestTip(t, db, 2)
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	point := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
 	require.NoError(t, o.localstatequeryServerAcquire(
@@ -1173,7 +1069,7 @@ func TestLocalstatequeryExpiredSnapshotCannotReopenRolledBackPoint(
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
 	moveTestTip(t, db, 2)
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	require.NoError(t, o.localstatequeryServerAcquire(
 		ctx,
@@ -1381,7 +1277,7 @@ func TestLocalstatequeryProtocol_QueryAfterExpiryKeepsConnection(
 	o, db, acquiredTip := newSnapshotTestOuroboros(t, OuroborosConfig{
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	client := newLocalStateQueryTestClient(t, o)
 
 	require.NoError(t, client.AcquireVolatileTip())
@@ -1423,7 +1319,7 @@ func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
 
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
 	moveTestTip(t, db, 2)
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	client := newLocalStateQueryTestClient(t, o)
 
 	point := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
@@ -1499,10 +1395,10 @@ func TestLocalstatequeryReopen_PinsReopenedView(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+			o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
 				LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 			})
-			prepareReopenableChain(t, db)
+			prepareReopenableChain(t, o)
 			ctx := olocalstatequery.CallbackContext{
 				ConnectionId: ouroboros.ConnectionId{},
 			}
@@ -1534,10 +1430,10 @@ func TestLocalstatequeryReopen_PinsReopenedView(t *testing.T) {
 func TestLocalstatequeryReopen_CloseAfterOpenReleasesPin(t *testing.T) {
 	t.Parallel()
 
-	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	expired := acquireSnapshotTestSession(t, o, ctx).view
 	testutil.WaitForCondition(t, func() bool {
@@ -1571,10 +1467,10 @@ func TestLocalstatequeryReopen_CloseAfterOpenReleasesPin(t *testing.T) {
 func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 	t.Parallel()
 
-	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
 		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
-	prepareReopenableChain(t, db)
+	prepareReopenableChain(t, o)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	session := acquireSnapshotTestSession(t, o, ctx)
 	expired := session.view

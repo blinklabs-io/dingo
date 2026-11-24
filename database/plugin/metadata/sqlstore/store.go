@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"regexp"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -44,6 +46,11 @@ type Config struct {
 	// could point introspection clients at a different database. It is empty
 	// for in-memory SQLite and other backends, and immutable after construction.
 	SQLitePath string
+	// ScratchDir holds temporary files sized by the stored data, such as the
+	// spool the UTxO set digest sorts the live set in. Empty selects the
+	// directory of SQLitePath, or the operating system's temporary directory
+	// when that is empty too.
+	ScratchDir string
 	// SQLiteOverlayInsertRows opts an eager-preparing SQLite provider into
 	// wider overlay INSERTs after transaction-local limit and trigger checks.
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
@@ -85,15 +92,24 @@ type Config struct {
 	VacuumInterval time.Duration
 	// Checkpoint is an optional provider-owned hook run on its own ticker,
 	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
-	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
-	// so the on-disk WAL file can be shrunk back down on a schedule, rather
-	// than relying solely on the commit-triggered wal_autocheckpoint passive
-	// checkpoint, which never truncates. This is best-effort: an active read
+	// run a periodic WAL checkpoint off the write path (see
+	// sqlite.checkpointWAL), PASSIVE on most ticks and TRUNCATE on some, so
+	// commits never checkpoint themselves and the on-disk WAL file can be
+	// shrunk back down on a schedule. This is best-effort: an active read
 	// snapshot can leave a given attempt busy, deferring the reduction to a
 	// later tick instead of guaranteeing an unconditional size ceiling. Left
 	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
 	// same convention Maintenance/MaintenanceInterval already use.
-	Checkpoint         func(context.Context) error
+	Checkpoint func(context.Context) error
+	// BulkCheckpoint, when set, runs on the Checkpoint ticker in place of
+	// Checkpoint while bulk-load pragmas are active, which suppress
+	// Checkpoint, and on the same cadence while Start runs migrations, before
+	// the Checkpoint ticker starts. It must not take the writer lock: the
+	// import or migration keeps committing on the write connection
+	// throughout. SQLite uses it for a PASSIVE checkpoint, because its write
+	// connection never checkpoints at commit and an import or upgrade would
+	// otherwise leave its whole write set in the WAL.
+	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
 	// SyncCommits is an optional provider-owned hook that makes every commit
 	// that returned before it began durable. A provider whose commits are
@@ -152,7 +168,12 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	// spendMu guards spends, the outputs this store inserted that a later
+	// spend can address by row id (see spendCache).
+	spendMu                 sync.Mutex
+	spends                  spendCache
 	sqlitePath              string
+	scratchDir              string
 	sqliteOverlayInsertRows int
 	writeDB                 *sql.DB
 	readDB                  *sql.DB
@@ -163,9 +184,6 @@ type Store struct {
 	// liveUtxo, when set, holds the live UTxO set: the store writes no utxo
 	// rows and resolves inputs through it. Set before the first write.
 	liveUtxo types.LiveUtxoSource
-	// rewardLiveStakeDrained is set once the live-stake family is drained:
-	// reward_live_stake holds no rows and no path may read or write it.
-	rewardLiveStakeDrained atomic.Bool
 
 	// committeeAuthRetentionSlots is the configured rollback window for
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
@@ -176,6 +194,11 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
+
+	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
+	// run of the digest spool, when non-zero. Only tests set it, to make the
+	// spool merge many runs.
+	utxoDigestRunBytes int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
@@ -217,11 +240,6 @@ type Store struct {
 	// Test hook runs after a prune has selected its horizon. Production leaves
 	// it nil.
 	committeeAuthPruneLocked func()
-	// drained is the mask of ledger-state families whose rows were deleted,
-	// pushed in by SetDrainedFamilies. A write or rollback delete that names a
-	// drained family's table must not run: the rows would reappear beside a
-	// set that no longer matches them.
-	drained atomic.Uint64
 	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
 	// reward credits and before its pool reads. Production leaves it nil.
 	liveStakePendingTotalsRead func()
@@ -264,6 +282,7 @@ type Store struct {
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
 	checkpoint       func(context.Context) error
+	bulkCheckpoint   func(context.Context) error
 	checkpointEvery  time.Duration
 	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
@@ -277,10 +296,11 @@ type Store struct {
 	bulkConn         *sql.Conn
 	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
 	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
-	// import can keep bulk mode active for hours; checkpointing the same SQLite
-	// database during that interval adds lock traffic without improving recovery,
+	// import can keep bulk mode active for hours; a writer-blocking checkpoint
+	// during that interval adds lock traffic without improving recovery,
 	// because the import is explicitly incomplete until its final ready-state
-	// transaction commits.
+	// transaction commits. Only bulkCheckpoint, which must not block the
+	// writer, runs then.
 	scheduledWorkMu    sync.Mutex
 	bulkMode           bool
 	bulkRestorePending bool
@@ -386,6 +406,7 @@ func New(config Config) (*Store, error) {
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
+		scratchDir:                  config.ScratchDir,
 		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
 		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,
@@ -403,6 +424,7 @@ func New(config Config) (*Store, error) {
 		vacuum:                      config.Vacuum,
 		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
+		bulkCheckpoint:              config.BulkCheckpoint,
 		checkpointEvery:             config.CheckpointInterval,
 		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
@@ -458,8 +480,10 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 	// Like Reset, a restore replaces the on-disk/remote schema and data out
 	// from under any statement prepared before it ran; invalidate the cache
 	// regardless of outcome so a later call always re-prepares against
-	// whatever RestoreFrom actually left behind.
+	// whatever RestoreFrom actually left behind. The restored rows carry
+	// their own ids, so no remembered spend id still names its output.
 	s.closePreparedStatements()
+	s.forgetSpendCache()
 	return err
 }
 
@@ -496,6 +520,8 @@ func (s *Store) Reset(ctx context.Context) error {
 	// whether reset succeeded or failed partway, rather than assume a
 	// partial failure left every cached statement's table intact.
 	s.closePreparedStatements()
+	// The recreated tables restart their id sequences.
+	s.forgetSpendCache()
 	return err
 }
 
@@ -571,7 +597,10 @@ func (s *Store) Start(ctx context.Context) error {
 			Logger:        s.logger,
 			Rebind:        s.dialect.Rebind,
 		}
-		if err := runner.Run(ctx); err != nil {
+		stopCheckpoint := s.startMigrationCheckpoint(ctx)
+		err := runner.Run(ctx)
+		stopCheckpoint()
+		if err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
 		}
 	}
@@ -919,8 +948,8 @@ func (s *Store) closeVacuumAdmission() {
 }
 
 // startCheckpointTicker runs s.checkpoint on its own ticker, independent of
-// maintenance and vacuum cadences. WAL checkpointing needs to run every 1-5
-// minutes to bound WAL growth, not once a day. Mirrors
+// maintenance and vacuum cadences. WAL checkpointing needs to run every few
+// seconds to bound WAL growth, not once a day. Mirrors
 // startMaintenance's admission/cancellation shape (checkpointState,
 // checkpointCancel, checkpointDone) exactly, as a distinct instance rather
 // than a shared one, so a slow VACUUM can never delay or skip a checkpoint
@@ -979,6 +1008,45 @@ func (s *Store) startCheckpointTicker() {
 	}()
 }
 
+// startMigrationCheckpoint runs s.bulkCheckpoint on the checkpoint cadence
+// while startup migrations commit on the write connection, and returns the
+// function that stops it. The scheduled checkpoint ticker starts only once the
+// store is ready, so without this a provider whose writer never checkpoints at
+// commit would keep every migration batch in the WAL until the upgrade ends.
+// bulkCheckpoint is used rather than s.checkpoint because it never takes the
+// writer lock the migration holds between batches.
+func (s *Store) startMigrationCheckpoint(ctx context.Context) func() {
+	if s.bulkCheckpoint == nil || s.checkpointEvery <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := s.bulkCheckpoint(ctx)
+				if err != nil && ctx.Err() == nil {
+					s.logger.Warn(
+						"metadata database WAL checkpoint during upgrade failed",
+						"dialect", s.dialect.Name(),
+						"error", err,
+					)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
 // whose provider commits durably.
 func (s *Store) SyncCommits(ctx context.Context) error {
@@ -993,7 +1061,10 @@ func (s *Store) runCheckpoint(ctx context.Context) error {
 	defer s.scheduledWorkMu.Unlock()
 	if s.bulkMode {
 		if !s.bulkRestorePending {
-			return nil
+			if s.bulkCheckpoint == nil {
+				return nil
+			}
+			return s.bulkCheckpoint(ctx)
 		}
 		if err := s.restoreNormalPragmas(ctx); err != nil {
 			return fmt.Errorf("restoring normal pragmas: %w", err)
@@ -1302,6 +1373,9 @@ type sqlTxn struct {
 	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
 	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
 	overlayAccumulator *transactionBatchAccumulator
+	// spends holds the spend-cache entries of outputs this transaction
+	// inserted; Commit publishes them once the commit succeeds.
+	spends map[string]spendCacheEntry
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1318,10 +1392,13 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	err := t.tx.Commit()
+	err := t.commitTx()
 	if err != nil {
 		t.restoreBatches(t.batchBefore)
+	} else if t.owner != nil {
+		t.owner.publishSpendEntries(t.spends)
 	}
+	t.spends = nil
 	for accumulator := range t.batchBefore {
 		accumulator.resetStatement()
 	}
@@ -1329,6 +1406,15 @@ func (t *sqlTxn) Commit() error {
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
 	return err
+}
+
+// commitTx commits the SQL transaction inside its trace region, ended by
+// defer so a panicking commit cannot leave it open.
+func (t *sqlTxn) commitTx() error {
+	if t.ctx != nil {
+		defer rtrace.StartRegion(t.ctx, tracing.RegionSQLCommit).End()
+	}
+	return t.tx.Commit()
 }
 
 func (t *sqlTxn) Rollback() error {
@@ -1343,6 +1429,7 @@ func (t *sqlTxn) Rollback() error {
 	t.finished = true
 	defer t.releaseConnection()
 	t.restoreBatches(t.batchBefore)
+	t.spends = nil
 	t.batchBefore = nil
 	t.batchSavepoints = nil
 	t.overlayAccumulator = nil
@@ -1413,6 +1500,8 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
+		// Ids inserted after the savepoint are freed for reuse.
+		t.spends = nil
 		t.restoreBatches(t.batchSavepoints[name])
 		for i, savepointName := range slices.Backward(t.savepointOrder) {
 			if savepointName == name {
@@ -1468,27 +1557,6 @@ func (s *Store) SetBulkLoadPragmas() error {
 	s.bulkMode = true
 	s.bulkRestorePending = false
 	return nil
-}
-
-// SetCatchUpPragmas applies the backend's crash-safe catch-up tuning to the
-// write connection. Unlike SetBulkLoadPragmas it leaves durability alone and
-// does not enter bulk mode, so checkpoints and planner maintenance carry on.
-// RestoreNormalPragmas undoes it. Backends without a SQLite write pool are
-// left untouched.
-func (s *Store) SetCatchUpPragmas() error {
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	if s.closed.Load() {
-		return errors.New("sqlstore: store is closed")
-	}
-	if s.dialect.Name() != "sqlite" {
-		return nil
-	}
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	return s.dialect.SetCatchUpMode(context.Background(), s.writeDB)
 }
 
 // RestoreNormalPragmas restores safe backend defaults.

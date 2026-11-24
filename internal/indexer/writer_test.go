@@ -205,7 +205,7 @@ func (s *syncRowIndexer) RollbackTo(
 
 func newTestStore(t *testing.T) *indexerdb.Store {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{})
+	db, err := dbtest.NewDatabase(t, &database.Config{Role: database.RoleIndexer})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(db, db, 10)
 	require.NoError(t, err)
@@ -728,4 +728,89 @@ func TestReplayShrinksBatchWhenBlobWritesAreTooBig(t *testing.T) {
 	tip, err := store.Tip(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(29), tip.BlockNumber)
+}
+
+// withContent gives every block of the chain a CBOR body of size bytes.
+func (c *fakeChain) withContent(size int) *fakeChain {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.canonical {
+		c.canonical[i].Cbor = make([]byte, size)
+		c.stored[string(c.canonical[i].Hash)] = c.canonical[i]
+	}
+	return c
+}
+
+// catchUpBatches indexes the chain and returns the committed batch count.
+func catchUpBatches(
+	t *testing.T, chain *fakeChain, idx BlockIndexer, batch int, sparse bool,
+) (int, *indexerdb.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	w := NewWriter(store, chain, idx, nil, batch)
+	if sparse {
+		w.WithSparseBatches()
+		w.sparseBytes = 1000
+	}
+	batches := 0
+	w.afterBatch = func(indexerdb.Tip) { batches++ }
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain)
+	return batches, store
+}
+
+func TestSparseBatchesCommitFewerTimesForSmallBlocks(t *testing.T) {
+	t.Parallel()
+	chain := newFakeChain(64, "a").withContent(10)
+	plain, plainStore := catchUpBatches(t, chain, &syncRowIndexer{}, 4, false)
+	sparse, sparseStore := catchUpBatches(t, chain, &syncRowIndexer{}, 4, true)
+	require.Equal(t, 16, plain)
+	// 4 blocks of 10 bytes stay under the budget, so each batch reads up to
+	// SparseBatchFactor*4 = 32 blocks.
+	require.Equal(t, 2, sparse)
+	require.Equal(t, rows(t, plainStore), rows(t, sparseStore))
+}
+
+func TestSparseBatchesKeepBlockLimitForDenseBlocks(t *testing.T) {
+	t.Parallel()
+	chain := newFakeChain(64, "a").withContent(1000)
+	plain, _ := catchUpBatches(t, chain, &syncRowIndexer{}, 4, false)
+	sparse, _ := catchUpBatches(t, chain, &syncRowIndexer{}, 4, true)
+	require.Equal(t, plain, sparse)
+}
+
+func TestSparseBatchesStillHalveOnOversizedTransaction(t *testing.T) {
+	t.Parallel()
+	chain := newFakeChain(200, "a").withContent(10)
+	idx := &sizeLimitedIndexer{limit: 5}
+	_, store := catchUpBatches(t, chain, idx, 8, true)
+	tip, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(199), tip.BlockNumber)
+}
+
+// vanishingChain fails its second BlocksAfter call, as when the block a
+// sparse batch continues from is rolled back between reads.
+type vanishingChain struct {
+	*fakeChain
+	calls atomic.Int32
+}
+
+func (c *vanishingChain) BlocksAfter(
+	ctx context.Context, after indexerdb.Tip, through uint64, limit int,
+) ([]models.Block, error) {
+	if c.calls.Add(1) == 2 {
+		return nil, errors.New("locate block to continue after: not found")
+	}
+	return c.fakeChain.BlocksAfter(ctx, after, through, limit)
+}
+
+func TestSparseBatchesKeepReadPrefixWhenContinuationFails(t *testing.T) {
+	t.Parallel()
+	chain := &vanishingChain{fakeChain: newFakeChain(64, "a").withContent(10)}
+	store := newTestStore(t)
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 4).WithSparseBatches()
+	w.sparseBytes = 1000
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain.fakeChain)
 }

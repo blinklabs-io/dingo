@@ -111,7 +111,7 @@ func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
 func TestMeshDatabaseAdapterEmptyDatabaseLookups(t *testing.T) {
 	t.Parallel()
 
-	db, indexerDB := newAdapterDatabase(t)
+	_, indexerDB := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(indexerDB)
 
 	t.Run("block by index not found", func(t *testing.T) {
@@ -139,7 +139,7 @@ func TestMeshDatabaseAdapterEmptyDatabaseLookups(t *testing.T) {
 	})
 
 	t.Run("cancelled context", func(t *testing.T) {
-		adapter := &meshDatabaseAdapter{db: db}
+		adapter := &meshDatabaseAdapter{db: indexerDB}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		_, err := adapter.BlockByHash(ctx, make([]byte, 32))

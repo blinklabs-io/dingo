@@ -485,16 +485,7 @@ func seedByronInputFromWitness(
 	})
 	require.NoError(t, err)
 	input := tx.Inputs()[0]
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      input.Id().Bytes(),
-		OutputIdx: input.Index(),
-		AddedSlot: 0,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(
-		txn.Blob(), input.Id().Bytes(), input.Index(), out,
-	))
-	require.NoError(t, txn.Commit())
+	fxSeedOutput(t, db, input.Id().Bytes(), input.Index(), 0, out)
 }
 
 // TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters covers the
@@ -539,12 +530,12 @@ func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
 			Cbor:        block.Cbor(),
 		}}),
 	)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 21_600, nil,
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
-		UtxoSet:            NewMemLiveSetForTest(),
+		UtxoSet:            OpenLiveSetForTest(t, db),
 		ChainManager:       cm,
 		CardanoNodeConfig:  nodeConfig,
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),

@@ -1,1 +1,1 @@
-DROP TABLE IF EXISTS `asset`;
+-- No contract statements.

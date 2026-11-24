@@ -38,7 +38,7 @@ func uncachedPendingInstantaneousRewards(
 	cred lcommon.Credential,
 ) *big.Int {
 	t.Helper()
-	effects, err := ls.db.GetMIRCertsInSlotRange(
+	effects, err := ls.ledgerDB().GetMIRCertsInSlotRange(
 		context.Background(), epochStartSlot, math.MaxInt64, txn,
 	)
 	require.NoError(t, err)
@@ -71,8 +71,8 @@ func mirTestCredential(credType uint, seed byte) lcommon.Credential {
 
 func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 	t.Parallel()
-	ls, db, gdb := newMIRTestLedger(t)
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+	ls, db, _ := newMIRTestLedger(t)
+	seedMIRDistribution(t, db, mirPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 			{Credential: mirCred28(2), Amount: big.NewInt(6)},
@@ -95,12 +95,12 @@ func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 
 func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 	t.Parallel()
-	ls, db, gdb := newMIRTestLedger(t)
-	seedMIRDistribution(t, gdb, mirPotReserves, 50,
+	ls, db, _ := newMIRTestLedger(t)
+	seedMIRDistribution(t, db, mirPotReserves, 50,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(1_000)},
 		})
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+	seedMIRDistribution(t, db, mirPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 			{Credential: mirCred28(2), Amount: big.NewInt(20)},
@@ -109,15 +109,15 @@ func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 				Amount: big.NewInt(30),
 			},
 		})
-	seedMIRDistribution(t, gdb, mirPotReserves, 160,
+	seedMIRDistribution(t, db, mirPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(7)},
 		})
-	seedMIRDistribution(t, gdb, mirPotTreasury, 170,
+	seedMIRDistribution(t, db, mirPotTreasury, 170,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(100)},
 		})
-	seedMIRPotTransfer(t, gdb, mirPotTreasury, 999, 180)
+	seedMIRPotTransfer(t, db, mirPotTreasury, 999, 180)
 	creds := []lcommon.Credential{
 		mirTestCredential(0, 1),
 		mirTestCredential(0, 2),
@@ -158,7 +158,7 @@ func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 // certificates only after it validates, so no view spans a MIR write.
 func TestLedgerViewPendingInstantaneousRewardsSeesLaterStoredCert(t *testing.T) {
 	t.Parallel()
-	ls, db, gdb := newMIRTestLedger(t)
+	ls, db, _ := newMIRTestLedger(t)
 	cred := mirTestCredential(0, 1)
 	read := func() *big.Int {
 		var got *big.Int
@@ -172,12 +172,12 @@ func TestLedgerViewPendingInstantaneousRewardsSeesLaterStoredCert(t *testing.T) 
 		return got
 	}
 	require.Nil(t, read())
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+	seedMIRDistribution(t, db, mirPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 		})
 	require.Zero(t, big.NewInt(10).Cmp(read()))
-	seedMIRDistribution(t, gdb, mirPotReserves, 160,
+	seedMIRDistribution(t, db, mirPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 		})

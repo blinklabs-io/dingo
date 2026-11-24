@@ -266,27 +266,13 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-			require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-				for _, utxo := range fx.inputs {
-					id := utxo.Id.Id().Bytes()
-					idx := utxo.Id.Index()
-					if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
-						TxId: id, OutputIdx: idx, AddedSlot: 1,
-					}); err != nil {
-						return err
-					}
-					encoded, err := cbor.Encode(utxo.Output)
-					if err != nil {
-						return err
-					}
-					if err := db.Blob().SetUtxo(
-						txn.Blob(), id, idx, encoded,
-					); err != nil {
-						return err
-					}
-				}
-				return nil
-			}))
+			for _, utxo := range fx.inputs {
+				encoded, err := cbor.Encode(utxo.Output)
+				require.NoError(t, err)
+				fxSeedOutput(
+					t, db, utxo.Id.Id().Bytes(), utxo.Id.Index(), 1, encoded,
+				)
+			}
 			tx := fx.tx(t, tc.fee)
 			var txHash [32]byte
 			copy(txHash[:], tx.Hash().Bytes())
@@ -336,23 +322,23 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 				return err
 			})
 
-			spent, err := db.Metadata().GetUtxoIncludingSpent(
-				fx.spendIn.Id().Bytes(), fx.spendIn.Index(), nil,
+			inputLive := outputLiveIn(
+				t, ls, fx.spendIn.Id().Bytes(), fx.spendIn.Index(),
 			)
-			require.NoError(t, err)
-			output, err := db.Metadata().GetUtxoIncludingSpent(
-				tx.Hash().Bytes(), 0, nil,
-			)
-			require.NoError(t, err)
+			outputLive := outputLiveIn(t, ls, tx.Hash().Bytes(), 0)
 			if tc.wantErr {
 				requireDijkstraFeeTooSmall(t, processErr)
-				require.Zero(t, spent.DeletedSlot)
-				require.Nil(t, output)
+				require.True(t, inputLive, "a rejected spend keeps its input")
+				require.False(t, outputLive)
 				return
 			}
 			require.NoError(t, processErr)
-			require.Equal(t, uint64(10), spent.DeletedSlot)
-			require.NotNil(t, output)
+			require.False(t, inputLive, "the block spends its input")
+			requireSpentAt(
+				t, ls, fx.spendIn.Id().Bytes(), fx.spendIn.Index(),
+				ocommon.Point{Slot: 9}, ocommon.Point{Slot: 10},
+			)
+			require.True(t, outputLive)
 		})
 	}
 }

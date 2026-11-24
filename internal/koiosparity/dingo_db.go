@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -39,9 +38,8 @@ import (
 type DingoDBConfig struct {
 	// Plugin is the metadata storage backend: "sqlite" (default), "postgres", or "mysql".
 	Plugin string
-	// DataDir is the Dingo node data directory.
-	// For SQLite this must contain metadata.sqlite; for other plugins it is only
-	// used to resolve the default cache path and is not required for DB access.
+	// DataDir is the directory of the SQLite IndexerDB, which must contain
+	// metadata.sqlite. Other plugins do not read it.
 	DataDir string
 	// DSN is the connection string for postgres and mysql plugins.
 	// Examples:
@@ -239,8 +237,9 @@ type DingoPoolEpochData struct {
 // "leader" row. Matches Koios /account_reward_history's own "member" type.
 const rewardTypeMember = "member"
 
-// DingoDB reads reward state directly from Dingo's metadata database.
-// It supports all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
+// DingoDB reads reward state directly from the tables of Dingo's IndexerDB,
+// which the IndexerDB writer fills from the ledger on an API node. It supports
+// all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
 type DingoDB struct {
 	db      *sql.DB
 	dialect string
@@ -291,65 +290,7 @@ func OpenDingoDB(cfg DingoDBConfig) (*DingoDB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping dingo metadata: %w", err)
 	}
-	if err := refuseDrainedReads(db, cfg.Plugin); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	return &DingoDB{db: db, dialect: cfg.Plugin}, nil
-}
-
-func gateTableExists(db *sql.DB) bool {
-	var probe int
-	err := db.QueryRow(`SELECT 1 FROM node_settings_gate LIMIT 1`).Scan(&probe)
-	return err == nil || errors.Is(err, sql.ErrNoRows)
-}
-
-// ErrDrainedDatabase is returned by OpenDingoDB for a database that has
-// deleted the SQL rows of a ledger-state family DingoDB reads.
-var ErrDrainedDatabase = errors.New(
-	"the metadata database has drained a ledger-state family this source reads",
-)
-
-// dingoDBFamilies are the families whose tables DingoDB queries directly.
-var dingoDBFamilies = nodesettings.FamilyMask(0).
-	With(nodesettings.FamilyEpochs).
-	With(nodesettings.FamilySummaries).
-	With(nodesettings.FamilyEraSwitch).
-	With(nodesettings.FamilyPParamsUpdates).
-	With(nodesettings.FamilyPoolsHistory).
-	With(nodesettings.FamilyAccounts).
-	With(nodesettings.FamilyGovernance).
-	With(nodesettings.FamilyRewardInputs).
-	With(nodesettings.FamilyRewardOutputs)
-
-// refuseDrainedReads reads the drain latch and refuses a database that has
-// deleted rows DingoDB would read as empty. A database whose gate table does
-// not exist predates the latch and has drained nothing.
-func refuseDrainedReads(db *sql.DB, dialect string) error {
-	var value string
-	err := db.QueryRow(
-		rebind(`SELECT value FROM node_settings_gate WHERE name = ?`, dialect),
-		nodesettings.LedgerStateDrainedGateName,
-	).Scan(&value)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
-		if !gateTableExists(db) {
-			return nil
-		}
-		return fmt.Errorf("read ledger-state latch: %w", err)
-	}
-	mask, err := nodesettings.DecodeFamilyMask(value)
-	if err != nil {
-		return err
-	}
-	if hit := mask & dingoDBFamilies; hit != 0 {
-		return fmt.Errorf(
-			"%w: %v", ErrDrainedDatabase, hit.Families(),
-		)
-	}
-	return nil
 }
 
 // Close releases the database connection.
@@ -659,9 +600,11 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 // independent of pool count. ctx is forwarded to the DB driver so that a
 // cancelled context aborts the query.
 // GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
-// mark pool_stake_snapshot rows for epoch. See the interface doc comment for
-// why this, and not epoch_summary.SnapshotReady, is the per-pool evidence of
-// pool-set membership.
+// mark rows for epoch of the IndexerDB's pool_stake_snapshot table, beside
+// the reward_pool_input rows GetPoolEpochDataMap reads from the same store.
+// See the interface doc comment for why this, and not
+// epoch_summary.SnapshotReady, is the per-pool evidence of pool-set
+// membership.
 func (d *DingoDB) GetPoolStakeSnapshotMembers(
 	ctx context.Context,
 	epoch uint64,

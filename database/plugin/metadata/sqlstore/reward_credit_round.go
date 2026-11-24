@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -808,11 +807,6 @@ func (s *Store) pendingDRepCredits(
 	filterCol string,
 	values []any,
 ) (map[string]uint64, map[uint64]uint64, error) {
-	if err := s.refuseDrained(
-		"account", "reward_account_output", "reward_credit_round",
-	); err != nil {
-		return nil, nil, err
-	}
 	byCredential := make(map[string]uint64)
 	byType := make(map[uint64]uint64)
 	if len(values) == 0 {
@@ -899,9 +893,7 @@ func (s *Store) recordRewardEligibilityRecheck(
 	db queryer,
 	refs []models.StakeCredentialRef,
 ) error {
-	// The key belongs to the reward-outputs family, whose drain deletes it;
-	// the set keeps the restored credentials itself.
-	if len(refs) == 0 || s.familyDrained(nodesettings.FamilyRewardOutputs) {
+	if len(refs) == 0 {
 		return nil
 	}
 	var raw string
@@ -1021,9 +1013,6 @@ func (s *Store) RewardCreditsAlreadyApplied(
 	credits []models.AccountRewardCredit,
 	txn types.Txn,
 ) ([]bool, error) {
-	if err := s.refuseDrained("account_reward_delta"); err != nil {
-		return nil, err
-	}
 	ret := make([]bool, len(credits))
 	if len(credits) == 0 {
 		return ret, nil

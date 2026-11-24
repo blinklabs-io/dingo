@@ -160,8 +160,8 @@ func overlayReadBarrierAll(ctx context.Context, db queryer) error {
 }
 
 // readsOverlayTables reports whether query names utxo, utxo_pointer or
-// reward_live_stake as a whole identifier, so utxo_address, utxo_id and
-// consumed_utxo_prune_floor do not match.
+// reward_live_stake as a whole identifier, so utxo_address and utxo_id do
+// not match.
 func readsOverlayTables(query string) bool {
 	return containsIdentifier(query, "utxo") ||
 		containsIdentifier(query, "utxo_pointer") ||

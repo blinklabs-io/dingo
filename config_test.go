@@ -485,6 +485,72 @@ func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	assert.Equal(t, capacity, selection.Config["capacity"])
 }
 
+func TestNewConfigBlockPipelineDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts []ConfigOptionFunc
+		want bool
+	}{
+		{name: "core", want: true},
+		{
+			name: "api",
+			opts: []ConfigOptionFunc{WithStorageMode(StorageModeAPI)},
+		},
+		{
+			name: "musashi name",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+			},
+		},
+		{
+			name: "musashi magic",
+			opts: []ConfigOptionFunc{
+				WithNetworkMagic(ouroboros.NetworkCardanoMusashi.NetworkMagic),
+			},
+		},
+		{
+			name: "explicit core disable",
+			opts: []ConfigOptionFunc{WithBlockPipelineEnabled(false)},
+		},
+		{
+			name: "explicit api enable",
+			opts: []ConfigOptionFunc{
+				WithStorageMode(StorageModeAPI),
+				WithBlockPipelineEnabled(true),
+			},
+			want: true,
+		},
+		{
+			name: "explicit enable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithRunMode("dev"),
+				WithBlockPipelineEnabled(true),
+			},
+			want: true,
+		},
+		{
+			name: "explicit disable survives dev override",
+			opts: []ConfigOptionFunc{
+				WithBlockPipelineEnabled(false),
+				WithRunMode("dev"),
+			},
+		},
+		{
+			name: "dev derives api default",
+			opts: []ConfigOptionFunc{WithRunMode("dev")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := NewConfig(tt.opts...)
+			assert.Equal(t, tt.want, cfg.BlockPipelineEnabled())
+		})
+	}
+}
+
 func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -1382,5 +1448,78 @@ func TestConfigValidateRejectsSinglePoolKeysWithBlockProducerPools(t *testing.T)
 			// New starts the event bus goroutines; Stop releases them.
 			t.Cleanup(func() { _ = n.Stop() })
 		})
+	}
+}
+
+func TestConfigValidateRejectsSharedKESWithoutSignMode(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "top-level local key",
+			cfg: NewConfig(
+				WithShelleyKESAgentShared(true),
+			),
+		},
+		{
+			name: "top-level serve-key socket",
+			cfg: NewConfig(
+				WithShelleyKESAgentSocket("/tmp/kes-agent.sock"),
+				WithShelleyKESAgentShared(true),
+			),
+		},
+		{
+			name: "pool local key",
+			cfg: NewConfig(WithBlockProducerPools(BlockProducerPool{
+				ShelleyKESAgentShared: true,
+			})),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{config: tt.cfg}
+			require.ErrorContains(
+				t,
+				n.configValidate(),
+				"WithShelleyKESAgentShared",
+			)
+		})
+	}
+}
+
+func TestConfigValidateAcceptsSharedKESSignMode(t *testing.T) {
+	t.Parallel()
+
+	validConfig := func(opts ...ConfigOptionFunc) Config {
+		return NewConfig(append([]ConfigOptionFunc{
+			WithNetworkMagic(1),
+			WithListeners(ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: "127.0.0.1:0",
+			}),
+		}, opts...)...)
+	}
+	for _, cfg := range []Config{
+		validConfig(
+			WithShelleyKESAgentSocket("/tmp/kes-agent.sock"),
+			WithShelleyKESAgentMode("sign"),
+			WithShelleyKESAgentShared(true),
+		),
+		validConfig(
+			WithShelleyKESAgentRemote("agent.example:3105", "", "", ""),
+			WithShelleyKESAgentShared(true),
+		),
+		validConfig(
+			WithBlockProducerPools(BlockProducerPool{
+				ShelleyKESAgentSocket: "/tmp/kes-agent.sock",
+				ShelleyKESAgentMode:   "sign",
+				ShelleyKESAgentShared: true,
+			}),
+		),
+	} {
+		n := &Node{config: cfg}
+		require.NoError(t, n.configValidate())
 	}
 }

@@ -155,7 +155,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"SkipRewardLiveStakeBackfillCheck",
 		"skip-reward-live-stake-backfill-check",
-		"skip the reward_live_stake startup consistency check (advanced/diagnostic use only, unsafe to leave enabled permanently)",
+		"no effect; accepted so existing configurations still load",
 	),
 	boolFlag(
 		"Tracing",
@@ -947,12 +947,12 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BackfillBatchSize",
 		"backfill-batch-size",
-		"API-mode metadata backfill block batch size",
+		"accepted for configuration compatibility; has no effect",
 	),
 	boolFlag(
 		"BlockPipelineEnabled",
 		"block-pipeline-enabled",
-		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
+		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default on in core mode except Musashi)",
 	),
 	boolFlag(
 		"BlockPipelineValidateEnabled",
@@ -983,7 +983,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"LedgerApplyRowBatchingEnabled",
 		"ledger-apply-row-batching-enabled",
-		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+		"accepted for released configurations; has no effect",
 	),
 
 	boolFlag(
@@ -1064,6 +1064,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"remote KES agent profile to sign for, named when the agent admits a session",
 	),
+	boolFlag(
+		"ShelleyKESAgentShared",
+		"shelley-kes-agent-shared",
+		"require a live upstream before using this sign-mode KES agent because another producer shares it",
+	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
 		"shelley-key-watch-interval",
@@ -1132,7 +1137,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"PlannerStatsRefreshEnabled",
 		"planner-stats-refresh-enabled",
-		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
+		"keep SQLite planner statistics current with a bounded ANALYZE at startup, after each epoch rollover and once a minute",
 	),
 
 	boolFlag(
@@ -1434,10 +1439,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
-		// Only gated fields, per provenance's documented contract: this loop
+		// Only tracked fields, per provenance's documented contract: this loop
 		// walks every registered flag, and recording the rest would fill the
 		// map with entries nothing reads.
-		if isGatedField(spec.field) {
+		if isProvenanceField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}

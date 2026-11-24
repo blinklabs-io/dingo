@@ -449,7 +449,7 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -469,16 +469,17 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 		Point:       ocommon.NewPoint(rival.SlotNumber(), rival.Hash().Bytes()),
 		BlockNumber: rival.BlockNumber(),
 	}
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		parentTip.Point.Hash, parentTip.Point.Slot,
 		siblingTestBytes(32, 0xa1), true, nil,
 	))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		rivalTip.Point.Hash, rivalTip.Point.Slot,
 		siblingTestBytes(32, 0xb2), false, nil,
 	))
 	require.NoError(t, db.SetTip(rivalTip, nil))
 	ls.currentTip = rivalTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = siblingTestBytes(32, 0xb2)
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()

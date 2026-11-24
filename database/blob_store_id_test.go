@@ -62,17 +62,20 @@ func newTestDatabaseAt(
 	if err != nil {
 		return nil, err
 	}
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{
-			DataDir: metaDir, StorageMode: config.StorageMode,
-			Logger: config.Logger, PromRegistry: config.PromRegistry,
-		},
-	)
-	if err != nil {
-		_ = host.Stop(context.Background())
-		return nil, err
+	var metadataStore metadata.MetadataStore
+	if config.Role != "" {
+		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
+			context.Background(), host,
+			plugin.CapabilityStorageMetadata, "sqlite", nil,
+			metadata.ProviderDependencies{
+				DataDir: metaDir, StorageMode: config.StorageMode,
+				Logger: config.Logger, PromRegistry: config.PromRegistry,
+			},
+		)
+		if err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
 	}
 	db, err := New(
 		context.Background(),
@@ -133,7 +136,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	first := gates["blob_store_id"]
 	require.NotEmpty(t, first)
@@ -145,7 +148,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err = reopened.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err = reopened.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, first, gates["blob_store_id"])
 	require.NoError(t, closeTestDatabase(reopened))
@@ -154,8 +157,10 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 	t.Parallel()
 
-	// A metadata store paired with a blob store it was not initialised
-	// with, which is what a swapped or emptied bucket looks like.
+	// Node settings paired with a blob store they were not recorded for,
+	// which is what a swapped or emptied bucket looks like. The ledger's
+	// database keeps its settings in the data directory and opens no
+	// metadata store.
 	metaDir := t.TempDir()
 	db, err := newTestDatabaseAt(t, metaDir, metaDir, &Config{
 		DataDir:     metaDir,
@@ -169,7 +174,7 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 		DataDir:     metaDir,
 		StorageMode: "core",
 		Network:     "preprod",
-	}, storesWithFreshBlob(t, metaDir))
+	}, Stores{Blob: storesWithFreshBlob(t, metaDir).Blob})
 	var settingsErr NodeSettingsError
 	require.ErrorAs(t, err, &settingsErr)
 	require.Contains(t, settingsErr.Error(), "blob store ID")
