@@ -19475,9 +19475,11 @@ second sync:
   the live node's own store rather than opening a second connection.
   - **Reward-state retention.** The observer changes no LedgerDB
     retention: `ledger/snapshot.cleanupOldSnapshots` prunes
-    `reward_pool_output`, `reward_account_output`, `reward_stake_input` and
-    the precompute cursors below `snapshot.RewardStateRetainedFrom` the same
-    whether or not it runs. Reward history older than that window is API data
+    `reward_account_output` and `reward_stake_input` below
+    `snapshot.RewardStateRetainedFrom` the same whether or not it runs, and
+    through the ledger's staging path, which also prunes the live set's
+    derived reward rows, `reward_pool_output` and the precompute cursors too;
+    a SQL store's `DeleteRewardStateBeforeEpoch` deletes only the first two. Reward history older than that window is API data
     and lives in the IndexerDB. `koiosParitySource` builds the source with
     `WithIndexerDB` when the node has one: the reward tables
     (`epoch_summary`, `reward_ada_pots`, `reward_pool_input`,
@@ -22683,8 +22685,10 @@ The Cleanup step of each epoch transition (`cleanupOldSnapshots`) prunes only
 what scales with delegator count — `RewardStakeInput` and (in `core` storage
 mode) `RewardAccountOutput`, plus `PoolStakeSnapshot` — to the four epochs the
 rotation and delayed reward model need (current through current-3). The
-LedgerDB prunes `RewardPoolOutput` and the precompute cursors with
-`RewardAccountOutput`; the IndexerDB keeps every epoch's.
+ledger's staging path prunes `RewardPoolOutput` and the precompute cursors
+with `RewardAccountOutput`, as derived reward rows of the live set; a SQL
+store's `DeleteRewardStateBeforeEpoch` deletes only `RewardStakeInput` and
+`RewardAccountOutput`. The IndexerDB keeps every epoch's.
 `EpochSummary`, `RewardAdaPots`, `RewardSnapshot` and `RewardPoolInput` are
 exempt and retained for the life of the database, so full per-epoch and
 per-pool reward history stays queryable and a missing

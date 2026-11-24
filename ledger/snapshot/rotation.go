@@ -1175,7 +1175,10 @@ func RewardStateRetainedFrom(currentEpoch uint64) uint64 {
 // reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
 // and is not needed once the epoch it snapshots has finished replaying, so
 // outside API storage mode it is pruned to that 4-epoch window, together with
-// the pool and account reward outputs and the precompute cursors. In API
+// the account reward outputs. Through the ledger's staging LedgerDB the same
+// prune also drops the live set's derived reward rows, the pool outputs and
+// precompute cursors; a SQL store's DeleteRewardStateBeforeEpoch deletes only
+// the stake inputs and account outputs. In API
 // storage mode (types.StorageModeAPI) both reward tables are retained without
 // bound. The window is the same whatever reads the rows outside it: reward
 // history older than the window is API data, which the IndexerDB holds.
