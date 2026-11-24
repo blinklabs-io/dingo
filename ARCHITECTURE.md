@@ -19105,37 +19105,30 @@ second sync:
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it wraps
   an already-open, live `*database.Database` and reads
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
-  `reward_account_output`/`reward_snapshot` through the `LedgerDB` the node's
-  ledger reads through (`NewDatabaseSourceWithLedgerDB`; `NewDatabaseSource`
-  uses the plain adapter), so the decorator, and in set mode the live UTxO
-  set, answers them, with the typed accessors (`GetEpochSummary`, `GetRewardAdaPots`,
-  `GetRewardPoolInputs`, `GetRewardPoolOutputs`, `GetRewardAccountOutputs`,
+  `reward_account_output`/`reward_snapshot` with the typed accessors
+  (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`,
   `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above, and
   `GetRewardSnapshot` for the zero-stake completeness proof above) inside a
-  fresh read-only transaction per call — the same tables
-  `ledger/snapshot/rotation.go` already populates at every epoch boundary, with
-  no new table and no metadata export. `GetRewardAccountOutputs` is what the
-  per-account exact-parity comparison (`compareEpochAccounts`, "Per-account
-  exact parity" below) reads Dingo's committed reward state through.
-  `GetProposalDepositRefunds` reads `governance_proposal`,
+  fresh read-only transaction per call. Built with `WithIndexerDB`, as the
+  node does when it has an IndexerDB, it reads those reward tables from the
+  IndexerDB, which keeps every epoch; without one it reads them through the
+  ledger's `LedgerDB` (`NewDatabaseSourceWithLedgerDB`), which keeps only the
+  epochs `snapshot.RewardStateRetainedFrom` covers. `GetRewardAccountOutputs`
+  is what the per-account exact-parity comparison (`compareEpochAccounts`,
+  "Per-account exact parity" below) reads Dingo's committed reward state
+  through. `GetProposalDepositRefunds` reads `governance_proposal`,
   `governance_proposal_drop` and the `account_reward_delta` journal through
   `GetGovernanceProposalsRefundedAt` and `GetPostSnapshotRewardCreditEvents`
   (see "Proposal refunds" below). Those tables are deleted only above a rollback
   or truncate slot, never by age or storage mode, so unlike
   `reward_account_output` a refund read does not age out.
-  - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
-    `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
-    for only a rolling 4-epoch window in core storage mode (API mode retains
-    both without bound instead); `reward_pool_input`/
-    `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
-    does not race this in any special, same-transaction way — it just reads
-    whatever is currently committed. What actually satisfies "available
-    before cleanup" is that the observer (below) processes a newly closed
-    epoch promptly after its own event fires, many epochs before that
-    epoch's rows would age out of the window; a read made long after they
-    have aged out comes back as absent (`nil`/`*Present == false`), the same
-    signal already used for "not yet computed" — never an error, and never
-    to be confused with a same-transaction guarantee.
+  - *LedgerDB pruning.* Read through the LedgerDB, reward rows below the
+    retention floor are gone (see "Reward-state retention" below), and a read
+    of them comes back absent (`nil`/`*Present == false`), the same signal
+    used for "not yet computed", never an error. The observer (below)
+    processes a newly closed epoch promptly after its own event fires, well
+    before its rows leave the window.
 - **`Observer`** (`internal/koiosparity/observer.go`) subscribes
   `HandleEpochTransitionEvent` to `event.EpochTransitionEventType` on the
   node's own `event.EventBus` — the same bus and event every other component
@@ -20221,15 +20214,16 @@ one of that layer's own tests passes unmodified.
   also disabled entirely
   (returning only the zero-reward half, which doesn't depend on any
   historical epoch's data) in two cases: `stakeEpoch == 0` (no valid
-  previous stake epoch to diff against), and when `dingo` is a
-  `*DatabaseSource` — the in-process observer's reward source, which reads
-  `reward_account_output` through core-mode's rolling pruning window and
-  cannot distinguish "the previous stake epoch genuinely had no reward
-  accounts" from "its rows have since been pruned" (both surface as an
-  empty, error-free result); treating a pruned-empty result as a complete
+  previous stake epoch to diff against), and when the source reports a
+  bounded reward-state retention window (`RewardStateRetainedFrom`). A
+  `*DatabaseSource` reading rewards through the LedgerDB has one, and cannot
+  distinguish "the previous stake epoch genuinely had no reward accounts"
+  from "its rows have since been pruned" (both surface as an empty,
+  error-free result); treating a pruned-empty result as a complete
   previous-epoch universe would make every current account look newly
-  registered. Only `*DingoDB` (the standalone CLI's full, unpruned copy) is
-  trusted for this diff.
+  registered. A `*DatabaseSource` built `WithIndexerDB`, which keeps every
+  epoch, and `*DingoDB` (the standalone CLI's full copy) report no bound, so
+  the diff runs for them.
 - **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
   (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
   `ObserverConfig` the same way `GraceHours` already does, down to
