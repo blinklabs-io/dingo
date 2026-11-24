@@ -223,12 +223,12 @@ func requireNoMigrationWork(t *testing.T, cfg *config.Config) {
 func TestMigrateToSplitMovesAnAPIStoreInPlace(t *testing.T) {
 	t.Parallel()
 	cfg, tip := seedAPIStore(t, "api", 5)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil))
 
 	require.FileExists(t, filepath.Join(indexerDirOf(cfg), "metadata.sqlite"))
 	requireNoMigrationWork(t, cfg)
 	requireSplitStores(t, cfg, tip, 5)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil),
 		"a migrated directory is left alone")
 }
 
@@ -264,7 +264,7 @@ func TestMigrateToSplitResumesAfterAStopAtEachStep(t *testing.T) {
 			))
 
 			require.NoError(
-				t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+				t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil),
 			)
 			requireNoMigrationWork(t, cfg)
 			requireSplitStores(t, cfg, tip, 4)
@@ -283,7 +283,7 @@ func TestMigrateToSplitRefusesTooLittleFreeSpace(t *testing.T) {
 	require.ErrorContains(t, err, "not enough free disk space")
 	require.NoDirExists(t, indexerDirOf(cfg))
 	requireNoMigrationWork(t, cfg)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil),
 		"the original store is untouched and migrates once there is space")
 }
 
@@ -293,20 +293,20 @@ func TestMigrateToSplitLeavesWhatItCannotMigrate(t *testing.T) {
 	t.Run("core store", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "core", 2)
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger, nil))
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
 	t.Run("no chain state", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 0)
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger, nil))
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
 	t.Run("fresh directory", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 0)
 		require.NoError(t, os.RemoveAll(cfg.DatabasePath))
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger, nil))
 	})
 }
 
@@ -317,7 +317,7 @@ func TestMigrateToSplitRefusesWhatDoesNotMatch(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 2)
 		cfg.Network = "preprod"
-		require.ErrorContains(t, MigrateToSplit(t.Context(), cfg, logger),
+		require.ErrorContains(t, MigrateToSplit(t.Context(), cfg, logger, nil),
 			"the database is for network")
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
@@ -329,7 +329,7 @@ func TestMigrateToSplitRefusesWhatDoesNotMatch(t *testing.T) {
 			filepath.Join(indexerDirOf(cfg), "metadata.sqlite"),
 			nil, 0o600,
 		))
-		err := MigrateToSplit(t.Context(), cfg, logger)
+		err := MigrateToSplit(t.Context(), cfg, logger, nil)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "IndexerDB")
 	})
@@ -357,7 +357,7 @@ func TestMigrateToSplitRefusesAnInterruptedBackfill(t *testing.T) {
 	cfg, _ := seedAPIStore(t, "api", 3)
 	raw := markInterruptedBackfill(t, cfg.DatabasePath)
 
-	err := MigrateToSplit(t.Context(), cfg, migrateTestLogger())
+	err := MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil)
 	require.ErrorIs(t, err, errInterruptedBackfill)
 
 	require.NoDirExists(t, indexerDirOf(cfg))
@@ -376,7 +376,7 @@ func TestMigrateToSplitRefusesAnInterruptedBackfill(t *testing.T) {
 	// A store without the status migrates.
 	_, err = raw.Exec(`DELETE FROM sync_state WHERE sync_key='sync_status'`)
 	require.NoError(t, err)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil))
 	require.FileExists(t, filepath.Join(indexerDirOf(cfg), "metadata.sqlite"))
 }
 
@@ -384,7 +384,7 @@ func TestMigrateToSplitRecordsCheckpointsBelowTheTip(t *testing.T) {
 	t.Parallel()
 	const numBlocks = 500
 	cfg, _ := seedAPIStore(t, "api", numBlocks)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger(), nil))
 
 	m := &splitMigration{cfg: cfg, logger: migrateTestLogger()}
 	deps, err := m.dependencies("core")

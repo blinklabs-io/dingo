@@ -4036,8 +4036,15 @@ indexed it. The pruner's `Held` hook (`Node.historyExpiryHeld`, over
 in use names its bytes: a datum or reference script a live output carries or
 names by hash, a protocol parameter update not yet past the current epoch, or
 an unspent Midnight registration, or the latest Midnight Ariadne parameters or
-current governance datum. A held block is skipped, the cursor stops at
-it so later rounds check it again, and later blocks still expire. A payload
+current governance datum. A held block is skipped and recorded in the
+`history_expiry_held` chain state; the cursor moves past it, each later round
+checks the recorded blocks first and expires one once nothing uses it, and later
+blocks still expire. A rollback deletes the `datum` and `script` rows added above
+its point, because those rows keep the block that first carried the content.
+The split-layout migration (`storageadopt.MigrateToSplit`, `AdoptStagedAPI`)
+takes the archive-backed blob store constructor as a parameter: `internal/node`,
+the root `Node` restore path and `cmd/dingo` pass `bark.ArchiveStore`, and
+`storageadopt` links no archive client of its own. A payload
 offset of an output-carried datum, reference script or Midnight registration
 names the bytes inside that output's own CBOR (`ContainedPayloadLocator`), not
 the first identical bytes in the block. Certified-closure payloads are named

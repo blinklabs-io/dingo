@@ -15,6 +15,7 @@
 package historyexpiry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -46,7 +48,8 @@ type PrunerConfig struct {
 	Ceiling func(ctx context.Context) (slot uint64, ok bool, err error)
 	// Held, when set, reports whether the block still holds a payload in use,
 	// such as a datum or script a live output names. A held block is skipped
-	// and checked again in a later round, once what used it is gone.
+	// and recorded, and checked again at the start of every later round, once
+	// what used it is gone. The scan cursor moves past it.
 	Held func(ctx context.Context, slot uint64, hash []byte) (bool, error)
 }
 
@@ -130,8 +133,69 @@ func (p *Pruner) refreshRetainedBound(ctx context.Context) {
 	}
 }
 
-// RunOnce runs one expiry round to completion without the pruner's ticker.
-func (p *Pruner) RunOnce(ctx context.Context) { p.prune(ctx) }
+// loadHeld returns the blocks held by earlier rounds. A failure to read them
+// ends the round: scanning on would move the cursor past blocks whose hold is
+// then lost.
+func (p *Pruner) loadHeld() ([]database.HeldBlock, bool) {
+	held, err := p.db.HistoryExpiryHeld()
+	if err != nil {
+		p.logger.Error("history expiry: failed to read held blocks", "error", err)
+		return nil, false
+	}
+	return held, true
+}
+
+// recheckHeld expires each held block whose payloads are no longer in use and
+// returns the blocks that stay held. A block that is already expired, or that
+// a rollback removed, needs no further expiry. It returns ok false when the
+// round must end.
+func (p *Pruner) recheckHeld(
+	ctx context.Context,
+	held []database.HeldBlock,
+) (kept []database.HeldBlock, ok bool) {
+	for i, block := range held {
+		if ctx.Err() != nil {
+			return append(kept, held[i:]...), false
+		}
+		inUse, err := p.config.Held(ctx, block.Slot, block.Hash)
+		if err != nil {
+			if ctx.Err() == nil {
+				p.logger.Error(
+					"history expiry: failed to check block payloads",
+					"error", err,
+				)
+			}
+			return append(kept, held[i:]...), false
+		}
+		if inUse {
+			kept = append(kept, block)
+			continue
+		}
+		err = p.expire(ctx, &database.BlobBlockResult{
+			Slot: block.Slot, Hash: block.Hash,
+		})
+		if err == nil ||
+			errors.Is(err, types.ErrHistoryExpired) ||
+			errors.Is(err, models.ErrBlockNotFound) ||
+			errors.Is(err, types.ErrBlobKeyNotFound) {
+			continue
+		}
+		if ctx.Err() == nil {
+			p.logger.Error(
+				"history expiry: failed to expire block",
+				"error", err,
+			)
+		}
+		return append(kept, held[i:]...), false
+	}
+	return kept, true
+}
+
+func (p *Pruner) saveHeld(held []database.HeldBlock) {
+	if err := p.db.SetHistoryExpiryHeld(held); err != nil {
+		p.logger.Error("history expiry: failed to save held blocks", "error", err)
+	}
+}
 
 func (p *Pruner) prune(ctx context.Context) {
 	currentSlot, err := p.ledgerState.CurrentSlot()
@@ -169,20 +233,52 @@ func (p *Pruner) prune(ctx context.Context) {
 		}
 		end = min(end, ceiling)
 	}
-	// cursor is the slot every block before has been expired through. It
-	// stops advancing at the first block whose expiry fails so that block
-	// stays inside the next round's range. The scan restarts at the cursor
-	// slot itself because only some of the blocks sharing it may be expired.
+	// cursor is the slot every block before has been expired through or
+	// recorded as held. It stops advancing at the first block whose expiry
+	// fails so that block stays inside the next round's range. The scan
+	// restarts at the cursor slot itself because only some of the blocks
+	// sharing it may be expired.
 	start := p.loadCursor()
 	cursor := start
-	// held stops the cursor at the first block a payload in use keeps, so the
-	// next round examines it again, while later blocks still expire.
-	held := false
+	// held is every block a payload in use keeps. The cursor moves past a held
+	// block, so a block that stays held costs a check each round and not a
+	// re-scan of the chain after it.
+	var held []database.HeldBlock
+	if p.config.Held != nil {
+		var ok bool
+		held, ok = p.loadHeld()
+		if !ok {
+			return
+		}
+	}
+	heldBefore := len(held)
+	heldChanged := false
 	defer func() {
+		// The held blocks are saved before the cursor passes them, so a failed
+		// save leaves the cursor behind and the blocks inside the next scan.
+		if heldChanged || len(held) != heldBefore {
+			p.saveHeld(held)
+		}
 		if cursor > start {
 			p.saveCursor(cursor)
 		}
 	}()
+	if len(held) > 0 {
+		kept, ok := p.recheckHeld(ctx, held)
+		heldChanged = len(kept) != len(held)
+		held = kept
+		if !ok {
+			return
+		}
+	}
+	type blockKey struct {
+		hash string
+		slot uint64
+	}
+	heldKeys := make(map[blockKey]struct{}, len(held))
+	for _, block := range held {
+		heldKeys[blockKey{string(block.Hash), block.Slot}] = struct{}{}
+	}
 	iter := p.db.BlocksInRangeContext(ctx, start, end)
 	defer iter.Close()
 
@@ -197,9 +293,7 @@ func (p *Pruner) prune(ctx context.Context) {
 					return
 				}
 				if errors.Is(err, types.ErrHistoryExpired) {
-					if !held {
-						cursor, _ = iter.Progress()
-					}
+					cursor, _ = iter.Progress()
 					continue
 				}
 				p.logger.Error(
@@ -215,6 +309,11 @@ func (p *Pruner) prune(ctx context.Context) {
 			}
 
 			if p.config.Held != nil {
+				if _, ok := heldKeys[blockKey{string(next.Hash), next.Slot}]; ok {
+					// Rechecked above, and kept: the cursor passes it.
+					cursor = next.Slot
+					continue
+				}
 				inUse, err := p.config.Held(ctx, next.Slot, next.Hash)
 				if err != nil {
 					if ctx.Err() != nil {
@@ -227,7 +326,11 @@ func (p *Pruner) prune(ctx context.Context) {
 					return
 				}
 				if inUse {
-					held = true
+					held = append(held, database.HeldBlock{
+						Slot: next.Slot, Hash: bytes.Clone(next.Hash),
+					})
+					heldKeys[blockKey{string(next.Hash), next.Slot}] = struct{}{}
+					cursor = next.Slot
 					continue
 				}
 			}
@@ -242,9 +345,7 @@ func (p *Pruner) prune(ctx context.Context) {
 				)
 				return
 			}
-			if !held {
-				cursor = next.Slot
-			}
+			cursor = next.Slot
 		}
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -48,6 +49,13 @@ type IndexerRollbackFactory func(
 // rolls the IndexerDB back with. Without it such a truncate is refused.
 func (s *Service) SetIndexerRollbackFactory(f IndexerRollbackFactory) {
 	s.rollbackFactory = f
+}
+
+// SetArchiveStore sets the constructor of the archive-backed blob store an
+// adoption of restored API storage reads expired blocks through. Without it,
+// an adoption whose configuration names an archive fails.
+func (s *Service) SetArchiveStore(f storageadopt.ArchiveStoreFunc) {
+	s.archiveStore = f
 }
 
 func (s *Service) databaseConfig() *database.Config {

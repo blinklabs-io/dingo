@@ -34,6 +34,10 @@ var ErrPayloadResolverRequired = errors.New(
 	"payload column read has no block source to resolve the offset through",
 )
 
+// ErrPayloadNotInBlock reports that a block does not contain the exact bytes of
+// a payload a locator was asked to find.
+var ErrPayloadNotInBlock = errors.New("payload not found in block")
+
 // PayloadLocator finds a payload inside the block it was decoded from and
 // returns the encoded CBOR offset that names it. It fails when the block does
 // not contain the exact bytes.
@@ -134,8 +138,8 @@ func (l *blockPayloadLocator) LocatePayload(payload []byte) ([]byte, error) {
 	idx := bytes.Index(l.block, payload)
 	if idx < 0 {
 		return nil, fmt.Errorf(
-			"locate payload: %d bytes not found in block at slot %d",
-			len(payload), l.slot,
+			"locate payload: %d bytes not found in block at slot %d: %w",
+			len(payload), l.slot, ErrPayloadNotInBlock,
 		)
 	}
 	return l.encode(idx, len(payload)), nil

@@ -95,9 +95,13 @@ VALUES (1, ?, ?, 100, 0, '0', '0', '0', 0, 1)`,
 	require.Equal(t, datum, gotDatum.RawDatum)
 }
 
-// A row whose block the stores do not hold cannot be converted: the migration
-// stops with the slot named instead of keeping the copy.
-func TestMigratePayloadOffsetsFailsWithoutTheRowsBlock(t *testing.T) {
+// A datum or script row written by a store that rolled back keeps the slot of
+// the block that first carried it. When no canonical block is stored at that
+// slot and no canonical transaction carries the content, nothing reachable
+// names the row: the migration removes it instead of stopping.
+func TestMigratePayloadOffsetsRemovesRowsNoCanonicalTransactionCarries(
+	t *testing.T,
+) {
 	t.Parallel()
 	pair := newIndexerTestDB(t, nil)
 	raw := rawSQLiteMetadataFixture(t, pair.indexer)
@@ -107,14 +111,119 @@ func TestMigratePayloadOffsetsFailsWithoutTheRowsBlock(t *testing.T) {
 		lcommon.Blake2b256Hash(datum).Bytes(), datum,
 	)
 	require.NoError(t, err)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 998, 1)",
+		bytes.Repeat([]byte{0x22}, 28), []byte{0x41, 0x00},
+	)
+	require.NoError(t, err)
 
-	err = pair.indexer.MigratePayloadOffsets(t.Context())
-	require.ErrorContains(t, err, "slot 999")
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	var count int
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM datum").Scan(&count))
+	require.Zero(t, count, "the orphaned datum row was kept")
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM script").Scan(&count))
+	require.Zero(t, count, "the orphaned script row was kept")
+}
+
+// An orphaned row whose content a canonical transaction carries is pointed at
+// the canonical block that carries it, and its slot follows, so the block is
+// the one the active-payload check holds.
+func TestMigratePayloadOffsetsRepointsOrphanedRowsToACanonicalCarrier(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	datum := []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	script := []byte{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: bytes.Join([][]byte{
+			[]byte("header"), datum, script, []byte("trailer"),
+		}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := raw.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	datumHash := lcommon.Blake2b256Hash(datum)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	exec("INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		datumHash.Bytes(), datum)
+	exec("INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		scriptHash, script)
+	exec(`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`,
+		bytes.Repeat([]byte{0x11}, 32))
+	exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+VALUES (1, ?, 100, 0, '0', '0', '0', 0, 1)`, block.Hash)
+	exec("INSERT INTO plutus_data (data, transaction_id) VALUES (?, 1)", datum)
+	exec("INSERT INTO witness_scripts (script_hash, transaction_id, type) VALUES (?, 1, 1)",
+		scriptHash)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	gotDatum, err := pair.indexer.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, gotDatum.RawDatum)
+	require.EqualValues(t, 100, gotDatum.AddedSlot)
+	var content []byte
+	var created uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT content, created_slot FROM script",
+	).Scan(&content, &created))
+	offset, err := types.DecodeCborOffset(content)
+	require.NoError(t, err)
+	require.EqualValues(t, 100, offset.BlockSlot)
+	require.EqualValues(t, 100, created)
+	require.Equal(
+		t, script,
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+	)
+}
+
+// A row that a canonical transaction carries, whose bytes the canonical block
+// does not hold, is not dropped: the migration stops with the row named.
+func TestMigratePayloadOffsetsFailsWhenACarrierBlockLacksTheBytes(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	datum := []byte{0xd8, 0x79, 0x80}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: []byte("a block that carries no datum"),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := raw.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	exec("INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		lcommon.Blake2b256Hash(datum).Bytes(), datum)
+	exec(`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`,
+		bytes.Repeat([]byte{0x11}, 32))
+	exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+VALUES (1, ?, 100, 0, '0', '0', '0', 0, 1)`, block.Hash)
+	exec("INSERT INTO plutus_data (data, transaction_id) VALUES (?, 1)", datum)
+
+	err := pair.indexer.MigratePayloadOffsets(t.Context())
+	require.ErrorContains(t, err, "datum")
+	require.ErrorIs(t, err, types.ErrPayloadNotInBlock)
 	var column []byte
 	require.NoError(
 		t, raw.QueryRow("SELECT raw_datum FROM datum").Scan(&column),
 	)
-	require.Equal(t, datum, column, "the datum copy was replaced")
+	require.Equal(t, datum, column, "the datum row was changed")
 }
 
 // With no archive configured, the payload of a block that expired locally is

@@ -15,11 +15,14 @@
 package sqlstore
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -138,18 +141,17 @@ func (s *Store) migrateSlotPayloadColumn(
 					if len(row.value) == 0 || isPayloadOffset(row.value) {
 						continue
 					}
-					locator, err := blocks.LocatorAtSlot(ctx, row.slot)
-					if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok {
-						// The block is gone and no archive has it: the
-						// payload is not kept, and a read names the block.
-						if _, err := db.ExecContext(
-							ctx, update,
-							types.EncodeExpiredPayload(
-								expired.Slot, expired.Hash,
-							),
-							row.key,
+					offset, expired, err := locatePayloadAt(
+						ctx, blocks, row.slot, row.value,
+					)
+					if err != nil && contentColumn(c) && isOrphaned(err) {
+						if err := s.resolveOrphanedContent(
+							ctx, db, blocks, c, row,
 						); err != nil {
-							return err
+							return fmt.Errorf(
+								"%s %d at slot %d: %w",
+								c.table, row.key, row.slot, err,
+							)
 						}
 						continue
 					}
@@ -159,11 +161,11 @@ func (s *Store) migrateSlotPayloadColumn(
 							c.table, row.key, row.slot, err,
 						)
 					}
-					offset, err := locator.LocatePayload(row.value)
-					if err != nil {
-						return fmt.Errorf(
-							"%s %d at slot %d: %w",
-							c.table, row.key, row.slot, err,
+					if expired != nil {
+						// The block is gone and no archive has it: the
+						// payload is not kept, and a read names the block.
+						offset = types.EncodeExpiredPayload(
+							expired.Slot, expired.Hash,
 						)
 					}
 					if _, err := db.ExecContext(
@@ -183,6 +185,170 @@ func (s *Store) migrateSlotPayloadColumn(
 		}
 		last = rows[len(rows)-1].key
 	}
+}
+
+// locatePayloadAt finds the payload in the canonical block at slot. A block
+// that expired with no archive returns the error naming it, with no offset.
+func locatePayloadAt(
+	ctx context.Context,
+	blocks metadata.PayloadBlockSource,
+	slot uint64,
+	payload []byte,
+) ([]byte, *types.HistoryExpiredError, error) {
+	locator, err := blocks.LocatorAtSlot(ctx, slot)
+	if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok {
+		return nil, expired, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if locator == nil {
+		return nil, nil, fmt.Errorf("no block locator at slot %d", slot)
+	}
+	offset, err := locator.LocatePayload(payload)
+	return offset, nil, err
+}
+
+// contentColumn reports whether the column is a content-addressed table whose
+// row keeps the slot of the first block that carried it.
+func contentColumn(c slotPayloadColumn) bool {
+	return c.table == "datum" || c.table == "script"
+}
+
+// isOrphaned reports whether a row's slot names no canonical block, or a
+// block that does not hold the row's bytes: the signature of a row written by
+// a block that a rollback abandoned.
+func isOrphaned(err error) bool {
+	return errors.Is(err, models.ErrBlockNotFound) ||
+		errors.Is(err, types.ErrPayloadNotInBlock)
+}
+
+// payloadCarrier is a canonical transaction's slot that carries a content row.
+// required is set when the transaction's own tables say its block holds the
+// bytes, as a witness does, and clear when it only names them by hash.
+type payloadCarrier struct {
+	slot     uint64
+	required bool
+}
+
+// carrierQueries find, per content table, the slots of the applied
+// transactions that carry a hash. A rolled-back transaction's rows are
+// deleted with it, so every row they reach is canonical.
+var carrierQueries = map[string][]struct {
+	query    string
+	required bool
+}{
+	"datum": {
+		{`SELECT DISTINCT a.slot FROM plutus_data p
+JOIN applied_transaction a ON a.tx_id = p.transaction_id
+WHERE p.data = ?`, true},
+		{`SELECT DISTINCT a.slot FROM utxo u
+JOIN applied_transaction a ON a.tx_id = u.tx_id
+WHERE u.datum_hash = ?`, false},
+	},
+	"script": {
+		{`SELECT DISTINCT a.slot FROM witness_scripts w
+JOIN applied_transaction a ON a.tx_id = w.transaction_id
+WHERE w.script_hash = ?`, true},
+		{`SELECT DISTINCT a.slot FROM utxo_reference_script r
+JOIN utxo u ON u.id = r.utxo_id
+JOIN applied_transaction a ON a.tx_id = u.tx_id
+WHERE r.script_hash = ?`, true},
+	},
+}
+
+// resolveOrphanedContent gives a datum or script row a defined result when
+// the block it names is not canonical or does not hold its bytes. The row is
+// re-pointed to the first canonical transaction whose block carries the
+// content, its slot following. A row no canonical transaction carries is
+// unreachable and is deleted, which is what a rollback now does to the same
+// row. A canonical transaction that must carry the bytes in a block that does
+// not hold them stops the migration instead: that row would otherwise be lost.
+func (s *Store) resolveOrphanedContent(
+	ctx context.Context,
+	db queryer,
+	blocks metadata.PayloadBlockSource,
+	c slotPayloadColumn,
+	row payloadRow,
+) error {
+	var hash []byte
+	if err := db.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT hash FROM %s WHERE %s = ?", c.table, c.key),
+		row.key,
+	).Scan(&hash); err != nil {
+		return err
+	}
+	var carriers []payloadCarrier
+	for _, q := range carrierQueries[c.table] {
+		arg := hash
+		if c.table == "datum" && q.required {
+			arg = row.value
+		}
+		slots, err := carrierSlots(ctx, db, q.query, arg)
+		if err != nil {
+			return err
+		}
+		for _, slot := range slots {
+			carriers = append(carriers, payloadCarrier{
+				slot: slot, required: q.required,
+			})
+		}
+	}
+	slices.SortStableFunc(carriers, func(a, b payloadCarrier) int {
+		return cmp.Compare(a.slot, b.slot)
+	})
+	update := fmt.Sprintf(
+		"UPDATE %s SET %s = ?, %s = ? WHERE %s = ?",
+		c.table, c.column, c.slot, c.key,
+	)
+	for _, carrier := range carriers {
+		offset, expired, err := locatePayloadAt(
+			ctx, blocks, carrier.slot, row.value,
+		)
+		if expired != nil {
+			offset = types.EncodeExpiredPayload(expired.Slot, expired.Hash)
+		} else if err != nil && !carrier.required && isOrphaned(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf(
+				"the canonical transaction at slot %d carries it: %w",
+				carrier.slot, err,
+			)
+		}
+		_, err = db.ExecContext(ctx, update, offset, carrier.slot, row.key)
+		return err
+	}
+	_, err := db.ExecContext(
+		ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE %s = ?", c.table, c.key),
+		row.key,
+	)
+	return err
+}
+
+func carrierSlots(
+	ctx context.Context,
+	db queryer,
+	query string,
+	arg []byte,
+) ([]uint64, error) {
+	rows, err := db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var slots []uint64
+	for rows.Next() {
+		var slot int64
+		if err := rows.Scan(&slot); err != nil {
+			return nil, err
+		}
+		if slot > 0 {
+			slots = append(slots, uint64(slot))
+		}
+	}
+	return slots, rows.Err()
 }
 
 func readPayloadRows(

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -32,6 +33,96 @@ import (
 // than every tombstone left by earlier rounds. A rollback or truncate lowers
 // it to the rollback point, the slot above which replay stores new blocks.
 const HistoryExpiryCursorKey = "history_expiry_cursor"
+
+// HistoryExpiryHeldKey names the block-store chain state holding the blocks
+// the history-expiry pruner passed over because a payload column in use still
+// names their bytes. The cursor moves past them, so they are kept here and
+// checked again each round until they can expire.
+const HistoryExpiryHeldKey = "history_expiry_held"
+
+// HeldBlock identifies a block that history expiry has not expired because an
+// active payload names its bytes.
+type HeldBlock struct {
+	Hash []byte
+	Slot uint64
+}
+
+// HistoryExpiryHeld returns the blocks the pruner is holding, in the order
+// stored. An unreadable entry is an error: dropping it would leave the block
+// unexpired forever.
+func (d *Database) HistoryExpiryHeld() ([]HeldBlock, error) {
+	raw, err := d.GetChainState(HistoryExpiryHeldKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read history expiry held blocks: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	entries := strings.Split(raw, ";")
+	held := make([]HeldBlock, 0, len(entries))
+	for _, entry := range entries {
+		slotText, hashText, ok := strings.Cut(entry, ":")
+		if !ok {
+			return nil, fmt.Errorf("malformed held block entry %q", entry)
+		}
+		slot, err := strconv.ParseUint(slotText, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block slot %q: %w", entry, err)
+		}
+		hash, err := hex.DecodeString(hashText)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block hash %q: %w", entry, err)
+		}
+		held = append(held, HeldBlock{Slot: slot, Hash: hash})
+	}
+	return held, nil
+}
+
+// SetHistoryExpiryHeld replaces the held blocks.
+func (d *Database) SetHistoryExpiryHeld(held []HeldBlock) error {
+	return d.writeHistoryExpiryHeld(held, nil)
+}
+
+func (d *Database) writeHistoryExpiryHeld(
+	held []HeldBlock,
+	txn *Txn,
+) error {
+	entries := make([]string, 0, len(held))
+	for _, block := range held {
+		entries = append(entries, fmt.Sprintf(
+			"%d:%s", block.Slot, hex.EncodeToString(block.Hash),
+		))
+	}
+	if err := d.SetChainState(
+		HistoryExpiryHeldKey, strings.Join(entries, ";"), txn,
+	); err != nil {
+		return fmt.Errorf("write history expiry held blocks: %w", err)
+	}
+	return nil
+}
+
+// lowerHistoryExpiryHeld drops the held blocks above slot, which a rollback
+// abandons: they would otherwise be checked and expired by a hash the chain no
+// longer stores. The transaction handling is that of lowerHistoryExpiryCursor.
+func (d *Database) lowerHistoryExpiryHeld(slot uint64, txn *Txn) error {
+	if txn != nil && txn.Blob() == nil {
+		txn = nil
+	}
+	held, err := d.HistoryExpiryHeld()
+	if err != nil {
+		return err
+	}
+	kept := held[:0:0]
+	for _, block := range held {
+		if block.Slot <= slot {
+			kept = append(kept, block)
+		}
+	}
+	if len(kept) == len(held) {
+		return nil
+	}
+	return d.writeHistoryExpiryHeld(kept, txn)
+}
 
 // oldestRetainedScanLimit bounds how many consecutive expired blocks
 // RefreshOldestRetainedSlot walks past the history-expiry cursor before giving

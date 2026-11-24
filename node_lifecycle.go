@@ -2109,6 +2109,7 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 			cfg.Plugins.Storage.Metadata = n.config.pluginSelections[plugin.CapabilityStorageMetadata]
 			return storageadopt.AdoptStagedAPI(
 				ctx, cfg, n.config.logger, n.config.cardanoNodeConfig, stagingDir,
+				bark.ArchiveStore,
 			)
 		}
 	}

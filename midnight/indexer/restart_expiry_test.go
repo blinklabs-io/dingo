@@ -14,6 +14,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -61,13 +62,28 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 		)},
 	)}, 1_000))
 
+	// The pruner runs on its ticker, as in the node. Every Held call is a
+	// signal: a round checks the held block once, so the second call means the
+	// first round ran to completion.
+	checks := make(chan struct{}, 1024)
 	pruner := historyexpiry.NewPruner(historyexpiry.PrunerConfig{
 		LedgerState: fixedLedgerWindow{current: 300, window: 5},
 		DB:          consensus,
-		Frequency:   time.Hour,
+		Frequency:   5 * time.Millisecond,
 		Held: func(ctx context.Context, slot uint64, hash []byte) (bool, error) {
-			return indexerDB.BlockHoldsActivePayloads(ctx, slot, hash, 0)
+			held, err := indexerDB.BlockHoldsActivePayloads(ctx, slot, hash, 0)
+			select {
+			case checks <- struct{}{}:
+			default:
+			}
+			return held, err
 		},
+	})
+	require.NoError(t, pruner.Start(t.Context()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, pruner.Stop(stopCtx))
 	})
 	expired := func() bool {
 		txn := consensus.BlobTxn(false)
@@ -76,7 +92,8 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 		_, _, err := consensus.Blob().GetBlock(txn.Blob(), block.Slot, block.Hash)
 		return errors.Is(err, types.ErrHistoryExpired)
 	}
-	pruner.RunOnce(context.Background())
+	testutil.RequireReceive(t, checks, 5*time.Second, "first round")
+	testutil.RequireReceive(t, checks, 5*time.Second, "second round")
 	require.False(t, expired(), "an unspent registration keeps its block")
 
 	restarted, err := New(cfg)
@@ -93,8 +110,10 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 			[]lcommon.TransactionInput{buildInput(t, regTx, 0)},
 			[]lcommon.TransactionOutput{anyOutput(t)}),
 	}, 2_000))
-	pruner.RunOnce(context.Background())
-	require.True(t, expired(), "the block expires once the registration is spent")
+	testutil.WaitForCondition(
+		t, expired, 5*time.Second,
+		"the block expires once the registration is spent",
+	)
 	_, err = New(cfg)
 	require.NoError(t, err, "startup never reads an expired payload")
 }

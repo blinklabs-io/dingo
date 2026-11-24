@@ -41,6 +41,19 @@ func TestMigrateToSplitRecoversInterruptedRestoreBeforeOpeningStores(t *testing.
 	require.NoDirExists(t, backupDir)
 }
 
+// The node supplies the archive store constructor, so a configuration that
+// names an archive migrates. Nothing in the store expired, so the archive is
+// never contacted.
+func TestNodeMigrateToSplitBuildsTheConfiguredArchiveStore(t *testing.T) {
+	t.Parallel()
+	cfg, tip := storageadopt.SeedAPIStore(t, "api", 5)
+	cfg.BarkBaseUrl = "http://127.0.0.1:1"
+	require.NoError(t, node.MigrateToSplit(
+		t.Context(), cfg, storageadopt.MigrateTestLogger(),
+	))
+	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+}
+
 func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

@@ -25,7 +25,8 @@ import (
 type PayloadBlockSource interface {
 	// LocatorAtSlot returns the locator of the canonical block at slot. A
 	// block that expired, and that no archive serves, is reported as a
-	// *types.HistoryExpiredError naming it.
+	// *types.HistoryExpiredError naming it. A slot with no canonical block
+	// is reported as an error wrapping models.ErrBlockNotFound.
 	LocatorAtSlot(ctx context.Context, slot uint64) (types.PayloadLocator, error)
 }
 

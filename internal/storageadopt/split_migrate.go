@@ -56,17 +56,25 @@ const (
 	migrateStepLatched = "latched"
 )
 
-// ArchiveStore wraps a blob store with the archive fallback cfg configures.
-// Package bark sets it; storageadopt cannot import bark, which imports it.
-var ArchiveStore func(
+// ArchiveStoreFunc wraps a blob store with the archive fallback cfg
+// configures. The node's composition supplies it, because this package cannot
+// import the archive client.
+type ArchiveStoreFunc func(
 	cfg *config.Config,
 	upstream blob.BlobStore,
 ) (blob.BlobStore, error)
 
 // MigrateToSplit adopts an API database in place. The caller must recover
-// interrupted restores before adopting active storage.
-func MigrateToSplit(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	m := &splitMigration{cfg: cfg, logger: logger}
+// interrupted restores before adopting active storage. archive builds the
+// blob store that fetches blocks expired locally; it is required only when
+// cfg names an archive.
+func MigrateToSplit(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	archive ArchiveStoreFunc,
+) error {
+	m := &splitMigration{cfg: cfg, logger: logger, archive: archive}
 	return m.run(ctx)
 }
 
@@ -83,16 +91,19 @@ func SupportsAPIAdoption(provider string) bool {
 
 // AdoptStagedAPI migrates restored API storage before node activation. For
 // server providers the caller must prepare an empty derived core database
-// and retain its rollback backup.
+// and retain its rollback backup. archive is as for MigrateToSplit.
 func AdoptStagedAPI(
 	ctx context.Context,
 	cfg config.Config,
 	logger *slog.Logger,
 	genesis *cardano.CardanoNodeConfig,
 	stagingDir string,
+	archive ArchiveStoreFunc,
 ) error {
 	cfg.DatabasePath = stagingDir
-	m := &splitMigration{cfg: &cfg, logger: logger, genesis: genesis}
+	m := &splitMigration{
+		cfg: &cfg, logger: logger, genesis: genesis, archive: archive,
+	}
 	switch cfg.Plugins.Storage.Metadata.Provider {
 	case "sqlite":
 		return m.migrate(ctx)
@@ -108,6 +119,7 @@ type splitMigration struct {
 	cfg         *config.Config
 	logger      *slog.Logger
 	genesis     *cardano.CardanoNodeConfig
+	archive     ArchiveStoreFunc
 	// afterStep, when set, runs after each step and fails the migration
 	// there. Tests use it to stop at the boundary a crash can fall on.
 	afterStep func(step string) error
@@ -546,10 +558,10 @@ func (m *splitMigration) prepareCopy(
 	if m.cfg.BarkBaseUrl != "" {
 		// A block that expired locally is fetched from the archive to
 		// compute its offsets, and reads of those rows proxy the same fetch.
-		if ArchiveStore == nil {
-			return errors.New("an archive is configured but no archive store is linked")
+		if m.archive == nil {
+			return errors.New("an archive is configured but the migration was given no archive store")
 		}
-		archived, err := ArchiveStore(m.cfg, idx.Blob())
+		archived, err := m.archive(m.cfg, idx.Blob())
 		if err != nil {
 			return fmt.Errorf("create archive blob store: %w", err)
 		}

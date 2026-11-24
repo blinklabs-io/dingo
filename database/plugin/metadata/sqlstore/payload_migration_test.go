@@ -264,19 +264,22 @@ func TestMigratePayloadColumnsKeepsEveryReaderResult(t *testing.T) {
 }
 
 // A payload its block does not hold stops the migration with the row named,
-// and no row is left holding a made-up offset.
+// and no row is left holding a made-up offset. Datum and script rows are the
+// exception: see the orphan tests in the database package.
 func TestMigratePayloadColumnsFailsWhenTheBlockLacksAPayload(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	fx := seedReleasedPayloadRows(t, store)
-	block := newMigrationBlock(t, fx.datum, fx.registration, fx.candidate)
+	block := newMigrationBlock(
+		t, fx.datum, fx.script, fx.registration, fx.candidate,
+	)
 
 	err := store.MigratePayloadColumns(t.Context(), block)
-	require.ErrorContains(t, err, "script")
+	require.ErrorContains(t, err, "applied_transaction")
 	require.ErrorContains(t, err, "not found in block")
-	require.Equal(t, fx.script, columnBytes(
-		t, store, "SELECT content FROM script",
-	), "the script row was rewritten")
+	require.Equal(t, fx.metadata, columnBytes(
+		t, store, "SELECT metadata FROM applied_transaction",
+	), "the metadata row was rewritten")
 }
 
 type failingBlocks struct{}

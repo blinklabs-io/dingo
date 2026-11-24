@@ -20,21 +20,19 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/storageadopt"
 )
 
-// The split-layout migration fetches blocks that expired locally through the
-// archive the configuration names, with the wrapper the node reads through.
-func init() {
-	storageadopt.ArchiveStore = func(
-		cfg *config.Config,
-		upstream blob.BlobStore,
-	) (blob.BlobStore, error) {
-		return NewBarkBlobStore(BlobStoreBarkConfig{
-			BaseUrl:                            cfg.BarkBaseUrl,
-			BlockDownloadAllowedHosts:          cfg.BarkBlockDownloadHosts,
-			BlockDownloadAllowPrivateAddresses: cfg.BarkBlockDownloadAllowPrivateAddresses,
-			HTTPClient:                         &http.Client{Timeout: 30 * time.Second},
-		}, upstream)
-	}
+// ArchiveStore wraps upstream with the archive fallback cfg configures: the
+// wrapper the node reads through. The split-layout migration fetches blocks
+// that expired locally through it.
+func ArchiveStore(
+	cfg *config.Config,
+	upstream blob.BlobStore,
+) (blob.BlobStore, error) {
+	return NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:                            cfg.BarkBaseUrl,
+		BlockDownloadAllowedHosts:          cfg.BarkBlockDownloadHosts,
+		BlockDownloadAllowPrivateAddresses: cfg.BarkBlockDownloadAllowPrivateAddresses,
+		HTTPClient:                         &http.Client{Timeout: 30 * time.Second},
+	}, upstream)
 }

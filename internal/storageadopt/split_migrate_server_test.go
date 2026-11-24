@@ -474,7 +474,7 @@ func TestAdoptionRefusesAReleasedInterruptedBackfillUntouched(t *testing.T) {
 		{name: "staged sqlite", adopt: func(t *testing.T, dir string) error {
 			cfg := releasedServerMigration(t, "sqlite", t.TempDir()).cfg
 			return AdoptStagedAPI(
-				t.Context(), *cfg, migrateTestLogger(), nil, dir,
+				t.Context(), *cfg, migrateTestLogger(), nil, dir, nil,
 			)
 		}},
 	} {
@@ -536,11 +536,11 @@ func releasedServerMigration(
 // through the archive store the configuration builds, so a block that expired
 // locally can be fetched to compute its offsets.
 func TestMigrationReadsBlocksThroughTheConfiguredArchive(t *testing.T) {
-	// Not t.Parallel: ArchiveStore is a package-level seam, and the migration
-	// reads it.
+	t.Parallel()
 	var wrapped atomic.Int32
-	previous := ArchiveStore
-	ArchiveStore = func(
+	m, _ := seedServerMigration(t, "postgres")
+	m.cfg.BarkBaseUrl = "https://archive.example"
+	m.archive = func(
 		cfg *config.Config,
 		upstream blob.BlobStore,
 	) (blob.BlobStore, error) {
@@ -548,10 +548,16 @@ func TestMigrationReadsBlocksThroughTheConfiguredArchive(t *testing.T) {
 		wrapped.Add(1)
 		return upstream, nil
 	}
-	t.Cleanup(func() { ArchiveStore = previous })
-
-	m, _ := seedServerMigration(t, "postgres")
-	m.cfg.BarkBaseUrl = "https://archive.example"
 	require.NoError(t, m.run(t.Context()))
 	require.NotZero(t, wrapped.Load(), "the archive store was not used")
+}
+
+// A migration whose configuration names an archive and that is given no
+// constructor stops, instead of converting rows without the archive.
+func TestMigrationWithAnArchiveAndNoConstructorFails(t *testing.T) {
+	t.Parallel()
+	m, _ := seedServerMigration(t, "postgres")
+	m.cfg.BarkBaseUrl = "https://archive.example"
+	err := m.run(t.Context())
+	require.ErrorContains(t, err, "no archive store")
 }
