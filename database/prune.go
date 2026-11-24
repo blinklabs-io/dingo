@@ -203,9 +203,11 @@ func (d *Database) MaterializeBlockUtxos(
 	}
 	var materialized int
 	// An IndexerDB writes its entries in its metadata transaction.
-	blobTxn := d.BlockBlobTxn()
+	var blobTxn *Txn
 	if d.isIndexer() {
 		blobTxn = d.Transaction(ctx, true)
+	} else {
+		blobTxn = d.BlockBlobTxn()
 	}
 	if err := blobTxn.Do(func(txn *Txn) error {
 		n, err := d.materializeUtxosTxn(ctx, txn, slot, hash, utxoRefs)

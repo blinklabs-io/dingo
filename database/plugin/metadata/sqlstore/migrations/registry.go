@@ -114,6 +114,7 @@ const (
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	utxoAddressPrefixIndexDropSchemaRelease             = "utxo-address-prefix-index-drop"
 	indexerOffsetsSchemaRelease                         = "indexer-cbor-offsets"
 )
 
@@ -308,7 +309,8 @@ var schemaVersions = []struct {
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
-	{Version: 74, Name: indexerOffsetsSchemaRelease, Dir: "v74"},
+	{Version: 74, Name: utxoAddressPrefixIndexDropSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: indexerOffsetsSchemaRelease, Dir: "v75"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -2159,6 +2161,7 @@ func translateSchemaSQLInSchema(
 				"idx_account_drep":                    "account",
 				"idx_datum_hash":                      "datum",
 				"idx_script_hash":                     "script",
+				"idx_utxo_address_address":            "utxo_address",
 			} {
 				value = strings.ReplaceAll(
 					value,

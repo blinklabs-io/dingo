@@ -1135,7 +1135,9 @@ func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 // and releases the hold when it does.
 func TestStreamCatchUpNoProgressWatchdog(t *testing.T) {
 	t.Parallel()
-	const timeout = 300 * time.Millisecond
+	// Long enough for file 0 to download and commit on a loaded machine
+	// before the watchdog can fire.
+	const timeout = 5 * time.Second
 	opts := streamFixtureOptions(6, nil)
 	fixture := newV2Fixture(t, opts)
 	// File 0 arrives; every later file hangs until the run gives up on it.
