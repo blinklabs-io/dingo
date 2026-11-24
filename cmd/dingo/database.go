@@ -106,6 +106,17 @@ bootstrap=false): it is not a bootstrap artifact and a node cannot be
 restarted from it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// An empty value passes the flag-group checks, which only
+			// test that a flag was set, and must be refused before
+			// commonRun opens the data directory.
+			for _, name := range []string{"dir", "scls"} {
+				if cmd.Flags().Changed(name) {
+					value, _ := cmd.Flags().GetString(name)
+					if value == "" {
+						return fmt.Errorf("--%s must not be empty", name)
+					}
+				}
+			}
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
 				return errors.New("no config found in context")
@@ -142,7 +153,7 @@ func runDatabaseSnapshot(
 	logger *slog.Logger,
 	destDir, sclsOutput string,
 ) error {
-	if sclsOutput != "" {
+	if cmd.Flags().Changed("scls") {
 		res, err := exportSCLS(cmd, cfg.DatabasePath, sclsOutput)
 		if err != nil {
 			return fmt.Errorf("snapshot SCLS: %w", err)

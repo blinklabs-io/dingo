@@ -88,8 +88,11 @@ func TestExportSCLSReleasesTheSetAndPublishesAVerifiedFile(t *testing.T) {
 func TestDatabaseSnapshotSCLSRoutesToExporter(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "state.scls")
+	cmd := databaseSnapshotCommand()
+	cmd.SetContext(t.Context())
+	require.NoError(t, cmd.Flags().Set("scls", out))
 	err := runDatabaseSnapshot(
-		newExportCmd(t),
+		cmd,
 		&config.Config{DatabasePath: t.TempDir()},
 		nil,
 		"",
@@ -125,6 +128,32 @@ func TestDatabaseSnapshotRequiresExactlyOneOutput(t *testing.T) {
 			cmd := databaseSnapshotCommand()
 			cmd.SetArgs(test.args)
 			require.ErrorContains(t, cmd.Execute(), test.err)
+		})
+	}
+}
+
+func TestDatabaseSnapshotRejectsEmptyOutputBeforeOpeningTheDatabase(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, flag := range []string{"dir", "scls"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			cmd := databaseSnapshotCommand()
+			cmd.SetContext(config.WithContext(
+				t.Context(),
+				&config.Config{DatabasePath: dataDir},
+			))
+			cmd.SetArgs([]string{"--" + flag, ""})
+			require.ErrorContains(
+				t,
+				cmd.Execute(),
+				"--"+flag+" must not be empty",
+			)
+			entries, err := os.ReadDir(dataDir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
 		})
 	}
 }
