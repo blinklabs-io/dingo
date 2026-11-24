@@ -420,7 +420,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			// The peer's block requires state older than the retained UTxO
 			// history. Rotate the ChainSync intersection instead of returning
 			// an error that would retry the same peer and target.
-			ls.publishReplayRecoveryPruneFloorResync(rewindPoint)
+			ls.publishReplayRecoveryJournalFloorResync(rewindPoint)
 			return true, nil
 		}
 		return false, err
@@ -1047,12 +1047,12 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 	)
 }
 
-func (ls *LedgerState) publishReplayRecoveryPruneFloorResync(
+func (ls *LedgerState) publishReplayRecoveryJournalFloorResync(
 	point ocommon.Point,
 ) {
 	ls.publishReplayRecoveryResync(
 		point,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 	)
 }
 
@@ -1915,7 +1915,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		)
 		rewindPoint = ledgerTip.Point
 	} else if belowJournal {
-		ls.metrics.atTipRecoveryPruneFloorClamped.Inc()
+		ls.metrics.atTipRecoveryJournalFloorClamped.Inc()
 		ls.config.Logger.Warn(
 			"at-tip recovery rewind target is below the live UTxO set journal, holding at ledger tip instead",
 			"component", "ledger",

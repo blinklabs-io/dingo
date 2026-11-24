@@ -2347,9 +2347,8 @@ type LedgerState struct {
 	// rollback bracket's generation bump. The write phase holds it from its
 	// guard through commit, and the bump takes it, so any write that passed
 	// the guard has committed before the rollback's truncation starts and
-	// that truncation deletes its rows. SQLite's single write connection
-	// already imposes this order; Postgres and MySQL run the two transactions
-	// concurrently, and without it the stale write lands after the delete.
+	// that truncation deletes its rows. The two transactions otherwise run
+	// concurrently, and the stale write would land after the delete.
 	rewardPrecomputeWriteMu sync.Mutex
 	// rewardPrecomputeBeforeSaveHook is a test seam, nil in production. It
 	// runs inside the precompute write transaction after the rollback guard

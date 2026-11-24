@@ -1049,11 +1049,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 }
 
 // persistDeferredHeaderValidation durably records the deferred-header marker
-// for point in the blob store. It deliberately does not use sync_state: this
-// runs on the blockfetch handler, and a sync_state write needs the single
-// SQLite write connection, which a block-apply transaction holds for its whole
-// length. A handler parked there stops block intake for the duration of an
-// epoch-rollover snapshot.
+// for point in the blob store.
 func (ls *LedgerState) persistDeferredHeaderValidation(
 	point ocommon.Point,
 ) error {
@@ -4014,7 +4010,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// worth ERROR.
 			ls.reportUnrecoverableRollbackIfStuck(
 				e.Point,
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 				e.ConnectionId,
 			)
 			logRejection := ls.config.Logger.Error
@@ -4044,7 +4040,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 					event.ChainsyncResyncEvent{
 						ConnectionId: e.ConnectionId,
 						Reason: event.
-							ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+							ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 					},
 				),
 			)

@@ -3741,7 +3741,6 @@ func makeTestPoint(block models.Block) pcommon.Point {
 	return pcommon.NewPoint(block.Slot, block.Hash)
 }
 
-// TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
 func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	t *testing.T,
 ) {
@@ -13027,7 +13026,7 @@ func TestAtTipRecoveryRewindBelowUtxoSetJournal(t *testing.T) {
 	)
 	require.Positive(
 		t,
-		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryPruneFloorClamped),
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryJournalFloorClamped),
 		"the refused rewind must be visible to an operator",
 	)
 }

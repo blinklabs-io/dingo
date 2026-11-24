@@ -20950,7 +20950,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		e.Reason,
 	)
 	require.Equal(t, fixture.connId, e.ConnectionId)

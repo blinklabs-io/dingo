@@ -3741,10 +3741,9 @@ and the live UTxO set of that database's data directory
 and hands the set to the ledger. A v0.94.2 database's ledger state has
 already moved by then: the open runs `nodestorage.ReleasedMigration` as every
 opener of the ledger's database does (see below). Before the ledger starts it
-runs `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: refuse
-a set an import has not finished, mark a database at origin as holding its UTxO
-set in the set, reconcile the set with the ledger, and remove the per-family
-SQL rows the set holds. `LoadWithDB` replays the kept blocks after reconciliation returns and
+runs `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish
+a pending import into the set, reconcile the set with the ledger, and remove
+the zero-value Byron genesis outputs from it. `LoadWithDB` replays the kept blocks after reconciliation returns and
 before the ledger appends any. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through
@@ -5479,16 +5478,9 @@ failed commit restores its initial queue, and savepoint rollback restores the
 queue at that savepoint. Transaction-scoped insert statements close when their
 SQL transaction finishes, including the implicit transaction path.
 
-In API storage mode, `LedgerDeltaBatch.apply` carries one accumulator across its
-block deltas and flushes it before the surrounding database transaction commits.
-Core storage mode does the same only when
-`LedgerStateConfig.ApplyRowBatchingEnabled` is set (see "Batched apply for
-unvalidated blocks") or the batch is applied by `ApplyTrustedBatch`, whose
-blocks are never validated. Closure-context batches apply validation state
-immediately in every mode; API storage defers output-address,
-transaction-address, key witness and metadata-label indexes until the closure
-finishes. Other conflict-tolerant or strict consumed-input batches, and the
-delta a validated block returns, keep the unbatched write path. A trusted
+The ledger's database opens no SQL store, so `LedgerDeltaBatch.apply` stages
+each block delta's ledger changes for the LedgerDB and writes no row. The
+IndexerDB writer batches the API rows of the blocks it indexes. A trusted
 immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
@@ -6638,14 +6630,12 @@ transaction order. Invalid signatures abort the closure and roll back its
 writes. Preverification time belongs to the first transaction's validation
 sample, and results are discarded when the closure finishes.
 
-Certified closure application can use the metadata provider's optional
-`LeiosClosureBatcher` to collect API-only address history, metadata-label and
-key witness rows within one closure. Ledger validation and all consensus effects
-stay in transaction order, with UTxO and stake reads seeing earlier writes. The
-ledger flushes those API rows before publishing any closure events or proceeding
-to the certifier's epoch transition. Failure aborts the outer database
-transaction; a provider lacking the capability uses the existing immediate path.
-This does not activate the trusted UTxO overlay for Dijkstra.
+The IndexerDB writer indexes a certified closure through the metadata
+provider's `LeiosClosureBatcher` (`internal/node/indexer_closure.go`), which
+collects its API-only address history, metadata-label and key witness rows
+within the closure, with UTxO and stake reads seeing earlier writes. A failure
+aborts the IndexerDB transaction, and a provider without the capability is
+refused.
 
 **Certified-closure consistency gate:** a certified EB is held to a stricter
 rule than a current announcement, which application never reads and which the
@@ -11763,7 +11753,7 @@ local primary-chain membership check also used for historical headers: an
 absent point escalates at the recurrence threshold, while an on-chain point
 waits for the full tracking window, since a refused rollback to our own chain
 means the peer is behind or forked. Origin is on every chain and never
-escalates. A prune-floor rejection whose target is on the local chain is
+escalates. A journal-floor rejection whose target is on the local chain is
 logged at WARN rather than ERROR. Unavailable chain state or a lookup error
 cannot produce a diagnosis. History expiry removes only a block's CBOR, so the
 membership check, like the behind-peer check on these rejection paths, reads
@@ -22544,7 +22534,7 @@ Live stake and persisted consensus snapshots carry a shared calculation version.
 At startup the node compares every live aggregate row with canonical account and
 unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go
 snapshot or authoritative Mark metadata has an older version, startup stops with
-a rebootstrap error: after consumed-UTxO tombstones have been pruned,
+a rebootstrap error: the live UTxO set keeps no spent outputs, so
 regenerating a historical SNAP from current state would be unsafe.
 
 Calculation version 3 includes Dijkstra boundary credits in its Mark snapshot.
@@ -23872,8 +23862,8 @@ POOLREAP precedes SNAP.
    back, and the snapshot is written to the live UTxO set's `#` row family at
    its boundary slot. A live boundary passes the same callback, which stages
    the row in the batch of the commit that applies RATIFY. A boundary the
-   journal does not reach or hold, the Mithril trust boundary or the
-   consumed-output prune floor cannot reach, or whose reward basis retention
+   journal does not reach or hold, the Mithril trust boundary cannot reach, or
+   whose reward basis retention
    has pruned, stops the pass,
    leaving `ErrGovernanceBoundarySnapshotNotRetained` for it and every older
    epoch. A ledger with no readable set skips the pass.

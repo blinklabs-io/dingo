@@ -2844,7 +2844,7 @@ func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 		func(evt event.Event) {
 			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
 			if ok && resync.Reason ==
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor {
+				event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal {
 				resyncCh <- resync
 			}
 		},

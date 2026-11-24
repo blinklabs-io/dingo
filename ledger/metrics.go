@@ -255,7 +255,7 @@ type stateMetrics struct {
 	// UTxO set's journal and is clamped to the ledger tip. A rising value
 	// means recovery is asking for rewinds deeper than local history can
 	// support.
-	atTipRecoveryPruneFloorClamped prometheus.Counter
+	atTipRecoveryJournalFloorClamped prometheus.Counter
 	// Incremented when an at-tip recovery rewind target would cross the
 	// most recent epoch boundary and is clamped to the first block at or
 	// after it, so the completed rollover is not discarded and recomputed.
@@ -1252,7 +1252,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
 		},
 	)
-	m.atTipRecoveryPruneFloorClamped = promautoFactory.NewCounter(
+	m.atTipRecoveryJournalFloorClamped = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_prune_floor_clamped_total",
 			Help: "times an at-tip validation recovery rewind target below the live UTxO set journal was clamped to the ledger tip, because the set cannot roll back past its journal",

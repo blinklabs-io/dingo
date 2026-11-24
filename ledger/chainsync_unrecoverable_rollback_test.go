@@ -191,7 +191,7 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 		event.ChainsyncResyncReasonRollbackLoop,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
@@ -237,7 +237,7 @@ func TestProtocolConstrainedRollbackProgressDoesNotAccumulate(t *testing.T) {
 	for _, reason := range []string{
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
@@ -311,7 +311,7 @@ func TestReportUnrecoverableRollbackClearsProgressBeforeFuturePointReturn(t *tes
 
 	fixture.ls.reportUnrecoverableRollbackIfStuck(
 		point,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		fixture.connId,
 	)
 	_, tracked := fixture.ls.unrecoverableRollbacks[key]
@@ -417,7 +417,7 @@ func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
 var protocolConstrainedRollbackReasons = []string{
 	event.ChainsyncResyncReasonRollbackExceedsK,
 	event.ChainsyncResyncReasonRollbackExceedsMithril,
-	event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 }
 
 // A protocol-constrained refusal of a point that is off our primary chain is
@@ -542,7 +542,7 @@ func TestRollbackTargetOnLocalChainReusesTrackerClassification(t *testing.T) {
 	for range 3 {
 		fixture.ls.reportUnrecoverableRollbackIfStuck(
 			fixture.ancestorTip.Point,
-			event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 			fixture.connId,
 		)
 		require.True(t, fixture.ls.rollbackTargetOnLocalChain(fixture.ancestorTip.Point))

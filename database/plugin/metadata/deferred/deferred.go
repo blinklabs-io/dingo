@@ -189,7 +189,7 @@ var Manifest = []Index{
 		// deleted_slot = 0 in id order, which grows, and a spend lands under
 		// the spend slot.
 		MySQLColumns: []string{"deleted_slot"},
-		Notes:        "Rollback un-spend and stake-credential sweep, spent-UTxO prune",
+		Notes:        "Rollback un-spend and stake-credential sweep",
 		Critical:     true,
 	},
 	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.

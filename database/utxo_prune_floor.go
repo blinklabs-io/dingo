@@ -16,7 +16,6 @@ package database
 
 // ConsumedUtxoPruneFloorSyncKey names the sync_state row in which a v0.94.2
 // database recorded the slot up to which it had deleted spent utxo rows. The
-// revert that precedes the move of those rows into the live UTxO set, and a
-// truncate of a database that still holds the row, do not go below it. The
-// row is deleted once the move has finished.
+// revert that precedes the move of those rows into the live UTxO set does not
+// go below it.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
