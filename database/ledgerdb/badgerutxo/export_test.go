@@ -374,3 +374,9 @@ func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
 func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
 	s.added.beforeIndex = fn
 }
+
+// TopSeeksForTest returns how many journal and state journal scans have
+// started at the top of their prefix since the process began.
+func TopSeeksForTest() uint64 {
+	return topSeeks.Load()
+}
