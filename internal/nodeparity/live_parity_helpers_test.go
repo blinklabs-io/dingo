@@ -161,7 +161,7 @@ func TestResetFallbackTimerNotYetFiredGetsFullInterval(t *testing.T) {
 	t.Cleanup(func() { fallback.Stop() })
 
 	start := time.Now()
-	resetFallbackTimer(fallback, interval)
+	resetFallbackTimer(fallback, interval, false)
 	select {
 	case <-fallback.C:
 		elapsed := time.Since(start)
@@ -182,7 +182,7 @@ func TestResetFallbackTimerAlreadyFiredSchedulesImmediately(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		resetFallbackTimer(fallback, time.Hour)
+		resetFallbackTimer(fallback, time.Hour, false)
 		close(done)
 	}()
 	select {
@@ -194,6 +194,25 @@ func TestResetFallbackTimerAlreadyFiredSchedulesImmediately(t *testing.T) {
 	case <-fallback.C:
 	case <-time.After(time.Second):
 		t.Fatal("an already-fired timer must be rescheduled immediately")
+	}
+}
+
+func TestResetFallbackTimerConsumedFireGetsFullInterval(t *testing.T) {
+	t.Parallel()
+	const interval = 300 * time.Millisecond
+	fallback := time.NewTimer(10 * time.Millisecond)
+	t.Cleanup(func() { fallback.Stop() })
+	// The loop received this fire to start the cycle; it is not an overrun.
+	<-fallback.C
+
+	start := time.Now()
+	resetFallbackTimer(fallback, interval, true)
+	select {
+	case <-fallback.C:
+		assert.GreaterOrEqual(t, time.Since(start), interval,
+			"a consumed fire must wait a full interval, not run again at once")
+	case <-time.After(interval + 3*time.Second):
+		t.Fatal("fallback timer never fired after being reset")
 	}
 }
 
@@ -294,8 +313,10 @@ func TestFromGenesisCountersRecordEpoch(t *testing.T) {
 
 func TestFromGenesisCountersResult(t *testing.T) {
 	t.Parallel()
+	// A run that ends at its deadline before any epoch, as against an
+	// unreachable node, compared nothing and must not pass.
 	var none fromGenesisCounters
-	assert.NoError(t, none.result(), "no epoch reached is not a failure here")
+	require.ErrorContains(t, none.result(), "compared no epoch")
 
 	clean := fromGenesisCounters{
 		epochsChecked: 3, ppVerified: 3, stakeVerified: 3, utxoVerified: 3,

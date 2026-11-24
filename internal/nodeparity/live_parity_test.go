@@ -391,6 +391,7 @@ func liveWatchFull(
 
 	fallback := time.NewTimer(fallbackInterval)
 	defer fallback.Stop()
+	fallbackFired := false
 	for {
 		cycleCtx, cancel := context.WithTimeout(ctx, checkTimeout)
 		result, err := Check(
@@ -404,13 +405,15 @@ func liveWatchFull(
 		if liveHandleCheck(t, result, err) {
 			tally.completed++
 		}
-		resetFallbackTimer(fallback, fallbackInterval)
+		resetFallbackTimer(fallback, fallbackInterval, fallbackFired)
+		fallbackFired = false
 		select {
 		case <-ctx.Done():
 			return tally
 		case <-dingoWatcher.Events:
 		case <-cardanoWatcher.Events:
 		case <-fallback.C:
+			fallbackFired = true
 		}
 	}
 }
@@ -439,8 +442,16 @@ func liveHandleCheck(t *testing.T, result *CheckResult, err error) bool {
 // resetFallbackTimer rearms fallback for the next cycle. A timer that already
 // fired during a long check schedules the next cycle at once rather than a
 // whole interval later, so an overrun does not compound into two intervals
-// between checks.
-func resetFallbackTimer(fallback *time.Timer, interval time.Duration) {
+// between checks. consumed says the fire was what started this cycle; Stop
+// reports false for it too, and treating it as an overrun would run checks
+// back to back on idle nodes.
+func resetFallbackTimer(
+	fallback *time.Timer, interval time.Duration, consumed bool,
+) {
+	if consumed {
+		fallback.Reset(interval)
+		return
+	}
 	if !fallback.Stop() {
 		select {
 		case <-fallback.C:
@@ -729,7 +740,12 @@ func (c *fromGenesisCounters) result() error {
 			c.ppMismatches, c.stakeMismatches, c.utxoMismatches,
 		)
 	}
-	if c.epochsChecked > 0 && c.ppVerified == 0 && c.stakeVerified == 0 &&
+	if c.epochsChecked == 0 {
+		return errors.New(
+			"compared no epoch against Koios: check the Dingo address, or raise -timeout to reach an epoch boundary",
+		)
+	}
+	if c.ppVerified == 0 && c.stakeVerified == 0 &&
 		c.utxoVerified == 0 {
 		return fmt.Errorf(
 			"verified nothing against Koios across %d epoch(s): every protocol-param, "+
