@@ -39,6 +39,18 @@ CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"
 
+# go test runs each test binary in its package directory, so every path handed
+# to a generator must be absolute.
+absolute_path() {
+  case "$1" in
+  /*) printf '%s\n' "$1" ;;
+  *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+DIST_DIR="$(absolute_path "$DIST_DIR")"
+CONFORMANCE_DIR="$(absolute_path "$CONFORMANCE_DIR")"
+CBOR_DATASET_DIR="$(absolute_path "$CBOR_DATASET_DIR")"
+
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
 # corpus preparation is capped at six minutes, leaving 11 minutes for gzip.
 CBOR_GENERATOR_TIMEOUT_SECONDS=120
@@ -159,7 +171,8 @@ run_generator() {
   rm -f "$report"
   local log status=0
   log="$(mktemp)"
-  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" 2>"$log" || status=$?
+  # go test reports a failing test on stdout, so the log keeps both streams.
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" >"$log" 2>&1 || status=$?
   redact_log <"$log" >&2
   if [ "$status" -eq 124 ]; then
     write_error_report "$report" "$scenario" \
