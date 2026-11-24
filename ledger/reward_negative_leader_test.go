@@ -276,7 +276,7 @@ func TestPrecomputeStakeRewardsSkipsNegativeLeaderReward(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.engine().PrecomputeStakeRewards(
+		return ls.precomputeStakeRewardsForTest(
 			txn, negativeLeaderNewEpoch, 300, negativeLeaderBoundarySlot,
 		)
 	}))

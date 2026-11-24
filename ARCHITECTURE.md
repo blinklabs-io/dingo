@@ -18636,14 +18636,14 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     `reward_pool_input`'s `DelegatedStake`/`DelegatorCount`/`Margin`/`Cost`
     are the mark stake
     distribution Praos actually used as K's active-stake/reward-calculation
-    basis — derived from `ledger/reward_calculation.go`'s
+    basis — derived from `ledger/epochengine/reward_calculation.go`'s
     `StakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
     where `epochs.performance` is the unambiguous calendar epoch whose blocks
     are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
     total`) is written from that same `epochs.snapshot` value in the same
     reward-application call, so it is read at the identical epoch as
     `reward_pool_input`'s stake fields, never at K. `reward_account_output`
-    shares this exact offset too: `ledger/reward_calculation.go`'s
+    shares this exact offset too: `ledger/epochengine/reward_calculation.go`'s
     `SaveStakeRewardOutputs` calls `meta.SaveRewardAccountOutputs` in the same
     transaction and at the same `app.epochs.snapshot` value as
     `SaveRewardPoolOutputs`, and `rewardAccountOutputs`'s own `Epoch` field is
@@ -18713,7 +18713,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   2-epoch-lagged running sum, roughly matching the Shelley "mark→set→go"
   stake-snapshot delay. Dingo's `reward_ada_pots.Rewards`, by contrast, is a
   fresh per-epoch flow value — `rewards.Result.TotalRewardPot`, overwritten
-  (not carried forward) every epoch by `ledger/reward_calculation.go` — with
+  (not carried forward) every epoch by `ledger/epochengine/reward_calculation.go` — with
   no stored cumulative counterpart anywhere in Dingo's schema. This checker
   does not derive one by summing across epochs on Dingo's behalf: a missing
   aggregate is a Dingo data-model gap to raise and fix at the source (see
@@ -22765,7 +22765,7 @@ it.
 
 That fee pot -- `SnapShots.ssFee` -- is exact for the imported epoch's own row
 and the boundary that reads it, but was not enough for the boundary after that
-one. `LedgerState.RewardEpochFees` computes the *following* epoch's fee pot by
+one. `epochengine.RewardEpochFees` computes the *following* epoch's fee pot by
 summing stored transaction fees over the whole epoch that just ended, reading
 only this node's local transactions. A node bootstrapped mid-epoch stores no
 transactions at or before its anchor, so that sum silently dropped every
@@ -23062,7 +23062,7 @@ remain outside the snapshot manager's responsibility.
 
 CIP-0163 reward-account inactivity (proof-of-life) tracks each account's
 `expiration_epoch`. An account is active iff `expiration_epoch == 0` (unset) or
-`expiration_epoch >= currentEpoch` (`ledger.AccountExpiredAtEpoch`, negated).
+`expiration_epoch >= currentEpoch` (`epochengine.AccountExpiredAtEpoch`, negated).
 DRep activity uses the same inclusive boundary: a DRep is active iff
 `drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch`
 (`ledger/governance/epoch.go` `drepActiveAtEpoch`). Expiry equal to the current
@@ -23100,7 +23100,7 @@ queries
 (`GetDRepVotingPower`/`GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`, see
 "Epoch Boundary State Transitions" step 5) for the DRep governance tally; and
 the reward-crediting guard in `ApplyStakeRewardApplication`
-(`ledger/reward_calculation.go`). The stake-aggregation chokepoint already
+(`ledger/epochengine/reward_calculation.go`). The stake-aggregation chokepoint already
 removes an expired delegator's stake from the reward basis, so an expired
 delegator earns nothing. A pool's reward (leader) account, however, is credited
 its leader reward independent of that account's own stake, so an expired reward
@@ -23173,7 +23173,7 @@ per-block renewal hook uses. The new epoch row is persisted later in the same
 transaction. The stored epoch is not just a flag: because the
 activation stamp sets `A + DelegatorInactivity` without leaving any witness,
 the reward round (`GuardedExpiredRewardCredentials`, read back via
-`LedgerState.DelegatorInactivityActivationEpoch`) reads `A` as an activation
+`epochengine.Engine.DelegatorInactivityActivationEpoch`) reads `A` as an activation
 floor and clamps each account the activation marked up to
 `A + DelegatorInactivity` — otherwise an account whose last witness predates
 the activation would be taken as expired at its witness epoch plus the window.
@@ -23370,7 +23370,7 @@ The reference rule for what that denominator contains, with
 it sums every registered credential delegated to any pool id, while
 numerators come only from registered pools -- and those two sets coincide
 only because POOLREAP clears a retiring pool's delegations in the same update
-that removes it (dingo mirrors this in `ledger/poolreap.go`).
+that removes it (dingo mirrors this in `ledger/epochengine/poolreap.go`).
 
 ### Boundary Capture And Events
 

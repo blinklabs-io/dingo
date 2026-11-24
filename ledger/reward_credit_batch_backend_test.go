@@ -780,7 +780,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		} else {
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.engine().PrecomputeStakeRewards(txn, 4, 200, 1_200)
+				return ls.precomputeStakeRewardsForTest(txn, 4, 200, 1_200)
 			}))
 		}
 		for _, index := range deregistered {

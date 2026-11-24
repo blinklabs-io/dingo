@@ -204,7 +204,7 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // directly from Dingo's actual snapshot/reward lifecycle layout — see
 // ledger/snapshot/rotation.go's buildRewardStateInputs (which stamps
 // BlocksProduced from evt.PreviousEpoch onto the *next* epoch's
-// reward_pool_input row) and ledger/reward_calculation.go's
+// reward_pool_input row) and ledger/epochengine/reward_calculation.go's
 // StakeRewardEpochsForNewEpoch (epochs.snapshot = epochs.performance - 1,
 // with reward_pool_output written at epochs.snapshot alongside the
 // reward_pool_input row actually consumed for that computation) — rather

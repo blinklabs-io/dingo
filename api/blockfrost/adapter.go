@@ -2830,7 +2830,7 @@ func (a *NodeAdapter) AccountRewardHistory(ctx context.Context,
 	ret := make([]AccountRewardHistoryInfo, 0, len(rows))
 	for _, row := range rows {
 		// row.Epoch is the snapshot epoch (StakeRewardEpochsForNewEpoch's
-		// "snapshot" = newEpoch-3 in ledger/reward_calculation.go, which is
+		// "snapshot" = newEpoch-3 in ledger/epochengine/reward_calculation.go, which is
 		// what rewardAccountOutputs persists into this column), not the
 		// earned epoch Blockfrost reports. Rewards computed from that
 		// snapshot are credited at the boundary into newEpoch, i.e. they

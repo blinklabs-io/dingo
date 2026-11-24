@@ -71,8 +71,8 @@ type DingoEpochData struct {
 	Fees         string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
-	// epoch — see ledger/reward_calculation.go:389,1955 and
-	// ledger/rewards/rewards.go's Pots type, which carries no "rewards" field
+	// epoch — see ledger/epochengine/reward_calculation.go, where each round
+	// writes it, and ledger/rewards/rewards.go's Pots type, which carries no "rewards" field
 	// forward between epochs). Koios's /totals.reward, by contrast, is a
 	// monotonically increasing cumulative accumulator (verified against live
 	// preview data — see CompareEpochTotals), not a per-epoch snapshot. Since
@@ -958,7 +958,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // (see DingoPoolEpochData). It is the Dingo side of CompareMemberRewards.
 //
 // The predicate matches what the ledger actually credits: ApplyStakeRewards
-// (ledger/reward_calculation.go) skips a reward that is not spendable and one
+// (ledger/epochengine/reward_calculation.go) skips a reward that is not spendable and one
 // whose reward account is guarded by CIP-0163 expiry, so both are excluded
 // from the sum — but not from the presence test, which asks only whether the
 // epoch's rows survive at all.

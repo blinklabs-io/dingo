@@ -2614,8 +2614,7 @@ func finalizePrecomputedRewardOutputs(
 // path recomputes authoritatively when it runs. The chunked precompute
 // (RewardPrecomputeSnapshotUnchanged) applies the same row comparison per
 // chunk instead of once at the end of a single write phase, so it does not
-// call this directly, but this remains the guard PrecomputeStakeRewards
-// exercises and its dedicated tests pin.
+// call this directly, but this remains the guard its dedicated tests pin.
 //
 //nolint:unused // Used by tests
 func StakeRewardPrecomputeSnapshotGuardOK(
@@ -2662,9 +2661,8 @@ func StakeRewardPrecomputeSnapshotGuardOK(
 // PrecomputeStakeRewardsCalculate performs the read-only portion of stake
 // reward precomputation: checking whether a valid precomputed application
 // already exists for newEpoch and, if not, computing one. It issues no
-// writes and is safe to run inside a read-only transaction. Called by
-// PrecomputeStakeRewards (the single-transaction variant) and its tests; the
-// production chunked path computes the same shape per pool batch instead
+// writes and is safe to run inside a read-only transaction. Only tests call
+// it; the production chunked path computes the same shape per pool batch instead
 // (ResolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
 //
 //nolint:unused // Used by tests
@@ -2715,8 +2713,8 @@ func (e *Engine) PrecomputeStakeRewardsCalculate(
 
 // SaveStakeRewardPrecompute persists a computed StakeRewardApplication as a
 // precompute result: the reward output rows plus the updated RewardAdaPots
-// rewards total. Callers must run it inside a write transaction. Called by
-// PrecomputeStakeRewards and its tests; the production chunked path persists
+// rewards total. Callers must run it inside a write transaction. Only tests call it; the
+// production chunked path persists
 // the same two things per pool batch instead
 // (stakeRewardPrecomputeChunkStep, finishStakeRewardPrecomputeLocked).
 //
@@ -2786,47 +2784,6 @@ func saveReconstructedRewardStakeInputs(
 		)
 	}
 	return nil
-}
-
-// PrecomputeStakeRewards computes and immediately persists stake rewards for
-// newEpoch within the given transaction. It is kept for callers that already
-// hold a single read-write transaction spanning both phases and for the
-// dedicated tests of PrecomputeStakeRewardsCalculate/
-// StakeRewardPrecomputeSnapshotGuardOK/SaveStakeRewardPrecompute; the
-// production async EventBus path
-// (precomputeStakeRewardsAfterEpochTransition) instead runs
-// runChunkedStakeRewardPrecomputeRound, which chunks the same read-then-guarded-
-// write shape across many short transactions (see
-// stakeRewardPrecomputeChunkStep) rather than one of each.
-//
-//nolint:unused // Used by tests
-func (e *Engine) PrecomputeStakeRewards(
-	txn ledgerdb.Txn,
-	newEpoch uint64,
-	capturedSlot uint64,
-	boundarySlot uint64,
-) error {
-	app, ok, err := e.PrecomputeStakeRewardsCalculate(
-		txn,
-		newEpoch,
-		capturedSlot,
-		boundarySlot,
-	)
-	if err != nil || !ok {
-		return err
-	}
-	if app == nil {
-		return errors.New("missing stake reward application")
-	}
-	ldb := e.ledgerDB()
-	return e.SaveStakeRewardPrecompute(
-		ldb,
-		txn,
-		app,
-		newEpoch,
-		capturedSlot,
-		boundarySlot,
-	)
 }
 
 // DeleteUncreditedRewardOutputs deletes the reward outputs of snapshotEpoch

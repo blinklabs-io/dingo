@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2353,7 +2354,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.engine().PrecomputeStakeRewards(
+		return ls.precomputeStakeRewardsForTest(
 			txn,
 			newEpoch,
 			precomputeSlot,
@@ -4817,7 +4818,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.engine().PrecomputeStakeRewards(
+			return ls.precomputeStakeRewardsForTest(
 				txn,
 				newEpoch,
 				capturedSlot,
@@ -4891,7 +4892,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.engine().PrecomputeStakeRewards(
+				return ls.precomputeStakeRewardsForTest(
 					txn,
 					newEpoch,
 					prefilterSlot,
@@ -4930,7 +4931,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.engine().PrecomputeStakeRewards(
+			return ls.precomputeStakeRewardsForTest(
 				txn,
 				newEpoch,
 				capturedSlot,
@@ -6346,7 +6347,7 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 // (precomputeStakeRewardsAfterEpochTransition) into a read-only calculation
 // transaction plus a short write transaction produces byte-identical reward
 // output rows and ADA pots to the single read-write-transaction
-// PrecomputeStakeRewards path used directly by other tests in this file.
+// precomputeStakeRewardsForTest path used directly by other tests in this file.
 // This guards the read/write split introduced to stop the async precompute
 // from holding SQLite's single writer for the entire calculation.
 func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
@@ -6366,7 +6367,7 @@ func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
 	lsRef, dbRef := seedRewardPrecomputeTimingState(t, 7)
 	refTxn := dbRef.Transaction(context.Background(), true)
 	require.NoError(t, refTxn.Do(func(txn *database.Txn) error {
-		return lsRef.engine().PrecomputeStakeRewards(
+		return lsRef.precomputeStakeRewardsForTest(
 			txn,
 			newEpoch,
 			eventBoundarySlot,
@@ -11156,4 +11157,28 @@ func TestRewardRoundEnumeratedAbsences(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.engine().ApplyStakeRewards(context.Background(), txn, 0, 0, false)
 	}))
+}
+
+// precomputeStakeRewardsForTest computes and persists stake rewards for
+// newEpoch within one read-write transaction, composing the same calculate
+// and save steps the chunked production path splits across transactions.
+func (ls *LedgerState) precomputeStakeRewardsForTest(
+	txn ledgerdb.Txn,
+	newEpoch uint64,
+	capturedSlot uint64,
+	boundarySlot uint64,
+) error {
+	e := ls.engine()
+	app, ok, err := e.PrecomputeStakeRewardsCalculate(
+		txn, newEpoch, capturedSlot, boundarySlot,
+	)
+	if err != nil || !ok {
+		return err
+	}
+	if app == nil {
+		return errors.New("missing stake reward application")
+	}
+	return e.SaveStakeRewardPrecompute(
+		ls.ledgerDB(), txn, app, newEpoch, capturedSlot, boundarySlot,
+	)
 }

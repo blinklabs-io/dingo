@@ -50,7 +50,7 @@ type rewardPrecomputeRollbackSnapshot struct {
 // transaction, on the block-processing goroutine. On mainnet that scan takes
 // minutes, during which no block is applied and any leader slot in the window
 // is lost. The async path exists precisely so the calculation never holds
-// SQLite's single writer (see PrecomputeStakeRewards); this restores it for
+// SQLite's single writer (see the chunked precompute); this restores it for
 // the one case the event cannot cover.
 //
 // Idempotent and self-limiting: PrecomputeStakeRewardsCalculate returns early

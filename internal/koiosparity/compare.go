@@ -305,7 +305,7 @@ func CompareEpochAggregates(
 // totals.fees and totals.treasury/reserves are single point-in-time pot
 // balances, matching what Dingo already stores per epoch (Fees is that
 // epoch's fee-pot snapshot; Treasury/Reserves are running ledger balances
-// Dingo already carries forward — see ledger/reward_calculation.go's
+// Dingo already carries forward — see ledger/epochengine/reward_calculation.go's
 // NetworkState updates), so those three are compared directly. totals.reward
 // is different in kind — a cumulative accumulator, not a snapshot — and is
 // not compared at all; see the comment after the totals_fees check below.
@@ -1271,7 +1271,7 @@ func rewardTypeSumsRepeatedRows(rewardType string) bool {
 // accounting is never masked by a flood of "missing" rows for a mechanism
 // Dingo was never expected to track in the first place. If Dingo's ledger
 // package ever starts tracking any of these (see
-// ledger/reward_calculation.go/ledger/rewards/rewards.go), this map (and
+// ledger/epochengine/reward_calculation.go/ledger/rewards/rewards.go), this map (and
 // ARCHITECTURE.md's Koios Parity Tracker section) is the first place to
 // update.
 var koiosAccountRewardTypesOutOfScope = map[string]bool{

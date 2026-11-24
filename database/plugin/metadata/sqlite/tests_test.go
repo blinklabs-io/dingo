@@ -734,7 +734,7 @@ const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
 // node never applied a block for them, and the anchor slot cannot hold more
 // than one block in any case.
 //
-// Reward performance (ledger/reward_calculation.go),
+// Reward performance (ledger/epochengine/reward_calculation.go),
 // reward_pool_input seeding (ledger/snapshot/rotation.go) and Blockfrost's
 // blocks_minted all count these rows as minted blocks, so a bootstrapped node
 // credits every pool holding a certified counter with a block it never made
@@ -2956,7 +2956,7 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 		AddedSlot:  10,
 	}).Error)
 
-	// Pre-SNAP: delayed reward update (ledger.ApplyStakeRewards) and MIR
+	// Pre-SNAP: delayed reward update (epochengine.Engine.ApplyStakeRewards) and MIR
 	// (governance.CreditRegisteredRewardAccountBeforeSnapshot).
 	for i, amount := range []uint64{50, 3} {
 		require.NoError(t, store.AddAccountRewardByCredential(
