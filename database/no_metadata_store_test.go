@@ -16,6 +16,7 @@ package database_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -142,4 +143,50 @@ func TestSQLReadsAndWritesRefuseOnTheLedgersDatabase(t *testing.T) {
 			require.ErrorIs(t, call(), database.ErrNoMetadataStore)
 		})
 	}
+}
+
+// A transaction on the ledger's database has no SQL connection to refuse a
+// cancelled context, so Do itself must.
+func TestLedgerDatabaseTransactionRefusesCancelledContext(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	require.Nil(t, db.Metadata())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for name, open := range map[string]func() *database.Txn{
+		"Transaction read":  func() *database.Txn { return db.Transaction(ctx, false) },
+		"Transaction write": func() *database.Txn { return db.Transaction(ctx, true) },
+		"NewTxn":            func() *database.Txn { return database.NewTxn(ctx, db, false) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ran := false
+			err := open().Do(func(*database.Txn) error {
+				ran = true
+				return nil
+			})
+			require.ErrorIs(t, err, context.Canceled)
+			require.False(t, ran)
+		})
+	}
+
+	t.Run("live context runs", func(t *testing.T) {
+		t.Parallel()
+		ran := false
+		require.NoError(t, db.Transaction(t.Context(), false).Do(
+			func(*database.Txn) error {
+				ran = true
+				return nil
+			},
+		))
+		require.True(t, ran)
+	})
+
+	t.Run("BlockBySlot", func(t *testing.T) {
+		t.Parallel()
+		_, err := database.BlockBySlot(ctx, db, 1)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }

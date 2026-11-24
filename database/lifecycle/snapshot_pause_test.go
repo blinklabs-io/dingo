@@ -338,7 +338,7 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	go func() {
 		_, err := snapshotAt(
 			t.Context(), db, dir,
-			lifecycle.WithMaxCommitPause(time.Minute),
+			lifecycle.WithMaxCommitPause(10*time.Minute),
 		)
 		result <- err
 	}()
