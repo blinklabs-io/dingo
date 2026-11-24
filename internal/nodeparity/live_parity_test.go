@@ -294,16 +294,17 @@ func TestLiveNodeParityWatch(t *testing.T) {
 	}
 	ctx := liveContext(t)
 	logger := liveLogger(t, slog.LevelInfo)
+	var completed int
 	switch mode {
 	case "full":
-		liveWatchFull(
+		completed = liveWatchFull(
 			ctx,
 			t,
 			target,
 			liveDuration(t, liveEnvFallbackInterval, defaultLiveFallbackInterval),
 			liveDuration(t, liveEnvCheckTimeout, defaultLiveCheckTimeout),
 			logger,
-		)
+		).completed
 	case "incremental":
 		cursorFile := os.Getenv(liveEnvCursorFile)
 		if cursorFile == "" {
@@ -325,9 +326,12 @@ func TestLiveNodeParityWatch(t *testing.T) {
 				reason FullCheckReason, result *CheckResult, err error,
 			) {
 				t.Logf("full checkpoint (%s)", reason)
-				liveHandleCheck(t, result, err)
+				if liveHandleCheck(t, result, err) {
+					completed++
+				}
 			},
 			OnBlockCheck: func(tip Tip, diff Diff) {
+				completed++
 				if !diff.Empty() {
 					t.Errorf("block %d (slot %d) diverged: %s",
 						tip.BlockNumber, tip.Slot,
@@ -342,6 +346,26 @@ func TestLiveNodeParityWatch(t *testing.T) {
 	default:
 		t.Fatalf("%s must be full or incremental, got %q", liveEnvWatch, mode)
 	}
+	if err := liveWatchVerdict(mode, completed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// liveWatchVerdict fails a watch that never completed a comparison. Check
+// errors are only logged so a transient hiccup does not end the watch, which
+// would otherwise let an unreachable node pass as validated.
+func liveWatchVerdict(mode string, completed int) error {
+	if completed == 0 {
+		return fmt.Errorf("%s watch completed no comparison", mode)
+	}
+	return nil
+}
+
+// liveWatchTally counts a full-mode watch's checks: attempts that returned
+// before the watch ended, and those that compared the nodes.
+type liveWatchTally struct {
+	attempts  int
+	completed int
 }
 
 // liveWatchFull runs a full check after every tip change on either node,
@@ -352,8 +376,9 @@ func liveWatchFull(
 	target liveTarget,
 	fallbackInterval, checkTimeout time.Duration,
 	logger *slog.Logger,
-) {
+) liveWatchTally {
 	t.Helper()
+	var tally liveWatchTally
 	watcherLog := func(format string, args ...any) {
 		logger.Warn(fmt.Sprintf(format, args...))
 	}
@@ -373,13 +398,16 @@ func liveWatchFull(
 		)
 		cancel()
 		if ctx.Err() != nil {
-			return
+			return tally
 		}
-		liveHandleCheck(t, result, err)
+		tally.attempts++
+		if liveHandleCheck(t, result, err) {
+			tally.completed++
+		}
 		resetFallbackTimer(fallback, fallbackInterval)
 		select {
 		case <-ctx.Done():
-			return
+			return tally
 		case <-dingoWatcher.Events:
 		case <-cardanoWatcher.Events:
 		case <-fallback.C:
@@ -388,20 +416,24 @@ func liveWatchFull(
 }
 
 // liveHandleCheck fails the test on a divergence and only logs a check error
-// or a discarded cycle, which the next cycle retries.
-func liveHandleCheck(t *testing.T, result *CheckResult, err error) {
+// or a discarded cycle, which the next cycle retries. It reports whether the
+// nodes were compared.
+func liveHandleCheck(t *testing.T, result *CheckResult, err error) bool {
 	t.Helper()
 	switch {
 	case result == nil:
 		t.Logf("check error: %v", err)
+		return false
 	case result.Skipped:
 		t.Logf("check skipped: %s", result.SkipDetail)
+		return false
 	case result.Diff.Empty():
 		t.Logf("matched at slot %d (block %d)",
 			result.Tip.Slot, result.Tip.BlockNumber)
 	default:
 		t.Error(liveCheckResultErr(result))
 	}
+	return true
 }
 
 // resetFallbackTimer rearms fallback for the next cycle. A timer that already

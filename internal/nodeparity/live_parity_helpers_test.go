@@ -15,8 +15,10 @@
 package nodeparity
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,6 +96,62 @@ func TestLiveNetworkMagic(t *testing.T) {
 	require.Error(t, err)
 	_, err = liveNetworkMagic("mainnet-typo")
 	require.Error(t, err)
+}
+
+func TestLiveWatchVerdict(t *testing.T) {
+	t.Parallel()
+	require.ErrorContains(t, liveWatchVerdict("full", 0), "completed no comparison")
+	require.ErrorContains(t, liveWatchVerdict("incremental", 0), "incremental")
+	require.NoError(t, liveWatchVerdict("full", 1))
+}
+
+func TestLiveHandleCheckReportsComparison(t *testing.T) {
+	t.Parallel()
+	assert.False(t, liveHandleCheck(t, nil, io.ErrUnexpectedEOF))
+	assert.False(t, liveHandleCheck(t, &CheckResult{Skipped: true}, nil))
+	assert.True(t, liveHandleCheck(t, &CheckResult{Tip: Tip{Slot: 1}}, nil))
+}
+
+// A peer that accepts and never answers must cost one checkTimeout per cycle:
+// it must not wedge the loop until the watch ends, and the much shorter
+// fallback interval must not cut a slow check short.
+func TestLiveWatchFullStalledPeerBoundedByCheckTimeout(t *testing.T) {
+	t.Parallel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+
+	const (
+		fallbackInterval = 50 * time.Millisecond
+		checkTimeout     = time.Second
+	)
+	ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
+	defer cancel()
+	tally := liveWatchFull(
+		ctx, t,
+		liveTarget{
+			magic:       42,
+			dingoAddr:   listener.Addr().String(),
+			cardanoAddr: listener.Addr().String(),
+		},
+		fallbackInterval, checkTimeout,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	// Bounded by checkTimeout: two attempts end before the watch does. An
+	// unbounded cycle ends none; a fallback-bounded one ends dozens.
+	assert.GreaterOrEqual(t, tally.attempts, 1)
+	assert.LessOrEqual(t, tally.attempts, 2)
+	assert.Zero(t, tally.completed)
+	require.Error(t, liveWatchVerdict("full", tally.completed))
 }
 
 func TestResetFallbackTimerNotYetFiredGetsFullInterval(t *testing.T) {

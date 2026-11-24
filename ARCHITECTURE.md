@@ -20483,7 +20483,8 @@ A `Watcher` reconnects on its own (bounded exponential backoff, matching
 `internal/test/devnet/observer.go`'s pattern) if its session drops, so a
 node restart does not require the operator to do anything.
 
-**`DINGO_NODE_PARITY_WATCH=incremental`, the default (finalized after the mode's
+**`DINGO_NODE_PARITY_WATCH=incremental` (the variable is required and selects
+the mode; unset, the watch test skips. Finalized after the mode's
 own introduction
 below, once full mode's per-cycle cost against a real Preview-scale UTxO set was
 measured — see "Measured, not just reasoned about" above):** validates one block
