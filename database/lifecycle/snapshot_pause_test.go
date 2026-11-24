@@ -339,12 +339,12 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	go func() {
 		_, err := snapshotAt(
 			t.Context(), db, dir,
-			lifecycle.WithMaxCommitPause(time.Minute),
+			lifecycle.WithMaxCommitPause(10*time.Minute),
 		)
 		result <- err
 	}()
 	err := testutil.RequireReceive(
-		t, result, 30*time.Second,
+		t, result, testutil.AsyncWait,
 		"a failed set backup must cancel the blob backup",
 	)
 	require.ErrorIs(t, err, errInjectedBackup)
