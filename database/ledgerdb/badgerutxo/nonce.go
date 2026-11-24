@@ -221,6 +221,7 @@ func (s *Store) LatestNonce() (Nonce, bool, error) {
 	var ok bool
 	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{NonceTag}
 		opts.Reverse = true
 		it := txn.NewIterator(opts)
