@@ -205,3 +205,19 @@ func TestAPINodeResolvesOnlyTheIndexerDBMetadataStore(t *testing.T) {
 	}
 	requireNoSQLiteFile(t, n.config.dataDir)
 }
+
+// The seed ledger writes only the genesis epoch row however long it stays open:
+// it applies none of the loaded blocks, which span several epochs, so the
+// fixture's single-row check does not depend on how fast the ledger closes.
+func TestLiveLifecycleSeedLedgerAppliesNoLoadedBlocks(t *testing.T) {
+	t.Parallel()
+	const numBlocks = 21
+	// Long enough for a ledger that processed blocks to cross the boundaries
+	// the loaded blocks span: it replayed them in well under this in testing.
+	const holdWindow = 2 * time.Second
+	newLiveLifecycleTestNodeWithGenesis(
+		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),
+		disabledLiveLifecycleTestWorkerPoolCfg,
+		withSeedLedgerHold(func() { <-time.After(holdWindow) }),
+	)
+}

@@ -132,6 +132,14 @@ type liveNodeSeed struct {
 	livedIn bool
 	legacy  bool
 	host    *plugin.Host
+	// holdSeed runs while the seed ledger is open, between Start and Close.
+	holdSeed func()
+}
+
+// withSeedLedgerHold runs hold while the seed ledger that writes the epoch rows
+// is open, so a test can give it time to apply loaded blocks.
+func withSeedLedgerHold(hold func()) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.holdSeed = hold }
 }
 
 // withPluginHost runs the node on host instead of a fresh built-in one.
@@ -157,6 +165,7 @@ func seedLedgerEpochsForLoadedBlocks(
 	t *testing.T,
 	n *Node,
 	points []ocommon.Point,
+	hold func(),
 ) {
 	t.Helper()
 	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
@@ -180,6 +189,9 @@ func seedLedgerEpochsForLoadedBlocks(
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
+	if hold != nil {
+		hold()
+	}
 	require.NoError(t, seedLedger.Close())
 	epochs, err := set.Epochs()
 	require.NoError(t, err)
@@ -329,7 +341,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// restore/truncate is compared against identical production wiring on
 	// both sides rather than against a harness config that happens to omit
 	// the field under test.
-	seedLedgerEpochsForLoadedBlocks(t, n, points)
+	seedLedgerEpochsForLoadedBlocks(t, n, points, seed.holdSeed)
 	if storageMode == StorageModeCore && !seed.legacy {
 		seedLiveUtxoSet(t, db, tmpDir, points, finalTip, seed.livedIn,
 			uint64(n.config.cardanoNodeConfig.ShelleyGenesis().EpochLength))
