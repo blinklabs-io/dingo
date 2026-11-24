@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/go-scls"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -82,6 +83,50 @@ func TestExportSCLSReleasesTheSetAndPublishesAVerifiedFile(t *testing.T) {
 	again, err := badgerutxo.Open(badgerutxo.DirFor(dataDir))
 	require.NoError(t, err)
 	require.NoError(t, again.Close())
+}
+
+func TestDatabaseSnapshotSCLSRoutesToExporter(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "state.scls")
+	err := runDatabaseSnapshot(
+		newExportCmd(t),
+		&config.Config{DatabasePath: t.TempDir()},
+		nil,
+		"",
+		out,
+	)
+	require.ErrorContains(t, err, "snapshot SCLS: no live UTxO set")
+}
+
+func TestDatabaseSnapshotRequiresExactlyOneOutput(t *testing.T) {
+	t.Parallel()
+
+	cmd := databaseSnapshotCommand()
+	require.NotNil(t, cmd.Flags().Lookup("dir"))
+	require.NotNil(t, cmd.Flags().Lookup("scls"))
+
+	for _, test := range []struct {
+		name string
+		args []string
+		err  string
+	}{
+		{
+			name: "no output",
+			err:  "at least one of the flags in the group [dir scls] is required",
+		},
+		{
+			name: "both outputs",
+			args: []string{"--dir", "snapshot", "--scls", "state.scls"},
+			err:  "if any flags in the group [dir scls] are set none of the others can be",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := databaseSnapshotCommand()
+			cmd.SetArgs(test.args)
+			require.ErrorContains(t, cmd.Execute(), test.err)
+		})
+	}
 }
 
 func TestExportSCLSRefusesADataDirWithoutASet(t *testing.T) {

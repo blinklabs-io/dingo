@@ -4151,8 +4151,9 @@ import replaces, so the set's governance rows stay as the import leaves them.
 
 #### Exporting the set as an SCLS file
 
-`dingo database export-scls --output <file>` writes the UTxO set as an SCLS
-(CIP-0165) file. It is offline: it opens the set under the data directory,
+`dingo database snapshot --scls <file>` writes the UTxO set as an SCLS
+(CIP-0165) file. `--scls` and the native snapshot's `--dir` are mutually
+exclusive. The command is offline: it opens the set under the data directory,
 which fails while a node holds it, and never reads a running node's state.
 
 The checkpoint is one Badger read transaction (`Store.CheckpointableSnapshot`),
