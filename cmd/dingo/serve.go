@@ -92,7 +92,7 @@ func runServePreflight(
 	// the sync_state table holds a non-empty value, a previous sync
 	// did not complete. The user must finish (or re-run) the sync
 	// before starting the node.
-	if err := checkSyncState(cfg, logger); err != nil {
+	if err := checkSyncState(ctx, cfg, logger); err != nil {
 		return err
 	}
 	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
@@ -100,7 +100,7 @@ func runServePreflight(
 	// with the gate off, then restart with it on" path that Guard 1 in the
 	// sync command cannot see; a bootstrapped node cannot reproduce a
 	// genesis-synced node's expiration state.
-	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
+	if err := checkMithrilInactivityCompat(ctx, cfg, logger); err != nil {
 		return err
 	}
 	if err := repairPendingMithrilRewardState(
@@ -124,11 +124,12 @@ func runServePreflight(
 // other value is an interrupted `dingo sync` or `dingo mithril sync`, which
 // only that command can finish, so it refuses whatever mithril.enabled says.
 func checkSyncState(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -137,7 +138,7 @@ func checkSyncState(
 	if runtimeErr != nil {
 		return runtimeErr
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 
 	val, err := db.GetChainState(database.SyncStatusKey, nil)
 	if err != nil {
@@ -350,6 +351,7 @@ func mithrilRewardRepairPending(
 // serving such a database would diverge from a genesis-synced node. A no-op
 // when the gate is off or the database was not Mithril-bootstrapped.
 func checkMithrilInactivityCompat(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
@@ -357,7 +359,7 @@ func checkMithrilInactivityCompat(
 		return nil
 	}
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -366,7 +368,7 @@ func checkMithrilInactivityCompat(
 	if runtimeErr != nil {
 		return runtimeErr
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 
 	bootstrapped, err := mithril.WasBootstrapped(db)
 	if err != nil {

@@ -54,7 +54,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Gate off: no-op, no database access.
-	require.NoError(t, checkMithrilInactivityCompat(
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(), 
 		&config.Config{DelegatorInactivityEnabled: false},
 		logger,
 	))
@@ -67,7 +67,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	}
 
 	// Gate on, fresh (non-bootstrapped) database: allowed.
-	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(), cfg, logger))
 
 	// Mark the database as Mithril-bootstrapped, then confirm serving is
 	// refused. The key mirrors mithril's durable immutable-import marker
@@ -80,7 +80,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	err = checkMithrilInactivityCompat(cfg, logger)
+	err = checkMithrilInactivityCompat(t.Context(), cfg, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
 }
@@ -112,7 +112,7 @@ func TestCheckMithrilInactivityCompatLegacyMarker(t *testing.T) {
 	require.NoError(t, db.SetChainState("mithril_ledger_slot", "12345678", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	err = checkMithrilInactivityCompat(cfg, logger)
+	err = checkMithrilInactivityCompat(t.Context(), cfg, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
 }
@@ -159,7 +159,7 @@ func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
 	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(), cfg, logger))
 }
 
 // Not t.Parallel: swaps the package-level runMithrilSyncForCommand seam.
