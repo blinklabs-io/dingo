@@ -4706,6 +4706,25 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				evt.HeaderCryptoVerificationGeneration,
 			)
 			if !current {
+				// A rollback invalidates the proof's generation even when the
+				// retained header remains valid against the restored state.
+				generation, err := ls.validatePeerChainSelectionHeaderCryptoWithGeneration(
+					ctx,
+					connId,
+					evt.BlockHeader,
+				)
+				if err != nil {
+					ls.chainsyncBlockfetchMutex.Lock()
+					ls.clearQueuedHeaders()
+					ls.chainsyncBlockfetchMutex.Unlock()
+					return 0, err
+				}
+				evt.HeaderCryptoVerificationGeneration = generation
+				release, current = ls.PinHeaderCryptoVerificationGeneration(
+					generation,
+				)
+			}
+			if !current {
 				ls.chainsyncBlockfetchMutex.Lock()
 				ls.clearQueuedHeaders()
 				ls.chainsyncBlockfetchMutex.Unlock()
@@ -5445,6 +5464,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 			if resolved {
+				if generation := ls.chain.QueuedHeaderCryptoVerificationGeneration(e.Point); generation != 0 {
+					headerCryptoVerificationGeneration = generation
+					e.HeaderCryptoVerificationGeneration = generation
+					if e.PeerTipUpdate != nil {
+						e.PeerTipUpdate.HeaderCryptoVerificationGeneration = generation
+					}
+				}
 				if headerValidationRequired {
 					headerTrusted = ls.queuedHeaderCryptoVerdictCurrent(e.Point)
 				}
@@ -6919,8 +6945,8 @@ func (ls *LedgerState) tryResolveForkPinned(
 	if reverifyAfterRollback {
 		// Rollback publishes a new producer-authorization generation and needs
 		// the generation write lock, so release the old generation before the
-		// destructive transition. The fork suffix is replayed after a fresh
-		// intersection and verified against the resulting ledger state.
+		// destructive transition. The retained suffix must then be verified
+		// against the resulting ledger state before it is queued again.
 		releaseIncomingGeneration()
 	}
 
@@ -7042,20 +7068,35 @@ func (ls *LedgerState) tryResolveForkPinned(
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
 	ls.setChainsyncState(RollbackChainsyncState)
-	if reverifyAfterRollback {
-		ls.requestChainsyncResync(
-			e.ConnectionId,
-			event.ChainsyncResyncReasonPersistentFork,
-			pending,
-		)
-		return true, nil
-	}
-
 	// Rollback succeeded — re-add the known peer fork segment from the
 	// common ancestor forward. Re-adding only the latest mismatching header
 	// works for one-block forks but fails once the winning fork is already
 	// several headers ahead.
 	for _, forkEvent := range forkPath {
+		if reverifyAfterRollback {
+			generation, err := ls.validatePeerChainSelectionHeaderCryptoWithGeneration(
+				ls.lifecycleContext(), e.ConnectionId, forkEvent.BlockHeader,
+			)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"failed to revalidate fork header after rollback",
+					"component", "ledger",
+					"error", err,
+					"slot", forkEvent.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
+				ls.requestChainsyncResync(
+					e.ConnectionId,
+					event.ChainsyncResyncReasonPersistentFork,
+					pending,
+				)
+				return true, nil
+			}
+			forkEvent.HeaderCryptoVerificationGeneration = generation
+			if pointMatches(forkEvent.Point, e.Point) {
+				incomingCryptoVerificationGeneration = generation
+			}
+		}
 		if err := ls.addForkPathHeader(
 			forkEvent, e.Point, incomingCryptoVerificationGeneration,
 		); err != nil {

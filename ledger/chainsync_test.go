@@ -10281,6 +10281,103 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	fixture.ls.blockfetchRequestRangeCleanup()
 }
 
+func TestRecoverAfterLocalRollbackRevalidatesRetainedHeader(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 0)
+	ancestor := f.ls.currentTip
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+	f.ls.config.CardanoNodeConfig = newHighFreqShelleyGenesisCfg(t)
+	var logs bytes.Buffer
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	f.ls.metrics.init(prometheus.NewRegistry())
+	nonce := bytes.Repeat([]byte{0x31}, 32)
+	blockNumber := ancestor.BlockNumber + 1
+	tb := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t, [32]byte{81}, nonce, ancestor.Point.Slot+1, ancestor.Point.Slot+200, ancestor.Point.Hash,
+		&blockNumber, tamperNone,
+	)
+	f.ls.currentEra = eras.BabbageEraDesc
+	f.ls.currentPParams = &babbage.BabbageProtocolParameters{ProtocolMajor: 7}
+	f.ls.epochCache = []models.Epoch{{
+		EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000,
+		SlotLength: 1000, EraId: eras.BabbageEraDesc.Id, Nonce: nonce,
+	}}
+	seedBlockPoolRegistration(t, f.ls.db, tb.block)
+	pool := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, f.ls.db, 4, pool[:], 1_000_000_000)
+	f.ls.publishSnapshotsLocked()
+	header := tb.block.Header()
+	generation, err := f.ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(
+		connID,
+		header,
+	)
+	require.NoError(t, err)
+	f.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: connID, HeaderCryptoVerificationGeneration: generation,
+		Type: gledger.BlockTypeBabbage,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+	})
+	f.ls.publishSnapshotsLocked()
+	require.False(t, f.ls.headerCryptoVerificationGenerationCurrent(generation))
+	f.ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, nil
+	}
+	result := f.ls.RecoverAfterLocalRollback(
+		t.Context(),
+		[]ouroboros.ConnectionId{connID},
+		ancestor.Point,
+	)
+	require.True(t, result.Recovered, logs.String())
+	require.Equal(t, 1, f.ls.chain.HeaderCount())
+	f.ls.blockfetchRequestRangeCleanup()
+
+	f.ls.publishSnapshotsLocked()
+	f.ls.forkHeaderNonceCacheMutex.Lock()
+	f.ls.forkHeaderPathCache = nil
+	f.ls.forkHeaderNonceCacheMutex.Unlock()
+	checked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var paused atomic.Bool
+	f.ls.peerForkOpCertCheckedHook = func() {
+		if paused.CompareAndSwap(false, true) {
+			close(checked)
+			<-release
+		}
+	}
+	recovered := make(chan LocalRollbackRecoveryResult, 1)
+	go func() {
+		recovered <- f.ls.RecoverAfterLocalRollback(
+			t.Context(), []ouroboros.ConnectionId{connID}, ancestor.Point,
+		)
+	}()
+	testutil.RequireReceive(t, checked, testutil.AsyncWait,
+		"recovery reached the opcert commit")
+	verificationLock := f.ls.peerHeaderVerificationLock(connID)
+	if verificationLock.TryLock() {
+		verificationLock.Unlock()
+		require.FailNow(t, "rollback replay did not serialize peer verification")
+	}
+	unblock()
+	result = testutil.RequireReceive(t, recovered, testutil.AsyncWait,
+		"recovery completes alongside peer admission")
+	require.True(t, result.Recovered, logs.String())
+	f.ls.blockfetchRequestRangeCleanup()
+}
+
 func TestRecoverAfterLocalRollbackRejectsStaleHeaderHistory(t *testing.T) {
 	t.Parallel()
 
