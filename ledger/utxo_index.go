@@ -24,6 +24,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -211,7 +212,11 @@ func (ls *LedgerState) scanLive(
 	})
 	stopped := false
 	emit := func(txID []byte, index uint32, cbor []byte) error {
-		stop, err := fn(models.Utxo{TxId: txID, OutputIdx: index, Cbor: cbor})
+		u, err := liveUtxoRow(txID, index, cbor)
+		if err != nil {
+			return err
+		}
+		stop, err := fn(u)
 		stopped = stop
 		return err
 	}
@@ -249,6 +254,22 @@ func (ls *LedgerState) scanLive(
 		}
 	}
 	return nil
+}
+
+// liveUtxoRow is the row a live output is reported as: the set stores only
+// its CBOR, so the lovelace amount is read from it.
+func liveUtxoRow(txID []byte, index uint32, cbor []byte) (models.Utxo, error) {
+	u := models.Utxo{TxId: txID, OutputIdx: index, Cbor: cbor}
+	out, err := u.Decode()
+	if err != nil {
+		return u, fmt.Errorf("decode output %x#%d: %w", txID, index, err)
+	}
+	amount, err := models.CheckedUint64FromBigInt(out.Amount())
+	if err != nil {
+		return u, fmt.Errorf("output %x#%d amount: %w", txID, index, err)
+	}
+	u.Amount = types.Uint64(amount)
+	return u, nil
 }
 
 func compareUtxoKeys(a, b utxoref.Key) int {

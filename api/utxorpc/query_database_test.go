@@ -48,21 +48,12 @@ import (
 // datum or transaction rows.
 func TestCoreQueryServiceReadsTheLedgerAndRefusesHistory(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
 
 	// The api harness finds a live output of the shared fixture chain.
 	api := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	apiCli := queryconnect.NewQueryServiceClient(
 		api.Client, api.Server.URL, connect.WithGRPC(),
 	)
-	search, err := apiCli.SearchUtxos(
-		ctx, connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
-	)
-	require.NoError(t, err)
-	require.NotEmpty(t, search.Msg.GetItems())
-	ref := search.Msg.GetItems()[0].GetTxoRef()
-
 	core := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 20,
 		tune: func(cfg *UtxorpcConfig) {
@@ -74,6 +65,16 @@ func TestCoreQueryServiceReadsTheLedgerAndRefusesHistory(t *testing.T) {
 	cli := queryconnect.NewQueryServiceClient(
 		core.Client, core.Server.URL, connect.WithGRPC(),
 	)
+
+	// The budget covers the RPCs only, not building the harnesses.
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	search, err := apiCli.SearchUtxos(
+		ctx, connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, search.Msg.GetItems())
+	ref := search.Msg.GetItems()[0].GetTxoRef()
 
 	read, err := cli.ReadUtxos(ctx, connect.NewRequest(
 		&query.ReadUtxosRequest{Keys: []*query.TxoRef{ref}},
@@ -333,9 +334,6 @@ func addressPredicate(pattern *utxorpcCardano.AddressPattern) *query.UtxoPredica
 // database does not hold, so a read of any other store finds none of them.
 func TestCoreQueryServiceServesLiveSetOnlyOutputs(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
 	// A page examines at most maxHistoryItems+1 candidates.
 	const maxHistoryItems = 3
 	core := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
@@ -350,6 +348,8 @@ func TestCoreQueryServiceServesLiveSetOnlyOutputs(t *testing.T) {
 	cli := queryconnect.NewQueryServiceClient(
 		core.Client, core.Server.URL, connect.WithGRPC(),
 	)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
 	datum := data.NewInteger(big.NewInt(4242))
 	targetA := coreTestOutput(t, 0xA1, 0xB1, nil)
 	targetDatum := coreTestOutput(t, 0xA2, 0, &datum)
@@ -441,6 +441,24 @@ func TestCoreQueryServiceServesLiveSetOnlyOutputs(t *testing.T) {
 		))
 		require.NoError(t, err)
 		require.Len(t, res.Msg.GetItems(), 3)
+	}
+
+	// A live page reports each output's lovelace, which the set stores only
+	// inside the CBOR.
+	livePage, err := core.LS.UtxosByAddressBoundedPage(
+		ctx,
+		&models.UtxoWithOrderingQuery{
+			Limit: 10,
+			AddressPatterns: []models.UtxoAddressPattern{{
+				PaymentPart: bytes.Repeat([]byte{0xA1}, lcommon.AddressHashSize),
+			}},
+		},
+		100, 1<<20,
+	)
+	require.NoError(t, err)
+	require.Len(t, livePage.Utxos, 3)
+	for _, u := range livePage.Utxos {
+		require.EqualValues(t, 2_000_000, u.Amount)
 	}
 
 	// An address with nothing live finds nothing.
