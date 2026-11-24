@@ -313,7 +313,7 @@ func TestOpenMovesAReleasedRollbackIntentIntoTheBlockStore(t *testing.T) {
 		)
 		row, err := db.Metadata().GetSyncState(RollbackIntentKey, nil)
 		require.NoError(t, err)
-		require.Empty(t, row, "the released row was left behind")
+		require.NotEmpty(t, row, "the move copies and keeps the row")
 
 		intent, pending, err := db.GetRollbackIntent()
 		require.NoError(t, err)
@@ -340,9 +340,9 @@ func TestOpenMovesAReleasedRollbackIntentIntoTheBlockStore(t *testing.T) {
 	}
 }
 
-// An open that stopped after writing the block-store record and before
-// removing the row must not replace the record, which the ledger may have
-// rewritten since, with the row's older content.
+// The row stays after its record is copied, so a later open must not
+// replace the record, which the ledger may have rewritten since, with the
+// row's older content.
 func TestOpenKeepsTheBlockStoreRollbackIntentOverALeftoverRow(t *testing.T) {
 	t.Parallel()
 	db := rollbackIntentTestDBAs(t, RoleReleased)
@@ -363,7 +363,7 @@ func TestOpenKeepsTheBlockStoreRollbackIntentOverALeftoverRow(t *testing.T) {
 	require.Zero(t, rolledBackBlockCount(t, db))
 	row, err := db.Metadata().GetSyncState(RollbackIntentKey, nil)
 	require.NoError(t, err)
-	require.Empty(t, row)
+	require.NotEmpty(t, row, "the move copies and keeps the row")
 }
 
 func TestOpenDiscardsAnUnreadableReleasedRollbackIntent(t *testing.T) {
@@ -393,9 +393,6 @@ func TestOpenDiscardsAnUnreadableReleasedRollbackIntent(t *testing.T) {
 			_, pending, err := db.GetRollbackIntent()
 			require.NoError(t, err)
 			require.False(t, pending)
-			left, err := db.Metadata().GetSyncState(RollbackIntentKey, nil)
-			require.NoError(t, err)
-			require.Empty(t, left)
 			require.Zero(t, rolledBackBlockCount(t, db))
 		})
 	}

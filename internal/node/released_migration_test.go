@@ -24,9 +24,11 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -192,4 +194,25 @@ func TestReleasedMigrationResumesAfterAStopAtEachStep(t *testing.T) {
 			require.NoError(t, rt.Close(context.Background()))
 		})
 	}
+}
+
+// The migration is one-way: it upgrades the v0.94.2 metadata store's schema
+// past the last version v0.94.2 knows, so that release refuses the store it
+// leaves rather than opening a ledger the migration has rewound.
+func TestReleasedMigrationLeavesAStoreV0942Refuses(t *testing.T) {
+	t.Parallel()
+	dir := unpackLegacyDatabase(t, legacyParityArchive)
+	_, err := dbtest.ReleasedMetadataSyncStatus(dir)
+	require.NoError(t, err, "v0.94.2 opens the store it wrote")
+	require.NoError(t, MigrateToSplit(
+		t.Context(), parityConfig(dir),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	rt, err := releasedOpen(t, dir, nil)
+	require.NoError(t, err)
+	require.NoError(t, rt.Close(context.Background()))
+
+	_, err = dbtest.ReleasedMetadataSyncStatus(dir)
+	require.ErrorIs(t, err, migrations.ErrNewerSchema)
 }

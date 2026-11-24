@@ -109,13 +109,7 @@ func TestOpenMovesImportProgressOutOfSyncState(t *testing.T) {
 		require.Equal(t, value, got, key)
 		row, err := reopened.Metadata().GetSyncState(key, nil)
 		require.NoError(t, err)
-		if key == ImportedLedgerStateSlotKey ||
-			key == ImportedLedgerStateHashKey {
-			// The metadata store's block counts read the boundary row.
-			require.Equal(t, value, row, key)
-			continue
-		}
-		require.Empty(t, row, "%s row was left in sync_state", key)
+		require.Equal(t, value, row, "the move copies and keeps the %s row", key)
 	}
 	slot, err := reopened.ImportedLedgerStateBoundarySlotStrict(nil)
 	require.NoError(t, err)

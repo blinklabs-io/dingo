@@ -152,12 +152,12 @@ func decodeReleasedRollbackBlocks(
 // moveReleasedRollbackIntent turns a v0.94.2 rollback intent row into a
 // block-store intent: each body the row carries is written back as a
 // rolled-back block, one transaction per body, then the record that names
-// them, then the row is removed.
+// them, synced. The row stays.
 //
 // A stop at any step is repeated by the next open: the bodies are rewritten
 // with the same bytes, and once the block store holds a record the row is
-// only removed. A row that cannot be read is removed without a record, which
-// is what recovery in that release did with it.
+// left alone. A row that cannot be read gets no record, which is what
+// recovery in that release did with it.
 func (d *Database) moveReleasedRollbackIntent() error {
 	raw, err := d.metadata.GetSyncStateBounded(
 		RollbackIntentKey, releasedRollbackIntentEncodedBytes, nil,
@@ -173,15 +173,10 @@ func (d *Database) moveReleasedRollbackIntent() error {
 	if err != nil {
 		return err
 	}
-	if held == "" {
-		if err := d.writeReleasedRollbackIntent(raw, tooLarge); err != nil {
-			return err
-		}
+	if held != "" {
+		return nil
 	}
-	if err := d.metadata.DeleteSyncState(RollbackIntentKey, nil); err != nil {
-		return fmt.Errorf("remove %s row: %w", RollbackIntentKey, err)
-	}
-	return nil
+	return d.writeReleasedRollbackIntent(raw, tooLarge)
 }
 
 func (d *Database) writeReleasedRollbackIntent(

@@ -48,7 +48,13 @@ const (
 // metadata store's sync_state while that store is the authority, the set's
 // own markers for what it holds. The block store's migration marker is
 // written last, so a stop anywhere before it reruns the migration, and every
-// step finds its own work done. The metadata store is left as it is.
+// step finds its own work done.
+//
+// The migration is one-way and changes the metadata store: opening it
+// upgrades its schema past the last version v0.94.2 knows, so that release
+// refuses it afterwards, and the rewind reverts it below its tip. Its rows
+// are copied, never deleted, and nothing opens the store once the marker is
+// written.
 type ReleasedMigration struct {
 	// Config is the ledger database's configuration; the migration opens the
 	// v0.94.2 database with it under database.RoleReleased.
@@ -230,8 +236,7 @@ func (m ReleasedMigration) Move(
 	if err := m.step(ReleasedStepRewards); err != nil {
 		return err
 	}
-	// The metadata store keeps its rows: nothing reopens it, and leaving it
-	// whole keeps it a copy of what v0.94.2 left.
+	// The rows are copied, not removed: nothing reopens the store.
 	if err := MigrateUtxoRows(
 		ctx, db, set, m.UtxoSet.DataDir, logger,
 	); err != nil {

@@ -110,14 +110,15 @@ func TestOpenMovesDeferredHeaderStateOutOfSyncState(t *testing.T) {
 		{Key: "1001:bb", Value: attributed},
 	}, markers)
 
+	// The move copies: the v0.94.2 rows stay.
 	row, err := reopened.Metadata().GetSyncState(DeferredHeaderFloorKey, nil)
 	require.NoError(t, err)
-	require.Empty(t, row)
+	require.NotEmpty(t, row)
 	rows, err := reopened.Metadata().ListSyncStateKeysByPrefix(
 		legacyDeferredHeaderMarkerPrefix, nil,
 	)
 	require.NoError(t, err)
-	require.Empty(t, rows)
+	require.NotEmpty(t, rows)
 }
 
 func TestOpenKeepsTheHigherDeferredHeaderFloor(t *testing.T) {
@@ -174,7 +175,7 @@ func TestOpenMovesTheHistoryExpiryCursorOutOfSyncState(t *testing.T) {
 	require.Equal(t, "8640", cursor)
 	row, err := reopened.Metadata().GetSyncState(HistoryExpiryCursorKey, nil)
 	require.NoError(t, err)
-	require.Empty(t, row)
+	require.Equal(t, "8640", row, "the move copies and keeps the row")
 
 	require.ErrorIs(
 		t,
@@ -276,7 +277,7 @@ func TestOpenMovesForgeFencesOutOfSyncState(t *testing.T) {
 			require.Equal(t, want, got)
 			row, err := db.Metadata().GetSyncState(name, nil)
 			require.NoError(t, err)
-			require.Empty(t, row, "the row outlived the move")
+			require.Equal(t, want, row, "the move copies and keeps the row")
 		}
 		require.NoError(t, closeTestDatabase(db))
 	}
@@ -302,12 +303,12 @@ func TestOpenMovesLeaderSchedulesOutOfSyncState(t *testing.T) {
 	require.Equal(t, "schedule", got)
 	row, err := db.Metadata().GetSyncState(name, nil)
 	require.NoError(t, err)
-	require.Empty(t, row, "the row outlived the move")
+	require.Equal(t, "schedule", row, "the move copies and keeps the row")
 	require.NoError(t, closeTestDatabase(db))
 }
 
-// A stop between the copy and the row's removal leaves both. The fence may
-// then advance before the next open, which must not put the older row back.
+// The row stays after its copy. The fence may then advance before the next
+// open, which must not put the older row back.
 func TestOpenKeepsTheBlockStoreForgeFenceOverALeftoverRow(t *testing.T) {
 	t.Parallel()
 
@@ -326,7 +327,7 @@ func TestOpenKeepsTheBlockStoreForgeFenceOverALeftoverRow(t *testing.T) {
 	require.Equal(t, "newer", got)
 	row, err := db.Metadata().GetSyncState(name, nil)
 	require.NoError(t, err)
-	require.Empty(t, row)
+	require.Equal(t, "older", row, "the move copies and keeps the row")
 }
 
 // A metadata store opened with a blob store it was not created with keeps
@@ -385,7 +386,9 @@ func TestOpenMovesSingleValuesOutOfSyncState(t *testing.T) {
 				require.Equal(t, "released", got)
 				row, err := db.Metadata().GetSyncState(name, nil)
 				require.NoError(t, err)
-				require.Empty(t, row, "the row outlived the move")
+				require.Equal(
+					t, "released", row, "the move copies and keeps the row",
+				)
 				require.NoError(t, closeTestDatabase(db))
 			}
 
@@ -415,5 +418,42 @@ func TestOpenMovesSingleValuesOutOfSyncState(t *testing.T) {
 				t, db.DeleteSyncState(name, nil), ErrBlockStoreChainState,
 			)
 		})
+	}
+}
+
+// Each copy of a v0.94.2 chain-state row is flushed to the block store before
+// the move goes on, as every other chain-state value is.
+func TestMovedChainStateIsFlushed(t *testing.T) {
+	t.Parallel()
+	real, err := newTestDatabase(
+		t, &Config{DataDir: t.TempDir(), Role: RoleReleased},
+	)
+	require.NoError(t, err)
+	counting := &syncCountingBlob{BlobStore: real.Blob()}
+	db := &Database{
+		config:   &Config{},
+		logger:   real.logger,
+		metadata: real.Metadata(),
+		blobRef:  newBlobStoreRef(counting),
+	}
+	for key, value := range map[string]string{
+		HistoryExpiryCursorKey:                    "8640",
+		DeferredHeaderFloorKey:                    "900",
+		legacyDeferredHeaderMarkerPrefix + "1:ab": "true",
+	} {
+		require.NoError(t, db.Metadata().SetSyncState(key, value, nil))
+	}
+	for name, move := range map[string]func() error{
+		"history-expiry cursor": func() error {
+			return db.moveSyncStateValue(HistoryExpiryCursorKey)
+		},
+		"deferred-header floor":   db.moveDeferredHeaderFloor,
+		"deferred-header markers": db.moveLegacyDeferredHeaderMarkers,
+	} {
+		before := counting.syncs.Load()
+		require.NoError(t, move(), name)
+		require.Greater(
+			t, counting.syncs.Load(), before, "%s copy was not flushed", name,
+		)
 	}
 }

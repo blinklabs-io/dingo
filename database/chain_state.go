@@ -290,12 +290,10 @@ func (d *Database) movePairedChainStateToBlockStore(ctx context.Context) error {
 }
 
 // moveChainStateToBlockStore copies into the block store the chain state a
-// v0.94.2 database holds in sync_state, then removes each row.
-//
-// It runs when the database opens, so a row that is present is the value to
-// keep. A stop between the block-store write and the row's removal leaves
-// both, and the next open copies the row again before anything else has
-// written the value, so the repeat changes nothing; a marker is also written
+// v0.94.2 database holds in sync_state, and syncs each copy. The rows stay:
+// the migration is one-way, and once it finishes nothing opens the store
+// again. An open that repeats the copy, after a stop before the migration
+// finished, finds each value already held and leaves it; a marker is written
 // only where none exists and the floor only ever rises.
 func (d *Database) moveChainStateToBlockStore(ctx context.Context) error {
 	if d.isIndexer() || isNilStore(d.metadata) {
@@ -390,13 +388,10 @@ func (d *Database) moveSyncStatePrefix(prefix string) error {
 }
 
 // moveSyncStateValueIfAbsent copies the sync_state row name into the block
-// store unless the block store already holds a value under that name, and
-// removes the row.
+// store unless the block store already holds a value under that name.
 //
 // The value is written only through the block store once it has moved, so a
-// value already held there is at least as new as the row: either an earlier
-// open stopped between the copy and the row's removal, or an open that
-// stopped before the move wrote it afresh.
+// value already held there is at least as new as the row.
 func (d *Database) moveSyncStateValueIfAbsent(name string) error {
 	value, err := d.metadata.GetSyncState(name, nil)
 	if err != nil {
@@ -409,19 +404,14 @@ func (d *Database) moveSyncStateValueIfAbsent(name string) error {
 	if err != nil {
 		return err
 	}
-	if held == "" {
-		if err := d.SetChainStateSynced(name, value); err != nil {
-			return err
-		}
+	if held != "" {
+		return nil
 	}
-	if err := d.metadata.DeleteSyncState(name, nil); err != nil {
-		return fmt.Errorf("remove %s row: %w", name, err)
-	}
-	return nil
+	return d.SetChainStateSynced(name, value)
 }
 
 // moveSyncStateValue copies the sync_state row name into the block store
-// under the same name and removes the row.
+// under the same name.
 func (d *Database) moveSyncStateValue(name string) error {
 	value, err := d.metadata.GetSyncState(name, nil)
 	if err != nil {
@@ -430,13 +420,7 @@ func (d *Database) moveSyncStateValue(name string) error {
 	if value == "" {
 		return nil
 	}
-	if err := d.SetChainState(name, value, nil); err != nil {
-		return err
-	}
-	if err := d.metadata.DeleteSyncState(name, nil); err != nil {
-		return fmt.Errorf("remove %s row: %w", name, err)
-	}
-	return nil
+	return d.SetChainStateSynced(name, value)
 }
 
 func (d *Database) moveLegacyDeferredHeaderMarkers() error {
@@ -472,11 +456,11 @@ func (d *Database) moveLegacyDeferredHeaderMarkers() error {
 				}
 			}
 		}
-		if err := d.metadata.DeleteSyncState(row, nil); err != nil {
-			return fmt.Errorf("remove deferred-header marker %q: %w", row, err)
-		}
 	}
-	return nil
+	if len(rows) == 0 {
+		return nil
+	}
+	return d.syncBlockStore("deferred-header markers")
 }
 
 func (d *Database) moveDeferredHeaderFloor() error {
@@ -495,14 +479,24 @@ func (d *Database) moveDeferredHeaderFloor() error {
 	if err != nil {
 		return err
 	}
-	if !found || held < floor {
-		if err := d.SetDeferredHeaderFloor(floor); err != nil {
-			return err
-		}
+	if found && held >= floor {
+		return nil
 	}
-	err = d.metadata.DeleteSyncState(DeferredHeaderFloorKey, nil)
-	if err != nil {
-		return fmt.Errorf("remove deferred header floor row: %w", err)
+	return d.SetChainStateSynced(
+		DeferredHeaderFloorKey, strconv.FormatUint(floor, 10),
+	)
+}
+
+// syncBlockStore flushes the block store, so the chain state copied into it
+// survives a host crash.
+func (d *Database) syncBlockStore(what string) error {
+	store, release := d.PinBlob()
+	defer release()
+	if store == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	if err := store.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", what, err)
 	}
 	return nil
 }

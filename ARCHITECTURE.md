@@ -22365,17 +22365,18 @@ conservative `legacy-byte-v0` marker: it becomes `word-v1` only when no Alonzo
 protocol-parameter row is left. A surviving Alonzo row keeps the marker and
 fails closed; a missing or unknown marker is never inferred.
 
-Block-store chain state moves out of `sync_state` at open
+Block-store chain state is copied out of `sync_state` at open
 (`moveChainStateToBlockStore`, `database/chain_state.go`): the rows of a
 database from a release that kept them there, listed with the `chainstate/`
-blob key in `DATABASE.md`. `init` runs the move first when the persisted
+blob key in `DATABASE.md`. Each copy is synced and the rows stay, since the
+migration is one-way and nothing opens the v0.94.2 store once it finishes. `init` runs the move first when the persisted
 `blob_store_id` gate equals the identity the blob store holds
 (`movePairedChainStateToBlockStore`), after the node settings have their home
 in `dingo.dbinfo`: phase 1 reads the tip from the block store, and node startup
 checks for an interrupted truncate before the ledger starts. A database that
 has no `blob_store_id` gate yet has nothing proving the pairing, so phase 1
-runs the move again after the gates, where it finds nothing left on a paired
-store. The
+runs the move again after the gates, where a paired store finds every value
+already held. The
 ledger's database refuses those `sync_state` keys afterwards
 (`ErrBlockStoreChainState`), so the block store is their only writer; an
 IndexerDB is exempt.
