@@ -12955,9 +12955,9 @@ reason the connection ended; a remote hang-up or a local close is a clean end.
 pool. A closed `PeerConn` releases its pool cursor.
 
 `internal/test/dmqinterop` runs this against a real dmq-node. `run.sh` downloads
-a release and checks its SHA-256, builds Linux builds of Dingo and a submit
-helper, and runs Dingo's single-node devnet and dmq-node together in one
-container, dmq-node using the devnet as its Cardano node. The tests, built only
+a release and checks its SHA-256, builds Linux builds of Dingo and of the
+package's test binary, and runs Dingo's single-node devnet and dmq-node
+together in one container, dmq-node using the devnet as its Cardano node. The tests, built only
 with the `dingo_dmq_interop` tag, cover Dingo dialing dmq-node, dmq-node serving
 a message signed by the devnet pool's real KES key to Dingo, which checks the
 signatures itself, and dmq-node dialing in and pulling a message from Dingo,
