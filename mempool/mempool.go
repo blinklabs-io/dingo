@@ -638,11 +638,14 @@ func (o *utxoOverlay) updateSettled(
 	o.rebuildAggregates()
 }
 
-// releasesSettledUnderPool reports whether release names a settled
-// transaction the overlay holds while a transaction in applied, other than
-// those in skip, remains. Such a transaction may resolve a released output as
-// a spent input, a reference input or collateral, and appliedTx records only
-// the spent inputs, so any such release is treated as orphaning it.
+// releasesSettledUnderPool reports whether release names a transaction the
+// overlay holds, settled or applied, while a transaction in applied, other
+// than those in skip, remains. A released applied transaction is one confirmed
+// ahead of the applied tip that the settled budget could not keep, so its
+// outputs leave the overlay with it. A remaining transaction may resolve a
+// released output as a spent input, a reference input or collateral, and
+// appliedTx records only the spent inputs, so any such release is treated as
+// orphaning it.
 func (o *utxoOverlay) releasesSettledUnderPool(
 	release map[string]struct{},
 	skip map[string]struct{},
@@ -665,6 +668,11 @@ func (o *utxoOverlay) releasesSettledUnderPool(
 			return true
 		}
 	}
+	for _, at := range o.applied {
+		if _, ok := release[at.hash]; ok {
+			return true
+		}
+	}
 	return false
 }
 
@@ -674,7 +682,9 @@ func (o *utxoOverlay) releasesSettledUnderPool(
 // ledger has applied (slot at or below tipSlot), those older than
 // settledRetention, and the oldest beyond budget bytes. A pool transaction is
 // settled only when its block is ahead of tipSlot. The returned unsettled
-// includes unsettle.
+// includes unsettle, and the pool transactions confirmed ahead of tipSlot
+// that the budget leaves unsettled: their outputs leave the overlay before
+// the ledger holds them.
 func (o *utxoOverlay) settledChange(
 	slots map[string]uint64,
 	sizes map[string]int64,
@@ -728,6 +738,7 @@ func (o *utxoOverlay) settledChange(
 		total -= st.bytes
 	}
 	for len(settled) > 0 && total > budget {
+		unsettled[settled[0].at.hash] = struct{}{}
 		total -= settled[0].bytes
 		settled = settled[1:]
 	}

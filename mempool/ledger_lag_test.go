@@ -553,6 +553,52 @@ func TestConfirmationDuringRevalidationKeepsSettledOutputs(t *testing.T) {
 	})
 }
 
+// A pool transaction confirmed ahead of the applied tip that the settled
+// budget cannot keep, here after the capacity shrinks below its size, is
+// released as it settles. Confirmed while a revalidation is in flight, its
+// child validated against its outputs is judged again rather than published.
+func TestBudgetReleaseOfConfirmationDuringRevalidationRevalidatesChild(
+	t *testing.T,
+) {
+	t.Parallel()
+	forBothPools(t, func(t *testing.T, useDAG bool) {
+		f := newLedgerLagFixture(t, useDAG, func() uint64 { return 100 })
+		ctx := context.Background()
+		f.v.mu.Lock()
+		f.v.onValidate = func() {
+			f.m.capacity.Store(1)
+			f.m.RemoveTxsByHash([]string{f.parent.Hash().String()})
+		}
+		f.v.mu.Unlock()
+		require.NoError(t, f.m.rebuildOverlay(ctx))
+		require.False(t, f.has(f.parent.Hash().String()))
+		require.Zero(t, f.settledCount())
+		require.False(
+			t, f.has(f.child.Hash().String()),
+			"a child of a confirmation the budget released is judged "+
+				"without the parent's outputs",
+		)
+	})
+}
+
+// A pool transaction confirmed ahead of the tip that the budget cannot keep
+// is reported as released, not silently dropped.
+func TestSettledChangeReportsConfirmationOverBudget(t *testing.T) {
+	t.Parallel()
+	o := newUtxoOverlay()
+	o.applied = []appliedTx{{hash: "big"}, {hash: "child"}}
+	settled, unsettled := o.settledChange(
+		map[string]uint64{"big": 301},
+		map[string]int64{"big": 50},
+		nil, 200, time.Now(), 10,
+	)
+	require.Empty(t, settled)
+	require.Equal(t, map[string]struct{}{"big": {}}, unsettled)
+	require.True(t, o.releasesSettledUnderPool(
+		unsettled, map[string]struct{}{"big": {}},
+	))
+}
+
 // spendParentOutput returns a transaction outside the pool that spends the
 // parent's output at index.
 func (f *ledgerLagFixture) spendParentOutput(
