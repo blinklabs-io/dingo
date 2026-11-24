@@ -166,6 +166,10 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
+	// Without this the seed ledger replays the loaded blocks from the origin
+	// between Start and Close, writing epoch rows and UTxO state up to an
+	// arbitrary slot before the fixture derives the rest.
+	cfg.ManualBlockProcessing = true
 	// The node's own set, loaded at the origin as a node's first start loads
 	// it, so its journal still reaches back to the first block.
 	tip, err := n.db.GetTip(nil)
