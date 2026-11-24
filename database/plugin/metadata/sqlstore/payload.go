@@ -82,17 +82,26 @@ func payloadLocatorFor(
 // a nullable column records no payload.
 func payloadLocate(
 	locator types.PayloadLocator,
-) func([]byte) ([]byte, error) {
-	return func(payload []byte) ([]byte, error) {
+) locateFunc {
+	return func(payload []byte, container ...[]byte) ([]byte, error) {
 		if len(payload) == 0 {
 			return nil, nil
 		}
 		if locator == nil {
 			return nil, types.ErrPayloadLocatorRequired
 		}
+		if contained, ok := locator.(types.ContainedPayloadLocator); ok &&
+			len(container) > 0 && len(container[0]) > 0 {
+			return contained.LocatePayloadIn(payload, container[0])
+		}
 		return locator.LocatePayload(payload)
 	}
 }
+
+// locateFunc turns payload bytes into an encoded offset. The optional
+// container is the CBOR of the output that carries the payload, which the
+// offset is then taken inside.
+type locateFunc = func(payload []byte, container ...[]byte) ([]byte, error)
 
 // resolvePayload returns the bytes a payload column's offset names. An empty
 // column holds no payload.

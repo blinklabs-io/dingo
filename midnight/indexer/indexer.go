@@ -795,13 +795,20 @@ func (idx *Indexer) bindPayloads(txn types.Txn, block models.Block) error {
 	return nil
 }
 
-// locateDatum returns the offset of datum in the block txn writes.
-func locateDatum(txn types.Txn, datum []byte) ([]byte, error) {
+// locateDatumIn returns the offset of datum in the block txn writes, taken
+// inside the CBOR of the output that carries it, so the offset names the output's own bytes
+// and not an identical datum earlier in the block.
+func locateDatumIn(txn types.Txn, datum, container []byte) ([]byte, error) {
 	source, ok := txn.(types.PayloadLocatorSource)
 	if !ok || source.PayloadLocator() == nil {
 		return nil, types.ErrPayloadLocatorRequired
 	}
-	return source.PayloadLocator().LocatePayload(datum)
+	locator := source.PayloadLocator()
+	if contained, ok := locator.(types.ContainedPayloadLocator); ok &&
+		len(container) > 0 {
+		return contained.LocatePayloadIn(datum, container)
+	}
+	return locator.LocatePayload(datum)
 }
 
 // processRegistrationBlock replays only the registration UTxO lifecycle.
@@ -873,8 +880,12 @@ func (idx *Indexer) processRegistrationBlock(
 			}
 			outIndex := uint32(outputIndex)
 			datumCBOR := datum.Cbor()
+			datumOffset, err := locateDatumIn(txn, datumCBOR, output.Cbor())
+			if err != nil {
+				return fmt.Errorf("locate registration datum tx=%s output=%d: %w", hex.EncodeToString(txHash), outIndex, err)
+			}
 			row := &models.MidnightRegistration{
-				FullDatum: datumCBOR, TxHash: txHash, OutputIndex: outIndex,
+				FullDatum: datumCBOR, FullDatumOffset: datumOffset, TxHash: txHash, OutputIndex: outIndex,
 				BlockNumber: block.Number, BlockHash: block.Hash,
 				TxIndex: uint32(txIndex), BlockTimestampMs: timestampMs,
 			}
@@ -2228,8 +2239,16 @@ func (idx *Indexer) processOutput(
 			if datum != nil {
 				datumCbor := datum.Cbor()
 				if len(datumCbor) > 0 {
+					datumOffset, err := locateDatumIn(txn, datumCbor, out.Cbor())
+					if err != nil {
+						return fmt.Errorf(
+							"locate registration datum tx=%s output=%d: %w",
+							txHashHex, outIdx, err,
+						)
+					}
 					row := &models.MidnightRegistration{
 						FullDatum:        datumCbor,
+						FullDatumOffset:  datumOffset,
 						TxHash:           txHashBytes,
 						OutputIndex:      outIdx,
 						BlockNumber:      block.Number,
@@ -2389,7 +2408,7 @@ func (idx *Indexer) processOutput(
 		var datumOffset []byte
 		if len(datumCbor) > 0 {
 			var err error
-			datumOffset, err = locateDatum(txn, datumCbor)
+			datumOffset, err = locateDatumIn(txn, datumCbor, out.Cbor())
 			if err != nil {
 				return fmt.Errorf(
 					"locate candidate datum tx=%s output=%d block=%d: %w",

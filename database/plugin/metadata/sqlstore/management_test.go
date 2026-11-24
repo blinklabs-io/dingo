@@ -284,8 +284,11 @@ func newManagementTestStore(t *testing.T) *Store {
 
 // testLocate returns the locate function of the archive a test store
 // resolves payloads from, so a payload written through it reads back.
-func testLocate(store *Store) func([]byte) ([]byte, error) {
-	return store.payloads.(*testutil.PayloadArchive).LocatePayload
+func testLocate(store *Store) locateFunc {
+	archive := store.payloads.(*testutil.PayloadArchive)
+	return func(payload []byte, _ ...[]byte) ([]byte, error) {
+		return archive.LocatePayload(payload)
+	}
 }
 
 // bindTestPayloads makes writes through the given transactions and

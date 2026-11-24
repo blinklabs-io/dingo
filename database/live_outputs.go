@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -119,4 +120,20 @@ func (d *Database) livePayloadFallback(
 		return append([]byte(nil), cbor[start:start+offset.ByteLength]...), nil
 	}
 	return nil, err
+}
+
+// BlockHoldsActivePayloads reports whether the metadata store still names
+// bytes of the block at (slot, hash) from a payload column in use, so history
+// expiry keeps the block. A database without such a store holds none.
+func (d *Database) BlockHoldsActivePayloads(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+	currentEpoch uint64,
+) (bool, error) {
+	checker, ok := d.metadata.(metadata.ActivePayloadChecker)
+	if !ok {
+		return false, nil
+	}
+	return checker.BlockHoldsActivePayloads(ctx, slot, hash, currentEpoch)
 }

@@ -44,6 +44,10 @@ type PrunerConfig struct {
 	// reader such as the IndexerDB writer that has yet to read older block
 	// bodies. ok false means no block may be expired yet.
 	Ceiling func(ctx context.Context) (slot uint64, ok bool, err error)
+	// Held, when set, reports whether the block still holds a payload in use,
+	// such as a datum or script a live output names. A held block is skipped
+	// and checked again in a later round, once what used it is gone.
+	Held func(ctx context.Context, slot uint64, hash []byte) (bool, error)
 }
 
 type Pruner struct {
@@ -126,6 +130,9 @@ func (p *Pruner) refreshRetainedBound(ctx context.Context) {
 	}
 }
 
+// RunOnce runs one expiry round to completion without the pruner's ticker.
+func (p *Pruner) RunOnce(ctx context.Context) { p.prune(ctx) }
+
 func (p *Pruner) prune(ctx context.Context) {
 	currentSlot, err := p.ledgerState.CurrentSlot()
 	if err != nil {
@@ -168,6 +175,9 @@ func (p *Pruner) prune(ctx context.Context) {
 	// slot itself because only some of the blocks sharing it may be expired.
 	start := p.loadCursor()
 	cursor := start
+	// held stops the cursor at the first block a payload in use keeps, so the
+	// next round examines it again, while later blocks still expire.
+	held := false
 	defer func() {
 		if cursor > start {
 			p.saveCursor(cursor)
@@ -187,7 +197,9 @@ func (p *Pruner) prune(ctx context.Context) {
 					return
 				}
 				if errors.Is(err, types.ErrHistoryExpired) {
-					cursor, _ = iter.Progress()
+					if !held {
+						cursor, _ = iter.Progress()
+					}
 					continue
 				}
 				p.logger.Error(
@@ -202,6 +214,23 @@ func (p *Pruner) prune(ctx context.Context) {
 				return
 			}
 
+			if p.config.Held != nil {
+				inUse, err := p.config.Held(ctx, next.Slot, next.Hash)
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					p.logger.Error(
+						"history expiry: failed to check block payloads",
+						"error", err,
+					)
+					return
+				}
+				if inUse {
+					held = true
+					continue
+				}
+			}
 			if err := p.expire(ctx, next); err != nil {
 				if ctx.Err() != nil {
 					return
@@ -213,7 +242,9 @@ func (p *Pruner) prune(ctx context.Context) {
 				)
 				return
 			}
-			cursor = next.Slot
+			if !held {
+				cursor = next.Slot
+			}
 		}
 	}
 }

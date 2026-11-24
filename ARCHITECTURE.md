@@ -4031,7 +4031,18 @@ accumulator before it writes the block's transactions, and
 so readers get the same bytes by reading the block stores. Two node-tracked
 positions keep those blocks readable while a row names them. The history
 expiry `Ceiling` is the IndexerDB tip: no block expires before the writer has
-indexed it. `node_indexer.go` also installs the IndexerDB tip as the ledger
+indexed it. The pruner's `Held` hook (`Node.historyExpiryHeld`, over
+`Database.BlockHoldsActivePayloads`) also keeps a block while a payload column
+in use names its bytes: a datum or reference script a live output carries or
+names by hash, a protocol parameter update not yet past the current epoch, or
+an unspent Midnight registration, or the latest Midnight Ariadne parameters or
+current governance datum. A held block is skipped, the cursor stops at
+it so later rounds check it again, and later blocks still expire. A payload
+offset of an output-carried datum, reference script or Midnight registration
+names the bytes inside that output's own CBOR (`ContainedPayloadLocator`), not
+the first identical bytes in the block. Certified-closure payloads are named
+by endorser offsets into the LeiosDB, which keeps them and is not subject to
+block expiry. `node_indexer.go` also installs the IndexerDB tip as the ledger
 database's rolled-back-block hold, and the writer's `Moved` callback has the
 ledger release the bodies a rollback abandoned (`LedgerState.ReleaseRolledBackBlocks`)
 once the writer has rolled back past them; until then the payload resolver

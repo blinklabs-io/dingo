@@ -147,7 +147,25 @@ func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 		Logger:      n.config.logger,
 		Frequency:   prunerFreq,
 		Ceiling:     n.historyExpiryCeiling,
+		Held:        n.historyExpiryHeld,
 	}
+}
+
+// historyExpiryHeld keeps a block while a payload column of the IndexerDB that
+// is still in use names its bytes: a datum or script a live output carries or
+// names by hash, a pending protocol parameter update, an unspent Midnight
+// registration. Without an IndexerDB no column names a block.
+func (n *Node) historyExpiryHeld(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	if n.indexerDB == nil || n.ledgerState == nil {
+		return false, nil
+	}
+	return n.indexerDB.BlockHoldsActivePayloads(
+		ctx, slot, hash, n.ledgerState.CurrentEpoch(),
+	)
 }
 
 // historyExpiryCeiling keeps history expiry behind the IndexerDB writer,

@@ -3613,6 +3613,18 @@ type AddressTransactionIndexRebuilder interface {
 	) error
 }
 
+// ActivePayloadChecker is implemented by stores whose payload columns name
+// block bytes. History expiry asks it whether a block still holds a payload in
+// use before expiring the block.
+type ActivePayloadChecker interface {
+	BlockHoldsActivePayloads(
+		ctx context.Context,
+		slot uint64,
+		hash []byte,
+		currentEpoch uint64,
+	) (bool, error)
+}
+
 // UtxoSpendStateReader optionally narrows consumed-input recovery reads. A nil
 // result means the reference is absent, including from any pending UTxO overlay.
 // Providers must observe the same transaction and overlay visibility as

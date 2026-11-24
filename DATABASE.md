@@ -4524,8 +4524,27 @@ those in the expired block. A spent output, and a payload no live output of the
 block contains (witness datums and scripts, metadata, protocol parameter
 updates), still returns `ErrHistoryExpired`, or goes through the archive when
 one is configured. A datum or script that a live output names only by hash and
-that was located in another transaction's witness set is not reachable this
-way. The lookup serves payload reads only; the writer reads no facts through it.
+that was located in another transaction's witness set is reachable because
+history expiry does not expire its block: `Database.BlockHoldsActivePayloads`
+(`ActivePayloadChecker`, implemented by the SQL store) reports a block as held
+while a `datum` row added at its slot is named by a live `utxo.datum_hash`, a
+`script` row created at its slot is the reference script of a live output, a
+`pparam_update` row added at its slot targets an epoch not before the current
+one (a classic proposal is enacted or discarded at the boundary into the epoch
+after its target, `selectClassicPParamUpdate`), an unspent
+`midnight_registrations` row carries its `block_hash`, or the latest
+`midnight_ariadne_params` row or the newest `midnight_governance_datums` row of
+a type holds an offset naming it (bytes 13 to 44 of the stored offset are the
+block hash). Migration v75 adds the indexes these lookups use, each a point
+read at 1,000,000 `utxo` rows: `idx_utxo_live_datum_hash` (partial on live rows
+with a datum hash; MySQL keeps a `(datum_hash(32), deleted_slot)` index),
+`idx_script_created_slot` and `idx_midnight_registrations_block_hash`. Not
+held: payment scripts of live outputs, which the scripts endpoint serves by
+hash for any known script rather than for a live output, and the
+transaction-metadata and per-label columns, which only serve historical
+transactions. Inline datum, reference script and Midnight registration offsets
+name the bytes inside their own output (`types.ContainedPayloadLocator`).
+The lookup serves payload reads only; the writer reads no facts through it.
 
 A ledger rollback keeps the bodies of the blocks it removes as rolled-back
 bodies. `Database.ReleaseRolledBackBlocks` deletes them once no rollback intent
@@ -6466,6 +6485,13 @@ Migration `v74` (`utxo-address-prefix-index-drop`, integer version 74) drops
 `idx_utxo_address_order`, which serves every exact-address lookup.
 `TestUtxoAddressPrefixIndexDropMigration` pins the drop.
 
+Migration `v75` (`active-payload-indexes`, integer version 75) adds
+`idx_utxo_live_datum_hash` (`utxo(datum_hash)` over live rows with a datum hash;
+MySQL, with no partial indexes, indexes `(datum_hash(32), deleted_slot)`),
+`idx_script_created_slot` and `idx_midnight_registrations_block_hash`, the
+indexes behind `BlockHoldsActivePayloads`. `TestActivePayloadQueriesUseIndexes`
+pins the plans.
+
 #### Mithril API reward-live-stake finalization
 
 After historical metadata backfill, API startup rebuilds reward stake from
@@ -8321,7 +8347,8 @@ older than the ledger stability window:
   RPC API, which names it in history-expired errors (`oldest retained
   slot=N`). `Database.RefreshOldestRetainedSlot` computes it when the pruner
   starts and after each round. The cursor is only a lower bound (the pruner
-  leaves it on the last block it expired, and a rollback lowers it below
+  leaves it on the last block it expired before the first block a payload in
+  use holds, and a rollback lowers it below
   already-expired blocks), so the refresh walks forward from it past
   tombstones, at most 4096 of them, to the first block whose body still reads
   back. `Database.OldestRetainedSlot` only reads the stored value, so an

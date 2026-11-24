@@ -41,6 +41,13 @@ type PayloadLocator interface {
 	LocatePayload(payload []byte) ([]byte, error)
 }
 
+// ContainedPayloadLocator is implemented by a PayloadLocator that can prefer
+// the occurrence of a payload inside a container, the CBOR of the output that
+// carries it, over an earlier identical occurrence elsewhere in the block.
+type ContainedPayloadLocator interface {
+	LocatePayloadIn(payload, container []byte) ([]byte, error)
+}
+
 // PayloadResolver returns the bytes an encoded CBOR offset names, reading the
 // block from the block stores. The result is a copy the caller may keep.
 type PayloadResolver interface {
@@ -131,14 +138,44 @@ func (l *blockPayloadLocator) LocatePayload(payload []byte) ([]byte, error) {
 			len(payload), l.slot,
 		)
 	}
+	return l.encode(idx, len(payload)), nil
+}
+
+// LocatePayloadIn implements ContainedPayloadLocator. It returns the position
+// of payload inside the first occurrence of container that holds it, so an
+// inline datum or reference script is named by the bytes of its own output.
+// Without such an occurrence it locates payload as LocatePayload does.
+func (l *blockPayloadLocator) LocatePayloadIn(
+	payload, container []byte,
+) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, errors.New("locate payload: empty payload")
+	}
+	if len(container) >= len(payload) {
+		for from := 0; from < len(l.block); {
+			at := bytes.Index(l.block[from:], container)
+			if at < 0 {
+				break
+			}
+			start := from + at
+			if within := bytes.Index(container, payload); within >= 0 {
+				return l.encode(start+within, len(payload)), nil
+			}
+			from = start + 1
+		}
+	}
+	return l.LocatePayload(payload)
+}
+
+func (l *blockPayloadLocator) encode(idx, length int) []byte {
 	offset := CborOffset{
 		BlockSlot:  l.slot,
 		BlockHash:  l.hash,
-		ByteOffset: uint32(idx),          // #nosec G115 -- block length checked
-		ByteLength: uint32(len(payload)), // #nosec G115 -- within the block
+		ByteOffset: uint32(idx),    // #nosec G115 -- block length checked
+		ByteLength: uint32(length), // #nosec G115 -- within the block
 	}
 	if l.endorser {
-		return offset.EncodeEndorser(), nil
+		return offset.EncodeEndorser()
 	}
-	return offset.Encode(), nil
+	return offset.Encode()
 }
