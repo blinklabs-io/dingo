@@ -57,7 +57,7 @@ func End(span trace.Span, err error) {
 // from storage never wraps to a negative attribute.
 func Uint64(key string, v uint64) attribute.KeyValue {
 	if v > math.MaxInt64 {
-		v = math.MaxInt64
+		return attribute.Int64(key, math.MaxInt64)
 	}
 	return attribute.Int64(key, int64(v))
 }
