@@ -842,8 +842,8 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	// The snapshot manager writes through the ledger's LedgerDB, so its
-	// snapshot rows reach the live UTxO set, where the drained reward-input
-	// families live.
+	// snapshot rows reach the live UTxO set, where the reward-input families
+	// live.
 	snapshotMgr := snapshot.NewManager(ls.LedgerDB(), nil, logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
 	// so replay matches serve mode (node.go) on the same DB.

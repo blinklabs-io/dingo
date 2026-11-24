@@ -125,7 +125,7 @@ type Store struct {
 
 // ErrLoadsRefused reports a family load refused by RefuseLoads.
 var ErrLoadsRefused = errors.New(
-	"badgerutxo: a row family cannot be reloaded from a source that has lost rows",
+	"badgerutxo: a row family cannot be reloaded while the set holds its rows",
 )
 
 // RefuseLoads makes a Load* method fail with ErrLoadsRefused, changing

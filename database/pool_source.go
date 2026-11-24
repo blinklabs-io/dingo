@@ -21,9 +21,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// PoolSource answers the pool reads of a database whose pools-history family
-// is drained, from the live UTxO set. It reads the committed set with no
-// transaction.
+// PoolSource answers a database's pool reads from the live UTxO set, which
+// holds the pool registrations and retirements the LedgerDB keeps. It reads the
+// committed set with no transaction.
 type PoolSource interface {
 	// Pool returns nil when the pool has no registration or retirement.
 	Pool(pkh lcommon.PoolKeyHash, includeInactive bool) (*models.Pool, error)
