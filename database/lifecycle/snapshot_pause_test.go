@@ -320,11 +320,13 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	t.Parallel()
 
 	peerCancelled := make(chan struct{})
+	releasePeer := make(chan struct{})
 	setFailed := make(chan struct{})
 	hooks := &backupHooks{
 		blob: func(ctx context.Context, _ io.Writer) error {
 			<-ctx.Done()
 			close(peerCancelled)
+			<-releasePeer
 			return ctx.Err()
 		},
 		set: func(context.Context, io.Writer) error {
@@ -352,6 +354,11 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 		t, peerCancelled, 5*time.Second,
 		"a failed set backup must cancel the blob backup",
 	)
+	testutil.RequireNoReceive(
+		t, result, 100*time.Millisecond,
+		"the snapshot must not return while its cancelled peer still runs",
+	)
+	close(releasePeer)
 	err := testutil.RequireReceive(
 		t, result, testutil.AsyncWait, "the snapshot must return",
 	)
