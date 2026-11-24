@@ -603,11 +603,16 @@ const (
 type sendGuard struct {
 	hub *eventHub
 	rc  *http.ResponseController
+	// mu binds the watcher's lag check and expiry to one batch: the handler
+	// cannot move to the next batch between them.
+	mu sync.Mutex
 	// sending is the cursor after the batch in flight plus one, or zero
 	// between batches.
-	sending atomic.Uint64
+	sending uint64
 	expired atomic.Int32
 	done    chan struct{}
+	// exited is closed when the watcher returns; nil without a controller.
+	exited chan struct{}
 }
 
 // guardSends starts a guard for one stream. Without a response controller in
@@ -617,18 +622,28 @@ func (h *eventHub) guardSends(ctx context.Context) *sendGuard {
 	g := &sendGuard{hub: h, done: make(chan struct{})}
 	g.rc, _ = ctx.Value(responseControllerKey{}).(*http.ResponseController)
 	if g.rc != nil {
+		g.exited = make(chan struct{})
 		go g.watch(ctx)
 	}
 	return g
 }
 
-func (g *sendGuard) stop() { close(g.done) }
+// stop ends the watcher and waits for it, because the response controller
+// must not be used once the handler has returned.
+func (g *sendGuard) stop() {
+	close(g.done)
+	if g.exited != nil {
+		<-g.exited
+	}
+}
 
 // begin marks the batch ending at cursor as in flight. It is stored before
 // the checks below, and the watcher reads it after observing a change, so a
 // lag or close is seen by at least one of them.
 func (g *sendGuard) begin(cursor uint64, lagErr func() error) error {
-	g.sending.Store(cursor + 1)
+	g.mu.Lock()
+	g.sending = cursor + 1
+	g.mu.Unlock()
 	select {
 	case <-g.hub.closed:
 		return errEventServiceClosing()
@@ -640,7 +655,11 @@ func (g *sendGuard) begin(cursor uint64, lagErr func() error) error {
 	return nil
 }
 
-func (g *sendGuard) end() { g.sending.Store(0) }
+func (g *sendGuard) end() {
+	g.mu.Lock()
+	g.sending = 0
+	g.mu.Unlock()
+}
 
 // sendError maps a failed Send to the reason the guard ended it, if any.
 func (g *sendGuard) sendError(err error, lagErr func() error) error {
@@ -654,20 +673,20 @@ func (g *sendGuard) sendError(err error, lagErr func() error) error {
 }
 
 func (g *sendGuard) watch(ctx context.Context) {
+	defer close(g.exited)
 	for {
 		g.hub.mu.Lock()
 		wake := g.hub.wake
 		g.hub.mu.Unlock()
-		if s := g.sending.Load(); s != 0 && g.hub.lagged(s-1) {
-			g.expire(sendExpiredLagged)
+		if g.expireIf(sendExpiredLagged, func(s uint64) bool {
+			return g.hub.lagged(s - 1)
+		}) {
 			return
 		}
 		select {
 		case <-wake:
 		case <-g.hub.closed:
-			if g.sending.Load() != 0 {
-				g.expire(sendExpiredClosing)
-			}
+			g.expireIf(sendExpiredClosing, func(uint64) bool { return true })
 			return
 		case <-g.done:
 			return
@@ -677,10 +696,18 @@ func (g *sendGuard) watch(ctx context.Context) {
 	}
 }
 
-func (g *sendGuard) expire(reason int32) {
+// expireIf expires the write when a batch is in flight and cond holds for it,
+// both judged under mu so the batch cannot change in between.
+func (g *sendGuard) expireIf(reason int32, cond func(sending uint64) bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sending == 0 || !cond(g.sending) {
+		return false
+	}
 	g.expired.Store(reason)
 	// A deadline in the past fails the pending write at once.
 	_ = g.rc.SetWriteDeadline(time.Unix(1, 0))
+	return true
 }
 
 // ackWindow tracks the sequences delivered to an acknowledging subscriber
