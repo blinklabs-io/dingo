@@ -638,35 +638,31 @@ func (o *utxoOverlay) updateSettled(
 	o.rebuildAggregates()
 }
 
-// spendsSettledOutputs reports whether a transaction in applied, other than
-// those in skip, spends an output of a settled transaction in release.
-func (o *utxoOverlay) spendsSettledOutputs(
+// releasesSettledUnderPool reports whether release names a settled
+// transaction the overlay holds while a transaction in applied, other than
+// those in skip, remains. Such a transaction may resolve a released output as
+// a spent input, a reference input or collateral, and appliedTx records only
+// the spent inputs, so any such release is treated as orphaning it.
+func (o *utxoOverlay) releasesSettledUnderPool(
 	release map[string]struct{},
 	skip map[string]struct{},
 ) bool {
 	if len(release) == 0 {
 		return false
 	}
-	outputs := make(map[utxoref.Key]struct{})
-	for _, st := range o.settled {
-		if _, ok := release[st.at.hash]; !ok {
-			continue
-		}
-		for key := range st.at.created {
-			outputs[key] = struct{}{}
+	pooled := false
+	for _, at := range o.applied {
+		if _, ok := skip[at.hash]; !ok {
+			pooled = true
+			break
 		}
 	}
-	if len(outputs) == 0 {
+	if !pooled {
 		return false
 	}
-	for _, at := range o.applied {
-		if _, ok := skip[at.hash]; ok {
-			continue
-		}
-		for _, key := range at.consumed {
-			if _, ok := outputs[key]; ok {
-				return true
-			}
+	for _, st := range o.settled {
+		if _, ok := release[st.at.hash]; ok {
+			return true
 		}
 	}
 	return false
@@ -1779,11 +1775,11 @@ var errValidationSnapshotChanged = errors.New(
 )
 
 // errSettledOutputsReleased means a mutation replayed onto a revalidation
-// candidate released settled outputs that a candidate transaction spends.
-// That transaction was validated against those outputs, so the rebuild starts
-// again from the live pool, which no longer holds them.
+// candidate released settled outputs while the candidate held pending
+// transactions, which may have been validated against them. The rebuild
+// starts again from the live pool, which no longer holds them.
 var errSettledOutputsReleased = fmt.Errorf(
-	"%w: settled outputs a pending transaction spends were released",
+	"%w: settled outputs were released under pending transactions",
 	errValidationSnapshotChanged,
 )
 
@@ -2067,7 +2063,7 @@ func (m *Mempool) rebuildOverlayAttempt(
 				if mutation.stopped {
 					return ErrMempoolStopped
 				}
-				if candidate.overlay.spendsSettledOutputs(
+				if candidate.overlay.releasesSettledUnderPool(
 					mutation.unsettled, mutation.removed,
 				) {
 					return errSettledOutputsReleased
@@ -2285,6 +2281,9 @@ func (m *Mempool) expireTransactions(ctx context.Context) {
 	}
 	ticker := time.NewTicker(m.cleanupInterval)
 	defer ticker.Stop()
+	// rebuildPending carries a rebuild owed for a settled release across
+	// ticks until one succeeds: the release is not repeated.
+	rebuildPending := false
 	for {
 		select {
 		case <-ticker.C:
@@ -2292,10 +2291,14 @@ func (m *Mempool) expireTransactions(ctx context.Context) {
 			m.removeExpiredTransactions()
 			// Bound settled transactions when no chain update arrives to
 			// release them, and judge the pool again when that takes
-			// outputs a pending transaction spends.
+			// outputs pending transactions may depend on.
 			if m.releaseSettled() {
-				if err := m.rebuildOverlay(ctx); err != nil &&
-					ctx.Err() == nil {
+				rebuildPending = true
+			}
+			if rebuildPending {
+				err := m.rebuildOverlay(ctx)
+				rebuildPending = err != nil
+				if err != nil && ctx.Err() == nil {
 					m.logger.Debug(
 						"mempool overlay rebuild after settled release failed",
 						"component", "mempool",
@@ -3281,8 +3284,9 @@ func (m *Mempool) settledChangeLocked(
 }
 
 // releaseSettled releases the settled transactions that are no longer needed.
-// It reports whether a pool transaction spends an output it released from a
-// block the ledger has not applied, which only a revalidation can judge.
+// It reports whether it released outputs of a block the ledger has not
+// applied while the pool holds transactions, which only a revalidation can
+// judge.
 func (m *Mempool) releaseSettled() bool {
 	m.mutationMutex.Lock()
 	defer m.mutationMutex.Unlock()
@@ -3303,7 +3307,7 @@ func (m *Mempool) releaseSettled() bool {
 			unapplied[st.at.hash] = struct{}{}
 		}
 	}
-	orphans := m.overlay.spendsSettledOutputs(unapplied, nil)
+	orphans := m.overlay.releasesSettledUnderPool(unapplied, nil)
 	m.overlay.updateSettled(nil, nil, unsettled)
 	m.recordMutationLocked(mempoolMutation{unsettled: unsettled})
 	return orphans

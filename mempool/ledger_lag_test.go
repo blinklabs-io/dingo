@@ -16,6 +16,7 @@ package mempool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -119,6 +120,18 @@ func (v *laggingLedgerValidator) ValidateTxWithOverlay(
 			return fmt.Errorf("utxo %s: not found", key.String())
 		}
 	}
+	for _, in := range tx.ReferenceInputs() {
+		key := utxoref.ForInput(in)
+		if _, ok := consumed[key]; ok {
+			return fmt.Errorf("utxo %s: already consumed", key.String())
+		}
+		if _, ok := created[key]; ok {
+			continue
+		}
+		if _, ok := v.utxos[key]; !ok {
+			return fmt.Errorf("utxo %s: not found", key.String())
+		}
+	}
 	return nil
 }
 
@@ -130,7 +143,11 @@ type sessionLedgerValidator struct {
 	// onOpen, when set, runs once as the next session opens: blocks it
 	// applies are part of that session's ledger.
 	onOpen func()
+	// failOpens is how many of the next sessions fail to open.
+	failOpens int
 }
+
+var errTestSessionUnavailable = errors.New("test: session unavailable")
 
 func (v *sessionLedgerValidator) WithTxValidationSession(
 	_ context.Context,
@@ -148,7 +165,14 @@ func (v *sessionLedgerValidator) WithTxValidationSession(
 	v.mu.Lock()
 	hook := v.onOpen
 	v.onOpen = nil
+	fail := v.failOpens > 0
+	if fail {
+		v.failOpens--
+	}
 	v.mu.Unlock()
+	if fail {
+		return errTestSessionUnavailable
+	}
 	if hook != nil {
 		hook()
 	}
@@ -675,4 +699,109 @@ func TestExpiredSettledReleaseRevalidatesPool(t *testing.T) {
 		"the child of a released parent the ledger never applied is dropped",
 	)
 	require.Zero(t, f.settledCount())
+}
+
+// pendingReferencer pools a transaction that spends a funded input of its own
+// and takes the parent's second output as a reference input, then confirms
+// the parent and the child in block 100 with the ledger behind. The
+// referencing transaction is the only pool transaction left, and it depends
+// on the settled parent only through its reference input.
+func (f *ledgerLagFixture) pendingReferencer(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	funding := indexTxInput{hash: [32]byte{0xf2}}
+	f.v.fund(funding)
+	var parentId [32]byte
+	copy(parentId[:], f.parent.Hash().Bytes())
+	raw, tx := buildIndexTx(t, indexTxSpec{
+		inputs:          []indexTxInput{funding},
+		referenceInputs: []indexTxInput{{hash: parentId, index: 1}},
+		outputs:         []lcommon.Address{indexTestAddress(t, 5)},
+	})
+	require.NoError(t, f.m.AddTransaction(ctx, uint(conway.EraIdConway), raw))
+	f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+		Block: blockCarryingTxs(t, 100, f.parentRaw, f.childRaw),
+	}))
+	require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+	hash := tx.Hash().String()
+	require.True(t, f.has(hash), "referencer survives the ledger lag")
+	require.Len(t, f.m.Transactions(), 1)
+	require.Equal(t, 2, f.settledCount())
+	return hash
+}
+
+// A transaction that only references a settled output is judged again when
+// a revalidation in flight replays the release of that output.
+func TestSettledReleaseDuringRevalidationRevalidatesReferencer(
+	t *testing.T,
+) {
+	t.Parallel()
+	forBothPools(t, func(t *testing.T, useDAG bool) {
+		f := newLedgerLagFixture(t, useDAG, nil)
+		hash := f.pendingReferencer(t)
+		f.v.mu.Lock()
+		f.v.onValidate = func() {
+			f.ageSettled()
+			f.m.releaseSettled()
+		}
+		f.v.mu.Unlock()
+		require.NoError(t, f.m.rebuildOverlay(context.Background()))
+		require.Zero(t, f.settledCount())
+		require.False(
+			t, f.has(hash),
+			"a transaction referencing a released output is judged without it",
+		)
+	})
+}
+
+// The expiry ticker revalidates the pool when it releases an output that a
+// pool transaction only references.
+func TestExpiredSettledReleaseRevalidatesReferencer(t *testing.T) {
+	t.Parallel()
+	f := newLedgerLagFixtureWith(
+		t, false, nil,
+		ledgerLagOptions{cleanupInterval: 10 * time.Millisecond},
+	)
+	hash := f.pendingReferencer(t)
+	f.ageSettled()
+	require.NoError(t, f.m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return !f.has(hash)
+	}, 5*time.Second, 10*time.Millisecond,
+		"a transaction referencing a released output is dropped",
+	)
+}
+
+// A rebuild the expiry ticker starts after a settled release, and that
+// fails, is retried on a later tick: the release itself is not repeated, so
+// it cannot be what triggers the retry.
+func TestExpiredSettledReleaseRetriesFailedRebuild(t *testing.T) {
+	t.Parallel()
+	f := newLedgerLagFixtureWith(
+		t, false, nil,
+		ledgerLagOptions{
+			sessions:        true,
+			cleanupInterval: 10 * time.Millisecond,
+		},
+	)
+	ctx := context.Background()
+	f.m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+		Block: blockCarryingTxs(t, 100, f.parentRaw),
+	}))
+	require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
+	require.True(t, f.has(f.child.Hash().String()))
+	f.ageSettled()
+	f.s.mu.Lock()
+	f.s.failOpens = 1
+	f.s.mu.Unlock()
+
+	require.NoError(t, f.m.Start(ctx))
+	require.Eventually(t, func() bool {
+		return !f.has(f.child.Hash().String())
+	}, 5*time.Second, 10*time.Millisecond,
+		"the rebuild that failed after the release is retried",
+	)
+	f.s.mu.Lock()
+	defer f.s.mu.Unlock()
+	require.Zero(t, f.s.failOpens, "the first rebuild did fail")
 }
