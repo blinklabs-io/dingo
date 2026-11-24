@@ -123,8 +123,10 @@ Method:
 The report and both result files are in the job summary and the
 `benchmark-gate` artifact. To reproduce locally, run
 `.github/scripts/bench-gate.sh <base-checkout> <head-checkout> <out-dir> 8`
-and `go run ./internal/benchci/cmd/benchgate <out-dir>/base.txt
-<out-dir>/head.txt report.md`.
+and `BENCHCI_BASE_FILE=<out-dir>/base.txt BENCHCI_HEAD_FILE=<out-dir>/head.txt
+BENCHCI_REPORT=$PWD/report.md go test ./internal/benchci -run '^TestGateFiles$' -count=1`
+with an absolute `<out-dir>`: `go test` runs in the package directory, so the
+test rejects relative paths.
 
 The same job ends with a report-only `external-storage-smoke` step for storage
 plugins that live outside this repository. It never gates and currently prints
