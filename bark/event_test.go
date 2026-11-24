@@ -395,6 +395,22 @@ func TestEventAckHubCloseEndsBlockedSend(t *testing.T) {
 	waitActive(t, f, 0)
 }
 
+// An acknowledging client that stops reading is detached once the ring moves
+// past the batch it is blocked on, as a plain subscriber is.
+func TestEventAckDetachesClientThatStopsReading(t *testing.T) {
+	t.Parallel()
+
+	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 64 }, false)
+	a := openAck(t, f, "stuck", 0)
+	waitActive(t, f, 1)
+	appendBlockingBatch(f)
+	a.recv(t)
+	for range 200 {
+		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+	}
+	waitActive(t, f, 0)
+}
+
 // appendBlockingBatch fills a 64-slot ring with 1 MiB events under one lock,
 // so the handler reads them as a single batch. A client that does not read
 // cannot take 64 MiB, so Send blocks part-way through that batch, before the
