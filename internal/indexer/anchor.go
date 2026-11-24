@@ -46,12 +46,6 @@ var ErrAnchorUnserved = errors.New(
 		"IndexerDB takes over at the Mithril anchor",
 )
 
-// Sync-state keys the ledger database records its Mithril anchor under.
-const (
-	mithrilLedgerSlotKey = "mithril_ledger_slot"
-	mithrilLedgerHashKey = "mithril_ledger_hash"
-)
-
 // AnchorChain is an optional ChainSource capability: the Mithril anchor the
 // ledger's state was imported at, when there is one.
 type AnchorChain interface {
@@ -71,7 +65,7 @@ func (s *DatabaseSource) Anchor(
 	if slot == 0 {
 		return indexerdb.Tip{}, false, nil
 	}
-	raw, err := s.db.GetSyncState(mithrilLedgerHashKey, nil)
+	raw, err := s.db.ImportedLedgerStateBoundaryHash()
 	if err != nil {
 		return indexerdb.Tip{}, false, fmt.Errorf(
 			"read Mithril anchor hash: %w",

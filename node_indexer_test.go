@@ -122,7 +122,9 @@ func TestAPIDatabaseFollowsTheLayout(t *testing.T) {
 
 func TestMeshReportsTheIndexerTipOnTheSplitLayout(t *testing.T) {
 	t.Parallel()
-	idx, err := dbtest.NewDatabase(t, &database.Config{})
+	ledgerDB, err := dbtest.NewDatabase(t, &database.Config{})
+	require.NoError(t, err)
+	idx, err := dbtest.NewIndexerDatabase(t, ledgerDB, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(idx, idx, 10)
 	require.NoError(t, err)
@@ -151,7 +153,9 @@ func TestHistoryExpiryCeilingFollowsTheIndexerTip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, ^uint64(0), ceiling)
 
-	idx, err := dbtest.NewDatabase(t, &database.Config{})
+	ledgerDB, err := dbtest.NewDatabase(t, &database.Config{})
+	require.NoError(t, err)
+	idx, err := dbtest.NewIndexerDatabase(t, ledgerDB, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(idx, idx, 10)
 	require.NoError(t, err)

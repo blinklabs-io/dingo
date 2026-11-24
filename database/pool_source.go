@@ -18,7 +18,6 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -49,21 +48,21 @@ type PoolSource interface {
 	) ([]models.PoolRetirementRefund, error)
 }
 
-// ErrNoPoolSource is returned by a pool read of a drained pools-history family
-// when no PoolSource was installed.
+// ErrNoPoolSource is returned by a pool read of a database with no metadata
+// store when no PoolSource was installed.
 var ErrNoPoolSource = errors.New(
-	"pools are drained from the metadata store and no source is installed",
+	"the database keeps no pools and no pool source is installed",
 )
 
-// SetPoolSource installs the source the pool reads of a drained pools-history
-// family come from.
+// SetPoolSource installs the source the pool reads of a database with no
+// metadata store come from.
 func (d *Database) SetPoolSource(src PoolSource) {
 	d.poolSource.Store(&src)
 }
 
-// poolsDrained reports whether the pools-history family is drained.
-func (d *Database) poolsDrained() bool {
-	return d.FamilyDrained(nodesettings.FamilyPoolsHistory)
+// poolsFromSource reports whether pool reads come from the PoolSource.
+func (d *Database) poolsFromSource() bool {
+	return d.metadata == nil
 }
 
 func (d *Database) poolSourceOrErr() (PoolSource, error) {

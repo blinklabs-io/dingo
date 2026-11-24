@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
@@ -468,14 +467,9 @@ func openFactLedger(
 	})
 	require.NoError(t, err)
 	require.NoError(t, (nodestorage.Reconcile{
-		DB:      consensus,
-		Set:     set,
-		DataDir: consensus.DataDir(),
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			ls.SetDrainedFamilies(mask)
-			set.SetDrainedFamilies(mask)
-		},
+		DB:     consensus,
+		Set:    set,
+		Logger: logger,
 		Resume: ls.ResumeUtxoSetFrom,
 	}).Run(ctx))
 	require.NoError(t, ls.Start(ctx))

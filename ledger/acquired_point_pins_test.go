@@ -25,56 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const pinTestStabilityWindow = 1_000
-
-// TestCapUtxoPruneFloor_NoPinsKeepsDefault pins the baseline: with nothing
-// acquired, cleanup prunes exactly as before this change.
-func TestCapUtxoPruneFloor_NoPinsKeepsDefault(t *testing.T) {
-	t.Parallel()
-	var ls LedgerState
-	require.Equal(t, uint64(5_000),
-		ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow))
-}
-
-// TestCapUtxoPruneFloor_PinLowersFloor is the retain half of the race: a prune
-// that runs after a point is acquired must not cut past it.
-func TestCapUtxoPruneFloor_PinLowersFloor(t *testing.T) {
-	t.Parallel()
-	var ls LedgerState
-	release := ls.PinAcquiredPoint(4_200)
-	defer release()
-	require.Equal(t, uint64(4_200),
-		ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow),
-		"a pin below the default floor must hold the floor at the pin")
-}
-
-// TestCapUtxoPruneFloor_PinAboveFloorIsIgnored covers a pin already inside
-// the retained window: it needs nothing kept, so the floor is unchanged.
-func TestCapUtxoPruneFloor_PinAboveFloorIsIgnored(t *testing.T) {
-	t.Parallel()
-	var ls LedgerState
-	release := ls.PinAcquiredPoint(9_000)
-	defer release()
-	require.Equal(t, uint64(5_000),
-		ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow))
-}
-
-// TestCapUtxoPruneFloor_BackstopBoundsAnAbandonedPin covers the issue's
-// resource-exhaustion requirement: a client that acquires and never releases
-// cannot stop spent-UTxO pruning for good. The pin holds the floor back by at
-// most acquiredPointMaxUtxoHoldWindows stability windows.
-func TestCapUtxoPruneFloor_BackstopBoundsAnAbandonedPin(t *testing.T) {
-	t.Parallel()
-	var ls LedgerState
-	release := ls.PinAcquiredPoint(10)
-	defer release()
-	const floor = 100_000
-	want := floor - pinTestStabilityWindow*acquiredPointMaxUtxoHoldWindows
-	require.Equal(t, uint64(want),
-		ls.capUtxoPruneFloor(floor, pinTestStabilityWindow),
-		"a pin older than the backstop must stop holding the floor back")
-}
-
 // TestPinAcquiredPoint_ReleaseIsIdempotent matters because more than one
 // clear path can reach the same pin -- a Release followed by the connection
 // closing -- and a double release must not underflow or panic.
@@ -86,23 +36,6 @@ func TestPinAcquiredPoint_ReleaseIsIdempotent(t *testing.T) {
 	release()
 	release()
 	require.Equal(t, 0, ls.AcquiredPointPinCountForTesting())
-	require.Equal(t, uint64(5_000),
-		ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow),
-		"a released pin must stop holding the floor back")
-}
-
-// TestCapUtxoPruneFloor_AnnouncedFloorIsMonotonic: once a floor has been
-// announced, rows below it may already be gone, so a later, lower cap must not
-// lower what verify checks against.
-func TestCapUtxoPruneFloor_AnnouncedFloorIsMonotonic(t *testing.T) {
-	t.Parallel()
-	var ls LedgerState
-	ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow)
-	release := ls.PinAcquiredPoint(4_000)
-	defer release()
-	ls.capUtxoPruneFloor(5_000, pinTestStabilityWindow)
-	utxo, _ := ls.announcedPruneFloors()
-	require.Equal(t, uint64(5_000), utxo)
 }
 
 // TestCapPoolSnapshotPruneBefore_PinLowersBoundary is the pool-snapshot half
@@ -136,41 +69,6 @@ func TestCapPoolSnapshotPruneBefore_UnmappableRetainsToBackstop(t *testing.T) {
 // records the point; a concurrent prune caps, announces, then deletes. Only
 // two interleavings matter, and each is driven here explicitly rather than by
 // racing goroutines, so the test cannot pass by luck.
-
-// TestVerifyPointQueryable_PinBeforePrune_IsRetained: the pin lands first, so
-// the prune that follows must retain the acquired point.
-func TestVerifyPointQueryable_PinBeforePrune_IsRetained(t *testing.T) {
-	t.Parallel()
-	ls, at := newPinnedPointLedger(t)
-
-	release := ls.PinAcquiredPoint(at.Slot)
-	defer release()
-	require.NoError(t, ls.VerifyPointQueryable(context.Background(), nil, at))
-
-	// The prune now runs, and would have cut well past the point.
-	floor := ls.capUtxoPruneFloor(at.Slot+500, pinTestStabilityWindow)
-	require.Equal(t, at.Slot, floor,
-		"a prune after the pin must not cut past the acquired point")
-}
-
-// TestVerifyPointQueryable_PruneAnnouncedBeforePin_IsRejected: the prune
-// announced its floor first, and its delete has not yet committed, so the
-// persisted floor still reads as safe. Without the announced-floor check the
-// verify passes and the point is recorded on state about to be deleted --
-// exactly the mid-query failure this exists to prevent. It must be refused
-// here, where the protocol has a clean AcquireFailure.
-func TestVerifyPointQueryable_PruneAnnouncedBeforePin_IsRejected(t *testing.T) {
-	t.Parallel()
-	ls, at := newPinnedPointLedger(t)
-
-	ls.capUtxoPruneFloor(at.Slot+500, pinTestStabilityWindow)
-
-	release := ls.PinAcquiredPoint(at.Slot)
-	defer release()
-	err := ls.VerifyPointQueryable(context.Background(), nil, at)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable,
-		"a point below an announced prune floor must be refused at Acquire")
-}
 
 // newPinnedPointLedger returns a ledger with a single on-chain point that
 // every retention check in VerifyPointQueryable accepts, so a rejection in

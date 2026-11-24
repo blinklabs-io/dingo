@@ -295,7 +295,7 @@ func (ls *LedgerState) committeeServed(
 ) (*CommitteeState, error) {
 	r := ls.committeeReader(txn)
 	if r == nil || !ls.setServes(&ls.committeeSetLoaded, r.CommitteeLoaded) {
-		return &CommitteeState{}, drainedUnserved(
+		return &CommitteeState{}, ledgerStateUnserved(
 			nodesettings.FamilyCommitteeConstitution,
 		)
 	}
@@ -321,7 +321,7 @@ func (ls *LedgerState) stageCommittee(
 		// The set is the only copy, so a change it cannot stage would be
 		// lost.
 		ls.failAccountStaging(
-			drainedUnserved(nodesettings.FamilyCommitteeConstitution),
+			ledgerStateUnserved(nodesettings.FamilyCommitteeConstitution),
 		)
 		return
 	}

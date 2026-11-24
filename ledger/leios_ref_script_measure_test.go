@@ -19,8 +19,6 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -225,16 +223,7 @@ func TestLeiosSelectionSessionMeasuresStoredReferenceScripts(t *testing.T) {
 	id := bytes.Repeat([]byte{0xe1}, 32)
 	encoded, err := cbor.Encode(additionalReferenceOutput(t, scriptSize))
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(t.Context(), true).Do(
-		func(txn *database.Txn) error {
-			if err := db.CreateUtxo(
-				t.Context(), txn, &models.Utxo{TxId: id},
-			); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-		},
-	))
+	fxSeedOutput(t, db, id, 0, 0, encoded)
 	refInput := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(id), 0,
 	)

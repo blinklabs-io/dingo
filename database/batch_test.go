@@ -147,7 +147,7 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 	sentinels := stagedProducer(t, db, candidate)
@@ -210,7 +210,7 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 	stagedProducer(t, db, candidate)
@@ -275,7 +275,7 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 	sentinels := stagedProducer(t, db, candidate)
@@ -330,7 +330,7 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
@@ -384,7 +384,7 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 
@@ -457,7 +457,7 @@ func TestSetTransactionBatchedWithOpts_TrustedImmutableReplaySkipsInputRecovery(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	candidate := sharedBatchCandidate(t)
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
 
@@ -519,7 +519,7 @@ func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	candidate := sharedBatchCandidate(t)
 

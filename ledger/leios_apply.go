@@ -447,24 +447,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		return 0, 0, err
 	}
 	snapshot := ls.txValidationSnapshot()
-	acc := ls.ledgerDB().NewLeiosClosureBatchAccumulator()
-	if acc != nil {
-		defer acc.Reset()
-	}
 	selected := make([]lcommon.Transaction, len(indexes))
 	for i, index := range indexes {
 		selected[i] = txs[index]
-	}
-	flush := func() error {
-		flushStart := time.Now()
-		err := ls.ledgerDB().FlushBatch(acc, txn)
-		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
-		if err != nil {
-			return &leiosEndorserBlockStorageError{
-				err: fmt.Errorf("flush endorser API details: %w", err),
-			}
-		}
-		return nil
 	}
 	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
@@ -474,21 +459,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		donation            uint64
 		expandedIndexOffset uint64
 	)
-	windowEnd := 0
-	for position, idx := range indexes {
-		if acc != nil && position == windowEnd {
-			n, err := ls.ledgerDB().PrepareLeiosClosureBatch(
-				acc,
-				txn,
-				selected[position:],
-			)
-			if err != nil {
-				return 0, 0, &leiosEndorserBlockStorageError{
-					err: fmt.Errorf("prepare endorser UTxO batch: %w", err),
-				}
-			}
-			windowEnd = position + n
-		}
+	for _, idx := range indexes {
 		tx := txs[idx]
 		if err := ls.loadLeiosSpentInputs(
 			ctx,
@@ -603,16 +574,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 		delta.addTransaction(tx, idx)
 		applyStart := time.Now()
-		if acc != nil {
-			err = delta.applyWithoutRecordingDonationsWithAccumulator(
-				ctx,
-				ls,
-				txn,
-				acc,
-			)
-		} else {
-			err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
-		}
+		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
@@ -633,11 +595,6 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 		for _, input := range tx.Consumed() {
 			consumed[utxoref.ForInput(input)] = struct{}{}
-		}
-	}
-	if acc != nil {
-		if err := flush(); err != nil {
-			return 0, 0, err
 		}
 	}
 	if len(applyEvents) > 0 {

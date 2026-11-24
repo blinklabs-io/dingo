@@ -2100,19 +2100,6 @@ func (q *Queries) GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64
 	return items, nil
 }
 
-const getImportCheckpoint = `-- name: GetImportCheckpoint :one
-SELECT id, import_key, phase
-FROM import_checkpoint
-WHERE import_key = ?
-`
-
-func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error) {
-	row := q.db.QueryRowContext(ctx, getImportCheckpoint, importKey)
-	var i ImportCheckpoint
-	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
-	return i, err
-}
-
 const getImportedEpochBlockTotal = `-- name: GetImportedEpochBlockTotal :one
 SELECT total_blocks
 FROM imported_epoch_block_total
@@ -4524,22 +4511,6 @@ func (q *Queries) SetEpoch(ctx context.Context, arg SetEpochParams) error {
 		arg.SlotLength,
 		arg.LengthInSlots,
 	)
-	return err
-}
-
-const setImportCheckpoint = `-- name: SetImportCheckpoint :exec
-INSERT INTO import_checkpoint (import_key, phase)
-VALUES (?, ?)
-ON CONFLICT (import_key) DO UPDATE SET phase = excluded.phase
-`
-
-type SetImportCheckpointParams struct {
-	ImportKey string
-	Phase     string
-}
-
-func (q *Queries) SetImportCheckpoint(ctx context.Context, arg SetImportCheckpointParams) error {
-	_, err := q.db.ExecContext(ctx, setImportCheckpoint, arg.ImportKey, arg.Phase)
 	return err
 }
 

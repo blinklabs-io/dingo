@@ -25,10 +25,10 @@ import (
 
 // stagingLedgerDB is the LedgerDB the ledger and the snapshot manager read
 // and write through. Ledger state is staged on its transaction's batch for
-// the LedgerDB set and read back from the set. What still reaches the
-// embedded metadata store is index data and node bookkeeping, never a
-// ledger-state read: the transaction and certificate history index and the
-// operational sync_state keys.
+// the LedgerDB set and read back from the set, the transaction index
+// included. What still reaches the embedded database is chain data, never a
+// ledger-state read or a sync_state key: blocks and the tip, which the block
+// store keeps.
 type stagingLedgerDB struct {
 	ledgerdb.LedgerDB
 	ls *LedgerState
@@ -143,6 +143,13 @@ func (ls *LedgerState) stageLedgerChanges(txn ledgerdb.Txn, lc LedgerChanges) {
 		b.rewardRounds = append(b.rewardRounds, lc.RewardRounds...)
 		b.postSnapshot = append(b.postSnapshot, lc.PostSnapshotCredits...)
 		b.opCerts = append(b.opCerts, lc.OpCerts...)
+		for _, e := range lc.TxIndex {
+			if b.txIndexAt == nil {
+				b.txIndexAt = make(map[string]int)
+			}
+			b.txIndexAt[string(e.Hash)] = len(b.txIndex)
+			b.txIndex = append(b.txIndex, e)
+		}
 		b.rewardBlocks = append(b.rewardBlocks, lc.RewardBlocks...)
 		b.rewardInputs = append(b.rewardInputs, lc.RewardInputs...)
 		b.rewardDerived = append(b.rewardDerived, lc.RewardDerived...)

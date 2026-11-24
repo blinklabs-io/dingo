@@ -48,7 +48,7 @@ func (s *Set) ensureDRepHistory(
 		txn := ldb.Begin(ctx, false)
 		rows, err = r.DRepHistoryRows(txn)
 		txn.Release()
-		if errors.Is(err, database.ErrFamilyDrained) {
+		if errors.Is(err, database.ErrNoMetadataStore) {
 			lost, err = true, nil
 		}
 		if err != nil {

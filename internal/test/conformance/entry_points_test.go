@@ -291,7 +291,7 @@ func rollbackEntryPointReplay(
 }
 
 // entryPointCorpusRun is the memoized entry-point replay. It is a second
-// replay of the corpus, separate from sqliteCorpusResults: the shared
+// replay of the corpus, separate from corpusResults: the shared
 // ouroboros-mock harness validates with its own upstream rule list and offers
 // no hook for a caller-supplied validator, so there is no way to observe
 // Dingo's entry points from inside the harness pass. tests_cc29688c_test.go's
@@ -305,10 +305,8 @@ func rollbackEntryPointReplay(
 // the pass pays for is a second Reset/LoadInitialState/ApplyTransaction pass
 // over the corpus, which is roughly what the harness replay itself costs.
 // Measured on one machine, the package went from 585s to 891s under -race.
-// It runs against SQLite only -- the Postgres and MySQL replays exist for
-// storage-dialect coverage, and the entry points do not vary by backend.
 //
-// It replays once per process, like sqliteCorpusResults, so a build that adds
+// It replays once per process, like corpusResults, so a build that adds
 // more consumers of this evidence does not add more replays.
 type entryPointCorpusRun struct {
 	err      error
@@ -527,7 +525,7 @@ func reportEntryPointCoverage(t *testing.T, run entryPointCorpusRun) {
 	}
 	sort.Strings(eraNames)
 
-	t.Logf("Dingo validation entry point coverage (sqlite):")
+	t.Logf("Dingo validation entry point coverage:")
 	t.Logf("  Vectors replayed: %d", len(run.evidence))
 	t.Logf("  Transactions routed: %d", routings)
 	for _, name := range eraNames {

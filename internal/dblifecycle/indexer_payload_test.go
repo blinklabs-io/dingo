@@ -64,7 +64,9 @@ func (s *advancingTipState) ListSyncStateKeysByPrefix(
 
 func TestCaptureIndexerPayloadRecordsTheTipOfTheBackup(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	ledgerDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	db, err := dbtest.NewIndexerDatabase(t, ledgerDB, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 	state := &advancingTipState{}
 	store, err := indexerdb.NewStore(db, state, 10)

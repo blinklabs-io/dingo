@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -524,10 +523,11 @@ type rewardPool struct {
 // and registered, whose stake the seeded reward rounds distribute.
 func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
 	t.Helper()
+	key := repeatByte(28, 0xc1)
 	rp := rewardPool{
-		key:    repeatByte(28, 0xc1),
-		owner:  s.addAccount(t, 0xc2, nil, ""),
-		member: s.addAccount(t, 0xc3, nil, ""),
+		key:    key,
+		owner:  s.addAccount(t, 0xc2, nil, string(key)),
+		member: s.addAccount(t, 0xc3, nil, string(key)),
 	}
 	margin := &types.Rat{Rat: big.NewRat(1, 10)}
 	require.NoError(t, fxImportPool(t, s.db, context.Background(), nil, &models.Pool{
@@ -546,14 +546,6 @@ func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
 		VrfKeyHash:    make([]byte, 32),
 		RewardAccount: rp.owner,
 	}))
-	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
-	require.NoError(t, err)
-	for _, cred := range [][]byte{rp.owner, rp.member} {
-		_, err := raw.Exec(
-			`UPDATE account SET pool = ? WHERE staking_key = ?`, rp.key, cred,
-		)
-		require.NoError(t, err)
-	}
 	return rp
 }
 

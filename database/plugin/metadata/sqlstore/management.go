@@ -27,49 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-func (s *Store) GetCommitTimestamp(ctx context.Context) (int64, error) {
-	if err := s.ensureReady(); err != nil {
-		return 0, err
-	}
-	queries, err := newManagementQueries(s.dialect.Name(), s.readDB)
-	if err != nil {
-		return 0, err
-	}
-	timestamp, err := queries.getCommitTimestamp(ctx)
-	err = normalizeNoRows(err)
-	if errors.Is(err, metadata.ErrNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("get commit timestamp: %w", err)
-	}
-	if !timestamp.Valid {
-		return 0, nil
-	}
-	return timestamp.Int64, nil
-}
-
-func (s *Store) SetCommitTimestamp(
-	timestamp int64,
-	txn types.Txn,
-) error {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	queries, err := newManagementQueries(s.dialect.Name(), db)
-	if err != nil {
-		return err
-	}
-	if err := queries.setCommitTimestamp(
-		ctx,
-		sql.NullInt64{Int64: timestamp, Valid: true},
-	); err != nil {
-		return fmt.Errorf("set commit timestamp: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) GetNodeSettings(ctx context.Context) (*types.NodeSettings, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
@@ -197,7 +154,7 @@ func (s *Store) SetNodeSettingsGates(ctx context.Context,
 // name exists yet, reporting whether this call is what created it. Unlike
 // SetNodeSettingsGates's unconditional upsert, this lets a caller detect a
 // concurrent opener's first-ever write to the same gate (see
-// commit_timestamp.go's evaluateAndPersistGates) instead of silently
+// node_settings.go's evaluateAndPersistGates) instead of silently
 // overwriting it -- the loser learns it lost and can re-evaluate against
 // what is now actually persisted rather than assuming its own write landed.
 func (s *Store) InsertNodeSettingsGateIfAbsent(ctx context.Context,

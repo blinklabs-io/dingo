@@ -922,13 +922,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
 	}
-	if cp == nil || !cp.Completed {
-		// Backfill rewrites SQL ledger state a drained family no longer
-		// keeps, and reads rows it deleted.
-		if err := b.db.RefuseLedgerStateRewrite(ctx); err != nil {
-			return fmt.Errorf("backfill: %w", err)
-		}
-	}
 	if cp != nil {
 		hasIndex := cp.LastIndexID != nil
 		hasHash := len(cp.LastBlockHash) > 0

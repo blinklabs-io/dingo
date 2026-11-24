@@ -36,23 +36,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// seedAddressUtxoAt stores the body of an output of amount paying addr, for a
+// test that commits the output's lifecycle to the set itself.
 func seedAddressUtxoAt(
 	t *testing.T,
 	db *database.Database,
 	addr lcommon.Address,
 	txIdSeed byte,
-	addedSlot uint64,
 	amount uint64,
 ) []byte {
 	t.Helper()
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		PaymentKey: addr.PaymentKeyHash().Bytes(),
-		AddedSlot:  addedSlot,
-		Amount:     dbtypes.Uint64(amount),
-	}))
 	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: addr,
 		OutputAmount:  amount,
@@ -101,10 +95,10 @@ func TestQueryShelleyUtxoByAddress_PinnedPointAnswersAtThatPoint(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	spentLater := seedAddressUtxoAt(t, db, addr, 0x01, 100, 1_000_000)
-	seedAddressUtxoAt(t, db, addr, 0x02, 100, 2_000_000)
-	seedAddressUtxoAt(t, db, addr, 0x03, 600, 3_000_000)
-	spentBefore := seedAddressUtxoAt(t, db, addr, 0x04, 100, 4_000_000)
+	spentLater := seedAddressUtxoAt(t, db, addr, 0x01, 1_000_000)
+	seedAddressUtxoAt(t, db, addr, 0x02, 2_000_000)
+	seedAddressUtxoAt(t, db, addr, 0x03, 3_000_000)
+	spentBefore := seedAddressUtxoAt(t, db, addr, 0x04, 4_000_000)
 	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
 		100: {{Added: []UtxoOutput{
 			{Ref: models.UtxoId{Hash: spentLater}, Cbor: queryTestOutputCBOR(t, db, spentLater, 0)},
@@ -195,7 +189,7 @@ func TestPinnedUtxoAddressAndRefQueriesFailClosedWithoutSet(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txID := seedAddressUtxoAt(t, db, addr, 0x66, 100, 1_000_000)
+	txID := seedAddressUtxoAt(t, db, addr, 0x66, 1_000_000)
 	at := QueryPoint{Slot: 300, Hash: bytes.Repeat([]byte{0x33}, 32)}
 
 	_, err = ls.queryShelleyUtxoByAddress(
@@ -420,7 +414,7 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 		nil,
 	)
 	require.NoError(t, err)
-	spent := seedAddressUtxoAt(t, db, addr, 0x05, 100, 5_000_000)
+	spent := seedAddressUtxoAt(t, db, addr, 0x05, 5_000_000)
 
 	// The set journals blocks in chain order: the output's block, the pinned
 	// block, then the block that spends the output.

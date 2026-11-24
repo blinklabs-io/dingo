@@ -172,38 +172,6 @@ func TestLeiosBoundaryStakeReadsFollowTheEffectiveOrder(t *testing.T) {
 	}
 }
 
-// With every graduated family drained, the statement guard armed and the
-// store's reads hidden, the four reads over the same closures are answered
-// without a read of the store.
-func TestLeiosBoundaryStakeReadsAnswerFromTheSetOnceEveryFamilyIsDrained(
-	t *testing.T,
-) {
-	t.Parallel()
-	h := newP5Harness(t, nil, nil)
-	s := h.scenario
-	s.ConfigureLeiosValidator()
-	fixture, err := h.store.GetBlockNoncesInSlotRange(0, math.MaxInt64, nil)
-	require.NoError(t, err)
-	s.StageNoncesInSet(fixture)
-	s.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-	s.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
-	s.CertifyLeios()
-	slots := s.CertifiedBoundaryStake(false)
-
-	s.InstallDrainedSources()
-	drainEveryGraduatedFamily(t, h)
-	requireEveryGraduatedFamilyDrained(t, h)
-	reached, hide := s.HideStoreReads(boundaryStakeReads...)
-	hide(true)
-	for _, slot := range []uint64{slots.Snapshot, slots.Current} {
-		got, err := readLeiosBoundary(t, s.LedgerDB(), slots.Pools, slot)
-		require.NoError(t, err, "slot %d", slot)
-		requireLeiosBoundaryFigures(t, slots, got, slot == slots.Current)
-	}
-	require.Zero(t, reached(), "a read reached the metadata store")
-	require.Empty(t, h.guard.Trips(), "a drained table was read")
-}
-
 // A closure applied through LedgerDelta.apply, as block processing applies
 // one, reaches the set with the slot it takes effect at: its created and
 // spent outputs as closure effects, and its registrations, delegations and

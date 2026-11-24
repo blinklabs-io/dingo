@@ -48,6 +48,7 @@ var loadedMarkers = [][]byte{
 	witnessSlotsKey,
 	legacyWitnessSlotsKey, rewardBlocksKey, legacyRewardBlocksKey,
 	rewardInputsKey, rewardDerivedKey, closureUtxoKey, delegationsKey,
+	txIndexKey,
 	importedBlocksKey, drepHistoryLoadedKey, rewardRecordsKey,
 	inactivityKey, ratifyPendingKey,
 }
@@ -124,6 +125,7 @@ var (
 		{WitnessTag},
 		{RewardBlocksTag},
 		{ClosureUtxoTag},
+		{TxIndexTag},
 		{DelegationTag},
 		{RewardStakeInputTag},
 		{RewardPoolInputTag},

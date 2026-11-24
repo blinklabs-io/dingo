@@ -48,8 +48,8 @@ type ReimportConfig struct {
 	DB        *database.Database
 	// CardanoNodeConfig supplies era epoch lengths to the ledger import.
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// UtxoSet receives the ledger state; the database drained families into
-	// it, so the import must be able to load them back.
+	// UtxoSet receives the ledger state; the database holds none of it, so
+	// the import must be able to load it back.
 	UtxoSet ledgerstate.CatchUpLoader
 	// Commit, when set, runs once the import has loaded UtxoSet and before the
 	// run is marked finished. It makes the loaded set the node's live set: the
@@ -128,18 +128,18 @@ func ReimportLedgerState(
 	if limit <= 0 {
 		limit = defaultReimportArtifacts
 	}
-	if err := cfg.DB.DeleteSyncState(
+	if err := cfg.DB.DeleteChainState(
 		database.LedgerReimportSwappedSyncKey, nil,
 	); err != nil {
 		return ocommon.Point{}, fmt.Errorf("clearing the re-import swap mark: %w", err)
 	}
-	if err := cfg.DB.SetSyncState(
+	if err := cfg.DB.SetChainState(
 		database.LedgerReimportSyncKey, "1", nil,
 	); err != nil {
 		return ocommon.Point{}, fmt.Errorf("marking the re-import in progress: %w", err)
 	}
-	if err := cfg.DB.SetSyncState(
-		"sync_status", syncStatusInProgress, nil,
+	if err := cfg.DB.SetChainStateSynced(
+		database.SyncStatusKey, syncStatusInProgress,
 	); err != nil {
 		return ocommon.Point{}, fmt.Errorf("marking the re-import in progress: %w", err)
 	}
@@ -194,7 +194,7 @@ func ReimportLedgerState(
 				)
 			}
 		}
-		if err := cfg.DB.SetSyncState(
+		if err := cfg.DB.SetChainState(
 			database.LedgerReimportSwappedSyncKey, database.LedgerReimportPointMark(point), nil,
 		); err != nil {
 			return ocommon.Point{}, fmt.Errorf("recording the swapped live UTxO set: %w", err)
@@ -287,7 +287,7 @@ func blocksStoredToBoundary(
 ) error {
 	slot, hash, err := mithrilLedgerAnchor(db)
 	if err != nil {
-		slotText, gerr := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+		slotText, gerr := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 		if gerr == nil && slotText == "" {
 			return nil
 		}
@@ -348,7 +348,7 @@ func finishReimport(
 			tip.Point.Slot, point.Slot,
 		)
 	}
-	prev, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	prev, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	if err != nil {
 		return err
 	}
@@ -365,14 +365,14 @@ func finishReimport(
 // node itself started and did not finish. The node runs it again at start, so
 // no sync command is needed to finish it.
 func ReimportInterrupted(db *database.Database) (bool, error) {
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	if err != nil {
 		return false, fmt.Errorf("reading sync_status: %w", err)
 	}
 	if status != syncStatusInProgress {
 		return false, nil
 	}
-	active, err := db.GetSyncState(database.LedgerReimportSyncKey, nil)
+	active, err := db.GetChainState(database.LedgerReimportSyncKey, nil)
 	if err != nil {
 		return false, fmt.Errorf("reading the re-import mark: %w", err)
 	}
@@ -385,7 +385,7 @@ func clearReimportMarks(db *database.Database) error {
 		database.LedgerReimportSyncKey,
 		database.LedgerReimportSwappedSyncKey,
 	} {
-		if err := db.DeleteSyncState(key, nil); err != nil {
+		if err := db.DeleteChainState(key, nil); err != nil {
 			return fmt.Errorf("clearing the re-import mark: %w", err)
 		}
 	}
@@ -393,12 +393,15 @@ func clearReimportMarks(db *database.Database) error {
 }
 
 func setMithrilLedgerAnchor(db *database.Database, point ocommon.Point) error {
+	if err := db.FollowImportedLedgerStateBoundaryRow(point); err != nil {
+		return err
+	}
 	return db.SetImportedLedgerStateBoundary(point, nil)
 }
 
 // mithrilLedgerAnchor reads the stable ledger point a Mithril import recorded.
 func mithrilLedgerAnchor(db *database.Database) (uint64, []byte, error) {
-	slotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	slotText, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("reading Mithril ledger slot: %w", err)
 	}
@@ -411,7 +414,7 @@ func mithrilLedgerAnchor(db *database.Database) (uint64, []byte, error) {
 	if err != nil {
 		return 0, nil, fmt.Errorf("parsing Mithril ledger slot: %w", err)
 	}
-	hashText, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	hashText, err := db.GetChainState(mithrilLedgerHashSyncKey, nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("reading Mithril ledger hash: %w", err)
 	}

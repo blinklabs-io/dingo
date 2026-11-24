@@ -23,11 +23,13 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -60,7 +62,7 @@ func setupLifecycleTestChain(
 	t *testing.T,
 	tmpDir string,
 	numBlocks int,
-) (db *database.Database, points []ocommon.Point) {
+) (db *database.Database, set *badgerutxo.Store, points []ocommon.Point) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: tmpDir})
 	require.NoError(t, err)
@@ -82,23 +84,26 @@ func setupLifecycleTestChain(
 
 	// These blocks are added directly to the chain index (c.AddBlock, inside
 	// loadBlocksFromImmutable) rather than run through LedgerState's normal
-	// block-application path, so no block_nonce row exists for any of them --
-	// unlike a really-synced chain, which writes one for every applied block
-	// including a per-epoch checkpoint. Without at least one checkpoint here,
-	// TestDatabaseLifecycleTruncateRealChain's truncate hits
-	// database.TruncateAfterSlot's checkpoint check with nothing to satisfy
-	// it -- correctly refused, but for this harness gap rather than a genuine
-	// unreconstructable truncate. The nonce value is a fixed placeholder, not
-	// folded from real VRF output: these tests assert lifecycle/truncate
-	// mechanics, not nonce correctness, and nothing here runs a LedgerState
-	// to fold or verify it.
-	require.NoError(t, db.SetBlockNonce(
-		blocks[0].Hash().Bytes(),
-		blocks[0].SlotNumber(),
-		bytes.Repeat([]byte{0x5c}, 32),
-		true, // isCheckpoint
-		nil,
-	))
+	// block-application path, so the live UTxO set holds no nonce for any of
+	// them -- unlike a really-synced chain, which records one for every
+	// applied block including a per-epoch checkpoint. Without at least one
+	// checkpoint here, a truncate is refused for this harness gap rather than
+	// for a genuinely unreconstructable target. The nonce value is a fixed
+	// placeholder: these tests assert lifecycle mechanics, not nonce
+	// correctness.
+	set, err = badgerutxo.Open(badgerutxo.DirFor(tmpDir))
+	require.NoError(t, err)
+	closing := set
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		_ = target.Close()
+	})
+	require.NoError(t, set.LoadNonces([]badgerutxo.Nonce{{
+		Point:      pts[0],
+		Nonce:      bytes.Repeat([]byte{0x5c}, 32),
+		Checkpoint: true,
+	}}))
 
 	last := blocks[len(blocks)-1]
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -106,7 +111,7 @@ func setupLifecycleTestChain(
 		BlockNumber: last.BlockNumber(),
 	}, nil))
 
-	return db, pts
+	return db, set, pts
 }
 
 // TestDatabaseLifecycleSnapshotRestoreRoundTrip verifies that a snapshot
@@ -115,7 +120,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	const numBlocks = 12
-	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
+	db, set, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
@@ -127,9 +132,12 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 		"test",
 		"badger",
 		"sqlite",
+		lifecycle.WithUtxoSetBackup(set),
 	)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
+	require.Empty(t, manifest.MetadataSHA256)
+	require.NotEmpty(t, manifest.UtxoSetSHA256)
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoredManifest, err := lifecycle.Restore(
@@ -137,7 +145,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err)
-	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
+	require.Equal(t, manifest.TipSlot, restoredManifest.TipSlot)
 
 	restoredDB, err := dbtest.NewDatabase(
 		t,
@@ -160,6 +168,15 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	restoredTip, err := restoredDB.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, restoredTip.Point.Slot)
+
+	restoredSet, err := dblifecycle.OpenUtxoSet(restoredDir)
+	require.NoError(t, err)
+	require.NotNil(t, restoredSet, "the live UTxO set was not restored")
+	defer restoredSet.Close()
+	nonce, err := dblifecycle.TruncateUtxoSet{Store: restoredSet}.
+		BlockNonceAt(points[0])
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x5c}, 32), nonce)
 }
 
 // TestDatabaseLifecycleTruncateRealChain is the direct CIP-0135
@@ -174,7 +191,7 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	t.Parallel()
 
 	const numBlocks = 12
-	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
+	db, set, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 
 	targetIndex := numBlocks / 2
@@ -187,9 +204,9 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 		db,
 		target,
 		0,
-		false,
-		0,
+		lifecycle.WithTruncateUtxoSet(dblifecycle.TruncateUtxoSet{Store: set}),
 	)
+
 	require.NoError(t, err)
 	// Blocks strictly after targetIndex, up to and including the last one
 	// (numBlocks-1): a difference between contiguous IDs, so it's exact
@@ -224,11 +241,11 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 	t.Parallel()
 
 	const numBlocks = 12
-	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
+	db, set, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 
 	boundaryIndex := numBlocks / 2
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		"mithril_ledger_slot",
 		strconv.FormatUint(points[boundaryIndex].Slot, 10),
 		nil,
@@ -244,9 +261,9 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 		db,
 		beforeBoundary,
 		0,
-		false,
-		0,
+		lifecycle.WithTruncateUtxoSet(dblifecycle.TruncateUtxoSet{Store: set}),
 	)
+
 	require.Error(t, err)
 	// Not just any error: specifically the Mithril-boundary rejection,
 	// wrapped in ErrTruncateNotStarted (nothing on disk was touched) --

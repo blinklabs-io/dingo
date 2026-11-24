@@ -45,13 +45,13 @@ func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 	ldb := scenario.LedgerDB()
 	decode := func([]byte) (lcommon.ProtocolParameters, error) { return nil, nil }
 	_, err = ldb.GetPParams(1, 6, decode, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.ListPParamsForEra(6, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPParamUpdates(1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.ForecastPParamUpdates(
 		2,
 		1,
@@ -65,12 +65,12 @@ func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 		},
 		nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, err = ldb.ComputeAndApplyPParamUpdates(
 		t.Context(), 1, 2, 6, 1, &conway.ConwayProtocolParameters{},
 		nil, nil, nil, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 
 	// The database's own reads fail the same way, and its writes are
 	// refused.
@@ -84,15 +84,15 @@ func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.ErrorIs(t, err, database.ErrPParamsSourceNotLoaded)
 	require.ErrorIs(
 		t, scenario.DB.SetPParamUpdate([]byte{1}, []byte{0xa0}, 1, 1, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 	require.ErrorIs(
 		t, scenario.DB.DeletePParamsAfterSlot(t.Context(), 1, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 	require.ErrorIs(
 		t, scenario.DB.DeletePParamUpdatesAfterSlot(t.Context(), 1, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 	require.ErrorIs(
 		t,
@@ -101,11 +101,11 @@ func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 			"true",
 			nil,
 		),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 	require.ErrorIs(
 		t,
 		scenario.DB.DeleteSyncState(database.SyntheticV2CostModelSyncKey, nil),
-		database.ErrFamilyDrained,
+		database.ErrNoMetadataStore,
 	)
 }

@@ -72,6 +72,19 @@ func ledgerAt(t *testing.T, tip ocommon.Point) *database.Database {
 	return db
 }
 
+// releasedAt is ledgerAt for a v0.94.2 database, whose metadata store holds
+// the ledger state a test seeds for the set to load.
+func releasedAt(t *testing.T, tip ocommon.Point) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
+	return db
+}
+
 func neverResume(context.Context, ocommon.Point) (bool, error) {
 	return false, nil
 }
@@ -123,15 +136,16 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 			wantErr: "rollback journal reaches back only to slot 5",
 		},
 		{
-			name:      "not authoritative, rebuilt from the store",
+			name:      "not authoritative, journal point",
 			cfg:       utxoset.Config{},
 			ledgerTip: slotPoint(5),
-			wantSlot:  5, wantCount: 0,
+			wantSlot:  5, wantCount: 5,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openRecoverySet(t, tc.cfg)
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
 			if tc.prune != 0 {
 				require.NoError(t, set.PruneHistory(tc.prune))
@@ -173,6 +187,7 @@ func TestReconcileRewindsASetThatFailedAnUpdate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openRecoverySet(t, utxoset.Config{Only: true})
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
 			require.NoError(t, set.MarkUtxoSetFailed(tc.markSlot))
 			db := ledgerAt(t, slotPoint(applied))

@@ -309,18 +309,7 @@ func seedReplayOutput(
 	t.Helper()
 	txID := bytes.Repeat([]byte{id}, 32)
 	encoded := replayStakedOutputCbor(t, stakingKey, amount)
-	require.NoError(t, db.Transaction(context.Background(), true).Do(
-		func(txn *database.Txn) error {
-			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:       txID,
-				StakingKey: stakingKey,
-				Amount:     types.Uint64(amount),
-			}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
-		},
-	))
+	fxSeedOutput(t, db, txID, 0, 0, encoded)
 }
 
 // addUtxo puts a live output of amount, staked to stakingKey and created at

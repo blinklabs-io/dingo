@@ -16,12 +16,10 @@ package ledger_test
 
 import (
 	"bytes"
-	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -32,16 +30,12 @@ import (
 // graduated family can be drained from it.
 func newDrainableRewardRoundRun(
 	t *testing.T,
-	guard *statedrain.TripGuard,
+	g metadata.StatementGuard,
 ) *rewardBlocksRun {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	var g metadata.StatementGuard
-	if guard != nil {
-		g = guard
-	}
 	scenario := ledger.NewRewardBlocksScenarioForTest(
 		t, set, "set", g,
 		ledger.RewardBlocksOptions{Imported: true, Round: true},
@@ -69,25 +63,13 @@ func newDrainableRewardRoundRun(
 // family drained and the statement guard armed.
 func drainedRewardRoundRun(
 	t *testing.T,
-) (*rewardBlocksRun, *statedrain.TripGuard) {
+) *rewardBlocksRun {
 	t.Helper()
-	guard := statedrain.NewTripGuard()
-	r := newDrainableRewardRoundRun(t, guard)
+	r := newDrainableRewardRoundRun(t, nil)
 	s := r.scenario
-	fixture, err := dbadapter.New(s.DB).GetBlockNoncesInSlotRange(
-		0, math.MaxInt64, nil,
-	)
-	require.NoError(t, err)
-	s.StageNoncesInSet(fixture)
 	s.InstallDrainedSources()
-	src := rewardBlocksDrainSource{r: r}
-	// The seeded reward basis gives the stored pparams a decentralization the
-	// set did not see when it counted the epoch's blocks, so the block-count
-	// comparison is left out; the rows the recheck reads are the ones under test.
-	require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{s.DB, s.DrainFamilies}, Set: src, Guard: guard,
-	}, statedrain.Graduated(src)))
-	return r, guard
+	r.set.ServeLedgerOnly()
+	return r
 }
 
 func requireMemberUnspendable(
@@ -119,13 +101,12 @@ func TestEveryGraduatedFamilyDrainedRewardRoundRechecksRegistrations(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r, guard := drainedRewardRoundRun(t)
+	r := drainedRewardRoundRun(t)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.DeregisterMemberInSet()
 	s.Boundary()
 	requireMemberUnspendable(t, s)
-	require.Empty(t, guard.Trips(), "a drained table was touched")
 }
 
 // The same after a rollback between the precompute and the boundary, which
@@ -135,7 +116,7 @@ func TestEveryGraduatedFamilyDrainedRewardRoundRechecksAfterARollback(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r, guard := drainedRewardRoundRun(t)
+	r := drainedRewardRoundRun(t)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.RollbackBeforeBoundary()
@@ -143,20 +124,4 @@ func TestEveryGraduatedFamilyDrainedRewardRoundRechecksAfterARollback(
 	s.Tip(11)
 	s.Boundary()
 	requireMemberUnspendable(t, s)
-	require.Empty(t, guard.Trips(), "a drained table was touched")
-}
-
-// With the reward families drained, a precompute chunk writes only the live
-// UTxO set, so a block commit proceeds while the chunk's transaction is open
-// rather than waiting for the metadata store's write connection.
-func TestDrainedRewardPrecomputeChunkLeavesTheWriteConnectionFree(
-	t *testing.T,
-) {
-	t.Parallel()
-	r, guard := drainedRewardRoundRun(t)
-	committed, err := r.scenario.PrecomputeRoundWithBlockCommit()
-	require.NoError(t, err)
-	require.True(t, committed,
-		"a block commit waited for the precompute chunk's write connection")
-	require.Empty(t, guard.Trips(), "a drained table was touched")
 }

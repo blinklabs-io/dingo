@@ -318,6 +318,7 @@ func (n *Node) startPoolProducer(
 		creds,
 		n.poolMetricsRegistry(pp.poolID),
 		n.slotArbiterFor(pp.poolID),
+		pp.keys.agentShared,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize block forger: %w", err)

@@ -59,7 +59,9 @@ func openCheckpointSet(t *testing.T, cfg utxoset.Config) *utxoset.Set {
 	t.Helper()
 	cfg.CheckpointDir = filepath.Join(t.TempDir(), "checkpoints")
 	cfg.CheckpointKeep = 2
-	return openRecoverySet(t, cfg)
+	set := openRecoverySet(t, cfg)
+	require.NoError(t, set.StartEmptyForTest())
+	return set
 }
 
 // TestWriteCheckpointKeepsTheNewestAndRefusesAFailedSet requires a rolling
@@ -175,7 +177,7 @@ func TestReconcileRestoresACheckpointWhenTheJournalCannotHelp(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openCheckpointSet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set.ServeLedgerOnly()
 			applyRange(t, set, 1, 4)
 			cp, err := set.WriteCheckpoint(t.Context())
 			require.NoError(t, err)
@@ -275,7 +277,7 @@ func TestReconcileReimportsFromMithrilWithoutACheckpoint(t *testing.T) {
 			t.Run(v.name+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
 				set := openCheckpointSet(t, utxoset.Config{Only: true})
-				set.SetDrainedFamilies(drainedMask(true))
+				set.ServeLedgerOnly()
 				applyRange(t, set, 1, 4)
 				if v.write {
 					_, err := set.WriteCheckpoint(t.Context())
@@ -309,7 +311,7 @@ func TestReconcileReimportsFromMithrilWithoutACheckpoint(t *testing.T) {
 func TestReconcileSkipsACheckpointAboveTheLedgerTip(t *testing.T) {
 	t.Parallel()
 	set := openCheckpointSet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set.ServeLedgerOnly()
 	applyRange(t, set, 1, 2)
 	_, err := set.WriteCheckpoint(t.Context())
 	require.NoError(t, err)
@@ -342,7 +344,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openRecoverySet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set.ServeLedgerOnly()
 			applySlots(t, set, 8)
 			ledgerTip := tc.setup(t, set)
 			var asked []uint64
@@ -361,7 +363,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 	t.Run("a directory with nothing usable", func(t *testing.T) {
 		t.Parallel()
 		set := openCheckpointSet(t, utxoset.Config{Only: true})
-		set.SetDrainedFamilies(drainedMask(true))
+		set.ServeLedgerOnly()
 		applySlots(t, set, 8)
 		require.NoError(t, set.PruneHistory(8))
 		err := set.Reconcile(
@@ -379,7 +381,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 func TestReconcileReportsAFailedReimport(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set.ServeLedgerOnly()
 	applySlots(t, set, 8)
 	require.NoError(t, set.PruneHistory(8))
 	cause := errors.New("the aggregator serves no snapshot at or below the tip")
@@ -463,7 +465,7 @@ func TestFailedCheckpointRecoveryLeavesTheSetUntouched(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			set := openCheckpointSet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set.ServeLedgerOnly()
 			applyRange(t, set, 1, 4)
 			cp, err := set.WriteCheckpoint(t.Context())
 			require.NoError(t, err)
@@ -495,7 +497,7 @@ func TestFailedCheckpointRecoveryLeavesTheSetUntouched(t *testing.T) {
 func TestReconcileFinishesAnInterruptedRestore(t *testing.T) {
 	t.Parallel()
 	set := openCheckpointSet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set.ServeLedgerOnly()
 	applyRange(t, set, 1, 4)
 	cp, err := set.WriteCheckpoint(t.Context())
 	require.NoError(t, err)
@@ -560,7 +562,7 @@ func TestRecoveryLogsAnErrorFromACommittedResume(t *testing.T) {
 			var logs syncBuffer
 			logger := slog.New(slog.NewTextHandler(&logs, nil))
 			set := openCheckpointSet(t, utxoset.Config{Only: true, Logger: logger})
-			set.SetDrainedFamilies(drainedMask(true))
+			set.ServeLedgerOnly()
 			applyRange(t, set, 1, 4)
 			if tc.ckpt {
 				_, err := set.WriteCheckpoint(t.Context())
@@ -696,7 +698,7 @@ func TestRecoveryRefusesACheckpointThatCarriesAFailureMark(t *testing.T) {
 	set := openRecoverySet(t, utxoset.Config{
 		Only: true, CheckpointDir: dir, CheckpointKeep: 2,
 	})
-	set.SetDrainedFamilies(drainedMask(true))
+	set.ServeLedgerOnly()
 	applyRange(t, set, 1, 8)
 	require.NoError(t, set.PruneHistory(8))
 

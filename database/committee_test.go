@@ -19,16 +19,13 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCommitteeQuorumZeroPersistsAndClearRemainsAbsent(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	db := newIndexerDB(t)
 	require.NoError(
 		t,
 		db.SetCommitteeQuorum(context.Background(), big.NewRat(0, 1), 10, nil),

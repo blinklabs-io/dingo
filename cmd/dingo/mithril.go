@@ -587,13 +587,6 @@ func runMithrilSyncWithRepair(
 					Percent: p.Percent,
 				})
 			}
-		case mithril.PhaseIndexRebuild:
-			// SyncProgress carries the rebuild duration as Description = d.String(),
-			// which is guaranteed round-trippable by time.ParseDuration.
-			if d, err := time.ParseDuration(p.Description); err == nil &&
-				d > 0 {
-				metrics.recordIndexRebuildDuration(d)
-			}
 		case mithril.PhasePostLedger:
 			// Phase-active gauge is updated above; no additional
 			// per-phase Prometheus counter for this phase in the CLI.
@@ -619,7 +612,6 @@ func runMithrilSyncWithRepair(
 		return fmt.Errorf("open live UTxO set: %w", err)
 	}
 	defer utxoSet.Close()
-	invalidateGovernance := utxoSet.InvalidateGovernance
 
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                 network,
@@ -650,8 +642,6 @@ func runMithrilSyncWithRepair(
 		Logger:          logger,
 		OnProgress:      onProgress,
 		Metrics:         metrics.pipeline,
-
-		InvalidateUtxoSetGovernance: invalidateGovernance,
 	})
 	if err != nil {
 		return err

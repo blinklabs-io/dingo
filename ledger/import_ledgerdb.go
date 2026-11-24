@@ -492,6 +492,16 @@ func (d importRewardBlocksDB) GetPoolBlockIssuersInSlotRange(
 	return nil, nil
 }
 
+// SumTransactionFeesInSlotRange returns no fee for the same reason: the
+// snapshot's ADA pots carry the fees of the anchor's epoch, and the ledger
+// counts the fees of every block it applies after the import.
+func (d importRewardBlocksDB) SumTransactionFeesInSlotRange(
+	_, _ uint64,
+	_ ledgerdb.Txn,
+) (uint64, error) {
+	return 0, nil
+}
+
 func (d importRewardBlocksDB) GetImportedPoolBlockCounts(
 	epoch uint64,
 	_ ledgerdb.Txn,

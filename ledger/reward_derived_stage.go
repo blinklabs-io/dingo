@@ -259,7 +259,7 @@ func (s stagingLedgerDB) claimPendingFromSet(
 		return nil, err
 	}
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	if len(key) == 0 {
 		return nil, nil
@@ -276,8 +276,8 @@ func (s stagingLedgerDB) claimPendingFromSet(
 	return out, nil
 }
 
-// claimUnfoldedFromSet is ClaimUnfoldedRewardCredits for a drained family:
-// up to limit unfolded credits of one credited round, in credential order.
+// claimUnfoldedFromSet is ClaimUnfoldedRewardCredits read from the set: up
+// to limit unfolded credits of one credited round, in credential order.
 func (s stagingLedgerDB) claimUnfoldedFromSet(
 	txn ledgerdb.Txn,
 	epoch uint64,
@@ -288,7 +288,7 @@ func (s stagingLedgerDB) claimUnfoldedFromSet(
 		return nil, err
 	}
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	credited, err := s.ls.rewardRoundSeenBy(r, txn, epoch)
 	if err != nil || !credited || limit <= 0 {

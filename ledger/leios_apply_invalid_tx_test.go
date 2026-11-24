@@ -91,13 +91,7 @@ func requireFixtureUtxo(
 	msg string,
 ) {
 	t.Helper()
-	utxo, err := fx.db.Metadata().GetUtxo(txId, index, nil)
-	require.NoError(t, err)
-	if want {
-		require.NotNil(t, utxo, msg)
-	} else {
-		require.Nil(t, utxo, msg)
-	}
+	require.Equal(t, want, outputLiveIn(t, fx.ls, txId, index), msg)
 }
 
 // A certified endorser transaction marked invalid spends its collateral and

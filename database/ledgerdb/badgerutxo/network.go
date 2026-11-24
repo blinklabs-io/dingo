@@ -149,6 +149,7 @@ func (s *Store) NetworkStateAt(slot uint64) (NetworkStateRow, bool, error) {
 	var found bool
 	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{NetworkStateTag}
 		opts.Reverse = true
 		it := txn.NewIterator(opts)

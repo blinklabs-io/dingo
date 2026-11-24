@@ -452,16 +452,14 @@ func (ls *LedgerState) drepStaging(
 	return ar, r
 }
 
-// drepsUnserved is the error of a DRep write the set cannot stage: when the
-// DReps family is drained the SQL write was skipped, so the write would be
-// lost. Otherwise the metadata store holds it and there is nothing to report.
+// drepsUnserved is the error of a DRep write the set cannot stage: no SQL
+// row holds it, so the write would be lost.
 func (s stagingLedgerDB) drepsUnserved() error {
-	return drainedUnserved(nodesettings.FamilyDReps)
+	return ledgerStateUnserved(nodesettings.FamilyDReps)
 }
 
-// failDrepStaging stops the set following the ledger and, when the DReps
-// family is drained and the set alone holds the write, returns err so the
-// write is not lost.
+// failDrepStaging stops the set following the ledger and, since the set
+// alone holds the write, returns err so the write is not lost.
 func (s stagingLedgerDB) failDrepStaging(err error) error {
 	s.ls.failAccountStaging(err)
 	return err
@@ -842,7 +840,7 @@ func (s stagingLedgerDB) bumpDrainedDormantDRepExpiries(
 ) (int, error) {
 	_, r := s.ls.drepStaging(txn)
 	if r == nil {
-		return 0, drainedUnserved(nodesettings.FamilyDReps)
+		return 0, ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	var staged []DormancyChange
 	var ceiling *uint64

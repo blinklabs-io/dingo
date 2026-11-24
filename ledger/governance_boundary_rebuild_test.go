@@ -381,15 +381,10 @@ func applyLiveSetChange(
 	f *treasuryRolloverFixture,
 	slot uint64,
 	evt UtxoEvent,
-	stakingKey []byte,
 ) {
 	t.Helper()
 	evt.Point = ocommon.Point{Slot: slot, Hash: repeatByte(32, byte(slot))}
 	require.NoError(t, f.ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{evt}))
-	require.NoError(t, f.db.RefreshRewardLiveStakeRefs(
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, stakingKey)},
-		slot, nil,
-	))
 }
 
 // liveSetState is what a rebuild must leave alone in the live UTxO set: its
@@ -447,7 +442,6 @@ func TestRebuildGovernanceBoundarySnapshotRestoresSpentLiveOutput(
 			applyLiveSetChange(
 				t, f, f.currentEpoch.StartSlot+90,
 				UtxoEvent{Added: []UtxoOutput{{Ref: id, Cbor: encoded}}},
-				stakeKey,
 			)
 		},
 		afterBoundary: func(
@@ -459,7 +453,6 @@ func TestRebuildGovernanceBoundarySnapshotRestoresSpentLiveOutput(
 			applyLiveSetChange(
 				t, f, epoch.StartSlot+50,
 				UtxoEvent{Removed: []models.UtxoId{spentID}},
-				stakeKey,
 			)
 		},
 	})

@@ -3,7 +3,7 @@
 Dingo includes a built-in **Model Context Protocol (MCP)** server that allows
 Large Language Models (LLMs) and AI agents (such as Claude Code CLI, Claude
 Desktop, Cursor, and custom agents) to safely inspect the live Cardano
-blockchain and query Dingo's SQLite metadata directly.
+blockchain and query Dingo's SQLite IndexerDB directly.
 
 ---
 
@@ -75,7 +75,8 @@ sessions remain until then.
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
 - **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain`
-  (query plan analysis), `sqlite_table_schema` (DDL schema inspection).
+  (query plan analysis), `sqlite_table_schema` (DDL schema inspection), all over
+  the IndexerDB; a node without an IndexerDB has no SQL store to query.
 - **Cardano Domain Tools (18)**:
   - Consensus & Chain Tip: `get_cardano_tip`, `get_block`, `get_transaction`.
   - Ledger, Protocol & UTxO: `get_utxos`, `get_account`, `get_asset_info`,
@@ -107,7 +108,8 @@ discovered non-internal SQLite table, so the total varies by database:
 Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and
 `prompts/get`:
 - `diagnose_node_health`: Reported tip and sync status, minor 69 fingerprint,
-  and any forge fence in `sync_state`.
+  and the IndexerDB's sync progress. The forge fence is block-store chain
+  state that no MCP tool reads.
 - `simulate_and_diagnose_tx`: Pre-flight dry-run of Plutus redeemers, ExUnits,
   fees, and datums.
 - `audit_pool_rewards`: Recorded block, stake, pledge, cost, margin,
@@ -253,7 +255,7 @@ Cardano domains:
 | **Pool Performance** | *"Inspect recent performance, pledge, and rewards for pool 003A75D8..."* | `get_pool_performance` | `{"pool_id": "003A75D8...", "limit": 10}` | Reads recorded epoch reward and stake snapshots; `limit` defaults to 10 and is capped at 50 epochs. Stake and pledge amounts are lovelace. |
 | **Delegator Status** | *"What account fields are indexed for this stake key?"* | `get_account` | `{"stake_address_or_credential": "stake_test1..."}` | Decodes the Bech32 stake credential and returns its stored account row. |
 | **Epoch Randomness** | *"What are the active epoch randomness nonces for slot leader checks?"* | `get_epoch_summary` | `{}` | Returns epoch boundary summary, active epoch number, and candidate block counts. |
-| **OpCert Sequences** | *"Verify pool operational certificate counter sequence numbers."* | `sqlite_query` | `{"query": "SELECT pool_key_hash, latest_op_cert_sequence FROM pool LIMIT 5"}` | Scans pool state table for OpCert sequence to verify anti-rollback forge fences. |
+| **OpCert Sequences** | *"Verify pool operational certificate counter sequence numbers."* | `sqlite_query` | `{"query": "SELECT pool_key_hash, latest_op_cert_sequence FROM pool LIMIT 5"}` | Reads the IndexerDB's pool rows for each pool's latest operational certificate counter. |
 | **Node Identity** | *"How does Dingo identify itself and comply with Minor 69?"* | `get_node_info` | `{"topic": "identity"}` | Returns official markdown guide detailing pure-Go block header minting and identity. |
 
 ### 3. Decentralized Exchange & Liquidity
@@ -311,8 +313,8 @@ The complete lifecycle of a request consists of 6 distinct phases:
    - The MCP dispatcher routes the call:
      - **Cardano Domain Tools**: Access immutable in-memory ledger state or
        compiled pure-Go Ouroboros APIs.
-     - **SQLite Tools**: Execute queries against `metadata.sqlite` using a
-       dedicated read-only connection pool (`PRAGMA query_only = ON`).
+     - **SQLite Tools**: Execute queries against the IndexerDB's SQLite store
+       using a dedicated read-only connection pool (`PRAGMA query_only = ON`).
 5. **Phase 5: Output Formatting & Sanitization**:
    - Binary hashes (TX IDs, pool hashes, policy IDs) are formatted into
      uppercase hex strings.
@@ -342,9 +344,9 @@ DINGO_PLUGINS_API_MCP_CONFIG_PORT=8088 ./dingo serve \
   --mcp-provider builtin
 ```
 
-> **Note**: SQL-backed tools require the SQLite metadata provider. Live ledger
-> tools remain available with other metadata providers; `storage-mode` controls
-> indexing depth independently of the provider.
+> **Note**: SQL-backed tools require an IndexerDB on the SQLite metadata
+> provider, which only API storage mode keeps. A core node has no SQL store;
+> live ledger tools remain available on every node.
 
 To explicitly disable MCP:
 ```bash
@@ -698,21 +700,21 @@ The Dingo MCP server provides 21 specialized tools:
 | Tool | Purpose | Key Parameters |
 | --- | --- | --- |
 | `get_node_info` | Retrieve Dingo node architecture, FAQs, block-production identity (minor 69), storage modes, and documentation | `topic` (string, optional: `'identity'`, `'faq'`, `'architecture'`) |
-| `sqlite_query` | Run read-only SQL `SELECT` against metadata SQLite | `query` (string, required), `limit` (int, default 50), `offset` (int) |
+| `sqlite_query` | Run read-only SQL `SELECT` against the IndexerDB's SQLite store; a node without an IndexerDB has none to query | `query` (string, required), `limit` (int, default 50), `offset` (int) |
 | `sqlite_table_schema` | Inspect table columns, types, primary keys, and indexes | `table_name` (string, required) |
-| `sqlite_explain` | Run `EXPLAIN QUERY PLAN` to audit index usage and query performance | `query` (string, required) |
+| `sqlite_explain` | Run `EXPLAIN QUERY PLAN` against the IndexerDB to audit index usage and query performance | `query` (string, required) |
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |
-| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials) |
-| `get_account` | Query the stored stake-account row, including indexed delegation, reward, and DRep fields | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
+| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential. With an IndexerDB it reads the indexed `utxo` rows; without one it reads the ledger's live UTxO set, pages by `offset` only, and says that cursor pages and the stored row columns need an IndexerDB | `address_or_credential` (string, required), `limit`, `cursor` (full addresses, IndexerDB only; nonzero `offset` rejected), `offset` (payment credentials, and every query without an IndexerDB) |
+| `get_account` | Query the stake account from the ledger state: delegation, reward balance, DRep and active fields. Its IndexerDB row references (`id`, `certificate_id`) come from the IndexerDB, and are marked as needing one on a node without it | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
 | `get_epoch_summary` | Summary stats and boundary nonces for an epoch | `epoch` (int, optional) |
 | `resolve_datum_or_script` | Look up and decode Plutus CIP-32 datum or script metadata from hash | `hash` (string, required - 56 or 64 hex chars) |
 | `evaluate_tx` | Simulate Plutus execution units (CPU steps, memory) & fee before submission | `cbor` (string, required - hex or base64) |
 | `get_utxos_by_asset` | Kupo-style pattern matching querying unspent UTxOs holding a specific policy or asset | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex), `limit`, `offset` (at most 10,000) |
 | `get_asset_info` | Detailed Cardano native asset metadata, Token Registry info, on-chain supply, count of holding UTxOs, and CIP-25 NFT metadata | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex) |
 | `get_governance_state` | Conway CIP-1694 governance state (constitution, committee quorum, members, DReps) | `drep_credential` (optional Bech32 `drep1...` or 56-hex) |
-| `get_pool_performance` | Historical SPO reward performance, blocks, delegated stake and pledge (lovelace), and apparent performance | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |
+| `get_pool_performance` | SPO reward performance per epoch, blocks, delegated stake and pledge (lovelace), and apparent performance. The IndexerDB holds every epoch; without one the tool reads the epochs the ledger state keeps and says that older ones need an IndexerDB | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |
 | `get_protocol_parameters` | Active ledger protocol parameters (fees, min UTxO, max ExUnits, Plutus prices, governance deposits) | *none* |
 | `get_mempool_info` | Live mempool metrics (pending tx count, byte volume, saturation percentage) or tx status | `tx_hash` (optional 64-character hex), `limit` (optional, default 10, at most 50) |
 | `decode_address` | Cryptographically parse Bech32 or raw hex address into network ID and payment/stake credentials | `address` (string, required) |
@@ -946,7 +948,7 @@ interactively.
 
 | Prompt | Title | Key Arguments | Target Persona & Workflow Protocol |
 | :--- | :--- | :--- | :--- |
-| `diagnose_node_health` | Diagnose Cardano Node Sync & Health | `detailed` (optional bool) | **Node Operations Engineer**: Evaluates reported tip and sync status, identity minor 69, and any forge fence in `sync_state`. It does not assess storage health. |
+| `diagnose_node_health` | Diagnose Cardano Node Sync & Health | `detailed` (optional bool) | **Node Operations Engineer**: Evaluates reported tip and sync status, identity minor 69, and the IndexerDB's sync progress. The forge fence is block-store chain state (`forge_fence:<pool_id>`) that no MCP tool reads, and the workflow reports it as not inspected. It does not assess storage health. |
 | `simulate_and_diagnose_tx` | Simulate and Diagnose Plutus Transaction | `tx_cbor` (required hex/b64), `purpose` (optional string) | **Smart Contract Auditor**: Executes dry-run in pure-Go Plutus CEK VM via `evaluate_tx`, computes ExUnits (CPU/Memory), audits fee sufficiency, validates collateral, and checks inline datums. |
 | `audit_pool_rewards` | Audit Stake Pool Performance & Rewards | `pool_id` (required Bech32/hex), `epoch` (optional non-negative integer string) | **Staking Analyst**: Audits recorded block/reward snapshots and queries the current active account count for the pool. Account rows do not provide a delegated stake total. |
 | `track_asset_portfolio` | Track Cardano Native Asset & Circulation | `policy_id` (required 56-hex), `asset_name` (optional, max 32 bytes) | **Financial Analyst**: Reads asset metadata and paginates matching UTxOs. The asset-info count is holding UTxOs, not unique addresses; no holder concentration is calculated. |
@@ -970,7 +972,7 @@ Clients supporting MCP prompts can list and trigger these workflows directly:
     "prompts": [
       {
         "name": "diagnose_node_health",
-        "description": "Workflow to inspect the reported Dingo node tip and sync status, identity fingerprint, and any forge fence in sync_state.",
+        "description": "Workflow to inspect the reported Dingo node tip and sync status, identity fingerprint, and forge readiness.",
         "arguments": [
           {"name": "detailed", "description": "Set to 'true' to include database schema and peer connectivity checks.", "required": false}
         ]
@@ -1045,7 +1047,7 @@ Clients supporting MCP prompts can list and trigger these workflows directly:
         "role": "user",
         "content": {
           "type": "text",
-          "text": "You are a Cardano node operations engineer diagnosing the health and synchronization state of this Dingo node. Follow this step-by-step diagnostic workflow:\n\n1. Node Tip & Consensus State: Invoke `get_cardano_tip`...\n2. Operational Status & Storage Mode: Read `dingo://node/status`...\n3. Forge Fencing & Sync State: Execute `sqlite_query`...\n4. Node Identity & Protocol Compliance: Invoke `get_node_info(topic=\"identity\")`...\n5. Diagnostic Summary & Remediation: Synthesize findings into an operational brief..."
+          "text": "You are a Cardano node operations engineer diagnosing the health and synchronization state of this Dingo node. Follow this step-by-step diagnostic workflow:\n\n1. Node Tip & Consensus State: Invoke `get_cardano_tip`...\n2. Operational Status & Storage Mode: Read `dingo://node/status`...\n3. IndexerDB Sync State: Execute `sqlite_query`...\n4. Node Identity & Protocol Compliance: Invoke `get_node_info(topic=\"identity\")`...\n5. Diagnostic Summary & Remediation: Synthesize findings into an operational brief..."
         }
       }
     ]

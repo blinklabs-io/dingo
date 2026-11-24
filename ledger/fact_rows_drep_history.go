@@ -51,11 +51,11 @@ func (ls *LedgerState) drepHistory(
 ) (ledgerdb.DRepHistoryRows, error) {
 	r := ls.drepReader(nil)
 	if r == nil {
-		return ledgerdb.DRepHistoryRows{}, drainedUnserved(nodesettings.FamilyDReps)
+		return ledgerdb.DRepHistoryRows{}, ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	h, ok := ls.readSet(nil).(DRepHistoryReader)
 	if !ok {
-		return ledgerdb.DRepHistoryRows{}, drainedUnserved(nodesettings.FamilyDReps)
+		return ledgerdb.DRepHistoryRows{}, ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	loaded, err := h.DRepHistoryLoaded()
 	if err != nil {

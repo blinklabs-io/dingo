@@ -212,7 +212,9 @@ func (n *Node) rollbackIndexerForTruncate(
 	}); err != nil {
 		return fmt.Errorf("roll back indexer: %w", err)
 	}
-	return nil
+	return lifecycle.TruncateMidnightJournals(
+		ctx, db, ocommon.NewPoint(target.Slot, target.Hash), target.Number,
+	)
 }
 
 // startIndexerWriter starts the writer and wakes it on ledger tip and reward

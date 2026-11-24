@@ -17,7 +17,6 @@
 package lifecycle
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,8 +26,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -75,22 +72,11 @@ func adapterSnapshot(t *testing.T) (string, Manifest) {
 			adapterSnapshotOnce.err = err
 			return
 		}
-		db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-		if err != nil {
-			adapterSnapshotOnce.err = err
-			return
-		}
-		if err := db.BlockCreate(models.Block{
-			ID: 1, Slot: 10, Number: 1, Type: 1,
-			Hash: bytes.Repeat([]byte{0x01}, 32), Cbor: []byte{0x80},
-		}, nil); err != nil {
-			adapterSnapshotOnce.err = err
-			return
-		}
+		src := newLedgerInternalSnapshotSource(t)
+		src.opts = append(src.opts, WithManifestKey(adapterTrustKey))
 		adapterSnapshotOnce.dir = filepath.Join(root, "snap")
-		adapterSnapshotOnce.manifest, adapterSnapshotOnce.err = Snapshot(
-			t.Context(), db, adapterSnapshotOnce.dir, TriggerManual, "test",
-			"badger", "sqlite", WithManifestKey(adapterTrustKey),
+		adapterSnapshotOnce.manifest, adapterSnapshotOnce.err = src.snapshot(
+			t.Context(), adapterSnapshotOnce.dir,
 		)
 	})
 	require.NoError(t, adapterSnapshotOnce.err)
@@ -181,10 +167,10 @@ func TestRestoreThroughCloudAdaptersRefusesForgedSnapshots(t *testing.T) {
 			t.Run("tampered payload of the declared size", func(t *testing.T) {
 				t.Parallel()
 				f := newAdapterRestoreFixture(t)
-				sql, ok := f.fc.Get(downloadTestBucket, "snap/metadata.sqlite")
+				set, ok := f.fc.Get(downloadTestBucket, "snap/utxoset.bak")
 				require.True(t, ok)
-				sql[len(sql)/2] ^= 0xFF
-				f.fc.Put(downloadTestBucket, "snap/metadata.sqlite", sql)
+				set[len(set)/2] ^= 0xFF
+				f.fc.Put(downloadTestBucket, "snap/utxoset.bak", set)
 				target, err := f.restore(t, scheme, adapterTrustKey)
 				require.ErrorIs(t, err, ErrSnapshotPayloadMismatch)
 				require.NoDirExists(t, target)
@@ -193,11 +179,11 @@ func TestRestoreThroughCloudAdaptersRefusesForgedSnapshots(t *testing.T) {
 			t.Run("payload and manifest replaced together", func(t *testing.T) {
 				t.Parallel()
 				f := newAdapterRestoreFixture(t)
-				forged := []byte("forged sql payload")
-				f.fc.Put(downloadTestBucket, "snap/metadata.sqlite", forged)
+				forged := []byte("forged set payload")
+				f.fc.Put(downloadTestBucket, "snap/utxoset.bak", forged)
 				m := f.manifest
-				m.MetadataBytes = int64(len(forged))
-				m.MetadataSHA256 = sha256Hex(forged)
+				m.UtxoSetBytes = int64(len(forged))
+				m.UtxoSetSHA256 = sha256Hex(forged)
 				// Written without the key, which is all an attacker has.
 				dir := t.TempDir()
 				require.NoError(t, WriteManifest(dir, m))

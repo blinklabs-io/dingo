@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -32,7 +33,12 @@ import (
 func TestScanUtxosByAddressVisitsEveryOutput(t *testing.T) {
 	t.Parallel()
 
-	db := fxOpenDB(t)
+	// Address scans read the IndexerDB, the only database that keeps UTxO
+	// rows.
+	db, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: "", Role: database.RoleIndexer},
+	)
+	require.NoError(t, err)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -69,7 +75,6 @@ func TestScanUtxosByAddressVisitsEveryOutput(t *testing.T) {
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
 	ls := &LedgerState{db: db}
-	fxAttachLedgerDB(t, ls)
 
 	seen := 0
 	gotTip, err := ls.ScanUtxosByAddress(

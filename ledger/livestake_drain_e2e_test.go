@@ -15,14 +15,10 @@
 package ledger_test
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -79,46 +75,4 @@ func TestLiveStakeFollowsBlocksARollbackAndAResume(t *testing.T) {
 	require.NoError(t, synced.Rollback(resumeAt))
 	require.Equal(t, syncedStake(), setStake(),
 		"the resumed set holds the stake of the resume point")
-}
-
-// The pool relay provider's stake lookup, which a Blockfrost-style relay list
-// reads, is answered from the set once the family is drained.
-func TestRelayProviderStakeIsServedFromTheSetOnceDrained(t *testing.T) {
-	t.Parallel()
-	pool := bytes.Repeat([]byte{0xd1}, 28)
-	stake := func(drain bool) (map[string]uint64, []statedrain.Trip) {
-		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = set.Close() })
-		guard := statedrain.NewTripGuard()
-		scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-			t, set, guard,
-		)
-		require.NoError(t, set.LoadLedgerState(
-			t.Context(), dbadapter.New(scenario.DB),
-		))
-		scenario.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-		scenario.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
-		if drain {
-			src := drainTestSource{set: set, db: scenario.DB}
-			var entries []statedrain.Entry
-			for _, e := range statedrain.Graduated(src) {
-				if e.Family == nodesettings.FamilyLiveStake {
-					entries = append(entries, e)
-				}
-			}
-			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{scenario.DB, scenario.DrainFamilies},
-				Set:   src, Guard: guard,
-			}, entries))
-		}
-		got, err := scenario.RelayProviderStake([][]byte{pool})
-		require.NoError(t, err)
-		return got, guard.Trips()
-	}
-	want, _ := stake(false)
-	require.Equal(t, uint64(40_000_000), want[string(pool)])
-	got, trips := stake(true)
-	require.Empty(t, trips)
-	require.Equal(t, want, got)
 }

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -262,8 +261,7 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	// API storage mode keeps every authorization: the Blockfrost committee
 	// vote endpoints map a cold credential to all the hot credentials it has
 	// authorized, superseded ones included.
-	if s.storageMode == types.StorageModeAPI ||
-		s.familyDrained(nodesettings.FamilyCommitteeConstitution) {
+	if s.storageMode == types.StorageModeAPI {
 		return 0, nil
 	}
 	s.committeeAuthImmutableSlotMu.RLock()
@@ -362,8 +360,7 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
-	if s.storageMode == types.StorageModeAPI ||
-		s.familyDrained(nodesettings.FamilyCommitteeConstitution) {
+	if s.storageMode == types.StorageModeAPI {
 		return nil
 	}
 	tipTxn := s.ReadTransaction(ctx)

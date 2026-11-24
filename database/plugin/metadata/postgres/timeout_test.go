@@ -30,9 +30,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// isPostgresConfigured mirrors internal/test/conformance's check of the same
-// name so this suite skips/runs under the same conditions in CI and locally:
-// CI's gate (services) job always sets POSTGRES_PASSWORD, so this runs
+// isPostgresConfigured reports whether a Postgres server is configured. CI's gate (services) job always sets POSTGRES_PASSWORD, so this runs
 // automatically in CI; a bare local `go test -tags dingo_extra_plugins ./...`
 // with no Postgres running skips cleanly instead of failing.
 func isPostgresConfigured() bool {
@@ -42,8 +40,8 @@ func isPostgresConfigured() bool {
 
 // postgresAdminDSN builds a libpq keyword/value DSN from the same
 // POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE/SSLMODE environment variables
-// this plugin's own provider and internal/test/conformance read. POSTGRES_DSN,
-// if set, overrides everything. Used to create/drop this suite's dedicated
+// this plugin's own provider reads. POSTGRES_DSN, if set, overrides
+// everything. Used to create/drop this suite's dedicated
 // schema (see postgresConformanceDSN).
 func postgresAdminDSN() string {
 	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
@@ -82,10 +80,8 @@ func postgresAdminDSN() string {
 
 // postgresConformanceDSN is postgresAdminDSN with the connection's
 // search_path pinned to a dedicated schema. That isolates this suite's
-// singleton rows (e.g. node_settings) from this plugin's own pool_test.go
-// and internal/test/conformance's Postgres variant, both of which connect to
-// the same dingo_test database concurrently as separate `go test ./...`
-// processes.
+// singleton rows (e.g. node_settings) from this plugin's own pool_test.go,
+// which connects to the same dingo_test database concurrently.
 func postgresConformanceDSN(schema string) string {
 	return storagetest.PostgresDSNWithSearchPath(postgresAdminDSN(), schema)
 }
@@ -167,7 +163,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Start(t.Context()))
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(1, txn))
+		require.NoError(t, store.SetSyncState("timeout_probe", "1", txn))
 		require.NoError(t, txn.Commit())
 		require.NoError(t, store.Close())
 	})

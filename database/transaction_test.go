@@ -167,7 +167,7 @@ func TestSetTransactionMetadataOnlyRecordsCertificatesWithoutUtxos(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 
 	output, err := mockledger.NewTransactionOutputBuilder().
 		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
@@ -328,14 +328,6 @@ func (m *mockBlobStore) NewIterator(
 	return m.iterator
 }
 
-func (m *mockBlobStore) GetCommitTimestamp() (int64, error) {
-	return 0, nil
-}
-
-func (m *mockBlobStore) SetCommitTimestamp(int64, types.Txn) error {
-	return nil
-}
-
 func (m *mockBlobStore) SetBlock(
 	types.Txn,
 	uint64,
@@ -480,7 +472,7 @@ func TestMithrilTrustBoundarySlotStrictPropagatesParseError(t *testing.T) {
 	db := openTestDB(t)
 	require.NoError(
 		t,
-		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+		db.SetChainState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
 	)
 
 	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
@@ -499,7 +491,7 @@ func TestMithrilTrustBoundarySlotSwallowsParseError(t *testing.T) {
 	db := openTestDB(t)
 	require.NoError(
 		t,
-		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+		db.SetChainState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
 	)
 
 	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
@@ -517,7 +509,7 @@ func TestMithrilTrustBoundarySlotStrictRejectsEmptyRecordedValue(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "", nil))
 
 	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
 	require.ErrorContains(t, err, "empty value")
@@ -549,7 +541,7 @@ func TestMithrilTrustBoundarySlotSwallowsEmptyRecordedValue(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "", nil))
 
 	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
 }
@@ -770,7 +762,7 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 ) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleIndexer})
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, db.Close())
@@ -884,6 +876,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	t.Parallel()
 
 	db, err := newTestDatabase(t, &Config{
+		Role:    RoleIndexer,
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -1095,6 +1088,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	newRecoverableDB := func(t *testing.T) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
+			Role:    RoleIndexer,
 			DataDir: t.TempDir(),
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -1191,7 +1185,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	t.Run("flag on tolerated at or below boundary", func(t *testing.T) {
 		t.Parallel()
 		db := newRecoverableDB(t)
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey,
 			fmt.Sprintf("%d", candidate.consumerPoint.Slot),
 			nil,
@@ -1204,6 +1198,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	t.Run("flag on inert without StrictUtxoValidation", func(t *testing.T) {
 		t.Parallel()
 		db, err := newTestDatabase(t, &Config{
+			Role:    RoleIndexer,
 			DataDir: t.TempDir(),
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -1260,6 +1255,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	newTestDB := func(t *testing.T, strict bool) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
+			Role:    RoleIndexer,
 			DataDir: t.TempDir(),
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
@@ -1312,6 +1308,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 		func(t *testing.T) {
 			t.Parallel()
 			db := newTestDB(t, true)
+			// An IndexerDB records its own trust boundary in sync_state.
 			require.NoError(
 				t,
 				db.SetSyncState(
@@ -1486,6 +1483,7 @@ func TestRecoverConsumedUtxoChecksClosureCertifierOnPrimaryChain(t *testing.T) {
 	t.Parallel()
 
 	db, err := newTestDatabase(t, &Config{
+		Role:                 RoleIndexer,
 		DataDir:              t.TempDir(),
 		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		StrictUtxoValidation: true,
@@ -1591,8 +1589,8 @@ func TestRecoverConsumedUtxoChecksClosureCertifierOnPrimaryChain(t *testing.T) {
 // TestDeleteUtxoBlobsUsesCallerBlobTxn pins that UTxO blob deletes are staged
 // in the caller's transaction rather than committed on their own.
 //
-// UtxosDeleteRolledback and UtxosDeleteConsumed delete blobs before the
-// metadata delete they accompany. Committing the blob deletes separately let a
+// UtxosDeleteRolledback deletes blobs before the metadata delete it
+// accompanies. Committing the blob deletes separately let a
 // successful delete survive the caller's rollback, leaving metadata that points
 // at blob data which is already gone.
 func TestDeleteUtxoBlobsUsesCallerBlobTxn(t *testing.T) {

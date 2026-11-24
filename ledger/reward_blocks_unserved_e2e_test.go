@@ -32,9 +32,6 @@ func TestRewardBlockReadsStayOnTheSetAfterDrain(t *testing.T) {
 	require.NoError(t, err)
 	wantEpochCounts, wantEpochTotal, wantEpochKnown, err := r.scenario.EpochCounts(4)
 	require.NoError(t, err)
-	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyRewardBlocksFees,
-	))
 	r.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardBlocksFees),
 	)

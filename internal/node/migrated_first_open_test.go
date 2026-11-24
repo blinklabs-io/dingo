@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
@@ -64,7 +63,7 @@ func openMigratedLedger(
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := &migratedLedger{fatal: make(chan error, 1)}
 	var closeDB func()
-	m.db, closeDB = openConsensus(t, dir)
+	m.db, closeDB = openConsensusRewound(t, dir, rewind)
 	var err error
 	m.set, _, err = nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
 		DataDir:             dir,
@@ -99,16 +98,10 @@ func openMigratedLedger(
 		closeDB()
 	})
 	require.NoError(t, (nodestorage.Reconcile{
-		DB:      m.db,
-		Set:     m.set,
-		DataDir: dir,
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			m.ls.SetDrainedFamilies(mask)
-			m.set.SetDrainedFamilies(mask)
-		},
-		Resume:       m.ls.ResumeUtxoSetFrom,
-		RewindBlocks: rewind,
+		DB:     m.db,
+		Set:    m.set,
+		Logger: logger,
+		Resume: m.ls.ResumeUtxoSetFrom,
 	}).Run(ctx))
 	require.NoError(t, cm.SetLedger(m.ls))
 	return m

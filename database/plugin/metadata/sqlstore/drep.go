@@ -709,9 +709,6 @@ func (s *Store) GetDRepDelegators(
 	credential []byte,
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if err := s.refuseDrained("account"); err != nil {
-		return nil, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -743,9 +740,6 @@ func (s *Store) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
-	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
-		return 0, err
-	}
 	if s.liveUtxo != nil {
 		// No utxo rows to sum; reward_live_stake carries UTxO stake.
 		ref := models.NewStakeCredentialRef(credentialTag, credential)
@@ -791,9 +785,6 @@ func (s *Store) GetDRepVotingPowerBatch(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
-		return nil, err
-	}
 	ret := make(map[string]uint64, len(credentials))
 	if len(credentials) == 0 {
 		return ret, nil
@@ -898,9 +889,6 @@ func (s *Store) GetDRepVotingPowerByType(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[uint64]uint64, error) {
-	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
-		return nil, err
-	}
 	ret := make(map[uint64]uint64, len(drepTypes))
 	if len(drepTypes) == 0 {
 		return ret, nil
@@ -1289,9 +1277,6 @@ func (s *Store) GetDrepLastRegistrationDeposit(
 func (s *Store) GetDreps(
 	txn types.Txn,
 ) ([]models.DrepListRow, error) {
-	if err := s.refuseDrained("drep"); err != nil {
-		return nil, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1387,9 +1372,6 @@ func (s *Store) GetDrepsPage(
 	page models.DrepListPageQuery,
 	txn types.Txn,
 ) ([]models.DrepListRow, int, error) {
-	if err := s.refuseDrained("drep", "account", "reward_live_stake"); err != nil {
-		return nil, 0, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -2093,9 +2075,6 @@ func validBool(value bool) sql.NullBool {
 func (s *Store) GetDrepLastRegistrationDeposits(
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	if err := s.refuseDrained("drep"); err != nil {
-		return nil, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err

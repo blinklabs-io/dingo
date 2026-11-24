@@ -72,7 +72,7 @@ func setPinnedArtifactTxn(
 	if err != nil {
 		return fmt.Errorf("encoding mithril artifact pin: %w", err)
 	}
-	if err := db.SetSyncState(
+	if err := db.SetChainState(
 		syncKeyPinnedArtifact, string(encoded), txn,
 	); err != nil {
 		return fmt.Errorf("pinning mithril artifact: %w", err)
@@ -87,7 +87,7 @@ func setPinnedArtifactTxn(
 func getPinnedArtifact(
 	db *database.Database,
 ) (pin pinnedArtifact, ok bool, err error) {
-	val, err := db.GetSyncState(syncKeyPinnedArtifact, nil)
+	val, err := db.GetChainState(syncKeyPinnedArtifact, nil)
 	if err != nil {
 		return pinnedArtifact{}, false, fmt.Errorf(
 			"reading mithril artifact pin: %w", err,
@@ -113,7 +113,7 @@ func getPinnedArtifact(
 // without importing anything, so a pin never outlives the run that wrote it on
 // a database that stays complete.
 func clearPinnedArtifact(db *database.Database) error {
-	if err := db.DeleteSyncState(syncKeyPinnedArtifact, nil); err != nil {
+	if err := db.DeleteChainState(syncKeyPinnedArtifact, nil); err != nil {
 		return fmt.Errorf("clearing mithril artifact pin: %w", err)
 	}
 	return nil

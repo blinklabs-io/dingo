@@ -79,7 +79,7 @@ type Schedule struct {
 // The invariant is upheld at every entry point that populates the slice:
 //   - CalculateSchedule iterates slots in ascending order, so AddLeaderSlot
 //     only ever appends a value greater than the last.
-//   - syncStateScheduleStore.LoadSchedule re-sorts after rebuilding from a
+//   - the schedule store's LoadSchedule re-sorts after rebuilding from a
 //     persisted record, guarding against a tampered or legacy unsorted list.
 
 // NewSchedule creates a new empty schedule for an epoch.

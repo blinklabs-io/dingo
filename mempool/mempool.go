@@ -679,7 +679,15 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
+// ErrTransactionAlreadyApplied reports that ledger validation rejected a
+// transaction whose hash is already applied in the same ledger snapshot.
+var ErrTransactionAlreadyApplied = errors.New(
+	"mempool: transaction already applied",
+)
+
 type apiSubmissionKey struct{}
+
+type peerSubmissionKey struct{}
 
 // WithAPISubmission marks ctx as belonging to a transaction submitted through
 // an API. AddTransaction validates such a transaction in the API slot pool
@@ -690,6 +698,18 @@ func WithAPISubmission(ctx context.Context) context.Context {
 
 func isAPISubmission(ctx context.Context) bool {
 	_, ok := ctx.Value(apiSubmissionKey{}).(struct{})
+	return ok
+}
+
+// WithPeerSubmission marks ctx as belonging to a transaction relayed by a
+// peer. Admission uses the marker only to classify a ledger rejection for a
+// transaction already applied in the validation snapshot.
+func WithPeerSubmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, peerSubmissionKey{}, struct{}{})
+}
+
+func isPeerSubmission(ctx context.Context) bool {
+	_, ok := ctx.Value(peerSubmissionKey{}).(struct{})
 	return ok
 }
 
@@ -1966,6 +1986,7 @@ func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		resolve func([]models.UtxoId) ([]models.Utxo, error),
+		isApplied func([]byte) (bool, error),
 	) error,
 ) error {
 	if provider, ok := m.validator.(ResolvingTxValidationSessionProvider); ok {
@@ -1982,7 +2003,7 @@ func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
 			stillCurrent func() bool,
 			commitIfCurrent func(func() error) (bool, error),
 		) error {
-			return fn(validate, stillCurrent, commitIfCurrent, nil)
+			return fn(validate, stillCurrent, commitIfCurrent, nil, nil)
 		})
 	}
 	var resolve func([]models.UtxoId) ([]models.Utxo, error)
@@ -1994,6 +2015,7 @@ func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
 		func() bool { return true },
 		func(commit func() error) (bool, error) { return true, commit() },
 		resolve,
+		nil,
 	)
 }
 
@@ -2123,6 +2145,8 @@ func (m *Mempool) AddTransaction(
 			errors.Is(err, ErrMempoolStopped):
 			// Infrastructure faults, not verdicts on the transaction.
 			result = "unavailable"
+		case errors.Is(err, ErrTransactionAlreadyApplied):
+			result = "already_applied"
 		case err != nil:
 			result = "rejected"
 		}
@@ -2332,6 +2356,7 @@ func (m *Mempool) addTransactionAttempt(
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		resolve func([]models.UtxoId) ([]models.Utxo, error),
+		isApplied func([]byte) (bool, error),
 	) error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
@@ -2414,6 +2439,22 @@ func (m *Mempool) addTransactionAttempt(
 			return ErrPendingStateMoved
 		}
 		if validateErr != nil {
+			if isPeerSubmission(ctx) && isApplied != nil {
+				applied, appliedErr := isApplied(tmpTx.Hash().Bytes())
+				if appliedErr != nil {
+					return fmt.Errorf(
+						"check applied transaction: %w",
+						appliedErr,
+					)
+				}
+				if applied {
+					return fmt.Errorf(
+						"%w: %s",
+						ErrTransactionAlreadyApplied,
+						txHash,
+					)
+				}
+			}
 			return fmt.Errorf(
 				"validate transaction: %w",
 				&submittedTxValidationError{era: txType, err: validateErr},

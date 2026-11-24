@@ -30,7 +30,7 @@ import (
 // Every vector resets the state manager and loads its own initial state, so
 // vectors are independent of one another and the corpus can be replayed by
 // several state managers at once. The replay is single-goroutine CPU work, so
-// the wall clock of the SQLite replay drops roughly with the worker count.
+// the wall clock of the replay drops roughly with the worker count.
 
 // corpusReplayWorkers returns how many state managers replay the corpus
 // concurrently.
@@ -201,7 +201,7 @@ func replayEntryPointsSharded(
 		wg.Go(func() {
 			sm, err := NewDingoStateManager()
 			if err != nil {
-				errs[worker] = fmt.Errorf("new sqlite state manager: %w", err)
+				errs[worker] = fmt.Errorf("new state manager: %w", err)
 				return
 			}
 			defer sm.Close()

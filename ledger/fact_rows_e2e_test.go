@@ -149,7 +149,7 @@ func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
 	type window struct{ from, through uint64 }
 	windows := []window{{0, math.MaxInt64}, {0, 0}}
 	out := map[string][]string{}
-	_, h := allGraduatedRun(t, func(h *p5Harness) func() []string {
+	_, h := releasedFactsRun(t, func(h *p5Harness) func() []string {
 		// DRep registrations, activity, a dormant expiry bump, a reset
 		// and a clear of dangling delegations write the DRep history.
 		h.scenario.Governance(h.refs[0], 10)
@@ -181,7 +181,7 @@ func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
 // answer.
 func TestDrainedSetServesEveryDrainedFactTable(t *testing.T) {
 	t.Parallel()
-	_, h := allGraduatedRun(t, func(*p5Harness) func() []string {
+	_, h := releasedFactsRun(t, func(*p5Harness) func() []string {
 		return func() []string { return nil }
 	})
 	require.Empty(t, h.scenario.UnservedFactTables())
@@ -196,7 +196,7 @@ func TestDrainedDRepHistoryFollowsARollback(t *testing.T) {
 		"drep_expiry_history", "drep_dormancy_history",
 		"drep_expiry_epoch_event", "account_drep_clear",
 	}
-	drained, _ := allGraduatedRun(t, func(h *p5Harness) func() []string {
+	drained, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
 		h.scenario.Governance(h.refs[0], 10)
 		return func() []string {
 			var lines []string
@@ -239,7 +239,7 @@ func TestSeekedFactPagesAreTheWholeTable(t *testing.T) {
 	tables := []string{
 		"account", "drep", "drep_expiry_history", "drep_dormancy_history",
 	}
-	allGraduatedRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *p5Harness) func() []string {
 		for _, name := range tables {
 			idx := slices.IndexFunc(metadata.FactTables, func(ft metadata.FactTable) bool {
 				return ft.Name == name
@@ -293,7 +293,7 @@ func TestAccountAndDrepExportCostFollowsTheRowsChangedInRange(t *testing.T) {
 		require.GreaterOrEqual(t, i, 0, name)
 		return metadata.FactTables[i]
 	}
-	allGraduatedRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *p5Harness) func() []string {
 		base := h.scenario.CurrentPoint().Slot + 10
 		cred := func(i int) []byte {
 			return []byte{0x90, byte(i >> 16), byte(i >> 8), byte(i), 1, 2, 3, 4}

@@ -16,16 +16,11 @@ package ledger
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -37,24 +32,8 @@ import (
 // that starts afterwards must not read at all.
 func TestClosingTheSetWaitsForARewardCreditCompactionInFlight(t *testing.T) {
 	t.Parallel()
-	dataDir := t.TempDir()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-	bus := newTestEventBus(t, nil)
-	t.Cleanup(bus.Stop)
-	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
-	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:          db,
-		UtxoSet:           set,
-		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-		EventBus:          bus,
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ls.Close() })
+	f := newRollbackCrashFixture(t)
+	ls := f.ls
 
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
@@ -79,7 +58,7 @@ func TestClosingTheSetWaitsForARewardCreditCompactionInFlight(t *testing.T) {
 		"the compaction job did not start")
 
 	closed := make(chan error, 1)
-	go func() { closed <- closeSet() }()
+	go func() { closed <- f.closeSet() }()
 	testutil.RequireNoReceive(t, closed, 200*time.Millisecond,
 		"the set closed under a compaction job that had yet to read it")
 

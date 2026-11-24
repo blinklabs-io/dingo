@@ -15,8 +15,9 @@
 package ledger_test
 
 import (
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 
 	"github.com/stretchr/testify/require"
 )

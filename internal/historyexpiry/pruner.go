@@ -44,6 +44,10 @@ type PrunerConfig struct {
 	// reader such as the IndexerDB writer that has yet to read older block
 	// bodies. ok false means no block may be expired yet.
 	Ceiling func(ctx context.Context) (slot uint64, ok bool, err error)
+	// BeforeExpire, when set, runs before each block expires, for a store
+	// such as the IndexerDB that keeps its own offsets into the block. An
+	// error leaves the block unexpired.
+	BeforeExpire func(ctx context.Context, slot uint64, hash []byte) error
 }
 
 type Pruner struct {
@@ -76,6 +80,11 @@ func (p *Pruner) pruneBlock(
 	ctx context.Context,
 	next *database.BlobBlockResult,
 ) error {
+	if p.config.BeforeExpire != nil {
+		if err := p.config.BeforeExpire(ctx, next.Slot, next.Hash); err != nil {
+			return fmt.Errorf("history expiry: %w", err)
+		}
+	}
 	if _, err := p.db.PruneBlock(ctx, next.Slot, next.Hash); err != nil {
 		return fmt.Errorf("history expiry: %w", err)
 	}
@@ -84,7 +93,7 @@ func (p *Pruner) pruneBlock(
 
 // loadCursor returns the persisted resume slot, or 0 when none is usable.
 func (p *Pruner) loadCursor() uint64 {
-	raw, err := p.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	raw, err := p.db.GetChainState(database.HistoryExpiryCursorKey, nil)
 	if err != nil {
 		p.logger.Error("history expiry: failed to read cursor", "error", err)
 		return 0
@@ -105,8 +114,8 @@ func (p *Pruner) loadCursor() uint64 {
 }
 
 func (p *Pruner) saveCursor(cursor uint64) {
-	if err := p.db.SetSyncState(
-		database.HistoryExpiryCursorSyncKey,
+	if err := p.db.SetChainState(
+		database.HistoryExpiryCursorKey,
 		strconv.FormatUint(cursor, 10),
 		nil,
 	); err != nil {

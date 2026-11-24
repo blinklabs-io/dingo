@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1694,7 +1695,7 @@ func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
 	require.NoError(t, txn.Rollback())
 
 	require.True(t, deferredMarkerPersisted(t, ls, point))
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	require.True(t, required, "rolled-back apply must leave the check pending")
 }
@@ -2303,25 +2304,22 @@ type deferredFloorWriteGateStore struct {
 	floorWrites      int
 }
 
-func (s *deferredFloorWriteGateStore) SetSyncState(
-	key string,
-	value string,
-	txn ledgerdb.Txn,
+func (s *deferredFloorWriteGateStore) SetDeferredHeaderFloor(
+	slot uint64,
 ) error {
-	if key == deferredHeaderValidationFloorSyncStateKey {
-		s.mu.Lock()
-		write := s.floorWrites
-		s.floorWrites++
-		s.mu.Unlock()
-		switch write {
-		case 0:
-			s.firstFloorWrite <- value
-			<-s.releaseFirst
-		case 1:
-			s.secondFloorWrite <- value
-		}
+	value := strconv.FormatUint(slot, 10)
+	s.mu.Lock()
+	write := s.floorWrites
+	s.floorWrites++
+	s.mu.Unlock()
+	switch write {
+	case 0:
+		s.firstFloorWrite <- value
+		<-s.releaseFirst
+	case 1:
+		s.secondFloorWrite <- value
 	}
-	return s.LedgerDB.SetSyncState(key, value, txn)
+	return s.LedgerDB.SetDeferredHeaderFloor(slot)
 }
 
 type malformedVrfKeyHashStore struct {
@@ -3549,35 +3547,18 @@ func seedLiveDelegatedPoolStake(
 	copy(txId, poolKeyHash)
 	txId[28] = discriminator
 	txId[31] = discriminator + 1
-	if ls := seedLedgerOf(db); ls != nil {
-		require.NoError(t, seedCreateAccount(
-			t, db, t.Context(), nil, &models.Account{
-				StakingKey: stakingKey,
-				Pool:       poolKeyHash,
-				AddedSlot:  slot,
-				Active:     true,
-			},
-		))
-		seedTestStakedOutput(
-			t, ls, txId, uint32(discriminator), stakingKey, totalStake,
-		)
-		return
-	}
-	err = db.Metadata().CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       poolKeyHash,
-		AddedSlot:  slot,
-		Active:     true,
-	})
-	require.NoError(t, err)
-	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  uint32(discriminator),
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(totalStake),
-		AddedSlot:  slot,
-	})
-	require.NoError(t, err)
+	require.NoError(t, seedCreateAccount(
+		t, db, t.Context(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       poolKeyHash,
+			AddedSlot:  slot,
+			Active:     true,
+		},
+	))
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, db), txId, uint32(discriminator), stakingKey,
+		totalStake,
+	)
 }
 
 func captureLiveMarkSnapshot(
@@ -4772,8 +4753,7 @@ func seedLiveStakeCredential(
 ) {
 	t.Helper()
 	require.Len(t, stakingKey, 28)
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	require.NoError(t, seedCreateAccount(
 		t, db, t.Context(), nil, &models.Account{
 			StakingKey: stakingKey,
@@ -5417,11 +5397,7 @@ func deferredMarkerCount(t *testing.T, db *database.Database) int {
 	t.Helper()
 	keys, err := db.ListDeferredHeaderMarkers()
 	require.NoError(t, err)
-	legacy, err := db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix, nil,
-	)
-	require.NoError(t, err)
-	return len(keys) + len(legacy)
+	return len(keys)
 }
 
 // TestBoundDeferredHeaderValidationWhileAppliedTipStalls drives deferred
@@ -5572,12 +5548,10 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 		"second bound should finish after the first bound",
 	))
 
-	storedFloor, err := seedDB(t, db).GetSyncState(
-		deferredHeaderValidationFloorSyncStateKey,
-		nil,
-	)
+	storedFloor, found, err := db.DeferredHeaderFloor()
 	require.NoError(t, err)
-	require.Equal(t, "51", storedFloor)
+	require.True(t, found)
+	require.Equal(t, uint64(51), storedFloor)
 	ls.deferredHeaderValidationMu.Lock()
 	inMemoryFloor := ls.deferredHeaderValidationFloor
 	ls.deferredHeaderValidationMu.Unlock()
@@ -5594,7 +5568,6 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
 	required, _, err := restarted.deferredHeaderValidationRequired(
 		newlyDeferred,
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, required)
@@ -5629,7 +5602,7 @@ func TestRepopulateDeferredHeaderValidationEnforcesMarkerCap(t *testing.T) {
 	require.LessOrEqual(t, count, markerCap)
 	require.Equal(t, 3, deferredMarkerCount(t, db))
 	require.Equal(t, uint64(3), floor)
-	required, _, err := ls.deferredHeaderValidationRequired(points[1], nil)
+	required, _, err := ls.deferredHeaderValidationRequired(points[1])
 	require.NoError(t, err)
 	require.True(t, required, "evicted slot must be covered by the floor")
 }
@@ -6139,37 +6112,6 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 		t,
 		batchErr,
 		"deletePersistedDeferredMarkers must propagate the lost-pin error",
-	)
-}
-
-// TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker pins
-// the ordering the failed-delete path relies on. A delete error is logged and
-// returns before the readmission re-test, which is safe only if the error
-// leaves the blob marker in place; removing the blob marker before the legacy
-// sync_state read would drop the durable pin of a point re-deferred during the
-// call, and after a restart its stateful check would be skipped.
-func TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-
-	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(point))
-
-	// Closing the metadata store makes the legacy sync_state read fail while
-	// the blob store stays usable.
-	require.NoError(t, db.Metadata().Close())
-
-	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
-		headerValidationPointKey(point),
-	))
-	assert.True(
-		t,
-		deferredMarkerPersisted(t, ls, point),
-		"a failed delete must leave the blob marker in place",
 	)
 }
 
@@ -9562,11 +9504,11 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// TestDeferredHeaderMarkerLegacySyncStateStillHonoured covers a marker an
-// earlier version wrote to sync_state: it must still force the apply-time
-// check, repopulate into the in-memory set, and be removed once the check
-// passes.
-func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
+// TestDeferredHeaderMarkerWithoutSourceStillHonoured covers a marker with the
+// one-byte payload a database from an earlier version carries: it must force
+// the apply-time check, repopulate into the in-memory set, and be removed once
+// the check passes.
+func TestDeferredHeaderMarkerWithoutSourceStillHonoured(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
@@ -9576,10 +9518,8 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	seedBlockPoolRegistration(t, db, tb.block)
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
-	require.NoError(t, seedDB(t, db).SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		nil,
+	require.NoError(t, db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	))
 	require.NoError(t, ls.repopulateDeferredHeaderValidation())
 	ls.deferredHeaderValidationMu.Lock()
@@ -9588,9 +9528,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	require.True(t, restored)
 	require.True(t, ls.consumeDeferredHeaderValidation(point))
 
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
-	require.True(t, required, "legacy sync_state marker must still gate apply")
+	require.True(t, required, "the marker must gate apply")
 
 	require.NoError(
 		t,
@@ -9604,12 +9544,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 				)
 			}),
 	)
-	value, err := seedDB(t, db).GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		nil,
-	)
+	held, err := db.HasDeferredHeaderMarker(headerValidationPointKey(point))
 	require.NoError(t, err)
-	require.Empty(t, value, "legacy marker must be removed after apply")
+	require.False(t, held, "the marker must be removed after apply")
 }
 
 // TestGenesisOverlayForecastsNextEpochInEraUpdate reproduces the preview

@@ -218,7 +218,6 @@ type mithrilLedger interface {
 	Tip() ochainsync.Tip
 	HoldNetworkIngest() (release func())
 	PauseChainIngest() (resume func())
-	DrainTrustedPrune(ctx context.Context) error
 	ApplyTrustedBatch(
 		ctx context.Context,
 		expected ocommon.Point,
@@ -247,10 +246,8 @@ func (a ledgerTrustedApplier) ApplyTrustedBatch(
 // Truncate replaces both, so it is read under liveLifecycleMu and never
 // kept past the cycle or run that read it.
 type mithrilLive struct {
-	ledger mithrilLedger
-	db     *database.Database
-	// tuning is nil when nothing tunes the database for a run.
-	tuning       mithrilCatchUpTuning
+	ledger       mithrilLedger
+	db           *database.Database
 	peerTipSlot  uint64
 	peerTipKnown bool
 }
@@ -384,14 +381,7 @@ func (c *mithrilCoordinator) cycle(ctx context.Context) {
 	if !useMithril {
 		return
 	}
-	gap := d.TargetImmutable - min(d.LocalImmutable, d.TargetImmutable)
-	largeGap := gap >= mithrilTunedCatchUpMinChunks
-	c.catchUp(ctx, live.ledger, mithrilTuningScope{
-		largeGap: largeGap,
-		catchUpIndexes: largeGap && mithrilCatchUpIndexesWorthDropping(
-			gap, d.LocalImmutable, tip.BlockNumber,
-		),
-	})
+	c.catchUp(ctx, live.ledger)
 }
 
 // ouroborosRate returns the blocks per second the ledger tip moved since the
@@ -417,14 +407,13 @@ func (c *mithrilCoordinator) ouroborosRate(
 func (c *mithrilCoordinator) catchUp(
 	ctx context.Context,
 	expect mithrilLedger,
-	scope mithrilTuningScope,
 ) {
 	runCtx, live, finish, ok := c.beginRun(ctx, expect)
 	if !ok {
 		return
 	}
 	defer finish()
-	run, err := c.stream(runCtx, ctx, live, scope)
+	run, err := c.stream(runCtx, live)
 	applied := run.after.BlockNumber - min(
 		run.before.BlockNumber, run.after.BlockNumber,
 	)
@@ -467,39 +456,17 @@ func (c *mithrilCoordinator) catchUp(
 }
 
 // stream runs the catch-up, handing it the hold it takes once prepared: hold
-// network ingest, then pause chain ingest, then tune the database. The
-// release undoes the hold in reverse; it also runs when the catch-up returns
-// without calling it, a panic included.
-//
-// The release first rebuilds the catch-up droppable indexes, because the
-// rollback and chain selection Ouroboros resumes read them. It does so on
-// nodeCtx, not ctx, so a run that failed or stalled still rebuilds them, and
-// only a node shutdown cancels the rebuild, leaving it to startup repair. A
-// run a live Restore or Truncate aborted (errMithrilLifecycleAbort) skips
-// it, or stops it if the abort arrives mid-rebuild, and the operation's
-// reinitialization repairs them before chain ingest.
-//
-// Then, on the same context, it drains the consumed-UTxO cleanup the trusted
-// batches still owe (DrainTrustedPrune), which batches run only every few
-// batches, so Ouroboros resumes without that backlog. A lifecycle abort skips
-// or stops the drain as it does the rebuild: the operation replaces or
-// rewrites the database the drain would prune.
-//
-// The run's end is stamped before the rebuild, so the Mithril rate is the
-// rate of applying, not of rebuilding. The rest of the tuning is undone
-// after the release, so the lazy rebuild holds neither Ouroboros nor the
-// stream's no-progress timeout.
+// network ingest, then pause chain ingest. The release undoes the hold in
+// reverse; it also runs when the catch-up returns without calling it, a panic
+// included.
 func (c *mithrilCoordinator) stream(
 	ctx context.Context,
-	nodeCtx context.Context,
 	live mithrilLive,
-	scope mithrilTuningScope,
 ) (mithrilRun, error) {
 	var (
 		run     mithrilRun
 		held    bool
 		release = func() {}
-		tuned   mithrilTuned
 	)
 	hold := func() func() {
 		if held {
@@ -512,60 +479,13 @@ func (c *mithrilCoordinator) stream(
 			defer releaseIngest()
 			defer resume()
 			run.end = c.now()
-			if errors.Is(context.Cause(ctx), errMithrilLifecycleAbort) {
-				if tuned.restore != nil {
-					c.logger.Info(
-						"mithril: skipping the catch-up index rebuild for a "+
-							"database lifecycle operation; it repairs them "+
-							"before chain ingest",
-						"component", "mithril",
-					)
-				}
-				return
-			}
-			// A lifecycle abort that arrives during the rebuild or the
-			// drain stops it too, so abortRun never waits one out.
-			releaseCtx, stopRelease := context.WithCancelCause(nodeCtx)
-			defer stopRelease(nil)
-			stopWatch := context.AfterFunc(ctx, func() {
-				if cause := context.Cause(ctx); errors.Is(
-					cause, errMithrilLifecycleAbort,
-				) {
-					stopRelease(cause)
-				}
-			})
-			defer stopWatch()
-			if tuned.restore != nil {
-				tuned.restore(releaseCtx)
-			}
-			// Ouroboros resumes on a ledger with no consumed-UTxO cleanup
-			// still owed by the trusted batches, as when every batch ran
-			// it.
-			if err := live.ledger.DrainTrustedPrune(
-				releaseCtx,
-			); err != nil && releaseCtx.Err() == nil {
-				c.logger.Warn(
-					"mithril: consumed UTxO cleanup after catch-up failed; "+
-						"the periodic cleanup reclaims the rows",
-					"component", "mithril",
-					"error", err,
-				)
-			}
 		})
-		if live.tuning != nil {
-			tuned = live.tuning.begin(ctx, scope)
-		}
 		// Timed from here: preparing, and waiting for the hold and the
 		// pause, is not Mithril's throughput.
 		run.start, run.before = c.now(), live.ledger.Tip()
 		return release
 	}
-	defer func() {
-		release()
-		if tuned.end != nil {
-			tuned.end(ctx)
-		}
-	}()
+	defer func() { release() }()
 	err := c.source.CatchUp(
 		ctx, live.db, ledgerTrustedApplier{ls: live.ledger}, hold,
 	)
@@ -1165,11 +1085,6 @@ func (n *Node) mithrilLive() mithrilLive {
 	live := mithrilLive{
 		ledger: n.ledgerState,
 		db:     n.db,
-		tuning: nodeMithrilTuning{
-			db:      n.db,
-			planner: n.plannerStatsMgr,
-			logger:  n.config.logger,
-		},
 	}
 	if n.chainsyncState != nil {
 		live.peerTipSlot, live.peerTipKnown = n.chainsyncState.PeerTipSlot()

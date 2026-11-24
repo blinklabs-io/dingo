@@ -1203,10 +1203,8 @@ func (m *Manager) cleanupOldSnapshots(
 	deleteBeforeEpoch := currentEpoch - 3
 
 	// Pool-stake snapshots are retained without bound in API storage mode,
-	// the same way UTxO's own consumed-row cleanup and reward_account_output
-	// already are (types.StorageModeAPI, ledger/state.go's
-	// cleanupConsumedUtxos and this function's own reward-state section
-	// below): API mode's whole purpose is retaining full history for
+	// the same way reward_account_output already is (types.StorageModeAPI,
+	// this function's own reward-state section below): API mode's whole purpose is retaining full history for
 	// historical queries, and a fixed 3-epoch pool-snapshot window
 	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
 	// older epoch the same way an unbounded UTxO table does for

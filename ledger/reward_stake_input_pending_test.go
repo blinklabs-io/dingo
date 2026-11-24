@@ -57,11 +57,11 @@ func markRewardStakeInputsPending(
 	return saveRewardStakeInputsPending(meta, metaTxn, pending)
 }
 
-// A store written by a release that kept ledger state in SQL can stop with a
-// snapshot's reward_stake_input rows written only in part, which its
-// sync_state pending record says. Startup moves the rows into the set and
-// deletes the record from SQL, so the set must carry the mark: without it the
-// part reads as the whole snapshot and rewards are computed from it.
+// A v0.94.2 database can stop with a snapshot's reward_stake_input rows
+// written only in part, which its sync_state pending record says. The
+// migration moves the rows into the set, so the set must carry the mark:
+// without it the part reads as the whole snapshot and rewards are computed
+// from it.
 func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 	t.Parallel()
 	const (
@@ -69,31 +69,34 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 		capturedSlot = uint64(690)
 		boundarySlot = uint64(700)
 	)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	meta := db.Metadata()
-	pool := bytes.Repeat([]byte{0x31}, 28)
-	require.NoError(t, db.SetEpoch(
-		boundarySlot, epoch, nil, nil, nil, nil, 6, 1000, 100, nil,
-	))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
-		Epoch: epoch, SnapshotType: "mark", CapturedSlot: capturedSlot,
-		BoundarySlot: boundarySlot, TotalDelegators: 2, Authoritative: true,
-	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
-		Epoch: epoch, PoolKeyHash: pool, DelegatorCount: 2,
-		CapturedSlot: capturedSlot, BoundarySlot: boundarySlot,
-	}}, nil))
-	// One of the snapshot's two rows was written before the store stopped.
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
-		Epoch: epoch, PoolKeyHash: pool,
-		StakingKey: bytes.Repeat([]byte{0x41}, 28), Stake: 5,
-		CapturedSlot: capturedSlot, BoundarySlot: boundarySlot,
-	}}, nil))
-	require.NoError(t, meta.SetSyncState(
-		rewardStakeInputsPendingKey,
-		`{"entries":[{"epoch":7,"boundary_slot":700}]}`, nil,
-	))
+	db := fxReleasedLedgerDB(t, t.TempDir(), func(released *database.Database) {
+		meta := released.Metadata()
+		pool := bytes.Repeat([]byte{0x31}, 28)
+		require.NoError(t, dbadapter.New(released).SetEpoch(
+			boundarySlot, epoch, nil, nil, nil, nil, 6, 1000, 100, nil,
+		))
+		require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+			Epoch: epoch, SnapshotType: "mark", CapturedSlot: capturedSlot,
+			BoundarySlot: boundarySlot, TotalDelegators: 2, Authoritative: true,
+		}, nil))
+		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+			Epoch: epoch, PoolKeyHash: pool, DelegatorCount: 2,
+			CapturedSlot: capturedSlot, BoundarySlot: boundarySlot,
+		}}, nil))
+		// One of the snapshot's two rows was written before the store
+		// stopped.
+		require.NoError(t, meta.SaveRewardStakeInputs(
+			[]*models.RewardStakeInput{{
+				Epoch: epoch, PoolKeyHash: pool,
+				StakingKey: bytes.Repeat([]byte{0x41}, 28), Stake: 5,
+				CapturedSlot: capturedSlot, BoundarySlot: boundarySlot,
+			}}, nil,
+		))
+		require.NoError(t, meta.SetSyncState(
+			rewardStakeInputsPendingKey,
+			`{"entries":[{"epoch":7,"boundary_slot":700}]}`, nil,
+		))
+	})
 
 	ls := &LedgerState{
 		db:         db,
@@ -106,9 +109,6 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 	fxAttachLedgerDB(t, ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 
-	record, err := meta.GetSyncState(rewardStakeInputsPendingKey, nil)
-	require.NoError(t, err)
-	require.Empty(t, record, "startup must delete the SQL record")
 	rows, err := ls.ledgerDB().GetRewardStakeInputs(epoch, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "the set holds the rows the store had")
@@ -131,29 +131,26 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 	)
 }
 
-// seedPartialSQLRewardStakeInputs leaves db as a release that kept ledger
-// state in SQL leaves it after stopping mid-write: the epoch 1 mark snapshot
+// seedPartialSQLRewardStakeInputs leaves the v0.94.2 database db as that
+// release leaves it after stopping mid-write: the epoch 1 mark snapshot
 // with one of its two stake rows, the pending record naming it, and the
 // UTxO and delegation history that rebuilds the other. It returns the rows
 // the whole capture wrote.
 func seedPartialSQLRewardStakeInputs(
 	t *testing.T,
-) (*database.Database, []*models.RewardStakeInput) {
+	db *database.Database,
+) []*models.RewardStakeInput {
 	t.Helper()
 	const (
 		epoch        = uint64(1)
 		boundarySlot = uint64(100)
 	)
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	// Every write below lands in SQL, as the earlier release left it: the
-	// set is not open yet.
 	sql := dbadapter.New(db)
 	poolHash := bytes.Repeat([]byte{0xd1}, 28)
 	ownerKey := bytes.Repeat([]byte{0x71}, 28)
 	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
-	require.NoError(t, fxImportPool(t, db, ctx, nil,
+	require.NoError(t, db.ImportPool(ctx, nil,
 		&models.Pool{
 			PoolKeyHash: poolHash, VrfKeyHash: make([]byte, 32),
 			Pledge: 5_000_000, Cost: 340_000_000,
@@ -170,7 +167,7 @@ func seedPartialSQLRewardStakeInputs(
 		},
 	))
 	for i, key := range [][]byte{ownerKey, delegatorKey} {
-		require.NoError(t, seedCreateAccount(t, db, ctx, nil, &models.Account{
+		require.NoError(t, db.CreateAccount(ctx, nil, &models.Account{
 			StakingKey: key, Pool: poolHash, Active: true,
 		}))
 		require.NoError(t, db.CreateUtxo(ctx, nil, &models.Utxo{
@@ -210,7 +207,8 @@ func seedPartialSQLRewardStakeInputs(
 		rewardStakeInputsPendingKey,
 		`{"entries":[{"epoch":1,"boundary_slot":100}]}`, nil,
 	))
-	return db, whole
+	fxStoreUtxoRowBodies(t, db)
+	return whole
 }
 
 // The stake rows a migrated store holds only in part are rebuilt, from the
@@ -220,7 +218,10 @@ func TestMigratedPartialRewardStakeInputsAreRebuilt(t *testing.T) {
 	t.Parallel()
 	const epoch = uint64(1)
 	ctx := context.Background()
-	db, whole := seedPartialSQLRewardStakeInputs(t)
+	var whole []*models.RewardStakeInput
+	db := fxReleasedLedgerDB(t, t.TempDir(), func(released *database.Database) {
+		whole = seedPartialSQLRewardStakeInputs(t, released)
+	})
 
 	ls := &LedgerState{
 		db:         db,
@@ -277,12 +278,27 @@ func (committedUtxoSet) RatifyPending(*uint64) ([]byte, bool, error) {
 // Startup rebuilds a pending snapshot's stake rows from the SQL history before
 // that history moves into the set, and clears the SQL record, so the set loads
 // the whole snapshot and no mark.
-func TestResolvePendingRewardStakeInputsRebuildsFromMetadataHistory(
+func TestResolveReleasedRewardStakeInputsRebuildsFromMetadataHistory(
 	t *testing.T,
 ) {
 	t.Parallel()
 	const epoch = uint64(1)
-	db, whole := seedPartialSQLRewardStakeInputs(t)
+	var whole []*models.RewardStakeInput
+	db := fxReleasedLedgerDB(t, t.TempDir(), func(released *database.Database) {
+		whole = seedPartialSQLRewardStakeInputs(t, released)
+		sql := dbadapter.New(released)
+		require.NoError(t, ResolveReleasedRewardStakeInputs(
+			t.Context(), sql, nil, false, 0,
+		))
+
+		rows, err := sql.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err)
+		require.Len(t, rows, len(whole))
+		pending, err := loadRewardStakeInputsPending(sql, nil)
+		require.NoError(t, err)
+		require.Empty(t, pending.Entries)
+	})
+
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -291,16 +307,6 @@ func TestResolvePendingRewardStakeInputsRebuildsFromMetadataHistory(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	sql := dbadapter.New(db)
-	require.NoError(t, ls.ResolvePendingRewardStakeInputs(t.Context(), sql))
-
-	rows, err := sql.GetRewardStakeInputs(epoch, nil)
-	require.NoError(t, err)
-	require.Len(t, rows, len(whole))
-	pending, err := loadRewardStakeInputsPending(sql, nil)
-	require.NoError(t, err)
-	require.Empty(t, pending.Entries)
-
 	fxAttachLedgerDB(t, ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	loaded, err := ls.ledgerDB().GetRewardStakeInputs(epoch, nil)

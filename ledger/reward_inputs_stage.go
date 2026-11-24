@@ -353,8 +353,8 @@ func sameStakeInputs(a, b []*models.RewardStakeInput) bool {
 }
 
 // ResolvePoolRewardAccountAutoVotes resolves from the pools and accounts the
-// ledger reads, which the set serves once those families are drained, rather
-// than from the metadata store's tables.
+// ledger reads, which the set serves, rather than from the metadata store's
+// tables.
 func (s stagingLedgerDB) ResolvePoolRewardAccountAutoVotes(
 	ctx context.Context,
 	snapshots []*models.PoolStakeSnapshot,

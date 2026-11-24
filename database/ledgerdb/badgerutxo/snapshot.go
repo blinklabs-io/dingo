@@ -18,7 +18,6 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -202,11 +201,11 @@ func (s *Store) BootstrapIncomplete() (bool, error) {
 }
 
 func (s *Store) dropPrefix(prefixes ...[]byte) error {
-	if drained := nodesettings.FamilyMask(s.loadsRefused.Load()); drained != 0 {
+	if s.loadsRefused.Load() {
 		var held bool
 		err := s.view(func(txn *badger.Txn) error {
 			for _, p := range prefixes {
-				if !tagDrained(drained, p) {
+				if !loadRefused(p) {
 					continue
 				}
 				opts := badger.DefaultIteratorOptions
@@ -301,5 +300,5 @@ var journaledFamilyTags = []byte{
 	OpCertTag, GenesisDelegationTag, MIRCertTag, CommitteeMemberTag,
 	CommitteeQuorumTag, ConstitutionTag, HotAuthTag, ResignTag, ProposalTag,
 	VoteTag, PParamUpdateTag, ImportBaselineTag, WitnessTag, ClosureUtxoTag,
-	DelegationTag,
+	DelegationTag, TxIndexTag,
 }

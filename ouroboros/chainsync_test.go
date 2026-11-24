@@ -7573,7 +7573,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonLiveTxValidationRecovery,
 		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		// This connection runs no chainsync client, so the local reasons
@@ -8197,7 +8197,7 @@ func TestChainsyncResyncDeniesPeerByReason(
 			wantDeniesPeer: false,
 		},
 		{
-			reason: event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			reason: event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 			// The rollback cannot be crossed locally, so the stale bearer
 			// must be replaced before the peer can retry its chain.
 			wantDeniesPeer: false,

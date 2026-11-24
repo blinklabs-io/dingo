@@ -80,14 +80,14 @@ func registerSQLiteTools(
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "sqlite_query",
-		Description: "Execute a read-only SQL SELECT query against Dingo's Cardano metadata SQLite database. Output is formatted as a compact Markdown table with pagination support.",
+		Description: "Execute a read-only SQL SELECT query against Dingo's IndexerDB, the SQLite store of the API indexes. Output is formatted as a compact Markdown table with pagination support.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input SQLiteQueryParams) (*mcp.CallToolResult, any, error) {
 		if db == nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available or not configured in read-only mode",
+						Text: "Error: SQLite database is not available or not configured in read-only mode; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -100,14 +100,6 @@ func registerSQLiteTools(
 					&mcp.TextContent{
 						Text: "Query validation failed: " + err.Error(),
 					},
-				},
-			}, nil, nil
-		}
-		if err := limits.refuseDrainedTables(input.Query); err != nil {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Query refused: " + err.Error()},
 				},
 			}, nil, nil
 		}
@@ -252,7 +244,7 @@ func registerSQLiteTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -266,14 +258,6 @@ func registerSQLiteTools(
 					&mcp.TextContent{
 						Text: "Query validation failed: " + err.Error(),
 					},
-				},
-			}, nil, nil
-		}
-		if err := limits.refuseDrainedTables(input.Query); err != nil {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Query refused: " + err.Error()},
 				},
 			}, nil, nil
 		}
@@ -351,7 +335,7 @@ func registerSQLiteTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil

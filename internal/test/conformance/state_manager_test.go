@@ -21,19 +21,18 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -53,7 +52,9 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	script := mockledger.RewardAccountKey{
 		CredType: common.CredentialTypeScriptHash, Credential: hash,
 	}
-	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
+	pp := testutil.CompleteRats(
+		&conway.ConwayProtocolParameters{DRepDeposit: 500_000_000},
+	)
 	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
 		DRepRegistrations: []common.Blake2b224{hash},
 		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
@@ -64,7 +65,7 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 		},
 	}, pp))
 
-	keyDRep, err := m.db.GetDrepByCredential(
+	keyDRep, err := m.ldb.GetDrepByCredential(
 		context.Background(),
 		0,
 		hash[:],
@@ -73,7 +74,7 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(0), keyDRep.CredentialTag)
-	scriptDRep, err := m.db.GetDrepByCredential(
+	scriptDRep, err := m.ldb.GetDrepByCredential(
 		context.Background(),
 		1,
 		hash[:],
@@ -83,7 +84,7 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptDRep.CredentialTag)
 	for _, credentialTag := range []uint8{0, 1} {
-		deposit, err := m.db.GetDrepLastRegistrationDeposit(
+		deposit, err := m.ldb.GetDrepLastRegistrationDeposit(
 			context.Background(),
 			credentialTag,
 			hash[:],
@@ -98,7 +99,7 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 		require.Equal(t, want, *deposit)
 	}
 
-	dreps, err := m.db.GetActiveDreps(context.Background(), nil)
+	dreps, err := m.ldb.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, dreps, 2)
 }
@@ -114,7 +115,9 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 		CredType: common.CredentialTypeScriptHash, Credential: hash,
 	}
 	const recordedDeposit = uint64(400_000_000)
-	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
+	pp := testutil.CompleteRats(
+		&conway.ConwayProtocolParameters{DRepDeposit: 500_000_000},
+	)
 	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
 		DRepRegistrations: []common.Blake2b224{hash},
 		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
@@ -125,7 +128,7 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 		},
 	}, pp))
 
-	drep, err := m.db.GetDrepByCredential(
+	drep, err := m.ldb.GetDrepByCredential(
 		context.Background(),
 		1,
 		hash[:],
@@ -135,7 +138,7 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(123), drep.ExpiryEpoch)
-	deposit, err := m.db.GetDrepLastRegistrationDeposit(
+	deposit, err := m.ldb.GetDrepLastRegistrationDeposit(
 		context.Background(),
 		1,
 		hash[:],
@@ -162,7 +165,7 @@ func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
 		},
 	}, &babbage.BabbageProtocolParameters{}))
 
-	dreps, err := m.db.GetActiveDreps(context.Background(), nil)
+	dreps, err := m.ldb.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, dreps)
 }
@@ -212,14 +215,14 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		m.db.SetGovernanceProposal(context.Background(), proposal, nil),
+		m.ldb.SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 
 	const (
 		ratifiedEpoch = uint64(4)
 		boundarySlot  = uint64(400)
 	)
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 	require.NoError(t, m.persistRatification(
 		txn,
@@ -227,9 +230,9 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 		ratifiedEpoch,
 		boundarySlot,
 	))
-	require.NoError(t, txn.Commit())
+	require.NoError(t, m.commit(txn))
 
-	stored, err := m.db.GetGovernanceProposal(
+	stored, err := m.ldb.GetGovernanceProposal(
 		context.Background(),
 		txHash,
 		0,
@@ -277,13 +280,55 @@ func testHash28(seed byte) common.Blake2b224 {
 // testHash32 builds a deterministic 32-byte hash value (the size of a
 // transaction id) for tests that need a well-formed but otherwise
 // arbitrary transaction identity.
+// testStakedOutput returns a stored output paying lovelace to a base address
+// staked to stakingKey.
+func testStakedOutput(
+	t *testing.T,
+	stakingKey common.Blake2b224,
+	lovelace uint64,
+) common.TransactionOutput {
+	t.Helper()
+	payment := testHash28(0x01)
+	addr, err := common.NewAddressFromParts(
+		common.AddressTypeKeyKey,
+		common.AddressNetworkTestnet,
+		payment[:],
+		stakingKey[:],
+	)
+	require.NoError(t, err)
+	raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  lovelace,
+	})
+	require.NoError(t, err)
+	output, err := gledger.NewTransactionOutputFromCbor(raw)
+	require.NoError(t, err)
+	return output
+}
+
+// seedParams makes pp the manager's protocol parameters the way
+// LoadInitialState does: written to the set and read back from it.
+func seedParams(
+	t *testing.T,
+	m *DingoStateManager,
+	pp common.ProtocolParameters,
+) {
+	t.Helper()
+	m.protocolParams = pp
+	txn := m.begin()
+	defer txn.Release()
+	require.NoError(t, m.storeProtocolParameters(pp, 0, 0, txn))
+	require.NoError(t, m.commit(txn))
+	require.NoError(t, m.loadProtocolParameters())
+}
+
 func testHash32(seed byte) []byte {
 	return bytes.Repeat([]byte{seed}, 32)
 }
 
 // TestDingoStateManagerRestartSurvivesReopen proves the audit's "after
 // restart" acceptance bullet: state committed by a DingoStateManager
-// backed by a real (file-based) sqlite store is still visible after that
+// backed by an on-disk LedgerDB set is still visible after that
 // manager is closed and a new one is opened against the same on-disk data
 // directory -- not just visible within the process that wrote it.
 func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
@@ -293,7 +338,7 @@ func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
 	m1, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
 
-	pp := &conway.ConwayProtocolParameters{}
+	pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
 	require.NoError(t, m1.LoadInitialState(
 		&conformance.ParsedInitialState{CurrentEpoch: 0},
 		pp,
@@ -339,17 +384,17 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 
 	cred := testHash28(0xbb)
 
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
 		Active:        true,
 	}
-	require.NoError(t, m.db.CreateAccount(context.Background(), txn, account))
+	require.NoError(t, m.ldb.ImportAccount(account, txn))
 	require.NoError(t, txn.Rollback())
 
-	got, err := m.db.GetAccountByCredential(
+	got, err := m.ldb.GetAccountByCredential(
 		context.Background(),
 		0,
 		cred[:],
@@ -362,8 +407,8 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 
 // TestDRepDelegationReadsRealBackendNotGovStateMirror proves the audit's
 // "backend bypass" finding is fixed: DRepDelegation must read the real
-// account.drep column through the backend, not the govState pre-validation
-// mirror, so a backend that never persists or returns account.drep
+// account's DRep delegation through the backend, not the govState
+// pre-validation mirror, so a backend that never persists or returns it
 // correctly cannot hide behind a mirror that happens to agree. Following
 // the reviewer's own probe, this stores one delegation only in govState
 // (the mirror) and a different delegation only in the real backend, then
@@ -388,15 +433,15 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 	})
 
 	// Backend-only delegation: always-abstain, written directly to
-	// account.drep_type/account.drep, disagreeing with the mirror above.
+	// the account in the set, disagreeing with the mirror above.
 	require.NoError(
 		t,
-		m.db.CreateAccount(context.Background(), nil, &models.Account{
+		m.ldb.ImportAccount(&models.Account{
 			StakingKey:    cred.Credential[:],
 			CredentialTag: 0,
 			DrepType:      models.DrepTypeAlwaysAbstain,
 			Active:        true,
-		}),
+		}, nil),
 	)
 
 	provider := NewDingoStateProvider(m)
@@ -419,11 +464,11 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 // that map holds the same initial/enacted set LoadInitialState and
 // enactProposal write to the real backend (see both functions' doc
 // comments), so a real backend that drops or never persists a
-// committee_member row correctly could still pass every vector here if
+// committee member correctly could still pass every vector here if
 // either method fell back to the mirror for a "missing" member instead of
 // reporting it absent. This stores a member only in govState -- exactly the
 // shape LoadInitialState always leaves behind once the harness reads it,
-// but with no corresponding real committee_member row, simulating a
+// but with no corresponding committee member in the set, simulating a
 // backend that dropped it -- and asserts CommitteeMember reports it absent
 // and CommitteeMembers excludes it, rather than serving the mirror's copy.
 func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
@@ -435,7 +480,7 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 	coldKey := testHash28(0x51)
 
 	// Mirror-only member: the real backend never received a matching
-	// committee_member row for this credential.
+	// committee member for this credential.
 	m.govState.CommitteeMembers[coldKey] = &conformance.CommitteeMemberInfo{
 		ColdKey:     coldKey,
 		ExpiryEpoch: 999,
@@ -480,8 +525,8 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 	require.NoError(t, err)
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
-	m.protocolParams = &conway.ConwayProtocolParameters{}
-	require.NoError(t, m.db.SetGovernanceProposal(
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{}))
+	require.NoError(t, m.ldb.SetGovernanceProposal(
 		context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        testHash32(0x50),
@@ -525,7 +570,7 @@ func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
 		&conformance.ParsedInitialState{
 			CommitteeMembers: map[common.Blake2b224]uint64{coldKey: 999},
 		},
-		&conway.ConwayProtocolParameters{},
+		testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 	))
 
 	applyCert := func(slot uint64, seed string, cert common.Certificate) {
@@ -624,7 +669,7 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 			}
 			require.NoError(t, m.LoadInitialState(
 				state,
-				&conway.ConwayProtocolParameters{},
+				testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 			))
 
 			member, err := NewDingoStateProvider(
@@ -666,9 +711,9 @@ func TestPoolCurrentStatePendingRetirement(t *testing.T) {
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 9},
-	}
+	}))
 
 	poolKeyHash := common.PoolKeyHash(testHash28(0x61))
 
@@ -755,7 +800,7 @@ func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
 // state_manager.go for why) and the real ledger/snapshot.Manager capture
 // that actually writes PoolStakeSnapshot rows (governance.ProcessEpoch
 // itself does not). It asserts the resulting stake-snapshot row exists via
-// a real metadata.StakeSnapshotStore read.
+// a LedgerDB stake-snapshot read.
 func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	t.Parallel()
 	m, err := NewDingoStateManager()
@@ -766,51 +811,51 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	// in production and the snapshot calculator resolve "what epoch is
 	// this slot in" from the epoch table, matching
 	// ledger/snapshot/calculator_test.go's seedEpochs pattern.
-	require.NoError(t, m.db.SetEpoch(
+	require.NoError(t, m.ldb.SetEpoch(
 		0, 0, nil, nil, nil, nil,
 		eras.ConwayEraDesc.Id, 1, uint(conformanceSlotsPerEpoch), nil,
 	))
 
 	poolHash := testHash28(0xcc)
 	stakingKey := testHash28(0xdd)
-	require.NoError(t, m.db.ImportPool(
-		context.Background(),
-		nil,
-		&models.Pool{PoolKeyHash: poolHash[:], VrfKeyHash: make([]byte, 32)},
+	require.NoError(t, m.ldb.ImportPool(
 		&models.PoolRegistration{
 			PoolKeyHash: poolHash[:],
 			VrfKeyHash:  make([]byte, 32),
 			AddedSlot:   0,
 		},
+		false,
+		nil,
 	))
 	require.NoError(
 		t,
-		m.db.CreateAccount(context.Background(), nil, &models.Account{
+		m.ldb.ImportAccount(&models.Account{
 			StakingKey: stakingKey[:],
 			Pool:       poolHash[:],
 			Active:     true,
-		}),
+		}, nil),
 	)
-	require.NoError(t, m.db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       testHash32(0xee),
-		OutputIdx:  0,
-		StakingKey: stakingKey[:],
-		Amount:     types.Uint64(40_000_000),
-		AddedSlot:  0,
-	}))
+	seed := m.begin()
+	m.createUtxo(common.Utxo{
+		Id: &dingoTransactionInput{
+			txId: common.NewBlake2b256(testHash32(0xee)),
+		},
+		Output: testStakedOutput(t, stakingKey, 40_000_000),
+	}, 0)
+	require.NoError(t, m.commit(seed))
 
 	pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
-	m.protocolParams = pp
+	seedParams(t, m, pp)
 	m.currentEpoch = 0
 	boundarySlot := conformanceSlotsPerEpoch
 
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 
 	_, err = governance.ProcessEpoch(
 		context.Background(),
 		&governance.EpochInput{
-			DB:           dbadapter.New(m.db),
+			DB:           m.ldb,
 			Txn:          txn,
 			PrevEpoch:    0,
 			NewEpoch:     1,
@@ -826,7 +871,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	)
 
 	snapshotMgr := snapshot.NewManager(
-		dbadapter.New(m.db),
+		m.ldb,
 		event.NewEventBus(nil, nil),
 		nil,
 	)
@@ -854,9 +899,9 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 			evt,
 		),
 	)
-	require.NoError(t, txn.Commit())
+	require.NoError(t, m.commit(txn))
 
-	poolSnapshot, err := m.db.Metadata().GetPoolStakeSnapshot(
+	poolSnapshot, err := m.ldb.GetPoolStakeSnapshot(
 		1, models.PoolStakeSnapshotTypeMark, poolHash[:], nil,
 	)
 	require.NoError(t, err)
@@ -882,7 +927,7 @@ var (
 // MotionNoConfidence, CommitteeNormal, and CommitteeNoConfidence paths.
 // Pool thresholds are trivial so tests isolate the DRep side.
 func noConfidenceCommitteeParams() *conway.ConwayProtocolParameters {
-	return &conway.ConwayProtocolParameters{
+	return testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
@@ -894,7 +939,7 @@ func noConfidenceCommitteeParams() *conway.ConwayProtocolParameters {
 			CommitteeNormal:       trivialThreshold,
 			CommitteeNoConfidence: trivialThreshold,
 		},
-	}
+	})
 }
 
 // TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes
@@ -916,7 +961,7 @@ func TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = noConfidenceCommitteeParams()
+	seedParams(t, m, noConfidenceCommitteeParams())
 
 	credential := mockledger.RewardAccountKey{
 		CredType:   common.CredentialTypeAddrKeyHash,
@@ -934,7 +979,7 @@ func TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes(
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -965,7 +1010,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    trivialThreshold,
@@ -977,7 +1022,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 			CommitteeNormal:       trivialThreshold,
 			CommitteeNoConfidence: trivialThreshold,
 		},
-	}
+	}))
 
 	credential := mockledger.RewardAccountKey{
 		CredType:   common.CredentialTypeAddrKeyHash,
@@ -995,7 +1040,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -1015,7 +1060,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
-	m.protocolParams = noConfidenceCommitteeParams()
+	seedParams(t, m, noConfidenceCommitteeParams())
 
 	drepHash := testHash28(0xd3)
 	drepCredential := mockledger.RewardAccountKey{
@@ -1041,7 +1086,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
@@ -1077,7 +1122,7 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 	defer func() { require.NoError(t, m.Close()) }()
 
 	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    reachable,
@@ -1089,7 +1134,7 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 			CommitteeNormal:       reachable,
 			CommitteeNoConfidence: reachable,
 		},
-	}
+	}))
 
 	// One DRep, backed by real delegated stake, votes yes.
 	drepCredentialHash := testHash28(0xe1)
@@ -1162,7 +1207,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 	defer func() { require.NoError(t, m.Close()) }()
 
 	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    reachable,
@@ -1174,7 +1219,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 			CommitteeNormal:       reachable,
 			CommitteeNoConfidence: reachable,
 		},
-	}
+	}))
 
 	drepCredentialHash := testHash28(0xf1)
 	drepStakeCredential := mockledger.RewardAccountKey{
@@ -1245,7 +1290,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = noConfidenceCommitteeParams()
+	seedParams(t, m, noConfidenceCommitteeParams())
 
 	credential := mockledger.RewardAccountKey{
 		CredType:   common.CredentialTypeAddrKeyHash,
@@ -1293,7 +1338,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 	defer func() { require.NoError(t, m.Close()) }()
 
 	pparamsAt := func(major uint) *conway.ConwayProtocolParameters {
-		return &conway.ConwayProtocolParameters{
+		return testutil.CompleteRats(&conway.ConwayProtocolParameters{
 			ProtocolVersion: common.ProtocolParametersProtocolVersion{
 				Major: major,
 			},
@@ -1305,7 +1350,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 			PoolVotingThresholds: conway.PoolVotingThresholds{
 				MotionNoConfidence: trivialThreshold,
 			},
-		}
+		})
 	}
 
 	credential := mockledger.RewardAccountKey{
@@ -1324,10 +1369,10 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
-	m.protocolParams = pparamsAt(9)
+	seedParams(t, m, pparamsAt(9))
 	ratifiedAtBootstrap, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
 	require.False(
@@ -1337,7 +1382,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 			"ratification regardless of votes",
 	)
 
-	m.protocolParams = pparamsAt(10)
+	seedParams(t, m, pparamsAt(10))
 	ratifiedAfterBootstrap, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
 	require.True(
@@ -1361,9 +1406,9 @@ func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 9},
-	}
+	}))
 
 	const govActionID = "f7f7f7f7#0"
 	m.govState.Proposals[govActionID] = &conformance.ProposalState{
@@ -1389,9 +1434,9 @@ func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 			"regardless of votes",
 	)
 
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
-	}
+	}))
 	require.NoError(t, m.ProcessEpochBoundary(2))
 	require.NotNil(
 		t,
@@ -1419,7 +1464,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion:    common.ProtocolParametersProtocolVersion{Major: 10},
 		CommitteeTermLimit: 5,
 		DRepVotingThresholds: conway.DRepVotingThresholds{
@@ -1430,7 +1475,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 			CommitteeNormal:       trivialThreshold,
 			CommitteeNoConfidence: trivialThreshold,
 		},
-	}
+	}))
 
 	const currentEpoch = 5
 	proposal := &conformance.ProposalState{
@@ -1446,7 +1491,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, currentEpoch)
@@ -1477,7 +1522,7 @@ func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
@@ -1485,7 +1530,7 @@ func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
 		PoolVotingThresholds: conway.PoolVotingThresholds{
 			MotionNoConfidence: trivialThreshold,
 		},
-	}
+	}))
 	// m.currentEpoch is left at its zero value deliberately -- the real
 	// path (ProcessEpochBoundary) always sets it to match the currentEpoch
 	// argument, but a direct call (as every test in this file makes) can
@@ -1517,7 +1562,7 @@ func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -1557,7 +1602,7 @@ func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 	defer func() { require.NoError(t, m.Close()) }()
 
 	reachable := cbor.Rat{Rat: big.NewRat(1, 2)}
-	m.protocolParams = &conway.ConwayProtocolParameters{
+	seedParams(t, m, testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    reachable,
@@ -1569,7 +1614,7 @@ func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 			CommitteeNormal:       reachable,
 			CommitteeNoConfidence: reachable,
 		},
-	}
+	}))
 
 	// DRep side: an AlwaysNoConfidence delegator is an implicit yes on a
 	// NoConfidence action, so the DRep ratio is 1 and the decision turns on
@@ -1632,7 +1677,7 @@ func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 		},
 	}
 
-	txn := m.db.Transaction(context.Background(), false)
+	txn := m.ldb.Begin(context.Background(), false)
 	defer txn.Release()
 
 	// The assertion deliberately goes through committeeActionRatified rather
@@ -1670,7 +1715,7 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 				seatedCold: hot,
 			},
 		},
-		&conway.ConwayProtocolParameters{},
+		testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 	))
 	keyCredential := func(hash common.Blake2b224) common.Credential {
 		return common.Credential{
@@ -1683,12 +1728,10 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 	persist := func(seed string, slot uint64, certs ...common.Certificate) {
 		tx, err := syntheticTransaction(seed, certs)
 		require.NoError(t, err)
-		require.NoError(t, m.db.SetTransactionMetadataOnly(context.Background(),
+		require.NoError(t, m.ldb.ImportCertificates(
 			tx,
 			ocommon.Point{Slot: slot, Hash: syntheticBlockHash(slot)},
-			0,
-			map[int]uint64{},
-			nil, 0,
+			nil,
 		))
 	}
 	persist("pending-auth", 10,
@@ -1755,7 +1798,7 @@ func TestCommitteeHotCredentialMemberDropsUnseatedAuthorizationAtBoundary(
 			CurrentEpoch:     5,
 			CommitteeMembers: map[common.Blake2b224]uint64{seatedCold: 999},
 		},
-		&conway.ConwayProtocolParameters{},
+		testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 	))
 	pending := common.Credential{
 		CredType:   common.CredentialTypeAddrKeyHash,
@@ -1774,7 +1817,7 @@ func TestCommitteeHotCredentialMemberDropsUnseatedAuthorizationAtBoundary(
 	require.NoError(t, err)
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
-	require.NoError(t, m.db.SetGovernanceProposal(context.Background(),
+	require.NoError(t, m.ldb.SetGovernanceProposal(context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        testHash32(0xa4),
 			ActionType:    uint8(common.GovActionTypeUpdateCommittee),
@@ -1857,19 +1900,19 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	pparams := &conway.ConwayProtocolParameters{
+	pparams := testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{
 			Major: 9,
 		},
 		GovActionValidityPeriod: 20,
 		DRepInactivityPeriod:    20,
-	}
-	m.protocolParams = pparams
+	})
+	seedParams(t, m, pparams)
 	m.currentEpoch = 100
 	drepCredential := testHash28(0xd7)
 	require.NoError(
 		t,
-		m.db.SetImportedDormantDRepEpochs(context.Background(), 3, nil),
+		m.ldb.SetImportedDormantDRepEpochs(3, 0, nil),
 	)
 
 	rewardHash := testHash28(0xd8)
@@ -1906,7 +1949,7 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(
 	transaction.WithProposalProcedures(proposal)
 
 	require.NoError(t, m.ApplyTransaction(transaction, 100))
-	drep, err := m.db.GetDrepByCredential(
+	drep, err := m.ldb.GetDrepByCredential(
 		context.Background(),
 		0,
 		drepCredential[:],
@@ -1917,7 +1960,7 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
-	dormantEpochs, err := m.db.GetDormantDRepEpochs(context.Background(), nil)
+	dormantEpochs, err := m.ldb.GetDormantDRepEpochs(context.Background(), nil)
 	require.NoError(t, err)
 	require.Zero(t, dormantEpochs)
 }
