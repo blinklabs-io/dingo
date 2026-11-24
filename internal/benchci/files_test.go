@@ -25,6 +25,27 @@ import (
 // The benchmark workflows run TestCheckFiles and TestGateFiles with `go test`
 // instead of building a binary. Both skip unless their input variables are set.
 
+// pathsFromEnv returns the named variables, or skips the test when any is
+// unset. go test runs the test binary in the package directory, not where it
+// was invoked, so a relative path would resolve under internal/benchci; it
+// fails the test instead.
+func pathsFromEnv(t *testing.T, names ...string) []string {
+	t.Helper()
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = os.Getenv(name)
+		if paths[i] == "" {
+			t.Skipf("%s not set", name)
+		}
+	}
+	for i, name := range names {
+		if !filepath.IsAbs(paths[i]) {
+			t.Fatalf("%s=%q must be an absolute path", name, paths[i])
+		}
+	}
+	return paths
+}
+
 // TestNoBenchciBinaries keeps the benchmark checks out of separate main
 // packages: the workflows invoke them through go test.
 func TestNoBenchciBinaries(t *testing.T) {
@@ -47,13 +68,14 @@ func TestNoBenchciBinaries(t *testing.T) {
 // A regression does not fail the test; the workflow reads the output line.
 func TestCheckFiles(t *testing.T) {
 	t.Parallel()
-	oldFile := os.Getenv("BENCHCI_OLD_FILE")
-	newFile := os.Getenv("BENCHCI_NEW_FILE")
-	reportPath := os.Getenv("BENCHCI_REPORT")
-	outputPath := os.Getenv("BENCHCI_OUTPUT")
-	if oldFile == "" || newFile == "" || reportPath == "" || outputPath == "" {
-		t.Skip("BENCHCI_OLD_FILE, BENCHCI_NEW_FILE, BENCHCI_REPORT and BENCHCI_OUTPUT not all set")
-	}
+	p := pathsFromEnv(
+		t,
+		"BENCHCI_OLD_FILE",
+		"BENCHCI_NEW_FILE",
+		"BENCHCI_REPORT",
+		"BENCHCI_OUTPUT",
+	)
+	oldFile, newFile, reportPath, outputPath := p[0], p[1], p[2], p[3]
 	report, regressed, err := Compare(oldFile, newFile, TrackedBenchmarks)
 	if err != nil {
 		t.Fatalf("comparing %s to %s: %v", oldFile, newFile, err)
@@ -79,12 +101,13 @@ func TestCheckFiles(t *testing.T) {
 // gate benchmark regressed or is missing from head.
 func TestGateFiles(t *testing.T) {
 	t.Parallel()
-	baseFile := os.Getenv("BENCHCI_BASE_FILE")
-	headFile := os.Getenv("BENCHCI_HEAD_FILE")
-	reportPath := os.Getenv("BENCHCI_REPORT")
-	if baseFile == "" || headFile == "" || reportPath == "" {
-		t.Skip("BENCHCI_BASE_FILE, BENCHCI_HEAD_FILE and BENCHCI_REPORT not all set")
-	}
+	p := pathsFromEnv(
+		t,
+		"BENCHCI_BASE_FILE",
+		"BENCHCI_HEAD_FILE",
+		"BENCHCI_REPORT",
+	)
+	baseFile, headFile, reportPath := p[0], p[1], p[2]
 	report, regressed, err := CompareGate(baseFile, headFile)
 	if err != nil {
 		t.Fatalf("comparing %s to %s: %v", baseFile, headFile, err)
