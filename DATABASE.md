@@ -4256,8 +4256,7 @@ fail closed: the Blockfrost account reward history
 (`Database.GetRewardAccountOutputsByCredential` and its count) returns
 `ErrFamilyDrained`, the MCP `get_pool_performance` tool refuses with
 `ErrDrainedFamily`, the standalone Koios parity reader refuses the database,
-the node's own parity source reads through the ledger's LedgerDB, and the
-offline `reward-input-repair` tool refuses a database that drained any family.
+and the node's own parity source reads through the ledger's LedgerDB.
 
 The `summaries` (`epoch_summary`) and `epochs` (`epoch`) families are
 graduated and drain last, summaries first: the summaries `Verify` bounds its
@@ -6724,12 +6723,6 @@ preserves the authoritative snapshot and pool rows, upserts missing or changed
 stake rows, and invalidates only that uncredited epoch's precomputed outputs and
 cursor in the same transaction. An already credited epoch cannot be repaired.
 
-`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
-databases. The operator supplies a previously verified ledger snapshot and an
-epoch within its mark/set/go window. It holds the Badger lock, opens metadata
-read-only by default, and reports the canonical comparison without changing
-state. `--apply` commits only a fully reconciled single-epoch repair. It does
-not import UTxOs, migrate schema, replace account balances, or move the tip.
 
 #### RewardStakeCalculationVersion and the Startup Provenance Gate
 
@@ -7507,8 +7500,6 @@ the live UTxO set (`badgerutxo.Open`) open such a store through
 Nothing is deleted or rewritten outside badger: the repair happens inside
 badger while it holds its directory lock, so a directory another process has
 open is left alone. The blob store logs the retry as a warning.
-`reward-input-repair` opens the blob directory read-only as a writer guard and
-does not retry; the node's next start repairs the file.
 
 ### Cross-Store Durability Contract
 
