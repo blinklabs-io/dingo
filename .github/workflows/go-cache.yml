@@ -193,7 +193,7 @@ jobs:
           go test -tags 'dingo_extra_plugins dingo_db_integration' -ldflags="-s -w" -run '^$' ./...
           go test -tags dingo_extra_plugins -ldflags="-s -w" -run '^$' ./...
           # make test-live-lifecycle runs the root package under -race.
-          go test -tags 'dingo_extra_plugins dingo_db_integration' -race -run '^$' .
+          go test -tags 'dingo_extra_plugins dingo_db_integration' -race -gcflags='modernc.org/...=-d=checkptr=0' -run '^$' .
       - name: save-go-build
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:

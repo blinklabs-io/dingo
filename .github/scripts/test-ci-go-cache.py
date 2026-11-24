@@ -44,9 +44,9 @@ def build_cache_step(job, action):
 
 
 # Flags that change no compile action ID: they select tests, set a time
-# limit, or only affect the link.
+# limit, format output, or only affect the link.
 IGNORED_VALUE_FLAGS = {"-run", "-timeout", "-count", "-ldflags", "-o", "-f"}
-IGNORED_FLAGS = {"-v"}
+IGNORED_FLAGS = {"-v", "-json"}
 VALUE_FLAGS = IGNORED_VALUE_FLAGS | {"-tags", "-gcflags", "-asmflags"}
 COMPILE_ENV = ("GOFLAGS", "CGO_ENABLED", "GOOS", "GOARCH")
 
@@ -68,16 +68,27 @@ def compile_signatures(job, makefile_dir):
             continue
         workdir = step.get("working-directory", ".")
         for line in command_lines(step["run"], makefile_dir):
-            sig = signature(line, workdir, base_env)
-            if sig:
-                sigs.add(sig)
+            for tokens in simple_commands(line):
+                sig = signature(tokens, workdir, base_env)
+                if sig:
+                    sigs.add(sig)
     return sigs
 
 
 def command_lines(run, makefile_dir):
+    pending = ""
     for raw in run.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
+        if not pending and (not line or line.startswith("#")):
+            continue
+        # A trailing backslash continues the command; shlex cannot read the
+        # first half alone and the command would go uncounted.
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        line = (pending + line).strip()
+        pending = ""
+        if not line:
             continue
         tokens = line.split()
         if tokens[0] == "make" and len(tokens) == 2:
@@ -93,11 +104,38 @@ def command_lines(run, makefile_dir):
             yield line
 
 
-def signature(line, workdir, base_env):
+SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+
+
+def simple_commands(line):
+    """Split a shell line into the token lists of its simple commands.
+
+    A folded run: block puts a whole pipeline on one line, so without this
+    the flags of every command in it would merge into one signature. xargs
+    is dropped so the go command it runs is read as one.
+    """
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
     try:
-        tokens = shlex.split(line)
+        tokens = list(lexer)
     except ValueError:
-        return None
+        return
+    current = []
+    for tok in tokens + [";"]:
+        if tok not in SHELL_OPERATORS:
+            current.append(tok)
+            continue
+        if current and current[0] == "xargs":
+            current = current[1:]
+            while current and current[0].startswith("-"):
+                current.pop(0)
+        if current:
+            yield current
+        current = []
+
+
+def signature(tokens, workdir, base_env):
+    tokens = list(tokens)
     env = dict(base_env)
     while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
         k, v = tokens.pop(0).split("=", 1)
