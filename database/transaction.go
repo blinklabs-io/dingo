@@ -2120,6 +2120,9 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 				len(txHashes),
 			)
 		}
+	} else if store, h, release, ok := indexerEntryWriter(txn); ok {
+		deleteBatch(store, h, txHashes)
+		release()
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))

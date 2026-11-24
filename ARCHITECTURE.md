@@ -4005,13 +4005,16 @@ the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
 and refuses to advance a complete split database.
 
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
-opens the second metadata store, in API mode, as a `database.Database` over
-the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
-UTxO and transaction offsets under their own key prefix),
-after the ledger database is recovered and before the ledger starts. The writer
-starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
-fires, and stops before the IndexerDB closes, which precedes the ledger
-database closing the blob store.
+opens the second metadata store, in API mode, as a `database.Database` that
+reads blocks from the ledger database's blob store and keeps its UTxO and
+transaction CBOR offsets in its own metadata store
+(`database.NewIndexerBlobStore`: read transactions only on the ledger's store,
+offsets in the `utxo_offset` and `transaction_offset` tables, written in the
+IndexerDB transaction that writes their rows), after the ledger database is
+recovered and before the ledger starts. The IndexerDB writes nothing to the
+ledger's stores. The writer starts after the ledger, wakes when `ledger.tip`
+or `ledger.reward_facts` fires, and stops before the IndexerDB closes, which
+precedes the ledger database closing the blob store the IndexerDB reads.
 Failed passes retry with exponential backoff from one to thirty seconds,
 without requiring another ledger event. Wakes interrupt the retry delay and
 successful passes return to waiting for events.

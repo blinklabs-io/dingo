@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -78,6 +77,13 @@ func NewIndexerDatabase(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
+	// The offsets go to the provider's store itself: a wrapper that embeds
+	// metadata.MetadataStore hides the optional capability.
+	blocks, err := database.NewIndexerBlobStore(consensus.Blob(), store)
+	if err != nil {
+		_ = host.Stop(context.Background())
+		return nil, err
+	}
 	if opts.WrapMetadata != nil {
 		store = opts.WrapMetadata(store)
 	}
@@ -93,7 +99,7 @@ func NewIndexerDatabase(
 				AlonzoLovelacePerUtxoWord,
 		},
 		database.Stores{
-			Blob:     blob.NewIndexerStore(consensus.Blob()),
+			Blob:     blocks,
 			Metadata: store,
 		},
 	)

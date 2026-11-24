@@ -4251,12 +4251,15 @@ between any two leaves a node that starts and continues:
 
 1. API-mode SQLite store to the IndexerDB (`MigrateToSplit`, before any command
    opens the consensus store): copy, rename, latch. It checks the volume holds
-   a second copy of the store and refuses with the sizes otherwise. The ledger's
-   UTxO and transaction offset entries (`u` and `t` keys) are copied into the
-   IndexerDB's `ix:` namespace before the rename, because the IndexerDB reads an
-   output's CBOR from its own entries and a block can only rebuild the outputs
-   it produced; the entries of outputs no block produced, such as genesis
-   outputs, exist only in the ledger's namespace.
+   a second copy of the store and refuses with the sizes otherwise. The released
+   store's UTxO and transaction offset entries (`u` and `t` blob keys) are
+   copied into the IndexerDB's `utxo_offset` and `transaction_offset` tables
+   before the rename, in batches of 1000 per IndexerDB transaction, because the
+   IndexerDB reads an output's CBOR from its own entries and a block can only
+   rebuild the outputs it produced; the entries of outputs no block produced,
+   such as genesis outputs, exist only in the blob store. A copy that stops
+   leaves only the work directory, which the next start removes before copying
+   again. The `u` and `t` keys stay: they are the ledger's own entries.
 
    An API-mode store whose `sync_status` is `backfill` is refused: a v0.94.2
    Mithril bootstrap stopped while writing its API history, which therefore
@@ -4494,15 +4497,19 @@ consensus-schema archive creates its schema, so its restore drops the emptied
 schema first, and renames the restored schema to this database's consensus
 schema when the archive was taken from a database of another name.
 
-The IndexerDB's `database.Database` (`Role: indexer`) sits over the same blob
-store through `blob.NewIndexerStore`. Block reads pass through. UTxO and
-transaction offset entries, which are keyed by identity the two stores share,
-live under the `ix:` key prefix for both reads and writes, so neither store
-sees or replaces the other's. Every other blob write is refused with
-`ErrIndexerReadOnly`: blocks and their indexes belong to the ledger. Its metrics register
-with `role="indexer"` and an `indexer_` name prefix: one collector name cannot be
-registered with two label sets. Closing the view does not close the shared
-store, and the IndexerDB closes before the ledger database does.
+The IndexerDB's `database.Database` (`Role: indexer`) reads blocks from the
+ledger's blob store through `database.NewIndexerBlobStore`, which opens only
+read transactions on it. Its UTxO and transaction CBOR entries live in its own
+metadata store, in the `utxo_offset` and `transaction_offset` tables
+(`metadata.IndexerOffsetStore`), and each IndexerDB transaction writes them in
+the same SQL transaction as the rows they belong to, so they commit and roll
+back together. The IndexerDB writes no key to the ledger's blob store: every
+blob write is refused with `database.ErrIndexerBlocksReadOnly`, because blocks
+and their indexes belong to the ledger. Its metrics register with
+`role="indexer"` and an `indexer_` name prefix: one collector name cannot be
+registered with two label sets. Closing the IndexerDB does not close the
+ledger's blob store, and the IndexerDB closes before the ledger database does,
+because it reads blocks from that store.
 
 The writer follows the ledger's durable tip and wakes at startup, on
 `ledger.tip`, and on `ledger.reward_facts` after reward precomputation commits.
@@ -4746,8 +4753,8 @@ A certifying ranking block carries no transactions of its own: the writer reads
 the endorser block its parent announced (`ledger.LoadCertifiedClosure` over the
 ledger's blob store, with the same manifest, count, hash and size checks as the
 ledger) and applies its transactions in manifest order, skipping those already
-stored. Offsets are written under the `ix:` prefix and point into the
-endorser-block blob the ledger stored. A closure whose ranking block starts an
+stored. Offsets are written to the IndexerDB's `transaction_offset` and
+`utxo_offset` tables and point into the endorser-block blob the ledger stored. A closure whose ranking block starts an
 epoch is applied with the previous epoch's parameters and dated by
 `leios_transaction_context` at the parent's slot, as the ledger applies it ahead
 of the boundary. A closure that cannot be read stops the writer.
@@ -5454,6 +5461,8 @@ the stored blocks as they age past the window, as it does on any node.
 | `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx_id` (`tx_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_tx_id` (`tx_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
+| `utxo_offset` | `tx_id`, `output_idx`, `data` | PK `(tx_id, output_idx)` (`WITHOUT ROWID` on SQLite) | IndexerDB only. The CBOR entry of each output the IndexerDB indexed: a 52-byte `DOFF` offset into a block of the ledger's blob store, or the output's raw CBOR once history expiry materialized it. Keyed by identity, as `utxo` rows are looked up; written and removed in the IndexerDB transaction that writes or removes the `utxo` row. Not carried into a consensus namespace. |
+| `transaction_offset` | `hash`, `data` | PK `hash` (`WITHOUT ROWID` on SQLite) | IndexerDB only. The `DOFF` or `DTXP` CBOR offset of each transaction the IndexerDB indexed, keyed by transaction hash; written and removed in the IndexerDB transaction that writes or removes the transaction rows. Not carried into a consensus namespace. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset_identity` | `id`, `policy_id`, `name` | PK `id` (`AUTOINCREMENT`); unique `(policy_id, name)` | One row per distinct native asset. `policy_id` and `name` are `NOT NULL`; the empty name is a zero-length value. `id` is a node-local surrogate: it differs between nodes, is never reused, and is not part of any API. Identity rows are never deleted, by rollback or by pruning, so an identity may have no holdings; every read joins `asset_holding`, and an identity with none is invisible. The CIP-14 fingerprint is not stored; it is computed from `policy_id` and `name` where it is returned. |
@@ -7319,6 +7328,10 @@ only the legacy `em`/`et`/`ec` keys of a database that has not yet migrated.
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Not read or written; a v0.94.2 database wrote it. |
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in the node settings (`dingo.dbinfo` for the ledger). Its presence also tells a v0.94.2 data directory from a fresh one when the ledger opens. |
 
+The `u` and `t` keys are the ledger's. An IndexerDB keeps its own UTxO and
+transaction entries in its `utxo_offset` and `transaction_offset` tables and
+writes no key to this store.
+
 Positive retention values must cover at least the network stability window,
 `ceil(3k/f)` slots, where `k` and the exact active slot coefficient `f` come
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
@@ -8197,10 +8210,10 @@ older than the ledger stability window:
   either storage mode. With an IndexerDB the pruner also stops below the
   IndexerDB tip, so it never expires a body the writer has not read, nor the
   tip block the writer re-reads to resume. The IndexerDB keeps its own
-  `DOFF` entries, under its key prefix, over the ledger's block store, which
-  the ledger's `PruneBlock` does not see, so the pruner's `BeforeExpire`
-  first rewrites them as raw CBOR (`Database.MaterializeBlockUtxos` on the
-  IndexerDB), spent outputs included.
+  `DOFF` entries, in its `utxo_offset` table, which the ledger's `PruneBlock`
+  does not see, so the pruner's `BeforeExpire` first rewrites them as raw CBOR
+  (`Database.MaterializeBlockUtxos` on the IndexerDB, in one IndexerDB
+  transaction), spent outputs included.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on

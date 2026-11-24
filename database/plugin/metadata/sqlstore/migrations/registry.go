@@ -114,6 +114,7 @@ const (
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	indexerOffsetsSchemaRelease                         = "indexer-cbor-offsets"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -307,6 +308,7 @@ var schemaVersions = []struct {
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
 	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: indexerOffsetsSchemaRelease, Dir: "v74"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
