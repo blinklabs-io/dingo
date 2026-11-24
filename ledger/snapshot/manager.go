@@ -50,17 +50,6 @@ type Manager struct {
 	delegatorInactivityPeriod  uint64
 	configurationLocked        bool
 
-	// rewardAccountOutputRetentionUnbounded mirrors whether the in-process
-	// Koios parity observer is enabled, from node/load construction. When true,
-	// cleanupOldSnapshots retains reward_account_output without bound in CORE
-	// storage mode too, exactly as it already does unconditionally in API
-	// storage mode — see cleanupOldSnapshots's doc comment. Not
-	// consensus-affecting: it only widens local historical retention, so it
-	// carries no configurationLocked gate and may be changed at any time.
-	// Default false preserves CORE mode's existing pruning behavior when the
-	// observer is disabled.
-	rewardAccountOutputRetentionUnbounded bool
-
 	// deferRewardStakeInputs makes the authoritative boundary capture stage
 	// the per-credential reward inputs for its caller to write after the
 	// boundary commits, instead of writing them inside the boundary
@@ -397,38 +386,6 @@ func (m *Manager) inactivityPeriod() uint64 {
 		return 0
 	}
 	return m.delegatorInactivityPeriod
-}
-
-// SetRewardAccountOutputRetentionUnbounded mirrors whether the in-process
-// Koios parity observer is enabled into the snapshot manager's
-// cleanup path. When enabled is true, cleanupOldSnapshots retains
-// reward_account_output without bound in CORE storage mode, matching API
-// storage mode's existing unbounded retention.
-//
-// The Koios parity observer validates each closed epoch against Koios only
-// after fetching and comparing over the network, which can fall arbitrarily
-// far behind chain progression during a from-genesis or catch-up sync —
-// unlike the fixed, small rotation/reward-replay window CORE mode's
-// cleanupOldSnapshots otherwise prunes to. Without this, reward_account_output
-// for an epoch is routinely pruned before the observer ever reads it, and the
-// koios-parity check for that epoch fails permanently with a
-// reward_account_output row that genuinely no longer exists.
-//
-// Not consensus-affecting — it only widens local historical retention — so
-// unlike SetDelegatorInactivity this is not gated by configurationLocked and
-// may be called or changed at any time, including after Start.
-func (m *Manager) SetRewardAccountOutputRetentionUnbounded(enabled bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rewardAccountOutputRetentionUnbounded = enabled
-}
-
-// RewardAccountOutputRetentionUnbounded reports the current value set by
-// SetRewardAccountOutputRetentionUnbounded, for tests and diagnostics.
-func (m *Manager) RewardAccountOutputRetentionUnbounded() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.rewardAccountOutputRetentionUnbounded
 }
 
 // SetPromRegistry enables snapshot manager metrics.

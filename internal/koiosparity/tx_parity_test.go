@@ -1003,7 +1003,7 @@ func TestDatabaseSourceTransactionSampleReadsTheIndexerDB(t *testing.T) {
 
 	source, err := NewDatabaseSource(consensus)
 	require.NoError(t, err)
-	source = source.WithTransactionHistory(indexerDB)
+	source = source.WithIndexerDB(indexerDB)
 
 	// The block is indexed but the tip has not passed the epoch: a later
 	// read could return more, so neither phase may take this as the sample.

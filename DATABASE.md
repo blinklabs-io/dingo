@@ -3982,7 +3982,7 @@ Readers outside the ledger's LedgerDB:
 |---|---|
 | MCP tools | With a ledger state the tools read through its LedgerDB. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
-| `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
+| `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
 
 ### Live UTxO set failure and recovery
@@ -4919,8 +4919,8 @@ them.
 ### Serving from the IndexerDB
 
 Blockfrost and Kupo read the IndexerDB, as do Mesh, MCP, Midnight, off-chain
-metadata, the token registry and the Koios parity observer's transaction
-sample; Kupo's checkpoints and health report the
+metadata, the token registry and the Koios parity observer's reward tables and
+transaction sample; Kupo's checkpoints and health report the
 IndexerDB tip, and health is `200` only once it has reached the ledger tip.
 Current-state routes (accounts, addresses, assets, pools, governance, latest
 epoch, Kupo matches) answer 503 with `Retry-After` while the IndexerDB is more
@@ -6086,7 +6086,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `imported_epoch_block_total` | `epoch`, `total_blocks`, `captured_slot` | PK `epoch` | One row per epoch whose block counts came from a bootstrap snapshot, holding the total its `imported_pool_block_count` rows sum to (the reference's `Map.foldr (+) 0` over `BlocksMade`). Written to the LedgerDB set by `ledgerstate.importBlocksMade` unconditionally, including for a map with no entries: an epoch in which no pool minted a block is a state the certified snapshot asserts, and the per-pool rows alone cannot express it. The row's presence is what `epochengine.Engine.RewardBlockCounts` reads as "these counts are known"; its absence for an epoch the anchor covers means the counts are unknown, and the reward round is declined rather than distributed at zero performance. The total is checked against the per-pool rows on every read, so a set truncated by a partial write is an error rather than a smaller self-consistent epoch that would raise every surviving pool's share of the blocks. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). |
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v47, for per-account stake history), `idx_reward_stake_input_epoch_registered_id` `(epoch, registered, id)` (migration v64, for the epoch-wide stakes count and page: the count reads only registered entries of the epoch and the page, ordered by `id`, needs no sort; the key holds no blob column because MySQL keys those by a 255-byte prefix that cannot serve an `ORDER BY`; a single pool's page keeps the credential order and is served by the unique `(epoch, pool_key_hash, credential_tag, staking_key)` index; `GetEpochStakes` skips the page query when the offset is at or past the count) | Per-credential positive stake frozen by the reward snapshot capture in the epoch-rollover transaction or the startup seed of `CaptureGenesisSnapshot`, or reconstructed provisionally from a Mithril-imported snapshot. The capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction; with no usable SNAP-point read it reconstructs historical stake at the snapshot slot in that same transaction. Check the matching `reward_snapshot.authoritative` value to distinguish a captured or seeded row from an imported one. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
-| `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
+| `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. The IndexerDB retains it for the life of the database, so it is the durable per-pool reward result for any closed epoch there; the ledger prunes it to the reward window with `reward_account_output` through the ledger's staging path, which also prunes the live set's derived reward rows; a SQL store's `DeleteRewardStateBeforeEpoch` deletes only `reward_stake_input` and `reward_account_output` (see the retention note below). |
 | `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `idx_reward_account_output_epoch_pool_cred_type` `(epoch, pool_key_hash, credential_tag, staking_key, reward_type)`; credential index `idx_reward_account_output_credential_epoch` `(credential_tag, staking_key, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; index `captured_slot` (migration 57 replaced the epoch-leading unique, the two credential indexes with `spendable`/`guarded` in the key, the credential covering index of migration 54 and the `boundary_slot` index) | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reads (reward history, count, pending credits, folds, claims) filter `spendable`, `guarded` and `folded` as boolean expressions on rows found through the credential index; written as equalities they match the pending index's flag prefix, which SQLite prefers and which walks every unfolded row. The flags are in no credential-keyed index key, so a fold or a flag change moves no entry of an index spanning the table's whole history, and the unique index is pool-ordered so the pool-at-a-time precompute appends to it. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first). |
 
@@ -6414,10 +6414,9 @@ so this finalizer does not hold one snapshot for the full rebuild.
 
 #### Snapshot and Reward-State Retention
 
-Reward outputs are not pruned in API storage mode or with the Koios parity
-observer enabled, because the Blockfrost account reward history and the
-parity comparison read closed epochs, so their credential index spans every
-epoch. The per-epoch write cost of that index is one WAL frame per inserted
+Reward outputs are not pruned in API storage mode, because the Blockfrost
+account reward history reads closed epochs, so their credential index spans
+every epoch. The per-epoch write cost of that index is one WAL frame per inserted
 row; `TestRewardAccountOutputWALFrames` measures the frames per b-tree of
 the table for one epoch's precompute, credit, fold, withdrawals and flag
 changes.
@@ -6431,18 +6430,19 @@ acquired-point retention pins below, which can hold `pool_stake_snapshot` rows
 longer).
 
 `reward_account_output` and `pool_stake_snapshot` are the two tables whose
-retention depends on node configuration. `reward_account_output` is retained
-WITHOUT BOUND, instead of pruned to the window below, whenever the database
-is in API storage mode (`types.StorageModeAPI`, so the
-Blockfrost account reward-history endpoint can serve an account's full
-history) or the in-process Koios parity observer is enabled
-(`Manager.SetRewardAccountOutputRetentionUnbounded`, wired from
-`KoiosParityConfig.Enabled` in `node.go`/`node_lifecycle.go`). The
-observer validates a closed epoch only after fetching and comparing against
-Koios over the network, which can fall arbitrarily far behind chain
-progression during a from-genesis or catch-up sync — well past the fixed
-4-epoch window — so without this a checked epoch's `reward_account_output`
-rows are routinely gone before the observer ever reads them.
+retention depends on storage mode. `reward_account_output` is retained
+WITHOUT BOUND, instead of pruned to the window below, when the database is in
+API storage mode (`types.StorageModeAPI`, so the Blockfrost account
+reward-history endpoint can serve an account's full history).
+
+The Koios parity observer changes no retention: the LedgerDB prunes the same
+whether or not it runs. Reward history older than the window is API data,
+which the IndexerDB holds for every epoch. On a node with an IndexerDB the
+observer reads the reward tables from it (`koiosparity.DatabaseSource`,
+`WithIndexerDB`). On a node without one it reads the LedgerDB and records a
+Koios epoch whose stake epoch lies below
+`snapshot.RewardStateRetainedFrom(tip epoch)` as `NOT_CHECKED`, with reason
+`reward_state_pruned`, rather than as a pass or a mismatch.
 
 `pool_stake_snapshot` is likewise retained WITHOUT BOUND in API storage mode
 only (`cleanupOldSnapshots`, `ledger/snapshot/rotation.go`): API
@@ -6453,15 +6453,13 @@ does for `GetUTxOWhole`. `VerifyPointQueryable`'s Acquire-time gate
 checks stake retention on every Acquire regardless of which query type
 the caller actually intends to ask, so even removing only UTxO's own window
 still leaves a historical Acquire failing at this pool-snapshot floor
-instead. Unlike `reward_account_output`, the Koios parity observer does not
-separately extend `pool_stake_snapshot`'s retention -- only API storage mode
-does.
+instead.
 
 `reward_stake_input` is retained WITHOUT BOUND in API storage mode, so the
 Blockfrost epoch stake and account stake-history endpoints can answer for any
 epoch the node has run in that mode. It scales with delegator count, about
 1.3M rows per epoch on mainnet, so this is a storage-retention cost of API
-mode. Core mode and the Koios parity observer still prune it to the window.
+mode. Core mode prunes it to the window.
 Retention is not retroactive: the table holds only the epochs a node still
 had when it first ran with unbounded retention, so per-credential history
 begins at that epoch on an upgraded node. The Blockfrost endpoints do not
@@ -6480,8 +6478,9 @@ Pruned at `epoch < current-3`:
 | Table | Scales with | Pruned by |
 |---|---|---|
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` (CORE mode only) |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
-| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode); never in API mode |
+| `reward_pool_output` | pools per epoch | the ledger staging path of `DeleteRewardStateBeforeEpoch` (CORE mode), which prunes the live set's derived reward rows; the SQL store's `DeleteRewardStateBeforeEpoch` does not delete it, and the IndexerDB never prunes it |
+| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode); never in API mode or the IndexerDB |
 
 `cleanupOldSnapshots` calls both reward prunes with no transaction, so the
 store deletes by primary key in batches, each in its own write transaction,
@@ -6495,11 +6494,13 @@ caller-supplied transaction the prune is a single statement.
 
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
-`imported_pool_block_count`, `imported_epoch_block_total`, `reward_pool_input`,
-and `reward_pool_output`. `epoch`, `epoch_summary`, and `reward_ada_pots` have
+`imported_pool_block_count`, `imported_epoch_block_total`, and
+`reward_pool_input`. The IndexerDB also retains `reward_pool_output` for every
+epoch; the LedgerDB prunes it to the window together with
+`reward_account_output`. `epoch`, `epoch_summary`, and `reward_ada_pots` have
 one row per epoch; `reward_snapshot` and `reward_seed_failure` can have one row
-per snapshot type per epoch; and the last two are roughly one row per pool per
-epoch, so full history is on the order of a few hundred thousand rows on a test
+per snapshot type per epoch; and `reward_pool_input` and `reward_pool_output`
+are roughly one row per pool per epoch, so full history is on the order of a few hundred thousand rows on a test
 network and a few million on mainnet. Only the two per-credential tables scale
 with delegator count — about 5k rows per epoch on preview and 1.3M on mainnet —
 which is why they alone stay windowed. No before-epoch delete method exists for
