@@ -152,6 +152,7 @@ func (s *Store) PParamsAt(era, epoch uint64) (PParamsRow, bool, error) {
 	var found bool
 	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = binary.BigEndian.AppendUint64([]byte{PParamsTag}, era)
 		opts.Reverse = true
 		it := txn.NewIterator(opts)

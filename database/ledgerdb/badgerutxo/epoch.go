@@ -400,7 +400,15 @@ func putSnapshot(txn *badger.Txn, r SnapshotRow) error {
 // changes after slot, the epochs
 // that start after slot, an era switch made after slot, and the snapshots of epochs after the
 // newest epoch left, as the metadata store's truncation does.
-func rollbackLedgerState(txn *badger.Txn, slot uint64) error {
+//
+// A rollback that undoes many records passes the same cursor to each call, so
+// the scan of the state journal resumes below the entries already undone
+// rather than walking them again. A nil cursor scans from the top.
+func rollbackLedgerState(
+	txn *badger.Txn,
+	slot uint64,
+	cur *rowsCursor,
+) error {
 	if err := bumpRollbackSeq(txn); err != nil {
 		return err
 	}
@@ -415,13 +423,21 @@ func rollbackLedgerState(txn *badger.Txn, slot uint64) error {
 	if err := deletePParamsAfter(txn, slot); err != nil {
 		return err
 	}
-	if err := rollbackRows(txn, slot); err != nil {
+	var below []byte
+	if cur != nil {
+		below = cur.below
+	}
+	last, err := rollbackRows(txn, slot, below)
+	if err != nil {
 		return err
+	}
+	if cur != nil && last != nil {
+		cur.undone = last
 	}
 	var gone [][]byte
 	var newest uint64
 	found := false
-	err := eachPrefix(txn, []byte{EpochTag}, func(k, v []byte) error {
+	err = eachPrefix(txn, []byte{EpochTag}, func(k, v []byte) error {
 		e, err := decodeEpoch(k, v)
 		if err != nil {
 			return err
