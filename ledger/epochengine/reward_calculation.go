@@ -2611,12 +2611,11 @@ func finalizePrecomputedRewardOutputs(
 // and account certificate history; the row comparison additionally detects a
 // direct replacement of the owning Mark snapshot. A mismatch means the
 // application must be dropped rather than persisted; the synchronous boundary
-// path recomputes authoritatively when it runs. The chunked precompute
+// path recomputes authoritatively when it runs. The single-pass precompute
+// of pre-Allegra and bootstrap rounds (precomputeStakeRewardsSinglePass in
+// package ledger) calls it before persisting. The chunked precompute
 // (RewardPrecomputeSnapshotUnchanged) applies the same row comparison per
-// chunk instead of once at the end of a single write phase, so it does not
-// call this directly, but this remains the guard its dedicated tests pin.
-//
-//nolint:unused // Used by tests
+// chunk instead.
 func StakeRewardPrecomputeSnapshotGuardOK(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,
@@ -2661,11 +2660,11 @@ func StakeRewardPrecomputeSnapshotGuardOK(
 // PrecomputeStakeRewardsCalculate performs the read-only portion of stake
 // reward precomputation: checking whether a valid precomputed application
 // already exists for newEpoch and, if not, computing one. It issues no
-// writes and is safe to run inside a read-only transaction. Only tests call
-// it; the production chunked path computes the same shape per pool batch instead
-// (ResolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
-//
-//nolint:unused // Used by tests
+// writes and is safe to run inside a read-only transaction. The single-pass
+// precompute of pre-Allegra and bootstrap rounds (precomputeStakeRewardsSinglePass
+// in package ledger) calls it; the chunked path computes the same shape per
+// pool batch instead (ResolveStakeRewardPrecomputeRound,
+// stakeRewardPrecomputeChunkStep).
 func (e *Engine) PrecomputeStakeRewardsCalculate(
 	txn ledgerdb.Txn,
 	newEpoch uint64,
@@ -2713,12 +2712,11 @@ func (e *Engine) PrecomputeStakeRewardsCalculate(
 
 // SaveStakeRewardPrecompute persists a computed StakeRewardApplication as a
 // precompute result: the reward output rows plus the updated RewardAdaPots
-// rewards total. Callers must run it inside a write transaction. Only tests call it; the
-// production chunked path persists
-// the same two things per pool batch instead
+// rewards total. Callers must run it inside a write transaction. The
+// single-pass precompute of pre-Allegra and bootstrap rounds
+// (precomputeStakeRewardsSinglePass in package ledger) calls it; the chunked
+// path persists the same two things per pool batch instead
 // (stakeRewardPrecomputeChunkStep, finishStakeRewardPrecomputeLocked).
-//
-//nolint:unused // Used by tests
 func (e *Engine) SaveStakeRewardPrecompute(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,

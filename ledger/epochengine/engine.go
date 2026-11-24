@@ -168,7 +168,10 @@ type Host interface {
 	// PrecomputeChunkPools returns the pools per precompute chunk, or zero for
 	// the default.
 	PrecomputeChunkPools() int
-	// RewardPrecomputeChunkDone is called after each committed chunk.
+	// RewardPrecomputeChunkDone is called after each non-final chunk and its
+	// cursor are staged, inside the chunk's transaction and before it commits.
+	// The final chunk does not call it, so completedPools never equals
+	// totalPools.
 	RewardPrecomputeChunkDone(completedPools, totalPools int)
 	// RewardPrecomputeBeforeSave is called before a precompute chunk is saved.
 	RewardPrecomputeBeforeSave()
