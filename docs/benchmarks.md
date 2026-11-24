@@ -48,8 +48,9 @@ background caches live with their in-flight work. This models good
 read-through-cache conditions without using the generated input as the read
 result. It does not exercise the network protocol's cache admission, TTL,
 eviction or wire encoding. Report it separately from the default cache-bypassing
-database workload, including with `-leiosdb.burst`. Both Make targets forward
-`LEIOS_DB_BENCH_ARGS` after `-args`, for example `make bench-leios-db-cached
+database workload, including with `-leiosdb.burst`. Both Make targets set
+`DINGO_BENCH_LEIOS_DB=1`, without which the benchmark skips so `make bench` stays
+fast, and forward `LEIOS_DB_BENCH_ARGS` after `-args`, for example `make bench-leios-db-cached
 LEIOS_DB_BENCH_ARGS=-leiosdb.burst`.
 
 Use `-leiosdb.cpuprofile=<file>` for a diagnostic run to profile the workload

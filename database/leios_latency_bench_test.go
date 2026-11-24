@@ -144,9 +144,11 @@ func (r *recorder) failed() bool {
 }
 
 // leiosBenchFlags holds the workload flags. Pass them to the test binary
-// after -args, e.g. go test -run '^$' -bench '^BenchmarkLeiosDBLatency$'
-// ./database -args -leiosdb.burst.
+// after -args, e.g. DINGO_BENCH_LEIOS_DB=1 go test -run '^$'
+// -bench '^BenchmarkLeiosDBLatency$' ./database -args -leiosdb.burst.
 var leiosBenchFlags = registerLeiosBenchFlags(flag.CommandLine)
+
+const envLeiosDBBench = "DINGO_BENCH_LEIOS_DB"
 
 func registerLeiosBenchFlags(fs *flag.FlagSet) *benchConfig {
 	config := &benchConfig{}
@@ -199,6 +201,11 @@ func registerLeiosBenchFlags(fs *flag.FlagSet) *benchConfig {
 // a fresh database and prints p50, p99, maximum and count for every step. Run
 // it with -benchtime=1x; b.N has no meaning beyond repeating the workload.
 func BenchmarkLeiosDBLatency(b *testing.B) {
+	// The default workload takes minutes and gigabytes, too much for the
+	// catch-all -bench=. run of make bench, so it runs only when asked.
+	if os.Getenv(envLeiosDBBench) != "1" {
+		b.Skip("set " + envLeiosDBBench + "=1 to run the LeiosDB latency workload")
+	}
 	config := *leiosBenchFlags
 	if err := validateConfig(config); err != nil {
 		b.Fatal(err)
