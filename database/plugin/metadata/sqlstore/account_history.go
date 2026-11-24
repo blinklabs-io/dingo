@@ -211,9 +211,6 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
-	if err := s.refuseDrained("stake_registration"); err != nil {
-		return nil, err
-	}
 	ret := []models.AccountRegistrationHistoryRow{}
 	if len(stakingKey) == 0 {
 		return ret, nil
@@ -321,9 +318,6 @@ func (s *Store) CountAccountRegistrationHistoryByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
-	if err := s.refuseDrained("stake_registration"); err != nil {
-		return 0, err
-	}
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
@@ -349,9 +343,6 @@ func (s *Store) GetAccountWithdrawalHistoryByCredential(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountWithdrawalHistoryRow, error) {
-	if err := s.refuseDrained("account_reward_delta"); err != nil {
-		return nil, err
-	}
 	ret := make([]models.AccountWithdrawalHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
@@ -404,9 +395,6 @@ func (s *Store) CountAccountWithdrawalHistoryByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
-	if err := s.refuseDrained("account_reward_delta"); err != nil {
-		return 0, err
-	}
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}

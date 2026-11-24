@@ -108,7 +108,6 @@ func TestIndexerStoreRefusesLedgerWrites(t *testing.T) {
 		view.TombstoneBlock(txn, 1, []byte("h")),
 		blob.ErrIndexerReadOnly,
 	)
-	require.ErrorIs(t, view.SetCommitTimestamp(1, txn), blob.ErrIndexerReadOnly)
 	require.ErrorIs(
 		t,
 		view.Set(txn, []byte("bp-ledger-key"), nil),

@@ -18,9 +18,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -30,38 +28,16 @@ import (
 	"github.com/blinklabs-io/dingo/utxoref"
 )
 
-// The validation session's applied predicate reads the store: an applied
-// transaction is reported, an identity-only producer row and an unknown hash
-// are not.
+// The validation session's applied predicate reads the LedgerDB's transaction
+// index: an applied transaction is reported and an unknown hash is not.
 func TestTxValidationSessionIsAppliedReadsStore(t *testing.T) {
 	t.Parallel()
 
-	db := newUtxoStorageTestDB(t)
-	iter := newUtxoStorageTestIterator(t)
-	block, blockCbor := nextProducingBlock(t, db, iter)
-
-	var appliedHash []byte
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
-		appliedHash = tx.Hash().Bytes()
-		return nil
-	}))
-
-	var identityOnly [32]byte
-	identityOnly[0] = 0x93
-	seed := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, seed.Do(func(txn *database.Txn) error {
-		return db.Metadata().ImportUtxos([]models.Utxo{{
-			TxId:      identityOnly[:],
-			OutputIdx: 0,
-			Amount:    types.Uint64(1_000_000),
-		}}, txn.Metadata())
-	}))
-	seed.Release()
-
 	ls := mainnetForecastLedgerState(t, eras.AlonzoEraDesc)
-	ls.db = db
+	ls.db = newTestDB(t)
+	attachTestLedgerDB(t, ls)
+	appliedHash := txIndexTestHash(0x93)
+	commitTxIndexBlock(t, ls, 100, appliedHash)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentEpoch = ls.epochCache[297]
 	ls.currentPParams = &alonzo.AlonzoProtocolParameters{ProtocolMajor: 6}
@@ -86,9 +62,6 @@ func TestTxValidationSessionIsAppliedReadsStore(t *testing.T) {
 			applied, err := isApplied(appliedHash)
 			require.NoError(t, err)
 			require.True(t, applied, "an applied transaction")
-			applied, err = isApplied(identityOnly[:])
-			require.NoError(t, err)
-			require.False(t, applied, "an identity-only producer row")
 			applied, err = isApplied(make([]byte, 32))
 			require.NoError(t, err)
 			require.False(t, applied, "an unknown hash")

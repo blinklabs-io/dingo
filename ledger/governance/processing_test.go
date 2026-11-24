@@ -60,7 +60,7 @@ func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
 
 func TestDormantDRepBoundaryUsesNewEpochProposalSet(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -132,7 +132,7 @@ func TestEpochContainsSlotZeroLengthRejectsAll(t *testing.T) {
 func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -313,7 +313,7 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 				name := fmt.Sprintf("%s/language-%d/%s", era, languageID, path)
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
-					db, err := dbtest.NewDatabase(t, &database.Config{
+					db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 						DataDir: t.TempDir(),
 						Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 					})
@@ -414,7 +414,7 @@ func TestMapVoterType(t *testing.T) {
 func TestProcessDRepActivityCertificates(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -502,7 +502,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -778,7 +778,7 @@ func TestExtractGovActionInfo_Info(t *testing.T) {
 func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -877,7 +877,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: tmpDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -1093,7 +1093,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: tmpDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -1326,7 +1326,7 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := dbtest.NewDatabase(t, &database.Config{
+			db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 				DataDir: t.TempDir(),
 				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			})
@@ -1476,7 +1476,7 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 func TestProcessVotesRecordsEveryCast(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

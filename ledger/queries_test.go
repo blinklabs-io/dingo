@@ -34,7 +34,6 @@ import (
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -1321,13 +1320,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_LiveBetweenCreationAndSpend(
 	)
 	require.NoError(t, err)
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
-	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC1, 0, addr, 5_000_000)
 
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 300)
@@ -1358,13 +1351,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_BeforeCreation_Absent(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txId := seedBabbageUtxo(t, db, 0xC2, 0, addr, 1_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC2, 0, addr, 1_000_000)
 
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 50)
@@ -1392,13 +1379,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_SpentAtExactSlot_Absent(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txId := seedBabbageUtxo(t, db, 0xC3, 0, addr, 1_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC3, 0, addr, 1_000_000)
 
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 500)
@@ -1424,13 +1405,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txId := seedBabbageUtxo(t, db, 0xC4, 0, addr, 1_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC4, 0, addr, 1_000_000)
 
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 700)
@@ -1461,7 +1436,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_NeverSpent_StillLive(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txId := seedBabbageUtxo(t, db, 0xC5, 0, addr, 1_000_000)
+	txId := seedBabbageUtxoCbor(t, db, 0xC5, 0, addr, 1_000_000)
 
 	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 0)
 	m := utxoByTxInAsOf(t, ls, txId, 0, 99_000)
@@ -1473,37 +1448,9 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_NeverSpent_StillLive(t *testing.T) {
 	)
 }
 
-// TestCheckUtxoRetentionWindowTooOldRejected covers the
-// retention-window boundary: a pinned point older than this node's
-// spent-UTxO retention floor (tip - stability window, the same threshold
-// UtxosDeleteConsumed prunes by) must reject cleanly with
-// ErrHistoricalStateUnavailable rather than risk answering "absent" for a
-// ref that may have been live at that point but whose spend record has
-// since been hard-deleted.
-func TestCheckUtxoRetentionWindowTooOldRejected(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
-	// calculateStabilityWindow returns the default (50_000) regardless of
-	// era -- see TestCleanupConsumedUtxos_CoreModePrunes's identical setup.
-	const tipSlot = 200_000
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
-	}, nil))
-
-	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	err := ls.checkUtxoRetentionWindow(nil, QueryPoint{Slot: 149_999})
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
-}
-
-// TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds covers the
-// exact floor slot itself: a ref spent at any slot strictly after the
-// floor is guaranteed to have survived the periodic cleanup sweep (see
-// checkUtxoRetentionWindow's doc comment for why), so a pin naming the
-// floor slot exactly must be accepted, not rejected.
+// TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds covers a pin
+// at the oldest slot of the stability window below the tip: it must be
+// accepted, not rejected.
 func TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 	t.Parallel()
 
@@ -1525,104 +1472,6 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestCheckUtxoRetentionWindowPersistedFloorOverridesLenientLiveWindow
-// covers the gap a retention floor derived from only the CURRENT tip and
-// era's own stability window leaves open: a rollback lowering the tip, or
-// an era transition widening the window (Byron's small 2k vs every
-// Shelley+ era's much larger 3k/f), can each make a freshly-computed floor
-// look more lenient than the floor real cleanup already committed to and
-// pruned against -- see persistConsumedUtxoPruneFloor's doc comment.
-// checkUtxoRetentionWindow must reject using the durably persisted floor
-// even when the live tip/window alone would compute a smaller one.
-func TestCheckUtxoRetentionWindowPersistedFloorOverridesLenientLiveWindow(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
-	// calculateStabilityWindow returns the default (50_000).
-	const tipSlot = 100_000
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
-	}, nil))
-
-	// Simulates an earlier cleanup pass (e.g. while still in Byron, or
-	// before a rollback lowered the tip) that already pruned up to slot
-	// 99_500 -- stricter than what today's live tip/window alone would
-	// compute (100_000 - 50_000 = 50_000).
-	require.NoError(t, ls.persistConsumedUtxoPruneFloor(99_500, nil))
-
-	err := ls.checkUtxoRetentionWindow(nil, QueryPoint{Slot: 60_000})
-	require.Error(
-		t,
-		err,
-		"a pin the live tip/window alone would wrongly call safe must "+
-			"still be rejected using the durably persisted floor",
-	)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
-}
-
-// TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected
-// covers checkUtxoRetentionWindow's utxoPruningDeferredForCatchup conjunct
-// (ledger/queries.go): while this node is still catching up to a known
-// upstream target, cleanupConsumedUtxos itself defers pruning entirely (see
-// utxoPruningDeferredForCatchup's doc comment), so nothing has actually been
-// pruned yet and the live-tip-derived retention floor must not apply either
-// -- only the durably persisted floor (unset here, so zero) still can.
-//
-// Same shape as TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected
-// (identical tip and default 50_000 stability window, so the live-tip floor
-// would otherwise be 150_000) except an active upstream connection with no
-// admitted target yet marks pruning as deferred for catchup -- mirroring
-// state_test.go's "active upstream, target not yet known"
-// case. No-opping the !ls.utxoPruningDeferredForCatchup(...) conjunct in
-// checkUtxoRetentionWindow makes this test fail with
-// ErrHistoricalStateUnavailable instead of the required nil.
-func TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
-	// calculateStabilityWindow returns the default (50_000).
-	const tipSlot = 200_000
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
-	}, nil))
-
-	// An active upstream connection with no admitted target yet: "still
-	// syncing," per utxoPruningDeferredForCatchup's own doc comment, so it
-	// reports deferred regardless of tipSlot/stabilityWindow.
-	connA := testChainsyncConnId(6301, 3301)
-	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
-		return &connA
-	}
-	ls.publishActiveUpstream(connA)
-
-	// Without deferral this would compute floor = 200_000 - 50_000 =
-	// 150_000 (see RetentionWindow_TooOldRejected) and reject slot 1
-	// outright.
-	txIn := ledger.MustNewShelleyTransactionInput(
-		hex.EncodeToString(repeatedBytes(32, 0xEE)),
-		0,
-	)
-	_, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{txIn},
-		QueryPoint{Slot: 1},
-		nil,
-	)
-	require.NoError(
-		t,
-		err,
-		"pruning deferred for catchup means nothing has actually been "+
-			"pruned yet, so the live-tip retention floor must not reject "+
-			"this pin",
-	)
-}
-
 // TestQuery_UtxoByTxIn_WiredThroughDispatch is an end-to-end check that
 // Query's dispatch switch (ledger/queries.go) actually threads at and txn
 // into queryShelleyUtxoByTxIn -- not just that the handler works when
@@ -1640,13 +1489,7 @@ func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txId := seedBabbageUtxo(t, db, 0xC6, 0, addr, 1_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
-		500,
-	))
+	txId := seedBabbageUtxoCbor(t, db, 0xC6, 0, addr, 1_000_000)
 
 	pointHash := bytes.Repeat([]byte{0xAB}, 32)
 	seedBlockAtSlot(t, ls, 300, pointHash)
@@ -1913,24 +1756,12 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 		txId []byte,
 		amount uint64,
 	) {
-		addressBytes, err := addr.Bytes()
-		require.NoError(t, err)
-		require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-			TxId:       txId,
-			OutputIdx:  0,
-			PaymentKey: addr.PaymentKeyHash().Bytes(),
-			Address:    addressBytes,
-			AddedSlot:  1,
-			Amount:     types.Uint64(amount),
-		}))
 		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 			OutputAddress: addr,
 			OutputAmount:  amount,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
-			return db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
-		}))
+		fxSeedOutput(t, db, txId, 0, 1, encoded)
 	}
 
 	addr1, err := lcommon.NewAddressFromParts(
@@ -2002,53 +1833,42 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 // with only one genuinely resolvable input, a regression back to resolving
 // just txIns[0] would still pass a count-based assertion.
 //
-// Blocks are stored in chain order, so a later block's transaction could
-// spend an earlier block's collected candidate output before the test gets
-// to use it. Liveness of every collected candidate is re-checked after each
-// new block is stored, and only candidates still live at that point are
-// kept; the loop stops as soon as two remain, so no further block storage
-// (and thus no further spends) can happen before they're used below.
+// Each output enters db's LedgerDB set as its block's application does, and
+// nothing spends it.
 func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	t.Parallel()
 
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
+	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
 
-	utxoIdKey := func(id models.UtxoId) string {
-		return fmt.Sprintf("%x:%d", id.Hash, id.Idx)
-	}
-
-	var candidates []models.UtxoId
 	var live []models.UtxoId
 	for len(live) < 2 {
-		block, blockCbor := nextProducingBlock(t, db, iter)
-		txn := db.Transaction(context.Background(), true)
-		var produced lcommon.Utxo
-		err := txn.Do(func(txn *database.Txn) error {
-			tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
-			produced = tx.Produced()[0]
-			return nil
-		})
+		immBlock, err := iter.Next()
 		require.NoError(t, err)
-		candidates = append(candidates, models.UtxoId{
+		require.NotNil(t, immBlock, "testdata holds two producing blocks")
+		block, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		if len(block.Transactions()) == 0 ||
+			len(block.Transactions()[0].Produced()) == 0 {
+			continue
+		}
+		produced := block.Transactions()[0].Produced()[0]
+		ref := models.UtxoId{
 			Hash: produced.Id.Id().Bytes(),
 			Idx:  produced.Id.Index(),
-		})
-
-		results, err := db.UtxosByRefs(context.Background(), candidates, nil)
-		require.NoError(t, err)
-		liveSet := make(map[string]struct{}, len(results))
-		for _, u := range results {
-			liveSet[utxoIdKey(models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})] = struct{}{}
 		}
-		live = live[:0]
-		for _, c := range candidates {
-			if _, ok := liveSet[utxoIdKey(c)]; ok {
-				live = append(live, c)
-			}
+		point := ocommon.Point{
+			Slot: block.SlotNumber(), Hash: block.Hash().Bytes(),
 		}
+		require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(
+			&point, []UtxoEvent{{Point: point, Added: []UtxoOutput{{
+				Ref: ref, Cbor: produced.Output.Cbor(),
+			}}}},
+		))
+		live = append(live, ref)
 	}
-	live = live[:2]
 
 	realTxIns := make([]ledger.ShelleyTransactionInput, len(live))
 	for i, ref := range live {
@@ -2065,9 +1885,6 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 		ledger.MustNewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
 	)
 
-	ls := &LedgerState{db: db}
-	fxAttachLedgerDB(t, ls)
-	attachQueryLiveUtxoSet(t, ls, db)
 	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
 	require.NoError(t, err)
 
@@ -2233,7 +2050,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 		Active:        true,
 		AddedSlot:     10,
 	}))
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey:    delegKey,
 		CredentialTag: 0,
 		Drep:          drepCred,
@@ -2382,7 +2199,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xAA)
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: stakeKey,
 		Pool:       nil, // undelegated
 		Reward:     types.Uint64(1_000_000),
@@ -2419,19 +2236,23 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xAB)
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: stakeKey,
 		Reward:     types.Uint64(1_000_000),
 		Active:     true,
 	}))
-	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
-		0,
-		stakeKey,
-		1_000_000,
-		42,
-		bytes.Repeat([]byte{0x55}, 32),
-		nil,
-	))
+	// The withdrawal as its transaction applies it: the balance emptied and
+	// the withdrawal recorded.
+	fxSeed(t, db, LedgerChanges{
+		Accounts: []AccountChange{{Slot: 42, Account: models.Account{
+			StakingKey: stakeKey, Active: true,
+		}}},
+		RewardRecords: []RewardRecord{{
+			Slot: 42, Withdrawal: true, Amount: 1_000_000,
+			Source: bytes.Repeat([]byte{0x55}, 32),
+			Ref:    models.NewStakeCredentialRef(0, stakeKey),
+		}},
+	})
 	ls := &LedgerState{db: db}
 	fxAttachLedgerDB(t, ls)
 
@@ -2462,7 +2283,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xBB)
 	poolHash := stakeCred28(0xCC) // 28 bytes is also pool key hash size
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: stakeKey,
 		Pool:       poolHash,
 		Reward:     types.Uint64(2_500_000),
@@ -2497,7 +2318,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 
 	delegatedKey := stakeCred28(0x01)
 	delegatedPool := stakeCred28(0x10)
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: delegatedKey,
 		Pool:       delegatedPool,
 		Reward:     types.Uint64(100),
@@ -2505,7 +2326,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 	}))
 
 	undelegatedKey := stakeCred28(0x02)
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: undelegatedKey,
 		Pool:       nil,
 		Reward:     types.Uint64(200),
@@ -2555,14 +2376,14 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 	keyPool := stakeCred28(0x45)
 	scriptPool := stakeCred28(0x46)
 
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		Pool:          keyPool,
 		Reward:        types.Uint64(100),
 		Active:        true,
 	}))
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 1,
 		Pool:          scriptPool,
@@ -2627,13 +2448,10 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	})
 	tx, err := txBuilder.Build()
 	require.NoError(t, err)
-	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
-		tx,
-		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
-		0,
+	fxApplyTx(
+		t, db, tx, ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)), 0,
 		map[int]uint64{0: 2_000_000},
-		nil, 0,
-	))
+	)
 
 	ls := &LedgerState{db: db}
 	fxAttachLedgerDB(t, ls)
@@ -4282,11 +4100,10 @@ func TestVerifyPointQueryable_UnknownEraId_Rejected(t *testing.T) {
 }
 
 // TestVerifyPointQueryable_PParamsRowOnly_Rejected covers a gap the other
-// TestVerifyPointQueryable* cases leave open: deleting the
-// checkUtxoRetentionWindow call, or this queryShelleyCurrentProtocolParams
-// call, from VerifyPointQueryable leaves every existing
-// TestVerifyPointQueryable* case green -- neither deletion
-// changes PastRetentionFloor_Rejected's outcome, since the stake floor
+// TestVerifyPointQueryable* cases leave open: deleting this
+// queryShelleyCurrentProtocolParams call from VerifyPointQueryable leaves
+// every existing TestVerifyPointQueryable* case green -- the deletion does
+// not change PastRetentionFloor_Rejected's outcome, since the stake floor
 // already rejects that fixture, and no case has a missing pparams row as its
 // only failure. The pinned point's epoch (3) sits exactly at the
 // stake-retention window's edge relative to the live epoch (5) -- mark

@@ -548,9 +548,6 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, nil, err
-	}
 	return s.getStakeByPoolsAtSlot(
 		poolKeyHashes, slot, 0, nil, expiryEpoch, inactivityPeriod, txn,
 	)
@@ -565,9 +562,6 @@ func (s *Store) GetEpochBoundaryStakeByPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, nil, err
-	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 		incomingEraID = nil
@@ -699,9 +693,6 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	ret := make(map[string]uint64)
 	if len(ownerKeys) == 0 {
 		return ret, nil
@@ -797,9 +788,6 @@ func (s *Store) GetRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	return s.getRewardStakeInputsForPools(
 		poolKeyHashes, slot, 0, false, nil,
 		expiryEpoch, inactivityPeriod, txn,
@@ -815,9 +803,6 @@ func (s *Store) GetEpochBoundaryRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 		incomingEraID = nil
@@ -1625,9 +1610,6 @@ func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
 	boundarySlot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
 	}
@@ -1743,6 +1725,46 @@ WHERE utxo.staking_key IS NOT NULL AND length(utxo.staking_key) > 0
 		}
 	}
 	return nil
+}
+
+// IterateAppliedTransactions calls fn with every applied transaction. It
+// reads only columns a v0.94.2 store holds.
+func (s *Store) IterateAppliedTransactions(
+	txn types.Txn,
+	fn func(models.AppliedTransaction) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT t.hash, a.block_hash, a.slot, a.type, a.block_index, a.valid
+FROM applied_transaction a
+JOIN "transaction" t ON t.id = a.tx_id`)
+	if err != nil {
+		return fmt.Errorf("iterate applied transactions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			tx                    models.AppliedTransaction
+			slot, era, blockIndex sql.NullInt64
+			valid                 sql.NullBool
+		)
+		if err := rows.Scan(
+			&tx.Hash, &tx.BlockHash, &slot, &era, &blockIndex, &valid,
+		); err != nil {
+			return fmt.Errorf("iterate applied transactions: %w", err)
+		}
+		tx.Slot = uint64(slot.Int64)             //nolint:gosec // slots are non-negative
+		tx.Type = uint8(era.Int64)               //nolint:gosec // era ids fit a byte
+		tx.BlockIndex = uint32(blockIndex.Int64) //nolint:gosec // bounded by the block
+		tx.Valid = valid.Bool
+		if err := fn(tx); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // IterateStakeDelegationEvents calls fn with every pool delegation

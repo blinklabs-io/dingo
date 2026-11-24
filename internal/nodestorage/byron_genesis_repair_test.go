@@ -197,6 +197,8 @@ SELECT (SELECT COUNT(*) FROM utxo x JOIN "transaction" t ON t.id = x.tx_id
 	return utxos, txs
 }
 
+// runReconcile moves db, a v0.94.2 database, into set, then reconciles set
+// with a ledger database as the node does once the move is done.
 func runReconcile(
 	t *testing.T,
 	db *database.Database,
@@ -205,11 +207,22 @@ func runReconcile(
 	nodeCfg *cardano.CardanoNodeConfig,
 ) {
 	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	require.NoError(t, nodestorage.ReleasedMigration{
+		UtxoSet: nodestorage.UtxoSetConfig{
+			DataDir:           dir,
+			CardanoNodeConfig: nodeCfg,
+		},
+		Logger: logger,
+	}.Move(t.Context(), db, set))
+	ledgerDB, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
 	require.NoError(t, nodestorage.Reconcile{
-		DB:                db,
+		DB:                ledgerDB,
 		Set:               set,
-		DataDir:           dir,
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:            logger,
 		CardanoNodeConfig: nodeCfg,
 	}.Run(t.Context()))
 }
@@ -222,7 +235,7 @@ func runReconcile(
 func TestReconcileRemovesLegacyZeroValueByronGenesis(t *testing.T) {
 	t.Parallel()
 	g := newLegacyGenesis(t)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -260,7 +273,7 @@ func TestReconcileRemovesLegacyZeroValueByronGenesis(t *testing.T) {
 func TestReconcileResumesInterruptedGenesisRepair(t *testing.T) {
 	t.Parallel()
 	g := newLegacyGenesis(t)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	seedLegacyStore(t, db, g.nodeCfg, g.all())
 	zero, err := ledger.ZeroValueByronGenesisOutputs(g.nodeCfg)
@@ -324,12 +337,17 @@ func (emptyLiveSource) EachLiveUtxoStake(
 func TestReconcileRemovesGenesisFromLiveSetOnlyStore(t *testing.T) {
 	t.Parallel()
 	g := newLegacyGenesis(t)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	require.NoError(t, db.SetLiveUtxoSource(emptyLiveSource{}))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
+	// A released store whose outputs already moved to the live set: the
+	// transaction rows stay behind without their utxo rows. A store with a
+	// live source writes neither, so the rows are seeded before it is set.
 	seedLegacyStore(t, db, g.nodeCfg, g.all())
+	_, err = raw.ExecContext(t.Context(), `DELETE FROM utxo`)
+	require.NoError(t, err)
+	require.NoError(t, db.SetLiveUtxoSource(emptyLiveSource{}))
 	for _, u := range g.zeroByron {
 		utxos, txs := metadataRows(t, raw, u)
 		require.Zero(t, utxos, "the store keeps no utxo rows")
@@ -381,7 +399,7 @@ func TestReconcileKeepsOutputAtSharedZeroByronReference(t *testing.T) {
 				append([]lcommon.Utxo{}, g.zeroByron[1:]...),
 				g.fundedByron, g.zeroShelley, shared,
 			)
-			db, err := dbtest.NewDatabase(
+			db, err := dbtest.NewReleasedDatabase(
 				t, &database.Config{DataDir: t.TempDir()},
 			)
 			require.NoError(t, err)

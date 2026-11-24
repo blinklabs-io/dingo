@@ -80,12 +80,12 @@ func TestRemainingTxnEntriesIsExact(t *testing.T) {
 	)
 }
 
-// TestRemainingTxnEntriesLeavesRoomForCommitTimestamp is the same contract
-// seen from the caller's side: stop one short of the reported budget and the
-// commit timestamp Txn.Commit writes into the same transaction still fits, so
-// the transaction commits. Running the budget to zero instead is what wedges
-// a startup rollback.
-func TestRemainingTxnEntriesLeavesRoomForCommitTimestamp(t *testing.T) {
+// TestRemainingTxnEntriesLeavesRoomForACommitWrite is the same contract seen
+// from the caller's side: stop one short of the reported budget and the write
+// Txn.Commit puts into the same transaction still fits, so the transaction
+// commits. Running the budget to zero instead is what wedges a startup
+// rollback.
+func TestRemainingTxnEntriesLeavesRoomForACommitWrite(t *testing.T) {
 	t.Parallel()
 	store := newBudgetTestStore(t)
 
@@ -101,8 +101,8 @@ func TestRemainingTxnEntriesLeavesRoomForCommitTimestamp(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		store.SetCommitTimestamp(1, txn),
-		"the reserved entry must still be there for the commit timestamp",
+		store.Set(txn, []byte("commit-write"), []byte{1}),
+		"the reserved entry must still be there for the commit write",
 	)
 	require.NoError(t, txn.Commit())
 }

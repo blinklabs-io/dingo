@@ -96,55 +96,52 @@ func TestP3DrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	cold := bytes.Repeat([]byte{0xa1}, 28)
 	pkh := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x6e}, 28))
 	_, err = ldb.GetConstitution(nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeQuorum(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeMembers(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeMembersIncludeDeleted(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeMember(ctx, 0, cold, 0, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.IsCommitteeMemberResigned(ctx, 0, cold, 0, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetResignedCommitteeMembers(
 		ctx, []models.CommitteeCredential{{Credential: cold}}, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveCommitteeMembers(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeAuthorizedCount(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetCommitteeHotAuthorizationsSince(ctx, 0, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 
 	_, _, err = ldb.LatestPoolOpCertSequence(ctx, pkh, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, err = ldb.LatestPoolOpCertSequenceAfter(ctx, pkh, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, err = ldb.LatestPoolOpCertSequenceAtOrBefore(ctx, pkh, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, err = ldb.LatestPoolOpCertSequenceInRange(ctx, pkh, 1, 2, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.LatestPoolOpCertSequences(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.LatestPoolOpCertSequencesAtOrBefore(ctx, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.PoolOpCertSequencesExistAtSlot(ctx, 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 
 	// The plain database refuses both reads and writes.
 	db := scenario.DB
 	_, err = db.GetCommitteeMembers(ctx, nil)
-	require.ErrorIs(t, err, database.ErrFamilyDrained)
+	require.ErrorIs(t, err, database.ErrNoMetadataStore)
 	_, err = db.GetConstitution(nil)
-	require.ErrorIs(t, err, database.ErrFamilyDrained)
+	require.ErrorIs(t, err, database.ErrNoMetadataStore)
 	_, _, err = db.LatestPoolOpCertSequence(ctx, pkh, nil)
-	require.ErrorIs(t, err, nodesettings.ErrFamilyDrained)
-	_, _, err = db.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{pkh}, 0, 10, nil,
-	)
-	require.ErrorIs(t, err, nodesettings.ErrFamilyDrained)
+	require.ErrorIs(t, err, database.ErrNoMetadataStore)
+	require.Nil(t, db.Metadata(), "the database keeps no metadata store")
 }
 
 // A drained op-cert read for a slot the set has no record of fails rather
@@ -168,9 +165,6 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 		t.Context(), lcommon.PoolKeyHash(slots.Pool), 5, slots.Batched+1, lower,
 	))
 	require.NoError(t, lower.Commit())
-	require.NoError(t, scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyOpCerts,
-	))
 	scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyOpCerts),
 	)
@@ -185,7 +179,7 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 	_, _, err = ldb.LatestPoolOpCertSequenceAfter(
 		t.Context(), pkh, slots.Batched, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
 // A pool that keeps its counter after a slot is the common case of a node
@@ -196,9 +190,6 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 func TestOpCertRepeatedCounterIsAnsweredByTheDrainedSet(t *testing.T) {
 	t.Parallel()
 	scenario, _, _ := setModeScenario(t)
-	require.NoError(t, scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyOpCerts,
-	))
 	scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyOpCerts),
 	)
@@ -240,9 +231,9 @@ func TestOpCertRepeatedCounterIsAnsweredByTheDrainedSet(t *testing.T) {
 	write(dropped, 6, base+2)
 	write(dropped, 5, base+3)
 	_, _, err = ldb.LatestPoolOpCertSequenceAfter(ctx, dropped, base+2, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, err = ldb.LatestPoolOpCertSequenceInRange(
 		ctx, dropped, base+3, base+3, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }

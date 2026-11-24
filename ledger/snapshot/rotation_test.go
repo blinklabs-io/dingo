@@ -42,7 +42,7 @@ func setupTestDBWithStorageMode(
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     tmpDir,
 		StorageMode: storageMode,
 	})

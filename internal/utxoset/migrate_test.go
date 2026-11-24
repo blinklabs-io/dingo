@@ -18,13 +18,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -105,14 +103,6 @@ func (f sqlStore) DeleteSyncState(_ context.Context, k string) error {
 	return nil
 }
 
-func (f sqlStore) DeleteUtxoRows(_ context.Context, limit int) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := min(limit, len(f.rows))
-	f.rows = f.rows[n:]
-	return int64(n), nil
-}
-
 func (f *sqlFixture) remaining() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -148,8 +138,7 @@ func (f *sqlFixture) env(hook func(string) error) utxoset.MigrationEnv {
 			defer f.mu.Unlock()
 			return f.marked, nil
 		},
-		ChunkRows: 10,
-		Hook:      hook,
+		Hook: hook,
 	}
 }
 
@@ -167,133 +156,80 @@ func requireMigrated(
 	n, err := set.Count()
 	require.NoError(t, err)
 	require.EqualValues(t, outputs, n)
+	progress, err := sqlStore{f}.GetSyncState(t.Context(), utxoset.MigrationSyncKey)
+	require.NoError(t, err)
+	require.Empty(t, progress, "the migration progress record")
 	tip, ok, err := set.Tip()
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, f.tip, tip)
 	require.True(t, f.marked, "the set-only mark")
-	require.Zero(t, f.remaining(), "utxo rows left")
-	require.NotContains(t, f.sync, utxoset.MigrationSyncKey)
+	require.Equal(
+		t, outputs, f.remaining(), "the metadata store keeps its rows",
+	)
 }
 
-// A database that holds its UTxO set in the metadata store moves it into the
-// live UTxO set, with the set-only mark written before any row is deleted.
+// A database that holds its UTxO set in the metadata store copies it into the
+// live UTxO set and leaves the rows in place.
 func TestMigrateFromSQLMovesTheUtxoSet(t *testing.T) {
 	t.Parallel()
 	const outputs = 25
 	f := newSQLFixture(outputs)
 	set := openOnly(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
-	var sawRows []int
-	err := set.MigrateFromSQL(t.Context(), f, f.env(func(step string) error {
-		if step == "marked" {
-			require.True(t, f.marked)
-			sawRows = append(sawRows, f.remaining())
-		}
-		return nil
-	}))
-	require.NoError(t, err)
-	require.Equal(t, []int{outputs}, sawRows, "rows deleted before the mark")
+	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 	requireMigrated(t, set, f, outputs)
 }
 
-func TestMigrateFromSQLInlineCleanupUsesTheCompletedMark(t *testing.T) {
+// A migration whose progress is committed and whose mark is durable resumes on
+// a set that serves the ledger, because it never reads the SQL rows again; an
+// uncommitted one must refuse, since no metadata store is its source.
+func TestMigrateFromSQLResumesCommittedMigrationOnASetServingTheLedger(
+	t *testing.T,
+) {
 	t.Parallel()
 	const outputs = 25
+	errCrash := errors.New("crash")
 	f := newSQLFixture(outputs)
 	set := openOnly(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
-	env := f.env(nil)
-	env.Marked = nil
-
-	require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
-	requireMigrated(t, set, f, outputs)
-}
-
-// A node can finish its cutover before deleting historical SQL rows. The
-// durable commit and set-only mark make the cleanup safe, and its progress
-// record remains until a managed worker completes every batch.
-func TestMigrateFromSQLDefersRowCleanupAfterCutover(t *testing.T) {
-	t.Parallel()
-	const outputs = 25
-	f := newSQLFixture(outputs)
-	set := openOnly(t, t.TempDir())
-	t.Cleanup(func() { _ = set.Close() })
-	env := f.env(nil)
-	env.DeferCleanup = true
-
-	require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
-	require.True(t, f.marked)
-	require.Equal(t, outputs, f.remaining())
-	require.Equal(
-		t,
-		"committed",
-		f.sync[utxoset.MigrationSyncKey],
-	)
-
-	require.NoError(t, set.CleanupMigratedSQLRows(t.Context(), env))
-	requireMigrated(t, set, f, outputs)
-}
-
-// A migration whose progress is committed and whose set-only mark is durable
-// resumes over drained ledger-state families, because it never reads the SQL
-// rows again; an uncommitted one must refuse, since the rows are no longer a
-// faithful source.
-func TestMigrateFromSQLResumesCommittedMigrationOverDrainedState(t *testing.T) {
-	t.Parallel()
-	const outputs = 25
-	for _, deferCleanup := range []bool{false, true} {
-		t.Run(fmt.Sprintf("defer=%t", deferCleanup), func(t *testing.T) {
-			t.Parallel()
-			f := newSQLFixture(outputs)
-			set := openOnly(t, t.TempDir())
-			t.Cleanup(func() { _ = set.Close() })
-			env := f.env(nil)
-			require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
-			requireMigrated(t, set, f, outputs)
-
-			// Rebuild a crash after the mark: rows and progress remain.
-			f.mu.Lock()
-			f.sync[utxoset.MigrationSyncKey] = "committed"
-			f.rows = newSQLFixture(outputs).rows
-			f.mu.Unlock()
-			set.SetDrainedFamilies(nodesettings.AllFamilies())
-			env.DeferCleanup = deferCleanup
-
-			require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
-			if deferCleanup {
-				require.Equal(t, outputs, f.remaining())
-				require.Equal(t, "committed", f.sync[utxoset.MigrationSyncKey])
-				require.NoError(t, set.CleanupMigratedSQLRows(t.Context(), env))
+	require.ErrorIs(t, set.MigrateFromSQL(t.Context(), f, f.env(
+		func(step string) error {
+			if step == "marked" {
+				return errCrash
 			}
-			requireMigrated(t, set, f, outputs)
-		})
-	}
+			return nil
+		},
+	)), errCrash)
+	set.ServeLedgerOnly()
+
+	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
+	requireMigrated(t, set, f, outputs)
+	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)), "finished")
 }
 
-func TestMigrateFromSQLRefusesUnmarkedMigrationOverDrainedState(t *testing.T) {
+func TestMigrateFromSQLRefusesUnmarkedMigrationOnASetServingTheLedger(t *testing.T) {
 	t.Parallel()
 	f := newSQLFixture(5)
 	set := openOnly(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
-	set.SetDrainedFamilies(nodesettings.AllFamilies())
+	set.ServeLedgerOnly()
 
 	err := set.MigrateFromSQL(t.Context(), f, f.env(nil))
 
-	require.ErrorContains(t, err, "drained ledger-state families")
+	require.ErrorContains(t, err, "serves the ledger")
 	require.Equal(t, 5, f.remaining())
 	require.False(t, f.marked)
 }
 
 // A stop between any two steps, as a crash would cause, leaves the metadata
-// store intact until the mark, and the next run finishes the migration.
+// store intact, and the next run finishes the migration.
 func TestMigrateFromSQLResumesAfterACrashAtEveryStep(t *testing.T) {
 	t.Parallel()
 	const outputs = 25
 	errCrash := errors.New("crash")
 	for _, step := range []string{
 		"scanned", "bootstrapped", "verified", "committed", "marked",
-		"drain:1", "drain:2",
 	} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
@@ -313,11 +249,8 @@ func TestMigrateFromSQLResumesAfterACrashAtEveryStep(t *testing.T) {
 			case "scanned", "bootstrapped", "verified", "committed":
 				require.False(t, f.marked, "marked before the crash point")
 				require.Equal(t, outputs, f.remaining())
-			case "marked":
-				require.Equal(t, outputs, f.remaining())
 			default:
-				require.Less(t, f.remaining(), outputs)
-				require.True(t, f.marked)
+				require.Equal(t, outputs, f.remaining())
 			}
 			require.NoError(t, set.Close())
 

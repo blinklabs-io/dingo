@@ -89,7 +89,7 @@ func (ls *LedgerState) stateMarksView(
 ) (stateMarksView, error) {
 	r, ok := ls.readSet(txn).(StateMarkReader)
 	if !ok || ls.utxoSetFailed.Load() {
-		return stateMarksView{}, drainedUnserved(family)
+		return stateMarksView{}, ledgerStateUnserved(family)
 	}
 	loaded := r.RatifyPendingLoaded
 	if family == nodesettings.FamilyAccounts {
@@ -97,7 +97,7 @@ func (ls *LedgerState) stateMarksView(
 	}
 	if ok, err := loaded(); err != nil || !ok {
 		if err == nil {
-			err = drainedUnserved(family)
+			err = ledgerStateUnserved(family)
 		}
 		return stateMarksView{}, err
 	}
@@ -169,7 +169,7 @@ func (s stagingLedgerDB) AccountInactivityActivationMembership(
 ) (map[string]struct{}, error) {
 	r := s.ls.accountServing(txn)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	out := make(map[string]struct{})
 	for _, ref := range refs {

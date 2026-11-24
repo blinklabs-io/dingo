@@ -27,7 +27,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,16 +147,12 @@ const (
 	blockfetchCommitBatchSize = 8
 	maxBufferedHeadersPerConn = 128
 
-	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
-	deferredHeaderValidationSyncStateValue  = "true"
+	deferredHeaderValidationSyncStateValue = "true"
 	// deferredHeaderMarkerSourceSeparator splits the marker from the address
 	// of the peer that supplied the block.
 	deferredHeaderMarkerSourceSeparator = "@"
-	// deferredHeaderValidationFloorSyncStateKey must not start with
-	// deferredHeaderValidationSyncStatePrefix, which marker scans match.
-	deferredHeaderValidationFloorSyncStateKey = "deferred_header_validation_floor"
-	defaultMaxDeferredHeaderMarkers           = 100_000
-	defaultMaxAdmissionVerified               = 100_000
+	defaultMaxDeferredHeaderMarkers     = 100_000
+	defaultMaxAdmissionVerified         = 100_000
 
 	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
 	// used to gate shadow blockfetch dispatch when no peer-population
@@ -269,14 +264,12 @@ var ErrChainTruncatedLedgerRollbackFailed = errors.New(
 	"primary chain truncated but ledger rollback failed",
 )
 
-// ErrRollbackBelowUtxoPruneFloor reports a rollback target below the slot the
-// consumed-UTxO sweep has hard-deleted spent rows at or below. Those rows are
-// gone, and database.TruncateAfterSlot restores spent UTxOs with an UPDATE, so
-// the rewind cannot reconstruct the live set the target implies. The rollback
-// is refused with the ledger untouched rather than performed and reported as a
-// repair.
-var ErrRollbackBelowUtxoPruneFloor = errors.New(
-	"rollback below consumed UTxO prune floor",
+// ErrRollbackBelowUtxoJournal reports a rollback target older than the oldest
+// point the live UTxO set's journal reaches. The set rolls back from its
+// journal alone, so it cannot return to the target. The rollback is refused
+// with the chain and the ledger untouched.
+var ErrRollbackBelowUtxoJournal = errors.New(
+	"rollback below the live UTxO set's journal",
 )
 
 // ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
@@ -567,12 +560,6 @@ func headerValidationPointKey(point ocommon.Point) string {
 	return fmt.Sprintf("%d:%s", point.Slot, hex.EncodeToString(point.Hash))
 }
 
-func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
-	return deferredHeaderValidationSyncStatePrefix + headerValidationPointKey(
-		point,
-	)
-}
-
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
 	ls.markDeferredHeaderValidationFrom(point, ouroboros.ConnectionId{})
@@ -632,12 +619,8 @@ func (ls *LedgerState) boundDeferredHeaderValidation() error {
 		evictedKeys = append(evictedKeys, m.key)
 		floor = max(floor, m.slot+1)
 	}
-	if ls.db != nil && ls.db.Metadata() != nil {
-		if err := ls.ledgerDB().SetSyncState(
-			deferredHeaderValidationFloorSyncStateKey,
-			strconv.FormatUint(floor, 10),
-			nil,
-		); err != nil {
+	if ls.db != nil {
+		if err := ls.ledgerDB().SetDeferredHeaderFloor(floor); err != nil {
 			return fmt.Errorf("persist deferred header floor: %w", err)
 		}
 	}
@@ -772,7 +755,7 @@ func (ls *LedgerState) takeDeferredHeaderValidation(
 // would pin its epoch's pool_stake_snapshot rows forever.
 //
 // Eviction is gated on the ROLLBACK HORIZON, not on the bare tip. Eviction
-// removes the durable sync_state marker as well as the in-memory entry, and
+// removes the durable marker as well as the in-memory entry, and
 // that marker is the only thing that makes deferredHeaderValidationRequired
 // return true at apply. If chain selection later rolls back and re-adopts a
 // fork containing an evicted point, its block applies with required == false,
@@ -850,14 +833,10 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	if len(mapKeys) == 0 || ls.db == nil {
 		return nil
 	}
-	// The membership test is taken under the lock, but the lock is RELEASED
-	// before the delete: removing a legacy sync_state row opens the single
-	// sqlite write connection (nil txn -> Transaction(true)), and block apply
-	// holds that connection before taking this mutex via
-	// consumeDeferredHeaderValidation.
-	// Holding the mutex across the delete inverts the lock order (mutex->write-
-	// conn here vs. write-conn->mutex on apply) and deadlocks the node on the
-	// single write connection -- the same inversion as the prune path. A point
+	// The membership test is taken under the lock, but the lock is released
+	// before the delete, so no durable write is made while holding a mutex
+	// block apply takes inside its transaction
+	// (consumeDeferredHeaderValidation). A point
 	// re-deferred (and re-persisted) between the membership test
 	// and the delete keeps its live pin in the in-memory set for the running
 	// process, so the retention floor still covers it; only its durable marker
@@ -930,11 +909,10 @@ const deferredMarkerRestoreMaxAttempts = 3
 // process keeps the pin; propagation surfaces the lost DURABLE pin so the node
 // fails the cleanup rather than continuing toward a restart that would lose it.
 func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
-	syncKey := deferredHeaderValidationSyncStatePrefix + k
 	if err := ls.deleteDeferredMarkerByKey(k); err != nil {
 		ls.config.Logger.Warn(
 			"failed to delete stale deferred-header marker",
-			"key", syncKey,
+			"key", k,
 			"error", err,
 			"component", "ledger",
 		)
@@ -963,7 +941,7 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 		}
 		ls.config.Logger.Warn(
 			"failed to restore re-deferred header marker; retrying",
-			"key", syncKey,
+			"key", k,
 			"attempt", attempt,
 			"error", restoreErr,
 			"component", "ledger",
@@ -971,31 +949,17 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	}
 	return fmt.Errorf(
 		"restore re-deferred header marker %q after %d attempts: %w",
-		syncKey,
+		k,
 		deferredMarkerRestoreMaxAttempts,
 		restoreErr,
 	)
 }
 
-// deleteDeferredMarkerByKey removes, when a read shows one, the sync_state row
-// an earlier version wrote for a map key, and then the blob marker.
-//
-// The blob marker goes last so that any error leaves it in place: the caller
-// treats a failed delete as harmless only because the durable marker survives
-// it, and skips the readmission re-test on that basis.
+// deleteDeferredMarkerByKey removes the durable marker for a map key. Any
+// error leaves it in place: the caller treats a failed delete as harmless only
+// because the durable marker survives it, and skips the readmission re-test on
+// that basis.
 func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
-	if ls.db.Metadata() != nil {
-		syncKey := deferredHeaderValidationSyncStatePrefix + k
-		value, err := ls.ledgerDB().GetSyncState(syncKey, nil)
-		if err != nil {
-			return err
-		}
-		if value != "" {
-			if err := ls.ledgerDB().DeleteSyncState(syncKey, nil); err != nil {
-				return err
-			}
-		}
-	}
 	return ls.ledgerDB().DeleteDeferredHeaderMarker(k)
 }
 
@@ -1034,62 +998,17 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		keys = append(keys, marker.Key)
 		blobValues[marker.Key] = marker.Value
 	}
-	// Markers and the eviction floor an earlier version wrote to sync_state
-	// are still honoured.
-	if ls.db.Metadata() != nil {
-		legacy, err := ls.ledgerDB().ListSyncStateKeysByPrefix(
-			deferredHeaderValidationSyncStatePrefix,
-			nil,
+	floor, found, err := ls.ledgerDB().DeferredHeaderFloor()
+	if err != nil {
+		return fmt.Errorf("read deferred header floor: %w", err)
+	}
+	if found {
+		ls.deferredHeaderValidationMu.Lock()
+		ls.deferredHeaderValidationFloor = max(
+			ls.deferredHeaderValidationFloor,
+			floor,
 		)
-		if err != nil {
-			return fmt.Errorf(
-				"repopulate deferred-header set from persisted markers: %w",
-				err,
-			)
-		}
-		for _, syncKey := range legacy {
-			mapKey := strings.TrimPrefix(
-				syncKey,
-				deferredHeaderValidationSyncStatePrefix,
-			)
-			value, err := ls.ledgerDB().GetSyncState(syncKey, nil)
-			if err != nil {
-				return fmt.Errorf(
-					"read deferred-header marker %q: %w", syncKey, err,
-				)
-			}
-			// Earlier releases wrote only the exact bare marker to sync_state.
-			// Reject unknown values rather than interpreting an unsupported
-			// address-bearing format or silently dropping a persisted marker.
-			if value == deferredHeaderValidationSyncStateValue {
-				keys = append(keys, mapKey)
-			} else if value != "" {
-				return fmt.Errorf(
-					"decode deferred-header marker %q: invalid legacy value %q",
-					syncKey,
-					value,
-				)
-			}
-		}
-		floorValue, err := ls.ledgerDB().GetSyncState(
-			deferredHeaderValidationFloorSyncStateKey,
-			nil,
-		)
-		if err != nil {
-			return fmt.Errorf("read deferred header floor: %w", err)
-		}
-		if floorValue != "" {
-			floor, err := strconv.ParseUint(floorValue, 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse deferred header floor: %w", err)
-			}
-			ls.deferredHeaderValidationMu.Lock()
-			ls.deferredHeaderValidationFloor = max(
-				ls.deferredHeaderValidationFloor,
-				floor,
-			)
-			ls.deferredHeaderValidationMu.Unlock()
-		}
+		ls.deferredHeaderValidationMu.Unlock()
 	}
 	slices.Sort(keys)
 	keys = slices.Compact(keys)
@@ -1130,11 +1049,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 }
 
 // persistDeferredHeaderValidation durably records the deferred-header marker
-// for point in the blob store. It deliberately does not use sync_state: this
-// runs on the blockfetch handler, and a sync_state write needs the single
-// SQLite write connection, which a block-apply transaction holds for its whole
-// length. A handler parked there stops block intake for the duration of an
-// epoch-rollover snapshot.
+// for point in the blob store.
 func (ls *LedgerState) persistDeferredHeaderValidation(
 	point ocommon.Point,
 ) error {
@@ -1150,9 +1065,7 @@ func (ls *LedgerState) persistDeferredHeaderValidation(
 	return nil
 }
 
-// clearPersistentDeferredHeaderValidation removes both forms of the marker:
-// the blob record, and the sync_state row a node running an earlier version
-// may have written.
+// clearPersistentDeferredHeaderValidation removes the durable marker.
 //
 // With a transaction the blob record is removed only once that transaction
 // commits. Deleting it earlier would let a crash between the blob commit and
@@ -1167,9 +1080,6 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 		return nil
 	}
 	key := headerValidationPointKey(point)
-	if err := ls.deleteLegacyDeferredMarker(point, txn); err != nil {
-		return err
-	}
 	if txn == nil {
 		if err := ls.ledgerDB().DeleteDeferredHeaderMarker(key); err != nil {
 			return fmt.Errorf(
@@ -1192,33 +1102,8 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 	return nil
 }
 
-// deleteLegacyDeferredMarker removes the sync_state form of the marker. The
-// row is only deleted when a read shows it, so a node with no pre-upgrade
-// markers never takes the write connection here.
-func (ls *LedgerState) deleteLegacyDeferredMarker(
-	point ocommon.Point,
-	txn ledgerdb.Txn,
-) error {
-	if ls.db.Metadata() == nil {
-		return nil
-	}
-	syncKey := deferredHeaderValidationSyncStateKey(point)
-	value, err := ls.ledgerDB().GetSyncState(syncKey, txn)
-	if err != nil {
-		return fmt.Errorf("read deferred header validation marker: %w", err)
-	}
-	if value == "" {
-		return nil
-	}
-	if err := ls.ledgerDB().DeleteSyncState(syncKey, txn); err != nil {
-		return fmt.Errorf("delete deferred header validation marker: %w", err)
-	}
-	return nil
-}
-
 func (ls *LedgerState) deferredHeaderValidationRequired(
 	point ocommon.Point,
-	txn ledgerdb.Txn,
 ) (bool, ouroboros.ConnectionId, error) {
 	source, required := ls.takeDeferredHeaderValidation(point)
 	ls.deferredHeaderValidationMu.Lock()
@@ -1250,27 +1135,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			source = persistedSource
 		}
 	}
-	if ls.db.Metadata() == nil {
-		return required || persisted, source, nil
-	}
-	value, err := ls.ledgerDB().GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		txn,
-	)
-	if err != nil {
-		return false, source, fmt.Errorf(
-			"read deferred header validation marker: %w",
-			err,
-		)
-	}
-	marked := value == deferredHeaderValidationSyncStateValue
-	if value != "" && !marked {
-		return false, source, fmt.Errorf(
-			"decode deferred header validation marker: invalid legacy value %q",
-			value,
-		)
-	}
-	return required || persisted || marked, source, nil
+	return required || persisted, source, nil
 }
 
 // deferredHeaderMarkerValue encodes a persisted deferred marker. The value is
@@ -1338,7 +1203,7 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	point ocommon.Point,
 	block gledger.Block,
 ) error {
-	required, source, err := ls.deferredHeaderValidationRequired(point, txn)
+	required, source, err := ls.deferredHeaderValidationRequired(point)
 	if err != nil {
 		return err
 	}
@@ -4119,7 +3984,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
 			return ls.handleMithrilBoundaryRollback(e, pending)
 		}
-		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+		if errors.Is(err, ErrRollbackBelowUtxoJournal) {
 			// A peer whose tip is a strict ancestor of our primary chain is
 			// merely behind. Keep it attached and unselected rather than
 			// forcing a fresh intersection for a rollback we cannot cross.
@@ -4127,13 +3992,13 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				ls.noteChainsyncPeerBehind(
 					e,
 					depth,
-					"rollback below consumed UTxO prune floor",
+					"rollback below the live UTxO set journal",
 				)
 				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
-			// The consumed-UTxO sweep hard-deleted the rows this rewind would
-			// have to restore, so the target is not crossable. That is a peer
+			// The live UTxO set's journal does not reach the target, so it
+			// is not crossable. That is a peer
 			// divergence this node cannot follow, not a local fault: refuse it
 			// and ask for a fresh intersection, exactly as the Mithril
 			// boundary does. Returning the error instead would reach
@@ -4145,7 +4010,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// worth ERROR.
 			ls.reportUnrecoverableRollbackIfStuck(
 				e.Point,
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 				e.ConnectionId,
 			)
 			logRejection := ls.config.Logger.Error
@@ -4153,7 +4018,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				logRejection = ls.config.Logger.Warn
 			}
 			logRejection(
-				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
+				"chainsync rollback is below the live UTxO set journal, rejecting peer chain",
 				"component",
 				"ledger",
 				"slot",
@@ -4164,8 +4029,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				e.ConnectionId.String(),
 				"error",
 				err,
-				"hint",
-				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 			)
 			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
@@ -4177,7 +4040,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 					event.ChainsyncResyncEvent{
 						ConnectionId: e.ConnectionId,
 						Reason: event.
-							ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+							ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 					},
 				),
 			)
@@ -4209,8 +4072,8 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 // rollbackIsAppliable reports whether rollbackChainAndStateDeferred(point) would
 // succeed right now, without mutating any state. It mirrors the pre-checks
 // rollbackChainAndStateDeferred relies on for its block-not-found / exceeds-K /
-// exceeds-Mithril / below-prune-floor failures: the point must sit at or above
-// the Mithril trust anchor and at or above the consumed-UTxO prune floor, and
+// exceeds-Mithril / below-journal failures: the point must sit at or above
+// the Mithril trust anchor and at or above the live UTxO set's journal floor, and
 // the chain must be able to roll back to it (target block present and within
 // the security parameter K, verified via chain.ValidateRollback).
 //
@@ -4238,12 +4101,11 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return false
 	}
-	// A target below the consumed-UTxO prune floor is not crossable either:
-	// the rows the rewind would have to restore were hard-deleted, so
-	// rollbackChainAndStateDeferred refuses it. An unreadable floor
-	// fails closed here for the same reason it does there.
-	belowPruneFloor, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(resolved)
-	if err != nil || belowPruneFloor {
+	// A target below the live UTxO set's journal is not crossable either:
+	// rollbackChainAndStateDeferred refuses it, as it does when the journal
+	// floor cannot be read.
+	belowJournal, err := ls.rollbackBelowUtxoSetJournal(resolved)
+	if err != nil || belowJournal {
 		return false
 	}
 	return ls.chain.ValidateRollback(ls.lifecycleContext(), point) == nil

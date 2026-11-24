@@ -164,10 +164,10 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 
 	f.anchor, err = database.BlockByHash(ctx, f.consensus, anchorPt.Hash)
 	require.NoError(t, err)
-	require.NoError(t, f.consensus.SetSyncState(
+	require.NoError(t, f.consensus.SetChainState(
 		"mithril_ledger_slot", strconv.FormatUint(f.anchor.Slot, 10), nil,
 	))
-	require.NoError(t, f.consensus.SetSyncState(
+	require.NoError(t, f.consensus.SetChainState(
 		"mithril_ledger_hash", hex.EncodeToString(f.anchor.Hash), nil,
 	))
 	f.indexerDB, err = internalplugins.OpenIndexerDatabase(

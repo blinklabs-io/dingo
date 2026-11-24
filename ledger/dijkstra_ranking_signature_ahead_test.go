@@ -96,13 +96,13 @@ func (f *dijkstraRankingAheadFixture) state(t *testing.T) aheadReplayState {
 	state := aheadReplayState{Tip: tip, LiveUtxos: map[string]bool{}}
 	for _, tx := range f.path.txs {
 		for _, input := range tx.Inputs() {
-			utxo, err := f.path.db.Metadata().GetUtxo(input.Id().Bytes(), input.Index(), nil)
-			require.NoError(t, err)
-			state.LiveUtxos[input.Id().String()] = utxo != nil
+			state.LiveUtxos[input.Id().String()] = outputLiveIn(
+				t, f.path.ls, input.Id().Bytes(), input.Index(),
+			)
 		}
-		utxo, err := f.path.db.Metadata().GetUtxo(tx.Hash().Bytes(), 0, nil)
-		require.NoError(t, err)
-		state.LiveUtxos[tx.Hash().String()] = utxo != nil
+		state.LiveUtxos[tx.Hash().String()] = outputLiveIn(
+			t, f.path.ls, tx.Hash().Bytes(), 0,
+		)
 	}
 	return state
 }
@@ -131,7 +131,7 @@ func TestDijkstraRankingValidateAheadMatchesSerial(t *testing.T) {
 				require.Equal(t, ahead.path.originHash, ahead.state(t).Tip.Point.Hash)
 				for i, tx := range ahead.path.txs {
 					require.True(t, ahead.path.inputUnspent(i), "the whole chunk must roll back")
-					stored, err := ahead.path.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+					stored, err := ahead.path.ls.ledgerDB().GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 					require.NoError(t, err)
 					require.Nil(t, stored)
 				}
@@ -141,7 +141,7 @@ func TestDijkstraRankingValidateAheadMatchesSerial(t *testing.T) {
 				require.Equal(t, ahead.blocks[1].Hash().Bytes(), ahead.state(t).Tip.Point.Hash)
 				for i, tx := range ahead.path.txs {
 					require.False(t, ahead.path.inputUnspent(i))
-					stored, err := ahead.path.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+					stored, err := ahead.path.ls.ledgerDB().GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 					require.NoError(t, err)
 					require.NotNil(t, stored)
 				}

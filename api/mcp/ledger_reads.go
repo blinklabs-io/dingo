@@ -15,19 +15,23 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ledgerStateAPI is the part of the ledger the Cardano tools use. LedgerDB is
@@ -40,6 +44,10 @@ type ledgerStateAPI interface {
 	CurrentSlot() (uint64, error)
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	LedgerDB() ledgerdb.LedgerDB
+	IterateLiveUtxos(
+		ctx context.Context,
+		fn func(*models.Utxo) error,
+	) error
 }
 
 // ledgerStateOf returns ls as a ledgerStateAPI, or nil for a nil ls, which a
@@ -816,4 +824,370 @@ func renderProposalList(proposals []*proposalRead) string {
 		)
 	}
 	return sb.String()
+}
+
+// needsIndexerDB is how a tool says that what it was asked for is an API
+// index, which only an IndexerDB holds.
+const needsIndexerDB = "needs an IndexerDB"
+
+// apiIndexesUnavailable is what a tool that reads only API indexes says on a
+// server with no IndexerDB to read them from.
+const apiIndexesUnavailable = "this tool reads API indexes and " +
+	needsIndexerDB + ", which this node does not have"
+
+// accountFromLedger reads the account (tag, cred) through ldb, inactive or
+// not, or nil when the ledger holds none.
+func accountFromLedger(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+	tag uint8,
+	cred []byte,
+) (*models.Account, error) {
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
+	a, err := ldb.GetAccountByCredential(ctx, tag, cred, true, txn)
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	return a, err
+}
+
+// renderAccount prints a as get_account prints a row of the account table.
+// id and certificate_id are IndexerDB row references: rowRefs holds them
+// when the server reads an IndexerDB, and nil says they need one.
+func renderAccount(cred string, a *models.Account, rowRefs []string) string {
+	hexOrNull := func(b []byte) string {
+		if b == nil {
+			return "null"
+		}
+		return hex.EncodeToString(b)
+	}
+	cols := []string{
+		"staking_key", "credential_tag", "pool", "drep", "drep_type",
+		"active", "reward", "added_slot", "created_slot", "expiration_epoch",
+		"id", "certificate_id",
+	}
+	row := []string{
+		hexOrNull(a.StakingKey),
+		strconv.FormatUint(uint64(a.CredentialTag), 10),
+		hexOrNull(a.Pool),
+		hexOrNull(a.Drep),
+		strconv.FormatUint(a.DrepType, 10),
+		strconv.FormatBool(a.Active),
+		strconv.FormatUint(uint64(a.Reward), 10),
+		strconv.FormatUint(a.AddedSlot, 10),
+		strconv.FormatUint(a.CreatedSlot, 10),
+		strconv.FormatUint(a.ExpirationEpoch, 10),
+	}
+	note := ""
+	if rowRefs != nil {
+		row = append(row, rowRefs...)
+	} else {
+		row = append(row, needsIndexerDB, needsIndexerDB)
+		note = "\n*`id` and `certificate_id` are IndexerDB row references; " +
+			"this node has no IndexerDB to read them from.*\n"
+	}
+	return fmt.Sprintf(
+		"### Stake Account: `%s`\n\n%s%s",
+		cred, FormatMarkdownTable(cols, [][]string{row}), note,
+	)
+}
+
+// accountRowRefs reads the IndexerDB row id and certificate id of the account
+// (tag, cred), "null" for a column the row leaves NULL and for an account
+// the IndexerDB has no row of.
+func accountRowRefs(
+	ctx context.Context,
+	db *sql.DB,
+	tag uint8,
+	cred []byte,
+) ([]string, error) {
+	var id, certID sql.NullInt64
+	err := db.QueryRowContext(
+		ctx,
+		"SELECT id, certificate_id FROM account WHERE staking_key = ? AND credential_tag = ? LIMIT 1",
+		cred, tag,
+	).Scan(&id, &certID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	out := []string{"null", "null"}
+	if id.Valid {
+		out[0] = strconv.FormatInt(id.Int64, 10)
+	}
+	if certID.Valid {
+		out[1] = strconv.FormatInt(certID.Int64, 10)
+	}
+	return out, nil
+}
+
+// poolPerformanceFromLedger reads up to limit epochs of the pool's reward
+// outputs through ldb, newest first, each with the pool's reward inputs of
+// that epoch. A requested epoch reads that epoch alone.
+func poolPerformanceFromLedger(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+	pool []byte,
+	requested *int,
+	limit int,
+) ([][]string, error) {
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
+	var epochs []uint64
+	if requested != nil {
+		if *requested < 0 {
+			return nil, errors.New("epoch must be nonnegative")
+		}
+		epochs = []uint64{uint64(*requested)}
+	} else {
+		all, err := ldb.GetEpochs(txn)
+		if err != nil {
+			return nil, fmt.Errorf("read epochs: %w", err)
+		}
+		for _, e := range all {
+			epochs = append(epochs, e.EpochId)
+		}
+		slices.Sort(epochs)
+		slices.Reverse(epochs)
+	}
+	var rows [][]string
+	for _, epoch := range epochs {
+		if len(rows) >= limit {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		outputs, err := ldb.GetRewardPoolOutputs(epoch, txn)
+		if err != nil {
+			return nil, fmt.Errorf("read reward outputs of epoch %d: %w", epoch, err)
+		}
+		i := slices.IndexFunc(outputs, func(o *models.RewardPoolOutput) bool {
+			return bytes.Equal(o.PoolKeyHash, pool)
+		})
+		if i < 0 {
+			continue
+		}
+		o := outputs[i]
+		inputs, err := ldb.GetRewardPoolInputs(epoch, txn)
+		if err != nil {
+			return nil, fmt.Errorf("read reward inputs of epoch %d: %w", epoch, err)
+		}
+		var in *models.RewardPoolInput
+		if j := slices.IndexFunc(inputs, func(p *models.RewardPoolInput) bool {
+			return bytes.Equal(p.PoolKeyHash, pool)
+		}); j >= 0 {
+			in = inputs[j]
+		}
+		rows = append(rows, poolPerformanceRow(o, in))
+	}
+	return rows, nil
+}
+
+// poolPerformanceRow is the get_pool_performance row of one epoch: "-" for
+// an input the epoch has no row of, as the SQL join leaves it NULL.
+func poolPerformanceRow(
+	o *models.RewardPoolOutput,
+	in *models.RewardPoolInput,
+) []string {
+	ratOr := func(r *types.Rat, none string) string {
+		if r == nil || r.Rat == nil {
+			return none
+		}
+		return r.String()
+	}
+	u := func(v types.Uint64) string { return strconv.FormatUint(uint64(v), 10) }
+	blocks, delegated, pledge, cost, margin := "0", "-", "-", "-", "-"
+	if in != nil {
+		if in.BlocksProduced != nil {
+			blocks = strconv.FormatUint(*in.BlocksProduced, 10)
+		}
+		delegated, pledge, cost = u(in.DelegatedStake), u(in.Pledge), u(in.Cost)
+		margin = ratOr(in.Margin, "-")
+	}
+	return []string{
+		strconv.FormatUint(o.Epoch, 10),
+		blocks,
+		delegated,
+		pledge,
+		cost,
+		margin,
+		ratOr(o.ApparentPerformance, "-"),
+		u(o.TotalReward),
+		u(o.LeaderReward),
+		u(o.MemberRewardTotal),
+	}
+}
+
+// liveUtxosFromLedger returns the rows of the live outputs whose address
+// match accepts, skipping the first offset matches and stopping after limit,
+// in the order the ledger's live UTxO set yields them.
+func liveUtxosFromLedger(
+	ctx context.Context,
+	ls ledgerStateAPI,
+	match func(lcommon.Address) bool,
+	offset, limit int,
+) ([][]string, error) {
+	errDone := errors.New("page filled")
+	var rows [][]string
+	skipped := 0
+	err := ls.IterateLiveUtxos(ctx, func(u *models.Utxo) error {
+		out, err := u.Decode()
+		if err != nil {
+			return fmt.Errorf("decode utxo %x#%d: %w", u.TxId, u.OutputIdx, err)
+		}
+		if !match(out.Address()) {
+			return nil
+		}
+		if skipped < offset {
+			skipped++
+			return nil
+		}
+		assets := 0
+		if ma := out.Assets(); ma != nil {
+			for _, policy := range ma.Policies() {
+				assets += len(ma.Assets(policy))
+			}
+		}
+		datumHash := "null"
+		if h := out.DatumHash(); h != nil {
+			datumHash = h.String()
+		}
+		rows = append(rows, []string{
+			hex.EncodeToString(u.TxId),
+			strconv.FormatUint(uint64(u.OutputIdx), 10),
+			out.Address().String(),
+			out.Amount().String(),
+			strconv.Itoa(assets),
+			datumHash,
+		})
+		if len(rows) >= limit {
+			return errDone
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDone) {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// liveUtxoColumns are the columns liveUtxosFromLedger fills.
+var liveUtxoColumns = []string{
+	"tx_hash", "output_index", "address", "lovelace", "assets", "datum_hash",
+}
+
+// liveUtxoPage answers get_utxos from the ledger's live UTxO set, for a
+// server with no IndexerDB: a full address matches its outputs exactly, a
+// credential the outputs whose address carries it. Without an IndexerDB's
+// address index the set is read in full, in its own order, so pages are by
+// offset and there is no cursor.
+func liveUtxoPage(
+	ctx context.Context,
+	ls ledgerStateAPI,
+	limits *readLimits,
+	addr, cursor string,
+	limit, offset int,
+) (*mcp.CallToolResult, any, error) {
+	if cursor != "" {
+		return nil, nil, errors.New(
+			"cursor pagination " + needsIndexerDB + "; page by offset",
+		)
+	}
+	if limits.maxOffset > 0 && offset > limits.maxOffset {
+		return nil, nil, errOffsetTooLarge
+	}
+	var match func(lcommon.Address) bool
+	if address, err := lcommon.NewAddress(addr); err == nil {
+		want, err := address.Bytes()
+		if err != nil {
+			return nil, nil, err
+		}
+		match = func(a lcommon.Address) bool {
+			raw, err := a.Bytes()
+			return err == nil && bytes.Equal(raw, want)
+		}
+	} else {
+		pk, sk, err := parseAddressOrCredential(addr)
+		if err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: "Invalid address or payment credential: " + err.Error(),
+					},
+				},
+			}, nil, nil
+		}
+		match = func(a lcommon.Address) bool {
+			payment, stake := addressCredentialHashes(a)
+			return (len(pk) == 0 || bytes.Equal(payment, pk)) &&
+				(len(sk) == 0 || bytes.Equal(stake, sk))
+		}
+	}
+	if err := limits.admit(); err != nil {
+		return nil, nil, err
+	}
+	defer limits.release()
+	rows, err := liveUtxosFromLedger(ctx, ls, match, offset, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the live UTxO set: %w", err)
+	}
+	header := fmt.Sprintf(
+		"### UTxOs for `%s`\n\n*(Showing %d results, offset %d, from the "+
+			"ledger's live UTxO set. Cursor pages and the stored utxo row "+
+			"columns %s.)*\n\n%s",
+		addr, len(rows), offset, needsIndexerDB,
+		offsetLimitNote(offset, limit, len(rows), limits.maxOffset),
+	)
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: header + FormatMarkdownTable(liveUtxoColumns, rows),
+			},
+		},
+	}, nil, nil
+}
+
+// poolPerformanceColumns are the columns of a get_pool_performance row.
+var poolPerformanceColumns = []string{
+	"Epoch",
+	"Blocks",
+	"Delegated Stake (lovelace)",
+	"Pledge (lovelace)",
+	"Fixed Cost (lovelace)",
+	"Margin",
+	"Apparent Performance",
+	"Total Reward",
+	"Leader Reward",
+	"Member Rewards",
+}
+
+// renderPoolPerformance prints the pool's rows, with source naming where
+// they were read from when that limits them.
+func renderPoolPerformance(
+	poolID string,
+	pool []byte,
+	rows [][]string,
+	source string,
+) string {
+	if len(rows) == 0 {
+		return fmt.Sprintf(
+			"No historical reward performance records found for pool `%s` (hash `%s`).\n\n"+
+				"**Possible reasons:**\n"+
+				"1. The pool did not produce blocks in recent epochs.\n"+
+				"2. Reward snapshot calculations for this epoch have not finalized yet.\n"+
+				"3. The pool ID is valid but not currently registered on this network.%s",
+			poolID,
+			hex.EncodeToString(pool),
+			source,
+		)
+	}
+	return fmt.Sprintf(
+		"### Performance History for Pool `%s`\n\n*(Showing %d epoch snapshots)*\n\n%s%s",
+		poolID,
+		len(rows),
+		FormatMarkdownTable(poolPerformanceColumns, rows),
+		source,
+	)
 }

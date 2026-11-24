@@ -57,8 +57,7 @@ func committeeSeedAuthorization(
 	slot uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	ls.stageLedgerChanges(nil, LedgerChanges{Committee: []CommitteeChange{{
 		Slot: slot,
 		Auth: &models.AuthCommitteeHot{
@@ -82,8 +81,7 @@ func committeeSeedResignation(
 	slot uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	ls.stageLedgerChanges(nil, LedgerChanges{Committee: []CommitteeChange{{
 		Slot: slot,
 		Resign: &models.ResignCommitteeCold{
@@ -141,8 +139,7 @@ func drepSeedRegistered(
 	active bool,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	tag, err := models.CredentialTagFromUint(cred.CredType)
 	require.NoError(t, err)
 	hash := bytes.Clone(cred.Credential[:])
@@ -163,6 +160,33 @@ func drepSeedRegistered(
 	ls.stageLedgerChanges(nil, changes)
 }
 
+// drepSeedRow stages a registered DRep whose credential is the stored
+// bytes, which need not be a well-formed hash, as a Mithril import writes it:
+// with the deposit it owes and no certificate behind the registration.
+func drepSeedRow(
+	t testing.TB,
+	db *database.Database,
+	tag uint8,
+	credential []byte,
+	slot, deposit uint64,
+) {
+	t.Helper()
+	seedLedgerOf(t, db).stageLedgerChanges(nil, LedgerChanges{
+		DReps: []DRepChange{{
+			Slot: slot,
+			Drep: models.Drep{
+				CredentialTag: tag,
+				Credential:    credential,
+				AddedSlot:     slot,
+				Active:        true,
+			},
+		}},
+		DRepDeposits: []DRepDepositChange{{
+			Slot: slot, Tag: tag, Credential: credential, Deposit: &deposit,
+		}},
+	})
+}
+
 // stakeSeedRegistration registers cred's account at slot in db's open
 // LedgerDB set, by a legacy stake registration certificate of the
 // transaction bytes.Repeat(seed, 32). A nil deposit is a registration whose
@@ -176,8 +200,7 @@ func stakeSeedRegistration(
 	seed byte,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	tag, err := models.CredentialTagFromUint(cred.CredType)
 	require.NoError(t, err)
 	key := bytes.Clone(cred.Credential[:])
@@ -216,8 +239,7 @@ func poolSeedRegistered(
 	reg *models.PoolRegistration,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the fixture's set must be open")
+	ls := seedLedgerOf(t, db)
 	ls.stageLedgerChanges(nil, LedgerChanges{
 		Pools: []PoolChange{{
 			Slot:  reg.AddedSlot,
@@ -240,11 +262,9 @@ func pparamSeedUpdate(
 	slot, epoch uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
+	ls := seedLedgerOf(t, db)
 	if ls == nil {
-		require.NoError(t, db.SetPParamUpdate(
-			genesisHash, updateCbor, slot, epoch, nil,
-		))
+		require.NoError(t, fxSeedPParamUpdate(t, db, genesisHash, updateCbor, slot, epoch))
 		return
 	}
 	ls.stageLedgerChanges(nil, LedgerChanges{

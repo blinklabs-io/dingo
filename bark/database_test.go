@@ -40,6 +40,7 @@ import (
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -1779,14 +1780,28 @@ func newDiskTestDB(t *testing.T, dataDir string) *database.Database {
 	return db
 }
 
+// reopenDiskTestDB closes db and opens dataDir again. Badger refreshes the
+// size DiskSize reports only when it opens and once a minute, so a test that
+// asserts the size of what it just wrote reopens the store first.
+func reopenDiskTestDB(
+	t *testing.T,
+	db *database.Database,
+	dataDir string,
+) *database.Database {
+	t.Helper()
+	require.NoError(t, dbtest.CloseDatabase(db))
+	return newDiskTestDB(t, dataDir)
+}
+
 // snapshotTemplate is the payload of one snapshot of a one-block, one-tip
 // database. The tests that exercise verify, restore, delete and listing need a
 // valid snapshot on disk but not a particular database, so the snapshot is
 // taken once per test binary and each test installs a copy under its own ID
 // instead of opening a database and running a backup of its own.
 type snapshotTemplate struct {
-	blob     []byte
-	metadata []byte
+	// files holds every payload file the snapshot wrote beside its manifest,
+	// by name.
+	files    map[string][]byte
 	manifest lifecycle.Manifest
 }
 
@@ -1832,16 +1847,26 @@ func buildSnapshotTemplate(t testing.TB) (snapshotTemplate, error) {
 	if err != nil {
 		return snapshotTemplate{}, err
 	}
-	tpl := snapshotTemplate{manifest: manifest}
-	if tpl.blob, err = os.ReadFile(
-		filepath.Join(dir, lifecycle.BlobBackupFileName),
-	); err != nil {
+	tpl := snapshotTemplate{manifest: manifest, files: map[string][]byte{}}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return snapshotTemplate{}, err
 	}
-	if tpl.metadata, err = os.ReadFile(
-		filepath.Join(dir, lifecycle.MetadataBackupFileName),
-	); err != nil {
-		return snapshotTemplate{}, err
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() ||
+			entry.Name() == lifecycle.ManifestFileName {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return snapshotTemplate{}, err
+		}
+		tpl.files[entry.Name()] = data
+	}
+	if _, ok := tpl.files[lifecycle.BlobBackupFileName]; !ok {
+		return snapshotTemplate{}, fmt.Errorf(
+			"template snapshot wrote no %s", lifecycle.BlobBackupFileName,
+		)
 	}
 	return tpl, nil
 }
@@ -1862,14 +1887,9 @@ func installTemplateSnapshot(
 	require.NoError(t, snapshotTemplateErr)
 	dir := filepath.Join(snapshotRoot, id)
 	require.NoError(t, os.MkdirAll(dir, 0o700))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, lifecycle.BlobBackupFileName),
-		snapshotTemplateData.blob, 0o600,
-	))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, lifecycle.MetadataBackupFileName),
-		snapshotTemplateData.metadata, 0o600,
-	))
+	for name, data := range snapshotTemplateData.files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o600))
+	}
 	require.NoError(t, lifecycle.WriteManifest(
 		dir, snapshotTemplateData.manifest, opts...,
 	))
@@ -1967,6 +1987,28 @@ func testBlock(id uint64, hashByte byte) models.Block {
 		Number: id,
 		Type:   1,
 	}
+}
+
+// seedUtxoSet writes the live UTxO set a node keeps beside dataDir, with one
+// commit per testBlock id in [1, n]. A truncate of the ledger's database rolls
+// that set back with the block store, so it refuses to start without one.
+func seedUtxoSet(t *testing.T, dataDir string, n uint64) {
+	t.Helper()
+	store, err := badgerutxo.Open(badgerutxo.DirFor(dataDir))
+	require.NoError(t, err)
+	for id := uint64(1); id <= n; id++ {
+		block := testBlock(id, byte(id))
+		_, err := store.Apply(
+			ocommon.NewPoint(block.Slot, block.Hash),
+			[]badgerutxo.Output{{
+				Ref:  badgerutxo.NewRef(bytes.Repeat([]byte{byte(id)}, 32), 0),
+				Cbor: []byte{0x80, byte(id)},
+			}},
+			nil,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, store.Close())
 }
 
 func waitForOperationStatus(
@@ -2288,6 +2330,7 @@ func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
 		BlockNumber: last.Number,
 	}, nil))
 	dbtest.CloseDatabase(db) //nolint:errcheck
+	seedUtxoSet(t, dataDir, 3)
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 
@@ -2409,6 +2452,7 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 		BlockNumber: last.Number,
 	}, nil))
 	dbtest.CloseDatabase(db) //nolint:errcheck
+	seedUtxoSet(t, dataDir, 3)
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 
@@ -2468,6 +2512,7 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 		Point:       ocommon.Point{Slot: 30},
 		BlockNumber: 3,
 	}, nil))
+	db = reopenDiskTestDB(t, db, dataDir)
 
 	h := newTestDatabaseServiceHandler(t, db, t.TempDir())
 
@@ -2479,10 +2524,9 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 	require.Equal(t, uint64(30), resp.Msg.GetTip().GetSlot())
 	require.Equal(t, uint64(3), resp.Msg.GetTip().GetBlockNumber())
 	require.False(t, resp.Msg.GetOperationInProgress())
-	// Real badger+sqlite stores with a block written must report a
-	// nonzero combined on-disk size — this is the actual regression
-	// check for GetDatabaseInfo summing db.Blob().DiskSize() and
-	// db.Metadata().DiskSize() instead of leaving SizeBytes at 0.
+	// A real badger store with blocks written must report a nonzero
+	// on-disk size: GetDatabaseInfo sums the stores' DiskSize instead of
+	// leaving SizeBytes at 0.
 	require.NotZero(t, resp.Msg.GetSizeBytes())
 	// testBlock(id, ...) sets Slot: id*10, so the 3 blocks created above
 	// land at slots 10/20/30 — block_count=3, oldest_slot=10.
@@ -3387,6 +3431,7 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
 		BlockNumber: block1.Number,
 	}, nil))
+	db = reopenDiskTestDB(t, db, barkDataDir)
 
 	svcDataDir := t.TempDir()
 	svcDB := newDiskTestDB(t, svcDataDir)
@@ -3396,6 +3441,7 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		BlockNumber: block1.Number,
 	}, nil))
 	dbtest.CloseDatabase(svcDB) //nolint:errcheck
+	seedUtxoSet(t, svcDataDir, 1)
 
 	svc := dblifecycle.NewService(&config.Config{
 		DatabasePath: svcDataDir,

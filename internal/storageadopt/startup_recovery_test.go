@@ -49,6 +49,7 @@ func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {
 	rt, err := internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
+			Role:    database.RoleReleased,
 			DataDir: cfg.DatabasePath, Logger: logger, StorageMode: "api",
 			Network: cfg.Network,
 		},

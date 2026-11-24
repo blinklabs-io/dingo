@@ -28,6 +28,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// newPruneTestDB opens a database whose SQL store lists the UTxOs that are
+// offsets into a block, with a block store of its own to expire the block
+// in. The ledger's database lists none: its live UTxO set holds the outputs.
+func newPruneTestDB(t *testing.T, mode string) *Database {
+	t.Helper()
+	return openTestDBWithStorageMode(t, mode)
+}
+
 // seedPrunableBlock writes a synthetic block plus offset-based blob entries
 // for each (utxoIdx, payload) pair. The block CBOR is the concatenation of
 // payloads in order, so each UTxO's offset within the block is the prefix
@@ -125,7 +133,7 @@ func seedUtxoMetadata(
 func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newPruneTestDB(t, "")
 
 	const slot uint64 = 100
 	txId := bytes.Repeat([]byte{0xAA}, 32)
@@ -216,7 +224,7 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newPruneTestDB(t, "")
 
 	const slot uint64 = 100
 	txId := bytes.Repeat([]byte{0xBB}, 32)
@@ -258,7 +266,7 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newPruneTestDB(t, "")
 
 	const slot uint64 = 100
 	txId := bytes.Repeat([]byte{0xEE}, 32)
@@ -301,9 +309,8 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 
 // TestPruneBlock_APIModeMaterializesSpentUtxos verifies that in API
 // storage mode the pruner materializes CBOR bytes for retained spent
-// UTxOs at the slot as well as live ones. This is the counterpart fix
-// to skipping cleanupConsumedUtxos in API mode: with spent rows
-// retained for historical transaction queries, the source block can
+// UTxOs at the slot as well as live ones: with spent rows retained for
+// historical transaction queries, the source block can
 // still be expired, but the spent UTxO blob entries — which hold
 // offset references into the expired block — must be rewritten
 // to raw CBOR up front so resolution does not require a wrapping
@@ -311,7 +318,7 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDBWithMode(t, types.StorageModeAPI)
+	db := newPruneTestDB(t, types.StorageModeAPI)
 
 	const slot uint64 = 100
 	txId := bytes.Repeat([]byte{0xA1}, 32)
@@ -354,7 +361,7 @@ func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newPruneTestDB(t, "")
 
 	const slot uint64 = 100
 	txId := bytes.Repeat([]byte{0xCC}, 32)
@@ -392,7 +399,7 @@ func (s cancelAfterPruneReadStore) GetLiveUtxosBySlot(slot uint64, txn types.Txn
 }
 func TestPruneBlockCancellationAfterMetadataReadPreservesBlob(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newPruneTestDB(t, "")
 	slot := uint64(100)
 	txID := randomHash(t)
 	hash, cbor := seedPrunableBlock(t, db, slot, txID, map[uint32][]byte{0: []byte("live-utxo")})
@@ -456,8 +463,8 @@ func TestOldestRetainedSlot(t *testing.T) {
 			db := newTestDB(t)
 			pruneSeededBlocks(t, db, slots, 3)
 			if tc.cursor != "" {
-				require.NoError(t, db.SetSyncState(
-					HistoryExpiryCursorSyncKey, tc.cursor, nil,
+				require.NoError(t, db.SetChainState(
+					HistoryExpiryCursorKey, tc.cursor, nil,
 				))
 			}
 			// Nothing is known before the first refresh.
@@ -488,8 +495,8 @@ func TestOldestRetainedSlot_ScanLimit(t *testing.T) {
 			t.Parallel()
 			db := newTestDB(t)
 			pruneSeededBlocks(t, db, []uint64{100, 200, 300, 400}, 3)
-			require.NoError(t, db.SetSyncState(
-				HistoryExpiryCursorSyncKey, "100", nil,
+			require.NoError(t, db.SetChainState(
+				HistoryExpiryCursorKey, "100", nil,
 			))
 			got, ok, err := db.oldestRetainedSlot(
 				context.Background(), tc.limit,
@@ -504,8 +511,8 @@ func TestOldestRetainedSlot_ScanLimit(t *testing.T) {
 func TestOldestRetainedSlot_MalformedCursorIsError(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	require.NoError(t, db.SetSyncState(
-		HistoryExpiryCursorSyncKey, "not-a-slot", nil,
+	require.NoError(t, db.SetChainState(
+		HistoryExpiryCursorKey, "not-a-slot", nil,
 	))
 	require.Error(t, db.RefreshOldestRetainedSlot(t.Context()))
 	_, ok := db.OldestRetainedSlot()
@@ -529,7 +536,7 @@ func seedRetainedBoundBlocks(t *testing.T, db *Database) []models.Block {
 	}
 	_, err := db.PruneBlock(t.Context(), blocks[0].Slot, blocks[0].Hash)
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState(HistoryExpiryCursorSyncKey, "100", nil))
+	require.NoError(t, db.SetChainState(HistoryExpiryCursorKey, "100", nil))
 	require.NoError(t, db.RefreshOldestRetainedSlot(t.Context()))
 	got, ok := db.OldestRetainedSlot()
 	require.True(t, ok)

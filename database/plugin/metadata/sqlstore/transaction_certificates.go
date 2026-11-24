@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -265,31 +264,29 @@ func (s *Store) deleteSpecializedCertificates(
 		return nil
 	}
 	var poolHashes [][]byte
-	if !s.poolsDrained() {
-		var err error
-		poolHashes, err = poolHashesOfTransactions(
-			ctx, db, []int64{transactionID},
-		)
-		if err != nil {
-			return err
-		}
-		if _, err := s.execCached(ctx, db, deletePoolRegistrationOwnersSQL,
-			transactionID,
-		); err != nil {
-			return fmt.Errorf("delete existing pool registration owners: %w", err)
-		}
-		if _, err := s.execCached(ctx, db, deletePoolRegistrationRelaysSQL,
-			transactionID,
-		); err != nil {
-			return fmt.Errorf("delete existing pool registration relays: %w", err)
-		}
+	var err error
+	poolHashes, err = poolHashesOfTransactions(
+		ctx, db, []int64{transactionID},
+	)
+	if err != nil {
+		return err
+	}
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationOwnersSQL,
+		transactionID,
+	); err != nil {
+		return fmt.Errorf("delete existing pool registration owners: %w", err)
+	}
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationRelaysSQL,
+		transactionID,
+	); err != nil {
+		return fmt.Errorf("delete existing pool registration relays: %w", err)
 	}
 	if _, err := s.execCached(ctx, db, deleteMIRRewardsSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing MIR rewards: %w", err)
 	}
-	for _, table := range s.liveCertificateTables(certificateTables) {
+	for _, table := range certificateTables {
 		if _, err := s.execCached(
 			ctx, db, certificateTableCleanupSQL(table),
 			transactionID,
@@ -380,9 +377,6 @@ func (s *Store) applySpecializedCertificate(
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
-		if s.poolsDrained() {
-			return 0, nil, nil
-		}
 		id, err := applyPoolRegistrationCertificate(
 			ctx,
 			db,
@@ -397,9 +391,6 @@ func (s *Store) applySpecializedCertificate(
 		)
 		return id, nil, err
 	case *lcommon.PoolRetirementCertificate:
-		if s.poolsDrained() {
-			return 0, nil, nil
-		}
 		id, err := applyPoolRetirementCertificate(
 			ctx,
 			db,
@@ -409,9 +400,6 @@ func (s *Store) applySpecializedCertificate(
 		)
 		return id, nil, err
 	case *lcommon.GenesisKeyDelegationCertificate:
-		if s.familyDrained(nodesettings.FamilyMIRGenesis) {
-			return 0, nil, nil
-		}
 		id, err := insertCertificateRow(ctx, db, `-- name: InsertGenesisDelegation :one
 INSERT INTO genesis_delegation (
     genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
@@ -435,7 +423,6 @@ RETURNING id`,
 			certificateID,
 			slot,
 			deposit,
-			s.familyDrained(nodesettings.FamilyDReps),
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
@@ -444,10 +431,6 @@ RETURNING id`,
 		// never nil, so this deposit never takes nullableDecimalUint64's
 		// NULL path, which exists for a deposit the ingest never knew.
 		amount := uint64(cert.Amount)
-		drained, err := s.drepFamiliesDrained()
-		if err != nil {
-			return 0, nil, err
-		}
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
@@ -456,7 +439,6 @@ RETURNING id`,
 			slot,
 			&amount,
 			protocolMajor,
-			drained,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -466,7 +448,6 @@ RETURNING id`,
 			cert,
 			certificateID,
 			slot,
-			s.familyDrained(nodesettings.FamilyDReps),
 		)
 		return id, nil, err
 	case *lcommon.AuthCommitteeHotCertificate:
@@ -484,9 +465,6 @@ RETURNING id`,
 		)
 		if err != nil {
 			return 0, nil, err
-		}
-		if s.familyDrained(nodesettings.FamilyCommitteeConstitution) {
-			return 0, nil, nil
 		}
 		id, err := insertCertificateRow(ctx, db, `-- name: InsertAuthCommitteeHot :one
 INSERT INTO auth_committee_hot (
@@ -530,9 +508,6 @@ RETURNING id`,
 		)
 		if err != nil {
 			return 0, nil, err
-		}
-		if s.familyDrained(nodesettings.FamilyCommitteeConstitution) {
-			return 0, nil, nil
 		}
 		id, err := insertCertificateRow(ctx, db, `-- name: InsertResignCommitteeCold :one
 INSERT INTO resign_committee_cold (
@@ -676,13 +651,6 @@ func (s *Store) applyAccountCertificate(
 	}
 	key := stakeCredential.Credential[:]
 	changesDrepDelegation := models.ChangesDrepDelegation(certificate)
-	if changesDrepDelegation {
-		drained, err := s.drepFamiliesDrained()
-		if err != nil {
-			return 0, nil, err
-		}
-		changesDrepDelegation = !drained
-	}
 	newDrepCredential := state.drep
 	newDrepType := state.drepType
 	var oldDrepCredential []byte
@@ -696,12 +664,10 @@ func (s *Store) applyAccountCertificate(
 			return 0, nil, fmt.Errorf("read prior account DRep delegation: %w", err)
 		}
 	}
-	if !s.familyDrained(nodesettings.FamilyAccounts) {
-		if err := s.updateCertificateAccount(
-			ctx, db, tag, key, slot, state,
-		); err != nil {
-			return 0, nil, err
-		}
+	if err := s.updateCertificateAccount(
+		ctx, db, tag, key, slot, state,
+	); err != nil {
+		return 0, nil, err
 	}
 	if changesDrepDelegation {
 		removeOld := models.ShouldRemovePriorDrepDelegation(
@@ -771,9 +737,6 @@ SELECT EXISTS (
 		args = []any{key, tag, state.drep, state.drepType, slot, certificateID}
 	}
 	ref := models.NewStakeCredentialRef(tag, key)
-	if s.tableDrained(table) {
-		return 0, &ref, nil
-	}
 	id, err := insertCertificateRow(
 		ctx,
 		db,
@@ -1123,7 +1086,6 @@ func applyDrepRegistrationCertificate(
 	certificateID uint,
 	slot uint64,
 	deposit *uint64,
-	drained bool,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -1137,20 +1099,18 @@ func applyDrepRegistrationCertificate(
 		anchorURL = cert.Anchor.Url
 		anchorHash = cert.Anchor.DataHash[:]
 	}
-	if !drained {
-		if err := setDrepCertificateState(
-			ctx,
-			db,
-			tag,
-			cert.DrepCredential.Credential[:],
-			slot,
-			anchorURL,
-			anchorHash,
-			true,
-			false,
-		); err != nil {
-			return 0, err
-		}
+	if err := setDrepCertificateState(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+		anchorURL,
+		anchorHash,
+		true,
+		false,
+	); err != nil {
+		return 0, err
 	}
 	return insertCertificateRow(ctx, db, `-- name: InsertRegistrationDrep :one
 INSERT INTO registration_drep (
@@ -1181,7 +1141,6 @@ func applyDrepDeregistrationCertificate(
 	slot uint64,
 	deposit *uint64,
 	protocolMajor uint64,
-	drained bool,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -1189,30 +1148,28 @@ func applyDrepDeregistrationCertificate(
 	if err != nil {
 		return 0, err
 	}
-	if !drained {
-		if err := setDrepCertificateState(
-			ctx,
-			db,
-			tag,
-			cert.DrepCredential.Credential[:],
-			slot,
-			"",
-			nil,
-			false,
-			true,
-		); err != nil {
-			return 0, err
-		}
-		if err := removeAllDrepDelegators(
-			ctx,
-			db,
-			tag,
-			cert.DrepCredential.Credential[:],
-			slot,
-			protocolMajor,
-		); err != nil {
-			return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
-		}
+	if err := setDrepCertificateState(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+		"",
+		nil,
+		false,
+		true,
+	); err != nil {
+		return 0, err
+	}
+	if err := removeAllDrepDelegators(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+		protocolMajor,
+	); err != nil {
+		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
 	}
 	return insertCertificateRow(ctx, db, `-- name: InsertDeregistrationDrep :one
 INSERT INTO deregistration_drep (
@@ -1234,7 +1191,6 @@ func applyDrepUpdateCertificate(
 	cert *lcommon.UpdateDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	drained bool,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -1248,20 +1204,18 @@ func applyDrepUpdateCertificate(
 		anchorURL = cert.Anchor.Url
 		anchorHash = cert.Anchor.DataHash[:]
 	}
-	if !drained {
-		if err := setDrepCertificateState(
-			ctx,
-			db,
-			tag,
-			cert.DrepCredential.Credential[:],
-			slot,
-			anchorURL,
-			anchorHash,
-			true,
-			true,
-		); err != nil {
-			return 0, err
-		}
+	if err := setDrepCertificateState(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+		anchorURL,
+		anchorHash,
+		true,
+		true,
+	); err != nil {
+		return 0, err
 	}
 	return insertCertificateRow(ctx, db, `-- name: InsertUpdateDrep :one
 INSERT INTO update_drep (

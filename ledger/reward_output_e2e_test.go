@@ -294,36 +294,6 @@ func TestRewardOutputsEpochWipeAndEligibilityFlip(t *testing.T) {
 	h.requireAgree(t, "after the rollback")
 }
 
-// TestRewardOutputReadsUseSetStateAfterUntrackedCredits pins set results when
-// a round and credit exist only in metadata.
-func TestRewardOutputReadsUseSetStateAfterUntrackedCredits(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarness(t, nil)
-	meta := h.scenario.DB.Metadata()
-	require.NoError(t, meta.AddAppliedRewardCreditRound(h.round(11), nil))
-	require.NoError(t, meta.SaveRewardAccountOutputs(
-		[]*models.RewardAccountOutput{
-			h.output(h.deleg, 11, 9, h.start+11, h.round(11).BoundarySlot),
-		}, nil,
-	))
-	reached, _ := h.scenario.HideStoreReads(rewardDerivedReadNames...)
-	ldb := h.scenario.LedgerDB()
-	applied, err := ldb.HasAppliedRewardCreditRound(11, nil)
-	require.NoError(t, err)
-	require.False(t, applied)
-	has, err := ldb.HasPendingRewardCreditRounds(nil)
-	require.NoError(t, err)
-	require.False(t, has)
-	pending, err := ldb.GetPendingRewardAccountOutputsForCredential(h.deleg.Tag, h.deleg.Key, nil)
-	require.NoError(t, err)
-	require.Empty(t, pending)
-	in, err := ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
-	require.NoError(t, err)
-	got, _ := stakeOf(in, h.deleg)
-	require.Equal(t, uint64(20_000_000), got)
-	require.Zero(t, reached(), "reward read reached the metadata store")
-}
-
 // TestRewardOutputReadsSeeTheirTransactionsStagedChanges requires the reads
 // in a write transaction to see the saves, wipe, round and claim that
 // transaction has staged and not yet committed, as the metadata store's do,

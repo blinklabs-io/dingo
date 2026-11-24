@@ -164,15 +164,3 @@ func (s *Store) GovernanceLoaded() (bool, error) {
 	})
 	return ok, err
 }
-
-// InvalidateGovernance removes the marker that says the store holds every
-// proposal and vote row, so the next load from the metadata store replaces
-// them. The rows themselves stay until that load.
-func (s *Store) InvalidateGovernance() error {
-	return s.update(func(txn *badger.Txn) error {
-		if err := txn.Delete(governanceKey); err != nil {
-			return err
-		}
-		return txn.Delete(legacyGovernanceKey)
-	})
-}

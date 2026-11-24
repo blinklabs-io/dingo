@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -91,16 +91,6 @@ func (s commitFailingBlobStore) SetTx(
 		unwrapCommitFailingBlobTxn(txn),
 		txHash,
 		offsetData,
-	)
-}
-
-func (s commitFailingBlobStore) SetCommitTimestamp(
-	timestamp int64,
-	txn dbtypes.Txn,
-) error {
-	return s.BlobStore.SetCommitTimestamp(
-		timestamp,
-		unwrapCommitFailingBlobTxn(txn),
 	)
 }
 
@@ -243,157 +233,6 @@ func publishGovernanceTestEpoch(
 		ls.currentEra = eras.ConwayEraDesc
 	}
 	ls.publishSnapshotsLocked()
-}
-
-type ledgerDeltaBatchStoreRecorder struct {
-	metadata.MetadataStore
-	events []string
-}
-
-// Embedding the store interface hides the optional rebuild method that API
-// mode startup requires, so forward it to the wrapped store.
-func (s *ledgerDeltaBatchStoreRecorder) RebuildAddressTransactionIndex(
-	ctx context.Context,
-	rebuild func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
-) error {
-	rebuilder, ok := s.MetadataStore.(metadata.AddressTransactionIndexRebuilder)
-	if !ok {
-		return errors.New("wrapped store cannot rebuild the address index")
-	}
-	return rebuilder.RebuildAddressTransactionIndex(ctx, rebuild)
-}
-
-func (s *ledgerDeltaBatchStoreRecorder) SetTransactionBatched(
-	tx lcommon.Transaction,
-	point ocommon.Point,
-	index uint32,
-	certDeposits map[int]uint64,
-	skipWithdrawalWitness bool,
-	acc dbtypes.MetadataBatchAccumulator,
-	txn dbtypes.Txn,
-	protocolMajor uint64,
-) error {
-	s.events = append(s.events, "set-transaction")
-	return s.MetadataStore.SetTransactionBatched(
-		tx, point, index, certDeposits, skipWithdrawalWitness, acc, txn, protocolMajor,
-	)
-}
-
-func (s *ledgerDeltaBatchStoreRecorder) FlushBatchStakeDeltas(
-	acc dbtypes.MetadataBatchAccumulator,
-	txn dbtypes.Txn,
-) error {
-	s.events = append(s.events, "flush-stake-deltas")
-	flusher, ok := s.MetadataStore.(interface {
-		FlushBatchStakeDeltas(dbtypes.MetadataBatchAccumulator, dbtypes.Txn) error
-	})
-	if !ok {
-		return nil
-	}
-	return flusher.FlushBatchStakeDeltas(acc, txn)
-}
-
-func TestLedgerDeltaBatchFlushesStakeBetweenDeltas(t *testing.T) {
-	t.Parallel()
-	baseDB, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     "",
-		StorageMode: dbtypes.StorageModeAPI,
-	})
-	require.NoError(t, err)
-	// The set takes over the database before the recorder wraps its store:
-	// the recorder forwards only the writes this test observes.
-	set := OpenLiveSetForTest(t, baseDB)
-	store := &ledgerDeltaBatchStoreRecorder{MetadataStore: baseDB.Metadata()}
-	db, err := database.New(context.Background(), baseDB.Config(), database.Stores{
-		Blob:     baseDB.Blob(),
-		Metadata: store,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	bus := newTestEventBus(t, nil)
-	t.Cleanup(bus.Stop)
-	ls := &LedgerState{
-		db: db,
-		config: LedgerStateConfig{
-			EventBus: bus,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-			UtxoSet:  set,
-		},
-	}
-	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	first := newTransactionEventTestDelta(t, 31, 0)
-	second := newTransactionEventTestDelta(t, 32, 0)
-	batch := NewLedgerDeltaBatch()
-	batch.addDelta(first)
-	batch.addDelta(second)
-	t.Cleanup(batch.Release)
-
-	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		return batch.apply(context.Background(), ls, txn)
-	})
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		"set-transaction",
-		"flush-stake-deltas",
-		"set-transaction",
-		"flush-stake-deltas",
-	}, store.events)
-}
-
-func TestLedgerDeltaBatchAPIStorageFlushesTransactionMetadata(t *testing.T) {
-	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir:     "",
-		StorageMode: dbtypes.StorageModeAPI,
-	})
-	require.NoError(t, err)
-	bus := newTestEventBus(t, nil)
-	t.Cleanup(bus.Stop)
-	ls := &LedgerState{
-		db: db,
-		config: LedgerStateConfig{
-			EventBus: bus,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	attachTestLiveSet(t, ls)
-
-	t.Run("commit persists queued metadata", func(t *testing.T) {
-		delta := newTransactionEventTestDelta(t, 21, 0)
-		batch := NewLedgerDeltaBatch()
-		batch.addDelta(delta)
-		t.Cleanup(batch.Release)
-
-		err := db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-			return batch.apply(context.Background(), ls, txn)
-		})
-		require.NoError(t, err)
-		stored, err := db.Metadata().GetTransactionByHash(
-			delta.Transactions[0].Tx.Hash().Bytes(), nil,
-		)
-		require.NoError(t, err)
-		require.NotNil(t, stored)
-	})
-
-	t.Run("failed batch rolls back earlier metadata", func(t *testing.T) {
-		first := newTransactionEventTestDelta(t, 22, 0)
-		invalid := newTransactionEventTestDelta(t, 23, -1)
-		batch := NewLedgerDeltaBatch()
-		batch.addDelta(first)
-		batch.addDelta(invalid)
-		t.Cleanup(batch.Release)
-
-		err := db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-			return batch.apply(context.Background(), ls, txn)
-		})
-		require.ErrorContains(t, err, "transaction index out of range")
-		stored, err := db.Metadata().GetTransactionByHash(
-			first.Transactions[0].Tx.Hash().Bytes(), nil,
-		)
-		require.NoError(t, err)
-		require.Nil(t, stored)
-	})
 }
 
 func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
@@ -610,7 +449,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 	drepOne := bytes.Repeat([]byte{0x31}, lcommon.Blake2b224Size)
 	drepTwo := bytes.Repeat([]byte{0x32}, lcommon.Blake2b224Size)
 	stakeCredential := bytes.Repeat([]byte{0x33}, lcommon.Blake2b224Size)
-	require.NoError(t, db.Metadata().ImportDrep(
+	require.NoError(t, fxImporter(t, db).ImportDrep(
 		&models.Drep{
 			CredentialTag: 0,
 			Credential:    drepOne,
@@ -621,11 +460,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 				Key: stakeCredential,
 			}},
 		},
-		&models.RegistrationDrep{
-			CredentialTag:  0,
-			DrepCredential: drepOne,
-			AddedSlot:      1,
-		},
+		0,
 		nil,
 	))
 	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
@@ -634,7 +469,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		AddedSlot:     1,
 		Active:        true,
 	}))
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	require.NoError(t, fxImporter(t, db).ImportAccount(&models.Account{
 		StakingKey:    stakeCredential,
 		CredentialTag: 0,
 		Drep:          drepOne,
@@ -731,7 +566,7 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], drepCredential)
-	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+	require.NoError(t, fxImporter(t, db).SetImportedDormantDRepEpochs(3, 0, nil))
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.ProtocolVersion.Major = 9
@@ -828,7 +663,7 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+	require.NoError(t, fxImporter(t, db).SetImportedDormantDRepEpochs(3, 0, nil))
 
 	drepCredential := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
 	proposalHash := bytes.Repeat([]byte{0x62}, lcommon.Blake2b256Size)
@@ -1275,9 +1110,9 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := db.Metadata().DeactivateDreps(txn.Metadata(), []models.StakeCredentialRef{
+		if err := fxImporter(t, db).DeactivateDreps([]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, credentialBytes),
-		}, point.Slot); err != nil {
+		}, point.Slot, dbadapter.Txn(txn)); err != nil {
 			return err
 		}
 		return (&LedgerDelta{Point: point}).processGovernance(
@@ -1371,7 +1206,7 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 		AddedSlot:     10,
 		Active:        true,
 	}))
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	require.NoError(t, fxImporter(t, db).ImportAccount(&models.Account{
 		StakingKey:    stakeCredential,
 		CredentialTag: 0,
 		AddedSlot:     10,

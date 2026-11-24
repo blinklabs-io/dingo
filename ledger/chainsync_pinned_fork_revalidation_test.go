@@ -80,21 +80,6 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 		)
 	}
 
-	// The rollback reloads the epoch cache from the database, so the epoch
-	// the fork headers belong to must be stored.
-	require.NoError(t, db.SetEpoch(
-		0, 6, epochNonce, epochNonce, epochNonce, nil,
-		eras.BabbageEraDesc.Id, 1_000, 432_000, nil,
-	))
-
-	pparamsCbor, err := cbor.Encode(
-		&babbage.BabbageProtocolParameters{ProtocolMajor: 8},
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
-		pparamsCbor, 0, 6, eras.BabbageEraDesc.Id, nil,
-	))
-
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
 		UtxoSet:           OpenLiveSetForTest(t, db),
@@ -104,6 +89,19 @@ func TestPinnedForkRollbackRevalidatesAndQueuesSuffix(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	// The rollback reloads the epoch cache from the LedgerDB, so the epoch the
+	// fork headers belong to and its parameters must be stored there.
+	require.NoError(t, seedDB(t, db).SetEpoch(
+		0, 6, epochNonce, epochNonce, epochNonce, nil,
+		eras.BabbageEraDesc.Id, 1_000, 432_000, nil,
+	))
+	pparamsCbor, err := cbor.Encode(
+		&babbage.BabbageProtocolParameters{ProtocolMajor: 8},
+	)
+	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).SetPParams(
+		pparamsCbor, 0, 6, eras.BabbageEraDesc.Id, nil,
+	))
 	// The set holds ledger state once open, so seed through it.
 	seedBlockPoolRegistration(t, db, ancestor.block)
 	pool := ancestor.block.IssuerVkey().Hash()

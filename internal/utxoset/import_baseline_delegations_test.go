@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -116,7 +115,7 @@ func TestSetLoadsTheDelegationsOfItsImportBaselines(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	pool, drep := bytes.Repeat([]byte{0xaa}, 28), bytes.Repeat([]byte{0xbb}, 28)
@@ -145,7 +144,7 @@ func TestSetReloadsLegacyImportBaselinesWhileTheRowsExist(t *testing.T) {
 	t.Parallel()
 	set := legacySet(t, baselineRef(1))
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	pool := bytes.Repeat([]byte{0xaa}, 28)
@@ -168,10 +167,8 @@ func TestSetMarksLegacyImportBaselineDelegationsLostOnceDrained(t *testing.T) {
 	t.Parallel()
 	set := legacySet(t, baselineRef(1))
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
-	set.SetDrainedFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
+	db := releasedAt(t, slotPoint(8))
+	set.ServeLedgerOnly()
 
 	loadBaselines(t, set, db)
 

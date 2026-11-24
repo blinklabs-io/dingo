@@ -43,9 +43,12 @@ var ErrNotOnCertifiedChain = errors.New(
 )
 
 // ErrRewardStateRepairWaitingForSnapshot means the selected certified state
-// does not reach the database's existing stable Mithril ledger point.
+// cannot be imported yet: it precedes the database's existing stable Mithril
+// ledger point, or the LedgerDB set cannot be rolled back to it.
 var ErrRewardStateRepairWaitingForSnapshot = errors.New(
-	"reward-state repair is waiting for a certified snapshot that reaches the existing stable ledger point",
+	"reward-state repair is waiting for a certified snapshot whose ledger state " +
+		"is not behind the existing stable ledger point and that the LedgerDB " +
+		"set can be rolled back to",
 )
 
 // openBootstrappedImmutable opens the ImmutableDB a bootstrap produced, through

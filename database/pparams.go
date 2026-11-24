@@ -54,8 +54,11 @@ func (d *Database) SetPParams(
 	era uint,
 	txn *Txn,
 ) error {
-	if d.pparamsDrained() {
-		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
+	}
+	if err := d.requireStore("SetPParams"); err != nil {
+		return err
 	}
 	if txn == nil {
 		err := d.metadata.SetPParams(params, slot, epoch, era, nil)
@@ -166,10 +169,13 @@ func (d *Database) ApplyPParamUpdates(
 	if err != nil {
 		return fmt.Errorf("encode updated pparams: %w", err)
 	}
-	if d.pparamsDrained() {
-		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
 	}
 	// Store params for the target epoch (epoch) where they take effect
+	if err := d.requireStore("ApplyPParamUpdates"); err != nil {
+		return err
+	}
 	return d.metadata.SetPParams(
 		pparamsCbor,
 		slot,
@@ -352,10 +358,13 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		"quorum", quorum,
 		"pparams", fmt.Sprintf("%#v", enactment.PParams),
 	)
-	if d.pparamsDrained() {
-		return nil, false, drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return nil, false, errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
 	}
 	// Store params for the target epoch (epoch) where they take effect
+	if err := d.requireStore("ComputeAndApplyPParamUpdates"); err != nil {
+		return nil, false, err
+	}
 	err = d.metadata.SetPParams(
 		enactment.Cbor,
 		slot,
@@ -571,8 +580,11 @@ func (d *Database) DeletePParamsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.pparamsDrained() {
-		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
+	}
+	if err := d.requireStore("DeletePParamsAfterSlot"); err != nil {
+		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamsAfterSlot(
@@ -596,8 +608,11 @@ func (d *Database) DeletePParamUpdatesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.pparamsDrained() {
-		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
+	}
+	if err := d.requireStore("DeletePParamUpdatesAfterSlot"); err != nil {
+		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamUpdatesAfterSlot(
@@ -619,8 +634,11 @@ func (d *Database) SetPParamUpdate(
 	slot, epoch uint64,
 	txn *Txn,
 ) error {
-	if d.pparamsDrained() {
-		return drainedWrite(nodesettings.FamilyPParamsUpdates)
+	if d.pparamsFromSource() {
+		return errNoMetadataStore(nodesettings.FamilyPParamsUpdates)
+	}
+	if err := d.requireStore("SetPParamUpdate"); err != nil {
+		return err
 	}
 	if txn == nil {
 		err := d.metadata.SetPParamUpdate(genesis, params, slot, epoch, nil)

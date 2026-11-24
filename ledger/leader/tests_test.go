@@ -262,7 +262,7 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 	for _, mutation := range []string{"version5", "absent_version", "consensus_identity", "nonce", "pool_stake", "total_stake", "out_of_range"} {
 		t.Run(mutation, func(t *testing.T) {
 			backing := newMockSyncStateStore()
-			store := NewSyncStateScheduleStore(backing)
+			store := NewChainStateScheduleStore(backing)
 			stale := NewSchedule(11, coeffTestPoolID, pool, total, nonce)
 			for _, slot := range reference.AssignedSlots {
 				stale.AddLeaderSlot(slot)
@@ -283,7 +283,7 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 			}
 			require.NoError(t, store.SaveSchedule(stale))
 			if mutation == "absent_version" {
-				key := syncStateScheduleKey(11, coeffTestPoolID)
+				key := chainStateScheduleKey(11, coeffTestPoolID)
 				var record map[string]json.RawMessage
 				require.NoError(
 					t,

@@ -26,8 +26,8 @@ import (
 )
 
 type consensusIdentityStore interface {
-	GetSyncState(string, *database.Txn) (string, error)
-	SetSyncState(string, string, *database.Txn) error
+	GetChainState(string, *database.Txn) (string, error)
+	SetChainState(string, string, *database.Txn) error
 	GetTip(*database.Txn) (ochainsync.Tip, error)
 }
 
@@ -115,7 +115,9 @@ func enforceConsensusIdentity(
 	store consensusIdentityStore,
 	identity string,
 ) error {
-	persisted, err := store.GetSyncState(nodeconsensus.DatabaseIdentitySyncKey, nil)
+	persisted, err := store.GetChainState(
+		database.ConsensusProviderIdentityKey, nil,
+	)
 	if err != nil {
 		return fmt.Errorf("read consensus database identity: %w", err)
 	}
@@ -136,8 +138,8 @@ func enforceConsensusIdentity(
 				identity,
 			)
 		}
-		if err := store.SetSyncState(
-			nodeconsensus.DatabaseIdentitySyncKey,
+		if err := store.SetChainState(
+			database.ConsensusProviderIdentityKey,
 			identity,
 			nil,
 		); err != nil {

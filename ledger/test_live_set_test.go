@@ -29,7 +29,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,30 +52,25 @@ var OpenLiveSetAtForTest func(
 // LiveSetOfForTest returns the set OpenLiveSetForTest already opened for db.
 var LiveSetOfForTest func(db *database.Database) (UtxoSetWriter, bool)
 
-// seedLedgerOf returns a ledger over db's open set to seed state through, or
-// nil while the set is not open yet.
-func seedLedgerOf(db *database.Database) *LedgerState {
-	set, ok := LiveSetOfForTest(db)
-	if !ok {
-		return nil
-	}
+// seedLedgerOf returns a ledger over db's LedgerDB set to seed state
+// through, opening the set first if no fixture has yet.
+func seedLedgerOf(t testing.TB, db *database.Database) *LedgerState {
+	t.Helper()
 	return &LedgerState{
-		db:     db,
-		config: LedgerStateConfig{UtxoSet: set, Logger: testLogger()},
+		db: db,
+		config: LedgerStateConfig{
+			UtxoSet: OpenLiveSetForTest(t, db),
+			Logger:  testLogger(),
+		},
 	}
 }
 
-// seedDB returns the writer a fixture seeds ledger state through. Once db's
-// LedgerDB set is open it is the ledger's own LedgerDB, whose writes outside
-// a transaction go straight to the set. Before that it is db's SQL tables,
-// the layout of a database written by an earlier release, which the set
-// takes over when it opens.
+// seedDB returns the writer a fixture seeds ledger state through: the
+// ledger's own LedgerDB over db's set, whose writes outside a transaction go
+// straight to the set.
 func seedDB(t testing.TB, db *database.Database) ledgerdb.LedgerDB {
 	t.Helper()
-	if ls := seedLedgerOf(db); ls != nil {
-		return stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: ls}
-	}
-	return dbadapter.New(db)
+	return stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: seedLedgerOf(t, db)}
 }
 
 // seedBlockNonce is seedDB for a block nonce, which the ledger stages itself
@@ -88,14 +82,10 @@ func seedBlockNonce(
 	slot uint64,
 	nonce []byte,
 	checkpoint bool,
-	txn *database.Txn,
+	_ *database.Txn,
 ) error {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	if ls == nil {
-		return db.SetBlockNonce(hash, slot, nonce, checkpoint, txn)
-	}
-	ls.stageBlockNonces(nil, []models.BlockNonce{{
+	seedLedgerOf(t, db).stageBlockNonces(nil, []models.BlockNonce{{
 		Hash: hash, Slot: slot, Nonce: nonce, IsCheckpoint: checkpoint,
 	}}, 0)
 	return nil
@@ -105,18 +95,14 @@ func seedBlockNonce(
 func seedCreateAccount(
 	t testing.TB,
 	db *database.Database,
-	ctx context.Context,
-	txn *database.Txn,
+	_ context.Context,
+	_ *database.Txn,
 	account *models.Account,
 ) error {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	if ls == nil {
-		return db.CreateAccount(ctx, txn, account)
-	}
-	ls.stageLedgerChanges(nil, LedgerChanges{Accounts: []AccountChange{{
-		Slot: account.AddedSlot, Account: *account,
-	}}})
+	seedLedgerOf(t, db).stageLedgerChanges(nil, LedgerChanges{
+		Accounts: []AccountChange{{Slot: account.AddedSlot, Account: *account}},
+	})
 	return nil
 }
 
@@ -124,23 +110,21 @@ func seedCreateAccount(
 func seedImportPool(
 	t testing.TB,
 	db *database.Database,
-	ctx context.Context,
-	txn *database.Txn,
+	_ context.Context,
+	_ *database.Txn,
 	pool *models.Pool,
 	reg *models.PoolRegistration,
 ) error {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	if ls == nil {
-		return db.ImportPool(ctx, txn, pool, reg)
-	}
-	ls.stageLedgerChanges(nil, LedgerChanges{Pools: []PoolChange{{
-		Slot: reg.AddedSlot,
-		State: PoolState{
-			Pool:   pool.PoolKeyHash,
-			Params: CleanPoolRegistration(reg),
-		},
-	}}})
+	seedLedgerOf(t, db).stageLedgerChanges(nil, LedgerChanges{
+		Pools: []PoolChange{{
+			Slot: reg.AddedSlot,
+			State: PoolState{
+				Pool:   pool.PoolKeyHash,
+				Params: CleanPoolRegistration(reg),
+			},
+		}},
+	})
 	return nil
 }
 
@@ -148,18 +132,14 @@ func seedImportPool(
 func seedCreateDrep(
 	t testing.TB,
 	db *database.Database,
-	ctx context.Context,
-	txn *database.Txn,
+	_ context.Context,
+	_ *database.Txn,
 	drep *models.Drep,
 ) error {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	if ls == nil {
-		return db.CreateDrep(ctx, txn, drep)
-	}
-	ls.stageLedgerChanges(nil, LedgerChanges{DReps: []DRepChange{{
-		Slot: drep.AddedSlot, Drep: *drep,
-	}}})
+	seedLedgerOf(t, db).stageLedgerChanges(nil, LedgerChanges{
+		DReps: []DRepChange{{Slot: drep.AddedSlot, Drep: *drep}},
+	})
 	return nil
 }
 
@@ -177,6 +157,44 @@ func commitTestLedgerChanges(
 	require.True(t, ok, "the fixture's set must keep ledger state")
 	require.NoError(t, w.ApplyLedgerChanges(&tip.Point, changes))
 	require.NoError(t, ls.db.SetTip(tip, nil))
+}
+
+// fxSetLedgerTip records tip as the ledger's tip in db and in db's LedgerDB
+// set, as applying the block at tip does. A set left behind a database tip
+// has no state to catch up from, so a ledger built on db would refuse it.
+func fxSetLedgerTip(t testing.TB, db *database.Database, tip ochainsync.Tip) {
+	t.Helper()
+	w, ok := OpenLiveSetForTest(t, db).(LedgerChangesWriter)
+	require.True(t, ok, "the fixture's set must keep ledger state")
+	require.NoError(t, w.ApplyLedgerChanges(&tip.Point, LedgerChanges{}))
+	require.NoError(t, db.SetTip(tip, nil))
+}
+
+// fxReleasedLedgerDB opens a v0.94.2 database in dataDir, lets seed write its
+// metadata store, takes that state into the LedgerDB set kept in dataDir
+// through OpenLiveSetAtForTest, and marks the block store migrated. It returns
+// the ledger's database reopened over the directory, with that set open.
+func fxReleasedLedgerDB(
+	tb testing.TB,
+	dataDir string,
+	seed func(*database.Database),
+) *database.Database {
+	tb.Helper()
+	released, err := dbtest.NewReleasedDatabase(
+		tb, &database.Config{DataDir: dataDir},
+	)
+	require.NoError(tb, err)
+	seed(released)
+	_, closeSet := OpenLiveSetAtForTest(tb, released, dataDir)
+	require.NoError(tb, closeSet())
+	// The migration records the move last, so the block store only opens as
+	// the ledger's once the set holds the state.
+	require.NoError(tb, database.MarkLedgerMigrated(released.Blob()))
+	require.NoError(tb, dbtest.CloseDatabase(released))
+	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
+	require.NoError(tb, err)
+	OpenLiveSetAtForTest(tb, db, dataDir)
+	return db
 }
 
 func attachTestLiveSet(t testing.TB, ls *LedgerState) {
@@ -264,54 +282,6 @@ func seedTestStakedOutput(t *testing.T, ls *LedgerState, txID []byte, index uint
 			Cbor: encoded,
 		}},
 	}}))
-	// The store's live stake aggregate follows the outputs a block applies;
-	// one seeded past the ledger is folded in here.
-	require.NoError(t, ls.db.RefreshRewardLiveStakeRefs(
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, stakeKey)},
-		0, nil,
-	))
-}
-
-// mirrorSeededUtxoRowsForTest gives ls's live UTxO set an output for every
-// staked utxo row a fixture seeded in the metadata store, at the slot the row
-// was added, as the startup migration moves rows into the set. The rows carry
-// no output CBOR, so each output is rebuilt from its staking key and amount.
-func mirrorSeededUtxoRowsForTest(t *testing.T, ls *LedgerState) {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, ls.db)
-	require.NoError(t, err)
-	rows, err := raw.Query(
-		`SELECT tx_id, output_idx, staking_key, CAST(amount AS INTEGER), added_slot
-		 FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL
-		 ORDER BY added_slot, id`,
-	)
-	require.NoError(t, err)
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			txID, stakeKey []byte
-			index          uint32
-			amount, slot   uint64
-		)
-		require.NoError(t, rows.Scan(&txID, &index, &stakeKey, &amount, &slot))
-		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
-			bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize), stakeKey,
-		)
-		require.NoError(t, err)
-		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-			OutputAddress: addr, OutputAmount: amount,
-		})
-		require.NoError(t, err)
-		require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
-			Point: ocommon.Point{Slot: slot, Hash: txID},
-			Added: []UtxoOutput{{
-				Ref:  models.UtxoId{Hash: txID, Idx: index},
-				Cbor: encoded,
-			}},
-		}}))
-	}
-	require.NoError(t, rows.Err())
 }
 
 // The seeding writers, for the external tests.

@@ -29,7 +29,7 @@ import (
 // Tests that only need a valid snapshot to feed a restore the code under test
 // rejects or inspects used to each open a database and take a snapshot, which
 // costs several seconds under the race detector. One snapshot of a database
-// holding block 1 is taken per test binary and every caller gets its own copy,
+// holding block 1, with its live UTxO set, is taken per test binary and every caller gets its own copy,
 // because some of them rewrite the manifest.
 var oneBlockSnapshot struct {
 	once sync.Once
@@ -76,12 +76,15 @@ func buildTwoBlockCloudSnapshot(t *testing.T) {
 			return
 		}
 	}
+	set := openUtxoSetStore(t, t.TempDir())
+	applyBlocks(t, set, 1, 2)
 	setFakeCloudBackingDir(t, root)
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, src,
 		snapshotTestDir(t, "snap"), lifecycle.TriggerManual, "test",
 		"badger", "sqlite", "faketest://bucket/prefix", "", "",
 		lifecycle.WithManifestKey(testTrustKey),
+		lifecycle.WithUtxoSetBackup(set),
 	)
 	twoBlockCloudSnapshot.manifest, twoBlockCloudSnapshot.err = m, err
 }
@@ -155,10 +158,7 @@ func buildOneBlockSnapshot(t *testing.T) (string, error) {
 	}
 	// The source database lives in the first caller's temp dir; the snapshot
 	// is a self-contained copy, so it can be dropped once Snapshot returns.
-	src := newTestDB(t)
-	if err := src.BlockCreate(testBlock(1, 0x01), nil); err != nil {
-		return root, err
-	}
+	src, set := newLedgerSnapshotSource(t)
 	_, err = lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -167,6 +167,7 @@ func buildOneBlockSnapshot(t *testing.T) (string, error) {
 		"test",
 		"badger",
 		"sqlite",
+		lifecycle.WithUtxoSetBackup(set),
 	)
 	return root, err
 }

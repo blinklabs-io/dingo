@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -37,7 +36,7 @@ import (
 // transaction writes it; whichever of the background job or the next boundary
 // writes them deletes it in the same transaction. The LedgerDB set keeps it,
 // journaled at the boundary's slot.
-const pendingRatificationSyncKey = statedrain.PendingRatificationSyncKey
+const pendingRatificationSyncKey = database.PendingRatificationSyncKey
 
 type pendingRatificationRecord struct {
 	Epoch        uint64 `json:"epoch"`
@@ -480,8 +479,8 @@ func (ls *LedgerState) retryRatificationApply(ctx context.Context) {
 // previous run never wrote. The snapshot it was deciding on is gone, and
 // deciding on later state would count votes and stake from after the
 // boundary. It records the rewind as a rollback intent, which start-up then
-// recovers; the intent's block and byte limits bound how far back it can
-// reach, and beyond them start-up fails rather than decide on the wrong state.
+// recovers; the intent's block limit bounds how far back it can reach, and
+// beyond it start-up fails rather than decide on the wrong state.
 func (ls *LedgerState) resumePendingRatification(ctx context.Context) error {
 	if err := ls.resumePendingRatificationIntent(ctx); err != nil {
 		return err

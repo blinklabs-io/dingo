@@ -90,18 +90,18 @@ func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
 		t.Skip("FIFO-based synchronization is POSIX-only")
 	}
 
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db, set := newLedgerSnapshotSource(t)
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, snapshotDir,
 		lifecycle.TriggerManual, "test", "badger", "sqlite",
 		lifecycle.WithManifestKey(testTrustKey),
+		lifecycle.WithUtxoSetBackup(set),
 	)
 	require.NoError(t, err)
 
-	backupPath := filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName)
+	backupPath := filepath.Join(snapshotDir, lifecycle.UtxoSetBackupFileName)
 	backup, err := os.ReadFile(backupPath)
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(backupPath))

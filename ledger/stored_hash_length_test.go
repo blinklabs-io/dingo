@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -97,9 +98,13 @@ func newStoredHashDB(
 ) (*database.Database, *storedHashStore) {
 	t.Helper()
 	store := &storedHashStore{}
+	// Rows a release that kept ledger state in SQL left behind are read only
+	// from a v0.94.2 database.
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		dbtest.Options{Config: &database.Config{
+			DataDir: "", Role: database.RoleReleased,
+		}},
 		func(inner metadata.MetadataStore) metadata.MetadataStore {
 			store.MetadataStore = inner
 			configure(store)
@@ -387,7 +392,7 @@ func TestRewardBlockCountsRejectsMalformedPoolInput(t *testing.T) {
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, _, _, err := ls.rewardBlockCounts(
-		seedDB(t, db),
+		dbadapter.New(db),
 		nil,
 		5,
 		[]*models.RewardPoolInput{{
@@ -413,7 +418,7 @@ func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, err := ls.rebuildPrunedRewardStakeInputs(
-		seedDB(t, db),
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
@@ -438,7 +443,7 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, err := ls.rebuildPrunedRewardStakeInputs(
-		seedDB(t, db),
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},

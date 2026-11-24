@@ -65,7 +65,28 @@ func TestPluginSystemIntegration(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, runtime.Database.Blob())
-	require.NotNil(t, runtime.Database.Metadata())
+	// The ledger's database keeps no metadata store; the selected one backs
+	// the IndexerDB.
+	require.Nil(t, runtime.Database.Metadata())
+	indexerHost, err := internalplugins.NewHost()
+	require.NoError(t, err)
+	indexer, err := internalplugins.OpenIndexerDatabase(
+		context.Background(),
+		indexerHost,
+		runtime.Database,
+		&database.Config{},
+		internalplugins.StorageSelections{
+			Metadata: plugin.Selection{
+				Provider: "sqlite",
+				Config:   map[string]any{},
+			},
+		},
+		internalplugins.StorageDependencies{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, indexer.Metadata())
+	require.NoError(t, indexer.Close())
+	require.NoError(t, indexerHost.Stop(context.Background()))
 	require.NoError(t, runtime.Close(context.Background()))
 	require.NoError(t, runtime.Close(context.Background()))
 }

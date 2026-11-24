@@ -46,7 +46,7 @@ func seedEpoch(
 // errors rather than being attributed to the nearest epoch.
 func TestEpochBySlot_Boundaries(t *testing.T) {
 	t.Parallel()
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	// Three contiguous epochs: [10,110), [110,260), [260,460).
 	seedEpoch(t, db, 0, 10, 100)
 	seedEpoch(t, db, 1, 110, 150)

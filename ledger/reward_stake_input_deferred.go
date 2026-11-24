@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -343,16 +344,27 @@ func (ls *LedgerState) completePendingRewardStakeInputs(newEpoch uint64) error {
 	return err
 }
 
-// ResolvePendingRewardStakeInputs completes every pending reward stake-input
-// epoch from ldb, the metadata store, in one write transaction. It must run
-// while that store still holds the UTxO and delegation history the rebuild
-// reads, which the move into the live UTxO set and the drain of the
-// reward-inputs family delete. An epoch whose history cannot reproduce the
-// retained pool totals keeps its marker.
-func (ls *LedgerState) ResolvePendingRewardStakeInputs(
+// ResolveReleasedRewardStakeInputs completes every pending reward
+// stake-input epoch of a v0.94.2 database from ldb, its metadata store, each
+// in one write transaction. It runs in the migration out of that store,
+// before the UTxO and delegation history the rebuild reads stop being the
+// ledger's, and before any ledger is built over the database. An epoch whose
+// history cannot reproduce the retained pool totals keeps its marker.
+func ResolveReleasedRewardStakeInputs(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
+	logger *slog.Logger,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
 ) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	ls := &LedgerState{config: LedgerStateConfig{
+		Logger:                     logger,
+		DelegatorInactivityEnabled: delegatorInactivityEnabled,
+		DelegatorInactivity:        delegatorInactivity,
+	}}
 	pending, err := loadRewardStakeInputsPending(ldb, nil)
 	if err != nil {
 		return err

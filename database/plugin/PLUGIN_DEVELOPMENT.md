@@ -163,7 +163,7 @@ path while the old provider may still be closing in the background.
 
 Test strict configuration decoding, construction/start failures, normal stop,
 and the subsystem contract. Storage providers must preserve transaction,
-iterator-lifetime, commit-timestamp, optimization, and persisted-format
+iterator-lifetime, optimization, and persisted-format
 semantics. Run both:
 
 ```text

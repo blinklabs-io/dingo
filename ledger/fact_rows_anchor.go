@@ -59,18 +59,18 @@ type RewardRecordStreamer interface {
 	EachRewardRecordIn(from, through uint64, fn func(RewardRecord) error) error
 }
 
-// AnchorStateReady implements metadata.AnchorStateSource. A drained accounts
-// family is served from the set's import baselines and reward records, which
-// the set holds only when it loaded them before the metadata store drained
-// the rows they come from.
+// AnchorStateReady implements metadata.AnchorStateSource. The accounts are
+// served from the set's import baselines and reward records, which the set
+// holds only when it loaded them while the metadata store still held the rows
+// they come from.
 func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
 	if ls.accountReader(nil) == nil {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	set := ls.readSet(nil)
 	pager, ok := set.(ImportBaselinePager)
 	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	lost, err := pager.ImportBaselineDelegationsLost()
 	if err != nil {
@@ -80,12 +80,12 @@ func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
 		return fmt.Errorf(
 			"%w: the import baselines were written before the set kept the "+
 				"delegations they record, and the rows were drained first",
-			drainedUnserved(nodesettings.FamilyAccounts),
+			ledgerStateUnserved(nodesettings.FamilyAccounts),
 		)
 	}
 	keeper, ok := set.(RewardRecordRetainer)
 	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	lost, err = keeper.RewardRecordsLost()
 	if err != nil {
@@ -95,7 +95,7 @@ func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
 		return fmt.Errorf(
 			"%w: the reward journal was drained before the set held it, and "+
 				"its entries before then are in neither store",
-			drainedUnserved(nodesettings.FamilyAccounts),
+			ledgerStateUnserved(nodesettings.FamilyAccounts),
 		)
 	}
 	return nil
@@ -148,7 +148,7 @@ func (ls *LedgerState) AnchorStateView(
 	}
 	snapper, ok := ls.readSet(nil).(UtxoSetSnapshotter)
 	if !ok {
-		return nil, nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	ls.utxoSetApplyMu.RLock()
 	snap, release, err := snapper.SnapshotUtxoSet()
@@ -206,7 +206,7 @@ func (v *anchorView) AnchorImportedAccounts(
 	r, _ := set.(AccountReader)
 	pager, ok := set.(ImportBaselinePager)
 	if r == nil || !ok {
-		return nil, nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	var after *models.StakeCredentialRef
 	if len(cursor) != 0 {
@@ -272,7 +272,7 @@ func (v *anchorView) EachAnchorRewardJournal(
 	}
 	r, ok := v.readSet().(RewardRecordStreamer)
 	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	defer v.lock()()
 	return r.EachRewardRecordIn(slot+1, math.MaxUint64, func(rec RewardRecord) error {

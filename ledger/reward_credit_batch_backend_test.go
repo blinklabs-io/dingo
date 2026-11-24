@@ -145,7 +145,7 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 				}
 				require.NoError(
 					t,
-					seedCreateAccount(t, db, context.Background(), nil, account),
+					db.Metadata().CreateAccount(nil, account),
 				)
 				for u := range 3 {
 					txID := make([]byte, 32)
@@ -382,7 +382,7 @@ func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
 	for i := range n {
 		require.NoError(
 			t,
-			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+			db.Metadata().CreateAccount(nil, &models.Account{
 				StakingKey: rewardBatchKey(0x31, i),
 				Pool:       rewardBatchKey(0x41, i%7),
 				Reward:     types.Uint64(1_000 + i),
@@ -541,7 +541,7 @@ func TestSaveRewardStakeInputsBatchUpsertsLikeRowByRow(t *testing.T) {
 			} {
 				inputs := build(base)
 				require.NoError(
-					t, seedDB(t, db).SaveRewardStakeInputs(inputs, nil),
+					t, dbadapter.New(db).SaveRewardStakeInputs(inputs, nil),
 				)
 				want := make(map[string]*models.RewardStakeInput)
 				for index, input := range inputs {
@@ -604,7 +604,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			for i := range n {
 				require.NoError(
 					t,
-					seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+					db.Metadata().CreateAccount(nil, &models.Account{
 						StakingKey: rewardBatchKey(0xf1, i),
 						Pool:       pool,
 						Drep:       drep,
@@ -967,7 +967,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+	cutoff, err := ls.rewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
@@ -1087,7 +1087,11 @@ func openSQLiteRewardRaceBackend(
 	t *testing.T,
 ) (*database.Database, *sql.DB, string) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	// The writers under test are the SQL metadata store's, which only a
+	// v0.94.2 database keeps for the ledger state.
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -1176,6 +1180,7 @@ func openPostgresRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "postgres",
@@ -1230,6 +1235,7 @@ func openMySQLRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "mysql",

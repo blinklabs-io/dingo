@@ -150,7 +150,6 @@ func TestSplitIndexerFollowsLedgerAndRollsBack(t *testing.T) {
 	}
 	waitForTip(ledgerTip.Point.Hash, "the IndexerDB to reach the ledger tip")
 
-	consensusRaw := openRaw(t, filepath.Join(dataDir, "metadata.sqlite"))
 	indexerRaw := openRaw(
 		t,
 		filepath.Join(
@@ -161,8 +160,6 @@ func TestSplitIndexerFollowsLedgerAndRollsBack(t *testing.T) {
 	)
 	apiTables := []string{"address_transaction", "utxo_address", "key_witness"}
 	for _, table := range apiTables {
-		require.Zero(t, rowCount(t, consensusRaw, table),
-			"the consensus store must hold no API rows (%s)", table)
 		require.NotZero(t, rowCount(t, indexerRaw, table),
 			"the IndexerDB must hold the API rows (%s)", table)
 	}
@@ -204,8 +201,8 @@ func TestIndexerServiceWithoutALedgerDoesNotStart(t *testing.T) {
 		t, &database.Config{DataDir: t.TempDir()},
 	)
 	require.NoError(t, err)
-	indexerDB, err := dbtest.NewDatabase(
-		t, &database.Config{DataDir: t.TempDir()},
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
 	)
 	require.NoError(t, err)
 

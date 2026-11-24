@@ -27,7 +27,7 @@ import (
 // verifyGovernance compares every proposal and vote row the set holds with
 // the metadata store's, soft-deleted rows, row IDs, lifecycle fields and
 // action CBOR included, and requires the set's ID sequence to start above
-// every stored ID so a drained family never reuses one.
+// every stored ID so a moved family never reuses one.
 func verifyGovernance(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,

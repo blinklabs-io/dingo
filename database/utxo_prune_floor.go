@@ -14,46 +14,8 @@
 
 package database
 
-import (
-	"fmt"
-	"strconv"
-)
-
-// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep has
-// hard-deleted spent rows at or below, or 0 when nothing has been swept.
-// Rolling back below this slot cannot restore the UTxOs consumed above it.
-//
-// It fails closed: a read or parse failure is returned rather than reported as
-// "nothing swept", because callers use it to refuse a destructive rollback and
-// a floor that cannot be verified must not read as absent.
-func (d *Database) ConsumedUtxoPruneFloor(txn *Txn) (uint64, error) {
-	val, err := d.GetSyncState(ConsumedUtxoPruneFloorSyncKey, txn)
-	if err != nil {
-		return 0, fmt.Errorf("read consumed UTxO prune floor: %w", err)
-	}
-	if val == "" {
-		return 0, nil
-	}
-	slot, err := strconv.ParseUint(val, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"parse consumed UTxO prune floor %q: %w",
-			val,
-			err,
-		)
-	}
-	return slot, nil
-}
-
-// writeConsumedUtxoPruneFloor records slot as the floor. It performs no read of
-// its own: the caller compares against the value it read before deleting
-// anything, so the only work left after an irreversible blob delete is this
-// write. Callers must not lower the floor -- rows an earlier, higher sweep
-// removed do not become restorable because a later sweep ran at a lower slot.
-func (d *Database) writeConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
-	return d.SetSyncState(
-		ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(slot, 10),
-		txn,
-	)
-}
+// ConsumedUtxoPruneFloorSyncKey names the sync_state row in which a v0.94.2
+// database recorded the slot up to which it had deleted spent utxo rows. The
+// revert that precedes the move of those rows into the live UTxO set does not
+// go below it.
+const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"

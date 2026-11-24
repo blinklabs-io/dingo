@@ -93,12 +93,9 @@ package nodeparity
 // behind Dingo's own live epoch). Separate Acquire calls keep each check
 // bounded by its own floor.
 //
-// Running Dingo with --storage-mode api removes the UTxO half of that
-// exposure entirely (checkUtxoRetentionWindow skips its own retention check
-// in that mode, the same way cleanupConsumedUtxos does). Pool-stake snapshot
-// pruning has the equivalent carve-out (ledger/snapshot/rotation.go's
-// cleanupOldSnapshots), so in API mode the stake comparison is no longer
-// bounded by that window either.
+// Pool-stake snapshot pruning has a carve-out in --storage-mode api
+// (ledger/snapshot/rotation.go's cleanupOldSnapshots), so in API mode the
+// stake comparison is not bounded by that window.
 
 import (
 	"context"

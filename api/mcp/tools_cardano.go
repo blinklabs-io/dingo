@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -200,8 +199,8 @@ func registerCardanoTools(
 				"- **Software**: Dingo (pure-Go Cardano node implementation by Blink Labs)\n"+
 				"- **Configured Network**: `%s`\n"+
 				"- **Block Header Protocol Minor Identifier**: `69` in the low byte of the protocol minor field (identifies Dingo-forged blocks on-chain without altering ledger protocol major version; with CIP-0203 enabled the upper bits carry an optional release-version payload)\n"+
-				"- **Block Production**: Enabled via `--block-producer` with VRF, KES, and OpCert; tracks slots in SQLite `sync_state` (`forge_fence:<pool_id>`) and `pool_opcert_sequence`\n"+
-				"- **Storage Modes**: `core` (Badger block blob store + SQLite WAL metadata) and `api` (PostgreSQL / indexed store)\n"+
+				"- **Block Production**: Enabled via `--block-producer` with VRF, KES, and OpCert; records the last forged slot as block-store chain state (`forge_fence:<pool_id>`) and operational certificate counters in the LedgerDB\n"+
+				"- **Storage Modes**: `core` (block store, ImmutableDB and LedgerDB; no SQL store) and `api` (core plus an IndexerDB on SQLite, PostgreSQL or MySQL)\n"+
 				"- **Mithril Bootstrap**: Supported for rapid certified state synchronisation\n\n"+
 				"### Available MCP Documentation Resources\n"+
 				"- `dingo://docs/identity`: How Dingo identifies itself to peers and on-chain via protocol minor version 69\n"+
@@ -540,8 +539,15 @@ func registerCardanoTools(
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
+		var lookup utxoAddressLookup
+		if len(addressLookups) > 0 {
+			lookup = addressLookups[0]
+		}
+		if db == nil && lookup == nil && ls != nil {
+			return liveUtxoPage(qCtx, ls, limits, addr, input.Cursor, limit, offset)
+		}
 		if address, err := lcommon.NewAddress(addr); err == nil {
-			if len(addressLookups) == 0 || addressLookups[0] == nil {
+			if lookup == nil {
 				return nil, nil, errors.New(
 					"exact address lookup requires the active metadata and blob stores",
 				)
@@ -553,7 +559,7 @@ func registerCardanoTools(
 			return exactAddressPage(
 				qCtx,
 				ctx,
-				addressLookups[0],
+				lookup,
 				pattern,
 				network,
 				addr,
@@ -756,9 +762,9 @@ func registerCardanoTools(
 	// Tool: get_account
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_account",
-		Description: "Query stake account details (delegation, pool ID, DRep, resignation status) from Dingo's SQLite store.",
+		Description: "Query stake account details (delegation, pool ID, DRep, reward balance, active status) from the ledger state, with the account's IndexerDB row references when the node has an IndexerDB.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input AccountParams) (*mcp.CallToolResult, any, error) {
-		if db == nil {
+		if db == nil && stateDB == nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -769,15 +775,49 @@ func registerCardanoTools(
 			}, nil, nil
 		}
 
-		if err := limits.refuseDrainedFamilies(
-			nodesettings.FamilyAccounts,
-		); err != nil {
-			return nil, nil, err
-		}
-
 		cred := strings.TrimSpace(input.StakeAddressOrCredential)
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
+
+		if stateDB != nil {
+			hash, tag, err := parseStakeCredential(cred, input.CredentialType)
+			if err != nil {
+				return nil, nil, err
+			}
+			account, err := accountFromLedger(qCtx, stateDB, tag, hash)
+			if err != nil {
+				return nil, nil, fmt.Errorf("read stake account: %w", err)
+			}
+			if account == nil {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{
+							Text: fmt.Sprintf(
+								"Stake account not found for credential '%s'",
+								cred,
+							),
+						},
+					},
+				}, nil, nil
+			}
+			var rowRefs []string
+			if db != nil {
+				rowRefs, err = accountRowRefs(qCtx, db, tag, hash)
+				if err != nil {
+					return nil, nil, fmt.Errorf(
+						"read the account's IndexerDB row: %w", err,
+					)
+				}
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: renderAccount(cred, account, rowRefs),
+					},
+				},
+			}, nil, nil
+		}
 
 		var cols []string
 		colsErr := func() error {
@@ -936,13 +976,6 @@ func registerCardanoTools(
 			}
 			epochNum, rawNonce, blockCount = read.epoch, read.nonce, read.blockCount
 		} else {
-			if err := limits.refuseDrainedFamilies(
-				nodesettings.FamilyNonces,
-				nodesettings.FamilyEpochs,
-				nodesettings.FamilySummaries,
-			); err != nil {
-				return nil, nil, err
-			}
 			if input.Epoch != nil {
 				epochNum = *input.Epoch
 				if epochNum < 0 {
@@ -1044,7 +1077,7 @@ func registerCardanoTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available to resolve datums or scripts.",
+						Text: "Error: SQLite database is not available to resolve datums or scripts; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -1165,7 +1198,7 @@ func registerCardanoTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -1375,7 +1408,7 @@ func registerCardanoTools(
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
-						Text: "Error: SQLite database is not available",
+						Text: "Error: SQLite database is not available; " + apiIndexesUnavailable,
 					},
 				},
 			}, nil, nil
@@ -1685,13 +1718,7 @@ func registerCardanoTools(
 		if stateDB != nil {
 			gs, err = governanceStateFromLedger(qCtx, stateDB)
 		} else {
-			err = limits.refuseDrainedFamilies(
-				nodesettings.FamilyCommitteeConstitution,
-				nodesettings.FamilyDReps,
-			)
-			if err == nil {
-				gs, err = governanceStateFromSQL(qCtx, db)
-			}
+			gs, err = governanceStateFromSQL(qCtx, db)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -1806,9 +1833,9 @@ func registerCardanoTools(
 	// Tool: get_pool_performance
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_pool_performance",
-		Description: "Query stake pool historical performance and rewards from Dingo's SQLite store: blocks produced, apparent performance, pledge, cost/margin, and member/leader rewards.",
+		Description: "Query stake pool performance and rewards per epoch: blocks produced, apparent performance, pledge, cost/margin, and member/leader rewards. The IndexerDB holds every epoch; without one, the epochs the ledger state keeps.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input PoolPerformanceParams) (*mcp.CallToolResult, any, error) {
-		if db == nil {
+		if db == nil && stateDB == nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -1831,13 +1858,6 @@ func registerCardanoTools(
 			}, nil, nil
 		}
 
-		if err := limits.refuseDrainedFamilies(
-			nodesettings.FamilyRewardInputs,
-			nodesettings.FamilyRewardOutputs,
-		); err != nil {
-			return nil, nil, err
-		}
-
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 10
@@ -1847,6 +1867,27 @@ func registerCardanoTools(
 
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
+
+		if db == nil {
+			poolRows, err := poolPerformanceFromLedger(
+				qCtx, stateDB, poolBytes, input.Epoch, limit,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: renderPoolPerformance(
+							input.PoolID, poolBytes, poolRows,
+							"\n\n*Read from the ledger state, which keeps "+
+								"only the epochs its reward calculation still "+
+								"uses; older epochs "+needsIndexerDB+".*",
+						),
+					},
+				},
+			}, nil, nil
+		}
 
 		var q string
 		var args []any
@@ -1881,18 +1922,6 @@ func registerCardanoTools(
 		}
 		defer rows.Close()
 
-		cols := []string{
-			"Epoch",
-			"Blocks",
-			"Delegated Stake (lovelace)",
-			"Pledge (lovelace)",
-			"Fixed Cost (lovelace)",
-			"Margin",
-			"Apparent Performance",
-			"Total Reward",
-			"Leader Reward",
-			"Member Rewards",
-		}
 		var poolRows [][]string
 		for rows.Next() {
 			var epoch int64
@@ -1966,32 +1995,11 @@ func registerCardanoTools(
 			}, nil, nil
 		}
 
-		if len(poolRows) == 0 {
-			msg := fmt.Sprintf(
-				"No historical reward performance records found for pool `%s` (hash `%s`).\n\n"+
-					"**Possible reasons:**\n"+
-					"1. The pool did not produce blocks in recent epochs.\n"+
-					"2. Reward snapshot calculations for this epoch have not finalized yet.\n"+
-					"3. The pool ID is valid but not currently registered on this network.",
-				input.PoolID,
-				hex.EncodeToString(poolBytes),
-			)
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: msg},
-				},
-			}, nil, nil
-		}
-
-		md := fmt.Sprintf(
-			"### Performance History for Pool `%s`\n\n*(Showing %d epoch snapshots)*\n\n%s",
-			input.PoolID,
-			len(poolRows),
-			FormatMarkdownTable(cols, poolRows),
-		)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
-				&mcp.TextContent{Text: md},
+				&mcp.TextContent{
+					Text: renderPoolPerformance(input.PoolID, poolBytes, poolRows, ""),
+				},
 			},
 		}, nil, nil
 	})

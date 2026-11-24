@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -82,21 +83,24 @@ func seedSplitDir(
 	blocks, err := testfixtures.GenerateBabbageChainAt(1, 2, numBlocks)
 	require.NoError(t, err)
 	points := make([]ocommon.Point, 0, numBlocks)
-	for i, b := range blocks {
+	for _, b := range blocks {
 		require.NoError(t, cm.PrimaryChain().AddBlock(
 			context.Background(), b, nil,
 		))
-		if i == 0 {
-			// The checkpoint a truncate reconstructs nonces from.
-			require.NoError(t, db.SetBlockNonce(
-				b.Hash().Bytes(), b.SlotNumber(),
-				bytes.Repeat([]byte{0x5c}, 32), true, nil,
-			))
-		}
 		points = append(points, ocommon.Point{
 			Slot: b.SlotNumber(), Hash: b.Hash().Bytes(),
 		})
 	}
+	// The live UTxO set holds the checkpoint nonce a truncate reconstructs
+	// the target's nonce from.
+	set, err := badgerutxo.Open(badgerutxo.DirFor(cfg.DatabasePath))
+	require.NoError(t, err)
+	require.NoError(t, set.LoadNonces([]badgerutxo.Nonce{{
+		Point:      points[0],
+		Nonce:      bytes.Repeat([]byte{0x5c}, 32),
+		Checkpoint: true,
+	}}))
+	require.NoError(t, set.Close())
 	last := points[len(points)-1]
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: last, BlockNumber: uint64(numBlocks),
@@ -126,7 +130,12 @@ func seedSplitDir(
 
 // indexerTipOf opens the IndexerDB of a split data directory and returns its
 // tip.
-func indexerTipOf(t *testing.T, cfg *config.Config) indexerdb.Tip {
+// withIndexerOf opens cfg's ledger database and its IndexerDB for fn.
+func withIndexerOf(
+	t *testing.T,
+	cfg *config.Config,
+	fn func(idx *database.Database),
+) {
 	t.Helper()
 	deps := internalplugins.StorageDependencies{
 		DataDir: cfg.DatabasePath, StorageMode: "core",
@@ -153,10 +162,18 @@ func indexerTipOf(t *testing.T, cfg *config.Config) indexerdb.Tip {
 	)
 	require.NoError(t, err)
 	defer idx.Close() //nolint:errcheck
-	store, err := indexerdb.NewStore(idx, idx, 10)
-	require.NoError(t, err)
-	tip, err := store.Tip(nil)
-	require.NoError(t, err)
+	fn(idx)
+}
+
+func indexerTipOf(t *testing.T, cfg *config.Config) indexerdb.Tip {
+	t.Helper()
+	var tip indexerdb.Tip
+	withIndexerOf(t, cfg, func(idx *database.Database) {
+		store, err := indexerdb.NewStore(idx, idx, 10)
+		require.NoError(t, err)
+		tip, err = store.Tip(nil)
+		require.NoError(t, err)
+	})
 	return tip
 }
 
@@ -441,6 +458,61 @@ func TestServiceTruncateOnSplitRollsTheIndexerBackFirst(t *testing.T) {
 		"the IndexerDB rolls back while the ledger still stores the blocks")
 	require.Equal(t, slot, rolledTo.Load())
 	require.Equal(t, slot, indexerTipOf(t, cfg).Slot)
+}
+
+// The Midnight indexer keeps its journals in the IndexerDB, so an offline
+// truncate removes the ones above the target there and winds its backfill
+// checkpoint back.
+func TestServiceTruncateOfAnAPINodeTruncatesTheIndexerMidnightJournals(
+	t *testing.T,
+) {
+	t.Parallel()
+	const target = 3
+	cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+	points := seedSplitDir(t, cfg, 8, 6)
+	var targetNumber atomic.Uint64
+	svc := dblifecycle.NewService(cfg, nil, nil)
+	svc.SetIndexerRollbackFactory(func(
+		_, indexer *database.Database,
+	) (dblifecycle.IndexerRoller, error) {
+		return rollerFunc(func(_ context.Context, to indexerdb.Tip) error {
+			targetNumber.Store(to.BlockNumber)
+			store := indexer.Metadata()
+			for number := to.BlockNumber; number <= to.BlockNumber+2; number++ {
+				if err := store.CreateMidnightAriadneRollback(nil,
+					&models.MidnightAriadneRollback{
+						BlockNumber: number, Epoch: number,
+					},
+				); err != nil {
+					return err
+				}
+			}
+			return store.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+				Phase: "midnight", LastSlot: points[7].Slot, Completed: true,
+			}, nil)
+		}), nil
+	})
+	slot := points[target].Slot
+	_, err := svc.Truncate(t.Context(), dblifecycle.TruncateTarget{Slot: &slot})
+	require.NoError(t, err)
+
+	withIndexerOf(t, cfg, func(idx *database.Database) {
+		store := idx.Metadata()
+		number := targetNumber.Load()
+		kept, err := store.FindMidnightAriadneRollbacksByBlock(nil, number)
+		require.NoError(t, err)
+		require.Len(t, kept, 1)
+		for above := number + 1; above <= number+2; above++ {
+			rows, err := store.FindMidnightAriadneRollbacksByBlock(nil, above)
+			require.NoError(t, err)
+			require.Empty(t, rows, "journal of block %d", above)
+		}
+		checkpoint, err := store.GetBackfillCheckpoint("midnight", nil)
+		require.NoError(t, err)
+		require.NotNil(t, checkpoint)
+		require.Equal(t, slot, checkpoint.LastSlot)
+		require.False(t, checkpoint.Completed)
+	})
 }
 
 type rollerFunc func(context.Context, indexerdb.Tip) error

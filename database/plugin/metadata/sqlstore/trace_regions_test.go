@@ -19,7 +19,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/tracing/tracetest"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -81,59 +80,6 @@ func TestSetTransactionOverlayRecordsPhaseRegions(t *testing.T) {
 	trace := tracetest.Capture(t, func() {
 		applyOverlayChain(t, store, chain, true)
 	})
-
-	tracetest.RequireRegionOrder(
-		t,
-		trace,
-		"dingo.sqlstore.tx.prepare",
-		"dingo.sqlstore.tx.identity",
-		"dingo.sqlstore.tx.produced",
-		"dingo.sqlstore.tx.spend",
-		"dingo.sqlstore.tx.supply_stake",
-	)
-}
-
-// emptyLiveUtxoSource is a live UTxO set holding no outputs.
-type emptyLiveUtxoSource struct{}
-
-func (emptyLiveUtxoSource) LiveUtxoCbor(
-	types.Txn, []byte, uint32,
-) ([]byte, bool, error) {
-	return nil, false, nil
-}
-
-func (emptyLiveUtxoSource) LiveUtxoStake(
-	types.Txn, uint8, []byte,
-) (uint64, error) {
-	return 0, nil
-}
-
-func (emptyLiveUtxoSource) LivePointerStakes(
-	types.Txn,
-) ([]types.PointerStake, error) {
-	return nil, nil
-}
-
-func (emptyLiveUtxoSource) EachLiveUtxoStake(
-	types.Txn, func(uint8, []byte, uint64) error,
-) error {
-	return nil
-}
-
-// A live UTxO source returns before the SQL path's spend and stake phases,
-// so it marks its own.
-//
-// Not t.Parallel: only one execution trace can run per process.
-func TestSetTransactionLiveUtxoRecordsPhaseRegions(t *testing.T) {
-	store := newMigratedSQLiteStore(t)
-	store.SetLiveUtxoSource(emptyLiveUtxoSource{})
-	tx, point, _, _ := assetOutputTx(t, 0x62)
-
-	var err error
-	trace := tracetest.Capture(t, func() {
-		err = store.SetTransaction(tx, point, 0, nil, true, nil, 0)
-	})
-	require.NoError(t, err)
 
 	tracetest.RequireRegionOrder(
 		t,

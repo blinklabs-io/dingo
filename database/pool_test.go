@@ -156,7 +156,7 @@ func TestGetPoolKeyHashesRetiredByEpoch(t *testing.T) {
 		poolSyntheticOverCertRet   = retiredPoolKeyHash(0xAB)
 	)
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	seeder := &retiredPoolSeeder{raw: rawSQLiteMetadataFixture(t, db)}
 
@@ -368,7 +368,7 @@ func TestGetPoolsRetiringAtEpochSameSlotResolution(t *testing.T) {
 		poolRetiredTwiceInSlot = retiredPoolKeyHash(0xB9)
 	)
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	seeder := &retiredPoolSeeder{raw: rawSQLiteMetadataFixture(t, db)}
 
@@ -517,7 +517,7 @@ func TestGetPoolsRetiringAtEpochSameSlotResolution(t *testing.T) {
 func TestImportPoolRejectsTransactionWithoutMetadataWriteHandle(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 
 	newPool := func() (*models.Pool, *models.PoolRegistration) {

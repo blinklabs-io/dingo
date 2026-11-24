@@ -198,9 +198,6 @@ func run() (runErr error) {
 				fmt.Errorf("close Dingo database: %w", err))
 		}
 	}()
-	if err := rt.RecoveryError(); err != nil {
-		return fmt.Errorf("open Dingo database recovery state: %w", err)
-	}
 
 	if config.heapProfile != "" {
 		stopMemoryProfile := startMemoryProfile(config.heapProfile)

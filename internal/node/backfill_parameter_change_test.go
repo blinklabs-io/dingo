@@ -86,7 +86,7 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 
 			txCbor := testutil.ParameterChangeTxCbor(t, test.ppu, test.name)
@@ -210,7 +210,7 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 
 			conwayPParams := mockledger.NewMockConwayProtocolParams()

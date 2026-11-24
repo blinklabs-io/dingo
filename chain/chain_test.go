@@ -4853,58 +4853,6 @@ func goroutineStackContains(dump []byte, required ...[]byte) bool {
 	return false
 }
 
-func TestRollbackDeferredThenExcludesPersistentAdds(t *testing.T) {
-	t.Parallel()
-
-	_, c := callerTxnChain(t)
-	barrierEntered := make(chan struct{})
-	releaseBarrier := make(chan struct{})
-	barrierDone := make(chan error, 1)
-	go func() {
-		_, err := c.RollbackDeferredThen(context.Background(), c.Tip().Point, func() error {
-			close(barrierEntered)
-			<-releaseBarrier
-			return nil
-		})
-		barrierDone <- err
-	}()
-	<-barrierEntered
-
-	addDone := make(chan error, 1)
-	addStarted := make(chan struct{})
-	go func() {
-		close(addStarted)
-		addDone <- c.AddBlock(context.Background(), testBlocks[4], nil)
-	}()
-	<-addStarted
-	waitUntilParkedInFrom(
-		t,
-		"chain.(*Chain).beginStandaloneAdd",
-		"chain_test.TestRollbackDeferredThenExcludesPersistentAdds.func2",
-	)
-
-	close(releaseBarrier)
-	if err := testutil.RequireReceive(
-		t,
-		barrierDone,
-		30*time.Second,
-		"mutation barrier did not finish",
-	); err != nil {
-		t.Fatalf("mutation barrier: %v", err)
-	}
-	if err := testutil.RequireReceive(
-		t,
-		addDone,
-		30*time.Second,
-		"persistent add did not resume after mutation barrier",
-	); err != nil {
-		t.Fatalf("persistent add: %v", err)
-	}
-	if got := c.Tip().Point; got.Slot != testBlocks[4].SlotNumber() {
-		t.Fatalf("tip slot after persistent add = %d, want %d", got.Slot, testBlocks[4].SlotNumber())
-	}
-}
-
 func TestRollbackDeferredPreflightWaitsForCallerAdd(t *testing.T) {
 	t.Parallel()
 

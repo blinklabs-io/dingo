@@ -38,7 +38,6 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/internal/badgermem"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
 )
@@ -106,9 +105,8 @@ type Store struct {
 	// afterBootstrapFlush runs between a bootstrap's contents and its tip;
 	// an error stops the bootstrap there. Only tests set it.
 	afterBootstrapFlush func() error
-	// loadsRefused holds the families whose source tables have lost rows; see
-	// RefuseLoadsFor.
-	loadsRefused atomic.Uint64
+	// loadsRefused is set by RefuseLoads.
+	loadsRefused atomic.Bool
 	// added holds, for each family, the index of rows below the export floor
 	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
 	// put a row below the floor, each of which invalidates it.
@@ -130,21 +128,19 @@ var ErrLoadsRefused = errors.New(
 	"badgerutxo: a row family cannot be reloaded from a source that has lost rows",
 )
 
-// RefuseLoadsFor makes a Load* method fail with ErrLoadsRefused, changing
-// nothing, while the family it replaces is in drained and holds rows. A load
-// replaces a family's rows with the source's, which is wrong once the source
-// has drained that family: it would replace the set's only copy with nothing.
-// A family outside drained still has its source rows, and a family that holds
-// no row loses none.
-func (s *Store) RefuseLoadsFor(drained nodesettings.FamilyMask) {
-	s.loadsRefused.Store(uint64(drained))
+// RefuseLoads makes a Load* method fail with ErrLoadsRefused, changing
+// nothing, while the rows it replaces are held. A load replaces a family's
+// rows with the source's, which is wrong once the set is the ledger's only
+// copy of its state: no metadata store holds the rows to load. A family that
+// holds no row loses none.
+func (s *Store) RefuseLoads() {
+	s.loadsRefused.Store(true)
 }
 
-// LoadsRefusedFor reports whether family has lost its source rows. In-place
-// migrations use this to avoid querying a drained source before upgrading the
-// set's retained rows.
-func (s *Store) LoadsRefusedFor(family nodesettings.Family) bool {
-	return nodesettings.FamilyMask(s.loadsRefused.Load()).Has(family)
+// LoadsRefused reports whether RefuseLoads was called. In-place upgrades of
+// the set's rows use it to avoid querying a source that holds none.
+func (s *Store) LoadsRefused() bool {
+	return s.loadsRefused.Load()
 }
 
 // Open opens or creates the store in dir.
@@ -963,4 +959,9 @@ func (s *Store) RemoveOutputs(
 		removed += n
 	}
 	return removed, nil
+}
+
+// Sync makes every write committed so far durable.
+func (s *Store) Sync() error {
+	return s.db.Sync()
 }

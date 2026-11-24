@@ -976,25 +976,9 @@ type Config struct {
 	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
 	// intentionally unavailable.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation"                                                                                            split_words:"true"`
-	// SkipRewardLiveStakeBackfillCheck skips the startup consistency check
-	// between reward_live_stake and the live UTxO/account set. That check
-	// scans the entire live UTxO table every startup regardless of whether
-	// anything needs fixing, which is expensive on a mainnet-scale database.
-	// Unsafe to leave enabled permanently -- it exists to catch a stale or
-	// pre-migration reward_live_stake table -- so this is for advanced/
-	// diagnostic use only (e.g. repeated restarts against a database already
-	// known to be consistent).
-	//
-	// reward_live_stake.utxo_stake is a running total maintained
-	// incrementally by the block-application path, so this
-	// check is also the only automatic reconciliation of that total against
-	// the live UTxO set. Skipping it leaves any drift in place for the whole
-	// life of the process, including across the epoch boundaries whose stake
-	// snapshots consume it.
-	//
-	// It does not affect the stake-snapshot provenance check that runs in the
-	// same startup step: that one is cheap, indexed, and fails closed, so it
-	// runs unconditionally.
+	// SkipRewardLiveStakeBackfillCheck has no effect. The ledger's database
+	// keeps no reward_live_stake table, so there is no startup scan to skip;
+	// the key is accepted so configurations that set it still load.
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                                                split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
@@ -1058,14 +1042,9 @@ type Config struct {
 	// earlier blocks of the chunk apply. Not consensus-affecting; on by
 	// default.
 	LedgerValidateAheadEnabled bool `yaml:"ledgerValidateAheadEnabled"    envconfig:"DINGO_LEDGER_VALIDATE_AHEAD_ENABLED"`
-	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
-	// that are not validated through the metadata store's batched path in core
-	// storage mode, as API storage mode already does, instead of one statement
-	// group per row. Validated blocks, Leios endorser-block applies, and
-	// batches applied with closure context keep the per-transaction path in
-	// every storage mode. The stored state is identical either way, so the
-	// setting is not consensus-affecting; it defaults off until throughput is
-	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
+	// LedgerApplyRowBatchingEnabled is a released setting that no longer has
+	// an effect: the ledger writes its state to the LedgerDB, which has no
+	// batched row path. It still loads so released configurations start.
 	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled" envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
 
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
@@ -2265,7 +2244,7 @@ func newDefaultConfig() *Config {
 		// blocks of its chunk. Neither changes a verdict or stored state.
 		LedgerPrefetchAheadEnabled: true,
 		LedgerValidateAheadEnabled: true,
-		// A set-only database checkpoints its live UTxO set once an epoch
+		// A database checkpoints its live UTxO set once an epoch
 		// and keeps the last two.
 		LedgerUtxoCheckpointEpochs: 1,
 		LedgerUtxoCheckpointKeep:   2,

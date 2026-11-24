@@ -31,9 +31,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// isMysqlConformanceConfigured mirrors internal/test/conformance's check of
-// the same name so this suite skips/runs under the same conditions in CI and
-// locally. Unlike this plugin's own TestOpenStoreAppliesPoolSettings (which
+// isMysqlConformanceConfigured reports whether a MySQL server this suite can
+// administer is configured. Unlike this plugin's own TestOpenStoreAppliesPoolSettings (which
 // only needs a DSN string, no live server), this suite needs privileges to
 // create its own database (see mysqlConformanceRootDSN), so it specifically
 // requires MYSQL_ROOT_PASSWORD or a full MYSQL_DSN override -- CI's
@@ -45,8 +44,8 @@ func isMysqlConformanceConfigured() bool {
 }
 
 // mysqlConformanceRootDSN builds a root DSN from the same MYSQL_HOST/PORT
-// environment variables this plugin's own provider and
-// internal/test/conformance read, authenticated as root (not the
+// environment variables this plugin's own provider reads, authenticated as
+// root (not the
 // mysql/mysql user CI also provisions) since this suite needs CREATE
 // DATABASE privileges to isolate itself. MYSQL_DSN, if set, overrides
 // everything.
@@ -166,7 +165,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Start(t.Context()))
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(1, txn))
+		require.NoError(t, store.SetSyncState("timeout_probe", "1", txn))
 		require.NoError(t, txn.Commit())
 		require.NoError(t, store.Close())
 	})

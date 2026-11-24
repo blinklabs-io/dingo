@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -228,39 +227,5 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Empty(t, effects)
-	})
-}
-
-// TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites requires set
-// reads to ignore certificates written directly to the metadata store.
-func TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites(t *testing.T) {
-	t.Parallel()
-	forEachGenesisMIRRead(t, func(t *testing.T, reads string) {
-		h := newGenesisMIRHarness(t, reads)
-		s := h.slots
-		raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
-		require.NoError(t, err)
-		// Written around the ledger's LedgerDB, so the set never sees them.
-		_, err = raw.Exec(`
-INSERT INTO genesis_delegation (
-    genesis_hash, genesis_delegate_hash, vrf_key_hash,
-    added_slot, block_index, cert_index, certificate_id
-) VALUES (?, ?, ?, ?, 0, 0, 999999)`,
-			s.Genesis, s.DelegateA, s.VrfA, s.DelegB+10)
-		require.NoError(t, err)
-		_, err = raw.Exec(`
-INSERT INTO move_instantaneous_rewards (pot, added_slot, other_pot)
-VALUES (0, ?, '7')`, s.DelegB+10)
-		require.NoError(t, err)
-
-		ldb := h.scenario.LedgerDB()
-		rows, err := ldb.GetGenesisDelegationsInSlotRange(s.DelegB+10, s.DelegB+10, nil)
-		require.NoError(t, err)
-		effects, err := ldb.GetMIRCertsInSlotRange(
-			t.Context(), s.DelegB+10, s.DelegB+11, nil,
-		)
-		require.NoError(t, err)
-		require.Empty(t, rows, "the read answers from the set")
-		require.Empty(t, effects, "the read answers from the set")
 	})
 }

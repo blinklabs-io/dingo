@@ -401,7 +401,7 @@ func TestWriterTakesOneFinalPlannerStatsPassAtTheAnchor(t *testing.T) {
 	probe := &plannerStatsProbe{}
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{Config: &database.Config{}},
+		dbtest.Options{Config: &database.Config{Role: database.RoleIndexer}},
 		func(m metadata.MetadataStore) metadata.MetadataStore {
 			probe.MetadataStore = m
 			return probe
@@ -454,7 +454,7 @@ func TestWriterFallsBackToAFullPlannerStatsPassAtTheAnchor(t *testing.T) {
 	probe := &fullPassProbe{}
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{Config: &database.Config{}},
+		dbtest.Options{Config: &database.Config{Role: database.RoleIndexer}},
 		func(m metadata.MetadataStore) metadata.MetadataStore {
 			probe.MetadataStore = m
 			return probe
@@ -544,7 +544,7 @@ func TestWriterLogsAFailedAnchorPlannerStatsPass(t *testing.T) {
 			t.Parallel()
 			db, err := dbtest.NewDatabaseWithMetadataWrapper(
 				t,
-				dbtest.Options{Config: &database.Config{}},
+				dbtest.Options{Config: &database.Config{Role: database.RoleIndexer}},
 				func(m metadata.MetadataStore) metadata.MetadataStore {
 					probe.MetadataStore = m
 					return probe

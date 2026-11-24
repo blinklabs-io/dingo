@@ -27,8 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -40,11 +38,9 @@ import (
 type p5Harness struct {
 	scenario ledger.BoundaryEpochStateScenario
 	set      *utxoset.Set
-	guard    *statedrain.TripGuard
 	// store is the metadata store's own LedgerDB, whose answers are the
 	// reference an undrained run's reads are rendered from.
-	store ledgerdb.LedgerDB
-	// drainErr is what statedrain.Run returned.
+	store    ledgerdb.LedgerDB
 	drainErr error
 	// refs and pool are the harness's accounts and the pool the first one
 	// delegates to, read from the metadata store before any drain.
@@ -78,12 +74,10 @@ func newSeededP5Harness(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	guard := statedrain.NewTripGuard()
 	h := &p5Harness{
-		set:   set,
-		guard: guard,
+		set: set,
 		scenario: ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-			t, set, guard,
+			t, set, nil,
 		),
 	}
 	h.store = dbadapter.New(h.scenario.DB)
@@ -106,25 +100,7 @@ func newSeededP5Harness(
 	if corrupt != nil {
 		corrupt(h.scenario.DB)
 	}
-	src := drainTestSource{set: set, db: h.scenario.DB}
-	candidates := append(statedrain.Graduated(src), statedrain.Staged(src)...)
-	var entries []statedrain.Entry
-	for _, f := range drain {
-		before := len(entries)
-		for _, e := range candidates {
-			if e.Family == f {
-				entries = append(entries, e)
-			}
-		}
-		require.Greater(
-			t, len(entries), before,
-			"family %s has no drain entry", f,
-		)
-	}
-	h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-		Set:   src, Guard: guard,
-	}, entries)
+	set.ServeLedgerOnly()
 	return h
 }
 
@@ -142,17 +118,6 @@ func (h *p5Harness) requireDrained(
 ) {
 	t.Helper()
 	require.NoError(t, h.drainErr)
-	require.Empty(t, h.guard.Trips(), "a drained table was read or written")
-	mask, err := h.scenario.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
-	require.NoError(t, err)
-	for _, f := range families {
-		require.True(t, mask.Has(f), "latch bit of %s", f)
-		for _, table := range tables[f] {
-			require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-		}
-	}
 }
 
 // With the set failed, the LedgerDB fails the read rather than answer from
@@ -171,9 +136,9 @@ func TestMIRGenesisDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	_, err = ldb.GetGenesisDelegationForSlot(
 		bytes.Repeat([]byte{1}, 28), math.MaxInt64, genesisMIRWindow, nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetGenesisDelegationsInSlotRange(0, math.MaxInt64, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
 var p5DRepKeys = [][]byte{
@@ -376,9 +341,9 @@ func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	ctx := t.Context()
 	key := bytes.Repeat([]byte{1}, 28)
 	_, err = ldb.GetAccountByCredential(ctx, 0, key, true, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveAccountCredentials(nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetAccountRegistrationHistoryByCredential(
 		ctx,
 		0,
@@ -388,15 +353,15 @@ func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 		"asc",
 		nil,
 	)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.AccountLastWitnessSlots(ctx, []models.StakeCredentialRef{
 		models.NewStakeCredentialRef(0, key),
 	}, 100, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActiveDreps(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetDrepByCredential(ctx, 0, key, true, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetDormantDRepEpochs(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }

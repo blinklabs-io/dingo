@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,15 +46,33 @@ var sourceDBSlots = make(chan struct{}, max(2, runtime.NumCPU()/2))
 
 // newTestDatabaseSourceDB creates a real, in-process *database.Database
 // (Badger blob + SQLite metadata, matching ledger/snapshot's own test
-// pattern) for exercising DatabaseSource against the same storage stack a
-// live node uses, rather than a bare raw connection.
+// pattern) for exercising DatabaseSource against a SQL metadata store read
+// through dbadapter, rather than a bare raw connection. It opens as a v0.94.2
+// database: the ledger's own database keeps no metadata store.
 func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 	t.Helper()
 	sourceDBSlots <- struct{}{}
 	t.Cleanup(func() { <-sourceDBSlots })
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
 	require.NoError(t, err)
 	return db
+}
+
+// setSourceTip records the ledger tip the in-process source reads, with a
+// block number of 1.
+func setSourceTip(
+	t *testing.T,
+	db *database.Database,
+	hash []byte,
+	slot uint64,
+) {
+	t.Helper()
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: slot, Hash: hash},
+		BlockNumber: 1,
+	}, nil))
 }
 
 // sourceSQLDB reaches into the metadata store's underlying SQLite file so
@@ -460,9 +480,7 @@ func TestDatabaseSourceReportsRewardsPendingForMissingRow(t *testing.T) {
 			  cost, delegator_count, captured_slot, boundary_slot)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			poolHash, stakeEpoch, "0", "1000", "0", "0", 1, 0, 0).Error)
-		require.NoError(t, sqlDB.Exec(
-			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-			[]byte{0x01}, tipSlot, 1).Error)
+		setSourceTip(t, db, []byte{0x01}, uint64(tipSlot))
 		if seedApplyEpoch {
 			require.NoError(t, sqlDB.Exec(
 				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
@@ -526,10 +544,7 @@ func TestDatabaseSourceReportsRewardsPending(t *testing.T) {
 		poolHash, stakeEpoch, "0", "0", "0", "4006269", "0", "0", "1857",
 		0, boundarySlot,
 	).Error)
-	require.NoError(t, sqlDB.Exec(
-		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-		[]byte{0x01}, boundarySlot-1, 1,
-	).Error)
+	setSourceTip(t, db, []byte{0x01}, boundarySlot-1)
 
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -542,9 +557,7 @@ func TestDatabaseSourceReportsRewardsPending(t *testing.T) {
 	require.True(t, data.RewardsPending,
 		"before the boundary, spendable flags remain provisional")
 
-	require.NoError(t, sqlDB.Exec(
-		`UPDATE tip SET slot = ?`, boundarySlot,
-	).Error)
+	setSourceTip(t, db, []byte{0x01}, boundarySlot)
 	dataMap, err = source.GetPoolEpochDataMap(
 		context.Background(), stakeEpoch, paramEpoch,
 	)
@@ -681,7 +694,7 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 		boundarySlot = uint64(1_000)
 	)
 	dir := t.TempDir()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -870,7 +883,7 @@ func TestGetRewardSnapshotImplementationsAgree(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
 	sqlDB := sourceSQLDB(t, db)
 
@@ -1031,7 +1044,7 @@ func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
 			t.Parallel()
 
 			dir := t.TempDir()
-			db, err := dbtest.NewDatabase(
+			db, err := dbtest.NewReleasedDatabase(
 				t,
 				&database.Config{DataDir: dir},
 			)
@@ -1039,7 +1052,14 @@ func TestGetEarliestAvailableEpochImplementationsAgree(t *testing.T) {
 			require.NoError(t, db.SetEpoch(
 				1_000, 10, nil, nil, nil, nil, 5, 20, tc.lengthInSlots, nil,
 			))
-			require.NoError(t, db.SetSyncState(
+			require.NoError(t, db.SetChainState(
+				"mithril_ledger_slot",
+				tc.boundarySlot,
+				nil,
+			))
+			// DingoDB reads the boundary row an IndexerDB records for
+			// itself; this one store stands in for both databases.
+			require.NoError(t, db.Metadata().SetSyncState(
 				"mithril_ledger_slot",
 				tc.boundarySlot,
 				nil,

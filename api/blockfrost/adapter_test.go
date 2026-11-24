@@ -940,8 +940,8 @@ func setChainTip(t *testing.T, adapter *NodeAdapter, tip ochainsync.Tip) {
 }
 
 // seedEpochs stores epochs [from, to) of 86400 one-second slots in the
-// consensus database, where the ledger's epoch cache loads them from, and in
-// the IndexerDB, where the adapter's SQL reads them, and reloads the cache.
+// ledger's LedgerDB set, where the ledger's epoch cache loads them from, and
+// in the IndexerDB, where the adapter's SQL reads them, and reloads the cache.
 func seedEpochs(
 	t *testing.T,
 	adapter *NodeAdapter,
@@ -950,19 +950,26 @@ func seedEpochs(
 	to uint64,
 ) {
 	t.Helper()
-	ledgerRaw, err := dbtest.RawSQLiteMetadata(
-		t, adapter.ledgerState.Database(),
-	)
-	require.NoError(t, err)
-	for _, store := range []*sql.DB{ledgerRaw, raw} {
-		for epoch := from; epoch < to; epoch++ {
-			_, err := store.Exec(
-				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (?, ?, 86400, 1000, 6)`,
-				epoch, epoch*86400,
-			)
-			require.NoError(t, err)
-		}
+	set, ok := livesettest.LedgerDBOf(adapter.ledgerState.Database())
+	require.True(t, ok, "the fixture's ledger has a LedgerDB set")
+	epochs := make([]models.Epoch, 0, to-from)
+	for epoch := from; epoch < to; epoch++ {
+		epochs = append(epochs, models.Epoch{
+			EpochId:       epoch,
+			StartSlot:     epoch * 86400,
+			LengthInSlots: 86400,
+			SlotLength:    1000,
+			EraId:         6,
+		})
+		_, err := raw.Exec(
+			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (?, ?, 86400, 1000, 6)`,
+			epoch, epoch*86400,
+		)
+		require.NoError(t, err)
 	}
+	require.NoError(t, set.ApplyLedgerChanges(
+		nil, ledger.LedgerChanges{Epochs: epochs},
+	))
 	require.NoError(
 		t,
 		adapter.ledgerState.PrepareEpochCacheForStartup(t.Context()),

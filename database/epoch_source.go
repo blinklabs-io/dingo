@@ -19,12 +19,11 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// EpochSource answers the epoch and era switch reads of a database whose
-// epochs or era-switch family is drained, from the live UTxO set.
+// EpochSource answers the epoch and era switch reads of a database with no
+// metadata store, from the live UTxO set.
 type EpochSource interface {
 	// Epochs returns every epoch row, in epoch order.
 	Epochs() ([]models.Epoch, error)
@@ -32,23 +31,15 @@ type EpochSource interface {
 	EraSwitch() (*MidEpochEraSwitch, error)
 }
 
-// ErrNoEpochSource is returned by a read or rollback that needs a drained
-// epochs or era-switch family when no EpochSource was installed.
+// ErrNoEpochSource is returned by a read or rollback of a database with no
+// metadata store that needs epochs or the era switch when no EpochSource was
+// installed.
 var ErrNoEpochSource = errors.New(
-	"epochs or the era switch are drained from the metadata store and no source is installed",
+	"the database keeps no epochs or era switch and no epoch source is installed",
 )
 
-// ErrFamilyDrained is returned by a read or write of a ledger-state family
-// whose SQL rows are drained: the set is the only copy, and a row written here
-// would reappear beside a set that no longer matches it.
-var ErrFamilyDrained = nodesettings.ErrFamilyDrained
-
-func drainedWrite(f nodesettings.Family) error {
-	return fmt.Errorf("%w: %s", ErrFamilyDrained, f)
-}
-
-// SetEpochSource installs the source reads of a drained epochs or era-switch
-// family come from.
+// SetEpochSource installs the source epoch and era switch reads of a
+// database with no metadata store come from.
 func (d *Database) SetEpochSource(src EpochSource) {
 	d.epochSource.Store(&src)
 }
@@ -61,7 +52,7 @@ func (d *Database) epochSourceOrErr() (EpochSource, error) {
 	return *p, nil
 }
 
-func (d *Database) drainedEpochs() ([]models.Epoch, error) {
+func (d *Database) sourceEpochs() ([]models.Epoch, error) {
 	src, err := d.epochSourceOrErr()
 	if err != nil {
 		return nil, err
@@ -69,9 +60,9 @@ func (d *Database) drainedEpochs() ([]models.Epoch, error) {
 	return src.Epochs()
 }
 
-// drainedEpochBySlot picks the epoch that contains slot the way the metadata
+// sourceEpochBySlot picks the epoch that contains slot the way the metadata
 // store does: the latest start at or before slot whose length covers it.
-func drainedEpochBySlot(
+func sourceEpochBySlot(
 	epochs []models.Epoch,
 	slot uint64,
 ) *models.Epoch {
@@ -88,9 +79,9 @@ func drainedEpochBySlot(
 }
 
 // truncateEraSwitch returns the recorded era switch for a rollback: from the
-// source once the era-switch family is drained, else from sync_state.
+// source when there is no metadata store, else from sync_state.
 func (d *Database) truncateEraSwitch(txn *Txn) (*MidEpochEraSwitch, error) {
-	if d.FamilyDrained(nodesettings.FamilyEraSwitch) {
+	if d.metadata == nil {
 		src, err := d.epochSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -114,13 +105,7 @@ func (d *Database) newestEpochAtOrBefore(
 	slot uint64,
 	txn *Txn,
 ) (uint64, bool, error) {
-	var epochs []models.Epoch
-	var err error
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		epochs, err = d.drainedEpochs()
-	} else {
-		epochs, err = d.GetEpochs(txn)
-	}
+	epochs, err := d.GetEpochs(txn)
 	if err != nil {
 		return 0, false, fmt.Errorf("read epochs after rollback: %w", err)
 	}
@@ -138,15 +123,15 @@ func (d *Database) newestEpochAtOrBefore(
 }
 
 // epochRecord reads one epoch row for the metadata-store paths that take a
-// metadata transaction: from the source once the epochs family is drained.
+// metadata transaction: from the source when there is no metadata store.
 func (d *Database) epochRecord(
 	epochID uint64,
 	txn types.Txn,
 ) (*models.Epoch, error) {
-	if !d.FamilyDrained(nodesettings.FamilyEpochs) {
+	if d.metadata != nil {
 		return d.metadata.GetEpoch(epochID, txn)
 	}
-	epochs, err := d.drainedEpochs()
+	epochs, err := d.sourceEpochs()
 	if err != nil {
 		return nil, err
 	}

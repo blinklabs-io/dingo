@@ -121,9 +121,6 @@ WHERE h.deleted = false`
 		where += " AND (" + strings.Join(predicates, " OR ") + ")"
 	}
 	if filter.AuthorizedBy != nil {
-		if s.tableDrained("auth_committee_hot") {
-			return nil, 0, errTableDrained("auth_committee_hot")
-		}
 		// A subquery, not a list of the member's hot credentials: a member
 		// that rotates on a schedule authorizes thousands, and an OR chain
 		// that long exceeds SQLite's expression depth.
@@ -256,9 +253,6 @@ WHERE item.credential_tag = ? AND item.credential = ?`
 func (s *Store) HasUnattributedCommitteeVotes(
 	txn types.Txn,
 ) (bool, error) {
-	if s.tableDrained("auth_committee_hot") {
-		return false, errTableDrained("auth_committee_hot")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, err
@@ -359,9 +353,6 @@ func (s *Store) GetDRepDelegatorStakes(
 	order string,
 	txn types.Txn,
 ) ([]models.PoolDelegatorRow, int, error) {
-	if err := s.refuseDrained("account", "drep_delegator", "reward_live_stake"); err != nil {
-		return nil, 0, err
-	}
 	ret := []models.PoolDelegatorRow{}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {

@@ -42,23 +42,17 @@ const expectedBlueprintVectorCount = 2575
 // tests_cc29688c_test.go for why the replay is memoized per backend and what the
 // previous separate statistics pass cost.
 func TestRulesConformanceVectors(t *testing.T) {
-	// The three backend replays run in parallel so the package takes the
-	// longest replay rather than their sum. Each owns its store: SQLite a
-	// temporary directory, Postgres its process schema and MySQL its process
-	// database, each with its own blob directory. Every other test that opens
-	// the Postgres or MySQL process store is sequential, so it has finished
-	// before these resume.
 	t.Parallel()
 	testutil.SkipUnderRace(
 		t,
-		"a single-goroutine replay of the corpus through the SQLite state "+
+		"a single-goroutine replay of the corpus through the state "+
 			"manager; CI's check and gate (services) jobs replay it "+
 			"un-instrumented",
 	)
-	results := sqliteCorpusResults(t)
-	reportCorpus(t, "sqlite", results)
+	results := corpusResults(t)
+	reportCorpus(t, "LedgerDB", results)
 	require.Equal(t, expectedBlueprintVectorCount, len(results))
-	assertCorpus(t, "sqlite", results)
+	assertCorpus(t, "LedgerDB", results)
 }
 
 // corpusRun is one backend's memoized corpus replay. err is retained rather
@@ -95,27 +89,25 @@ func replayCorpusRoot(sm *DingoStateManager, root string) corpusRun {
 }
 
 var (
-	sqliteCorpusOnce sync.Once
-	sqliteCorpusRun  corpusRun
+	corpusOnce     sync.Once
+	replayedCorpus corpusRun
 )
 
-// sqliteCorpusResults returns the SQLite backend's memoized corpus replay.
-// SQLite needs no external service, so this is the backend every run has and
-// the baseline the Postgres and MySQL comparisons measure against.
-func sqliteCorpusResults(t *testing.T) []conformance.VectorResult {
+// corpusResults returns the memoized corpus replay.
+func corpusResults(t *testing.T) []conformance.VectorResult {
 	t.Helper()
-	sqliteCorpusOnce.Do(func() {
+	corpusOnce.Do(func() {
 		root, err := corpusTestdataRoot()
 		if err != nil {
-			sqliteCorpusRun = corpusRun{err: err}
+			replayedCorpus = corpusRun{err: err}
 			return
 		}
-		sqliteCorpusRun = replayCorpusSharded(
+		replayedCorpus = replayCorpusSharded(
 			root, corpusReplayWorkers(), NewDingoStateManager,
 		)
 	})
-	require.NoError(t, sqliteCorpusRun.err, "sqlite corpus replay")
-	return sqliteCorpusRun.results
+	require.NoError(t, replayedCorpus.err, "corpus replay")
+	return replayedCorpus.results
 }
 
 // assertCorpus is the pass/fail gate. Each vector becomes a named subtest, as

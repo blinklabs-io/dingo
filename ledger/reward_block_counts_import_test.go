@@ -18,7 +18,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,25 +68,19 @@ func stakeRewardApplicationForTest(
 ) *stakeRewardApplication {
 	t.Helper()
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 	if fromImport {
-		require.NoError(t, seedDB(t, db).SetSyncState(
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey,
 			"199",
 			nil,
 		))
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
-					Epoch:          2,
-					PoolKeyHash:    rewardCalcHash(0x4a),
-					BlocksProduced: 10,
-					CapturedSlot:   199,
-				},
-			},
+		require.NoError(t, fxImporter(t, db).ReplaceImportedBlockCounts(
+			2,
+			map[string]uint64{string(rewardCalcHash(0x4a)): 10},
+			10,
+			199,
 			nil,
 		))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(2, 10, 199, nil))
 	}
 	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })

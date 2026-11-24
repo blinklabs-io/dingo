@@ -27,7 +27,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // IndexerRoller rolls an IndexerDB back to a block of the ledger database.
@@ -87,6 +89,9 @@ func (s *Service) storageDependencies() (
 		MaxConnections:      s.cfg.DatabaseWorkers,
 		Logger:              s.logger,
 		TracingEnabled:      s.cfg.Tracing,
+		MigrateReleased: nodestorage.MigrateReleased(
+			s.cfg, s.databaseConfig(), nil, s.logger,
+		),
 	}, nil
 }
 
@@ -217,6 +222,9 @@ func (s *Service) rollbackIndexer(
 		}); err != nil {
 			return fmt.Errorf("roll back indexer: %w", err)
 		}
-		return nil
+		return lifecycle.TruncateMidnightJournals(
+			ctx, idx, ocommon.NewPoint(target.Slot, target.Hash),
+			target.Number,
+		)
 	})
 }

@@ -221,8 +221,7 @@ func (ls *LedgerState) summaryListViewLocked(
 	return view, nil
 }
 
-// GetLatestEpochSummary is the set's highest-epoch summary, as txn sees it,
-// once the summaries family is drained; it is otherwise the metadata store's.
+// GetLatestEpochSummary is the set's highest-epoch summary, as txn sees it.
 func (s stagingLedgerDB) GetLatestEpochSummary(
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {

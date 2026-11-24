@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 )
@@ -152,7 +151,7 @@ func (s *Set) ensureAccountInactivityActivation(
 	}); err != nil {
 		return fmt.Errorf("utxoset: list accounts for activation provenance: %w", err)
 	}
-	if !s.store.LoadsRefusedFor(nodesettings.FamilyAccounts) {
+	if !s.store.LoadsRefused() {
 		for start := 0; start < len(refs); start += 400 {
 			end := min(start+400, len(refs))
 			batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
@@ -439,7 +438,7 @@ func (s *Set) ensureRewardRecords(
 				PostSnapshot: row.PostSnapshot,
 			})
 		})
-		if errors.Is(err, database.ErrFamilyDrained) {
+		if errors.Is(err, database.ErrNoMetadataStore) {
 			lost = true
 			return nil
 		}

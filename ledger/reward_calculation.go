@@ -1393,7 +1393,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	if activationApplies {
 		r := ls.accountServing(txn)
 		if r == nil {
-			return nil, drainedUnserved(nodesettings.FamilyAccounts)
+			return nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 		}
 		activationReader, ok := r.(AccountInactivityActivationReader)
 		if !ok {
@@ -4449,7 +4449,7 @@ func (ls *LedgerState) rewardBlockCounts(
 		// declines rather than distributes.
 		return nil, 0, false, nil
 	}
-	return nil, 0, false, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+	return nil, 0, false, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 func rewardIsOverlaySlot(

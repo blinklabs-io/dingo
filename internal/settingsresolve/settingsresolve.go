@@ -21,13 +21,12 @@
 // fatal error naming the conflict, because an operator-supplied value is
 // never silently discarded.
 //
-// Apply opens only the metadata store -- read-only in effect, since it
-// persists nothing itself; the real database.New does that -- and only
-// long enough to read the legacy node_settings row and the
-// node_settings_gate table. It never touches the blob store: badger's
-// exclusive directory lock would block the real open moments later, and
-// merely opening it would mint a blob_store_id as a side effect of reading
-// configuration.
+// Apply reads the settings from the data directory's dbinfo file
+// (database/dbinfo) and opens no store. Only a data directory v0.94.2 left,
+// whose settings the first open by this release has not yet moved into that
+// file, has them in its metadata store: Apply then opens that store alone,
+// persisting nothing, long enough to read them. It never touches the blob
+// store: Badger's directory lock would block the real open moments later.
 package settingsresolve
 
 import (
@@ -251,73 +250,59 @@ func checkMetadataPluginSidecar(cfg *config.Config) error {
 		return nil
 	}
 	configuredPlugin := cfg.Plugins.Storage.Metadata.Provider
-	if info.MetadataPlugin == "" || info.MetadataPlugin == configuredPlugin {
+	recorded := info.Plugin()
+	if recorded == "" || recorded == configuredPlugin {
 		return nil
 	}
 	return fmt.Errorf(
 		"database at %q was created with metadata plugin %q but the "+
 			"configured metadata plugin is %q",
-		cfg.DatabasePath, info.MetadataPlugin, configuredPlugin,
+		cfg.DatabasePath, recorded, configuredPlugin,
 	)
 }
 
-// ReadPersistedGateValues returns the node settings persisted in the metadata
-// store at cfg.DatabasePath, opened alone and closed again. ok is false when
-// the store cannot be opened or read. err is the refusal of a store that no
-// later open may migrate (metadata.ErrInterruptedBackfill); every other
-// failure is left for the open that follows to report.
+// ReadPersistedGateValues returns the node settings persisted for the data
+// directory at cfg.DatabasePath. ok is false when they cannot be read. err is
+// the refusal of a store that no later open may migrate
+// (metadata.ErrInterruptedBackfill); every other failure is left for the open
+// that follows to report.
 func ReadPersistedGateValues(
 	cfg *config.Config,
 ) (values nodesettings.Values, ok bool, err error) {
 	return readPersistedGateValues(cfg)
 }
 
-// readPersistedGateValues opens only the metadata store at cfg.DatabasePath
-// and merges the legacy node_settings row with node_settings_gate the same
-// way database/commit_timestamp.go's persistedGateValues does: the legacy
-// row is read first and node_settings_gate is copied on top of it, since
-// node_settings_gate is authoritative for every gate including storage_mode
-// and network. The store and its plugin host are closed on every path,
-// including every error path, before this returns -- leaving either open
-// would block the real database.New that follows.
-//
-// ok is false whenever the store could not be opened or read for any
-// reason, in which case the caller treats this as "nothing to resolve" and
-// leaves database.New to report the real problem properly.
+// readPersistedGateValues reads the dbinfo file. Only when it does not hold
+// the settings yet, which is a data directory v0.94.2 left, does it read them
+// from the metadata store instead (readGateValuesFrom).
 func readPersistedGateValues(
 	cfg *config.Config,
 ) (values nodesettings.Values, ok bool, err error) {
-	values, ok, err = readGateValuesFrom(cfg, false, cfg.StorageMode)
-	if err != nil || !ok {
-		return nil, false, err
+	info, err := dbinfo.Read(cfg.DatabasePath)
+	if err != nil {
+		slog.Debug(
+			"settingsresolve: failed to read node settings; leaving configuration unresolved",
+			"error", err,
+		)
+		return nil, false, nil
 	}
-	provider := cfg.Plugins.Storage.Metadata.Provider
-	if values["indexer_layout"] != config.IndexerLayoutSplit ||
-		(provider != "postgres" && provider != "mysql") {
-		return values, true, nil
+	if info.HoldsGates() {
+		return info.Gates, true, nil
 	}
-	// The configured PostgreSQL or MySQL database of a split node is its
-	// IndexerDB. The node's settings are the consensus namespace's, as the
-	// SQLite consensus store's are; until adoption has copied them there,
-	// the IndexerDB's are the only ones recorded.
-	core, coreOK, _ := readGateValuesFrom(cfg, true, "core")
-	if !coreOK || core["network"] == "" {
-		return values, true, nil
-	}
-	return core, true, nil
+	return readGateValuesFrom(cfg)
 }
 
 // newHost builds the plugin host readGateValuesFrom opens a store on. Tests
 // replace it to register a stand-in provider.
 var newHost = internalplugins.NewHost
 
-// readGateValuesFrom opens the configured metadata store alone, or its
-// consensus namespace when coreNamespace is set, and returns its merged
-// settings.
+// readGateValuesFrom opens the configured metadata store alone and returns
+// the settings v0.94.2 recorded in it: the node_settings row with
+// node_settings_gate copied on top, since the gate table is authoritative
+// for every gate. The store and its plugin host are closed on every path
+// before this returns; either left open would block the open that follows.
 func readGateValuesFrom(
 	cfg *config.Config,
-	coreNamespace bool,
-	storageMode string,
 ) (values nodesettings.Values, ok bool, err error) {
 	ctx := context.Background()
 	host, err := newHost()
@@ -344,9 +329,8 @@ func readGateValuesFrom(
 		cfg.Plugins.Storage.Metadata.Provider,
 		cfg.Plugins.Storage.Metadata.Config,
 		metadata.ProviderDependencies{
-			CoreNamespace:  coreNamespace,
 			DataDir:        cfg.DatabasePath,
-			StorageMode:    storageMode,
+			StorageMode:    cfg.StorageMode,
 			MaxConnections: 1,
 			Logger:         slog.Default(),
 		},
@@ -371,10 +355,10 @@ func readGateValuesFrom(
 		}
 	}()
 
-	legacy, err := store.GetNodeSettings(context.Background())
+	row, err := store.GetNodeSettings(context.Background())
 	if err != nil {
 		slog.Debug(
-			"settingsresolve: failed to read legacy node settings",
+			"settingsresolve: failed to read the node_settings row",
 			"error", err,
 		)
 		return nil, false, nil
@@ -389,12 +373,12 @@ func readGateValuesFrom(
 	}
 
 	values = make(nodesettings.Values, len(gates)+2)
-	if legacy != nil {
-		if legacy.StorageMode != "" {
-			values["storage_mode"] = legacy.StorageMode
+	if row != nil {
+		if row.StorageMode != "" {
+			values["storage_mode"] = row.StorageMode
 		}
-		if legacy.Network != "" {
-			values["network"] = legacy.Network
+		if row.Network != "" {
+			values["network"] = row.Network
 		}
 	}
 	maps.Copy(values, gates)
@@ -429,7 +413,7 @@ type gateBinding struct {
 	// the same way database/nodesettings expects it to be persisted. ok is
 	// false when this path cannot supply a meaningful value at all (only
 	// network_magic today: a zero magic means "not known yet", the same
-	// convention database/commit_timestamp.go's phase1GateValues uses, so
+	// convention database/node_settings.go's phase1GateValues uses, so
 	// ApplyDefaults can still derive it from a Network this very call may
 	// have just resumed).
 	configuredValue func(cfg *config.Config) (string, bool)
@@ -477,7 +461,7 @@ func gateBindings() []gateBinding {
 			// cfg is always a fully-resolved *config.Config here, never one
 			// of database.Config's partial callers, so an empty StartEra is
 			// unambiguously "no start era" -- unlike phase1GateValues
-			// (database/commit_timestamp.go), which has to guard against
+			// (database/node_settings.go), which has to guard against
 			// a partial caller's zero value too. Emit the same
 			// nodesettings.NoStartEra sentinel that writer uses so a
 			// persisted "no start era" round-trips through Apply's override

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/dbinfo"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,6 +34,32 @@ func TestWriteThenReadRoundTrips(t *testing.T) {
 	info, err := dbinfo.Read(dir)
 	require.NoError(t, err)
 	require.Equal(t, "postgres", info.MetadataPlugin)
+}
+
+func TestWriteGatesThenReadRoundTrips(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-yet-created")
+	require.NoError(t, dbinfo.WriteGates(dir, nodesettings.Values{
+		"network":         "preprod",
+		"metadata_plugin": "sqlite",
+	}))
+	info, err := dbinfo.Read(dir)
+	require.NoError(t, err)
+	require.True(t, info.HoldsGates())
+	require.Equal(t, "preprod", info.Gates["network"])
+	require.Equal(t, "sqlite", info.Plugin())
+}
+
+func TestReadReleasedFormatHoldsNoGates(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, dbinfo.FileName),
+		[]byte(`{"formatVersion":1,"metadataPlugin":"postgres"}`),
+		0o644,
+	))
+	info, err := dbinfo.Read(dir)
+	require.NoError(t, err)
+	require.False(t, info.HoldsGates())
+	require.Equal(t, "postgres", info.Plugin())
 }
 
 func TestReadMissingFileIsNotAnError(t *testing.T) {
@@ -108,7 +135,7 @@ func TestReadDetectsNullMetadataPluginField(t *testing.T) {
 func TestReadDetectsEmptyStringMetadataPluginField(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion,
+		FormatVersion:  dbinfo.ReleasedFormatVersion,
 		MetadataPlugin: "",
 	}))
 	_, err := dbinfo.Read(dir)

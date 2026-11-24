@@ -69,7 +69,7 @@ func indexDecodeTestBlocks(
 func TestIndexBlocksDecodesAheadOfWriter(t *testing.T) {
 	t.Parallel()
 	blocks := decodeTestBlocks(t, 4)
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 	bf.SetDelegatorInactivityEnabled(false)
 	bf.decodeWorkers = 2
@@ -111,7 +111,7 @@ func TestIndexBlocksReportsDecodeErrorAtItsBlock(t *testing.T) {
 	blocks := decodeTestBlocks(t, 4)
 	bad := 2
 	blocks[bad].Cbor = blocks[bad].Cbor[:len(blocks[bad].Cbor)/2]
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 	bf.SetDelegatorInactivityEnabled(false)
 	err := indexDecodeTestBlocks(t.Context(), db, bf, blocks)
@@ -130,7 +130,7 @@ func TestIndexBlocksReportsDecodeErrorAtItsBlock(t *testing.T) {
 func TestIndexBlocksCancellationStopsDecodeWorkers(t *testing.T) {
 	t.Parallel()
 	blocks := decodeTestBlocks(t, 4)
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 	bf.SetDelegatorInactivityEnabled(false)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -163,7 +163,7 @@ func TestIndexBlocksBoundsDecodeLookahead(t *testing.T) {
 	const workers = 2
 	window := decodeWindow(workers)
 	blocks := decodeTestBlocks(t, 3*window)
-	db := newTestDB(t)
+	db := newIndexerTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 	bf.SetDelegatorInactivityEnabled(false)
 	bf.decodeWorkers = workers

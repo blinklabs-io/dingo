@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -31,23 +30,6 @@ import (
 
 // UtxoStore resolves and maintains the live UTxO set consensus reads.
 type UtxoStore interface {
-	// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep
-	// has hard-deleted spent rows at or below, or 0 when nothing has been
-	// swept. Rolling back below this slot cannot restore the UTxOs consumed
-	// above it.
-	//
-	// It fails closed: a read or parse failure is returned rather than reported
-	// as "nothing swept", because callers use it to refuse a destructive
-	// rollback and a floor that cannot be verified must not read as absent.
-	ConsumedUtxoPruneFloor(txn Txn) (uint64, error)
-	// CountUtxosConsumedUpTo counts, up to limit, the spent UTxO rows that
-	// UtxosDeleteConsumed with the same slot would remove. It reads at most
-	// limit rows, so a result equal to limit means at least that many.
-	CountUtxosConsumedUpTo(
-		ctx context.Context,
-		slot uint64,
-		limit int,
-	) (int, error)
 	// GetLiveUtxoLovelace returns the total lovelace of every live
 	// (unspent) UTxO.
 	GetLiveUtxoLovelace(txn Txn) (uint64, error)
@@ -79,62 +61,6 @@ type UtxoStore interface {
 		ctx context.Context,
 		txn Txn,
 		fn func(*models.Utxo) error,
-	) error
-	// IterateUtxoRefsAsOf is IterateLiveUtxoRefs' historical counterpart: it
-	// invokes fn once for each UTxO row live as of atSlot rather than live
-	// right now, and likewise does not resolve u.Cbor (see
-	// ledger.queryShelleyUtxoWhole, its only caller as of this writing, which
-	// resolves CBOR itself across a worker pool). As with IterateLiveUtxoRefs,
-	// the callback receives a pointer to a row whose underlying buffer is
-	// reused between callbacks -- copy out anything you intend to retain past
-	// the current call. When txn is nil a read transaction is opened
-	// internally.
-	//
-	// Callers pinning atSlot should check checkUtxoRetentionWindow (or the
-	// equivalent guarantee for their own use) first: a slot older than this
-	// node's spent-UTxO retention floor cannot be answered correctly by this
-	// query, since the rows it would need may already be pruned -- see
-	// IterateUtxosAsOf's doc comment on the MetadataStore interface.
-	IterateUtxoRefsAsOf(
-		ctx context.Context,
-		atSlot uint64,
-		txn Txn,
-		fn func(*models.Utxo) error,
-	) error
-	// IterateUtxoRefsAsOfPaged invokes fn once for each UTxO live as of atSlot,
-	// like IterateUtxoRefsAsOf, but reads pageSize rows per short read
-	// transaction instead of holding one for the whole walk. Over SQLite a
-	// transaction held for a whole-UTxO walk -- minutes on a large chain --
-	// keeps the WAL from restarting, and one walk after another keeps it
-	// growing.
-	//
-	// The pages agree with one another without sharing a snapshot because of
-	// how UTxO rows change. Blocks applied after atSlot add rows with a later
-	// added_slot and spend rows at a later slot, and the as-of predicate
-	// already excludes the first and includes the second. Spent-row pruning
-	// removes only rows spent before the prune floor, which an acquired-point
-	// pin holds at or below atSlot. Rows keep their id, so paging on it neither
-	// repeats nor skips a row. The one change that alters the as-of set is a
-	// rollback below atSlot, which noteUtxoRollback reports: this returns
-	// ErrUtxoHistoryRolledBack and the caller decides whether to retry. Callers
-	// must hold pruning at or below atSlot themselves.
-	IterateUtxoRefsAsOfPaged(
-		ctx context.Context,
-		atSlot uint64,
-		pageSize int,
-		fn func(database.UtxoRef) error,
-	) error
-	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
-	// refs as deleted at atSlot. Refs that don't match any live row are
-	// silently ignored; rollback un-deletion is handled by the existing
-	// rollback path (SetUtxosNotDeletedAfterSlot). When txn is nil a
-	// write transaction is opened, committed on success and rolled back
-	// on error via Txn.Do.
-	MarkUtxosDeletedAtSlot(
-		ctx context.Context,
-		txn Txn,
-		refs []types.UtxoKey,
-		atSlot uint64,
 	) error
 	// UtxoByRef returns the unspent output txId#outputIdx, or
 	// database.ErrUtxoNotFound when it does not exist or is spent.
@@ -178,40 +104,12 @@ type UtxoStore interface {
 		maxResults int,
 		txn Txn,
 	) ([]models.Utxo, error)
-	// UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
-	// the metadata store's GetUtxosByAddressAsOf). Rows spent at or before
-	// atSlot and later removed by consumed-UTxO cleanup are missing, so callers
-	// must reject a point below their retention floor first.
-	UtxosByAddressAsOf(
-		ctx context.Context,
-		addrs []ledger.Address,
-		atSlot uint64,
-		maxResults int,
-		txn Txn,
-	) ([]models.Utxo, error)
 	// UtxosByRefs returns the live UTxOs matching the given references in a
 	// single batch. Refs with no matching live UTxO are simply absent from the
 	// result.
 	UtxosByRefs(
 		ctx context.Context,
 		refs []models.UtxoId,
-		txn Txn,
-	) ([]models.Utxo, error)
-	// UtxosByRefsAsOf returns the UTxOs matching refs as they stood at atSlot:
-	// a ref is included when it was created at-or-before atSlot and is either
-	// still live or was spent strictly after atSlot. As with UtxosByRefs, a
-	// ref with no matching row is simply absent from the result -- but unlike
-	// UtxosByRefs, that absence is ambiguous once atSlot is older than this
-	// node's spent-UTxO retention floor: it could mean "genuinely never live
-	// at atSlot" or "was live at atSlot but its spend record has since been
-	// hard-deleted by the periodic stability-window cleanup"
-	// (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
-	// node-parity) must reject that case themselves before
-	// calling this -- see ledger's checkUtxoRetentionWindow.
-	UtxosByRefsAsOf(
-		ctx context.Context,
-		refs []models.UtxoId,
-		atSlot uint64,
 		txn Txn,
 	) ([]models.Utxo, error)
 	// UtxosByRefsBounded is UtxosByRefs with a cap on the CBOR it will load.
@@ -228,26 +126,6 @@ type UtxoStore interface {
 		maxBytes int64,
 		txn Txn,
 	) ([]models.Utxo, error)
-	// UtxosDeleteConsumed hard-deletes up to limit outputs consumed at or
-	// before slot and returns how many it removed.
-	UtxosDeleteConsumed(
-		ctx context.Context,
-		slot uint64,
-		limit int,
-		txn Txn,
-	) (int, error)
-	// UtxosDeleteSpentInBatch removes the rows of outputs that one trusted
-	// batch both created and spent, inside the transaction that applied it, so
-	// they are never committed. Every id must name a row the same transaction
-	// has already marked spent. slot is the last slot the transaction applied;
-	// the consumed-UTxO prune floor is raised to it, as UtxosDeleteConsumed
-	// does, because a rollback below it could not restore the removed rows.
-	UtxosDeleteSpentInBatch(ids []models.UtxoId, slot uint64, txn Txn) error
-	// UtxosDropSpentInBatchBlobs is UtxosDeleteSpentInBatch for a batch whose
-	// metadata rows a batch UTxO overlay already handled: it deletes the blob
-	// offset keys of ids and raises the consumed-UTxO prune floor to slot the
-	// same way, but deletes no metadata row.
-	UtxosDropSpentInBatchBlobs(ids []models.UtxoId, slot uint64, txn Txn) error
 }
 
 // AccountStore holds stake accounts, registrations, delegations and deposits.
@@ -361,6 +239,12 @@ type AccountStore interface {
 	IterateStakeDelegationEvents(
 		txn Txn,
 		fn func(models.StakeDelegationEventRow) error,
+	) error
+	// IterateAppliedTransactions invokes fn for each transaction the
+	// metadata store records as applied, in unspecified order.
+	IterateAppliedTransactions(
+		txn Txn,
+		fn func(models.AppliedTransaction) error,
 	) error
 	// IterateLeiosClosureUtxoEffects invokes fn for each staked output a Leios
 	// closure transaction created or spent at a context slot before the slot
@@ -1101,17 +985,6 @@ type PoolStore interface {
 		pkh lcommon.PoolKeyHash,
 		sequence uint64,
 		slot uint64,
-		txn Txn,
-	) error
-	// UpdatePoolOpCertSequenceBatched queues an observed op-cert sequence in
-	// acc. FlushBatch writes every queued observation and advances each pool's
-	// denormalized maximum inside txn.
-	UpdatePoolOpCertSequenceBatched(
-		ctx context.Context,
-		pkh lcommon.PoolKeyHash,
-		sequence uint64,
-		slot uint64,
-		acc database.BatchAccumulator,
 		txn Txn,
 	) error
 }
@@ -1906,14 +1779,16 @@ type ChainStore interface {
 	// intended for primary-chain membership checks that need only the canonical
 	// slot and hash at an internal block index.
 	BlockPointByIndex(blockIndex uint64, txn Txn) (common.Point, error)
+	// DeferredHeaderFloor returns the slot below which evicted
+	// deferred-header markers no longer exist, and whether one is recorded.
+	DeferredHeaderFloor() (uint64, bool, error)
 	// DeleteDeferredHeaderMarker removes the marker for key. Deleting an absent
 	// marker is not an error.
 	DeleteDeferredHeaderMarker(key string) error
 	// DeleteSyncState removes a sync state key.
 	DeleteSyncState(key string, txn Txn) error
 	// EnsureBlockInventory creates the retained-block inventory when it is
-	// absent. It is safe to call during commit-timestamp recovery and is a
-	// no-op after the inventory has been initialized.
+	// absent. It is a no-op after the inventory has been initialized.
 	EnsureBlockInventory() error
 	// GetDeferredHeaderMarkerValue returns a copy of a marker's opaque payload.
 	// found is false when no marker exists for key.
@@ -1937,12 +1812,18 @@ type ChainStore interface {
 	// state loaded without replaying the blocks below it. It fails closed on
 	// unreadable or malformed persisted state.
 	ImportedLedgerStateBoundarySlotStrict(txn Txn) (uint64, error)
+
+	// ImportedLedgerStateBoundaryHash returns, as hex, the block hash
+	// recorded with that boundary, or the empty string when none is.
+	ImportedLedgerStateBoundaryHash() (string, error)
 	// OldestRetainedSlot returns the slot of the oldest block whose body is
 	// still stored, as last computed by RefreshOldestRetainedSlot. ok is false
 	// before the first refresh, when history expiry has never run, when the
 	// bound could not be found, and after the block at or below the bound was
 	// expired or deleted, until the next refresh. It reads only memory.
 	OldestRetainedSlot() (uint64, bool)
+	// SetDeferredHeaderFloor records slot as the deferred-header floor.
+	SetDeferredHeaderFloor(slot uint64) error
 	// SetDeferredHeaderMarkerWithValue records an opaque marker payload with
 	// the same durability and isolation as SetDeferredHeaderMarker. The
 	// one-byte payload used by SetDeferredHeaderMarker remains the legacy
@@ -2015,29 +1896,6 @@ type Applier interface {
 	// BlockBatchTxnContext starts a serialized blob-only block transaction. ctx
 	// can cancel inventory admission before the backend transaction opens.
 	BlockBatchTxnContext(ctx context.Context) (Txn, error)
-	// EnableBatchUtxoOverlay attaches a batch UTxO overlay to acc for the rest
-	// of txn when the metadata plugin supports one (see
-	// metadata.BatchUtxoOverlay). It reports false, and changes nothing, when
-	// it does not.
-	EnableBatchUtxoOverlay(
-		acc database.BatchAccumulator,
-		txn Txn,
-		inputs []models.UtxoId,
-		deleteOnSpend []models.UtxoId,
-		producers [][]byte,
-	) (bool, error)
-	// FlushBatch writes accumulated metadata rows for the active metadata
-	// plugin.
-	FlushBatch(acc database.BatchAccumulator, txn Txn) error
-	// FlushBatchStakeDeltas applies pending live-stake changes while leaving
-	// the accumulator's other batched rows queued for FlushBatch.
-	FlushBatchStakeDeltas(acc database.BatchAccumulator, txn Txn) error
-	// NewBatchAccumulator creates an accumulator for the configured metadata
-	// plugin.
-	NewBatchAccumulator() database.BatchAccumulator
-	// NewValidatedBlockBatchAccumulator creates an API-detail accumulator whose
-	// consensus state remains immediate. Unsupported providers return nil.
-	NewValidatedBlockBatchAccumulator() database.BatchAccumulator
 	// PersistTransactionOffsets writes the transaction offset and produced-UTxO
 	// offset blob entries of txs from offsets, for a caller that then applies
 	// the same transactions with BatchedTxIngestOpts.OffsetsPersisted.
@@ -2063,21 +1921,6 @@ type Applier interface {
 		txs []lcommon.Transaction,
 		offsets *database.BlockIngestionResult,
 		afterBatch func() error,
-	) error
-	// SetTransactionBatchedWithOpts is the option-aware form of
-	// SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
-	SetTransactionBatchedWithOpts(
-		ctx context.Context,
-		tx lcommon.Transaction,
-		point common.Point,
-		idx uint32,
-		updateEpoch uint64,
-		pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
-		certDeposits map[int]uint64,
-		offsets *database.BlockIngestionResult,
-		acc database.BatchAccumulator,
-		txn Txn,
-		opts database.BatchedTxIngestOpts,
 	) error
 	// SetTransactionWithOpts is SetTransaction with control over UTxO ingest
 	// behavior via opts. Certified Leios endorser-block closure application
@@ -2212,18 +2055,6 @@ type LeiosStore interface {
 	// selected provider, but a canceled caller will not continue scanning later
 	// records.
 	MaxLeiosEBSlotContext(ctx context.Context) (uint64, error)
-	// NewLeiosClosureBatchAccumulator creates an API-detail accumulator when
-	// the metadata provider supports ordered closure application; nil selects
-	// the existing immediate path.
-	NewLeiosClosureBatchAccumulator() database.BatchAccumulator
-	// PrepareLeiosClosureBatch prepares the next ordered closure window.
-	// Providers without window support retain the complete-closure batching
-	// behavior.
-	PrepareLeiosClosureBatch(
-		acc database.BatchAccumulator,
-		txn Txn,
-		transactions []lcommon.Transaction,
-	) (int, error)
 	// SetLeiosEB persists an endorser block's manifest and, when txsRaw is
 	// non-nil, its transaction bodies in a SINGLE blob-store transaction (one
 	// commit), merging what SetLeiosEBManifest + SetLeiosEBTxs do in two, for
@@ -2255,8 +2086,9 @@ type ImportedBlockRows struct {
 }
 
 // ImportedBlockRowsReader is implemented by a LedgerDB that lists every epoch
-// the metadata store holds imported block counts for. A drained store holds
-// none and the read fails with database.ErrFamilyDrained.
+// the metadata store holds imported block counts for. A database with no
+// metadata store holds none and the read fails with
+// database.ErrNoMetadataStore.
 type ImportedBlockRowsReader interface {
 	ImportedBlockRows(txn Txn) (map[uint64]ImportedBlockRows, error)
 }
@@ -2274,8 +2106,8 @@ type RewardJournalRow struct {
 }
 
 // RewardJournalReader is implemented by a LedgerDB that lists the reward
-// journal in the order it was written. A drained store holds none and the read
-// fails with database.ErrFamilyDrained.
+// journal in the order it was written. A database with no metadata store
+// holds none and the read fails with database.ErrNoMetadataStore.
 type RewardJournalReader interface {
 	EachRewardJournalRow(txn Txn, fn func(RewardJournalRow) error) error
 }
@@ -2324,8 +2156,8 @@ type DRepHistoryRows struct {
 }
 
 // DRepHistoryRowsReader is implemented by a LedgerDB that lists the DRep
-// history tables. A drained store holds none and the read fails with
-// database.ErrFamilyDrained.
+// history tables. A database with no metadata store holds none and the read
+// fails with database.ErrNoMetadataStore.
 type DRepHistoryRowsReader interface {
 	DRepHistoryRows(txn Txn) (DRepHistoryRows, error)
 }

@@ -56,9 +56,9 @@ import (
 // scan-based approach is still correct — the stash variant gives the
 // same answer because spent UTxOs are absent from both views — so the
 // divergence is purely an implementation choice driven by dingo's
-// SQLite-backed UTxO model, not a semantic difference.
+// live UTxO set model, not a semantic difference.
 //
-// Returns the count and total lovelace of the rows marked deleted.
+// Returns the count and total lovelace of the outputs removed.
 func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
 	txn ledgerdb.Txn,
 	boundarySlot uint64,
@@ -104,12 +104,6 @@ func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
 		return nil
 	}); err != nil {
 		return 0, 0, fmt.Errorf("scan live utxos: %w", err)
-	}
-	if err := ls.ledgerDB().MarkUtxosDeletedAtSlot(
-		ctx,
-		txn, refs, boundarySlot,
-	); err != nil {
-		return 0, 0, fmt.Errorf("mark avvm utxos deleted: %w", err)
 	}
 	if len(refs) > 0 {
 		removed := make([]models.UtxoId, 0, len(refs))

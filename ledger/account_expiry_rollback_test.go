@@ -133,20 +133,10 @@ func seedRollbackCertificate(
 	tx := mockledger.NewTransactionBuilder()
 	tx.WithId(txID)
 	tx.WithCertificates(cert)
-	require.NoError(t, db.SetTransactionMetadataOnly(
-		context.Background(),
-		tx,
-		ocommon.NewPoint(slot, txID),
-		0,
-		map[int]uint64{0: 0},
-		nil, 0,
+	require.NoError(t, seedLedgerOf(t, db).stageAccountTransaction(
+		nil, tx, slot, 0, txID,
+		database.BatchedTxIngestOpts{}, map[int]uint64{0: 0},
 	))
-	if ls := seedLedgerOf(db); ls != nil {
-		require.NoError(t, ls.stageAccountTransaction(
-			nil, tx, slot, 0, txID,
-			database.BatchedTxIngestOpts{}, map[int]uint64{0: 0},
-		))
-	}
 }
 
 func rollbackStakeRegistrationCertificate(

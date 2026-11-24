@@ -83,7 +83,7 @@ func TestLoadedDRepHistoryFollowsCommitsAndRollbacks(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	writeDRepHistoryFacts(t, db.Metadata())
 
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
@@ -143,13 +143,13 @@ type drainedHistoryLedgerDB struct {
 func (drainedHistoryLedgerDB) DRepHistoryRows(
 	ledgerdb.Txn,
 ) (ledgerdb.DRepHistoryRows, error) {
-	return ledgerdb.DRepHistoryRows{}, database.ErrFamilyDrained
+	return ledgerdb.DRepHistoryRows{}, database.ErrNoMetadataStore
 }
 
 func (drainedHistoryLedgerDB) ImportedBlockRows(
 	ledgerdb.Txn,
 ) (map[uint64]ledgerdb.ImportedBlockRows, error) {
-	return nil, database.ErrFamilyDrained
+	return nil, database.ErrNoMetadataStore
 }
 
 // A set that loads while the metadata store has already drained its history
@@ -160,7 +160,7 @@ func TestSetLoadedFromADrainedStoreRecordsWhatItLost(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 2)
-	db := ledgerAt(t, slotPoint(2))
+	db := releasedAt(t, slotPoint(2))
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), drainedHistoryLedgerDB{dbadapter.New(db)},
 	))
