@@ -76,7 +76,7 @@ func TestAccountBalance(t *testing.T) {
 		Point:       ocommon.NewPoint(500, tipHash),
 		BlockNumber: 25,
 	}
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		got []lcommon.Address,
 	) ([]models.Utxo, error) {
 		require.Len(t, got, 1)
@@ -138,7 +138,7 @@ func TestAccountBalanceAggregatesAssets(t *testing.T) {
 	)
 	policyB := testKeyHash(0xbb)
 	policyA := testKeyHash(0xaa)
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return []models.Utxo{
@@ -194,7 +194,7 @@ func TestAccountBalanceAggregatesAssets(t *testing.T) {
 }
 
 // TestAccountBalanceHistoricalByIndex covers a balance pinned to an
-// earlier block: the ledger must be queried at that block's slot, and
+// earlier block: the UTxOs must be read at that block's slot, and
 // the response must report the requested block rather than the tip, so
 // a client can tell which point the balance belongs to.
 func TestAccountBalanceHistoricalByIndex(t *testing.T) {
@@ -220,13 +220,13 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 			Slot:   1200,
 		}, nil
 	}
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		t.Fatal("historical request must not read the tip UTxO set")
 		return nil, nil
 	}
-	deps.ledger.utxosAtSlot = func(
+	deps.database.utxosAtSlot = func(
 		got lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error) {
@@ -261,11 +261,11 @@ func TestAccountBalanceHistoricalAggregatesLargeAddress(t *testing.T) {
 	deps.database.blockByIndex = func(uint64) (models.Block, error) {
 		return models.Block{Hash: testHash(0x39), Number: 120, Slot: 1200}, nil
 	}
-	deps.ledger.utxosAtSlot = func(lcommon.Address, uint64) ([]models.Utxo, error) {
+	deps.database.utxosAtSlot = func(lcommon.Address, uint64) ([]models.Utxo, error) {
 		t.Fatal("historical balance must not materialize UTxOs")
 		return nil, nil
 	}
-	deps.ledger.balanceAtSlot = func(
+	deps.database.balanceAtSlot = func(
 		ctx context.Context,
 		got lcommon.Address,
 		slot uint64,
@@ -304,7 +304,7 @@ func TestAccountBalanceHistoricalByHash(t *testing.T) {
 			Slot:   550,
 		}, nil
 	}
-	deps.ledger.utxosAtSlot = func(
+	deps.database.utxosAtSlot = func(
 		_ lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error) {
@@ -343,13 +343,13 @@ func TestAccountBalanceHistoricalEmptyIdentifier(t *testing.T) {
 		BlockNumber: 7,
 	}
 	called := false
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		called = true
 		return nil, nil
 	}
-	deps.ledger.utxosAtSlot = func(
+	deps.database.utxosAtSlot = func(
 		lcommon.Address, uint64,
 	) ([]models.Utxo, error) {
 		t.Fatal("empty identifier must not take the historical path")
@@ -397,7 +397,7 @@ func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
 				return models.Block{},
 					models.ErrBlockNotFound
 			}
-			deps.ledger.utxosAtSlot = func(
+			deps.database.utxosAtSlot = func(
 				lcommon.Address, uint64,
 			) ([]models.Utxo, error) {
 				t.Fatal("must not query an unresolved point")
@@ -434,7 +434,7 @@ func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
 			Hash: testHash(0x3b), Number: 4, Slot: 40,
 		}, nil
 	}
-	deps.ledger.utxosAtSlot = func(
+	deps.database.utxosAtSlot = func(
 		lcommon.Address, uint64,
 	) ([]models.Utxo, error) {
 		return nil, errors.New("historical read failed")
@@ -470,7 +470,7 @@ func TestAccountBalanceHistoricalBudgetErrorIsInvalidRequest(t *testing.T) {
 					Hash: testHash(0x3d), Number: 4, Slot: 40,
 				}, nil
 			}
-			deps.ledger.utxosAtSlot = func(
+			deps.database.utxosAtSlot = func(
 				lcommon.Address, uint64,
 			) ([]models.Utxo, error) {
 				return nil, queryErr
@@ -524,7 +524,7 @@ func TestAccountBalanceLedgerError(t *testing.T) {
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x07), nil,
 	)
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return nil, errors.New("ledger unavailable")
@@ -555,11 +555,11 @@ func TestAccountCoins(t *testing.T) {
 		Point:       ocommon.NewPoint(10, testHash(0x0c)),
 		BlockNumber: 4,
 	}
-	deps.ledger.scanTip = ochainsync.Tip{
+	deps.database.scanTip = ochainsync.Tip{
 		Point:       ocommon.NewPoint(9, testHash(0x0b)),
 		BlockNumber: 3,
 	}
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return []models.Utxo{
@@ -631,7 +631,7 @@ func TestAccountCoinsLedgerError(t *testing.T) {
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x0c), nil,
 	)
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return nil, errors.New("ledger unavailable")
@@ -696,13 +696,13 @@ func TestAccountCoinsReturnsTheCompleteResult(t *testing.T) {
 	deps := newTestDeps()
 	key := testKeyHash(0x34)
 	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
-	deps.ledger.utxos = func(
+	deps.database.utxos = func(
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		t.Fatal("account coins must not use the bounded balance lookup")
 		return nil, nil
 	}
-	deps.ledger.utxosComplete = func(
+	deps.database.utxosComplete = func(
 		ctx context.Context,
 		_ []lcommon.Address,
 	) ([]models.Utxo, error) {
@@ -742,7 +742,7 @@ func TestAccountBalanceCurrentTipCancellationReachesRead(t *testing.T) {
 	started := make(chan struct{})
 	readErr := make(chan error, 1)
 	var first sync.Once
-	deps.ledger.utxosComplete = func(
+	deps.database.utxosComplete = func(
 		ctx context.Context,
 		_ []lcommon.Address,
 	) ([]models.Utxo, error) {
@@ -834,14 +834,14 @@ func TestAccountBalanceCanceledReadWritesNoErrorResponse(t *testing.T) {
 			)
 			requestCtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			deps.ledger.utxosComplete = func(
+			deps.database.utxosComplete = func(
 				ctx context.Context,
 				_ []lcommon.Address,
 			) ([]models.Utxo, error) {
 				cancel()
 				return nil, ctx.Err()
 			}
-			deps.ledger.balanceAtSlot = func(
+			deps.database.balanceAtSlot = func(
 				ctx context.Context,
 				_ lcommon.Address,
 				_ uint64,

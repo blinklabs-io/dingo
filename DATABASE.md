@@ -3973,10 +3973,11 @@ Readers outside the ledger's LedgerDB:
 
 | Reader | Behavior |
 |---|---|
-| MCP tools | With a ledger state the tools read through its LedgerDB. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
+| MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses and `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
 | `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
+| `api/mesh`, `api/utxorpc` | Read address UTxOs, datums and transaction history from the IndexerDB through `mesh.MeshDatabase` and `utxorpc.QueryDatabase`, which the node builds over it. The ledger forwards none of these reads. |
 
 ### Live UTxO set failure and recovery
 

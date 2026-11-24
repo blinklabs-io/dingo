@@ -43,7 +43,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
@@ -3527,16 +3526,6 @@ func (ls *LedgerState) LatestOpCertSequence(
 	return ls.ledgerDB().LatestPoolOpCertSequence(
 		context.Background(), pkh, nil,
 	)
-}
-
-// Datums looks up datums by hash in one read transaction for
-// query.ReadData. The result is aligned with hashes; an entry is nil when
-// that datum is not stored.
-func (ls *LedgerState) Datums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return ls.indexerDB().GetDatums(ctx, hashes)
 }
 
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
@@ -15372,49 +15361,6 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
-// one bounded page at a time from a single database snapshot and returns the
-// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
-func (ls *LedgerState) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (ochainsync.Tip, error) {
-	return ls.indexerDB().
-		ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
-// bounding candidate work and retained CBOR.
-func (ls *LedgerState) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return ls.indexerDB().UtxosByAddressBoundedPage(
-		ctx,
-		q,
-		maxCandidates,
-		maxBytes,
-	)
-}
-
-// UtxoBalanceByAddressAtSlot aggregates a historical address balance without
-// materializing its UTxO set.
-func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-) (models.AddressBalance, error) {
-	txn := database.NewTxnContext(ctx, ls.db, false)
-	defer txn.Release()
-	return ls.indexerDB().
-		UtxoBalanceByAddressAtSlot(ctx, addr, slot, dbadapter.Txn(txn))
-}
-
 // UtxoByRefIncludingSpent returns a UTxO by reference, including
 // spent outputs. This is needed for APIs that must resolve consumed
 // inputs to display source address and amount.
@@ -15423,18 +15369,6 @@ func (ls *LedgerState) UtxoByRefIncludingSpent(
 	outputIdx uint32,
 ) (*models.Utxo, error) {
 	return ls.utxoIncludingSpent(context.Background(), nil, txId, outputIdx)
-}
-
-// GetTransactionsByBlockHash returns all transactions for a given
-// block hash.
-func (ls *LedgerState) GetTransactionsByBlockHash(
-	blockHash []byte,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByBlockHash(
-		context.Background(),
-		blockHash,
-		nil,
-	)
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -15447,96 +15381,6 @@ func (ls *LedgerState) GetTransactionsByHashes(
 		return nil, fmt.Errorf("get transactions by hashes: %w", err)
 	}
 	return txs, nil
-}
-
-// GetTransactionsByAddress returns transactions involving the given
-// address.
-func (ls *LedgerState) GetTransactionsByAddress(
-	addr lcommon.Address,
-	limit int,
-	offset int,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByAddress(
-		context.Background(),
-		addr,
-		limit,
-		offset,
-		nil,
-	)
-}
-
-// GetTransactionsByAddressWithOrder returns transactions
-// involving the given address with explicit ordering.
-func (ls *LedgerState) GetTransactionsByAddressWithOrder(
-	ctx context.Context,
-	addr lcommon.Address,
-	limit int,
-	offset int,
-	order string,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) ([]models.Transaction, error) {
-	txs, err := ls.indexerDB().GetTransactionsByAddressWithOrder(
-		ctx,
-		addr,
-		limit,
-		offset,
-		order,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get transactions by address (limit=%d offset=%d order=%s): %w",
-			limit,
-			offset,
-			order,
-			err,
-		)
-	}
-	return txs, nil
-}
-
-// CountTransactionsByAddress returns the total number of
-// transactions involving the given address.
-func (ls *LedgerState) CountTransactionsByAddress(
-	ctx context.Context,
-	addr lcommon.Address,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByAddress(
-		ctx,
-		addr,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("count transactions by address: %w", err)
-	}
-	return count, nil
-}
-
-// CountTransactionsByMetadataLabel returns the total number of transactions
-// that include metadata for the requested label.
-func (ls *LedgerState) CountTransactionsByMetadataLabel(
-	label uint64,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions by metadata label %d: %w",
-			label,
-			err,
-		)
-	}
-	return count, nil
 }
 
 // resolveBlockValidationEra returns the era that validates a transaction from
@@ -17462,11 +17306,6 @@ func (ls *LedgerState) BlockfetchRangeExpectedBytes(
 		return 0
 	}
 	return size
-}
-
-// indexerDB returns the IndexerDB queries ledger state forwards for the APIs.
-func (ls *LedgerState) indexerDB() indexerdb.Reader {
-	return dbadapter.New(ls.db)
 }
 
 // ledgerDB returns the LedgerDB consensus reads and writes through: the one

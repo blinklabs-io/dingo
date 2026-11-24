@@ -362,6 +362,12 @@ var importBoundaryRules = []importBoundaryRule{
 		},
 	},
 	{
+		from:      "ledger",
+		forbidden: []string{"database/indexerdb"},
+		reason: "validation never reads the IndexerDB; the APIs read their " +
+			"history from it themselves",
+	},
+	{
 		from:      "chainselection",
 		forbidden: []string{"peergov"},
 		reason: "chain selection should emit neutral chain-switch decisions " +

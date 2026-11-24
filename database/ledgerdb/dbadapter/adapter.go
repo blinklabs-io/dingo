@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package dbadapter implements ledgerdb.LedgerDB and indexerdb.Reader over a
-// *database.Database.
+// Package dbadapter implements ledgerdb.LedgerDB over a *database.Database.
 package dbadapter
 
 import (
@@ -22,18 +21,16 @@ import (
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
 var (
 	_ ledgerdb.LedgerDB = Adapter{}
-	_ indexerdb.Reader  = Adapter{}
 	_ ledgerdb.Txn      = (*database.Txn)(nil)
 )
 
-// Adapter serves the LedgerDB and IndexerDB roles from one *database.Database.
+// Adapter serves the LedgerDB roles from one *database.Database.
 // It is a single pointer, so wrapping a database is free: an Adapter value
 // stored in an interface does not allocate.
 // Its transactions are *database.Txn values. Their savepoints cover the

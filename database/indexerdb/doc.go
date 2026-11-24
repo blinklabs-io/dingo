@@ -15,6 +15,7 @@
 // Package indexerdb defines the IndexerDB: chain history and the address and
 // asset projections that serve the APIs. It is not consulted by validation.
 //
-// Today the metadata store provides it, through the same adapter as the
-// LedgerDB.
+// The node opens it as its own *database.Database, which the APIs read
+// directly; Store records its tip and readiness. The ledger holds no handle to
+// it.
 package indexerdb

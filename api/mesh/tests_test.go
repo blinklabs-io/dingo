@@ -678,6 +678,31 @@ type fakeDatabase struct {
 	blockByIndex   func(idx uint64) (models.Block, error)
 	txByHash       func(hash []byte) (*models.Transaction, error)
 	txsByBlockHash func(hash []byte) ([]models.Transaction, error)
+	utxos          func(addrs []lcommon.Address) ([]models.Utxo, error)
+	// utxosComplete supplies the account's whole UTxO set; the default
+	// ScanUtxosByAddress pages it by the query limit. scan replaces that
+	// paging entirely, and scanTip is the snapshot tip the default returns.
+	utxosComplete func(
+		ctx context.Context,
+		addrs []lcommon.Address,
+	) ([]models.Utxo, error)
+	scan func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+		visit func([]models.UtxoWithOrdering) error,
+	) (ochainsync.Tip, error)
+	scanTip     ochainsync.Tip
+	utxosAtSlot func(
+		addr lcommon.Address,
+		slot uint64,
+	) ([]models.Utxo, error)
+	balanceAtSlot func(
+		ctx context.Context,
+		addr lcommon.Address,
+		slot uint64,
+	) (models.AddressBalance, error)
 }
 
 func (f *fakeDatabase) BlockByHash(ctx context.Context,
@@ -716,59 +741,7 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 	return f.txsByBlockHash(hash)
 }
 
-// fakeLedgerState is a MeshLedgerState with per-test behavior.
-type fakeLedgerState struct {
-	pparams    lcommon.ProtocolParameters
-	slotToTime func(slot uint64) (time.Time, error)
-	utxos      func(addrs []lcommon.Address) ([]models.Utxo, error)
-	// utxosComplete supplies the account's whole UTxO set; the default
-	// ScanUtxosByAddress pages it by the query limit. scan replaces that
-	// paging entirely, and scanTip is the snapshot tip the default returns.
-	utxosComplete func(
-		ctx context.Context,
-		addrs []lcommon.Address,
-	) ([]models.Utxo, error)
-	scan func(
-		ctx context.Context,
-		q *models.UtxoWithOrderingQuery,
-		maxCandidates int,
-		maxBytes int64,
-		visit func([]models.UtxoWithOrdering) error,
-	) (ochainsync.Tip, error)
-	scanTip     ochainsync.Tip
-	utxosAtSlot func(
-		addr lcommon.Address,
-		slot uint64,
-	) ([]models.Utxo, error)
-	balanceAtSlot func(
-		ctx context.Context,
-		addr lcommon.Address,
-		slot uint64,
-	) (models.AddressBalance, error)
-}
-
-func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
-	return f.pparams
-}
-
-func (f *fakeLedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameters {
-	return f.pparams
-}
-
-func (f *fakeLedgerState) SlotToTime(
-	slot uint64,
-) (time.Time, error) {
-	if f.slotToTime == nil {
-		// Mirror the ledger's Shelley-era 1s slots so handlers that
-		// do not exercise the fallback path get stable timestamps.
-		return time.Unix(
-			testGenesisStartTimeSec+int64(slot), 0,
-		).UTC(), nil
-	}
-	return f.slotToTime(slot)
-}
-
-func (f *fakeLedgerState) UtxosByAddress(
+func (f *fakeDatabase) UtxosByAddress(
 	ctx context.Context,
 	addrs []lcommon.Address,
 ) ([]models.Utxo, error) {
@@ -781,7 +754,7 @@ func (f *fakeLedgerState) UtxosByAddress(
 	return f.utxos(addrs)
 }
 
-func (f *fakeLedgerState) ScanUtxosByAddress(
+func (f *fakeDatabase) ScanUtxosByAddress(
 	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	maxCandidates int,
@@ -819,7 +792,7 @@ func (f *fakeLedgerState) ScanUtxosByAddress(
 	return f.scanTip, nil
 }
 
-func (f *fakeLedgerState) UtxosByAddressAtSlot(
+func (f *fakeDatabase) UtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,
 ) ([]models.Utxo, error) {
@@ -829,7 +802,7 @@ func (f *fakeLedgerState) UtxosByAddressAtSlot(
 	return f.utxosAtSlot(addr, slot)
 }
 
-func (f *fakeLedgerState) UtxoBalanceByAddressAtSlot(
+func (f *fakeDatabase) UtxoBalanceByAddressAtSlot(
 	ctx context.Context,
 	addr lcommon.Address,
 	slot uint64,
@@ -865,6 +838,33 @@ func (f *fakeLedgerState) UtxoBalanceByAddressAtSlot(
 		}
 	}
 	return balance, nil
+}
+
+// fakeLedgerState is a MeshLedgerState with per-test behavior.
+type fakeLedgerState struct {
+	pparams    lcommon.ProtocolParameters
+	slotToTime func(slot uint64) (time.Time, error)
+}
+
+func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
+	return f.pparams
+}
+
+func (f *fakeLedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameters {
+	return f.pparams
+}
+
+func (f *fakeLedgerState) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	if f.slotToTime == nil {
+		// Mirror the ledger's Shelley-era 1s slots so handlers that
+		// do not exercise the fallback path get stable timestamps.
+		return time.Unix(
+			testGenesisStartTimeSec+int64(slot), 0,
+		).UTC(), nil
+	}
+	return f.slotToTime(slot)
 }
 
 // submittedTx records one accepted MeshMempool.AddTransaction call.

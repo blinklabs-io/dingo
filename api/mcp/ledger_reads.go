@@ -74,6 +74,23 @@ type epochSummaryRead struct {
 	epoch      int
 	nonce      []byte
 	blockCount int
+	// startSlot and length are the epoch's boundaries, which an IndexerDB
+	// count reads its blocks within.
+	startSlot uint64
+	length    uint64
+}
+
+// epochBlockCounter counts the blocks in the inclusive slot range
+// [start, end].
+type epochBlockCounter func(ctx context.Context, start, end uint64) (int, error)
+
+// indexerReads are the reads the Cardano tools take from the IndexerDB of a
+// node that has one. Each is nil on a node without an IndexerDB.
+type indexerReads struct {
+	addressLookup utxoAddressLookup
+	// epochBlocks counts an epoch's blocks over all the history the
+	// IndexerDB holds, where the ledger keeps only a retained window.
+	epochBlocks epochBlockCounter
 }
 
 // errNoEpochs is what the SQLite path reports when no epoch row exists, the
@@ -143,6 +160,7 @@ func epochSummaryFromLedger(
 		return out, fmt.Errorf("count recorded epoch blocks: %w", err)
 	}
 	out.blockCount = len(nonces)
+	out.startSlot, out.length = row.StartSlot, uint64(length)
 	return out, nil
 }
 
