@@ -1195,9 +1195,8 @@ func (k *KoiosClient) getAttempts(
 				// Logged through the package-level default rather than
 				// an injected logger: one KoiosClient serves the
 				// concurrent chunk fetchers, so it deliberately holds no
-				// logger field. cmd/dingo and
-				// cmd/node-parity call slog.SetDefault before building
-				// one, and cmd/koios-parity logs through slog.Default()
+				// logger field. cmd/dingo calls slog.SetDefault before
+				// building one, and cmd/koios-parity logs through slog.Default()
 				// itself, so this lands wherever the binary's own output
 				// goes.
 				slog.Warn(

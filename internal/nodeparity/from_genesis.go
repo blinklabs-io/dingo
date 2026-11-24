@@ -487,7 +487,7 @@ type EpochResult struct {
 
 // FromGenesisReporter receives one EpochResult per epoch boundary
 // RunFromGenesis observes, as soon as that epoch's checks finish -- a
-// caller (cmd/node-parity) renders/logs/exports metrics for it however it
+// caller renders or logs it however it
 // wants. Called synchronously from RunFromGenesis's own ChainSync callback,
 // so it must not block for long: do expensive reporting (network calls, file
 // I/O) on a separate goroutine if needed.

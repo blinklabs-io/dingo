@@ -200,7 +200,7 @@ func decodeProtocolParams(
 // never as a PASS with nothing compared.
 //
 // Exported (not just decodeProtocolParams' own internal helper) because
-// cmd/node-parity's Koios-backed comparison needs
+// internal/nodeparity's Koios-backed comparison needs
 // exactly the same conversion from a live LocalStateQuery
 // GetCurrentProtocolParams() result, which decodes to this same
 // lcommon.ProtocolParameters interface -- reusing this avoids a second,
@@ -216,7 +216,7 @@ func ProtocolParamsFromNative(
 		// two eras are indistinguishable from the struct type alone -- the
 		// caller (decodeProtocolParams) overwrites EraID/EraName with the
 		// epoch-correct one afterward when it knows which; a live
-		// LocalStateQuery caller (cmd/node-parity) has no such external
+		// LocalStateQuery caller (internal/nodeparity) has no such external
 		// signal, so Shelley is the honest default here.
 		out.EraID = shelley.EraIdShelley
 		out.EraName = shelley.EraNameShelley

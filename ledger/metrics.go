@@ -346,7 +346,7 @@ type stateMetrics struct {
 	// (see poolStakeDistribution's own comment), not a failure, so it
 	// does not abort the query -- but a sustained nonzero value means a
 	// real cross-node comparison tool would see dingo's reply as short by
-	// that many pools, the exact condition found via cmd/node-parity against a
+	// that many pools, the exact condition found via node-parity against a
 	// real cardano-node without any other visible symptom. Making this a metric
 	// rather than only the existing WARN log lets that be caught by an alert
 	// instead of requiring a manual diff to notice again.

@@ -73,7 +73,7 @@ func nextBackoff(current time.Duration, established bool) time.Duration {
 
 // Watcher follows one node's chain over a persistent ChainSync session and
 // sends a BlockEvent on Events every time its tip changes, so a caller (see
-// cmd/node-parity's watch command) can trigger a Check the moment a new
+// the full-mode watch in live_parity_test.go) can trigger a Check the moment a new
 // block appears instead of polling on a fixed clock. It reconnects on its
 // own if the session drops, matching
 // internal/test/devnet/observer.go's pattern, so a node restart does not

@@ -18448,7 +18448,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   inputs and outputs, plus the collateral inputs, collateral return and phase-2
   validity verdict its `Consumed`/`Produced` need; the reference inputs serve
   only the in-process observer's transaction sample, below). That table is
-  written by `cmd/node-parity from-genesis` and by that sample, not by the
+  written by the node-parity from-genesis test and by that sample, not by the
   `fetch` subcommand, and unlike the
   per-epoch tables it needs no TTL — a settled transaction never changes
   Koios-side. A `payload_version` column stands in for one: it stamps the struct
@@ -20225,22 +20225,25 @@ one of that layer's own tests passes unmodified.
   observer. 0 for either (the default) selects the package default —
   existing `--accounts` behavior is unchanged unless explicitly tuned.
 
-### Node Parity (`cmd/node-parity/`, `internal/nodeparity/`)
+### Node Parity (`internal/nodeparity/`)
 
-An operator tool that compares Dingo's and a reference cardano-node's ledger
+A live test harness that compares Dingo's and a reference cardano-node's ledger
 state (protocol parameters, stake distribution, whole UTxO set) over their
 node-to-client LocalStateQuery interfaces, on preview or preprod.
 Unlike the Koios Parity Tracker above (which reads
-both sides from a database, after the fact), this tool talks Ouroboros NtC
+both sides from a database, after the fact), it talks Ouroboros NtC
 directly to two live, independently-running node processes it does not
-start, stop, or otherwise manage.
+start, stop, or otherwise manage. It runs with `go test` from
+`internal/nodeparity/live_parity_test.go`; every live test skips unless its
+environment variables are set, so a normal test run dials nothing.
 
-The `from-genesis` subcommand is the exception to "two nodes": it replaces the
+The from-genesis test is the exception to "two nodes": it replaces the
 reference cardano-node with Koios. A real cardano-node cannot fill the reference
 role for a from-genesis replay, because its own replay races ahead of a
 freshly-started Dingo fast enough that no matching historical block is left to
 compare against by the time Dingo reaches it; Koios retains full per-epoch
-history instead. It follows `--dingo-addr`'s chain from genesis over one
+history instead. It follows `DINGO_NODE_PARITY_DINGO_ADDR`'s chain from genesis
+over one
 reconnecting ChainSync session and, at every epoch boundary, compares protocol
 parameters, stake distribution, and the whole UTxO set against Koios. The UTxO
 side is a running reconstruction seeded from Dingo at the start point and
@@ -20264,7 +20267,7 @@ backpressure for LocalStateQuery, so a whole-UTxO reply larger than the muxer's
 64MiB connection ingress budget is read at the client's pace instead of
 overflowing it and closing the connection. A session that ends for any reason,
 including Dingo closing the connection, is resumed from the last block processed
-after a backoff; only interruption ends the run. The rollback that opens a
+after a backoff; only the test deadline ends the run. The rollback that opens a
 resumed session lands on the block already processed, so it changes nothing and
 keeps the comparison. A "not run" verdict names its cause: a failed `/tx_info`
 fetch, a rollback and its slot, or a baseline captured at that boundary. The
@@ -20305,8 +20308,9 @@ to end it; the whole-UTxO queries carry no deadline.
 
 `/tx_info` is fetched by a pipeline while the chain is read. Each block's
 transaction hashes are queued in chain order and cut into chunks of
-`--koios-tx-info-batch-size`; at most `--koios-tx-info-concurrency` chunks are
-in flight, and results are applied to the reconstruction strictly in chain
+`DINGO_NODE_PARITY_KOIOS_TX_INFO_BATCH_SIZE`; at most
+`DINGO_NODE_PARITY_KOIOS_TX_INFO_CONCURRENCY` chunks are in flight, and results
+are applied to the reconstruction strictly in chain
 order, since an output created in one chunk may be spent in a later one.
 Reading stops only while eight rounds of chunks (eight times the concurrency)
 are unapplied, so one stalled request does not leave the other request slots
@@ -20321,9 +20325,10 @@ session end cuts off is not reported: hashes still queued stay unapplied, the
 comparison neither taints nor re-baselines the reconstruction, and the checks
 run again at that epoch's next block on the resumed session.
 
-`--koios-cache-path` makes those lookups cache-first against a `koios-parity`
-`cache.db`, which may be the one a dingo instance's own embedded observer is
-writing, provided its recorded Koios API root matches `--koios-base-url`.
+`DINGO_NODE_PARITY_KOIOS_CACHE_PATH` makes those lookups cache-first against
+a Koios parity `cache.db`, which may be the one a dingo instance's own
+embedded observer is writing, provided its recorded Koios API root matches
+`DINGO_NODE_PARITY_KOIOS_BASE_URL`.
 
 **Architecture:**
 
@@ -20340,83 +20345,59 @@ internal/nodeparity/       # shared library, untagged and importable
   txinfo_pipeline.go        # txInfoPipeline: windowed /tx_info fetches applied in chain order; orderedSlots
   epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
-
-cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands
-  main.go                  # root command (default action: one check, same as 'check')
-  check.go                  # one-shot subcommand (full mode only)
-  watch.go                  # --mode=full (block-triggered, --fallback-interval backstop) or
-                             # --mode=incremental (sequential per-block, --full-check-interval/--cursor-file)
-  from_genesis.go           # from-genesis subcommand: Koios, not a reference cardano-node,
-                             # --koios-base-url/--koios-api-key/--koios-cache-path, --at-slot/--at-hash resume
-  metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
-                             # server 'watch' starts when --metrics-addr is set; 'check' never
-                             # serves metrics, since a one-shot invocation has nothing ongoing
-                             # to expose them for
+  live_parity_test.go       # go test harness: check, watch (full or incremental) and from-genesis,
+                             # each skipped unless its DINGO_NODE_PARITY_* environment is set
 ```
 
-**Usage:** neither node is started or managed by this tool -- point it at
-two already-running, already-synced NtC listeners. `watch`'s `--mode`
-defaults to `incremental`; pass `--mode full` explicitly for the
-whole-ledger-state comparison instead.
+**Usage:** neither node is started or managed by the tests -- point them at
+two already-running, already-synced NtC listeners. Each test runs until it
+finishes or until go test's `-timeout` less one minute, so pass a `-timeout`
+as long as the watch or replay should last.
 
 Dingo's TCP node-to-client listener is disabled by default. The
-`--dingo-addr localhost:3002` examples below need `privatePort: 3002` (or
-`CARDANO_PRIVATE_PORT=3002`); otherwise pass the path of `dingo.socket` as
-`--dingo-addr`.
+`localhost:3002` examples below need `privatePort: 3002` (or
+`CARDANO_PRIVATE_PORT=3002`); otherwise pass the path of `dingo.socket`.
 
 ```shell
-# One-shot: run a single comparison cycle and exit non-zero on divergence
-# or a discarded cycle.
-node-parity check \
-  --network preview \
-  --dingo-addr localhost:3002 \
-  --cardano-addr /path/to/cardano-node.socket
+# One comparison cycle; fails on divergence or a discarded cycle.
+DINGO_NODE_PARITY_NETWORK=preview \
+DINGO_NODE_PARITY_DINGO_ADDR=localhost:3002 \
+DINGO_NODE_PARITY_CARDANO_ADDR=/path/to/cardano-node.socket \
+  go test -count=1 -run '^TestLiveNodeParityCheck$' -v ./internal/nodeparity
 
-# Continuous, incremental mode: validate one block at a time in strict
-# chain order, with periodic full checkpoints (--full-check-interval
-# blocks) and a persisted cursor (--cursor-file, required) so a restart
-# resumes rather than re-baselining.
-node-parity watch \
-  --network preprod \
-  --dingo-addr localhost:3002 \
-  --cardano-addr /path/to/cardano-node.socket \
-  --full-check-interval 1000 \
-  --cursor-file /var/lib/node-parity/preprod-cursor.json \
-  --metrics-addr :9464
+# The same at an explicit historical block instead of the live tip.
+DINGO_NODE_PARITY_AT_SLOT=122256283 \
+DINGO_NODE_PARITY_AT_HASH=4c160b6b0f131bbba0845924b0db3f94ded5e3f806c8adac11482e41a0162a54 \
+  ... go test -count=1 -run '^TestLiveNodeParityCheck$' -v ./internal/nodeparity
 
-# Continuous, full mode: react to each node's tip changes with a whole-
-# ledger-state comparison every time, with a periodic backstop check
-# (--fallback-interval) in case a watcher's subscription silently stalls,
-# and --check-timeout bounding how long any one cycle (fallback-triggered
-# or block-triggered) may take -- both flags' own out-of-the-box values
-# (2m/20m) rarely need overriding; raise --check-timeout only if a target
-# network's UTxO-set scale exceeds the measured 7-9 minute walk that value
-# already covers with headroom. Serves Prometheus metrics on
-# --metrics-addr (commonly :9464).
-node-parity watch \
-  --network preprod \
-  --dingo-addr localhost:3002 \
-  --cardano-addr /path/to/cardano-node.socket \
-  --mode full \
-  --metrics-addr :9464
+# Incremental watch for a day: one block at a time in chain order, with a
+# full checkpoint every DINGO_NODE_PARITY_FULL_CHECK_INTERVAL blocks (1000)
+# and a persisted cursor so a rerun resumes rather than re-baselining.
+DINGO_NODE_PARITY_WATCH=incremental \
+DINGO_NODE_PARITY_CURSOR_FILE=/var/lib/node-parity/preprod-cursor.json \
+  ... go test -count=1 -timeout 24h -run '^TestLiveNodeParityWatch$' -v ./internal/nodeparity
 
-# Explicit historical mode (check only): compare an exact past block
-# instead of the live tip, regardless of where either node's live tip
-# currently is. Requires both flags together.
-node-parity check \
-  --network preview \
-  --dingo-addr localhost:3002 \
-  --cardano-addr /path/to/cardano-node.socket \
-  --at-slot 122256283 \
-  --at-hash 4c160b6b0f131bbba0845924b0db3f94ded5e3f806c8adac11482e41a0162a54
+# Full watch: a whole-ledger comparison on each tip change, with a fallback
+# check every DINGO_NODE_PARITY_FALLBACK_INTERVAL (2m) and each cycle bounded
+# by DINGO_NODE_PARITY_CHECK_TIMEOUT (20m).
+DINGO_NODE_PARITY_WATCH=full \
+  ... go test -count=1 -timeout 24h -run '^TestLiveNodeParityWatch$' -v ./internal/nodeparity
+
+# From genesis against Koios. Optional: DINGO_NODE_PARITY_KOIOS_API_KEY or
+# _KOIOS_API_KEY_FILE, _KOIOS_BASE_URL, _KOIOS_CACHE_PATH, _SKIP_UTXO,
+# _BOUNDARY_CAPTURE_DIR, _VERBOSE, and _AT_SLOT/_AT_HASH to resume from a
+# validated point.
+DINGO_NODE_PARITY_FROM_GENESIS=true \
+DINGO_NODE_PARITY_NETWORK=preview \
+DINGO_NODE_PARITY_DINGO_ADDR=localhost:3002 \
+  go test -count=1 -timeout 72h -run '^TestLiveNodeParityFromGenesis$' -v ./internal/nodeparity
 ```
 
-`--dingo-addr`/`--cardano-addr` accept either a `host:port` TCP address or a
-leading-`/` Unix socket path (a real cardano-node's own NtC endpoint is
-normally a socket). `--network` is `preview` or `preprod` only. Running
-`node-parity` with no subcommand is equivalent to `check`. See
-`docs/dashboards/prometheus.yaml`/`alerts.yaml` for the accompanying scrape
-config and alert rules.
+Addresses accept either a `host:port` TCP address or a leading-`/` Unix
+socket path (a real cardano-node's own NtC endpoint is normally a socket).
+`DINGO_NODE_PARITY_NETWORK` is `preview`, `preprod` or `mainnet`. With
+`DINGO_NODE_PARITY_DINGO_ADDR` set, `TestMain` keeps the production retry and
+reconnect waits instead of the shortened ones the unit tests use.
 
 **The UTxO comparison is intentionally one-directional, a deliberate,
 accepted gap, not an oversight.**
@@ -20437,30 +20418,30 @@ to ask a real cardano-node for its total UTxO set at this scale to compare
 against. See `QueryReferenceUTxOSnapshot`'s doc comment
 (`internal/nodeparity/snapshot.go`) for the full account.
 
-`--at-slot`/`--at-hash` (both-or-neither, validated by `requireAtPoint`)
-switch `check` into explicit historical mode: `nodeparity.Check` skips the
+`DINGO_NODE_PARITY_AT_SLOT`/`_AT_HASH` (both-or-neither, validated by
+`liveAtPoint`) switch `check` into explicit historical mode: `nodeparity.Check`
+skips the
 live-tip-agreement step entirely and acquires the named point directly on
 both connections, rather than requiring the two nodes to currently share a
 tip. This is what lets an operator fall behind the live chain and still
 walk through specific past blocks (N, N+1, N+2, ...) one at a time via
-repeated `check` invocations -- `watch` is unchanged and still only ever
+repeated `check` runs -- `watch` is unchanged and still only ever
 follows the live tip. A point neither node can reconstruct (too old, ahead
-of a node's own tip, or off that node's chain) surfaces as a command error
+of a node's own tip, or off that node's chain) surfaces as a test failure
 rather than a discarded cycle, since there is no live-tip race left to
 discard a cycle over once a point is explicitly named.
 
 **Design: on-demand `check`, plus `watch` in one of two modes.** `check` runs
-one full comparison cycle and exits non-zero on divergence or a discarded
-cycle. `watch` originally polled on a fixed `--interval` matching
-`cmd/koios-parity`'s own shape, but that meant a 15-minute gap left roughly 45
+one full comparison cycle and fails on divergence or a discarded
+cycle. A fixed polling interval would leave a 15-minute gap of roughly 45
 blocks (at ~20s each) completely unchecked between cycles — acceptable for
-koios-parity, whose epoch-closed reward data only changes once an epoch, but
-not for block-level ledger state, which changes every block. `watch`'s
-`--mode=full` now follows both nodes' live chains instead (`nodeparity.Watcher`,
+Koios parity, whose epoch-closed reward data only changes once an epoch, but
+not for block-level ledger state, which changes every block. Full-mode
+`watch` follows both nodes' live chains instead (`nodeparity.Watcher`,
 one persistent ChainSync session per node) and runs a full `Check` the moment
 either one's tip changes, so it reacts within a fraction of a second of a new
 block landing rather than missing everything produced between clock ticks.
-`--fallback-interval` (default 2m) still runs a
+`DINGO_NODE_PARITY_FALLBACK_INTERVAL` (default 2m) still runs a
 check on a fixed schedule regardless, purely as a backstop in case a
 watcher's subscription silently stalls without erroring.
 
@@ -20479,38 +20460,38 @@ between every two cycles, every cycle, in steady state. A later measurement
 against a different Preview-scale node found the whole-UTxO walk taking
 7-9+ minutes end to end.
 
-**`--check-timeout` bounds one check cycle, separately from
-`--fallback-interval`.** These two used to be the same value --
-`runWatchCycle` bounded each `Check` by `--fallback-interval` itself --
-which made full mode fail by default out of the box: `--fallback-interval`'s
+**`DINGO_NODE_PARITY_CHECK_TIMEOUT` bounds one check cycle, separately from
+`DINGO_NODE_PARITY_FALLBACK_INTERVAL`.** These two used to be the same value --
+`liveWatchFull` bounded each `Check` by `DINGO_NODE_PARITY_FALLBACK_INTERVAL`
+itself --
+which made full mode fail by default out of the box:
+`DINGO_NODE_PARITY_FALLBACK_INTERVAL`'s
 2m default is far shorter than the measured 7-9+ minute whole-UTxO walk, so
 every cycle self-cancelled via its own context deadline before a comparison
 could ever complete, indistinguishable in the logs from the unrelated
 node-side "protocol is shutting down" failure this tool was originally built
 to route around.
-`--check-timeout` (default 20m, comfortably above the measured cost) now
-bounds `runWatchCycle` instead; `--fallback-interval` keeps its own, much
+`DINGO_NODE_PARITY_CHECK_TIMEOUT` (default 20m, comfortably above the measured
+cost) now
+bounds `liveWatchFull` instead; `DINGO_NODE_PARITY_FALLBACK_INTERVAL` keeps its
+own, much
 smaller, "also trigger a check on this schedule regardless of block
 activity" meaning and no longer needs to grow to match the real per-cycle
-cost. One related operational note: `docs/dashboards/alerts.yaml`'s
-`NodeParityNotChecking` rule's fixed 10m window assumes one cycle finishes
-well within it -- a cycle reports nothing to any of its three counters
-until it completes or times out, so a genuinely slow (not stuck) cycle
-taking longer than 10m (a larger UTxO-set scale than Preview, or
-`--check-timeout` raised well above its default) can misfire that alert
-during an otherwise healthy run; widen the rule's window to match if so.
+cost.
 
 A `Watcher` reconnects on its own (bounded exponential backoff, matching
 `internal/test/devnet/observer.go`'s pattern) if its session drops, so a
 node restart does not require the operator to do anything.
 
-**`--mode=incremental`, the default (finalized after the mode's own introduction
+**`DINGO_NODE_PARITY_WATCH=incremental`, the default (finalized after the mode's
+own introduction
 below, once full mode's per-cycle cost against a real Preview-scale UTxO set was
 measured — see "Measured, not just reasoned about" above):** validates one block
 at a time, in strict chain order (`internal/nodeparity/incremental.go`,
 `RunIncremental`), trading full independent re-derivation of the whole ledger
 state for a cost bounded by what one block actually touches rather than the
-whole UTxO set. Its own persistent ChainSync session (against `--cardano-addr`,
+whole UTxO set. Its own persistent ChainSync session (against
+`DINGO_NODE_PARITY_CARDANO_ADDR`,
 chosen as the block content source since either node's copy of a canonical block
 decodes identically -- this choice is about which node a decode bug should never
 be attributed to, not about whose bytes are "real") decodes each block via
@@ -20703,9 +20684,11 @@ mid-interval does not reset the checkpoint countdown. When the fresh baseline
 also logs a distinct warning naming the cursor's starting point "disputed"
 rather than confirmed-agreed, so this is visible without cross-referencing the
 same routine per-cycle diff report every other full check produces. Persisted to
-`--cursor-file` after every block, so a restart resumes from there rather than
+`DINGO_NODE_PARITY_CURSOR_FILE` after every block, so a restart resumes from
+there rather than
 re-baselining from genesis-of-this-run every time. Beyond the mandatory startup
-baseline, a fresh full `Check` also runs on `--full-check-interval` blocks
+baseline, a fresh full `Check` also runs on
+`DINGO_NODE_PARITY_FULL_CHECK_INTERVAL` blocks
 (default 1000, a periodic checkpoint against whatever a single block's delta
 cannot reveal on its own), on a rollback (`chainsync.WithRollBackwardFunc`'s
 reported point becomes the new cursor; the ChainSync protocol itself resumes
@@ -20769,7 +20752,8 @@ trustworthily (`fullCheckSucceeded`: no error, and not `Skipped`) -- a
 failed (dial/query error) or discarded (skipped) attempt no longer resets
 `BlocksSinceFullCheck`. Resetting it on every attempt regardless of outcome
 was the original behavior, but it silently delayed the next legitimate
-interval checkpoint by up to a full `--full-check-interval`'s worth of
+interval checkpoint by up to a full `DINGO_NODE_PARITY_FULL_CHECK_INTERVAL`'s
+worth of
 blocks even though nothing had actually been confirmed;
 a failed attempt
 instead leaves the countdown exactly where it was, so `decideFullCheckReason`
@@ -20789,7 +20773,8 @@ node. Those blocks were never covered by the check that just completed, so
 zeroing the counter discarded them and silently delayed the next periodic
 checkpoint by that same amount.
 Recomputing from `at.BlockNumber` instead keeps exactly that residual, so
-the next checkpoint still lands `--full-check-interval` blocks after the
+the next checkpoint still lands `DINGO_NODE_PARITY_FULL_CHECK_INTERVAL` blocks
+after the
 point this one was actually pinned to.
 
 An earlier version of this fix subtracted a snapshot of the counter's own
@@ -20829,7 +20814,8 @@ seeded from the prior run's cursor rather than reset, verified across a real
 `SIGKILL`). Two behaviors were never observed live: while Dingo did not yet
 attribute pointer-address UTxOs to their stake credential, the mismatch
 trigger fired on effectively every block on the real network, which
-preempted ever observing `--full-check-interval`'s own countdown fire on its
+preempted ever observing `DINGO_NODE_PARITY_FULL_CHECK_INTERVAL`'s own countdown
+fire on its
 own, or the pipeline reporting a fully clean match end-to-end.
 
 Those two, plus the epoch-transition trigger and a genuine rollback (both
@@ -20857,7 +20843,8 @@ connection-instability pattern below, but not to rule out a slower-building
 issue over many hours.
 
 **Point pinning, and why:** in live-tip mode (`at` nil, the mode `Check`
-runs in absent `--at-slot`/`--at-hash`), the cycle reads both nodes' tips
+runs in absent `DINGO_NODE_PARITY_AT_SLOT`/`_AT_HASH`), the cycle reads both
+nodes' tips
 once (`ReadTip`, a one-shot ChainSync
 `GetCurrentTip`); if they agree (`tipsAgree`, a pure function,
 unit-tested without a live node — the only remaining `Skip*` reason,
@@ -20947,7 +20934,7 @@ full-table scan rather than the live path's indexed `deleted_slot = 0`
 filter -- slower, but a wrong answer was worse than a slow one for a tool
 whose whole purpose is catching real ledger divergence. Before this fix,
 this handler ignored the pinned point entirely and always answered from
-live state, which made it the one comparison field cmd/node-parity's
+live state, which made it the one comparison field node-parity's
 periodic full checks reported as "diverged" on essentially every run that
 took long enough for the live tip to move during the walk -- confirmed
 live against a real Preview cardano-node: every flagged row's own
@@ -21031,8 +21018,8 @@ carries both `Slot` and `Hash` for exactly this reason, and
 `database.BlockBySlot`.
 
 `Check` takes a `context.Context` and threads it into `Dial`, which closes
-its connection the instant the context is cancelled (SIGINT/SIGTERM via
-`cmd/node-parity`'s `signal.NotifyContext`): `ouroboros.New` performs the
+its connection the instant the context is cancelled (the test's own
+deadline): `ouroboros.New` performs the
 NtC handshake synchronously with no context or per-call timeout of its own,
 and neither do `ReadTip`/`QuerySnapshot`'s later synchronous protocol
 calls, so without this a peer that accepts a connection and then never
@@ -21040,81 +21027,18 @@ responds would otherwise leave `Check` (and so `watch`'s shutdown) blocked
 indefinitely. `internal/nodeparity/watch.go`'s `watchSession` applies the
 same pattern independently for its own persistent ChainSync connections.
 
-**Metrics:** `check`/`watch` and `from-genesis` register separate counter
-sets, because they measure different things at cadences three orders of
-magnitude apart -- a check per block against an epoch that can take tens of
-minutes. Sharing one set made `NodeParityNotChecking`, whose window is sized
-for block cadence, report a healthy replay as a stalled tool: a preview
-replay's per-epoch gap reached a 10.5 min median by epoch 1100, against the
-15 min that rule tolerates, and rises with the UTxO set being reconstructed.
-`from-genesis` therefore registers none of `checks_total`,
-`checks_skipped_total` or `check_errors_total` -- not even at zero, since a
-zero series is what that rule matches on -- and has its own liveness rules,
-`NodeParityFromGenesisStalled` and `NodeParityFromGenesisNotVerifying`.
-
-`from-genesis` records `node_parity_epochs_total` (epochs where at least one
-check reached a trustworthy verdict; an epoch whose every check was untrusted
-verified nothing and is not counted) and
-`node_parity_epoch_checks_incomplete_total{field}` (`field`:
-`protocol_params`/`stake_distribution`/`utxo` -- a check that could not be
-trusted, most often the Koios reference being unavailable). The second is
-deliberately not `checks_skipped_total`: that metric's `reason` means a whole
-cycle discarded by the tip sandwich, which `from-genesis` has no equivalent
-of, and folding per-field failures into it both broke the label's contract
-and counted one degraded epoch as up to three discarded cycles.
-`NodeParityFromGenesisNotVerifying` pairs the two -- checks being attempted
-and failing while no epoch reaches a verdict -- which is the case a
-permanently unreachable Koios produces and which previously raised no alert
-at all.
-
-`check`/`watch` register `node_parity_checks_total`,
-`node_parity_checks_skipped_total{reason}`
-(`reason`: `tip_mismatch`),
-`node_parity_divergence_total{field,reference}` (`field`: `protocol_params`/
-`stake_distribution`/`utxo`; `reference`: `cardano_node` for `check`/`watch`,
-`koios` for `from-genesis`, so an alert names the oracle that disagreed
-rather than assuming cardano-node -- this one series is shared by both
-counter sets on purpose, since a divergence is a divergence whichever mode
-found it and the alert rules key on this name), and
-`node_parity_check_errors_total` (a Check
-call that failed outright -- a dial or query error -- as opposed to a
-completed or skipped cycle; counted separately so a persistently
-misconfigured address, which never increments the other two counters
-either, is distinguishable from the tool itself being stuck --
-`NodeParityCheckErrors` alerts on it directly). `--mode=incremental` also
-increments `node_parity_check_errors_total` whenever `incrementalSession`
-ends in error (a per-block query failure, a dial failure, or any other
-session-ending error) via `IncrementalConfig.OnBlockCheckError` -- a
-callback distinct from `OnBlockCheck` (only ever called for a block that
-was actually decoded and queried) and `OnFullCheck` (only this mode's own
-full checkpoints), added because neither one previously let this failure
-class reach any metric at all, so `NodeParityCheckErrors` could not see it
-(without them, the
-per-block-behind-tip stake-distribution stall above would never have paged
-anyone). `--mode=incremental` adds
-`node_parity_incremental_blocks_total`/`node_parity_incremental_mismatch_total`
-(per-block cycles, matched or diverged -- kept separate from
-`checks_total`/`divergence_total` above, which cover full-ledger-state
-cycles at a different cadence, so a dashboard built around one mode's rate
-does not misread the other's) and
-`node_parity_full_check_triggers_total{reason}` (`reason`: `startup`/
-`interval`/`epoch_transition`/`rollback`/`mismatch` -- incremental mode's own
-full checkpoints; a full-mode per-block-triggered check is never counted
-here, only in `checks_total`). An incremental mismatch still also increments
-the shared `divergence_total{field}` series, so a dashboard built around
-that alone sees it regardless of which mode found it. All of the above are
-registered under a registry wrapped with a
-`network` const label the same way the real node's own
-`configWrapPromRegistry` (root `config.go`) labels `cardano_node_metrics_*` —
-see `docs/dashboards/prometheus.yaml`'s `node-parity`/`cardano-node-reference`
-jobs and `docs/dashboards/alerts.yaml`'s `node-parity` rule group. No
-Slack/webhook/PagerDuty integration; Prometheus/Grafana is the alerting
-surface for this tool, matching the rest of this repo's operator tooling.
+**Reporting:** the tests report through `go test` itself: each divergence is
+a test error, and check errors and discarded cycles are logged and retried on
+the next cycle. From-genesis counts, per check, the epochs that reached a
+verdict and those that could not be trusted (most often the Koios reference
+being unavailable); it fails on a real mismatch, and on a run that reached an
+epoch boundary but verified nothing, since such a run finds zero mismatches.
 Unlike `internal/koiosparity`'s `FatalFunc`/`strict` precedent, there is no
 mode that kills a node on mismatch: live cross-node disagreement is often
 transient (propagation delay, short forks) rather than a confirmed bug, so
-the standalone tool only ever reports and retries on the next cycle -- true
-of both `--mode=full` and `--mode=incremental`.
+the watch only ever reports and retries on the next cycle -- true
+of both `DINGO_NODE_PARITY_WATCH=full` and
+`DINGO_NODE_PARITY_WATCH=incremental`.
 
 ### Bark (`bark/`)
 
@@ -22033,8 +21957,9 @@ variable, or a flag passed on the command line.
 `LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
 the remaining file paths once every source is merged and clears them. The
 `koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
-`--metadata-dsn-file` beside its literal forms, and `node-parity from-genesis`
-offers `--koios-api-key-file`; both use `secretfile.Resolve` for the same
+`--metadata-dsn-file` beside its literal forms, and the node-parity
+from-genesis test takes `DINGO_NODE_PARITY_KOIOS_API_KEY_FILE`; both use
+`secretfile.Resolve` for the same
 both-set rule.
 
 `LoadConfig` (`internal/config`) only parses and merges the YAML and environment

@@ -644,8 +644,8 @@ chain tip/growth) can be compared against the reference implementation
 
 `internal/test/devnet/endpoints_conformance.go`'s `DingoProducerNtcAddr()`
 and `CardanoProducerNtcAddr()` return these host addresses, and
-`internal/nodeparity`'s `SnapshotAtTip(addr, magic)` (shared with
-`cmd/node-parity`; this scenario is not the only caller) queries one node's
+`internal/nodeparity`'s `SnapshotAtTip(addr, magic)` (shared with the
+live parity tests; this scenario is not the only caller) queries one node's
 current protocol parameters, stake distribution, and whole UTxO set
 (normalized into a comparable form) via a single acquired LocalStateQuery
 session; `DiffSnapshots(a, b)` reports every divergence between two such

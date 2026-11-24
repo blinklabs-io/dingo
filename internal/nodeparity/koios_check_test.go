@@ -1642,9 +1642,8 @@ func TestCheckProtocolParams_PropagatesExplicitEraQueryError(t *testing.T) {
 // Koios computes pool_history only after processing an epoch. For one it has
 // not published, every pool Dingo reports looks absent, and the per-pool
 // loop calls each a divergence -- 646 of them per cycle on preview, forever,
-// because from-genesis keeps re-checking the tip epoch. With metrics
-// each cycle also increments node_parity_divergence_total, so
-// NodeParityRepeatedDivergence pages critical hourly on false data.
+// because from-genesis keeps re-checking the tip epoch, and every one of
+// them fails the run on false data.
 //
 // The trigger is Koios lag after close, not an open epoch: preview epoch
 // 1435 closed at 00:00 UTC and /pool_history still returned an empty array

@@ -1199,7 +1199,7 @@ func fetchEpochParamsOnly(
 // epoch (the value fetchEpoch/the caller actually requested) is used
 // instead, matching this function's own prior inline form.
 //
-// Exported so cmd/node-parity's Koios-backed comparison
+// Exported so internal/nodeparity's Koios-backed comparison
 // can build the same row shape a
 // koios_pool_epoch-backed cache lookup would return, directly from a live
 // GetPoolEpochHistory call, without going through this package's own fetch
@@ -1256,7 +1256,7 @@ func PoolEpochFromKoiosHistoryItem(
 // CompareEpochProtocolParams reads as "this era does not define this
 // parameter" rather than as zero.
 //
-// Exported so cmd/node-parity's Koios-backed comparison
+// Exported so internal/nodeparity's Koios-backed comparison
 // can build the same row shape
 // CompareEpochProtocolParams expects directly from a live GetEpochParams
 // call, without going through this package's own cache.
