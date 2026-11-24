@@ -757,9 +757,9 @@ func (ls *LedgerState) tickForkCandidateEpoch(
 func (ls *LedgerState) restampForkHeaderAfterRollback(
 	forkEvent ChainsyncEvent,
 ) ChainsyncEvent {
-	if forkEvent.HeaderCryptoVerificationGeneration != 0 {
-		forkEvent.HeaderCryptoVerificationGeneration =
-			ls.CurrentHeaderCryptoVerificationGeneration()
+	if forkEvent.HeaderCryptoVerificationGeneration == 0 {
+		return forkEvent
 	}
+	forkEvent.HeaderCryptoVerificationGeneration = ls.CurrentHeaderCryptoVerificationGeneration()
 	return forkEvent
 }
