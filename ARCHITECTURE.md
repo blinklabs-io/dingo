@@ -21345,7 +21345,11 @@ handlers only enqueue onto a bounded
 channel; one goroutine converts and appends to a ring buffer of
 `barkEventBufferSize` events that carries the delivery sequence and serving-run
 identifier. New acknowledged subscriptions receive a ready response that fixes
-their run and initial resume position before event delivery. A reconnect sends
+their run and initial resume position before event delivery. The server also
+records that position for the subscriber identifier until the subscriber
+acknowledges an event, so a reconnect that still carries no cursor because the
+ready response was lost resumes from it while it is buffered, not from the new
+head. A reconnect sends
 both values: a cursor from the current run resumes after its sequence, while a
 cursor from an earlier run resumes from the oldest event still buffered in the
 new run. Legacy clients that omit the run identifier retain sequence-only
@@ -21376,8 +21380,10 @@ EventBus as `bark.remote_event` with a `RemoteEvent{Source, Event}` payload.
 The Event Service does not subscribe to that type, so a remote event is never
 sent back out to this node's own subscribers. The bark client reconnects with
 backoff and resumes after the last handled run and sequence. Its ready response
-fixes the initial cursor before delivery, so a drop before the first event does
-not move the cursor forward. When the remote node restarts, the changed run
+fixes the initial cursor before delivery, and the remote node keeps that
+position for the subscriber identifier until the first acknowledgement, so a
+drop before the first event, even before the ready response arrives, does not
+move the cursor forward. When the remote node restarts, the changed run
 identifier resumes from the oldest event still buffered by the new run. The
 cursor remains in memory: restarting this node starts from the remote node's
 current position. An `OUT_OF_RANGE` response also clears the cursor and starts

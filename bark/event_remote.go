@@ -87,7 +87,9 @@ type RemoteEventsConfig struct {
 // on its own and resumes after the last event it handled. The cursor includes
 // the remote serving run, so a remote restart resumes from the oldest event
 // still buffered by the new run. The initial position is fixed before event
-// delivery, so a reconnect before the first event does not move it forward.
+// delivery and kept by the remote node for this subscriber until the first
+// acknowledgement, so a reconnect before the first event, including one after
+// a lost ready response, does not move it forward.
 // This node's own restart still loses its in-memory cursor.
 type RemoteEvents struct {
 	cfg RemoteEventsConfig

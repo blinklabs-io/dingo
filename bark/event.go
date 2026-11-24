@@ -73,6 +73,12 @@ type eventHub struct {
 	active  int
 	perHost map[string]int
 	ackIDs  map[string]struct{}
+	// joinedAt holds the head position handed to each acknowledging
+	// subscriber that joined without a cursor, until it acknowledges an
+	// event. Its client learns that position only from the ready response;
+	// if the stream drops before the client reads it, the reconnect again
+	// carries no cursor and must resume here rather than at the new head.
+	joinedAt map[string]uint64
 }
 
 type busSubscription struct {
@@ -103,11 +109,12 @@ func newEventHub(cfg BarkConfig) *eventHub {
 		maxPerHost: maxPerHost,
 		// A send window of half the ring leaves the other half for
 		// events arriving while the client catches up on acks.
-		window:  max(uint64(size/2), 1),
-		ring:    make([]*eventv1alpha1.Event, size),
-		wake:    make(chan struct{}),
-		perHost: make(map[string]int),
-		ackIDs:  make(map[string]struct{}),
+		window:   max(uint64(size/2), 1),
+		ring:     make([]*eventv1alpha1.Event, size),
+		wake:     make(chan struct{}),
+		perHost:  make(map[string]int),
+		ackIDs:   make(map[string]struct{}),
+		joinedAt: make(map[string]uint64),
 	}
 }
 
@@ -276,6 +283,33 @@ func (h *eventHub) claimSubscriberID(id string) (release func(), ok bool) {
 	}, true
 }
 
+// joinPositionLocked returns where a subscriber joining without a cursor
+// starts: the position recorded when this id last joined, while that position
+// is still buffered, otherwise the current head. Recorded positions that have
+// left the ring are dropped, which keeps the map to ids whose start is still
+// servable. Callers hold h.mu.
+func (h *eventHub) joinPositionLocked(id string, head, oldest uint64) uint64 {
+	for other, pos := range h.joinedAt {
+		if pos < head && pos+1 < oldest {
+			delete(h.joinedAt, other)
+		}
+	}
+	pos, ok := h.joinedAt[id]
+	if !ok {
+		pos = head
+		h.joinedAt[id] = pos
+	}
+	return pos
+}
+
+// forgetJoinPosition drops the recorded join position once the subscriber has
+// acknowledged an event: from then on its client resumes with its own cursor.
+func (h *eventHub) forgetJoinPosition(id string) {
+	h.mu.Lock()
+	delete(h.joinedAt, id)
+	h.mu.Unlock()
+}
+
 // eventServiceHandler implements the EventService on top of eventHub.
 type eventServiceHandler struct {
 	hub            *eventHub
@@ -403,19 +437,20 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	}
 	defer releaseID()
 
+	cursor := start.GetLastAckedSequence()
+	previousRun := start.GetLastAckedRunId()
 	s.hub.mu.Lock()
 	head := s.hub.last
 	oldest := s.hub.oldestLocked()
 	runID := s.hub.idPrefix
-	s.hub.mu.Unlock()
-	cursor := start.GetLastAckedSequence()
-	previousRun := start.GetLastAckedRunId()
 	restarted := previousRun != "" && previousRun != runID
+	joined := !restarted && previousRun == "" && cursor == 0
 	if restarted {
 		cursor = oldest - 1
-	} else if previousRun == "" && cursor == 0 {
-		cursor = head
+	} else if joined {
+		cursor = s.hub.joinPositionLocked(id, head, oldest)
 	}
+	s.hub.mu.Unlock()
 	if !restarted &&
 		(cursor > head || (cursor < head && cursor+1 < oldest)) {
 		return connect.NewError(
@@ -471,6 +506,10 @@ func (s *eventServiceHandler) SubscribeWithAck(
 				return
 			}
 			win.ack(seq)
+			if joined {
+				joined = false
+				s.hub.forgetJoinPosition(id)
+			}
 			select {
 			case ackCh <- struct{}{}:
 			default:

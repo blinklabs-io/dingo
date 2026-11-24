@@ -552,6 +552,50 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 	require.Equal(t, []uint64{1, 2}, got)
 }
 
+// A client whose stream drops before it reads the ready response still has no
+// run and no sequence, so its reconnect looks like a new subscriber. It must
+// resume from the position the server handed out, not the current head.
+func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, nil, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	start := &eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId: "lost-ready",
+				AcceptReady:  true,
+			},
+		},
+	}
+	first := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, first.Send(start))
+	resp, err := first.Receive()
+	require.NoError(t, err)
+	require.Zero(t, resp.GetReady().GetResumeFromSequence())
+	require.NoError(t, first.CloseRequest())
+	waitActive(t, f, 0)
+
+	f.publishChurn("a:1")
+	f.publishChurn("b:1")
+	require.Eventually(t, func() bool {
+		return eventPosition(f.hub) == 2
+	}, 5*time.Second, 5*time.Millisecond)
+
+	second := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, second.Send(start))
+	resp, err = second.Receive()
+	require.NoError(t, err)
+	require.Zero(t, resp.GetReady().GetResumeFromSequence())
+	var got []uint64
+	for range 2 {
+		resp, err = second.Receive()
+		require.NoError(t, err)
+		got = append(got, resp.GetEvent().GetSequence())
+	}
+	require.Equal(t, []uint64{1, 2}, got)
+}
+
 // A filtered ack stream must not count events the filter rejected toward
 // its send window: the client has nothing to acknowledge for them.
 func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
