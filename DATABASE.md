@@ -427,11 +427,12 @@ set. Query and scan failures return tool errors, not empty proposal lists or
 zero vote counts. These reads do not alter the schema or stored governance
 state. With a ledger state, `get_epoch_summary`, `get_governance_state` and
 `get_governance_proposal` read through the ledger's `LedgerDB`
-(`GetEpochs`, `GetEpoch`, `GetEpochSummary`, `GetBlockNoncesInSlotRange`,
-`GetConstitution`, `LatestCommitteeQuorum`, `GetCommitteeMembers`,
+(`GetEpochs`, `GetEpoch`, `GetEpochSummary`, `GetConstitution`, `LatestCommitteeQuorum`, `GetCommitteeMembers`,
 `GetActiveDreps`, `GetDrepByCredential`, `GetGovernanceProposal`,
 `GetAllGovernanceProposals`, `GetGovernanceVotes`) and print what the SQL reads
-print. `LedgerDB` also carries `GetLatestEpochSummary`,
+print. `get_epoch_summary`'s block count comes from the IndexerDB's
+`block_nonce` rows on a node with an IndexerDB, and otherwise from
+`GetBlockNoncesInSlotRange`, which covers only the window the ledger retains. `LedgerDB` also carries `GetLatestEpochSummary`,
 `GetPoolKeyHashesRetiredByEpoch`, `GetGovernanceProposalsRefundedAt` and
 `GetPostSnapshotRewardCreditEvents`, which the in-process Koios parity source
 reads through it. MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a

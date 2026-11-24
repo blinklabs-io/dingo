@@ -17287,9 +17287,12 @@ size.
 The tools that read epoch, constitution, committee, DRep and governance
 proposal and vote state (`get_epoch_summary`, `get_governance_state`,
 `get_governance_proposal`) read it through the ledger's `LedgerDB` when the
-server has a ledger state (`api/mcp/ledger_reads.go`), so they see what
-consensus sees in every mode and need no SQLite connection; with no ledger
-state they read the SQLite database as before. `get_account` reads the
+server has a ledger state (`api/mcp/ledger_reads.go`) and need no SQLite
+connection; with no ledger state they read the SQLite database. The one
+exception is `get_epoch_summary`'s block count: on a node with an IndexerDB it
+is counted from the IndexerDB, which can lag consensus, and without one from
+the block nonces the ledger retains, with a note that it covers only that
+window. `get_account` reads the
 account from the ledger and takes only its IndexerDB row references from the
 IndexerDB. `get_pool_performance` reads the IndexerDB's reward rows, which
 keep every epoch, and without an IndexerDB the epochs the ledger state keeps.
