@@ -635,6 +635,31 @@ func TestApplyRefusesAnInterruptedBackfillOfAnAPIStore(t *testing.T) {
 	}
 }
 
+// Once the node settings have moved into the dbinfo file, this release has
+// opened the metadata store and upgraded its schema, so v0.94.2 can no longer
+// finish a backfill there and startup does not read the store again.
+func TestApplyReadsNoReleasedStoreOnceTheSettingsMoved(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedReleasedDatabase(t, map[string]string{"storage_mode": "api"})
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "metadata.sqlite"))
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO sync_state(sync_key,value) VALUES('sync_status','backfill')`,
+	)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	require.NoError(t, dbinfo.WriteGates(dir, nodesettings.Values{
+		"metadata_plugin": "sqlite",
+		"storage_mode":    "api",
+	}))
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.StorageMode = "api"
+	cfg.Plugins.Storage.Metadata.Provider = "sqlite"
+
+	require.NoError(t, settingsresolve.Apply(cfg))
+}
+
 // A v0.94.2 API store interrupted during its metadata backfill is refused by
 // the open of its provider, before that open migrates the schema: on a
 // PostgreSQL or MySQL store, and on a SQLite store outside the data directory,

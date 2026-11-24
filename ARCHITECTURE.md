@@ -22083,7 +22083,10 @@ the `node_settings` row with `node_settings_gate` on top, and closes the store
 and stops its plugin host on every path before returning, since either left
 open would block the real `database.New` that follows. Before provider
 resolution can migrate a SQLite store, `Apply` opens its existing metadata
-file read-only and checks for an interrupted v0.94.2 API-history backfill. A
+file read-only and checks for an interrupted v0.94.2 API-history backfill,
+unless `dingo.dbinfo` already holds the settings: their move is the first open
+by this release, which upgrades the store's schema, so v0.94.2 refuses the
+store from then on and startup does not open it again. A
 persisted backfill status is fatal unless the store's persisted storage mode
 is core; startup leaves the database untouched. Provider resolution also
 propagates `metadata.ErrInterruptedBackfill` instead of treating it as an

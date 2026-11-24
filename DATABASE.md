@@ -4285,7 +4285,9 @@ between any two leaves a node that starts and continues:
    returns the refusal from its settings read, which is the first open of the
    store. For the SQLite store in the data directory it refuses earlier
    still, from a read-only read of the file, so not even the provider opens
-   it. A store already at this version's schema is outside this check, since
+   it. That read is skipped once `dingo.dbinfo` holds the settings, since
+   their move is the first open that upgrades the schema, and startup then
+   opens no SQL store in the data directory. A store already at this version's schema is outside this check, since
    v0.94.2 no longer opens it; the migration refuses it before it copies
    anything, and the database is then restored as v0.94.2 left it.
 
