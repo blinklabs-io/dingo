@@ -152,8 +152,6 @@ func NewMCPServer(
 
 	// Register tools, resources & prompts
 	limits := newReadLimits()
-	limits.ledgerStateOutsideSQL = deps.LedgerState != nil ||
-		(deps.Database != nil && deps.Database.Metadata() == nil)
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(
 		server,

@@ -135,7 +135,7 @@ func RegisterPrompts(
 				"2. Analyze the evaluation result:\n"+
 				"   - If evaluation succeeds: Record the CPU steps, memory units, and total estimated execution fee. Verify that each redeemer's consumption is within the network's max execution budget per transaction.\n"+
 				"   - If evaluation fails: Inspect the exact error message. If the failure indicates a missing datum, determine the missing hash and check 'resolve_datum_or_script'. Note that CIP-32 inline datums are stored directly on the input UTxO.\n"+
-				"3. For each input referenced in the transaction, verify that the UTxO is currently unspent by querying 'get_utxos' or checking 'deleted_slot = 0' via 'sqlite_query'.\n"+
+				"3. For each input referenced in the transaction, verify that the UTxO is currently unspent by querying 'get_utxos' or, on a node with an IndexerDB, checking 'deleted_slot = 0' via 'sqlite_query'.\n"+
 				"4. Check if the transaction contains required collateral inputs adequate for the calculated execution fee.\n"+
 				"5. Synthesize a structured report detailing:\n"+
 				"   - Plutus redeemer execution units (CPU steps & Memory) and budget utilization\n"+
@@ -204,7 +204,7 @@ func RegisterPrompts(
 			"You are a Cardano staking analyst auditing the performance and reward distribution of stake pool '%s'%s.\n\n"+
 				"Execute the following audit workflow:\n"+
 				"1. Call 'get_pool_performance' with pool_id='%s'%s to retrieve recorded blocks, delegated stake and pledge, fixed cost, margin, apparent performance, and reward snapshots.\n"+
-				"2. Query the 'account' table via 'sqlite_query' (SELECT COUNT(*) AS active_delegators FROM account WHERE active = 1 AND pool = X'%s') to count currently active accounts delegated to this pool. Do not infer current delegated stake from this table; use the performance tool's recorded stake figures.\n"+
+				"2. On a node with an IndexerDB, query its 'account' table via 'sqlite_query' (SELECT COUNT(*) AS active_delegators FROM account WHERE active = 1 AND pool = X'%s') to count currently active accounts delegated to this pool. Do not infer current delegated stake from this table; use the performance tool's recorded stake figures.\n"+
 				"3. Compare recorded block counts and rewards across the returned snapshots. Do not infer protocol correctness or financial returns from these aggregates alone.\n"+
 				"4. Summarize the recorded cost, margin, and leader/member reward values. These snapshots do not independently verify protocol reward calculations.\n"+
 				"5. Synthesize an SPO performance dossier with:\n"+

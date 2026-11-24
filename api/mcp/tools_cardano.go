@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -977,13 +976,6 @@ func registerCardanoTools(
 			}
 			epochNum, rawNonce, blockCount = read.epoch, read.nonce, read.blockCount
 		} else {
-			if err := limits.refuseLedgerStateFamilies(
-				nodesettings.FamilyNonces,
-				nodesettings.FamilyEpochs,
-				nodesettings.FamilySummaries,
-			); err != nil {
-				return nil, nil, err
-			}
 			if input.Epoch != nil {
 				epochNum = *input.Epoch
 				if epochNum < 0 {
@@ -1726,13 +1718,7 @@ func registerCardanoTools(
 		if stateDB != nil {
 			gs, err = governanceStateFromLedger(qCtx, stateDB)
 		} else {
-			err = limits.refuseLedgerStateFamilies(
-				nodesettings.FamilyCommitteeConstitution,
-				nodesettings.FamilyDReps,
-			)
-			if err == nil {
-				gs, err = governanceStateFromSQL(qCtx, db)
-			}
+			gs, err = governanceStateFromSQL(qCtx, db)
 		}
 		if err != nil {
 			return nil, nil, err

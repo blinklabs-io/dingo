@@ -75,7 +75,8 @@ sessions remain until then.
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
 - **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain`
-  (query plan analysis), `sqlite_table_schema` (DDL schema inspection).
+  (query plan analysis), `sqlite_table_schema` (DDL schema inspection), all over
+  the IndexerDB; a node without an IndexerDB has no SQL store to query.
 - **Cardano Domain Tools (18)**:
   - Consensus & Chain Tip: `get_cardano_tip`, `get_block`, `get_transaction`.
   - Ledger, Protocol & UTxO: `get_utxos`, `get_account`, `get_asset_info`,
@@ -698,9 +699,9 @@ The Dingo MCP server provides 21 specialized tools:
 | Tool | Purpose | Key Parameters |
 | --- | --- | --- |
 | `get_node_info` | Retrieve Dingo node architecture, FAQs, block-production identity (minor 69), storage modes, and documentation | `topic` (string, optional: `'identity'`, `'faq'`, `'architecture'`) |
-| `sqlite_query` | Run read-only SQL `SELECT` against metadata SQLite | `query` (string, required), `limit` (int, default 50), `offset` (int) |
+| `sqlite_query` | Run read-only SQL `SELECT` against the IndexerDB's SQLite store; a node without an IndexerDB has none to query | `query` (string, required), `limit` (int, default 50), `offset` (int) |
 | `sqlite_table_schema` | Inspect table columns, types, primary keys, and indexes | `table_name` (string, required) |
-| `sqlite_explain` | Run `EXPLAIN QUERY PLAN` to audit index usage and query performance | `query` (string, required) |
+| `sqlite_explain` | Run `EXPLAIN QUERY PLAN` against the IndexerDB to audit index usage and query performance | `query` (string, required) |
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |

@@ -277,3 +277,24 @@ func TestUtxosReadTheLiveSetWithoutAnIndexerDB(t *testing.T) {
 	}, true)
 	require.Contains(t, text, needsIndexerDB)
 }
+
+// On a node with an IndexerDB the SQL tools query it, its account and epoch
+// tables included; on a node without one they say an IndexerDB is needed.
+func TestSQLiteToolsQueryTheIndexerDB(t *testing.T) {
+	t.Parallel()
+	c := newCoreLedger(t)
+	for _, tool := range []string{"sqlite_query", "sqlite_explain"} {
+		for _, query := range []string{
+			"SELECT count(*) FROM account",
+			"SELECT epoch_id FROM epoch",
+			"SELECT count(*) FROM block_nonce",
+		} {
+			args := map[string]any{"query": query}
+			text := callTool(t, c.session(t, newSchemaDB(t)), tool, args, false)
+			require.NotContains(t, text, "refused", tool+": "+query)
+
+			text = callTool(t, c.session(t, nil), tool, args, true)
+			require.Contains(t, text, needsIndexerDB, tool+": "+query)
+		}
+	}
+}

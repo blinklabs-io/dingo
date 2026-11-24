@@ -3831,7 +3831,7 @@ from the `EpochSource` it installs, as it reads protocol parameters from the
 them in its own rollback across the epoch that confirmed real data.
 `lifecycle.Truncate` installs the opened set as those sources itself and
 refuses without one (`lifecycle.ErrTruncateNeedsUtxoSet`). The MCP raw-SQL
-tools refuse a ledger-state table when the ledger state is in the LedgerDB.
+tools query the IndexerDB, and a node without one has none to query.
 `stagingLedgerDB` overrides each `LedgerDB` method a running node reads ledger
 state through, and a method it leaves to the store must be classified
 in `stagingPromoted` (`ledger/staging_promoted_test.go`). A read that lists accounts,
