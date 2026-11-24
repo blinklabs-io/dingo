@@ -4865,8 +4865,9 @@ backup wrote.
 
 #### SCLS export of the live UTxO set
 
-`dingo database export-scls` (`cmd/dingo/database.go`) is wiring only: it opens
-the set with `dblifecycle.OpenUtxoSet`, takes `ledgerstate.NewSCLSSource` (one
+`dingo database snapshot --scls <file>` (`cmd/dingo/database.go`) is wiring
+only: it opens the set with `dblifecycle.OpenUtxoSet`, takes
+`ledgerstate.NewSCLSSource` (one
 `badgerutxo.Store.CheckpointableSnapshot` read transaction) and calls
 `ledgerstate.ExportSCLS`, releasing both on every exit path. The conversion
 lives in `ledgerstate` behind the narrow `SCLSSource` interface (tip, era,
