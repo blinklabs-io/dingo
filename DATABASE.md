@@ -4006,21 +4006,21 @@ ledger rolled back to the set's tip (`ResumeUtxoSetFrom`) and the blocks after
 it applied again, and the marker is cleared once the set and ledger agree.
 The set holds the live stake of its own tip, so the rollback leaves the
 stake of the point the ledger resumes from. A
-marker the journal cannot rewind stops a set that is the only copy, with an
-error saying that no copy of the ledger state from before the failed commit is
-retained, and leaves the marker: rows the failed commit left outside the
-journal cannot be told apart from the rest of the set. Any other set is
-rebuilt from the `utxo` table, which clears it.
+marker the journal cannot rewind stops the node, with an error saying that no
+copy of the ledger state from before the failed commit is retained, and leaves
+the marker: rows the failed commit left outside the journal cannot be told
+apart from the rest of the set. Only the v0.94.2 migration, which still has a
+metadata `utxo` table to read, rebuilds the set from it, which clears the
+marker.
 
 A set ahead of the ledger tip, as after an offline truncate, a lifecycle
 restore, is rolled back to the ledger tip with
 `Store.Rollback` when that tip is a point the journal restores exactly (the
 current tip, or the tip before a journaled commit: `Store.HasJournalPoint`).
-This applies when the set is authoritative. When the tip is not such a point,
-a set that is the only copy takes the journal walk of "Ledger state in the
-LedgerDB", which rolls the set back to the nearest point the ledger can
-resume from, and an authoritative set that has a metadata `utxo` table is
-rebuilt from it, as a set that is not authoritative always is.
+The rollback is unconditional. When the tip is not such a point, the set takes
+the journal walk of "Ledger state in the LedgerDB", which rolls the set back to
+the nearest point the ledger can resume from. Only the v0.94.2 migration
+rebuilds the set from a metadata `utxo` table.
 
 `database/lifecycle` keeps the set in step with the database:
 
