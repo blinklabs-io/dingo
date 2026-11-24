@@ -147,10 +147,11 @@ jobs:
             echo "baseline_file has an unexpected path: ${BASELINE_FILE}" >&2
             exit 1
           fi
-          go run ./internal/benchci/cmd/benchcheck \
-            "${BASELINE_FILE}" \
-            "${RUN_FILE}" \
-            report.md | tee -a "$GITHUB_OUTPUT"
+          BENCHCI_OLD_FILE="${BASELINE_FILE}" \
+            BENCHCI_NEW_FILE="${RUN_FILE}" \
+            BENCHCI_REPORT="$PWD/report.md" \
+            BENCHCI_OUTPUT="$GITHUB_OUTPUT" \
+            go test ./internal/benchci -run '^TestCheckFiles$' -count=1 -v
 
       - name: write-step-summary
         shell: bash
