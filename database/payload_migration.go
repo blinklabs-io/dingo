@@ -21,6 +21,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // MigratePayloadOffsets replaces the payload columns of an API store written
@@ -44,7 +46,9 @@ func (d *Database) MigratePayloadOffsets(ctx context.Context) error {
 // slotPayloadSource reads the canonical block at a slot, keeping the last
 // one: the rows of a block are adjacent.
 type slotPayloadSource struct {
-	db      *Database
+	db *Database
+	// decode, when set, replaces the ledger's block decoder.
+	decode  func(blockType uint, cbor []byte) ([]lcommon.Transaction, error)
 	slot    uint64
 	locator types.PayloadLocator
 	loaded  bool
@@ -81,4 +85,129 @@ func (s *slotPayloadSource) LocatorAtSlot(
 	}
 	s.slot, s.locator, s.loaded = slot, locator, true
 	return locator, nil
+}
+
+var _ metadata.PayloadCarrierScanner = (*slotPayloadSource)(nil)
+
+// carriedContent returns the keys of the scripts a transaction carries in its
+// auxiliary data and of the datums and reference scripts its sub-transaction
+// outputs carry: content the store indexes no table row for.
+func carriedContent(tx lcommon.Transaction) []metadata.ContentKey {
+	var keys []metadata.ContentKey
+	script := func(s lcommon.Script) {
+		keys = append(keys, metadata.ContentKey{
+			Table: "script", Hash: string(s.Hash().Bytes()),
+		})
+	}
+	if aux := tx.AuxiliaryData(); aux != nil {
+		if scripts, err := aux.NativeScripts(); err == nil {
+			for _, s := range scripts {
+				script(s)
+			}
+		}
+		if scripts, err := aux.PlutusV1Scripts(); err == nil {
+			for _, s := range scripts {
+				script(s)
+			}
+		}
+		if scripts, err := aux.PlutusV2Scripts(); err == nil {
+			for _, s := range scripts {
+				script(s)
+			}
+		}
+		if scripts, err := aux.PlutusV3Scripts(); err == nil {
+			for _, s := range scripts {
+				script(s)
+			}
+		}
+		if scripts, err := aux.PlutusV4Scripts(); err == nil {
+			for _, s := range scripts {
+				script(s)
+			}
+		}
+	}
+	for _, output := range lcommon.SubTransactionOutputsFromTransaction(tx) {
+		if output == nil {
+			continue
+		}
+		if ref := output.ScriptRef(); ref != nil {
+			script(ref)
+		}
+		if datum := output.Datum(); datum != nil && len(datum.Cbor()) > 0 {
+			keys = append(keys, metadata.ContentKey{
+				Table: "datum",
+				Hash:  string(lcommon.Blake2b256Hash(datum.Cbor()).Bytes()),
+			})
+		}
+	}
+	return keys
+}
+
+// FindCarriers implements metadata.PayloadCarrierScanner. It reads the
+// canonical blocks once in ascending order and stops when every wanted key has
+// a carrier. The scan runs only for the orphaned rows no indexed table
+// accounts for, so a store without any pays nothing.
+func (s *slotPayloadSource) FindCarriers(
+	ctx context.Context,
+	wanted map[metadata.ContentKey]struct{},
+) (map[metadata.ContentKey]uint64, *types.HistoryExpiredError, error) {
+	found := make(map[metadata.ContentKey]uint64, len(wanted))
+	if len(wanted) == 0 {
+		return found, nil, nil
+	}
+	iter, err := s.db.CanonicalBlocksFromIndex(ctx, 0, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer iter.Close()
+	var unreadable *types.HistoryExpiredError
+	for len(found) < len(wanted) {
+		block, err := iter.NextRaw()
+		if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok {
+			if unreadable == nil {
+				unreadable = expired
+			}
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if block == nil {
+			break
+		}
+		txs, err := s.transactions(block.BlockType, block.Cbor)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"decode the block at slot %d: %w", block.Slot, err,
+			)
+		}
+		for _, tx := range txs {
+			for _, key := range carriedContent(tx) {
+				if _, ok := wanted[key]; !ok {
+					continue
+				}
+				if _, ok := found[key]; !ok {
+					found[key] = block.Slot
+				}
+			}
+		}
+	}
+	if len(found) == len(wanted) {
+		unreadable = nil
+	}
+	return found, unreadable, nil
+}
+
+func (s *slotPayloadSource) transactions(
+	blockType uint,
+	cbor []byte,
+) ([]lcommon.Transaction, error) {
+	if s.decode != nil {
+		return s.decode(blockType, cbor)
+	}
+	block, err := ledger.NewBlockFromCbor(blockType, cbor)
+	if err != nil {
+		return nil, err
+	}
+	return block.Transactions(), nil
 }

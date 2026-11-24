@@ -4289,12 +4289,23 @@ between any two leaves a node that starts and continues:
    is stored at the row's slot, or that block does not hold the bytes, the row
    is re-pointed to the earliest canonical transaction whose block does (a
    witness datum or script, a reference script, or an output naming the
-   datum), and its slot follows. A row no canonical transaction carries is
-   unreachable and is deleted, as a rollback now deletes it. A canonical
-   witness or reference script whose block lacks the bytes fails the migration
-   with the row named, so a carried row is never dropped. Auxiliary-data
-   scripts have no table naming their transaction, so an orphaned one is
-   deleted. A block that expired
+   datum), and its slot follows. A row is unreachable only when no canonical
+   transaction carries it anywhere, so before a row with no indexed carrier is
+   deleted, one scan of the canonical blocks
+   (`metadata.PayloadCarrierScanner`, ascending order, stopping when every
+   such row has a carrier) looks for it in the places no table indexes, a
+   script in a transaction's auxiliary data and a datum or reference script in
+   a sub-transaction output, and re-points the row to the first block that
+   carries it. Only a row carried nowhere is deleted, as a rollback now deletes
+   it. The scan runs only when such rows exist. With an archive configured it
+   reads expired blocks through the archive. Without one, a row that is still
+   unresolved while the scan could not read an expired block is kept with a
+   `DEXP` marker naming the first such block, since the row might be carried
+   there: the carrier is unknown, so the block named may not be the one that
+   carried it, and a read fails with `types.ErrHistoryExpired` naming it. A
+   row is deleted only when every canonical block was read and none carries it. A canonical witness or
+   reference script whose block lacks the bytes fails the migration with the
+   row named, so a carried row is never dropped. A block that expired
    locally is handled by whether an archive is configured (`barkBaseUrl`). With
    one, the migration fetches the block through the archive's block-store
    fallback to compute the offset, and a later read of the row proxies the same

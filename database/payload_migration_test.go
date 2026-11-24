@@ -18,9 +18,13 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -285,4 +289,157 @@ func TestMigratePayloadOffsetsDropsPayloadsOfExpiredBlocksWithoutAnArchive(
 	)
 	require.NoError(t, err)
 	require.Equal(t, keptDatum, gotKept.RawDatum)
+}
+
+type auxScripts struct {
+	lcommon.AuxiliaryData
+	v1 []lcommon.PlutusV1Script
+}
+
+func (a auxScripts) NativeScripts() ([]lcommon.NativeScript, error) { return nil, nil }
+
+func (a auxScripts) PlutusV1Scripts() ([]lcommon.PlutusV1Script, error) {
+	return a.v1, nil
+}
+
+func (a auxScripts) PlutusV2Scripts() ([]lcommon.PlutusV2Script, error) { return nil, nil }
+func (a auxScripts) PlutusV3Scripts() ([]lcommon.PlutusV3Script, error) { return nil, nil }
+func (a auxScripts) PlutusV4Scripts() ([]lcommon.PlutusV4Script, error) { return nil, nil }
+
+type auxTransaction struct {
+	lcommon.Transaction
+	aux lcommon.AuxiliaryData
+}
+
+func (t auxTransaction) AuxiliaryData() lcommon.AuxiliaryData { return t.aux }
+
+// An orphaned script row whose only canonical carrier is a transaction's
+// auxiliary data, which no indexed table links to the transaction, is
+// re-pointed to that block and not deleted.
+func TestMigratePayloadOffsetsRepointsAScriptCarriedOnlyInAuxiliaryData(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	script := lcommon.PlutusV1Script{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: bytes.Join([][]byte{
+			[]byte("header"), script.RawScriptBytes(), []byte("trailer"),
+		}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	_, err := raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		script.Hash().Bytes(), script.RawScriptBytes(),
+	)
+	require.NoError(t, err)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x11}, 32))
+	source := &slotPayloadSource{
+		db: pair.indexer,
+		decode: func(uint, []byte) ([]lcommon.Transaction, error) {
+			return []lcommon.Transaction{auxTransaction{
+				Transaction: tx,
+				aux:         auxScripts{v1: []lcommon.PlutusV1Script{script}},
+			}}, nil
+		},
+	}
+	migrator, ok := pair.indexer.Metadata().(metadata.PayloadColumnMigrator)
+	require.True(t, ok)
+
+	require.NoError(t, migrator.MigratePayloadColumns(t.Context(), source))
+
+	var content []byte
+	var created uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT content, created_slot FROM script",
+	).Scan(&content, &created), "the script row was deleted")
+	offset, err := types.DecodeCborOffset(content)
+	require.NoError(t, err)
+	require.EqualValues(t, 100, created)
+	require.Equal(
+		t, script.RawScriptBytes(),
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+	)
+}
+
+// An orphaned row that no readable canonical block carries, while a canonical
+// block expired with no archive, might be carried in that block. The payload
+// is not kept: the migration completes and a read fails with the
+// expired-history error instead of the row being deleted.
+func TestMigratePayloadOffsetsMarksAnOrphanWhoseCarrierMayHaveExpired(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	script := []byte{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	expired := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xe1}, 32),
+		Cbor: bytes.Join([][]byte{[]byte("old"), script}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(expired, nil))
+	_, err := pair.ledger.PruneBlock(t.Context(), expired.Slot, expired.Hash)
+	require.NoError(t, err)
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		scriptHash, script,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	_, err = pair.indexer.GetScript(
+		t.Context(), lcommon.NewBlake2b224(scriptHash).Bytes(), nil,
+	)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	var expiredErr *types.HistoryExpiredError
+	require.ErrorAs(t, err, &expiredErr)
+	require.EqualValues(t, 100, expiredErr.Slot)
+}
+
+// The real block decoder runs over real preview-network blocks: none of their
+// transactions carries the orphaned script, so the scan reads and decodes
+// every block, finds no carrier and the row is deleted. The test data holds no
+// transaction with a script in auxiliary data to find.
+func TestMigratePayloadOffsetsScansRealBlocks(t *testing.T) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	imm, err := immutable.New("immutable/testdata")
+	require.NoError(t, err)
+	it, err := imm.BlocksInChunk(299)
+	require.NoError(t, err)
+	created := 0
+	for created < 100 {
+		next, err := it.Next()
+		require.NoError(t, err)
+		if next == nil {
+			break
+		}
+		decoded, err := ledger.NewBlockFromCbor(next.Type, next.Cbor)
+		require.NoError(t, err)
+		created++
+		require.NoError(t, pair.ledger.BlockCreate(models.Block{
+			ID: uint64(created), Slot: next.Slot, Hash: next.Hash,
+			Number: decoded.BlockNumber(), Type: next.Type, Cbor: next.Cbor,
+		}, nil))
+	}
+	require.NotZero(t, created, "no real blocks were loaded")
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999999999, 1)",
+		bytes.Repeat([]byte{0x22}, 28), []byte{0x49, 0x01, 0x00, 0x00, 0x22},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	var count int
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM script").Scan(&count))
+	require.Zero(t, count)
 }

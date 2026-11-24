@@ -125,14 +125,19 @@ func (s *Store) migrateSlotPayloadColumn(
 		"UPDATE %s SET %s = ? WHERE %s = ?", c.table, c.column, c.key,
 	)
 	var last int64 = -1
+	// pending are the orphaned rows no indexed table names a carrier for,
+	// settled once the table has been read through.
+	var pending []unresolvedOrphan
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		var rows []payloadRow
+		var batchPending []unresolvedOrphan
 		err := s.withWriteTransactionContext(
 			ctx, nil, func(db queryer, ctx context.Context) error {
 				var err error
+				batchPending = nil
 				rows, err = readPayloadRows(ctx, db, query, last)
 				if err != nil {
 					return err
@@ -145,13 +150,17 @@ func (s *Store) migrateSlotPayloadColumn(
 						ctx, blocks, row.slot, row.value,
 					)
 					if err != nil && contentColumn(c) && isOrphaned(err) {
-						if err := s.resolveOrphanedContent(
+						orphan, err := s.resolveOrphanedContent(
 							ctx, db, blocks, c, row,
-						); err != nil {
+						)
+						if err != nil {
 							return fmt.Errorf(
 								"%s %d at slot %d: %w",
 								c.table, row.key, row.slot, err,
 							)
+						}
+						if orphan != nil {
+							batchPending = append(batchPending, *orphan)
 						}
 						continue
 					}
@@ -180,8 +189,9 @@ func (s *Store) migrateSlotPayloadColumn(
 		if err != nil {
 			return err
 		}
+		pending = append(pending, batchPending...)
 		if len(rows) < payloadMigrationBatch {
-			return nil
+			return s.resolveUnindexedCarriers(ctx, blocks, c, pending)
 		}
 		last = rows[len(rows)-1].key
 	}
@@ -270,14 +280,14 @@ func (s *Store) resolveOrphanedContent(
 	blocks metadata.PayloadBlockSource,
 	c slotPayloadColumn,
 	row payloadRow,
-) error {
+) (*unresolvedOrphan, error) {
 	var hash []byte
 	if err := db.QueryRowContext(
 		ctx,
 		fmt.Sprintf("SELECT hash FROM %s WHERE %s = ?", c.table, c.key),
 		row.key,
 	).Scan(&hash); err != nil {
-		return err
+		return nil, err
 	}
 	var carriers []payloadCarrier
 	for _, q := range carrierQueries[c.table] {
@@ -287,7 +297,7 @@ func (s *Store) resolveOrphanedContent(
 		}
 		slots, err := carrierSlots(ctx, db, q.query, arg)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, slot := range slots {
 			carriers = append(carriers, payloadCarrier{
@@ -311,20 +321,97 @@ func (s *Store) resolveOrphanedContent(
 		} else if err != nil && !carrier.required && isOrphaned(err) {
 			continue
 		} else if err != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"the canonical transaction at slot %d carries it: %w",
 				carrier.slot, err,
 			)
 		}
 		_, err = db.ExecContext(ctx, update, offset, carrier.slot, row.key)
-		return err
+		return nil, err
 	}
-	_, err := db.ExecContext(
-		ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE %s = ?", c.table, c.key),
-		row.key,
+	return &unresolvedOrphan{row: row, hash: hash}, nil
+}
+
+// unresolvedOrphan is an orphaned content row no indexed table accounts for.
+type unresolvedOrphan struct {
+	row  payloadRow
+	hash []byte
+}
+
+// resolveUnindexedCarriers settles the orphaned rows of one content table that
+// no indexed table names a carrier for. One scan of the canonical blocks finds
+// those a transaction still carries somewhere the store keeps no row for, such
+// as a script in auxiliary data; each is re-pointed to the first such block, as
+// for any other carrier. The rest are carried by no canonical transaction and
+// are deleted. A source that cannot read transactions finds no carrier.
+func (s *Store) resolveUnindexedCarriers(
+	ctx context.Context,
+	blocks metadata.PayloadBlockSource,
+	c slotPayloadColumn,
+	orphans []unresolvedOrphan,
+) error {
+	if len(orphans) == 0 {
+		return nil
+	}
+	carriers := map[metadata.ContentKey]uint64{}
+	var unreadable *types.HistoryExpiredError
+	if scanner, ok := blocks.(metadata.PayloadCarrierScanner); ok {
+		wanted := make(map[metadata.ContentKey]struct{}, len(orphans))
+		for _, o := range orphans {
+			wanted[metadata.ContentKey{Table: c.table, Hash: string(o.hash)}] = struct{}{}
+		}
+		var err error
+		if carriers, unreadable, err = scanner.FindCarriers(ctx, wanted); err != nil {
+			return fmt.Errorf("scan canonical transactions for %s rows: %w", c.table, err)
+		}
+	}
+	update := fmt.Sprintf(
+		"UPDATE %s SET %s = ?, %s = ? WHERE %s = ?",
+		c.table, c.column, c.slot, c.key,
 	)
-	return err
+	remove := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", c.table, c.key)
+	return s.withWriteTransactionContext(
+		ctx, nil, func(db queryer, ctx context.Context) error {
+			for _, o := range orphans {
+				slot, ok := carriers[metadata.ContentKey{Table: c.table, Hash: string(o.hash)}]
+				if !ok && unreadable != nil {
+					// A block the scan could not read might carry the row.
+					// No archive serves it, so the payload is not kept: the
+					// marker names that block, which may not be the carrier,
+					// and a read fails with the expired-history error.
+					if _, err := db.ExecContext(
+						ctx,
+						fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", c.table, c.column, c.key),
+						types.EncodeExpiredPayload(unreadable.Slot, unreadable.Hash),
+						o.row.key,
+					); err != nil {
+						return err
+					}
+					continue
+				}
+				if !ok {
+					if _, err := db.ExecContext(ctx, remove, o.row.key); err != nil {
+						return err
+					}
+					continue
+				}
+				offset, expired, err := locatePayloadAt(ctx, blocks, slot, o.row.value)
+				if err != nil {
+					return fmt.Errorf(
+						"%s %d: the canonical transaction at slot %d carries it: %w",
+						c.table, o.row.key, slot, err,
+					)
+				}
+				if expired != nil {
+					offset = types.EncodeExpiredPayload(expired.Slot, expired.Hash)
+				}
+				if _, err := db.ExecContext(ctx, update, offset, slot, o.row.key); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
 }
 
 func carrierSlots(

@@ -30,6 +30,31 @@ type PayloadBlockSource interface {
 	LocatorAtSlot(ctx context.Context, slot uint64) (types.PayloadLocator, error)
 }
 
+// ContentKey names a datum or script by the hash its table is keyed on.
+type ContentKey struct {
+	// Table is "datum" or "script".
+	Table string
+	// Hash is the datum hash or script hash.
+	Hash string
+}
+
+// PayloadCarrierScanner is implemented by a PayloadBlockSource that can read
+// the canonical blocks' transactions, for content that no indexed table links
+// to the transaction carrying it: a script in auxiliary data, and a datum or
+// reference script in a sub-transaction output.
+type PayloadCarrierScanner interface {
+	// FindCarriers returns, for each wanted key a canonical transaction
+	// carries, the slot of the first canonical block that does. A key absent
+	// from the result is carried by no block the scan could read. The error
+	// names the first canonical block the scan could not read because it
+	// expired with no archive, and is nil when every block was read or every
+	// key was found: an absent key might be carried in that block.
+	FindCarriers(
+		ctx context.Context,
+		wanted map[ContentKey]struct{},
+	) (map[ContentKey]uint64, *types.HistoryExpiredError, error)
+}
+
 // PayloadColumnMigrator is implemented by metadata stores that can replace
 // the payload columns of a store written before they held offsets, in place.
 type PayloadColumnMigrator interface {
