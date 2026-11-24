@@ -205,10 +205,10 @@ bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BE
 .PHONY: bench-leios-db-cached
 
 bench-leios-db: ## Run the LeiosDB latency benchmark against the default storage providers
-	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench $(LEIOS_DB_BENCH_ARGS)
+	go test $(GO_TAG_FLAGS) -run='^$$' -bench='^BenchmarkLeiosDBLatency$$' -benchtime=1x -benchmem -timeout=0 ./database -args $(LEIOS_DB_BENCH_ARGS)
 
 bench-leios-db-cached: ## Run the LeiosDB latency benchmark with shared cached reads
-	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench -cached-reads $(LEIOS_DB_BENCH_ARGS)
+	go test $(GO_TAG_FLAGS) -run='^$$' -bench='^BenchmarkLeiosDBLatency$$' -benchtime=1x -benchmem -timeout=0 ./database -args -leiosdb.cached-reads $(LEIOS_DB_BENCH_ARGS)
 
 bench-gate: ## Run the pull-request gate benchmark set on this checkout (BENCH_GATE_OUT, BENCH_GATE_ROUNDS)
 	bash .github/scripts/bench-gate.sh --record . $(BENCH_GATE_OUT) $(BENCH_GATE_ROUNDS)

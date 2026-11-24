@@ -3777,8 +3777,8 @@ run the phase between resolving the stores and `database.New`; every
 `internalplugins.OpenDatabase` caller that opens the ledger's database of a
 configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
-(`nodestorage.MigrateReleased`). `mithril sync` and `leios-db-bench` pass none
-and refuse such a block store. The phase opens the configured metadata
+(`nodestorage.MigrateReleased`). `mithril sync` and the
+`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store. The phase opens the configured metadata
 provider on a plugin host of its own, opens the v0.94.2 database over it and
 the block store as `database.RoleReleased` (the role storage adoption also
 opens it with), reverts it to the block `k` blocks below its tip

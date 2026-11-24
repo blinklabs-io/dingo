@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command leios-db-bench measures the latency of Dingo's LeiosDB storage
+package database_test
+
+// BenchmarkLeiosDBLatency measures the latency of Dingo's LeiosDB storage
 // steps, mirroring the ouroboros-consensus LeiosDB-bench latency benchmark.
 //
 // Every measured endorser block (EB) goes through:
@@ -27,8 +29,8 @@
 //
 // The measured EBs go one at a time. Optional background bursts of EBs are
 // fetched, voted on and served concurrently and push the measured latencies
-// where they overlap. Pruning keeps the stored EB window at -volatile-ebs.
-package main
+// where they overlap. Pruning keeps the stored EB window at
+// -leiosdb.volatile-ebs.
 
 import (
 	"cmp"
@@ -46,11 +48,13 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/txresponse"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -139,29 +143,76 @@ func (r *recorder) failed() bool {
 	return r.err != nil
 }
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+// leiosBenchFlags holds the workload flags. Pass them to the test binary
+// after -args, e.g. go test -run '^$' -bench '^BenchmarkLeiosDBLatency$'
+// ./database -args -leiosdb.burst.
+var leiosBenchFlags = registerLeiosBenchFlags(flag.CommandLine)
+
+func registerLeiosBenchFlags(fs *flag.FlagSet) *benchConfig {
+	config := &benchConfig{}
+	fs.IntVar(&config.volatileEbs, "leiosdb.volatile-ebs", 1000,
+		"EBs stored before timing and kept stored by pruning")
+	fs.IntVar(&config.txsPerEb, "leiosdb.txs-per-eb", 2857,
+		"number of transactions in each EB")
+	fs.IntVar(&config.txSizeBytes, "leiosdb.tx-size-bytes", 350,
+		"serialized transaction item size in bytes")
+	fs.IntVar(&config.requestBytes, "leiosdb.request-bytes", 500_000,
+		"upper bound on the transaction bytes of one request")
+	fs.IntVar(&config.jobBytes, "leiosdb.job-bytes", 65_536,
+		"transaction bytes per job, the unit a request is made of")
+	fs.IntVar(&config.upstreamPeers, "leiosdb.upstream-peers", 20,
+		"peers the transaction chunks of every EB are fetched from")
+	fs.IntVar(&config.downstreamPeers, "leiosdb.downstream-peers", 100,
+		"peers each reading every EB once it is complete")
+	fs.IntVar(&config.samples, "leiosdb.samples", 100,
+		"measured EBs, processed one at a time")
+	fs.IntVar(
+		&config.gcEvery,
+		"leiosdb.gc-every",
+		10,
+		"prune beyond the volatile window every this many fetched EBs; the stored window can exceed -leiosdb.volatile-ebs by up to this many minus one",
+	)
+	fs.BoolVar(&config.burst, "leiosdb.burst", false,
+		"fetch and serve bursts of background EBs while measuring")
+	fs.IntVar(&config.burstSize, "leiosdb.burst-size", 10,
+		"background EBs started at once per burst")
+	fs.DurationVar(&config.burstInterval, "leiosdb.burst-interval",
+		5*time.Second, "time between background bursts")
+	fs.BoolVar(
+		&config.cachedReads,
+		"leiosdb.cached-reads",
+		false,
+		"share persisted manifest and closure reads per EB; clone returned transactions",
+	)
+	fs.StringVar(&config.cpuProfile, "leiosdb.cpuprofile", "",
+		"write a CPU profile of the measured workload, excluding prepopulation")
+	fs.StringVar(
+		&config.heapProfile,
+		"leiosdb.heapprofile",
+		"",
+		"write an unforced final heap profile and sample runtime memory; diagnostic runs only",
+	)
+	return config
+}
+
+// BenchmarkLeiosDBLatency runs the whole workload once per iteration against
+// a fresh database and prints p50, p99, maximum and count for every step. Run
+// it with -benchtime=1x; b.N has no meaning beyond repeating the workload.
+func BenchmarkLeiosDBLatency(b *testing.B) {
+	config := *leiosBenchFlags
+	if err := validateConfig(config); err != nil {
+		b.Fatal(err)
+	}
+	for range b.N {
+		b.StopTimer()
+		if err := runLeiosBench(b, config); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
-func run() (runErr error) {
-	config := parseConfig()
-	if err := validateConfig(config); err != nil {
-		return err
-	}
-
-	tmpDir, err := os.MkdirTemp("", "dingo-leios-db-bench-")
-	if err != nil {
-		return fmt.Errorf("create benchmark directory: %w", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			runErr = errors.Join(runErr,
-				fmt.Errorf("remove benchmark directory: %w", err))
-		}
-	}()
+func runLeiosBench(b *testing.B, config benchConfig) (runErr error) {
+	tmpDir := b.TempDir()
 	printBenchInfo(config, tmpDir)
 
 	dbDir := filepath.Join(tmpDir, "db")
@@ -221,55 +272,9 @@ func run() (runErr error) {
 			runErr = errors.Join(runErr, file.Close())
 		}()
 	}
+	b.StartTimer()
+	defer b.StopTimer()
 	return runBench(rt.Database, config)
-}
-
-func parseConfig() benchConfig {
-	config := benchConfig{}
-	flag.IntVar(&config.volatileEbs, "volatile-ebs", 1000,
-		"EBs stored before timing and kept stored by pruning")
-	flag.IntVar(&config.txsPerEb, "txs-per-eb", 2857,
-		"number of transactions in each EB")
-	flag.IntVar(&config.txSizeBytes, "tx-size-bytes", 350,
-		"serialized transaction item size in bytes")
-	flag.IntVar(&config.requestBytes, "request-bytes", 500_000,
-		"upper bound on the transaction bytes of one request")
-	flag.IntVar(&config.jobBytes, "job-bytes", 65_536,
-		"transaction bytes per job, the unit a request is made of")
-	flag.IntVar(&config.upstreamPeers, "upstream-peers", 20,
-		"peers the transaction chunks of every EB are fetched from")
-	flag.IntVar(&config.downstreamPeers, "downstream-peers", 100,
-		"peers each reading every EB once it is complete")
-	flag.IntVar(&config.samples, "samples", 100,
-		"measured EBs, processed one at a time")
-	flag.IntVar(
-		&config.gcEvery,
-		"gc-every",
-		10,
-		"prune beyond the volatile window every this many fetched EBs; the stored window can exceed -volatile-ebs by up to this many minus one",
-	)
-	flag.BoolVar(&config.burst, "burst", false,
-		"fetch and serve bursts of background EBs while measuring")
-	flag.IntVar(&config.burstSize, "burst-size", 10,
-		"background EBs started at once per burst")
-	flag.DurationVar(&config.burstInterval, "burst-interval", 5*time.Second,
-		"time between background bursts")
-	flag.BoolVar(
-		&config.cachedReads,
-		"cached-reads",
-		false,
-		"share persisted manifest and closure reads per EB; clone returned transactions",
-	)
-	flag.StringVar(&config.cpuProfile, "cpuprofile", "",
-		"write a CPU profile of the measured workload, excluding prepopulation")
-	flag.StringVar(
-		&config.heapProfile,
-		"heapprofile",
-		"",
-		"write an unforced final heap profile and sample runtime memory; diagnostic runs only",
-	)
-	flag.Parse()
-	return config
 }
 
 func validateConfig(config benchConfig) error {
@@ -290,7 +295,7 @@ func validateConfig(config benchConfig) error {
 	}
 	if minRequest := minRequestBytes(config); config.requestBytes < minRequest {
 		return fmt.Errorf(
-			"invalid benchmark configuration: -request-bytes %d is below one job (%d bytes)",
+			"invalid benchmark configuration: -leiosdb.request-bytes %d is below one job (%d bytes)",
 			config.requestBytes,
 			minRequest,
 		)
@@ -361,7 +366,7 @@ func (g *pruneGuard) end(slot uint64) {
 }
 
 func printBenchInfo(config benchConfig, dir string) {
-	background := "None (-burst to turn on)"
+	background := "None (-leiosdb.burst to turn on)"
 	if config.burst {
 		background = fmt.Sprintf(
 			"%d EBs every %s (%s)",
@@ -411,7 +416,7 @@ func printBenchInfo(config benchConfig, dir string) {
 		"  Default Txs requests reload the stored transaction list, then slice it.",
 	)
 	fmt.Println(
-		"  -cached-reads shares the first persisted read per EB; later reads reuse it.",
+		"  -leiosdb.cached-reads shares the first persisted read per EB; later reads reuse it.",
 	)
 	fmt.Println(
 		"  This models cached storage reads, not the protocol cache or wire encoding.",
@@ -983,5 +988,95 @@ func appendCborHead(dst []byte, major byte, value uint64) []byte {
 		dst = append(dst, prefix|27, 0, 0, 0, 0, 0, 0, 0, 0)
 		binary.BigEndian.PutUint64(dst[len(dst)-8:], value)
 		return dst
+	}
+}
+
+type ebReadCache struct {
+	manifest func() ([]byte, error)
+	txs      func() ([]cbor.RawMessage, error)
+}
+
+type ebReader interface {
+	GetLeiosEBManifest([]byte, uint64) ([]byte, error)
+	GetLeiosEBTxs([]byte, uint64) ([]cbor.RawMessage, error)
+}
+
+func newEBReadCache(db ebReader, hash []byte, slot uint64) *ebReadCache {
+	// Each cache belongs to one committed occurrence, not just its hash.
+	hash = slices.Clone(hash)
+	return &ebReadCache{
+		manifest: sync.OnceValues(func() ([]byte, error) {
+			return db.GetLeiosEBManifest(hash, slot)
+		}),
+		txs: sync.OnceValues(func() ([]cbor.RawMessage, error) {
+			return db.GetLeiosEBTxs(hash, slot)
+		}),
+	}
+}
+
+func readEBTxs(
+	db *database.Database,
+	eb *benchEb,
+	slot uint64,
+	rng txRange,
+) ([]cbor.RawMessage, error) {
+	var txs []cbor.RawMessage
+	var err error
+	if eb.readCache == nil {
+		txs, err = db.GetLeiosEBTxs(eb.hash, slot)
+	} else {
+		txs, err = eb.readCache.txs()
+	}
+	if rng.end == -1 {
+		rng.end = len(txs)
+	}
+	if err != nil || rng.start < 0 || rng.end < rng.start ||
+		len(txs) < rng.end {
+		return nil, err
+	}
+	txs = txs[rng.start:rng.end]
+	if eb.readCache != nil {
+		// Serving must not hand out mutable aliases into the shared closure.
+		return txresponse.Clone(txs), nil
+	}
+	return txs, nil
+}
+
+func startMemoryProfile(path string) func() error {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		var peakAllocated, peakInUse, peakRetained uint64
+		for {
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			peakAllocated = max(peakAllocated, stats.HeapAlloc)
+			peakInUse = max(peakInUse, stats.HeapInuse)
+			peakRetained = max(peakRetained, stats.Sys-stats.HeapReleased)
+			select {
+			case <-stop:
+				fmt.Fprintf(os.Stderr,
+					"Memory diagnostic (bytes): peak_alloc=%d peak_inuse=%d "+
+						"peak_runtime_retained=%d final_alloc=%d "+
+						"final_idle=%d final_released=%d gc_cycles=%d\n",
+					peakAllocated, peakInUse, peakRetained, stats.HeapAlloc,
+					stats.HeapIdle, stats.HeapReleased, stats.NumGC)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return func() error {
+		close(stop)
+		<-done
+		// Do not force a collection: it changes the workload's retained heap.
+		file, err := os.Create(path)
+		if err != nil {
+			return fmt.Errorf("create heap profile: %w", err)
+		}
+		return errors.Join(pprof.WriteHeapProfile(file), file.Close())
 	}
 }
