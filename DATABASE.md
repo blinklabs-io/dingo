@@ -98,6 +98,13 @@ statistics were taken after; nothing writes it now. Mithril ready-state cleanup
 still leaves the row in place alongside the deferred-index marker, and the MCP
 maintenance status reports whether the store it reads holds one.
 
+A transaction on the ledger's database has no SQL connection that observes its
+context. `Txn.Do` therefore checks the context given to `Database.Transaction`
+or `NewTxn` before it runs the function, and rolls back and returns the
+context's error when it is already cancelled, as a metadata transaction does
+when it cannot take a connection. Blob reads and writes inside the function
+still do not observe cancellation.
+
 SQLite reward live stake rebuilds from running totals analyze the transaction
 and application tables before joining delegation certificates to transactions. Batched rebuilds
 reload the statistics on each batch's transaction connection before preparing
