@@ -339,6 +339,7 @@ type Config struct {
 	blockProducerPools                                                                  []BlockProducerPool
 	shelleyKESAgentPlaintext                                                            bool
 	shelleyKESAgentProfile                                                              string
+	shelleyKESAgentShared                                                               bool
 	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -681,8 +682,31 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
 				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
 				"WithShelleyKESAgentRemote, WithShelleyKESAgentPlaintext and " +
-				"WithShelleyKESAgentProfile; set them in each pool",
+				"WithShelleyKESAgentProfile and WithShelleyKESAgentShared; set them in each pool",
 		)
+	}
+	if n.config.cfg.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+		n.config.cfg.ShelleyKESAgentMode,
+		n.config.cfg.ShelleyKESAgentSocket,
+		n.config.cfg.ShelleyKESAgentAddress,
+		n.config.cfg.ShelleyKESAgentAddresses,
+	) {
+		return errors.New(
+			"WithShelleyKESAgentShared requires a KES agent in sign mode",
+		)
+	}
+	for i, pool := range n.config.cfg.BlockProducerPools {
+		if pool.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+			pool.ShelleyKESAgentMode,
+			pool.ShelleyKESAgentSocket,
+			pool.ShelleyKESAgentAddress,
+			pool.ShelleyKESAgentAddresses,
+		) {
+			return fmt.Errorf(
+				"WithShelleyKESAgentShared on blockProducerPools[%d] requires a KES agent in sign mode",
+				i,
+			)
+		}
 	}
 	for name, v := range map[string]int{
 		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
@@ -838,6 +862,22 @@ func (n *Node) configValidate() error {
 		}
 	}
 	return nil
+}
+
+func sharedKESAgentUsesSignMode(
+	mode, socket, address string,
+	addresses []string,
+) bool {
+	hasRemote := address != "" || len(addresses) > 0
+	if mode == "" {
+		switch {
+		case hasRemote:
+			mode = "sign"
+		case socket != "":
+			mode = "serve-key"
+		}
+	}
+	return mode == "sign" && (socket != "" || hasRemote)
 }
 
 // ConfigOptionFunc is a type that represents functions that modify the Connection config
@@ -1107,6 +1147,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.shelleyKESAgentProfile = c.cfg.ShelleyKESAgentProfile
+	c.shelleyKESAgentShared = c.cfg.ShelleyKESAgentShared
 	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -2016,7 +2057,8 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
 // WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
 // WithShelleyKESAgentMode, WithShelleyKESAgentRemote,
-// WithShelleyKESAgentPlaintext and WithShelleyKESAgentProfile options; New
+// WithShelleyKESAgentPlaintext, WithShelleyKESAgentProfile and
+// WithShelleyKESAgentShared options; New
 // refuses a config that sets any of them beside the pools.
 // WithShelleyKESAgentSignTimeout and WithShelleyKeyWatchInterval apply to
 // every pool.
@@ -2055,6 +2097,17 @@ func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
 func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentProfile = profile
+	}
+}
+
+// WithShelleyKESAgentShared marks a sign-mode KES agent as shared by another
+// producer for the same pool (CARDANO_SHELLEY_KES_AGENT_SHARED). Shared-agent
+// producers forge only while a live upstream connection is selected, so a
+// disconnected producer cannot consume the agent's first signature for a slot
+// on a stale parent. False preserves solo-producer behavior.
+func WithShelleyKESAgentShared(shared bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentShared = shared
 	}
 }
 
@@ -3052,7 +3105,8 @@ func (c *Config) DatabaseQueueSize() int {
 	return c.cfg.DatabaseQueueSize
 }
 
-// BackfillBatchSize returns the batch size for database backfill operations.
+// BackfillBatchSize returns the configured backfillBatchSize. The setting has
+// no effect; it is kept so existing configurations keep loading.
 func (c *Config) BackfillBatchSize() int {
 	return c.cfg.BackfillBatchSize
 }

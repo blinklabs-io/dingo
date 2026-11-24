@@ -81,7 +81,12 @@ func (ls *LedgerState) VerifyPeerHeaderAncestry(
 		if snapshot == nil {
 			return errHeaderVerificationContextUnavailable
 		}
-		if err := ls.validateChainSelectionHeaderCrypto(ctx, conn, header, true); err != nil {
+		// Take the per-peer lock: this check rewrites the same fork-path
+		// cache entry as peer header validation, and a repair interleaved
+		// between its opcert counters and its commit aborts the check.
+		if err := ls.validatePeerChainSelectionHeaderCrypto(
+			ctx, conn, header,
+		); err != nil {
 			return err
 		}
 		target := ochainsync.Tip{

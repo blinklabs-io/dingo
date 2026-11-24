@@ -1007,6 +1007,8 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"               envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"             envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	// BackfillBatchSize is accepted for configuration compatibility and has
+	// no effect: the IndexerDB writer sizes its own batches.
 	BackfillBatchSize int `yaml:"backfillBatchSize"             envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop that reads blocks back from the primary chain and applies
@@ -1207,14 +1209,21 @@ type Config struct {
 	// several pools on one listener binds each session to the profile it
 	// names; one with a single profile needs none.
 	ShelleyKESAgentProfile string `yaml:"shelleyKesAgentProfile"           envconfig:"SHELLEY_KES_AGENT_PROFILE"`
+	// ShelleyKESAgentShared marks a sign-mode agent as shared with another
+	// producer for the same pool. A shared signer makes the first header it
+	// receives for a slot authoritative, so this producer forges only while it
+	// has a live upstream connection. The default is false, preserving solo
+	// producer behavior.
+	ShelleyKESAgentShared bool `yaml:"shelleyKesAgentShared"            envconfig:"SHELLEY_KES_AGENT_SHARED"`
 	// BlockProducerPools lists every pool this block producer forges for,
 	// each with its own VRF key, operational certificate and KES source. It
 	// replaces the single-pool shelleyVrfKey, shelleyKesKey,
 	// shelleyOperationalCertificate, shelleyKesAgentSocket,
 	// shelleyKesAgentMode, shelleyKesAgentAddress,
 	// shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile,
-	// shelleyKesAgentServerSpkiSha256, shelleyKesAgentPlaintext and
-	// shelleyKesAgentProfile settings above, which stay the way to configure
+	// shelleyKesAgentServerSpkiSha256, shelleyKesAgentPlaintext,
+	// shelleyKesAgentProfile and shelleyKesAgentShared settings above, which
+	// stay the way to configure
 	// one pool; shelleyKesAgentSignTimeout and shelleyKeyWatchInterval apply
 	// to every pool. It is set in YAML or with dingo.WithBlockProducerPools, and is not
 	// read from the environment.
@@ -2976,6 +2985,7 @@ type BlockProducerPool struct {
 	ShelleyKESAgentAddresses        []string `yaml:"shelleyKesAgentAddresses"`
 	ShelleyKESAgentPlaintext        bool     `yaml:"shelleyKesAgentPlaintext"`
 	ShelleyKESAgentProfile          string   `yaml:"shelleyKesAgentProfile"`
+	ShelleyKESAgentShared           bool     `yaml:"shelleyKesAgentShared"`
 }
 
 // isZero reports whether no key setting of the pool is set.
@@ -2989,7 +2999,8 @@ func (p *BlockProducerPool) isZero() bool {
 		p.ShelleyKESAgentServerSPKISHA256 == "" &&
 		len(p.ShelleyKESAgentAddresses) == 0 &&
 		!p.ShelleyKESAgentPlaintext &&
-		p.ShelleyKESAgentProfile == ""
+		p.ShelleyKESAgentProfile == "" &&
+		!p.ShelleyKESAgentShared
 }
 
 // RemoteAgentAddresses returns the pool's remote agents in order:
@@ -3040,5 +3051,6 @@ func (c *Config) singlePool() BlockProducerPool {
 		ShelleyKESAgentAddresses:        c.ShelleyKESAgentAddresses,
 		ShelleyKESAgentPlaintext:        c.ShelleyKESAgentPlaintext,
 		ShelleyKESAgentProfile:          c.ShelleyKESAgentProfile,
+		ShelleyKESAgentShared:           c.ShelleyKESAgentShared,
 	}
 }

@@ -947,7 +947,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BackfillBatchSize",
 		"backfill-batch-size",
-		"API-mode metadata backfill block batch size",
+		"accepted for configuration compatibility; has no effect",
 	),
 	boolFlag(
 		"BlockPipelineEnabled",
@@ -1063,6 +1063,11 @@ var flagSpecs = []flagSpec{
 		"shelley-kes-agent-profile",
 		"",
 		"remote KES agent profile to sign for, named when the agent admits a session",
+	),
+	boolFlag(
+		"ShelleyKESAgentShared",
+		"shelley-kes-agent-shared",
+		"require a live upstream before using this sign-mode KES agent because another producer shares it",
 	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
