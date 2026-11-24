@@ -22,9 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
-// defaultKoiosParityCacheSubdir mirrors cmd/koios-parity's own
-// defaultCacheSubdir default so the in-process observer and the standalone
-// CLI agree on where an unconfigured cache.db lives under a data directory.
+// defaultKoiosParityCacheSubdir is where an unconfigured cache.db lives under
+// the data directory.
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
 // koiosParitySource builds the observer's source over the node's own stores

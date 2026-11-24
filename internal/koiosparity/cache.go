@@ -1791,8 +1791,7 @@ func (c *Cache) GetEpochsMissingParams(
 	// preprod /epoch_params?_epoch_no=0 and _epoch_no=1 both return [] — so
 	// without this filter they would be selected for parameter backfill on
 	// every run forever, fail the fetch as a transient error, and land in
-	// FailedEpochs permanently, which cmd/koios-parity turns into a hard
-	// error that skips the check phase.
+	// FailedEpochs permanently.
 	rows, err := c.db.Query(
 		`SELECT i.epoch FROM koios_epoch_info i
 		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
@@ -3281,13 +3280,6 @@ func MarshalPoolList(pools []string) string {
 		return "[]"
 	}
 	return string(b)
-}
-
-// UnmarshalPoolList decodes a JSON string from DB storage to a pool ID slice.
-func UnmarshalPoolList(s string) []string {
-	var pools []string
-	_ = json.Unmarshal([]byte(s), &pools)
-	return pools
 }
 
 func migrateSignificantMismatchCounts(db *sql.DB) error {

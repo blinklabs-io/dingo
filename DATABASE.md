@@ -3975,7 +3975,7 @@ Readers outside the ledger's LedgerDB:
 |---|---|
 | MCP tools | With a ledger state the tools read through its LedgerDB. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
-| `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
+| `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries the IndexerDB's SQL tables directly (`<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
 
 ### Live UTxO set failure and recovery

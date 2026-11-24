@@ -23,7 +23,6 @@ go.work
 # Program binary
 /dingo
 /bin/dingo
-/koios-parity
 /node-parity
 
 # Local data directory

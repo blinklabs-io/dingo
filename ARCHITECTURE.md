@@ -18368,23 +18368,21 @@ any other role yields the base address pairing key `role/index` with staking
 key `2/0`, on the node's network. Public derivation cannot reach a hardened
 index, so a role or index of 2^31 or more is rejected with HTTP 400.
 
-### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
+### Koios Parity Tracker (`internal/koiosparity/`)
 
-An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview, preprod and mainnet networks. On mainnet the account
-phase's `/account_list` crawl alone is several thousand requests, more than the
-public tier's daily allotment, so a mainnet run needs a Koios API key. Its
-original, still-supported form is a standalone binary built from
-`cmd/koios-parity/` that polls a separately synced copy of Dingo's metadata
-database. Dingo also has a second, in-process mode — an epoch-boundary observer
-the node itself can register from its own `Run()` composition — described in its
-own subsection below; both modes share the same `internal/koiosparity`
-comparison logic (`compare.go`/`check.go`) so a mismatch means the same thing
-either way.
+Validates Dingo's closed-epoch reward inputs against Koios reference data on
+preview, preprod and mainnet networks. On mainnet the account phase's
+`/account_list` crawl alone is several thousand requests, more than the public
+tier's daily allotment, so a mainnet run needs a Koios API key. It runs inside
+the node as an epoch-boundary observer, registered from the node's own `Run()`
+composition when `koiosParity` is enabled in the node configuration, and
+described in its own subsection below. There is no separate binary; the
+comparison logic (`compare.go`/`check.go`) is the same for every caller of the
+package.
 
 The observer separately selects its ERROR epochs for startup retries even when
-reference data has not changed; CLI freshness selection keeps its existing
-contract. Each observer queue retries its own ERROR outcomes after at least
+reference data has not changed. Each observer queue retries its own ERROR
+outcomes after at least
 `ObserverConfig.ErrorRetryDelay` (five minutes by default), without needing a
 new epoch transition. A completed non-ERROR check removes that pending retry.
 Fetch and check failures persist the affected queue's ERROR status before
@@ -18413,16 +18411,13 @@ internal/koiosparity/      # shared library
   fetch_accounts.go        # per-account Koios fetch (address-universe union), checkpointed resume
   account_chunk.go         # count+size bounded, content-addressed address chunking
   check.go                 # parity check orchestration (pool-level + per-account comparison + zero-reward/lifecycle)
-  report.go                # human-readable status + JSON report generation
-
-cmd/koios-parity/          # thin Cobra CLI wrapper
-  main.go                  # root command (default action: fetch+check+status)
-  run.go, fetch.go, check.go, status.go, explain.go, watch.go
+  observer.go              # in-process epoch-boundary observer
 ```
 
 **Data sources:**
 - **Reference (Koios):** fetched once into `cache.db` (default
-  `.koios/cache.db`) via the `fetch` subcommand. The cache holds
+  `{DatabasePath}/.koios/cache.db`) by the observer's fetch phase. The cache
+  holds
   `koios_epoch_info`, `koios_pool_epoch`, `koios_totals`, and
   `koios_epoch_params` rows per closed epoch, storing the full documented
   `/epoch_info`, `/pool_history`, and `/totals` field sets (not just the subset
@@ -18434,7 +18429,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   parameter". `cost_models` is stored as canonical JSON (`encoding/json` sorts
   the language keys) and compared entry for entry; the Conway governance
   parameters are deliberately not fetched. See the coverage table below.
-  `cache.db` is this tool's own private cache, not part of Dingo's own metadata
+  `cache.db` is the observer's own private cache, not part of Dingo's own
+  metadata
   schema — `DATABASE.md` does not (and need not) document it. It also holds
   `koios_account_rewards` (one row per `(network, epoch, stake_address,
   reward_type)` from `/account_reward_history` — widened to include
@@ -18449,7 +18445,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   validity verdict its `Consumed`/`Produced` need; the reference inputs serve
   only the in-process observer's transaction sample, below). That table is
   written by `cmd/node-parity from-genesis` and by that sample, not by the
-  `fetch` subcommand, and unlike the
+  epoch fetch, and unlike the
   per-epoch tables it needs no TTL — a settled transaction never changes
   Koios-side. A `payload_version` column stands in for one: it stamps the struct
   shape each row was written from, and rows carrying an older version are
@@ -18457,45 +18453,14 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   did not previously ask for.
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
-  supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
-  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` or
-  `--metadata-dsn-file` (explicit overrides) fall back to Dingo's own resolved
-  `plugins.storage.metadata` selection — loaded via `internal/config.LoadConfig`
-  (`--dingo-config`, or the same `~/.dingo/dingo.yaml`/`/etc/dingo/dingo.yaml`
-  search Dingo itself does), which applies
-  `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER`/`_CONFIG_*` the same way the real
-  node does — then default to `sqlite`. The data directory likewise falls back
-  through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only overrides) to
-  Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or `dingo.yaml`),
-  then `.dingo`. Dingo's configuration is loaded only for a value the flags
-  leave unset: the backend when `--metadata-plugin` is absent, the DSN of a
-  `postgres`/`mysql` backend when neither DSN flag is passed (a DSN flag passed
-  empty still counts as set and clears the configured DSN), and the data
-  directory of a `sqlite` backend when `--dingo-data` and `DINGO_DATA_DIR` are
-  absent. Only `sqlite` reads the data directory. If the configuration is needed
-  and fails to load (for example a plugin `_FILE` variable naming a missing
-  file), the command fails rather than falling back to defaults, which would
-  inspect a different database.
+  supported (`sqlite`, `postgres`, `mysql`). The observer reads through
+  `DatabaseSource`; `DingoDB` (`dingo_db.go`) reads a metadata database over
+  `database/sql`, read-only:
   - `sqlite`: opens `{data-dir}/indexer/metadata.sqlite`, the IndexerDB, in
     read-only WAL mode. The ledger's own store holds no ledger state to
     compare, and a metadata plugin `dataDir` override, which moves only that
     store, is not consulted
-  - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
-    DSN is assembled from discrete host/port/user/password/database/sslMode/
-    timeZone fields, defaulting any field left unset to that provider's own
-    `RegisterProvider` descriptor default (e.g. postgres:
-    `host=localhost user=postgres dbname=postgres sslmode=require`; mysql:
-    `host=localhost user=root database=dingo`) and building the connection
-    string the same way `database/plugin/metadata/{postgres,mysql}`'s own
-    `Start()` does (mysql via `go-sql-driver/mysql`'s own `Config`/
-    `FormatDSN`, so query-parameter encoding matches exactly). Selecting
-    `postgres`/`mysql` with no config section at all (or one missing every
-    discrete field) is valid Dingo configuration — the provider applies its
-    own complete defaults — so `dsnFromMetadataConfig` always resolves to a
-    working DSN for those two plugins rather than returning `""` and tripping
-    `dingo_db.go`'s `--metadata-dsn is required` error; that error remains as
-    a defensive check for direct `OpenDingoDB` callers that bypass this
-    resolution entirely.
+  - `postgres` / `mysql`: `OpenDingoDB` requires an explicit DSN.
 
   Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
   `reward_pool_output` (per-pool `member_reward_total`, merged into the same
@@ -18508,9 +18473,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
   **Coverage contract.** A `PASS` means only that every **exact-match** and
   **derived-match** field below matched. It does not claim parity for fields
-  classified as **intentionally-incomparable** or **unsupported**. The same
-  field-level matrix is emitted in every JSON report, and human-readable
-  status output reports the class counts.
+  classified as **intentionally-incomparable** or **unsupported**.
   `TestArchitectureDocumentsKoiosCoverageMatrix` (`internal/docsparity/`)
   compares the endpoint, field and classification of every row in the table
   below against that matrix in both directions, so a reclassified, added, or
@@ -18775,8 +18738,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   downgrading coverage mid-check cannot leave `member_rewards` unexamined while
   the account scope passes. A failed read of Dingo's pool data, which leaves
   `member_rewards` unexamined, is a `dingo_db_error` in the account scope as
-  well as the aggregate one. With account checking off (the standalone CLI
-  without `--accounts`), member rewards are therefore not checked at all. Where
+  well as the aggregate one. With account checking off, member rewards are
+  therefore not checked at all. Where
   `pool_history.member_rewards` disagrees with Koios's own per-account sum, the
   pool is recorded under the informational category
   `koios_pool_history_inconsistent`, carrying both Koios values. It never fails
@@ -19065,41 +19028,19 @@ than one epoch before the epoch stays `pool_only_dingo`, since the
 and a pool retiring at e still has rows at e and e+1; registered with
 persistently empty history
 leaves the reference incomplete, so the epoch is recorded `ERROR` and retried
-without calling `FatalFunc`. The standalone `check` command reads only the cache
-and does not do this reconciliation.
-
-`check` and the default `run` command return a non-nil error (surfaced as a
-non-zero process exit) whenever any epoch comes back `FAIL` or `ERROR`. This
-is based on the *persisted* `check_epoch_status` for the run's scope
-(`EffectiveCheckOutcome`, restricted to `--from-epoch`/`--through-epoch` when
-given), not just epochs freshly (re)checked during this invocation — a prior
-FAIL/ERROR whose reference row is still fresh (so `Check` found nothing
-needing rechecking and did no fresh work at all) must still surface, or
-CI/automation could mistake an already-known failure for success just because
-nothing new happened to fail this run. `watch`'s continuous loop only advances
-its own resume cursor
-past an epoch range once `fetch` reports no `FailedEpochs` and `check` reports
-no `ErrorEpochs` for it — `ERROR` (`dingo_db_error`/`dingo_db_missing`/
-`reference_lag`) and an isolated fetch failure are typically transient
-(a snapshot still being computed, or Dingo lagging Koios), so the range is
-retried on the next tick instead of being cached as permanently skipped. A
-`FAIL` (a real, confirmed mismatch) does not hold the cursor back, since
-retrying it every tick would not change the outcome.
-
-**Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+without calling `FatalFunc`. `Check` reads only the cache and does not do this
+reconciliation.
 
 #### In-process epoch-boundary observer
 
-The standalone CLI above polls a metadata database that was populated by a
-*separate* Dingo process — real, but structurally a second, independently
-synced copy of the truth. This mode has the node validate
+The observer has the node validate
 its own committed reward state as it advances, with no export step and no
 second sync:
 
 - **`RewardParitySource`** (`internal/koiosparity/source.go`) is the
   interface `check.go`'s comparison functions (`checkEpoch`/`CheckEpoch`)
-  consume instead of a concrete `*DingoDB`. `DingoDB` (the standalone CLI's
-  read-only `database/sql` connection to a separate database file) and
+  consume instead of a concrete `*DingoDB`. `DingoDB` (a
+  read-only `database/sql` connection to a metadata database) and
   `DatabaseSource` (below) both implement it, so the comparison logic itself
   is identical regardless of which one backs a given run.
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it wraps
@@ -19185,11 +19126,11 @@ second sync:
     restore the unbounded check, which fatal-shuts-down a fresh
     Mithril-bootstrapped node at epoch 2, on exactly the node whose
     boundary could not be confirmed. `DingoDB` carries its
-    own copy of that slot-to-epoch SQL for the standalone CLI, bounded at
+    own copy of that slot-to-epoch SQL, bounded at
     both ends exactly as the store query is, with
     `TestGetEarliestAvailableEpochImplementationsAgree` pinning the two
     together. `checkEpoch` applies the same bound directly
-    (independent of whether an epoch was ever seeded), so a standalone
+    (independent of whether an epoch was ever seeded), so a direct
     `Check` run against an already-fetched cache is covered too, not just
     the in-process observer's own backlog seeding.
   - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
@@ -19400,8 +19341,8 @@ second sync:
     returns the error rather than swallowing it, the check aborts on it, and
     `deferForHistory` persists the queue's ERROR status and retries the epoch
     after `ErrorRetryDelay` without emitting a result or calling
-    `FatalFunc`. The standalone `check` CLI reads through `DingoDB`, which
-    does not implement the interface, so it skips this comparison.
+    `FatalFunc`. `DingoDB` does not implement the interface, so a check
+    through it skips this comparison.
   - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this, a
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
@@ -19430,9 +19371,9 @@ second sync:
     already use), so the label can never drift from the persisted `Status`.
     `ObserverConfig .PromRegistry`, wired from `node_koiosparity.go`'s
     `n.config.promRegistry`, follows every other component's own `PromRegistry`
-    field; `newMetrics` returns nil for a nil registerer (the standalone
-    `cmd/koios-parity` CLI, and any test that builds an `ObserverConfig` without
-    one), and every `recordResult` call tolerates a nil receiver. A live
+    field; `newMetrics` returns nil for a nil registerer (any test that
+    builds an `ObserverConfig` without one), and every `recordResult` call
+    tolerates a nil receiver. A live
     restore/truncate re-runs `startKoiosParityObserver` against the same
     registry, so `newMetrics` reuses already-registered collectors instead of
     registering them again.
@@ -19525,27 +19466,22 @@ second sync:
 Extends the pool-level comparison above to a complete, exact, per-reward-
 account check: every relevant stake address, every closed epoch, compared as
 exact integer lovelace with no rounding/sampling/tolerance/aggregate-only
-shortcut. This is opt-in for both the standalone CLI and the in-process
-observer's underlying library calls, but **defaults to enabled for the
+shortcut. This is opt-in for the observer's underlying library calls, but
+**defaults to enabled for the
 in-process observer** (`ObserverConfig.AccountsEnabled`, wired from
 `KoiosParityConfig.Accounts` / `DefaultKoiosParityConfig`, mirroring
 `Strict`'s own "on once you opt into the feature at all" default) — the
 continuously-driven in-process path is the operationally-real one,
-so it gets the complete check by default; the
-standalone CLI's `--accounts` flag (`cmd/koios-parity`) stays opt-in-only
-since per-account fetching issues substantially more Koios requests than
-pool-level fetching (one chunked request set covering the full address
-universe per epoch, versus one request per pool). The public
+so it gets the complete check by default, although per-account fetching
+issues substantially more Koios requests than pool-level fetching (one chunked
+request set covering the full address universe per epoch, versus one request
+per pool). The public
 `dingo.KoiosParityConfig.Accounts` field is `*bool`, not `bool` — a plain
 bool's zero value (`false`) would be indistinguishable from an explicit
 opt-out, silently defeating the documented "defaults to true" behavior for
 any caller (including `internal/node`'s own composition) that builds a
 `KoiosParityConfig` without setting it explicitly; `nil` means "apply the
 default," matching `internal/config.DefaultKoiosParityConfig`.
-`cmd/koios-parity`'s own `--accounts`/`KOIOS_PARITY_ACCOUNTS` precedence
-follows CLAUDE.md's CLI > env rule via `cmd.Flags().Changed("accounts")`: an
-explicitly-set `--accounts=false` always wins over the environment variable,
-never the reverse.
 
 - **Account universe.** `BuildAccountAddressUniverse`
   (`fetch_accounts.go`) unions two sources for a given Koios reporting epoch:
@@ -19560,9 +19496,7 @@ never the reverse.
   real `acct_only_dingo`-or-`acct_only_koios` mismatch (whichever side is
   missing) rather than silently never being checked, mirroring why per-pool
   comparison already unions Koios's and Dingo's pool sets. `source` may be
-  `nil` (the standalone CLI's `fetch` invoked without `--metadata-*`
-  configured for accounts) — the universe then falls back to Koios's list
-  alone.
+  `nil`; the universe then falls back to Koios's list alone.
 
   The Koios half is cached in `koios_account_universe`, keyed by network, and
   reused across epochs by `ResolveKoiosAccountUniverseCached`. The crawl is 304
@@ -19621,8 +19555,8 @@ never the reverse.
   its pages into the other's set or promoting it incomplete.
 - **Koios host.** `koiosBaseURLs` maps the network to the public `*.koios.rest`
   v1 root, and `KoiosParityConfig.BaseURL` (`--koios-parity-base-url`,
-  `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url` / `KOIOS_URL` on the
-  standalone CLI) overrides it for a self-hosted or mirrored instance. A custom
+  `DINGO_KOIOS_PARITY_BASE_URL`) overrides it for a self-hosted or mirrored
+  instance. A custom
   host also drops the burst cap: `koiosBurstLimitSafe` describes koios.rest's
   own published Public/Free window and says nothing about another deployment, so
   applying it there would throttle against a limit that does not exist.
@@ -19636,10 +19570,8 @@ never the reverse.
   attach the API key as a Bearer token to every request and forged reference
   data can make a comparison report a false PASS. `AllowInsecureHTTP` is the
   local dev/test escape hatch, mirroring `Mithril.AllowInsecureHTTP` —
-  `--koios-parity-allow-insecure-http` on the node, and
-  `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
-  CLI, where an explicitly-set flag beats the environment per CLAUDE.md's CLI >
-  env rule. Outbound Koios traffic rejects loopback, private, link-local,
+  `--koios-parity-allow-insecure-http` on the node. Outbound Koios traffic
+  rejects loopback, private, link-local,
   multicast, and other special-use destinations at the initial URL, after every
   redirect, and again after DNS resolution immediately before dialing. The
   transport dials the validated IP directly and does not inherit environment
@@ -19648,9 +19580,8 @@ never the reverse.
   default transport cannot bypass that policy. An intentional private deployment
   requires the separate `AllowPrivateAddresses` opt-in
   (`--koios-parity-allow-private-addresses` /
-  `DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES` on the node and
-  `--koios-allow-private-addresses` / `KOIOS_ALLOW_PRIVATE_ADDRESSES` on the
-  standalone CLI); allowing plain HTTP does not imply permission to reach a
+  `DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES` on the node); allowing plain HTTP
+  does not imply permission to reach a
   private address. A custom root must also carry no query string or fragment,
   since `get` and `post` append an endpoint path and their own query to it and
   would otherwise reach a different endpoint than intended. Validation errors
@@ -19685,7 +19616,7 @@ never the reverse.
   both record and log the resolved root once at startup — `Start` rather than
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
-  the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
+  the in-process observer and says nothing on a direct `Fetch` call.
   Recording alone only invalidates the rows present when it runs, so the nine
   writes that carry the check verify, inside their own transaction, that the
   cache still holds the root this handle claimed: `CommitEpochData`,
@@ -19717,12 +19648,12 @@ never the reverse.
   source; none of them can carry a second host's answers. `UpsertEpochInfo` and
   `UpsertPoolEpoch` would, but have no callers, so wiring either up means
   giving it the check.
-  The default cache path is shared across the standalone commands and the
-  in-process observer, so an observer on one host and a `fetch --koios-url` on
-  another are a reachable pair; without the check the older
+  A cache path can be shared, for example between the observer and
+  `node-parity from-genesis --koios-cache-path`, so two clients on different
+  hosts are a reachable pair; without the check the older
   client would go on appending its host's answers under the newer host's
   marker. A handle that never recorded a source enforces nothing, which keeps
-  `status` and `explain` working against a cache someone else stamped. `Check`
+  read-only handles working against a cache someone else stamped. `Check`
   writes verdicts derived from the cache but has no client to name a source, so
   it calls `PinRecordedSource` at startup and claims whatever is recorded: the
   same re-point that discards check evidence then fails that run's three of
@@ -19876,8 +19807,7 @@ never the reverse.
   fetching would otherwise
   keep reporting a stale pool-only `PASS` with zero per-account validation
   ever attempted. Three additions close this gap, all gated on
-  `AccountsEnabled`/`cfg.Accounts` so pool-only mode (the standalone CLI's
-  default) is unaffected:
+  `AccountsEnabled`/`cfg.Accounts` so pool-only mode is unaffected:
   - `Cache.GetEpochsMissingAccountCoverage(network, from, through)` returns
     epochs that already have a `koios_epoch_info` row but whose
     `koios_account_coverage` is absent or `complete = 0`. `Fetch` (`fetch.go`)
@@ -20214,16 +20144,15 @@ one of that layer's own tests passes unmodified.
   accounts" from "its rows have since been pruned" (both surface as an
   empty, error-free result); treating a pruned-empty result as a complete
   previous-epoch universe would make every current account look newly
-  registered. Only `*DingoDB` (the standalone CLI's full, unpruned copy) is
+  registered. Only `*DingoDB` (a full, unpruned copy) is
   trusted for this diff.
-- **Configuration.** `--account-chunk-size`/`--account-chunk-max-bytes`
-  (standalone CLI: `fetch`/`run`/`watch`) thread through `FetchConfig`/
+- **Configuration.** The account chunk bounds thread through `FetchConfig`/
   `ObserverConfig` the same way `GraceHours` already does, down to
   `dingo.KoiosParityConfig.AccountChunkSize`/`AccountChunkMaxBytes` and
   `internal/config.KoiosParityConfig`'s matching YAML/env fields
   (`DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE`/`_MAX_BYTES`) for the in-process
   observer. 0 for either (the default) selects the package default —
-  existing `--accounts` behavior is unchanged unless explicitly tuned.
+  existing account behavior is unchanged unless explicitly tuned.
 
 ### Node Parity (`cmd/node-parity/`, `internal/nodeparity/`)
 
@@ -20451,10 +20380,9 @@ discard a cycle over once a point is explicitly named.
 
 **Design: on-demand `check`, plus `watch` in one of two modes.** `check` runs
 one full comparison cycle and exits non-zero on divergence or a discarded
-cycle. `watch` originally polled on a fixed `--interval` matching
-`cmd/koios-parity`'s own shape, but that meant a 15-minute gap left roughly 45
+cycle. A fixed polling interval would leave a 15-minute gap of roughly 45
 blocks (at ~20s each) completely unchecked between cycles — acceptable for
-koios-parity, whose epoch-closed reward data only changes once an epoch, but
+Koios parity, whose epoch-closed reward data only changes once an epoch, but
 not for block-level ledger state, which changes every block. `watch`'s
 `--mode=full` now follows both nodes' live chains instead (`nodeparity.Watcher`,
 one persistent ChainSync session per node) and runs a full `Check` the moment
@@ -22031,11 +21959,9 @@ source setting both fails startup.
 Presence counts as set, even when empty: a YAML key, a defined environment
 variable, or a flag passed on the command line.
 `LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
-the remaining file paths once every source is merged and clears them. The
-`koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
-`--metadata-dsn-file` beside its literal forms, and `node-parity from-genesis`
-offers `--koios-api-key-file`; both use `secretfile.Resolve` for the same
-both-set rule.
+the remaining file paths once every source is merged and clears them.
+`node-parity from-genesis` offers `--koios-api-key-file` beside its literal
+form and uses `secretfile.Resolve` for the same both-set rule.
 
 `LoadConfig` (`internal/config`) only parses and merges the YAML and environment
 sources; it makes no semantic judgments about the merged values, because CLI
@@ -22426,7 +22352,7 @@ transient rows a released database left in `sync_state`. The boundary
 accessors branch on the database's role: an IndexerDB reads the block store
 through a view of the ledger's, so it keeps the boundary its writer recorded
 in its own `sync_state`, which is also the row the metadata store's block
-counts and the standalone Koios parity reader use.
+counts and the Koios parity `DingoDB` reader use.
 
 Both phases share one `evaluateAndPersistGates` helper
 (`database/node_settings.go`) for the read-persisted/evaluate/
