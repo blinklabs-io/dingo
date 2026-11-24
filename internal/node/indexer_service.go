@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -32,9 +33,6 @@ import (
 type IndexerService struct {
 	writer *indexer.Writer
 	store  *indexerdb.Store
-	// ledgerless is set for a service given no ledger facts: it can roll the
-	// IndexerDB back and cannot follow the ledger.
-	ledgerless bool
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -53,11 +51,8 @@ func NewIndexerService(
 		return nil, errors.New("indexer service needs both databases")
 	}
 	// An IndexerDB a release seeded from genesis holds the zero-coin Byron
-	// outputs the reference translation drops, which a replay toward a
-	// Mithril anchor would then disagree with. They go before the writer
-	// reads the IndexerDB. The seed counted their genesis transactions into
-	// the replay's count, which the anchor check compares with the
-	// applied_transaction rows, so the count loses them with the rows.
+	// outputs the reference translation drops. They go before the writer
+	// reads the IndexerDB.
 	zero, err := ledger.ZeroValueByronGenesisOutputs(deps.NodeConfig)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -65,15 +60,9 @@ func NewIndexerService(
 			err,
 		)
 	}
-	replayState, err := indexerdb.NewStore(
-		deps.Indexer, deps.Indexer, deps.MaxReadyLagBlocks,
-	)
-	if err != nil {
-		return nil, err
-	}
 	if err := ledger.RepairZeroValueByronGenesis(
 		context.Background(), deps.Indexer, zero, deps.Logger,
-		replayState.RemoveReplayTransactions,
+		func(*database.Txn, uint64) error { return nil },
 	); err != nil {
 		return nil, fmt.Errorf("repair indexer genesis outputs: %w", err)
 	}
@@ -85,15 +74,7 @@ func NewIndexerService(
 		return nil, err
 	}
 	w.WithSparseBatches()
-	// Recorded before the factory returns, so no reader finds the IndexerDB
-	// ready for a chain whose anchor it has not been told about. A single
-	// small write.
-	if err := w.Prepare(context.Background()); err != nil {
-		return nil, fmt.Errorf("record indexer anchor: %w", err)
-	}
-	return &IndexerService{
-		writer: w, store: store, ledgerless: deps.FactRows == nil,
-	}, nil
+	return &IndexerService{writer: w, store: store}, nil
 }
 
 // newIndexerWriter assembles the writer over src. Tests substitute a source
@@ -109,7 +90,17 @@ func newIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
-	facts, err := indexer.NewMetadataFacts(deps.FactRows, deps.Indexer)
+	deriver, err := indexer.NewDeriver(deps.Indexer, indexer.DeriveConfig{
+		Logger:                     deps.Logger,
+		NodeConfig:                 deps.NodeConfig,
+		MinPoolMargin:              deps.MinPoolMargin,
+		PledgeLeverageEnabled:      deps.PledgeLeverageEnabled,
+		PledgeLeverage:             deps.PledgeLeverage,
+		FullPotRewardsEnabled:      deps.FullPotRewardsEnabled,
+		DelegatorInactivityEnabled: deps.DelegatorInactivityEnabled,
+		DelegatorInactivity:        deps.DelegatorInactivity,
+		WarmGenesisStake:           deps.WarmGenesisStake,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -119,28 +110,18 @@ func newIndexerWriter(
 	}
 	bf := NewBackfill(deps.Indexer, deps.NodeConfig, deps.Logger)
 	bf.SetDelegatorInactivityEnabled(deps.DelegatorInactivityEnabled)
+	bf.SetDelegatorInactivityWindow(deps.DelegatorInactivity)
 	// The ledger stores the endorser-block data certified closures are read
 	// from; the IndexerDB sees only its own offsets.
 	bf.SetClosureSource(ledger.NewDatabaseClosureSource(deps.Consensus))
 	w := indexer.NewWriter(
 		store, src, bf, deps.Logger, batchBlocks,
 	).
-		WithFacts(facts).
+		WithDeriver(deriver).
 		WithGenesisSeed(bf.SeedGenesis).
 		WithProgress(metrics.Observe).
 		WithRollbackAncestorLost(metrics.NoRollbackAncestor).
-		WithFailureReport(metrics.RepeatedFailures).
-		WithDeferredIndexes(
-			func(ctx context.Context) error {
-				NewDeferredIndexRebuilder(ctx, deps.Indexer, deps.Logger).Drop()
-				return nil
-			},
-			func(ctx context.Context) error {
-				return NewDeferredIndexRebuilder(
-					ctx, deps.Indexer, deps.Logger,
-				).BuildAll()
-			},
-		)
+		WithFailureReport(metrics.RepeatedFailures)
 	return w, store, nil
 }
 
@@ -154,9 +135,6 @@ func (s *IndexerService) Start(ctx context.Context) error {
 	defer s.mu.Unlock()
 	if s.started {
 		return errors.New("indexer service already started")
-	}
-	if s.ledgerless {
-		return indexer.ErrNoLedger
 	}
 	s.started = true
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

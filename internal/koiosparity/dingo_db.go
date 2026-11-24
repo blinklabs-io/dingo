@@ -188,8 +188,7 @@ type DingoPoolEpochData struct {
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
 	// spendable member reward, rather than the table having been pruned out
-	// from under the read (cleanupOldSnapshots retains reward_account_output
-	// without bound only in api storage mode).
+	// from under the read.
 	SpendableMemberRewardPresent bool
 	// SpendableMemberRewardTotal is the sum of reward_account_output.amount
 	// over the stake epoch's member rows the ledger actually credits —
@@ -969,11 +968,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // hundred rows per epoch, and the observer only runs on those two networks.
 //
 // Presence is epoch-level. A pool with no spendable member row legitimately
-// earned nothing, but only if the table holds the epoch at all —
-// cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and in core mode too when the node's
-// koios-parity observer is enabled; it prunes the table to a 4-epoch window
-// otherwise, so an empty read must not be reported as a pool-wide zero.
+// earned nothing, but only if the table holds the epoch at all — a database
+// that prunes it to a 4-epoch window no longer does, so an empty read must not
+// be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
 	ctx context.Context,
 	m map[string]*DingoPoolEpochData,

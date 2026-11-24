@@ -30,7 +30,6 @@ package badgerutxo
 import (
 	"fmt"
 	"slices"
-	"sync"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -44,12 +43,12 @@ var loadedMarkers = [][]byte{
 	legacyPoolHistoryKey, registrationHistoryKey,
 	legacyRegistrationHistoryKey, genesisMIRKey, opCertsKey, legacyOpCertsKey,
 	committeeKey, governanceKey, legacyGovernanceKey, pparamUpdatesKey,
-	rewardOutputsKey, importBaselinesKey, importBaselineDelegationsKey,
+	rewardOutputsKey, importBaselinesKey,
 	witnessSlotsKey,
 	legacyWitnessSlotsKey, rewardBlocksKey, legacyRewardBlocksKey,
 	rewardInputsKey, rewardDerivedKey, closureUtxoKey, delegationsKey,
 	txIndexKey,
-	importedBlocksKey, drepHistoryLoadedKey, rewardRecordsKey,
+	importedBlocksKey, rewardRecordsKey,
 	inactivityKey, ratifyPendingKey,
 }
 
@@ -60,13 +59,10 @@ var utxoMarkers = [][]byte{
 }
 
 // valueMarkers hold values a full bootstrap resets with the rows they
-// describe. The reward consumer's marks are positions in the reward record
-// numbering, so they restart with it; the consumer's registration is not
-// listed and stays.
+// describe.
 var valueMarkers = [][]byte{
-	eraSwitchKey, snapshotSlotsKey, pparamsSeqKey, syntheticV2Key, syntheticV2ClearedKey,
-	governanceSeqKey, rewardSeqKey, rewardConsumedKey, rewardConsumedSlotKey,
-	exportFloorKey,
+	eraSwitchKey, pparamsSeqKey, syntheticV2Key, syntheticV2ClearedKey,
+	governanceSeqKey,
 }
 
 var (
@@ -84,7 +80,6 @@ var (
 		{NonceTag},
 		{EpochTag},
 		{SnapshotTag},
-		{SnapshotSlotTag},
 		{SummaryTag},
 		{NetworkStateTag},
 		{DonationTag},
@@ -95,7 +90,6 @@ var (
 		{AccountDRepTag},
 		{StateJournalTag},
 		{RewardRecordTag},
-		rewardSeqIndexPrefix,
 		{DRepTag},
 		{DRepLinkTag},
 		{DormancyTag},
@@ -132,7 +126,6 @@ var (
 		{RewardDerivedTag},
 		{RewardCursorTag},
 		{ImportedBlocksTag},
-		{DRepHistoryTag},
 		{GovernanceBoundaryTag},
 		{InactivityTag},
 		{RatifyPendingTag},
@@ -150,15 +143,10 @@ func concatKeys(groups ...[][]byte) [][]byte {
 // loadSink is where a family load writes its rows: a Badger write batch.
 type loadSink struct {
 	wb *badger.WriteBatch
-	// end ends the rewrite the load is, at its Flush or Cancel.
-	end func()
 }
 
 func (s *Store) newLoadSink() *loadSink {
-	return &loadSink{
-		wb:  s.newWriteBatch(),
-		end: sync.OnceFunc(s.rewriteRows()),
-	}
+	return &loadSink{wb: s.newWriteBatch()}
 }
 
 // Set writes the row under k.
@@ -173,13 +161,11 @@ func (l *loadSink) Delete(k []byte) error {
 
 // Flush writes what is buffered.
 func (l *loadSink) Flush() error {
-	defer l.end()
 	return l.wb.Flush()
 }
 
 // Cancel discards the sink.
 func (l *loadSink) Cancel() {
-	defer l.end()
 	l.wb.Cancel()
 }
 

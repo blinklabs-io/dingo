@@ -274,7 +274,7 @@ func (s *Set) ensureRewardDerived(
 		tombstone func(slot uint64, prefix []byte) error,
 	) error {
 		for _, e := range epochs {
-			if !s.retainRewards && e.EpochId+uint64(ledger.RewardInputEpochWindow) < newest {
+			if e.EpochId+uint64(ledger.RewardInputEpochWindow) < newest {
 				continue
 			}
 			n, err := loadDerivedEpoch(ldb, txn, e.EpochId, put, tombstone)
@@ -432,12 +432,6 @@ func (s *Set) RewardCursorRow(
 	epoch uint64, asOf *uint64,
 ) ([]byte, bool, error) {
 	return s.rewardRow(badgerutxo.RewardCursorKey(epoch), asOf)
-}
-
-// RewardDerivedEpochs lists the epochs holding a pool or account output
-// row, oldest first.
-func (s *Set) RewardDerivedEpochs() ([]uint64, error) {
-	return s.store.DistinctUint64Keys([]byte{badgerutxo.RewardDerivedTag})
 }
 
 var _ ledger.RewardDerivedReader = (*Set)(nil)

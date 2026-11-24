@@ -59,11 +59,10 @@ func (n *Node) openUtxoSet() error {
 
 func (n *Node) utxoSetConfig() nodestorage.UtxoSetConfig {
 	return nodestorage.UtxoSetConfig{
-		DataDir:             n.config.dataDir,
-		Logger:              n.config.logger,
-		CardanoNodeConfig:   n.config.cardanoNodeConfig,
-		RetainRewardRecords: n.splitIndexer(),
-		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
+		DataDir:           n.config.dataDir,
+		Logger:            n.config.logger,
+		CardanoNodeConfig: n.config.cardanoNodeConfig,
+		CheckpointKeep:    n.config.ledgerUtxoCheckpointKeep,
 	}
 }
 

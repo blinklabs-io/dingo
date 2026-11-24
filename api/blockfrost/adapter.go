@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -235,14 +236,27 @@ func (a *NodeAdapter) dataTipAt(txn *database.Txn) (ochainsync.Tip, error) {
 }
 
 // rewardStakeInputsIncomplete reports whether a snapshot in [from, through)
-// still has stake inputs being written. The ledger store records that state;
-// the IndexerDB's own transaction is not valid there, so it is read from the
-// ledger store's committed state.
+// still has stake inputs being written, as the IndexerDB records it in its own
+// sync state.
 func (a *NodeAdapter) rewardStakeInputsIncomplete(
+	txn *database.Txn,
 	from uint64,
 	through uint64,
 ) (bool, error) {
-	return a.ledgerState.RewardStakeInputsIncompleteCommitted(from, through)
+	raw, err := a.db().GetSyncState(models.RewardStakeInputsPendingKey, txn)
+	if err != nil {
+		return false, err
+	}
+	entries, err := epochengine.ParseRewardStakeInputsPending(raw)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Epoch >= from && e.Epoch < through {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // db is the database API rows are read from.

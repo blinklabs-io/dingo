@@ -44,9 +44,6 @@ type UtxoSetConfig struct {
 	Logger            *slog.Logger
 	Registerer        prometheus.Registerer
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// RetainRewardRecords is set on the split layout; see
-	// utxoset.Config.RetainRewardRecords.
-	RetainRewardRecords bool
 	// CheckpointKeep is how many checkpoints the set retains.
 	CheckpointKeep int
 }
@@ -85,13 +82,12 @@ func OpenUtxoSet(cfg UtxoSetConfig) (*utxoset.Set, string, error) {
 		dataDir = tempDir
 	}
 	set, err := utxoset.Open(utxoset.Config{
-		Dir:                 utxoset.DirFor(dataDir),
-		Logger:              logger,
-		Registerer:          cfg.Registerer,
-		HistorySlots:        history,
-		Only:                true,
-		RetainRewardRecords: cfg.RetainRewardRecords,
-		Authoritative:       true,
+		Dir:           utxoset.DirFor(dataDir),
+		Logger:        logger,
+		Registerer:    cfg.Registerer,
+		HistorySlots:  history,
+		Only:          true,
+		Authoritative: true,
 		// The set is the only copy of the ledger state, so it needs a
 		// checkpoint to recover from.
 		CheckpointDir:  utxoset.CheckpointDirFor(dataDir),

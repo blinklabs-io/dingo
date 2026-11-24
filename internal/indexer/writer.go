@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"log/slog"
 	rtrace "runtime/trace"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -103,26 +101,10 @@ type IndexAborter interface {
 	AbortIndexing()
 }
 
-// RollbackFloorSetter is an optional BlockIndexer capability: the lowest slot
-// a rollback may reach, the Mithril anchor recorded in the IndexerDB. The
-// IndexerDB carries no trust boundary of its own, so the writer supplies it.
-type RollbackFloorSetter interface {
-	SetRollbackFloor(slot uint64)
-}
-
-// ErrRollbackBelowAnchor is returned for a rollback past the Mithril anchor:
-// the IndexerDB's history below it was imported, not replayed from blocks the
-// ledger still holds, and cannot be rebuilt.
-var ErrRollbackBelowAnchor = errors.New(
-	"indexer: rollback target is below the Mithril anchor",
-)
-
 // WithdrawalDebiter is an optional BlockIndexer capability: choosing whether
-// the withdrawals of the blocks it indexes debit account reward balances.
-// The writer enables it for every batch that replays the ledger's reward
-// credits, so a balance is the credits less the withdrawals, and disables it
-// for the replay up to a Mithril anchor, whose balances are set from the
-// imported state afterwards.
+// the withdrawals of the blocks it indexes debit account reward balances. The
+// writer enables it, since the reward credits it derives are what a balance
+// holds.
 type WithdrawalDebiter interface {
 	DebitWithdrawals(on bool)
 }
@@ -132,7 +114,7 @@ type Writer struct {
 	store   *indexerdb.Store
 	src     ChainSource
 	idx     BlockIndexer
-	facts   FactsSource
+	derive  *Deriver
 	genesis func(ctx context.Context, txn *database.Txn) error
 	logger  *slog.Logger
 	batch   int
@@ -156,20 +138,6 @@ type Writer struct {
 	// consecutive passes that failed with the same error, zero on success.
 	failures   func(int)
 	afterBatch func(indexerdb.Tip) // test seam: called after each committed batch
-
-	// commitSync makes the IndexerDB's commits durable; nil when they are
-	// durable on return.
-	commitSync       func(ctx context.Context) error
-	syncEveryBatches int
-	// unsynced counts the batches committed since the last durability sync.
-	unsynced int
-
-	dropIndexes  func(ctx context.Context) error
-	buildIndexes func(ctx context.Context) error
-	// failed is a verification failure at the anchor. It is returned again
-	// without redoing the work until the writer restarts, since every ledger
-	// tip signal would otherwise repeat the digest of both UTxO sets.
-	failed error
 }
 
 // NewWriter builds a writer. batchBlocks <= 0 selects DefaultBatchBlocks.
@@ -195,9 +163,6 @@ func NewWriter(
 		limit:  batchBlocks,
 		wake:   make(chan struct{}, 1),
 	}
-	if syncer, ok := store.Database().Metadata().(metadata.CommitSyncer); ok {
-		w.commitSync = syncer.SyncCommits
-	}
 	return w
 }
 
@@ -212,10 +177,11 @@ func (w *Writer) WithSparseBatches() *Writer {
 	return w
 }
 
-// WithFacts makes the writer copy ledger facts alongside blocks. Without it
-// only block-derived rows are written.
-func (w *Writer) WithFacts(f FactsSource) *Writer {
-	w.facts = f
+// WithDeriver makes the writer derive the ledger facts itself: it crosses
+// each epoch boundary of the blocks it indexes with the epoch engine, over the
+// IndexerDB's own rows.
+func (w *Writer) WithDeriver(d *Deriver) *Writer {
+	w.derive = d
 	return w
 }
 
@@ -257,17 +223,6 @@ func (w *Writer) WithGenesisSeed(
 	seed func(ctx context.Context, txn *database.Txn) error,
 ) *Writer {
 	w.genesis = seed
-	return w
-}
-
-// WithDeferredIndexes sets how the replay to a Mithril anchor drops the
-// IndexerDB's deferred indexes before it starts and builds them once it has
-// reached the anchor. Both must be idempotent: a replay resumed after a stop
-// drops again, and a build resumed after a stop builds what is missing.
-func (w *Writer) WithDeferredIndexes(
-	drop, build func(ctx context.Context) error,
-) *Writer {
-	w.dropIndexes, w.buildIndexes = drop, build
 	return w
 }
 
@@ -350,106 +305,29 @@ func isTxnTooBig(err error) bool {
 func (w *Writer) CatchUp(ctx context.Context) error {
 	w.runMu.Lock()
 	defer w.runMu.Unlock()
-	if w.failed != nil {
-		return w.failed
-	}
 	if err := w.adoptLegacyCheckpoint(ctx); err != nil {
 		return err
 	}
-	if err := w.bootstrap(ctx); err != nil {
-		if errors.Is(err, ErrAnchorMismatch) {
-			w.failed = err
-		}
-		return err
-	}
-	refreshAtTip := true
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		done, err := w.step(ctx, nil, refreshAtTip)
-		if errors.Is(err, errForked) {
-			refreshAtTip = true
-			continue
-		}
-		if errors.Is(err, errBatchShrunk) {
+		done, err := w.step(ctx)
+		if errors.Is(err, errForked) || errors.Is(err, errBatchShrunk) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
 		if done {
-			w.syncAndAck(ctx)
 			return nil
 		}
-		// The batch copied completed facts. A later reward commit wakes Run.
-		refreshAtTip = false
 	}
 }
 
-// DurableAckBatches is how many committed batches pass between durability
-// syncs while the writer is behind. A caught-up pass always syncs.
-const DurableAckBatches = 64
-
-// FactsAcker is an optional capability of a FactsSource whose ledger retains
-// what the writer has not copied. FactsCommitted notes a committed batch;
-// AckFacts releases the retention of every committed batch, and must be called
-// only once those commits are durable in the IndexerDB.
-type FactsAcker interface {
-	FactsCommitted()
-	AckFacts() error
-}
-
-// factsCommitted notes a committed batch and syncs once enough have passed.
-// The acknowledgement lets the ledger prune the records the batch copied, and
-// a commit the IndexerDB can still lose to a power failure would then be lost
-// for good, so it waits for syncAndAck.
-func (w *Writer) factsCommitted(ctx context.Context) {
-	a, ok := w.facts.(FactsAcker)
-	if !ok {
-		return
-	}
-	a.FactsCommitted()
-	w.unsynced++
-	every := w.syncEveryBatches
-	if every <= 0 {
-		every = DurableAckBatches
-	}
-	if w.unsynced >= every {
-		w.syncAndAck(ctx)
-	}
-}
-
-// syncAndAck makes the committed batches durable and acknowledges them. A
-// failure only leaves the acknowledgement pending: the ledger keeps what it
-// holds a little longer and the next sync retries.
-func (w *Writer) syncAndAck(ctx context.Context) {
-	a, ok := w.facts.(FactsAcker)
-	if !ok || ctx.Err() != nil {
-		return
-	}
-	if w.commitSync != nil {
-		if err := w.commitSync(ctx); err != nil {
-			if ctx.Err() == nil {
-				w.logger.Warn("make indexer commits durable", "error", err)
-			}
-			return
-		}
-	}
-	w.unsynced = 0
-	if err := a.AckFacts(); err != nil {
-		w.logger.Warn("acknowledge reward journal", "error", err)
-	}
-}
-
-// step indexes one batch. A non-nil ceiling is a replay to that block: the
-// ledger tip is read for reporting only, no block past the ceiling is indexed,
-// and a store with no tip is seeded with the chain's origin.
-func (w *Writer) step(
-	ctx context.Context,
-	ceiling *indexerdb.Tip,
-	refreshAtTip bool,
-) (bool, error) {
+// step indexes one batch and reports whether the IndexerDB is at the ledger's
+// tip.
+func (w *Writer) step(ctx context.Context) (bool, error) {
 	tip, err := w.store.Tip(nil)
 	if err != nil {
 		return false, fmt.Errorf("read indexer tip: %w", err)
@@ -466,31 +344,14 @@ func (w *Writer) step(
 			return false, errForked
 		}
 	}
-	ledgerTip, err := w.src.LedgerTip(ctx)
+	target, err := w.src.LedgerTip(ctx)
 	if err != nil {
 		return false, fmt.Errorf("read ledger tip: %w", err)
-	}
-	target := ledgerTip
-	if ceiling != nil {
-		target = ochainsync.Tip{
-			Point:       ocommon.NewPoint(ceiling.Slot, ceiling.Hash),
-			BlockNumber: ceiling.BlockNumber,
-		}
 	}
 	if !tip.IsZero() &&
 		(bytes.Equal(tip.Hash, target.Point.Hash) ||
 			tip.Slot > target.Point.Slot) {
-		if refresh, ok := w.facts.(FactsRefresher); ok && ceiling == nil &&
-			refreshAtTip &&
-			bytes.Equal(tip.Hash, target.Point.Hash) {
-			txn := w.store.Database().Transaction(ctx, true)
-			if err := txn.Do(func(txn *database.Txn) error {
-				return refresh.RefreshFacts(ctx, txn, tip.Slot)
-			}); err != nil {
-				return false, fmt.Errorf("refresh ledger facts at tip: %w", err)
-			}
-		}
-		w.report(tip, ledgerTip)
+		w.report(tip, target)
 		return true, nil
 	}
 	var blocks []models.Block
@@ -520,57 +381,24 @@ func (w *Writer) step(
 		BlockNumber: last.Number,
 		Hash:        last.Hash,
 	}
-	segments, err := w.segments(ctx, tip, blocks)
-	if err != nil {
-		return false, err
-	}
-	seed := false
-	if tip.IsZero() && w.genesis != nil && ceiling != nil {
-		// A replay starts at the chain's origin by construction, whatever
-		// state the ledger was later imported at.
-		seed = true
-	} else if tip.IsZero() && w.genesis != nil {
-		if gc, ok := w.src.(GenesisChain); ok {
-			if seed, err = gc.FromGenesis(ctx); err != nil {
-				return false, fmt.Errorf("read chain origin: %w", err)
-			}
-		}
-	}
+	// The chain always starts at genesis: a Mithril bootstrap is replayed
+	// from the first block, never from an imported ledger state.
+	seed := tip.IsZero() && w.genesis != nil
 	if d, ok := w.idx.(WithdrawalDebiter); ok {
-		d.DebitWithdrawals(ceiling == nil)
+		d.DebitWithdrawals(true)
 	}
 	batch := func(txn *database.Txn) error {
 		if seed {
 			if err := w.genesis(ctx, txn); err != nil {
 				return fmt.Errorf("seed genesis state: %w", err)
 			}
-			if ceiling != nil {
-				if err := w.countSeeded(ctx, txn); err != nil {
-					return err
-				}
-			}
 		}
-		for _, seg := range segments {
-			if w.facts != nil {
-				if err := w.copyFacts(ctx, txn, seg); err != nil {
-					return fmt.Errorf("copy ledger facts: %w", err)
-				}
+		if w.derive != nil {
+			if err := w.deriveAndIndex(ctx, txn, blocks); err != nil {
+				return err
 			}
-			if len(seg.blocks) > 0 {
-				if err := w.indexBlocks(ctx, txn, seg); err != nil {
-					return err
-				}
-				if ceiling != nil {
-					if err := w.countReplayed(txn); err != nil {
-						return err
-					}
-				}
-			}
-			if w.facts != nil {
-				if err := w.patchFacts(ctx, txn, seg); err != nil {
-					return fmt.Errorf("patch ledger facts: %w", err)
-				}
-			}
+		} else if err := w.indexBlocks(ctx, txn, blocks); err != nil {
+			return err
 		}
 		if err := w.store.AddCheckpoint(newTip, txn); err != nil {
 			return err
@@ -586,6 +414,9 @@ func (w *Writer) step(
 		// indexer wrote, so the state it carried between calls is stale.
 		if a, ok := w.idx.(IndexAborter); ok {
 			a.AbortIndexing()
+		}
+		if w.derive != nil {
+			w.derive.Reset()
 		}
 		// The same batch would fail the same way on every retry, so read
 		// fewer blocks. A single block that is too big cannot shrink.
@@ -618,8 +449,7 @@ func (w *Writer) step(
 	if w.reach < SparseBatchFactor {
 		w.reach = min(2*w.reach, SparseBatchFactor)
 	}
-	w.factsCommitted(ctx)
-	w.report(newTip, ledgerTip)
+	w.report(newTip, target)
 	if w.afterBatch != nil {
 		w.afterBatch(newTip)
 	}
@@ -678,55 +508,6 @@ func (w *Writer) report(tip indexerdb.Tip, ledgerTip ochainsync.Tip) {
 	if w.progress != nil {
 		w.progress(tip, ledgerTip)
 	}
-}
-
-// segment is a run of blocks inside one epoch, with the slot range of the
-// ledger facts that belong with it.
-type segment struct {
-	blocks        []models.Block
-	from, through uint64
-}
-
-// segments splits blocks at each epoch boundary the ledger crossed, so a
-// boundary's reward credits land between the blocks before and after it
-// rather than after the whole batch. Without facts the batch is one segment.
-func (w *Writer) segments(
-	ctx context.Context,
-	tip indexerdb.Tip,
-	blocks []models.Block,
-) ([]segment, error) {
-	from := uint64(0)
-	if !tip.IsZero() {
-		from = tip.Slot + 1
-	}
-	through := blocks[len(blocks)-1].Slot
-	if w.facts == nil {
-		return []segment{{blocks: blocks, from: from, through: through}}, nil
-	}
-	boundaries, err := w.facts.Boundaries(ctx, from, through)
-	if err != nil {
-		return nil, fmt.Errorf("read epoch boundaries: %w", err)
-	}
-	var out []segment
-	start, startSlot := 0, from
-	for _, b := range boundaries {
-		if b <= blocks[0].Slot {
-			continue
-		}
-		cut := start + sort.Search(len(blocks)-start, func(i int) bool {
-			return blocks[start+i].Slot >= b
-		})
-		if cut == start || cut >= len(blocks) {
-			continue
-		}
-		out = append(out, segment{
-			blocks: blocks[start:cut], from: startSlot, through: b - 1,
-		})
-		start, startSlot = cut, b
-	}
-	return append(out, segment{
-		blocks: blocks[start:], from: startSlot, through: through,
-	}), nil
 }
 
 // rollback moves the IndexerDB to a block on the canonical chain that its
@@ -831,28 +612,20 @@ func (w *Writer) moveBack(
 	ctx context.Context,
 	tip, ancestor indexerdb.Tip,
 ) error {
-	anchor, err := w.store.Anchor(nil)
-	if err != nil {
-		return fmt.Errorf("read Mithril anchor: %w", err)
-	}
-	if !anchor.IsZero() && ancestor.Slot < anchor.Slot {
-		return fmt.Errorf(
-			"%w: target slot %d, anchor slot %d",
-			ErrRollbackBelowAnchor, ancestor.Slot, anchor.Slot,
-		)
-	}
-	if f, ok := w.idx.(RollbackFloorSetter); ok {
-		f.SetRollbackFloor(anchor.Slot)
-	}
 	point := ocommon.Point{Slot: ancestor.Slot, Hash: ancestor.Hash}
 	txn := w.store.Database().Transaction(ctx, true)
-	err = txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *database.Txn) error {
+		if w.derive != nil {
+			if err := w.derive.BeforeRollback(ctx, txn, point.Slot); err != nil {
+				return err
+			}
+		}
 		if err := w.idx.RollbackTo(ctx, txn, point); err != nil {
 			return err
 		}
-		if w.facts != nil {
-			if err := w.facts.RollbackFacts(ctx, txn, point); err != nil {
-				return fmt.Errorf("roll back ledger facts: %w", err)
+		if w.derive != nil {
+			if err := w.derive.RollbackTo(ctx, txn, point.Slot); err != nil {
+				return fmt.Errorf("roll back derived facts: %w", err)
 			}
 		}
 		if err := w.store.DropCheckpointsAbove(ancestor.BlockNumber, txn); err != nil {
@@ -860,6 +633,9 @@ func (w *Writer) moveBack(
 		}
 		return w.store.SetTip(ancestor, txn)
 	})
+	if w.derive != nil {
+		w.derive.Reset()
+	}
 	if err != nil {
 		return fmt.Errorf(
 			"roll back indexer to slot %d: %w",
@@ -995,29 +771,42 @@ func withRegion(ctx context.Context, name string, fn func() error) error {
 	return fn()
 }
 
-func (w *Writer) copyFacts(
-	ctx context.Context,
-	txn *database.Txn,
-	seg segment,
-) error {
-	defer rtrace.StartRegion(ctx, tracing.RegionIndexerCopyFacts).End()
-	return w.facts.CopyFacts(ctx, txn, seg.from, seg.through)
-}
-
 func (w *Writer) indexBlocks(
 	ctx context.Context,
 	txn *database.Txn,
-	seg segment,
+	blocks []models.Block,
 ) error {
 	defer rtrace.StartRegion(ctx, tracing.RegionIndexerIndexBlocks).End()
-	return w.idx.IndexBlocks(ctx, txn, seg.blocks)
+	return w.idx.IndexBlocks(ctx, txn, blocks)
 }
 
-func (w *Writer) patchFacts(
+// deriveAndIndex indexes blocks, crossing every epoch boundary they contain
+// first: the boundary's facts are derived before the block that opens the new
+// epoch is indexed.
+func (w *Writer) deriveAndIndex(
 	ctx context.Context,
 	txn *database.Txn,
-	seg segment,
+	blocks []models.Block,
 ) error {
-	defer rtrace.StartRegion(ctx, tracing.RegionIndexerPatchFacts).End()
-	return w.facts.PatchFacts(ctx, txn, seg.from, seg.through)
+	rest := blocks
+	for len(rest) > 0 {
+		n, err := w.derive.Split(txn, rest)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			if err := w.indexBlocks(ctx, txn, rest[:n]); err != nil {
+				return err
+			}
+			rest = rest[n:]
+			continue
+		}
+		err = withRegion(ctx, tracing.RegionIndexerCopyFacts, func() error {
+			return w.derive.Cross(ctx, txn, rest[0])
+		})
+		if err != nil {
+			return fmt.Errorf("derive ledger facts: %w", err)
+		}
+	}
+	return nil
 }

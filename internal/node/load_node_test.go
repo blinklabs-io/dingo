@@ -83,7 +83,6 @@ func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 
 	set, err := utxoset.Open(utxoset.Config{
 		Dir: utxoset.DirFor(dir), Logger: logger, Only: true,
-		RetainRewardRecords: cfg.SplitIndexer(),
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()

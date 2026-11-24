@@ -78,8 +78,6 @@ type RewardDerivedReader interface {
 	RewardCursorRow(epoch uint64, asOf *uint64) ([]byte, bool, error)
 	// RewardRollbackSeq returns the durable rollback counter.
 	RewardRollbackSeq() (uint64, error)
-	// RewardDerivedEpochs lists the epochs holding a derived row.
-	RewardDerivedEpochs() ([]uint64, error)
 }
 
 // rewardDerivedReader returns the set's reader when it keeps derived reward

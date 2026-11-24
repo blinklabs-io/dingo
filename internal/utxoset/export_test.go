@@ -59,12 +59,6 @@ func (s *Set) PutSnapshotRowForTest(
 	return err
 }
 
-// IndexSnapshotSlotsForTest runs the capture index backfill of the epoch
-// state load on its own.
-func (s *Set) IndexSnapshotSlotsForTest() error {
-	return s.indexSnapshotSlots()
-}
-
 // StartEmptyForTest loads every ledger-state family empty, as Reconcile does
 // for a set that starts at origin, so a test can apply changes to a new set
 // and then reconcile it past origin.

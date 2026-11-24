@@ -70,9 +70,8 @@ func releasedOpen(
 					Blob:         blobStore,
 					OpenMetadata: openMetadata,
 					UtxoSet: nodestorage.UtxoSetConfig{
-						DataDir:             dir,
-						CardanoNodeConfig:   previewNodeConfig(t),
-						RetainRewardRecords: true,
+						DataDir:           dir,
+						CardanoNodeConfig: previewNodeConfig(t),
 					},
 					RewindBlocks: previewSecurityParam(t),
 					Hook:         hook,

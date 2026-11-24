@@ -422,19 +422,15 @@ type RewardStore interface {
 	// epoch.
 	DeleteRewardOutputsForEpoch(epoch uint64, txn Txn) error
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
-	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the Koios-parity pruning path, used so the observer
-	// can read reward_account_output behind the tip. API storage mode prunes
-	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
+	// below epoch, leaving reward_account_output intact.
 	DeleteRewardStakeInputBeforeEpoch(
 		ctx context.Context,
 		epoch uint64,
 		txn Txn,
 	) error
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
-	// retained snapshot window. This is the CORE storage-mode pruning path:
-	// it deletes both reward_stake_input and reward_account_output. See
-	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
+	// retained snapshot window, in every storage mode: it deletes both
+	// reward_stake_input and reward_account_output.
 	DeleteRewardStateBeforeEpoch(
 		ctx context.Context,
 		epoch uint64,
@@ -2120,44 +2116,4 @@ type RewardSeedFailureSlotReader interface {
 		snapshotType string,
 		txn Txn,
 	) (string, uint64, error)
-}
-
-// DRepExpiryHistoryRow is the activity and expiry epochs a DRep holds from
-// Slot on.
-type DRepExpiryHistoryRow struct {
-	Tag        uint8
-	Credential []byte
-	Slot       uint64
-	Activity   uint64
-	Expiry     uint64
-}
-
-// DRepDormancyHistoryRow is the dormancy counter in force before the change
-// at Slot.
-type DRepDormancyHistoryRow struct {
-	Slot     uint64
-	Previous uint64
-}
-
-// DRepClearRow is an account whose DRep delegation was cleared at Slot.
-type DRepClearRow struct {
-	Tag        uint8
-	StakingKey []byte
-	Slot       uint64
-}
-
-// DRepHistoryRows are the DRep history tables of the metadata store.
-type DRepHistoryRows struct {
-	Expiry   []DRepExpiryHistoryRow
-	Dormancy []DRepDormancyHistoryRow
-	// Events are the slots a dormant DRep expiry bump was applied at.
-	Events []uint64
-	Clears []DRepClearRow
-}
-
-// DRepHistoryRowsReader is implemented by a LedgerDB that lists the DRep
-// history tables. A database with no metadata store holds none and the read
-// fails with database.ErrNoMetadataStore.
-type DRepHistoryRowsReader interface {
-	DRepHistoryRows(txn Txn) (DRepHistoryRows, error)
 }

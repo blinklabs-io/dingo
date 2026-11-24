@@ -201,6 +201,12 @@ type Backfill struct {
 	// always call the setter explicitly rather than assuming the default is
 	// safe for a new call site.
 	delegatorInactivityEnabled bool
+	// delegatorInactivity is the CIP-0163 window in epochs, used when
+	// IndexBlocks renews the expirations of witnessed accounts.
+	delegatorInactivity uint64
+	// witnessed collects the accounts the blocks of one IndexBlocks call
+	// witness; it is nil outside that call.
+	witnessed *witnessedAccounts
 
 	onProgress func(BackfillProgress)
 
@@ -272,6 +278,12 @@ func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
 // recovery.
 func (b *Backfill) SetFreshDatabaseBootstrap(enabled bool) {
 	b.freshDatabaseBootstrap = enabled
+}
+
+// SetDelegatorInactivityWindow sets the CIP-0163 inactivity window in epochs
+// IndexBlocks renews witnessed accounts' expirations by.
+func (b *Backfill) SetDelegatorInactivityWindow(epochs uint64) {
+	b.delegatorInactivity = epochs
 }
 
 // SetBatchSize overrides the number of processed blocks accumulated before
@@ -1626,6 +1638,7 @@ func (b *Backfill) processBlockTxsBatched(
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
+		b.noteWitnessed(epochId, levels)
 		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(

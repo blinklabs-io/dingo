@@ -692,7 +692,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 		h.ls.ledgerDB(), nil, replayBoundaryNewEpoch, snapshot.BoundarySlot,
 	))
 
-	incomplete, err := h.ls.RewardStakeInputsIncompleteCommitted(
+	incomplete, err := h.ls.rewardStakeInputsIncompleteCommitted(
 		replayBoundaryNewEpoch, replayBoundaryNewEpoch+1,
 	)
 	require.NoError(t, err)

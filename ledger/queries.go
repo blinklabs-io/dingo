@@ -442,9 +442,6 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
-	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
-		return nil
-	}
 	poolFloor := ls.announcedPoolSnapshotPruneFloor()
 	if poolFloor > 0 {
 		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -1769,8 +1766,7 @@ func (ls *LedgerState) stakeSnapshotsAsOf(
 	if err != nil {
 		return 0, nil, err
 	}
-	apiMode := ls.ledgerDB().StorageMode() == types.StorageModeAPI
-	if err := checkAsOfEpochRecency(epoch, liveEpoch, apiMode); err != nil {
+	if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
 		return 0, nil, err
 	}
 	oldest := epoch
@@ -1779,7 +1775,7 @@ func (ls *LedgerState) stakeSnapshotsAsOf(
 	} else if setEpoch, ok := priorEpoch(epoch, 1); ok {
 		oldest = setEpoch
 	}
-	if !apiMode && liveEpoch >= stakeSnapshotRetentionEpochs &&
+	if liveEpoch >= stakeSnapshotRetentionEpochs &&
 		oldest < liveEpoch-stakeSnapshotRetentionEpochs {
 		return 0, nil, fmt.Errorf(
 			"%w: GetStakeSnapshots as of epoch %d needs the snapshot of "+

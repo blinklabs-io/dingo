@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -276,6 +277,7 @@ func runApplyMIRCertsEra(
 	epochEraID uint,
 ) {
 	t.Helper()
+	recordCredits(ls)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.engine().ApplyMIRCerts(
@@ -635,9 +637,75 @@ func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
 	assert.NotEqual(t, string(hashes[0]), string(hashes[1]))
 }
 
+// creditRecorder records the reward credits the code under test asks its
+// LedgerDB to apply, in the order it asks, and passes each on.
+type creditRecorder struct {
+	ledgerdb.LedgerDB
+	mu      sync.Mutex
+	credits []models.AccountRewardCredit
+}
+
+func (r *creditRecorder) record(c models.AccountRewardCredit) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.credits = append(r.credits, c)
+}
+
+func (r *creditRecorder) AddAccountRewardByCredential(
+	ctx context.Context,
+	credentialTag uint8,
+	stakeKey []byte,
+	amount, slot uint64,
+	sourceHash []byte,
+	txn ledgerdb.Txn,
+) error {
+	r.record(models.AccountRewardCredit{
+		CredentialTag: credentialTag, StakingKey: stakeKey, Amount: amount,
+		Slot: slot, SourceHash: sourceHash,
+	})
+	return r.LedgerDB.AddAccountRewardByCredential(
+		ctx, credentialTag, stakeKey, amount, slot, sourceHash, txn,
+	)
+}
+
+func (r *creditRecorder) AddPostSnapshotAccountRewardByCredential(
+	ctx context.Context,
+	credentialTag uint8,
+	stakeKey []byte,
+	amount, slot uint64,
+	sourceHash []byte,
+	txn ledgerdb.Txn,
+) error {
+	r.record(models.AccountRewardCredit{
+		CredentialTag: credentialTag, StakingKey: stakeKey, Amount: amount,
+		Slot: slot, SourceHash: sourceHash,
+	})
+	return r.LedgerDB.AddPostSnapshotAccountRewardByCredential(
+		ctx, credentialTag, stakeKey, amount, slot, sourceHash, txn,
+	)
+}
+
+func (r *creditRecorder) AddAccountRewardsByCredential(
+	ctx context.Context,
+	credits []models.AccountRewardCredit,
+	txn ledgerdb.Txn,
+) error {
+	for _, c := range credits {
+		r.record(c)
+	}
+	return r.LedgerDB.AddAccountRewardsByCredential(ctx, credits, txn)
+}
+
+// recordCredits makes ls record the credits it applies from now on.
+func recordCredits(ls *LedgerState) {
+	if _, ok := ls.ldb.(*creditRecorder); !ok {
+		ls.ldb = &creditRecorder{LedgerDB: ls.ledgerDB()}
+	}
+}
+
 // boundaryRewardSourceHashes returns the discriminators of the reward
-// credits the LedgerDB set recorded for a credential at one boundary slot,
-// in the order it recorded them.
+// credits applied to a credential at one boundary slot, in the order they
+// were applied.
 func boundaryRewardSourceHashes(
 	t *testing.T,
 	ls *LedgerState,
@@ -645,17 +713,15 @@ func boundaryRewardSourceHashes(
 	boundarySlot uint64,
 ) [][]byte {
 	t.Helper()
-	set, ok := ls.config.UtxoSet.(interface {
-		RewardRecordsIn(from, through uint64) ([]RewardRecord, error)
-	})
-	require.True(t, ok, "the set keeps reward records")
-	records, err := set.RewardRecordsIn(boundarySlot, boundarySlot)
-	require.NoError(t, err)
+	recorder, ok := ls.ldb.(*creditRecorder)
+	require.True(t, ok, "the ledger records its credits")
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
 	var hashes [][]byte
-	for _, r := range records {
-		if !r.Withdrawal && r.Ref.Tag == 0 &&
-			bytes.Equal(r.Ref.Key, credential) {
-			hashes = append(hashes, r.Source)
+	for _, c := range recorder.credits {
+		if c.Slot == boundarySlot && c.CredentialTag == 0 &&
+			c.Amount > 0 && bytes.Equal(c.StakingKey, credential) {
+			hashes = append(hashes, c.SourceHash)
 		}
 	}
 	return hashes

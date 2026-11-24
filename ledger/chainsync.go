@@ -10670,13 +10670,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 
 // cleanupBlockNoncesBefore prunes non-checkpoint block nonces older than
 // startSlot. Nonce computation needs only the recent window and the
-// checkpoints, but the Blockfrost epoch and pool block lists read every
-// block's row, so API storage mode keeps them all.
+// checkpoints.
 func (ls *LedgerState) cleanupBlockNoncesBefore(
 	ctx context.Context,
 	startSlot uint64,
 ) {
-	if startSlot == 0 || ls.ledgerDB().StorageMode() == types.StorageModeAPI {
+	if startSlot == 0 {
 		return
 	}
 	ls.config.Logger.Debug(

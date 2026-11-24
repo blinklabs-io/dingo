@@ -153,6 +153,7 @@ func (b *Backfill) indexClosure(
 			)
 		}
 		expanded += childCount
+		b.noteWitnessed(epochId, txLevels)
 		var proposalsValidated bool
 		for levelIndex, level := range txLevels {
 			b.indexedTxs++

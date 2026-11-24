@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -27,22 +28,24 @@ import (
 // CLI agree on where an unconfigured cache.db lives under a data directory.
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
-// koiosParitySource builds the observer's source over the node's own stores
+// errKoiosParityNeedsIndexerDB is returned when the observer is enabled on a
+// node with no IndexerDB: the ledger prunes the reward state it validates to a
+// short window, and the IndexerDB holds the history.
+var errKoiosParityNeedsIndexerDB = errors.New(
+	"the Koios parity observer reads the IndexerDB, which only storage " +
+		"mode api provides",
+)
+
+// koiosParitySource builds the observer's source over the node's IndexerDB
 // (no export, no second Dingo sync, no new permanent table — see
-// koiosparity.DatabaseSource's doc comment). Reward state is read from the
-// consensus database through the ledger's LedgerDB. Transaction history is
-// read from the IndexerDB on an API node: the consensus database runs in
-// core mode there and retains none.
+// koiosparity.DatabaseSource's doc comment). Reward state and transaction
+// history are both read from it: the ledger's database prunes reward state to
+// a window the observer's network-bound validation can fall behind.
 func (n *Node) koiosParitySource() (*koiosparity.DatabaseSource, error) {
-	var source *koiosparity.DatabaseSource
-	var err error
-	if n.ledgerState != nil {
-		source, err = koiosparity.NewDatabaseSourceWithLedgerDB(
-			n.db, n.ledgerState.LedgerDB(),
-		)
-	} else {
-		source, err = koiosparity.NewDatabaseSource(n.db)
+	if n.indexerDB == nil {
+		return nil, errKoiosParityNeedsIndexerDB
 	}
+	source, err := koiosparity.NewDatabaseSource(n.indexerDB)
 	if err != nil {
 		return nil, err
 	}

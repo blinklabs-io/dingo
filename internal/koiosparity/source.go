@@ -192,18 +192,13 @@ var (
 // populate at every epoch boundary. It opens no second database connection,
 // requires no export step, and adds no new table.
 //
-// Retention: ledger/snapshot/rotation.go's cleanupOldSnapshots prunes
-// reward_account_output to the current epoch and the three that precede it
-// (a rolling 4-epoch window) only in core storage mode with the in-process
-// observer disabled. It is retained without bound in API storage mode
-// and whenever the observer is enabled, because
+// Retention: the ledger's database prunes reward_account_output to the
+// current epoch and the three that precede it (a rolling 4-epoch window), so
+// the in-process observer reads the node's IndexerDB, which holds every epoch:
 // the observer validates a closed epoch only after fetching and comparing
 // against Koios over the network and can fall arbitrarily far behind chain
 // progression during a from-genesis or catch-up sync — process-level timing
-// alone does not keep its reads inside the window. reward_pool_input,
-// reward_pool_output, epoch_summary and reward_ada_pots are retained for the
-// life of the database in every mode; pool_stake_snapshot and
-// reward_stake_input are pruned to the window in every mode. DatabaseSource
+// alone does not keep its reads inside the window. DatabaseSource
 // does not race that pruning in any special way — it just reads whatever is
 // currently committed, the same as DingoDB would against a separately synced
 // copy. A GetEpochData or GetPoolEpochDataMap call made after an epoch's data

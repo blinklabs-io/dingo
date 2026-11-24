@@ -81,36 +81,6 @@ func decodeTip(s string) (Tip, error) {
 	return Tip{Slot: slot, BlockNumber: number, Hash: hash}, nil
 }
 
-// AnchorSyncKey is the sync-state key holding the Mithril anchor the
-// IndexerDB's history must reach before it serves. It is absent for a chain
-// that starts at genesis.
-const AnchorSyncKey = "indexer_anchor"
-
-// BootstrapSyncKey is the sync-state key holding the phase of the replay that
-// builds the IndexerDB up to the anchor.
-const BootstrapSyncKey = "indexer_bootstrap"
-
-// ReplayTransactionsSyncKey is the sync-state key holding how many
-// transactions the replay has indexed, for the row-count check at the anchor.
-const ReplayTransactionsSyncKey = "indexer_replay_txs"
-
-// BootstrapPhase is where the replay to a Mithril anchor stands.
-type BootstrapPhase string
-
-const (
-	// PhaseNone is no bootstrap: a chain from genesis, or one adopted from a
-	// store that already held its history.
-	PhaseNone BootstrapPhase = ""
-	// PhaseReplay replays blocks from the chain's origin to the anchor with
-	// the deferred indexes dropped.
-	PhaseReplay BootstrapPhase = "replay"
-	// PhaseIndex builds the dropped indexes, then verifies the rows at the
-	// anchor and applies the imported account state.
-	PhaseIndex BootstrapPhase = "index"
-	// PhaseDone marks the anchor reached, built and verified.
-	PhaseDone BootstrapPhase = "done"
-)
-
 // StateStore is the key-value surface a Store keeps its tip in.
 // *database.Database implements it.
 type StateStore interface {
@@ -260,176 +230,6 @@ func (s *Store) DropCheckpointsAbove(
 	return nil
 }
 
-// Anchor returns the recorded Mithril anchor, or the zero Tip when the chain
-// has none.
-func (s *Store) Anchor(txn *database.Txn) (Tip, error) {
-	v, err := s.state.GetSyncState(AnchorSyncKey, txn)
-	if err != nil {
-		return Tip{}, err
-	}
-	return decodeTip(v)
-}
-
-// SetAnchor records the anchor. Call it in the transaction that starts the
-// replay.
-func (s *Store) SetAnchor(anchor Tip, txn *database.Txn) error {
-	if txn == nil {
-		return errors.New("indexerdb: SetAnchor needs the writer's transaction")
-	}
-	return s.state.SetSyncState(AnchorSyncKey, anchor.encode(), txn)
-}
-
-// TrustBoundarySyncKey is the sync-state key that dates the Mithril trust
-// boundary in every store that serves block counts. Counts raise their start
-// past it, so the op-cert counters a snapshot import records at the anchor are
-// never counted as blocks.
-const TrustBoundarySyncKey = "mithril_ledger_slot"
-
-// SetTrustBoundary records the anchor slot as the trust boundary, inside the
-// writer's transaction.
-func (s *Store) SetTrustBoundary(slot uint64, txn *database.Txn) error {
-	if txn == nil {
-		return errors.New(
-			"indexerdb: SetTrustBoundary needs the writer's transaction",
-		)
-	}
-	return s.state.SetSyncState(
-		TrustBoundarySyncKey, strconv.FormatUint(slot, 10), txn,
-	)
-}
-
-// AnchorDigestSyncKey is the sync-state key holding the digest of the ledger's
-// live UTxO set at the anchor, captured when the anchor was recorded.
-const AnchorDigestSyncKey = "indexer_anchor_digest"
-
-// AnchorDigest returns the recorded digest of the ledger's live UTxO set at
-// the anchor. found is false when none was recorded.
-func (s *Store) AnchorDigest(
-	txn *database.Txn,
-) (count uint64, digest [32]byte, found bool, err error) {
-	v, err := s.state.GetSyncState(AnchorDigestSyncKey, txn)
-	if err != nil {
-		return 0, digest, false, err
-	}
-	if v == "" {
-		return 0, digest, false, nil
-	}
-	countText, digestText, ok := strings.Cut(v, ":")
-	if ok {
-		raw, decodeErr := hex.DecodeString(digestText)
-		count, err = strconv.ParseUint(countText, 10, 64)
-		if decodeErr == nil && err == nil && len(raw) == len(digest) {
-			copy(digest[:], raw)
-			return count, digest, true, nil
-		}
-	}
-	return 0, digest, false, fmt.Errorf(
-		"malformed indexer anchor digest %q", v,
-	)
-}
-
-// SetAnchorDigest records the digest of the ledger's live UTxO set at the
-// anchor. Call it in the transaction that records the anchor.
-func (s *Store) SetAnchorDigest(
-	count uint64,
-	digest [32]byte,
-	txn *database.Txn,
-) error {
-	if txn == nil {
-		return errors.New(
-			"indexerdb: SetAnchorDigest needs the writer's transaction",
-		)
-	}
-	return s.state.SetSyncState(
-		AnchorDigestSyncKey,
-		strconv.FormatUint(count, 10)+":"+hex.EncodeToString(digest[:]),
-		txn,
-	)
-}
-
-// Bootstrap returns the phase of the replay to the anchor.
-func (s *Store) Bootstrap(txn *database.Txn) (BootstrapPhase, error) {
-	v, err := s.state.GetSyncState(BootstrapSyncKey, txn)
-	if err != nil {
-		return PhaseNone, err
-	}
-	switch p := BootstrapPhase(v); p {
-	case PhaseNone, PhaseReplay, PhaseIndex, PhaseDone:
-		return p, nil
-	}
-	return PhaseNone, fmt.Errorf("malformed indexer bootstrap phase %q", v)
-}
-
-// SetBootstrap records the phase. Call it in the transaction of the work that
-// completes the previous phase, so a crash resumes in the phase that still
-// has work to do.
-func (s *Store) SetBootstrap(phase BootstrapPhase, txn *database.Txn) error {
-	if txn == nil {
-		return errors.New(
-			"indexerdb: SetBootstrap needs the writer's transaction",
-		)
-	}
-	return s.state.SetSyncState(BootstrapSyncKey, string(phase), txn)
-}
-
-// ReplayTransactions returns how many transactions the replay has indexed.
-func (s *Store) ReplayTransactions(txn *database.Txn) (uint64, error) {
-	v, err := s.state.GetSyncState(ReplayTransactionsSyncKey, txn)
-	if err != nil || v == "" {
-		return 0, err
-	}
-	n, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("malformed indexer replay transactions: %w", err)
-	}
-	return n, nil
-}
-
-// AddReplayTransactions adds n to the replay's transaction count inside txn.
-func (s *Store) AddReplayTransactions(n uint64, txn *database.Txn) error {
-	if txn == nil {
-		return errors.New(
-			"indexerdb: AddReplayTransactions needs the writer's transaction",
-		)
-	}
-	cur, err := s.ReplayTransactions(txn)
-	if err != nil {
-		return err
-	}
-	return s.state.SetSyncState(
-		ReplayTransactionsSyncKey, strconv.FormatUint(cur+n, 10), txn,
-	)
-}
-
-// RemoveReplayTransactions takes n out of the replay's transaction count
-// inside txn, for applied_transaction rows removed after the replay counted
-// them. An IndexerDB with no count, which never replayed toward an anchor, is
-// left alone.
-func (s *Store) RemoveReplayTransactions(txn *database.Txn, n uint64) error {
-	if txn == nil {
-		return errors.New(
-			"indexerdb: RemoveReplayTransactions needs the writer's transaction",
-		)
-	}
-	v, err := s.state.GetSyncState(ReplayTransactionsSyncKey, txn)
-	if err != nil || v == "" || n == 0 {
-		return err
-	}
-	cur, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return fmt.Errorf("malformed indexer replay transactions: %w", err)
-	}
-	if n > cur {
-		return fmt.Errorf(
-			"indexerdb: removing %d transactions from a replay count of %d",
-			n, cur,
-		)
-	}
-	return s.state.SetSyncState(
-		ReplayTransactionsSyncKey, strconv.FormatUint(cur-n, 10), txn,
-	)
-}
-
 // Kind classifies what an API endpoint reads, for readiness.
 type Kind int
 
@@ -508,49 +308,23 @@ func (s *Store) SetTip(tip Tip, txn *database.Txn) error {
 }
 
 // Ready reports whether endpoints of kind may answer. ledgerBlockNumber is the
-// ledger's durable tip block number; anchorBlockNumber is the Mithril anchor's
-// block number, or zero when the node did not bootstrap from Mithril.
-func (s *Store) Ready(
-	kind Kind,
-	ledgerBlockNumber, anchorBlockNumber uint64,
-) (bool, error) {
+// ledger's durable tip block number. The IndexerDB is built by replaying every
+// block from genesis, so a history endpoint answers from any tip and a
+// current-state endpoint once the tip is within the lag bound of the ledger's.
+func (s *Store) Ready(kind Kind, ledgerBlockNumber uint64) (bool, error) {
 	tip, err := s.Tip(nil)
 	if err != nil {
 		return false, err
 	}
 	return readyFor(
-		kind, tip.BlockNumber, ledgerBlockNumber,
-		anchorBlockNumber, s.maxReadyLagBlocks,
+		kind, tip.BlockNumber, ledgerBlockNumber, s.maxReadyLagBlocks,
 	), nil
-}
-
-// ReadyServing is Ready for the recorded anchor: not ready until the replay to
-// the anchor has finished and the tip has passed it.
-func (s *Store) ReadyServing(
-	kind Kind,
-	ledgerBlockNumber uint64,
-) (bool, error) {
-	phase, err := s.Bootstrap(nil)
-	if err != nil {
-		return false, err
-	}
-	if phase == PhaseReplay || phase == PhaseIndex {
-		return false, nil
-	}
-	anchor, err := s.Anchor(nil)
-	if err != nil {
-		return false, err
-	}
-	return s.Ready(kind, ledgerBlockNumber, anchor.BlockNumber)
 }
 
 func readyFor(
 	kind Kind,
-	indexed, ledger, anchor, maxLag uint64,
+	indexed, ledger, maxLag uint64,
 ) bool {
-	if indexed < anchor {
-		return false
-	}
 	if kind == KindHistory {
 		return true
 	}

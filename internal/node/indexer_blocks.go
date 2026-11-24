@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	dledger "github.com/blinklabs-io/dingo/ledger"
@@ -33,69 +32,14 @@ import (
 )
 
 var (
-	_ indexer.BlockIndexer        = (*Backfill)(nil)
-	_ indexer.IndexAborter        = (*Backfill)(nil)
-	_ indexer.RollbackFloorSetter = (*Backfill)(nil)
-	_ indexer.TransactionCounter  = (*Backfill)(nil)
-	_ indexer.AnchorRestorer      = (*Backfill)(nil)
-	_ indexer.WithdrawalDebiter   = (*Backfill)(nil)
+	_ indexer.BlockIndexer      = (*Backfill)(nil)
+	_ indexer.IndexAborter      = (*Backfill)(nil)
+	_ indexer.WithdrawalDebiter = (*Backfill)(nil)
 )
 
 // DebitWithdrawals sets whether the withdrawals IndexBlocks replays debit
 // account reward balances.
 func (b *Backfill) DebitWithdrawals(on bool) { b.debitWithdrawals = on }
-
-// LastIndexedTransactions returns how many transaction bodies the last
-// IndexBlocks call applied.
-func (b *Backfill) LastIndexedTransactions() uint64 { return b.indexedTxs }
-
-// RestoreAnchor applies the account state a snapshot import established at
-// anchor, as the history backfill does when its replay reaches the anchor:
-// delegations that rules other than certificates moved are put back to the
-// snapshot's. It runs once the IndexerDB's rows are at the anchor and
-// inside txn, so the epochs and parameters it reads are those of the anchor.
-func (b *Backfill) RestoreAnchor(
-	ctx context.Context,
-	txn *database.Txn,
-	anchor indexerdb.Tip,
-) error {
-	if err := b.refreshEpochs(txn); err != nil {
-		return err
-	}
-	epochID, eraID := b.slotToEpoch(anchor.Slot)
-	if err := b.resolvePParamsThrough(ctx, epochID, txn); err != nil {
-		return fmt.Errorf("resolving anchor protocol parameters: %w", err)
-	}
-	b.currentEraId = eraID
-	b.lastEpochId = epochID
-	if pp := b.getPParams(epochID); pp != nil {
-		b.currentPParams = pp
-	}
-	// The running state now describes the anchor, not the block the writer
-	// last indexed.
-	b.indexPrimed = false
-	restored, err := b.restoreImportedAccountsAtAnchorTxn(ctx, txn, anchor.Slot)
-	if err != nil {
-		return err
-	}
-	b.logger.Info(
-		"restored imported account state at the anchor",
-		"component",
-		"indexer",
-		"anchor_slot",
-		anchor.Slot,
-		"accounts",
-		restored,
-	)
-	return nil
-}
-
-// SetRollbackFloor sets the slot below which RollbackTo keeps rows. The
-// IndexerDB records no trust boundary of its own, so the writer passes the
-// Mithril anchor it recorded.
-func (b *Backfill) SetRollbackFloor(slot uint64) {
-	b.rollbackFloor = slot
-}
 
 // AbortIndexing drops the running nonce and epoch state, so the next
 // IndexBlocks call rebuilds it from the stored parent.
@@ -134,6 +78,13 @@ func (b *Backfill) IndexBlocks(
 		}
 	}
 	b.batchTxnEstimatedBytes = 0
+	if b.delegatorInactivityEnabled {
+		b.witnessed = &witnessedAccounts{
+			epoch: map[string]uint64{},
+			refs:  map[string]models.StakeCredentialRef{},
+		}
+		defer func() { b.witnessed = nil }()
+	}
 	acc := b.db.NewBatchAccumulator()
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
@@ -158,6 +109,11 @@ func (b *Backfill) IndexBlocks(
 	}
 	if err := b.db.FlushBatch(acc, txn); err != nil {
 		return fmt.Errorf("flushing indexed rows: %w", err)
+	}
+	if b.witnessed != nil {
+		if err := b.renewWitnessed(ctx, txn); err != nil {
+			return err
+		}
 	}
 	b.indexBatches++
 	return nil

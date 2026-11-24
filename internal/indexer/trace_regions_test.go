@@ -26,8 +26,7 @@ import (
 func TestWriterStepRecordsTraceRegions(t *testing.T) {
 	store := newTestStore(t)
 	chain := newFakeChain(4, "a")
-	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 3).
-		WithFacts(&recordingFacts{log: &[]string{}})
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 3)
 
 	var err error
 	trace := tracetest.Capture(t, func() {
@@ -40,9 +39,7 @@ func TestWriterStepRecordsTraceRegions(t *testing.T) {
 		trace,
 		tracing.RegionIndexerReadBlocks,
 		tracing.RegionIndexerBatch,
-		tracing.RegionIndexerCopyFacts,
 		tracing.RegionIndexerIndexBlocks,
-		tracing.RegionIndexerPatchFacts,
 		tracing.RegionSQLCommit,
 		tracing.RegionBlobCommit,
 	)

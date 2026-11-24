@@ -118,7 +118,7 @@ func decodeDrep(k, v []byte) (*models.Drep, error) {
 // rows.
 func drepRows(lc ledger.LedgerChanges) []badgerutxo.RowPut {
 	out := make([]badgerutxo.RowPut, 0,
-		len(lc.DReps)+len(lc.DRepLinks)+len(lc.Dormancy)+len(lc.DRepHistory))
+		len(lc.DReps)+len(lc.DRepLinks)+len(lc.Dormancy))
 	for _, c := range lc.DReps {
 		out = append(out, badgerutxo.RowPut{
 			Slot:   c.Slot,
@@ -141,26 +141,7 @@ func drepRows(lc ledger.LedgerChanges) []badgerutxo.RowPut {
 			Value: binary.BigEndian.AppendUint64(nil, c.Epochs),
 		})
 	}
-	for _, c := range lc.DRepHistory {
-		out = append(out, drepHistoryRow(c))
-	}
 	return out
-}
-
-func drepHistoryRow(c ledger.DRepHistoryChange) badgerutxo.RowPut {
-	row := badgerutxo.RowPut{Slot: c.Slot}
-	switch c.Kind {
-	case ledger.DRepHistoryExpiry:
-		row.Key = badgerutxo.DRepExpiryHistoryKey(c.Slot, c.Tag, c.Key)
-		row.Value = badgerutxo.EncodeDRepExpiryHistoryValue(c.Activity, c.Expiry)
-	case ledger.DRepHistoryDormancy:
-		row.Key = badgerutxo.DRepDormancyHistoryKey(c.Slot, c.Previous)
-	case ledger.DRepHistoryEvent:
-		row.Key = badgerutxo.DRepExpiryEventKey(c.Slot)
-	case ledger.DRepHistoryClear:
-		row.Key = badgerutxo.DRepClearKey(c.Slot, c.Tag, c.Key)
-	}
-	return row
 }
 
 // ensureDrepState loads the metadata store's DReps, live delegator links
@@ -234,42 +215,7 @@ func (s *Set) DrepAt(tag uint8, cred []byte, slot uint64) (*models.Drep, error) 
 }
 
 // Dreps calls fn with every DRep the set holds.
-// DrepsAfter calls fn with each DRep whose key is strictly after the DRep key
-// after (every DRep when nil), in key order, with that key, until fn returns
-// ledger.ErrStopRows.
-func (s *Set) DrepsAfter(
-	after []byte,
-	fn func(d *models.Drep, key []byte) error,
-) error {
-	return s.store.EachRowAfter(
-		[]byte{badgerutxo.DRepTag}, after, nil,
-		func(k, v []byte) error {
-			d, err := decodeDrep(k, v)
-			if err != nil {
-				return err
-			}
-			return stopRows(fn(d, bytes.Clone(k)))
-		},
-	)
-}
-
-// DrepsChangedIn is AccountsChangedIn for DReps.
-func (s *Set) DrepsChangedIn(
-	from, through uint64,
-	after []byte,
-	maxVisit int,
-	fn func(d *models.Drep, slot uint64, pos []byte) error,
-) (next []byte, covered, done bool, err error) {
-	return s.store.EachRowChangedIn(badgerutxo.DRepTag, drepAddedSlot, from, through, after,
-		maxVisit, func(slot uint64, key, value, pos []byte) error {
-			d, err := decodeDrep(key, value)
-			if err != nil {
-				return err
-			}
-			return stopRows(fn(d, slot, bytes.Clone(pos)))
-		})
-}
-
+// Dreps calls fn with every DRep the set holds.
 func (s *Set) Dreps(fn func(*models.Drep) error) error {
 	return s.store.Rows([]byte{badgerutxo.DRepTag}, func(k, v []byte) error {
 		d, err := decodeDrep(k, v)
@@ -337,12 +283,4 @@ func (s *Set) DormantEpochsAt(slot uint64) (uint64, error) {
 		return 0, errors.New("utxoset: malformed dormancy counter")
 	}
 	return binary.BigEndian.Uint64(v), nil
-}
-
-// drepAddedSlot reads the AddedSlot out of a DRep's value.
-func drepAddedSlot(v []byte) (uint64, error) {
-	if len(v) < 25 {
-		return 0, errMalformedDrep
-	}
-	return binary.BigEndian.Uint64(v[1:]), nil
 }

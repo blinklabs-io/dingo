@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -118,15 +119,18 @@ func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
 	// ledger.
 	consensus.SetEpochSource(set)
 
-	core, err := (&Node{db: consensus}).koiosParitySource()
-	require.NoError(t, err)
-	hashes, err := core.GetEpochTransactionHashes(ctx, 3, 20)
-	require.NoError(t, err)
-	require.Empty(t, hashes, "a core node retains no history to sample")
+	_, err = (&Node{db: consensus}).koiosParitySource()
+	require.ErrorIs(t, err, errKoiosParityNeedsIndexerDB,
+		"a core node retains no history to validate against")
 
+	// The IndexerDB derives its own epochs.
+	require.NoError(t, dbadapter.New(indexerDB).SetEpoch(
+		1000, 3, nil, nil, nil, nil, 5, 1000, 500, nil,
+	))
 	api, err := (&Node{db: consensus, indexerDB: indexerDB}).
 		koiosParitySource()
 	require.NoError(t, err)
+
 	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
 	require.ErrorIs(t, err, koiosparity.ErrTransactionHistoryPending,
 		"the sample must be read from the IndexerDB, which is still empty")
@@ -136,4 +140,15 @@ func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
 	}, nil))
 	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
 	require.NoError(t, err)
+
+	// The reward state is the IndexerDB's too: the ledger prunes it to a
+	// window the observer can fall behind.
+	_, err = api.GetLatestEpoch(ctx)
+	require.Error(t, err, "the IndexerDB holds no epoch summary yet")
+	require.NoError(t, indexerDB.Metadata().SaveEpochSummary(
+		&models.EpochSummary{Epoch: 2, BoundarySlot: 900}, nil,
+	))
+	latest, err := api.GetLatestEpoch(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), latest)
 }

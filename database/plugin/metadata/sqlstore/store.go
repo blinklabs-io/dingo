@@ -195,11 +195,6 @@ type Store struct {
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
 
-	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
-	// run of the digest spool, when non-zero. Only tests set it, to make the
-	// spool merge many runs.
-	utxoDigestRunBytes int
-
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
 	// rewardStatePruneInitialRows replaces the 5000-row starting batch size

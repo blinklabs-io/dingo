@@ -66,7 +66,6 @@ func (h *baselineHarness) importAround(
 			Slot: slot,
 			Baseline: ledger.ImportBaseline{
 				Ref: ref, Active: true, AddedSlot: slot, Deposit: deposit,
-				Pool: pool,
 			},
 		}},
 	}))

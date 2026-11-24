@@ -796,7 +796,7 @@ func requireMigratedNodeMatchesFresh(
 	set, err := utxoset.Open(utxoset.Config{
 		Dir:    utxoset.DirFor(legacyDir),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Only:   true, RetainRewardRecords: parityConfig(legacyDir).SplitIndexer(),
+		Only:   true,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()

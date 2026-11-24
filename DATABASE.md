@@ -432,8 +432,9 @@ missing rows nor empty core-mode indexes prove absence on-chain. MCP governance
 proposal lookups, listings, and vote tallies exclude rows with `deleted_slot`
 set. Query and scan failures return tool errors, not empty proposal lists or
 zero vote counts. These reads do not alter the schema or stored governance
-state. With a ledger state, `get_epoch_summary`, `get_governance_state` and
-`get_governance_proposal` read through the ledger's `LedgerDB`
+state. With a ledger state, `get_governance_state` and `get_governance_proposal`,
+and `get_epoch_summary` when there is no IndexerDB, read through the ledger's
+`LedgerDB`
 (`GetEpochs`, `GetEpoch`, `GetEpochSummary`, `GetBlockNoncesInSlotRange`,
 `GetConstitution`, `LatestCommitteeQuorum`, `GetCommitteeMembers`,
 `GetActiveDreps`, `GetDrepByCredential`, `GetGovernanceProposal`,
@@ -441,7 +442,7 @@ state. With a ledger state, `get_epoch_summary`, `get_governance_state` and
 print. `LedgerDB` also carries `GetLatestEpochSummary`,
 `GetPoolKeyHashesRetiredByEpoch`, `GetGovernanceProposalsRefundedAt` and
 `GetPostSnapshotRewardCreditEvents`, which the in-process Koios parity source
-reads through it. MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a
+reads from the IndexerDB through the same interface. MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a
 context-bound coordinated read transaction scans bounded candidate batches and
 compares output CBOR before returning matches. The continuation cursor records
 the last fully examined candidate, including nonmatches; deadlines can return
@@ -491,9 +492,10 @@ single epoch. The exact arbitrary-precision sum includes valid outputs and
 phase-2-invalid collateral returns, including spent outputs while retained.
 Complete historical totals require API storage mode; a core node keeps no
 spent outputs. Epoch and pool block lists read `block_nonce` joined to
-`pool_opcert_sequence`. API storage mode keeps every non-checkpoint
-`block_nonce` row for those lists (one row per block); core mode prunes them
-outside the three-epoch nonce window, keeping each epoch's checkpoint rows. The
+`pool_opcert_sequence`. The IndexerDB keeps every non-checkpoint
+`block_nonce` row for those lists (one row per block); the ledger's database
+prunes them outside the three-epoch nonce window in every storage mode, keeping
+each epoch's checkpoint rows. The
 historical metadata backfill writes a `block_nonce` row for every block it
 replays below the Mithril anchor, but not for the anchor block itself, whose row
 the import seeded from the ledger state; Byron blocks have no nonce function and
@@ -2656,10 +2658,9 @@ continuing used to seed the resumed evolving-nonce fold (`LedgerState.loadTip` �
 block nonce computed for the rest of that epoch and, through it, the following
 epoch's nonce, which fails VRF verification for every header in that epoch
 regardless of which honest peer serves it (observed live on 4
-independently-synced Preview-testnet nodes). In core storage mode `block_nonce`
+independently-synced Preview-testnet nodes). In the ledger's database `block_nonce`
 retains only the last 3 epochs plus each epoch's single checkpoint row
-(`ledger/chainsync.go`'s `cleanupBlockNoncesBefore`; API storage mode keeps
-every row for the Blockfrost epoch and pool block lists), so an unbounded
+(`ledger/chainsync.go`'s `cleanupBlockNoncesBefore`), so an unbounded
 disaster-recovery truncate — or, for Ouroboros Genesis chain selection, an
 ordinary rollback deeper than the Praos security parameter, since Genesis has no
 k-bound — can land on a slot whose own row was already pruned by that routine
@@ -2939,9 +2940,7 @@ UTxO changes. Their tags and markers are declared in
 |---|---|
 | `n` + slot (8 bytes, big-endian) + block hash | a `block_nonce` row: checkpoint flag (1 byte), then the nonce |
 | `e` + epoch (8 bytes, big-endian) | an `epoch` row: start slot and era (8 bytes each, big-endian), then the row's CBOR |
-| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row: a `0x00` mark, its captured slot (8 bytes, big-endian), then the row's CBOR. A row written before the slot was kept holds the CBOR alone, which never starts with `0x00` |
-| `$` + captured slot (8 bytes, big-endian) + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | the capture index of a `pool_stake_snapshot` row; empty value. It reads the rows captured in a slot range without reading the others |
-| `msnapslot` | set once every `s` row carries its captured slot and has its `$` entry. Without it a read of a slot range reads every snapshot row, and the ledger state load at the next start gives each row its slot and entry, in chunks that a restart resumes, then sets it |
+| `s` + epoch (8 bytes, big-endian) + type length (1 byte) + type + pool key hash | a `pool_stake_snapshot` row's CBOR |
 | `f` + epoch (8 bytes, big-endian) | an `epoch_summary` row's CBOR, without its `id` |
 | `mera` | the last mid-epoch era switch: epoch, slot, source era and target era (8 bytes each, big-endian) |
 | `t` + slot (8 bytes, big-endian) | a `network_state` row: treasury and reserves (8 bytes each, big-endian) |
@@ -2953,7 +2952,7 @@ UTxO changes. Their tags and markers are declared in
 | `b` + pool length (1 byte) + pool + credential | an active account delegating to that pool; empty value |
 | `v` + DRep type (1 byte) + DRep length (1 byte) + DRep + credential | an active account delegating to that DRep; empty value |
 | `k` + slot (8 bytes, big-endian) + primary key | the state journal: the row under that key (an account, a DRep, a DRep delegator link, the dormancy counter) before its first change at that slot: `0` for absent, else `1` and the value |
-| `r` + slot (8 bytes, big-endian) + kind (1 byte: credit or withdrawal) + source length (1 byte) + source + credential | a reward credit, by its source, or a withdrawal, by its transaction, applied at that slot; empty value |
+| `r` + slot (8 bytes, big-endian) + kind (1 byte: credit or withdrawal) + source length (1 byte) + source + credential | a reward credit, by its source, or a withdrawal, by its transaction, applied at that slot, so applying it again changes nothing: the amount (8 bytes, big-endian), then a flag byte set for a credit applied after the SNAP point. Pruned with the journal, below the rollback window |
 | `g` + credential tag (1 byte) + credential | a DRep: active flag, added slot, last activity epoch and expiry epoch (8 bytes each, big-endian), then anchor URL and hash (length-prefixed) |
 | `l` + DRep tag (1 byte) + DRep length (1 byte) + DRep + stake credential | a live link in a DRep's delegator set, as `drep_delegator` keeps it; empty value |
 | `zdormant` | the DRep dormancy counter (8 bytes, big-endian) |
@@ -2966,9 +2965,8 @@ UTxO changes. Their tags and markers are declared in
 | `h` + tag (1 byte) + key length (1 byte) + stake key + slot (8 bytes, big-endian) + position (8 bytes, big-endian) | a stake registration or deregistration certificate: a registered flag, the deposit (absent when unknown), the transaction and block hashes, the transaction slot and which table a registration belongs to; the position orders events inside a slot |
 | `i` + tag (1 byte) + credential length (1 byte) + DRep credential | a DRep's latest registration: the slot and the deposit (absent when unknown) |
 | `mreghist2` | set once every stake registration event and DRep deposit is loaded, each event with its effective slot; the earlier `mreghist` marked events without it and makes the set reload them |
-| `B` + credential tag (1 byte) + key | an account's import baseline: an active flag (1 byte), the baseline slot (8 bytes, big-endian), a deposit-known flag (1 byte) and the deposit (8 bytes, big-endian), then a marker byte, the DRep type (8 bytes, big-endian), and the pool and the DRep the import recorded, each behind a one-byte length. A row written before the set kept the delegations stops after the deposit and reads with none |
+| `B` + credential tag (1 byte) + key | an account's import baseline, the virtual registration a snapshot import, genesis or a catch-up import established: an active flag (1 byte), the baseline slot (8 bytes, big-endian), a deposit-known flag (1 byte) and the deposit (8 bytes, big-endian). It is read for the registration an account had when it has no certificate |
 | `mbaseline` | set once every import baseline is loaded |
-| `mbasedelegs` | set once the import baselines carry their delegations, or marked lost when the set holds baselines written before it kept them and the metadata store no longer held the rows to reload them from |
 | `K` + credential tag (1 byte) + key length (1 byte) + key + slot (8 bytes, big-endian) | a slot at which a credential was witnessed by an account certificate or a reward withdrawal; empty value. A witness of a Leios closure takes effect at the closure's context slot, before the slot it was applied at, and appends that effective slot (8 bytes, big-endian) to the key; the applied-slot reads (`LastWitnessSlot`) count it at the applied slot and `LastWitnessEffectiveSlot` at the effective slot. A reward withdrawal of such a closure also writes a row of its own, the witness's key with one marker byte (`01`) appended, so a certificate of the closure that witnesses the credential at the same slots does not stand for it (`EachWithdrawalWitness`); the set loads these rows with `IterateAccountWithdrawalEffectiveSlots`, which lists the withdrawals whose transaction context slot differs from their applied slot |
 | `mwitness2` | set once every witness slot is loaded with its effective slot; the earlier `mwitness` marked rows without it and makes the set reload them |
 | `L` + applied slot (8 bytes, big-endian) + kind (1 byte) + transaction hash (32 bytes) + output index (4 bytes, big-endian) | a staked output a Leios closure transaction created (kind 0) or spent (kind 1) whose context slot is before the slot it was applied at: the effective slot (8 bytes), the lovelace (8 bytes) and the credential stake sum key. Only a stake credential output of such a closure has a row, so an output of any other transaction costs no byte (about 92 bytes per row, key and value); the live output's own row is unchanged. Rows are journaled at the applied slot, so a rollback removes them, and pruned with the journal below its floor |
@@ -3025,12 +3023,8 @@ UTxO changes. Their tags and markers are declared in
 | `mrbseq` | a big-endian `uint64` every rollback increments in the transaction that makes it; it differs from a value read earlier exactly when a rollback has run in between (a rollback that undoes several batches increments it several times) |
 | `mrbpend` | the point a rollback in more than one transaction is restoring, set before its first transaction that leaves the set between two states it held and cleared by its last. A store that starts with it finishes the rollback (`Store.ResumeRollback`, which `Set.Reconcile` calls before it rewinds a failure mark), and `ApplyLedgerBatch` refuses with `ErrRollbackPending` until then |
 | `mimport` | a ledger-state import in progress: the snapshot point, then a byte that is `1` once the snapshot's outputs are all in the set. It is written before the import changes a row and removed by the import's last write (`Store.EndImport`); a store that holds it refuses to be reconciled (`ErrImportPending`) or checkpointed |
-| `mexportfloor` | the lowest slot, as a big-endian `uint64`, from which the state journal names every account and DRep row at the slot of its `AddedSlot`, so an export of a slot range reads the journal rather than the table. It is written when a store opens without it, as the tip slot plus one, and reset by a full bootstrap; the effective floor is the larger of it and `mjfloor` |
 | `mloadfloor` | the tip slot plus one at the last load that dropped a row family a rollback undoes through the state journal and whose load writes no entries or tombstones for the rows before the tip. It applies only while one of those families (delegations, genesis delegations, MIR certificates, witnesses, import baselines, stake and pool history, op-certs, accounts, DReps and their links, pools, committee, governance, protocol parameter updates, closure outputs) holds a row; the DRep dormancy counter, the reward block counts and the reward output rows are not among them. A rollback, `HasJournalPoint`, `PointBefore` and `JournalFloor` treat a point below it, other than the tip, as beyond the journal, so an undrained set is rebuilt from the metadata store; `mjfloor` is separate and still bounds only as-of reads |
-
-Snapshot prefix wipes and range-tombstone rollbacks delete each snapshot row
-and its capture-index entry in one transaction. Large prefixes use multiple
-transactions while keeping each row and entry together.
+| `mlayout` | set last by the layout migration. A store opened without it is migrated in place before anything reads it: rows no reader remains for are deleted, values are rewritten to the layout above, and the reward stake input, derived reward and pool stake snapshot rows below the retention window are dropped. Each step is idempotent and a stop anywhere reruns the migration at the next open |
 
 A state journal entry whose first value byte is `2` is a range tombstone
 (`RowPut.TombstonePrefix`): its key is a prefix that held no row before the
@@ -3704,12 +3698,7 @@ with none of them does nothing.
 - IndexerDB. `NewIndexerService` runs the same repair on the IndexerDB, which
   has its own `sync_state` key, before the writer reads it. That covers an
   IndexerDB seeded from genesis by a release and an API store copied by the
-  move to the split layout; both would otherwise disagree with a Mithril-imported
-  state when the replay reaches its anchor. The seed of a replay toward a
-  Mithril anchor counted the genesis transactions it wrote into
-  `indexer_replay_txs`, which the anchor check compares with the
-  `applied_transaction` rows, so the same transaction takes the removed
-  application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
+  move to the split layout.
 - Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
   `Set.RemoveZeroCoinOutputs` (`badgerutxo.Store.RemoveOutputs`) on every
   start. It deletes the listed outputs the set holds whose coin is zero, as the
@@ -3980,9 +3969,9 @@ Readers outside the ledger's LedgerDB:
 
 | Reader | Behavior |
 |---|---|
-| MCP tools | With a ledger state the tools read through its LedgerDB. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
+| MCP tools | With a ledger state the governance, DRep and account tools read through its LedgerDB; the epoch summary and pool performance tools read the IndexerDB when there is one. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
-| `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
+| `internal/koiosparity` | `DatabaseSource` reads the IndexerDB. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
 
 ### Live UTxO set failure and recovery
@@ -4462,12 +4451,11 @@ IndexerDB tip, so the writer reads every body before it is tombstoned.
 SQL transaction so a crash cannot leave rows the tip does not cover. The tip
 decoder rejects slots and block numbers outside the signed 64-bit range used by
 SQL position columns and Mesh block indexes. Readiness
-is per endpoint kind: history endpoints need the tip at or past the Mithril
-anchor, current-state endpoints also need it within
-`indexer.maxReadyLagBlocks` of the ledger tip. The anchor is recorded under
-`indexer_anchor` (same encoding) and the phase of the replay to it under
-`indexer_bootstrap` (`replay`, `index`, `done`); nothing is ready while the
-phase is `replay` or `index`.
+is per endpoint kind: history endpoints need an IndexerDB tip, and
+current-state endpoints also need it within `indexer.maxReadyLagBlocks` of the
+ledger tip, so a replay from genesis reports them not ready until it reaches the
+chain's tip. The IndexerDB records no anchor: the only trust point is the
+immutable tip.
 
 ### Split stores
 
@@ -4512,11 +4500,9 @@ with `role="indexer"` and an `indexer_` name prefix: one collector name cannot b
 registered with two label sets. Closing the view does not close the shared
 store, and the IndexerDB closes before the ledger database does.
 
-The writer follows the ledger's durable tip and wakes at startup, on
-`ledger.tip`, and on `ledger.reward_facts` after reward precomputation commits.
-A caught-up writer copies newly completed reward facts without advancing its
-tip or replaying withdrawals. Single-pass and chunked completion both persist
-the completed cursor before publishing the reward-facts event. Failed writer
+The writer follows the ledger's durable tip and wakes at startup and on
+`ledger.tip`. It never waits for a ledger reward round: it derives the rounds
+itself when its replay crosses their boundaries. Failed writer
 passes retry after one second, doubling the delay up to thirty seconds; a wake
 can retry sooner, and cancellation interrupts the wait.
 `dingo_indexer_tip_slot`, `dingo_indexer_lag_blocks` and
@@ -4524,185 +4510,53 @@ can retry sooner, and cancellation interrupts the wait.
 wall-clock distance between the two tips from the ledger's slot clock, and one
 second per slot until that clock exists.
 
-Each batch is split at the epoch boundaries the ledger crossed. For each
-segment the writer, in one transaction, copies the ledger facts dated in the
-segment's slots, indexes its blocks, patches the ledger's outcome columns onto
-the rows those blocks wrote, and records the tip. Facts cross by natural key,
-never by row id, from `metadata.FactTables`:
+The writer derives the ledger facts itself and reads none from the ledger.
+Each batch is indexed in one transaction with its tip. Before the block that
+opens an epoch, the writer crosses the boundary through `ledger/epochengine`
+over the IndexerDB's own rows (`indexer.Deriver`), which writes, by natural key,
+the tables of `metadata.FactTables`:
 
-- copied whole, replacing the row under the same key: `epoch`,
-  `epoch_summary`, `pool_stake_snapshot`, the `reward_*` input, output, pot and
-  snapshot tables, `reward_credit_round`, `imported_*`, `network_state`,
-  `network_donation`, `pparams`, `drep_expiry_history`,
-  `drep_dormancy_history`, `drep_expiry_epoch_event` and `account_drep_clear`;
-- patched onto rows block replay wrote: the delegation, activity and expiry
-  columns of `account` and `drep`, and the outcome columns of
-  `governance_proposal`; rows the IndexerDB does not hold are skipped. A
-  patched `account` also refreshes the credential's `reward_live_stake` row,
-  which mirrors the account's pool and registration, dated at the account's
-  slot, as the ledger's own write of the account does. `updated_slot` of that
-  row is the slot of its last write, which differs between the two write
-  paths; no read orders or filters by it;
-- `pool_opcert_sequence` is not copied: block replay writes one row per block
-  (the issuer's key hash and the header's issue number, at the block's slot),
-  as the ledger does when it applies a block, and the counters a snapshot
-  import certified are written once, at the anchor slot. They are read from
-  the ledger when the anchor is recorded, not when the replay reaches it,
-  because the live UTxO set keeps a pool's observations only within its
-  rollback window: from its metadata store, or from the set, where a pool the
-  set no longer holds an observation at the anchor for is left out and logged.
-  The IndexerDB also records `mithril_ledger_slot` once the replay reaches the
-  anchor, so the block counts and block lists raise their start past the
-  counters as they do on a shared store. Block rows below the anchor are
-  written too, which a shared store applying a snapshot never has;
-- reward credits, replayed from `account_reward_delta` through the idempotent
-  credit path so a balance moves once per journal entry. Block replay debits
-  the withdrawals, so a balance is the credits less the withdrawals, as live
-  apply leaves it. The replay up to a Mithril anchor does not debit: no
-  credit before the anchor is replayed, and the anchor's balances are set
-  from the imported state afterwards. The journal is exported from the set's
-  reward records, each of which carries
-  the post-snapshot flag and a sequence number the set assigns in write
-  order. The credits of a round are read again, after the last sequence a
-  read took, because a credit can be written late under the boundary slot of
-  an old round: that credit has the highest sequence whatever its slot. A set
-  loads the metadata store's journal (credits and withdrawals, numbered in
-  the order the store wrote them) when it first loads the accounts family, so
-  a database moved to the live UTxO set keeps its history. In API storage mode the set
-  keeps every record the writer has not copied past its rollback window: the
-  writer samples the next sequence number before it reads and acknowledges it,
-  with the slot it copied through, once the IndexerDB has made the commit
-  durable, and a prune drops a record only when it is below the window,
-  numbered below the acknowledged sequence and dated through the acknowledged
-  slot. A set with a registered consumer retains for it whichever store the
-  consumer last read the journal from. SQLite commits with
-  `synchronous=NORMAL` under WAL, so a commit is not durable when it returns;
-  the writer acknowledges after `metadata.CommitSyncer.SyncCommits`, which the
-  SQLite store implements as `PRAGMA wal_checkpoint(FULL)` on a dedicated
-  connection and an incomplete checkpoint is an error, every 64 committed
-  batches and whenever a pass catches up. A store without the capability
-  (MySQL, PostgreSQL) commits durably and acknowledges after each batch. A
-  failed sync leaves the acknowledgement pending, which only keeps the
-  records longer. The set numbers its credits in a derived index under the
-  marker namespace (`mrwq <seq:8 BE>`, value the record key), written with the
-  record, deleted with it by a prune or rollback, dropped with a bootstrap,
-  and verified against the record on every read, so a page of credits seeks to
-  its sequence instead of reading every record dated in its range. A set from
-  before sequences and the index is numbered in slot order and indexed when it
-  opens, in transactions that each number a batch together with the counter
-  and are repeated until the `mrwindexed` marker is set, so an interrupted
-  build resumes and no resync is needed. A full bootstrap restarts the
-  numbering and clears the consumer's acknowledged position with it. The DRep
-  history is read by slot range from the set. The stake
-  inputs and the derived reward rows are loaded for every epoch, and pruned
-  only for epochs the writer has copied past the reward window. A set whose
-  database lost the journal before the set kept it has nothing to load: it
-  marks the journal lost and the export fails with `ErrLedgerStateUnserved`,
-  since the credits before then are in neither store.
+- `epoch`, `epoch_summary` and `pparams`, with the parameters of every era up to
+  the chain's first block written at epoch 0;
+- `pool_stake_snapshot`, `reward_snapshot` and `reward_stake_input`, whose SNAP
+  stake is the historical reconstruction as of the boundary slot, not
+  `reward_live_stake`, which a replay rebuilds only when it ends;
+- `reward_ada_pots`, `reward_pool_input`, `reward_pool_output`,
+  `reward_account_output`, `reward_seed_failure` and `reward_credit_round`,
+  written when a round is applied at its boundary, never ahead of it;
+- `network_state`, `network_donation`, the governance proposal outcome and drop
+  columns, `drep_expiry_history`, `drep_dormancy_history`,
+  `drep_expiry_epoch_event`, `account_drep_clear` and the account and DRep
+  columns the governance tick and the Plomin HARDFORK rule move;
+- the credits of applied rounds, through the idempotent credit path, so a
+  balance is the credits less the withdrawals block replay debits.
 
-The copy reads fact rows through `ledger.LedgerState.ReadFactRows`. The
-tables that grow with the chain (`account`, `drep`, `drep_expiry_history`,
-`drep_dormancy_history`) are served from the set page by page: the cursor is a
-token for the position of the last row served. `account` and `drep` rows are
-named by the state journal: an entry `k <slot> <key>` sits at the slot of the
-change that set the row's `AddedSlot`, so a range `[from, through]` seeks to
-`from` in the journal (`Store.EachRowChangedIn`) and serves the rows whose
-`AddedSlot` equals the entry's slot. The cost is the journal entries in the
-range, not the size of the table, and the position is the last journal key
-served. The journal names every row only from `max(mjfloor, mexportfloor)`
-on: `mjfloor` is raised by pruning and by every row load, and `mexportfloor`
-(the tip slot plus one, set when a store opens without it) covers rows with
-no entry at their `AddedSlot`. A range that ends below it,
-as every segment of a replay over a set loaded from a snapshot, is served
-from an in-memory index of the family's rows by `(AddedSlot, key)`, built on
-first use (`Store.eachRowAddedIn`): the rows are the loaded ones, which a
-later write can only move out of the range, and an entry whose row has since
-changed is skipped. An index serves every range below the floor it was
-built at, so a prune that raises the floor keeps it; a range above that floor
-builds it again, and a rollback, load, restore or reset drops it. A read
-reuses the index only when its transaction began no earlier than the one the
-index was built from, since a block between them may have moved a row out of
-the range, and no rewrite began, ended or is running since the read began;
-otherwise it builds one from its own transaction. A
-range that crosses the floor reads the table
-in key order from the Badger key of the last row served
-(`Store.EachRowAfter`). If pruning raises
-the floor past a journal position held by an export in progress, the cursor
-fails with `metadata.ErrFactCursorLost` and the copy starts the table again.
-Both reads take `utxoSetApplyMu` for at most 4096 entries or rows at a time.
-A row that leaves the range between pages shifts no other. The history tables
-seek by slot prefix. Those pages come in the set's order, which the copy does
-not depend on. The other tables are small (epoch
-and snapshot keyed, and the reward inputs and outputs pruned to the reward
-window): they are read whole, ordered by `FactTable.Key`, and a page resumes
-strictly after the key of the last row served. A cursor of an export the
-ledger no longer holds fails with `metadata.ErrFactCursorLost`
-(`ledger.ErrFactCursorLost`), and the copy starts that table again from the
-first page, which rewrites rows by their keys. A
-ledger-state table is exported from the live UTxO set by the same natural keys,
-as the metadata store held it; `epoch`, `epoch_summary`, `network_state`,
-`network_donation`, `pparams`, `pool_stake_snapshot`, `reward_ada_pots`,
-`reward_snapshot`, `reward_pool_input`, `reward_stake_input`,
-`reward_seed_failure`, `reward_pool_output`, `reward_account_output`,
-`reward_credit_round`, `imported_pool_block_count`,
-`imported_epoch_block_total`, `drep_expiry_history`,
-`drep_dormancy_history`, `drep_expiry_epoch_event`, `account_drep_clear`,
-`account`, `drep`, `governance_proposal` and `governance_proposal_drop` are
-exported today. `account`, `drep` and
-`governance_proposal` carry only their key and patch columns, the columns
-the copy applies to a row the IndexerDB already holds. `reward_stake_input`
-and `reward_account_output` are read by a cursor over the set's own key order,
-so a page reads only the rows it returns. The set keeps a reward seed failure
-at its snapshot's captured slot. The imported block counts a snapshot import
-carried are kept as imported under their own row family (tag `Y`, one
-prefix per epoch, with the capture slot in each value), apart from the
-windowed reward block rows that fold them into the observed counts. A set
-loads them from the metadata store on its first start with the marker absent,
-and a rollback below an epoch's capture slot drops its rows through a
-tombstone, as the metadata store does. The DRep history tables are kept the same way under tag `T`, each
-row keyed by the slot it was recorded at first (`T <slot> <kind> ...`): an
-expiry row per DRep and slot, a dormancy row per counter change, an
-epoch-event row per dormant expiry bump and a clear row per account whose
-DRep delegation was cleared. The ledger's DRep staging emits them where the
-metadata store writes them (`UpdateDRepActivity`, the dormant expiry bump,
-the dormancy reset, and the clears of a DRep deregistration or of the
-protocol version 10 dangling-delegation sweep), a set loads them from the
-metadata store on its first start with the marker absent, and the journal
-drops the rows after a rollback target as the metadata store deletes them.
-The v0.94.2 migration verifies them against the metadata store with the rest
-of the `dreps` family. A set whose database lost the imported block counts or
-the DRep history before the set kept them has nothing to read: the load marks it as having
-lost them, and a read of those tables fails with `ErrFactTableUnserved`
-instead of exporting an empty table. A catch-up import replaces the imported block
-rows of the epochs its snapshot carries and keeps the others. Every table the
-copy reads is served this way (`UnservedFactTables` is empty); a table without
-an exporter would fail with `ErrFactTableUnserved` instead of reading rows no
-store holds.
-The snapshots whose stake inputs are still being written are read from the
-ledger's pending record wherever it lives. The ledger state
-lives in the set in API storage mode too. A Mithril-bootstrapped chain's empty
-IndexerDB is served from the set: the import
-baselines, which carry the pool and DRep delegations the import recorded, the
-accounts' balances and the reward records after the anchor, and the UTxO set
-at the anchor from the journal (`AnchorStateSource`). The copy reads the
-accounts and the journal at one point, a set snapshot taken under the apply
-lock, so a credit or withdrawal that lands between the two reads is in neither
-the balance nor the journal (`metadata.AnchorStateViewer`). A
-copied account reward above the signed 64-bit range is rejected rather than
-truncated while applying signed reward-journal movements. A
-set whose baselines
-were written before it kept the delegations has them reloaded from the metadata
-store at its first load, while the rows exist, and marked lost once they do
-not; a set that lost them, or the reward journal, refuses the bootstrap with
-`indexer.ErrAnchorUnserved` naming which. That is the one case left. A
-journal that no longer reaches the anchor leaves the replay uncompared with the
-UTxO set at the anchor, with a warning.
+A rollback removes the fact rows dated after its target together with the block
+rows, in one transaction, and restores the reward pot of every round that stays
+applied, which the block rows' rollback clears for each round without pool
+outputs. `pool_opcert_sequence` is written by block replay, one row per block.
+The Byron-to-Shelley translation sets `network_state` reserves to the maximum
+supply less the live `utxo` rows, and the Allegra HARDFORK rule (protocol major
+3) returns the lovelace of the live outputs at Byron redeem (AVVM) addresses to
+the reserves, both over the IndexerDB's own `utxo` rows. The AVVM rule moves
+lovelace only: the rows stay live in `utxo`.
+
+With CIP-0163 delegator inactivity on, block replay renews `account.expiration_epoch`
+of every account a valid transaction witnesses to its block's epoch plus the
+window, once per batch after the batch's rows are flushed. The first boundary
+derived with the gate on stamps every active account with the entering epoch
+plus the window, records the entering epoch in `sync_state`
+(`delegator_inactivity_activated`) and the stamped credentials in
+`account_inactivity_activation`, which the reward round clamps expiry to. A
+rollback recomputes the expirations of the accounts witnessed after its target
+from the surviving witness rows, and undoes the stamp when it crosses back
+before the activation boundary.
 
 Block replay writes one `block_nonce` row per block, folding the evolving
 nonce from the stored parent as the historical backfill does. The first block
 of the chain and the first block of each epoch are checkpoints. The epoch and
 pool block lists read those rows, and the pool lists join `pool_opcert_sequence`,
-which block replay writes (and the anchor counters seed, above). The IndexerDB
+which block replay writes. The IndexerDB
 never prunes either table.
 
 Each commit also writes the metadata store's own `tip` row, the same position
@@ -4712,28 +4566,11 @@ its tip in the block store (`chainstate/tip`), which an IndexerDB store over
 it neither reads nor writes: `Database.GetTip` and `SetTip` on an IndexerDB
 address only its own `tip` row.
 
-A copy is as of the segment's last slot where the ledger records when a column
-changed. The outcome columns of `governance_proposal` are copied per outcome:
-ratified, enacted, expired and deleted values dated after the segment are left
-null until their own segment. A DRep's activity and expiry epochs are set from
-its `drep_expiry_history` as of that slot, because the ledger renews them in
-place without moving the row's slot. The columns with no such record are the
-ledger's current value when the row's slot falls in a segment: `drep.active`,
-the delegation and CIP-0163 `expiration_epoch` columns of `account`, and
-`reward_ada_pots.rewards`, which the reward calculation fills after the row's
-`captured_slot`. A reward round can finish after the writer has passed that slot. The writer
-reads completed reward-precompute cursors before each fact pass, copies the
-round's finished pool and account outputs by epoch and reward ADA pots rows
-dated no later than its captured slot, and persists a per-epoch copy marker in
-IndexerDB. A later boundary re-reads outputs whose eligibility changed before
-crediting them, preserving IndexerDB's local folded state.
-Rollback removes markers for rounds whose captured slots were rolled back.
-When the writer reaches the ledger tip, it refreshes finished rounds and
-deferred stake inputs in a transaction without replaying blocks or debiting
-withdrawals again. A completed round therefore reaches IndexerDB even if no
-new block arrives.
-Current-state routes that read ahead-running values answer 503 once the lag
-exceeds `indexer.maxReadyLagBlocks`; no current route reads `reward_ada_pots`.
+A reward round is derived when the replay crosses the boundary that applies
+it, so its pool and account outputs and its reward ADA pots row, including
+`rewards`, are written together at that boundary. Current-state routes that
+read ahead-running values answer 503 once the lag exceeds
+`indexer.maxReadyLagBlocks`; no current route reads `reward_ada_pots`.
 
 `pparam_update`, certificates, transactions and UTxOs are derived by block
 replay and not copied. An empty IndexerDB on a chain that starts at genesis is
@@ -4843,84 +4680,17 @@ from the potentially lagging IndexerDB again. A database of another network or m
 `mithril sync` runs on `split`. The ledger's own store opens in core mode,
 latches the `indexer_layout` gate on the empty database and imports the
 snapshot's ledger state, so the node can follow the tip as soon as it starts.
-The IndexerDB is built when the node runs, from the blocks already in the
-shared blob store. A database that is already complete is not advanced by a
-later `mithril sync`: the IndexerDB's rows belong to the anchor it was built
-at.
-
-When the writer finds a Mithril anchor in the ledger database
-(`mithril_ledger_slot` and `mithril_ledger_hash`) and an empty IndexerDB, it
-records the anchor, the op-cert counters the snapshot certified (dated at the
-anchor slot) and phase `replay` in one transaction, before any reader can ask.
-It refuses with `indexer.ErrAnchorUnserved` when the live UTxO set cannot
-serve the imported accounts (no
-set, or one that lost the delegations of its import baselines or its reward
-journal before it kept them). Then:
-
-1. `replay` drops the deferred-index manifest and indexes blocks from the
-   chain's origin to the anchor block, seeding genesis state in the first
-   transaction and counting the transactions it applies in
-   `indexer_replay_txs`. It indexes nothing past the anchor. The canonical
-   chain must start at the origin; a first block with a stored parent stops
-   the replay. Each batch commits its rows, facts and tip as usual, so a stop
-   resumes from the tip.
-2. `index` builds the dropped indexes (a build resumed after a stop builds what
-   is missing), then verifies the rows at the anchor: the `applied_transaction`
-   count equals the replay's count, and a SHA-256 over the live UTxO set at the
-   anchor, read in (transaction hash, output index) order, equals
-   the digest of the ledger database's set (outputs added at or before the
-   anchor and not spent at or before it). Each output's stored CBOR (assets,
-   inline datum, reference script) is part of the digest, hashed as a snapshot
-   import stores it so that block bytes and imported bytes of one output agree:
-   a legacy array output (including a Byron output's inline address) in map
-   form, the value in the MemPack form (zero quantities and then empty
-   policies dropped, a bare coin when no assets remain, policies and asset
-   names in bytewise order, shortest integer heads), and the address, datum
-   and reference script with shortest length heads around an inline datum's
-   and a native script's own bytes. A SQL store reads the set in one
-   unordered statement and sorts it itself, as an external merge sort of
-   16 MiB runs, into one file in the metadata store's scratch directory:
-   the SQLite database's directory, or the node's data directory for
-   PostgreSQL and MySQL. The file is roughly the size of the live set's
-   keys, amounts and credentials, is unlinked once open where the platform
-   allows, and the database runs no sort, so nothing spills into the
-   operating system's temporary directory. The store closes that cursor
-   before resolving any output, so resolvers can take their own read
-   connections; outputs are then resolved
-   and canonicalized in chunks on several goroutines and hashed in order. The
-   ledger's digest
-   is taken when the anchor is recorded and kept as `indexer_anchor_digest`.
-   With the live UTxO set the only copy of the UTxO set, the digest is taken
-   from the set's journal as of the anchor, the outputs decoded the way a row
-   is derived from one; a journal that no longer reaches the anchor leaves the
-   anchor without a digest. An anchor recorded without a digest is compared
-   against the ledger's current rows, or skipped with a warning when the set
-   is the only copy, and the transaction count
-   stands alone. The deferred-index manifest holds no unique
-   index, so uniqueness is enforced throughout the replay. A mismatch stops the
-   writer with `ErrAnchorMismatch`, leaves the phase at `index` and is returned
-   again by every pass until the node restarts.
-3. In one transaction with the `done` marker, the account state the snapshot
-   imported is applied: the import baselines of the accounts imported at the
-   anchor are copied from the ledger database, each such account's reward
-   balance at the anchor is set (the ledger's balance now, less the credits
-   and plus the withdrawals journaled in `account_reward_delta` after the
-   anchor), and `RestoreImportedAccountStates` and the DRep reconcile put the
-   delegations that rules other than certificates moved back to the snapshot's,
-   as the history backfill does at its anchor. The same
-   transaction records `mithril_ledger_slot` in the IndexerDB: while the replay
-   runs the genesis seed reads that key as a snapshot import, so it is written
-   last.
-
-After `done` the writer follows the ledger tip as before; facts dated after the
-anchor reach rows the ledger changed since in the order the ledger changed
-them.
+The IndexerDB is built when the node runs, by replaying every block from
+genesis out of the shared blob store through the same loop that follows the tip:
+no imported ledger rows, no anchor and no comparison with the ledger's state.
+Current-state endpoints report not ready until the replay reaches the
+immutable tip. A database that is already complete is not advanced by a later
+`mithril sync`.
 
 ### Serving from the IndexerDB
 
 Blockfrost and Kupo read the IndexerDB, as do Mesh, MCP, Midnight, off-chain
-metadata, the token registry and the Koios parity observer's transaction
-sample; Kupo's checkpoints and health report the
+metadata, the token registry and the Koios parity observer; Kupo's checkpoints and health report the
 IndexerDB tip, and health is `200` only once it has reached the ledger tip.
 Current-state routes (accounts, addresses, assets, pools, governance, latest
 epoch, Kupo matches) answer 503 with `Retry-After` while the IndexerDB is more
@@ -5411,7 +5181,7 @@ name below is a `chainstate/` blob key (see the blob key table), not a
 `GetSyncState`, `SetSyncState` and `DeleteSyncState`
 (`ErrBlockStoreChainState`). The group is `sync_status`, every `mithril_`
 name and the `ledger.state_reimport.` marks (`database/import_progress.go`).
-An IndexerDB keeps a `mithril_ledger_slot` row of its own in its `sync_state`.
+An IndexerDB records no `mithril_ledger_slot`: it has no anchor.
 
 `mithril_ledger_slot` and `mithril_ledger_hash` are the names released
 databases hold the generic imported-ledger-state boundary under. Every loader records that boundary
@@ -6414,74 +6184,40 @@ so this finalizer does not hold one snapshot for the full rebuild.
 
 #### Snapshot and Reward-State Retention
 
-Reward outputs are not pruned in API storage mode or with the Koios parity
-observer enabled, because the Blockfrost account reward history and the
-parity comparison read closed epochs, so their credential index spans every
-epoch. The per-epoch write cost of that index is one WAL frame per inserted
-row; `TestRewardAccountOutputWALFrames` measures the frames per b-tree of
-the table for one epoch's precompute, credit, fold, withdrawals and flag
-changes.
+Every epoch transition runs `cleanupOldSnapshots`, which prunes the ledger's
+database to the four epochs the Shelley rotation and delayed reward model need:
+current, current-1, current-2 for Go, and current-3 so reward calculation can be
+replayed after a rollback across the boundary where those rewards were
+applied. It prunes the same way in every storage mode and deletes only rows
+below that window (but see the deferred-header retention pin below, which can
+hold `pool_stake_snapshot` rows longer). History older than the window is the
+IndexerDB's: it derives its own copy of the epoch, reward and stake rows, and
+the Blockfrost epoch stake, account stake-history and account reward-history
+endpoints, the MCP pool performance and epoch summary tools and the Koios
+parity observer read it. A node that serves those endpoints runs in API storage
+mode, which has an IndexerDB; the ledger's database never holds rows for them.
+A local-state query as of an older point is core behaviour: it is answered
+only for points whose stake snapshots the ledger still holds, and refused with
+`ErrHistoricalStateUnavailable` for an older one.
 
-Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
-epochs the Shelley rotation and delayed reward model need: current, current-1,
-current-2 for Go, and current-3 so reward calculation can be replayed after a
-rollback across the boundary where those rewards were applied. It only ever
-deletes rows below that window (but see the deferred-header and
-acquired-point retention pins below, which can hold `pool_stake_snapshot` rows
-longer).
-
-`reward_account_output` and `pool_stake_snapshot` are the two tables whose
-retention depends on node configuration. `reward_account_output` is retained
-WITHOUT BOUND, instead of pruned to the window below, whenever the database
-is in API storage mode (`types.StorageModeAPI`, so the
-Blockfrost account reward-history endpoint can serve an account's full
-history) or the in-process Koios parity observer is enabled
-(`Manager.SetRewardAccountOutputRetentionUnbounded`, wired from
-`KoiosParityConfig.Enabled` in `node.go`/`node_lifecycle.go`). The
-observer validates a closed epoch only after fetching and comparing against
-Koios over the network, which can fall arbitrarily far behind chain
-progression during a from-genesis or catch-up sync — well past the fixed
-4-epoch window — so without this a checked epoch's `reward_account_output`
-rows are routinely gone before the observer ever reads them.
-
-`pool_stake_snapshot` is likewise retained WITHOUT BOUND in API storage mode
-only (`cleanupOldSnapshots`, `ledger/snapshot/rotation.go`): API
-mode's whole purpose is retaining full history for historical queries, and a
-fixed 3-epoch pool-snapshot window contradicts that for `GetStakeDistribution`/
-`GetPoolDistr2` pinned to an older epoch, the same way an unbounded UTxO table
-does for `GetUTxOWhole`. `VerifyPointQueryable`'s Acquire-time gate
-checks stake retention on every Acquire regardless of which query type
-the caller actually intends to ask, so even removing only UTxO's own window
-still leaves a historical Acquire failing at this pool-snapshot floor
-instead. Unlike `reward_account_output`, the Koios parity observer does not
-separately extend `pool_stake_snapshot`'s retention -- only API storage mode
-does.
-
-`reward_stake_input` is retained WITHOUT BOUND in API storage mode, so the
-Blockfrost epoch stake and account stake-history endpoints can answer for any
-epoch the node has run in that mode. It scales with delegator count, about
-1.3M rows per epoch on mainnet, so this is a storage-retention cost of API
-mode. Core mode and the Koios parity observer still prune it to the window.
-Retention is not retroactive: the table holds only the epochs a node still
-had when it first ran with unbounded retention, so per-credential history
-begins at that epoch on an upgraded node. The Blockfrost endpoints do not
-present the missing earlier epochs as empty: an epoch whose summary reports
-delegators over no `reward_stake_input` rows, an epoch whose snapshot was
-never captured, and an account whose history predates the oldest retained
-row and has no retained row at all each answer `404` with "The requested
-history is not retained by this node". A history that is only partly retained
-lists the retained epochs. A snapshot whose deferred `reward_stake_input` write
-has not finished (`LedgerState.RewardStakeInputsIncomplete`) answers the same
-`404` until the writer or the next reward round completes it, because its rows
-are a partial distribution.
+The per-credential stake rows are not retroactive in the IndexerDB: it holds
+only the epochs it derived. The Blockfrost endpoints do not present the
+missing earlier epochs as empty: an epoch whose summary reports delegators over
+no `reward_stake_input` rows, an epoch whose snapshot was never captured, and an
+account whose history predates the oldest retained row and has no retained row
+at all each answer `404` with "The requested history is not retained by this
+node". A history that is only partly retained lists the retained epochs. A
+snapshot whose `reward_stake_input` write is still pending in the IndexerDB's
+`sync_state` answers the same `404` until it completes, because its rows are a
+partial distribution.
 
 Pruned at `epoch < current-3`:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
-| `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` (CORE mode only) |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
-| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
+| `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
+| `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
 
 `cleanupOldSnapshots` calls both reward prunes with no transaction, so the
 store deletes by primary key in batches, each in its own write transaction,
@@ -6594,8 +6330,7 @@ re-checked on a later pass, but a pinned query against a missing snapshot
 simply fails, and the LocalStateQuery protocol has no failure reply mid-query,
 so the connection drops. That is why the floor is announced before the delete
 and Acquire's verify also refuses a point below an announced floor. The pin is
-released on the lifecycle described under SQL Conventions. API storage mode
-never calls the guard, since it retains `pool_stake_snapshot` without bound.
+released on the lifecycle described under SQL Conventions.
 
 Releasing the lock before `prune` means a header admitted after the release is
 not pinned by the pass in flight. This is safe because the retention floor is a
@@ -10469,12 +10204,9 @@ departed at 244 and 245, and `= $epoch` matches none of those later epochs.
 
 `pool_registration` and `pool_retirement` are retained for the life of the
 database, while `pool_stake_snapshot` is pruned to `currentEpoch - 3` by
-`Manager.cleanupOldSnapshots` in CORE storage mode (unbounded in API mode --
-see the pool-stake-snapshot retention discussion above). In CORE mode, that
-windowing is why this query, and not a pool-set membership read, is the
-departure evidence available to an observer running behind the node; in API
-mode the snapshot table itself remains a viable alternative, but this query
-is still used uniformly rather than branching behavior on storage mode.
+`Manager.cleanupOldSnapshots`. That windowing is why this query, and not a
+pool-set membership read, is the departure evidence available to an observer
+running behind the node.
 Backends differ only in identifier quoting (`"transaction"` on SQLite/Postgres,
 `` `transaction` `` on MySQL).
 

@@ -160,6 +160,19 @@ type Host interface {
 		carried []byte,
 	) ([]byte, error)
 
+	// IterateLiveUtxos calls fn for every live output of the host's UTxO set as
+	// txn sees it. The row passed to fn carries only the reference and the
+	// output CBOR, and its buffers are reused between calls.
+	IterateLiveUtxos(txn ledgerdb.Txn, fn func(*models.Utxo) error) error
+	// PublishAvvmRemoval announces, after txn commits, that the Allegra
+	// HARDFORK rule removed the outputs from the UTxO set at boundarySlot.
+	PublishAvvmRemoval(
+		ctx context.Context,
+		txn ledgerdb.Txn,
+		boundarySlot uint64,
+		removed []models.UtxoId,
+	)
+
 	// RewardInputGuards returns the host's rollback-detection counters.
 	RewardInputGuards() RewardInputGuards
 	// DeferStakeRewardPrecompute asks the host to retry a precompute of

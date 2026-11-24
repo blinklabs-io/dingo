@@ -15,10 +15,8 @@
 package utxoset
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 
@@ -28,15 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 )
 
-// importBaselineLen is the length of the part of an encoded import baseline
-// every version carries: the active flag, the added slot, whether a deposit is
-// recorded and the deposit. A baseline written once the set kept the imported
-// delegations follows it with a marker byte, the DRep type, and the pool and
-// DRep, each behind a one-byte length; an older one stops there and says
-// nothing about its delegations.
+// importBaselineLen is the length of an encoded import baseline: the active
+// flag, the added slot, whether a deposit is recorded and the deposit.
 const importBaselineLen = 1 + 8 + 1 + 8
-
-const importBaselineDelegations = 1
 
 func importBaselineKey(ref models.StakeCredentialRef) []byte {
 	k := make([]byte, 0, 2+len(ref.Key))
@@ -44,27 +36,14 @@ func importBaselineKey(ref models.StakeCredentialRef) []byte {
 	return append(k, ref.Key...)
 }
 
-func encodeImportBaseline(b ledger.ImportBaseline) ([]byte, error) {
-	if len(b.Pool) > math.MaxUint8 || len(b.Drep) > math.MaxUint8 {
-		return nil, fmt.Errorf(
-			"utxoset: import baseline delegation of %d and %d bytes",
-			len(b.Pool), len(b.Drep),
-		)
-	}
-	v := make([]byte, 0, importBaselineLen+11+len(b.Pool)+len(b.Drep))
+func encodeImportBaseline(b ledger.ImportBaseline) []byte {
+	v := make([]byte, 0, importBaselineLen)
 	v = append(v, boolByte(b.Active))
 	v = binary.BigEndian.AppendUint64(v, b.AddedSlot)
 	if b.Deposit == nil {
-		v = binary.BigEndian.AppendUint64(append(v, 0), 0)
-	} else {
-		v = binary.BigEndian.AppendUint64(append(v, 1), *b.Deposit)
+		return binary.BigEndian.AppendUint64(append(v, 0), 0)
 	}
-	v = append(v, importBaselineDelegations)
-	v = binary.BigEndian.AppendUint64(v, b.DrepType)
-	v = append(v, byte(len(b.Pool))) //nolint:gosec // bounded above
-	v = append(v, b.Pool...)
-	v = append(v, byte(len(b.Drep))) //nolint:gosec // bounded above
-	return append(v, b.Drep...), nil
+	return binary.BigEndian.AppendUint64(append(v, 1), *b.Deposit)
 }
 
 func boolByte(b bool) byte {
@@ -78,7 +57,7 @@ func decodeImportBaseline(
 	ref models.StakeCredentialRef,
 	v []byte,
 ) (*ledger.ImportBaseline, error) {
-	if len(v) < importBaselineLen {
+	if len(v) != importBaselineLen {
 		return nil, fmt.Errorf(
 			"utxoset: malformed import baseline of %d bytes", len(v),
 		)
@@ -91,33 +70,6 @@ func decodeImportBaseline(
 	if v[9] == 1 {
 		d := binary.BigEndian.Uint64(v[10:])
 		b.Deposit = &d
-	}
-	rest := v[importBaselineLen:]
-	if len(rest) == 0 {
-		return b, nil
-	}
-	malformed := fmt.Errorf(
-		"utxoset: malformed import baseline of %d bytes", len(v),
-	)
-	if rest[0] != importBaselineDelegations || len(rest) < 1+8+1 {
-		return nil, malformed
-	}
-	b.DrepType = binary.BigEndian.Uint64(rest[1:])
-	rest = rest[9:]
-	n := int(rest[0])
-	if len(rest) < 1+n+1 {
-		return nil, malformed
-	}
-	if n > 0 {
-		b.Pool = bytes.Clone(rest[1 : 1+n])
-	}
-	rest = rest[1+n:]
-	m := int(rest[0])
-	if len(rest) != 1+m {
-		return nil, malformed
-	}
-	if m > 0 {
-		b.Drep = bytes.Clone(rest[1 : 1+m])
 	}
 	return b, nil
 }
@@ -191,14 +143,10 @@ func accountWitnessRows(lc ledger.LedgerChanges) ([]badgerutxo.RowPut, error) {
 		if err := credentialKey(c.Baseline.Ref.Key); err != nil {
 			return nil, err
 		}
-		value, err := encodeImportBaseline(c.Baseline)
-		if err != nil {
-			return nil, err
-		}
 		out = append(out, badgerutxo.RowPut{
 			Slot:  c.Slot,
 			Key:   importBaselineKey(c.Baseline.Ref),
-			Value: value,
+			Value: encodeImportBaseline(c.Baseline),
 		})
 	}
 	for _, c := range lc.Witnesses {
@@ -221,11 +169,8 @@ func accountWitnessRows(lc ledger.LedgerChanges) ([]badgerutxo.RowPut, error) {
 	return out, nil
 }
 
-// ensureImportBaselines loads every account import baseline, with the
-// delegations the import recorded, from the metadata store into a set from
-// before it kept them. A set that holds the baselines without their
-// delegations has them reloaded while the metadata store still holds the
-// rows, and is marked as having lost them once it does not.
+// ensureImportBaselines loads every account import baseline from the metadata
+// store into a set from before it kept them.
 func (s *Set) ensureImportBaselines(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -235,16 +180,7 @@ func (s *Set) ensureImportBaselines(
 		return fmt.Errorf("utxoset: read the import baseline marker: %w", err)
 	}
 	if loaded {
-		settled, err := s.store.ImportBaselineDelegationsLoaded()
-		if err != nil {
-			return fmt.Errorf(
-				"utxoset: read the import baseline delegation marker: %w",
-				err,
-			)
-		}
-		if settled {
-			return nil
-		}
+		return nil
 	}
 	txn := ldb.Begin(ctx, false)
 	defer txn.Release()
@@ -259,31 +195,15 @@ func (s *Set) ensureImportBaselines(
 					r.CredentialTag,
 					r.StakingKey,
 				)
-				v, err := encodeImportBaseline(ledger.ImportBaseline{
-					Ref: ref, Active: r.Active, AddedSlot: r.AddedSlot,
-					Deposit: r.Deposit, Pool: r.Pool, Drep: r.Drep,
-					DrepType: r.DrepType,
-				})
-				if err != nil {
-					return err
-				}
 				n++
-				return put(importBaselineKey(ref), v)
+				return put(importBaselineKey(ref), encodeImportBaseline(
+					ledger.ImportBaseline{
+						Ref: ref, Active: r.Active, AddedSlot: r.AddedSlot,
+						Deposit: r.Deposit,
+					},
+				))
 			})
 	})
-	if loaded && errors.Is(err, badgerutxo.ErrLoadsRefused) {
-		// The rows to take the delegations from are drained, and the
-		// baselines the set holds are all there is.
-		if err := s.store.MarkImportBaselineDelegationsLost(); err != nil {
-			return err
-		}
-		s.logger.Warn(
-			"the live UTxO set holds import baselines without the " +
-				"delegations the import recorded, and the metadata store " +
-				"has drained them",
-		)
-		return nil
-	}
 	if err != nil {
 		return fmt.Errorf("utxoset: load import baselines: %w", err)
 	}
@@ -293,47 +213,6 @@ func (s *Set) ensureImportBaselines(
 		n,
 	)
 	return nil
-}
-
-// ImportBaselineDelegationsLost reports whether the set holds import
-// baselines that lack the delegations the import recorded.
-func (s *Set) ImportBaselineDelegationsLost() (bool, error) {
-	return s.store.ImportBaselineDelegationsLost()
-}
-
-// ImportBaselinesAfter returns at most limit import baselines whose
-// credential follows after (tag, then key; nil to start), in that order, and
-// the credential to continue from, nil at the end.
-func (s *Set) ImportBaselinesAfter(
-	after *models.StakeCredentialRef,
-	limit int,
-) ([]ledger.ImportBaseline, *models.StakeCredentialRef, error) {
-	var from []byte
-	if after != nil {
-		from = importBaselineKey(*after)
-	}
-	var out []ledger.ImportBaseline
-	err := s.store.RowsAfter(
-		[]byte{badgerutxo.ImportBaselineTag}, from, limit,
-		func(k, v []byte) error {
-			if len(k) < 2 {
-				return fmt.Errorf("utxoset: malformed import baseline key %x", k)
-			}
-			b, err := decodeImportBaseline(
-				models.NewStakeCredentialRef(k[1], bytes.Clone(k[2:])), v,
-			)
-			if err != nil {
-				return err
-			}
-			out = append(out, *b)
-			return nil
-		},
-	)
-	if err != nil || len(out) < limit {
-		return out, nil, err
-	}
-	last := out[len(out)-1].Ref
-	return out, &last, nil
 }
 
 // ensureWitnessSlots loads every slot a credential was witnessed at from the

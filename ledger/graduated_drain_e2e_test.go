@@ -139,7 +139,6 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 			require.Len(t, refunds, 1)
 			first := true
 			return func() []string {
-				initial := first
 				if first {
 					tip, err = h.scenario.DB.GetTip(nil)
 					require.NoError(t, err)
@@ -165,27 +164,6 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 						ops.Batched,
 					},
 				)...)
-				// The counters observed at one slot are what a snapshot
-				// import's anchor exports.
-				for _, slot := range []uint64{
-					ops.Base, ops.Raised, ops.Repeated, ops.Lowered,
-					ops.Batched, ops.Batched + 1,
-				} {
-					got, err := h.scenario.AnchorOpCertCounters(slot)
-					require.NoError(t, err, "anchor counters at %d", slot)
-					if initial && slot == ops.Repeated {
-						require.Len(t, got, 2, "both pools observed at %d", slot)
-					}
-					for _, c := range got {
-						lines = append(lines, fmt.Sprintf(
-							"anchor %d %x %d", slot, c.PoolKeyHash,
-							c.Sequence,
-						))
-					}
-					lines = append(lines, fmt.Sprintf(
-						"anchor %d count %d", slot, len(got),
-					))
-				}
 				return lines
 			}
 		},

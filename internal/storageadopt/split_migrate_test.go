@@ -29,10 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
@@ -114,9 +112,6 @@ func seedAPIStore(
 	require.NoError(
 		t, db.Metadata().SetSyncState(migrateProbeKey, "api-row", nil),
 	)
-	require.NoError(t, db.Metadata().SetSyncState(
-		models.RewardStakeInputsPendingKey, migratePendingInputs, nil,
-	))
 	require.NoError(t, rt.Close(t.Context()))
 	return cfg, last
 }
@@ -191,12 +186,6 @@ func requireSplitStores(
 	gotTx, err := idx.Blob().GetTx(blobTxn, migrateOffsetTx)
 	require.NoError(t, err, "the IndexerDB serves the ledger's transaction entries")
 	require.Equal(t, migrateOffsetTxValue, gotTx)
-	deferred, err := idx.Metadata().GetSyncState(
-		indexer.DeferredStakeInputsKey, nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, migratePendingInputs, deferred,
-		"snapshots the ledger was still writing stay pending for the writer")
 }
 
 // A transaction and an output that no block of the chain produced, such as a
@@ -207,8 +196,6 @@ var (
 	migrateOffsetUtxoValue = []byte{0x82, 0x01, 0x02}
 	migrateOffsetTxValue   = []byte{0x83, 0x03, 0x04, 0x05}
 )
-
-const migratePendingInputs = `{"entries":[{"epoch":7,"boundary_slot":700}]}`
 
 func requireNoMigrationWork(t *testing.T, cfg *config.Config) {
 	t.Helper()

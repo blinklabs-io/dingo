@@ -123,19 +123,17 @@ func TestReadyBoundaries(t *testing.T) {
 	t.Parallel()
 	const maxLag = 100
 	tests := []struct {
-		name                  string
-		kind                  Kind
-		indexed, ledger, anch uint64
-		want                  bool
+		name            string
+		kind            Kind
+		indexed, ledger uint64
+		want            bool
 	}{
-		{"below anchor current", KindCurrent, 99, 100, 100, false},
-		{"below anchor history", KindHistory, 99, 100, 100, false},
-		{"at anchor history far behind", KindHistory, 100, 10_000, 100, true},
-		{"at anchor current far behind", KindCurrent, 100, 10_000, 100, false},
-		{"lag exactly max", KindCurrent, 900, 1000, 0, true},
-		{"lag one past max", KindCurrent, 899, 1000, 0, false},
-		{"indexer ahead of ledger", KindCurrent, 1001, 1000, 0, true},
-		{"no anchor caught up", KindCurrent, 5, 5, 0, true},
+		{"history far behind", KindHistory, 100, 10_000, true},
+		{"current far behind", KindCurrent, 100, 10_000, false},
+		{"lag exactly max", KindCurrent, 900, 1000, true},
+		{"lag one past max", KindCurrent, 899, 1000, false},
+		{"indexer ahead of ledger", KindCurrent, 1001, 1000, true},
+		{"caught up", KindCurrent, 5, 5, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,7 +142,7 @@ func TestReadyBoundaries(t *testing.T) {
 				TipSyncKey: Tip{BlockNumber: tt.indexed}.encode(),
 			}, maxLag)
 			require.NoError(t, err)
-			got, err := s.Ready(tt.kind, tt.ledger, tt.anch)
+			got, err := s.Ready(tt.kind, tt.ledger)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
 		})
@@ -183,125 +181,4 @@ func TestCheckpointsAreNewestFirstPrunedAndDroppedOnRollback(t *testing.T) {
 	cps, err = s.Checkpoints(txn)
 	require.NoError(t, err)
 	require.Len(t, cps, 2, "block 9 is now out of retention too")
-}
-
-func TestAnchorAndBootstrapPhaseRoundTrip(t *testing.T) {
-	t.Parallel()
-	state := fakeState{}
-	s, err := NewStore(nil, state, 10)
-	require.NoError(t, err)
-	txn := &database.Txn{}
-
-	anchor, err := s.Anchor(nil)
-	require.NoError(t, err)
-	require.True(t, anchor.IsZero(), "a chain from genesis has no anchor")
-	phase, err := s.Bootstrap(nil)
-	require.NoError(t, err)
-	require.Equal(t, PhaseNone, phase)
-
-	want := Tip{Slot: 90, BlockNumber: 9, Hash: []byte{0xaa, 0xbb}}
-	require.NoError(t, s.SetAnchor(want, txn))
-	require.NoError(t, s.SetBootstrap(PhaseIndex, txn))
-	got, err := s.Anchor(nil)
-	require.NoError(t, err)
-	require.Equal(t, want, got)
-	phase, err = s.Bootstrap(nil)
-	require.NoError(t, err)
-	require.Equal(t, PhaseIndex, phase)
-
-	require.Error(
-		t,
-		s.SetAnchor(want, nil),
-		"the anchor is written with the writer's transaction",
-	)
-	require.Error(t, s.SetBootstrap(PhaseDone, nil))
-	state[BootstrapSyncKey] = "sideways"
-	_, err = s.Bootstrap(nil)
-	require.Error(t, err, "an unknown phase is refused, not read as done")
-}
-
-func TestReplayTransactionsAccumulate(t *testing.T) {
-	t.Parallel()
-	s, err := NewStore(nil, fakeState{}, 10)
-	require.NoError(t, err)
-	txn := &database.Txn{}
-	require.NoError(t, s.AddReplayTransactions(3, txn))
-	require.NoError(t, s.AddReplayTransactions(4, txn))
-	n, err := s.ReplayTransactions(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(7), n)
-}
-
-func TestReadyServingWaitsForTheAnchorAndTheBootstrap(t *testing.T) {
-	t.Parallel()
-	const maxLag = 100
-	anchor := Tip{Slot: 90, BlockNumber: 100, Hash: []byte{1}}
-	for _, tt := range []struct {
-		name    string
-		state   fakeState
-		indexed uint64
-		want    bool
-	}{
-		{"no anchor", fakeState{}, 5, true},
-		{"replaying", fakeState{
-			AnchorSyncKey: anchor.encode(), BootstrapSyncKey: string(PhaseReplay),
-		}, 100, false},
-		{"anchor reached, building indexes", fakeState{
-			AnchorSyncKey: anchor.encode(), BootstrapSyncKey: string(PhaseIndex),
-		}, 100, false},
-		{"done at the anchor", fakeState{
-			AnchorSyncKey: anchor.encode(), BootstrapSyncKey: string(PhaseDone),
-		}, 100, true},
-		{"done but below the anchor", fakeState{
-			AnchorSyncKey: anchor.encode(), BootstrapSyncKey: string(PhaseDone),
-		}, 99, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			tt.state[TipSyncKey] = Tip{BlockNumber: tt.indexed}.encode()
-			s, err := NewStore(nil, tt.state, maxLag)
-			require.NoError(t, err)
-			got, err := s.ReadyServing(KindHistory, 100)
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-		})
-	}
-}
-
-// listCountingState counts checkpoint listings.
-type listCountingState struct {
-	fakeState
-	lists int
-}
-
-func (l *listCountingState) ListSyncStateKeysByPrefix(
-	prefix string, txn *database.Txn,
-) ([]string, error) {
-	l.lists++
-	return l.fakeState.ListSyncStateKeysByPrefix(prefix, txn)
-}
-
-func TestAddCheckpointListsCheckpointsOnlyWhenPruning(t *testing.T) {
-	t.Parallel()
-	state := &listCountingState{fakeState: fakeState{}}
-	s, err := NewStore(nil, state, 10)
-	require.NoError(t, err)
-	txn := &database.Txn{}
-	tipAt := func(n uint64) Tip {
-		return Tip{Slot: n * 10, BlockNumber: n, Hash: []byte{byte(n)}}
-	}
-	for n := uint64(1); n <= 200; n++ {
-		require.NoError(t, s.AddCheckpoint(tipAt(n), txn))
-	}
-	require.LessOrEqual(t, state.lists, 1,
-		"batches inside the retention window do not list checkpoints")
-
-	require.NoError(t, s.AddCheckpoint(tipAt(CheckpointRetainBlocks+50), txn))
-	cps, err := s.Checkpoints(txn)
-	require.NoError(t, err)
-	for _, cp := range cps {
-		require.GreaterOrEqual(t, cp.BlockNumber, uint64(50),
-			"blocks out of retention are pruned")
-	}
-	require.Equal(t, uint64(CheckpointRetainBlocks+50), cps[0].BlockNumber)
 }

@@ -1153,44 +1153,20 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 // never binds; it exists only so a permanently-stuck deferred header cannot pin
 // ~1.3M rows/epoch on mainnet without limit. Retention never drops below the
 // default currentEpoch-3 window regardless.
-const poolSnapshotRetentionMaxDepth uint64 = 24
+const poolSnapshotRetentionMaxDepth = ledgerdb.PoolSnapshotRetentionBackstopEpochs
 
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
 // delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
 // current, current-1, current-2 for Go, and current-3 so reward calculation can
 // be replayed after a rollback across the boundary where those rewards were
-// applied.
-//
-// reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
-// and is not needed once the epoch it snapshots has finished replaying, so
-// outside API storage mode it is pruned to that 4-epoch window. In API storage
-// mode (types.StorageModeAPI) it is retained WITHOUT BOUND so the Blockfrost
-// epoch stake and account stake-history endpoints can answer for any epoch the
-// node has run in that mode. reward_account_output is pruned to the same
-// window in CORE storage mode (types.StorageModeCore), matching dingo's original pruning behavior exactly, but likewise retained
-// WITHOUT BOUND in API storage mode so the Blockfrost account
-// reward-history endpoint (GET /accounts/{stake_address}/rewards)
-// can serve an account's full reward history instead of only the trailing few
-// epochs — the same "silently look empty past the window" failure mode that
-// epoch_summary rows once showed. reward_account_output is likewise
-// retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
-// has been called (node.go wires this from the koios-parity observer's Enabled
-// config): that observer only validates a closed epoch after fetching and
-// comparing over the network, which can fall arbitrarily far behind chain
-// progression during a from-genesis or catch-up sync, so the fixed 4-epoch
-// window otherwise prunes an epoch's rows before the observer ever reads them.
-// See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (koios-parity, prunes only
-// reward_stake_input) for the implementation and full rationale.
+// applied. It prunes the same way in every storage mode: history older than
+// the window is the IndexerDB's, which derives its own copy.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
-// slot), so retaining the full history costs one row per epoch — roughly a
-// thousand rows over a network's lifetime — while making historical epoch
-// aggregates permanently queryable. Pruning it also made a legitimately
-// captured boundary indistinguishable from one that was never captured, which
-// is what made it read as a missing epoch-2 snapshot on a node that
-// had in fact captured it correctly 400 epochs earlier.
+// slot), so retaining the full history costs one row per epoch, and pruning it
+// would make a legitimately captured boundary indistinguishable from one that
+// was never captured.
 func (m *Manager) cleanupOldSnapshots(
 	ctx context.Context,
 	currentEpoch uint64,
@@ -1202,86 +1178,70 @@ func (m *Manager) cleanupOldSnapshots(
 
 	deleteBeforeEpoch := currentEpoch - 3
 
-	// Pool-stake snapshots are retained without bound in API storage mode,
-	// the same way reward_account_output already is (types.StorageModeAPI,
-	// this function's own reward-state section below): API mode's whole purpose is retaining full history for
-	// historical queries, and a fixed 3-epoch pool-snapshot window
-	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
-	// older epoch the same way an unbounded UTxO table does for
-	// GetUTxOWhole. VerifyPointQueryable's Acquire-time gate
-	// checks stake retention on every Acquire
-	// regardless of which query type the caller actually intends to ask,
-	// so even removing only UTxO's own window still leaves a historical
-	// Acquire failing at this pool-snapshot floor instead -- there is no
-	// protocol-level way to know in advance which query type a session
-	// will ask, so the whole Acquire is only as long-lived as its
-	// strictest per-query floor.
-	if m.db.StorageMode() != types.StorageModeAPI {
-		// Pool-stake snapshots may still be needed below the default window by a
-		// queued/deferred header that validates leader eligibility against an
-		// older epoch's mark snapshot. Pruning them out from under
-		// such a header makes leaderEligibilityStake read the missing rows as a
-		// zero-stake "pool absent" answer, which the reference node never
-		// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
-		// guard holds the deferred-header set stable across both the retention
-		// floor selection and this delete+commit, so no header can be admitted
-		// between the floor read and the prune and lose its snapshot. Only the
-		// pool-snapshot boundary moves; reward-state retention keeps the unchanged
-		// currentEpoch-3 window (deferred header validation reads pool stake, never
-		// reward rows), and runs in a separate transaction outside the guard to
-		// keep the locked section tight.
-		//
-		// prunePoolSnapshots deletes AND commits below the boundary the guard
-		// hands back (its own transaction), so the rows are actually gone before
-		// the guard releases the deferred-header lock.
-		prunePoolSnapshots := func(before uint64) error {
-			if before < deleteBeforeEpoch {
-				m.logger.Info(
-					"retaining historical pool stake snapshots for deferred header validation",
-					"component",
-					"snapshot",
-					"current_epoch",
-					currentEpoch,
-					"default_before_epoch",
-					deleteBeforeEpoch,
-					"pinned_before_epoch",
-					before,
-				)
-			}
-			poolTxn := m.db.Begin(ctx, true)
-			defer func() { _ = poolTxn.Rollback() }()
-			if err := m.db.DeletePoolStakeSnapshotsBeforeEpoch(
-				before,
-				poolTxn,
-			); err != nil {
-				return fmt.Errorf("cleanup pool snapshots: %w", err)
-			}
-			return poolTxn.Commit()
-		}
-		// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
-		// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
-		// of pool snapshots so an unresolvable deferred header cannot pin them
-		// without bound. It never rises above the default
-		// window (a header needing a within-window snapshot is unaffected), and the
-		// guard clamps the pinned boundary up to it.
-		minPoolSnapshotDeleteBefore := uint64(0)
-		if currentEpoch > poolSnapshotRetentionMaxDepth {
-			minPoolSnapshotDeleteBefore = currentEpoch - poolSnapshotRetentionMaxDepth
-		}
-		if minPoolSnapshotDeleteBefore > deleteBeforeEpoch {
-			minPoolSnapshotDeleteBefore = deleteBeforeEpoch
-		}
-		if guard := m.poolSnapshotRetentionGuard(); guard != nil {
-			if err := guard(
+	// Pool-stake snapshots may still be needed below the default window by a
+	// queued/deferred header that validates leader eligibility against an
+	// older epoch's mark snapshot. Pruning them out from under
+	// such a header makes leaderEligibilityStake read the missing rows as a
+	// zero-stake "pool absent" answer, which the reference node never
+	// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
+	// guard holds the deferred-header set stable across both the retention
+	// floor selection and this delete+commit, so no header can be admitted
+	// between the floor read and the prune and lose its snapshot. Only the
+	// pool-snapshot boundary moves; reward-state retention keeps the unchanged
+	// currentEpoch-3 window (deferred header validation reads pool stake, never
+	// reward rows), and runs in a separate transaction outside the guard to
+	// keep the locked section tight.
+	//
+	// prunePoolSnapshots deletes AND commits below the boundary the guard
+	// hands back (its own transaction), so the rows are actually gone before
+	// the guard releases the deferred-header lock.
+	prunePoolSnapshots := func(before uint64) error {
+		if before < deleteBeforeEpoch {
+			m.logger.Info(
+				"retaining historical pool stake snapshots for deferred header validation",
+				"component",
+				"snapshot",
+				"current_epoch",
+				currentEpoch,
+				"default_before_epoch",
 				deleteBeforeEpoch,
-				minPoolSnapshotDeleteBefore,
-				prunePoolSnapshots,
-			); err != nil {
-				return err
-			}
-		} else if err := prunePoolSnapshots(deleteBeforeEpoch); err != nil {
+				"pinned_before_epoch",
+				before,
+			)
+		}
+		poolTxn := m.db.Begin(ctx, true)
+		defer func() { _ = poolTxn.Rollback() }()
+		if err := m.db.DeletePoolStakeSnapshotsBeforeEpoch(
+			before,
+			poolTxn,
+		); err != nil {
+			return fmt.Errorf("cleanup pool snapshots: %w", err)
+		}
+		return poolTxn.Commit()
+	}
+	// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
+	// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
+	// of pool snapshots so an unresolvable deferred header cannot pin them
+	// without bound. It never rises above the default
+	// window (a header needing a within-window snapshot is unaffected), and the
+	// guard clamps the pinned boundary up to it.
+	minPoolSnapshotDeleteBefore := uint64(0)
+	if currentEpoch > poolSnapshotRetentionMaxDepth {
+		minPoolSnapshotDeleteBefore = currentEpoch - poolSnapshotRetentionMaxDepth
+	}
+	if minPoolSnapshotDeleteBefore > deleteBeforeEpoch {
+		minPoolSnapshotDeleteBefore = deleteBeforeEpoch
+	}
+	if guard := m.poolSnapshotRetentionGuard(); guard != nil {
+		if err := guard(
+			deleteBeforeEpoch,
+			minPoolSnapshotDeleteBefore,
+			prunePoolSnapshots,
+		); err != nil {
 			return err
 		}
+	} else if err := prunePoolSnapshots(deleteBeforeEpoch); err != nil {
+		return err
 	}
 
 	// Reward-state pruning: unchanged currentEpoch-3 window, outside the
@@ -1292,30 +1252,12 @@ func (m *Manager) cleanupOldSnapshots(
 	// on mainnet is minutes.
 	ldb := m.db
 
-	switch {
-	case m.db.StorageMode() == types.StorageModeAPI:
-		// API storage mode retains both reward tables without bound: the
-		// Blockfrost epoch stake and account history endpoints read
-		// reward_stake_input for epochs far behind the tip. This costs about
-		// 1.3M rows per epoch on mainnet.
-	case m.RewardAccountOutputRetentionUnbounded():
-		// The in-process Koios parity observer needs reward_account_output
-		// only (see doc comment above).
-		if err := ldb.DeleteRewardStakeInputBeforeEpoch(
-			ctx,
-			deleteBeforeEpoch,
-			nil,
-		); err != nil {
-			return fmt.Errorf("cleanup reward state: %w", err)
-		}
-	default:
-		if err := ldb.DeleteRewardStateBeforeEpoch(
-			ctx,
-			deleteBeforeEpoch,
-			nil,
-		); err != nil {
-			return fmt.Errorf("cleanup reward state: %w", err)
-		}
+	if err := ldb.DeleteRewardStateBeforeEpoch(
+		ctx,
+		deleteBeforeEpoch,
+		nil,
+	); err != nil {
+		return fmt.Errorf("cleanup reward state: %w", err)
 	}
 
 	m.logger.Debug(

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // engine returns the epoch-boundary engine over ls. It is built per call from
@@ -183,6 +184,26 @@ func (h engineHost) AccountInactivityActivationFloors(
 		}
 	}
 	return floors, nil
+}
+
+func (h engineHost) IterateLiveUtxos(
+	txn ledgerdb.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	return h.ls.iterateLiveUtxos(txn, fn)
+}
+
+func (h engineHost) PublishAvvmRemoval(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	boundarySlot uint64,
+	removed []models.UtxoId,
+) {
+	h.ls.publishUtxoEventAfterCommit(ctx, txn, UtxoEvent{
+		Point:   ocommon.Point{Slot: boundarySlot},
+		Cause:   UtxoChangeAvvmRemoval,
+		Removed: removed,
+	}, nil)
 }
 
 func (h engineHost) RewardLikelihoodDB() ledgerdb.RewardLikelihoodStore {

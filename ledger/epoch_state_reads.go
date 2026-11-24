@@ -19,7 +19,6 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -43,11 +42,6 @@ type EpochStateReader interface {
 		epoch uint64,
 		typ string,
 		limit int,
-	) ([]*models.PoolStakeSnapshot, error)
-	// PoolStakeSnapshotsCapturedIn returns the snapshot rows of every epoch
-	// and type captured in [from, through], from one read.
-	PoolStakeSnapshotsCapturedIn(
-		from, through uint64,
 	) ([]*models.PoolStakeSnapshot, error)
 }
 
@@ -349,81 +343,6 @@ func (ls *LedgerState) snapshotViewLocked(
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
-}
-
-// snapshotsCapturedInView is every snapshot row captured in [from, through]
-// as txn sees the set, for every epoch and type, sorted by epoch, type and
-// pool. It applies the staged batches as snapshotViewLocked does for one epoch
-// and type. Rows outside the range are dropped before the batches apply, which
-// cannot change the result: a staged save replaces a row by its key whatever
-// the stored row held, and a staged delete only removes rows.
-func (ls *LedgerState) snapshotsCapturedInView(
-	r EpochStateReader,
-	txn ledgerdb.Txn,
-	from, through uint64,
-) ([]*models.PoolStakeSnapshot, error) {
-	ls.utxoSetApplyMu.RLock()
-	defer ls.utxoSetApplyMu.RUnlock()
-	type rowKey struct {
-		epoch uint64
-		typ   string
-		pool  string
-	}
-	ops := ls.stagedEpochStateOps(txn)
-	rows, err := r.PoolStakeSnapshotsCapturedIn(from, through)
-	if err != nil {
-		return nil, err
-	}
-	starts, err := stagedRollbackEpochStarts(r, ops)
-	if err != nil {
-		return nil, err
-	}
-	view := make(map[rowKey]*models.PoolStakeSnapshot, len(rows))
-	for _, s := range rows {
-		view[rowKey{s.Epoch, s.SnapshotType, string(s.PoolKeyHash)}] = s
-	}
-	for _, o := range ops {
-		if o.rollbackTo != nil {
-			newest, found := rollbackEpochStarts(starts, *o.rollbackTo)
-			if found {
-				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
-					return k.epoch > newest
-				})
-			}
-		}
-		for _, e := range o.epochs {
-			starts[e.EpochId] = e.StartSlot
-		}
-		for _, c := range o.snapshots {
-			switch c.Kind {
-			case SnapshotSave:
-				s := *c.Snapshot
-				view[rowKey{s.Epoch, s.SnapshotType, string(s.PoolKeyHash)}] = &s
-			case SnapshotDeleteForEpoch:
-				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
-					return k.epoch == c.Epoch && k.typ == c.Type
-				})
-			case SnapshotDeleteBeforeEpoch:
-				maps.DeleteFunc(view, func(k rowKey, _ *models.PoolStakeSnapshot) bool {
-					return k.epoch < c.Epoch
-				})
-			}
-		}
-	}
-	out := make([]*models.PoolStakeSnapshot, 0, len(view))
-	for _, s := range view {
-		if s.CapturedSlot >= from && s.CapturedSlot <= through {
-			out = append(out, s)
-		}
-	}
-	slices.SortFunc(out, func(a, b *models.PoolStakeSnapshot) int {
-		return cmp.Or(
-			cmp.Compare(a.Epoch, b.Epoch),
-			cmp.Compare(a.SnapshotType, b.SnapshotType),
-			bytes.Compare(a.PoolKeyHash, b.PoolKeyHash),
-		)
-	})
 	return out, nil
 }
 

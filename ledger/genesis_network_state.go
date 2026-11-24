@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"errors"
 	"fmt"
 	"math/big"
 
@@ -105,51 +104,5 @@ func (ls *LedgerState) applyByronTranslationReserves(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil {
-		return errors.New("missing Shelley genesis")
-	}
-	ldb := ls.ledgerDB()
-	live, err := ls.liveUtxoLovelace(txn)
-	if err != nil {
-		return fmt.Errorf("sum live UTxO balance: %w", err)
-	}
-	if live == 0 {
-		return fmt.Errorf(
-			"no live UTxO at the Byron-to-Shelley boundary "+
-				"(epoch %d, slot %d): UTxO set is not populated",
-			newEpoch,
-			boundarySlot,
-		)
-	}
-	if live > shelleyGenesis.MaxLovelaceSupply {
-		return fmt.Errorf(
-			"live UTxO balance %d exceeds max lovelace supply %d",
-			live,
-			shelleyGenesis.MaxLovelaceSupply,
-		)
-	}
-	reserves := shelleyGenesis.MaxLovelaceSupply - live
-	state, err := ldb.GetNetworkState(txn)
-	if err != nil {
-		return fmt.Errorf("get network state: %w", err)
-	}
-	var treasury uint64
-	if state != nil {
-		treasury = uint64(state.Treasury)
-	}
-	if err := ldb.SetNetworkState(
-		treasury, reserves, boundarySlot, txn,
-	); err != nil {
-		return fmt.Errorf("set translated reserves: %w", err)
-	}
-	ls.config.Logger.Info(
-		"set Shelley reserves from Byron UTxO balance",
-		"reserves", reserves,
-		"live_utxo_lovelace", live,
-		"epoch", newEpoch,
-		"boundary_slot", boundarySlot,
-		"component", "ledger",
-	)
-	return nil
+	return ls.engine().ApplyByronTranslationReserves(txn, newEpoch, boundarySlot)
 }

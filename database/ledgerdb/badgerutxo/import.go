@@ -229,7 +229,6 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 				return put(DormancyKey, make([]byte, 8))
 			})
 		}},
-		{drepHistoryLoadedKey, func() error { return s.LoadDRepHistory(false, none) }},
 		{poolsKey, func() error { return s.LoadPools(none) }},
 		{poolHistoryKey, func() error { return s.LoadPoolHistory(none) }},
 		{registrationHistoryKey, func() error { return s.LoadRegistrationHistory(none) }},
@@ -244,9 +243,7 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 		{rewardBlocksKey, func() error { return s.LoadRewardBlocks(none) }},
 		{importedBlocksKey, func() error { return s.LoadImportedBlocks(false, noneSlots) }},
 		{rewardRecordsKey, func() error {
-			return s.LoadRewardRecords(
-				false, func(func(RewardRecord) error) error { return nil },
-			)
+			return s.LoadRewardRecords(func(func(RewardRecord) error) error { return nil })
 		}},
 		{rewardInputsKey, func() error { return s.LoadRewardInputs(noneSlots) }},
 		{rewardDerivedKey, func() error { return s.LoadRewardDerived(noneSlots) }},
