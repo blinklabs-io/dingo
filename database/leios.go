@@ -61,15 +61,6 @@ func (d *Database) LeiosDB() (leiosdb.Store, error) {
 	return d.openLeiosDBLocked()
 }
 
-// ShareLeiosDB makes d read the endorser-block store of peer, which owns it.
-// The IndexerDB reads the payloads of a certified closure's transactions from
-// the ledger's LeiosDB.
-func (d *Database) ShareLeiosDB(peer *Database) {
-	d.leiosMu.Lock()
-	defer d.leiosMu.Unlock()
-	d.leios.peer = peer
-}
-
 func (d *Database) openLeiosDBLocked() (leiosdb.Store, error) {
 	if d.leios.store != nil {
 		return d.leios.store, nil

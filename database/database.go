@@ -103,6 +103,11 @@ type Stores struct {
 	// Leios is the endorser-block store. Nil lets the Database open its own
 	// under the data directory on first use and close it with Close.
 	Leios leiosdb.Store
+	// LeiosPeer is the database whose endorser-block store the new Database
+	// reads and never opens or closes, as the IndexerDB reads the ledger's.
+	// It is installed before init runs, which can read a closure through the
+	// Leios store.
+	LeiosPeer *Database
 }
 
 // isNilStore reports whether an injected store is a nil interface or an
@@ -128,6 +133,9 @@ type Database struct {
 	// liveUtxo is set when the ledger holds the live UTxO set outside the
 	// metadata store; see SetLiveUtxoSource.
 	liveUtxo bool
+	// liveOutputs, when set, answers reads of an active output whose block
+	// history has expired; see SetLiveOutputs.
+	liveOutputs atomic.Pointer[types.LiveOutputReader]
 	// txIndex lists the transactions applied after a slot when the LedgerDB
 	// holds the transaction index; see SetLiveUtxoSource.
 	txIndex types.TxIndexSource
@@ -669,6 +677,9 @@ func New(
 	}
 	if stores.Leios != nil && !isNilStore(stores.Leios) {
 		db.leios.store = stores.Leios
+	}
+	if stores.LeiosPeer != nil {
+		db.leios.peer = stores.LeiosPeer
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)

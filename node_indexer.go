@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiready"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -182,6 +183,7 @@ func (n *Node) buildIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
+	db.SetLiveOutputs(nodeLiveOutputs{node: n})
 	var factRows metadata.LedgerFacts
 	if n.ledgerState != nil && consensus == n.db {
 		factRows = n.ledgerState
@@ -205,6 +207,23 @@ func (n *Node) buildIndexerWriter(
 		)
 	}
 	return db, writer, nil
+}
+
+// nodeLiveOutputs is the IndexerDB's read-only view of the ledger's live UTxO
+// set, followed across a live close and reopen of the set.
+type nodeLiveOutputs struct{ node *Node }
+
+// LiveUtxoCbor implements types.LiveOutputReader.
+func (l nodeLiveOutputs) LiveUtxoCbor(
+	_ types.Txn,
+	txID []byte,
+	index uint32,
+) ([]byte, bool, error) {
+	set := l.node.anchoredUtxoSet.Load()
+	if set == nil {
+		return nil, false, nil
+	}
+	return set.Get(txID, index)
 }
 
 // rollbackIndexerForTruncate rolls the IndexerDB back to the block a ledger

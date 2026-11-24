@@ -3366,8 +3366,22 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 		11,
 	)
 	require.NoError(t, err)
-	_, err = store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	gotDeletedDeregistrations, err := store.DeleteMidnightDeregistrationsByBlock(
+		rollback,
+		12,
+	)
 	require.NoError(t, err)
+	require.Len(t, gotDeletedDeregistrations, 1)
+	require.Equal(
+		t, []byte("deregistration-a"), gotDeletedDeregistrations[0].FullDatum,
+		"a deleted row returns the datum, not its stored offset",
+	)
+	require.NotEmpty(t, gotDeletedDeregistrations[0].FullDatumOffset)
+	require.NotEmpty(t, gotDeletedRegistrations)
+	for _, registration := range gotDeletedRegistrations {
+		require.True(t, bytes.HasPrefix(registration.FullDatum, []byte("registration-")))
+		require.NotEmpty(t, registration.FullDatumOffset)
+	}
 	require.NoError(t, rollback.Commit())
 	assetTxHashes := make([]string, len(gotUnspentAssets))
 	for i, asset := range gotUnspentAssets {

@@ -93,15 +93,15 @@ func NewIndexerDatabase(
 				AlonzoLovelacePerUtxoWord,
 		},
 		database.Stores{
-			Blob:     blob.NewIndexerStore(consensus.Blob()),
-			Metadata: store,
+			Blob:      blob.NewIndexerStore(consensus.Blob()),
+			Metadata:  store,
+			LeiosPeer: consensus,
 		},
 	)
 	if db == nil {
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
-	db.ShareLeiosDB(consensus)
 	databaseHosts.Store(db, host)
 	tb.Cleanup(func() {
 		if closeErr := CloseDatabase(db); closeErr != nil {

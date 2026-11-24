@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -49,14 +51,39 @@ func registrationRebuildConfig(store *testStore) Config {
 
 func validRegistrationHistoryBlock(t *testing.T) models.Block {
 	t.Helper()
+	return registrationHistoryBlock(
+		t, []byte{0x80}, []byte{0x80}, []byte{0xa0},
+	)
+}
+
+// validRegistrationHistoryBlockWithDatum is a block whose CBOR carries datum
+// in its auxiliary data map, so the datum can be located in the block bytes.
+func validRegistrationHistoryBlockWithDatum(
+	t *testing.T,
+	datum []byte,
+) models.Block {
+	t.Helper()
+	// One transaction, [{0: [], 1: [], 2: 0, 3: 0}], with the empty witness set
+	// [{}] and the metadata {0: {0: datum}}: label 0 of transaction 0.
+	body := []byte{0x81, 0xa4, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00, 0x03, 0x00}
+	witnesses := []byte{0x81, 0xa0}
+	aux := append([]byte{0xa1, 0x00, 0xa1, 0x00}, datum...)
+	return registrationHistoryBlock(t, body, witnesses, aux)
+}
+
+func registrationHistoryBlock(
+	t *testing.T,
+	bodies, witnesses, auxiliaryData []byte,
+) models.Block {
+	t.Helper()
 	raw := testutil.BuildBlockBytesFromComponents(
 		t,
 		ledger.BlockTypeShelley,
 		100,
 		0,
-		[]byte{0x80},
-		[]byte{0x80},
-		[]byte{0xa0},
+		bodies,
+		witnesses,
+		auxiliaryData,
 	)
 	decoded, err := ledger.NewBlockFromCbor(ledger.BlockTypeShelley, raw)
 	require.NoError(t, err)
@@ -144,7 +171,12 @@ func TestRegistrationRebuildValidatesAndReplaysCanonicalHistory(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	seedRegistration(t, store, 0x12)
-	block := validRegistrationHistoryBlock(t)
+	// A datum that cannot occur in the header by chance, so the offset below
+	// matches only when it names the datum in the replayed block.
+	datum, err := cbor.Encode([]byte("registration-datum-5f3c9a71e2b84d06"))
+	require.NoError(t, err)
+	block := validRegistrationHistoryBlockWithDatum(t, datum)
+	require.Equal(t, 1, bytes.Count(block.Cbor, datum))
 	cfg := registrationRebuildConfig(store)
 	cfg.LedgerTipBlock = func() (*models.Block, error) { return &block, nil }
 	iterated := 0
@@ -154,7 +186,6 @@ func TestRegistrationRebuildValidatesAndReplaysCanonicalHistory(t *testing.T) {
 		iterated++
 		return fn(block)
 	}
-	datum := simpleDatumCbor(t)
 	correctHash := pad32("cc000001")
 	wrongHash := pad32("dd000001")
 	correctTx := buildTx(t, correctHash,

@@ -333,8 +333,9 @@ func OpenIndexerDatabase(
 	cfg.StorageMode = "api"
 	cfg.PromRegistry = deps.PromRegistry
 	db, err := database.New(ctx, &cfg, database.Stores{
-		Blob:     blob.NewIndexerStore(consensus.Blob()),
-		Metadata: store,
+		Blob:      blob.NewIndexerStore(consensus.Blob()),
+		Metadata:  store,
+		LeiosPeer: consensus,
 	})
 	if err != nil {
 		if db != nil {
@@ -342,7 +343,6 @@ func OpenIndexerDatabase(
 		}
 		return nil, fmt.Errorf("open indexer database: %w", err)
 	}
-	db.ShareLeiosDB(consensus)
 	return db, nil
 }
 

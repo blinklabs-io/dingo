@@ -4008,11 +4008,19 @@ and refuses to advance a complete split database.
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
 opens the second metadata store, in API mode, as a `database.Database` over
 the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
-UTxO and transaction offsets under their own key prefix),
+UTxO and transaction offsets under their own key prefix, and the ledger
+database as `database.Stores.LeiosPeer`, so the startup address-history
+rebuild reads closures through the ledger's Leios store and never opens or
+closes it),
 after the ledger database is recovered and before the ledger starts. The writer
 starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
 fires, and stops before the IndexerDB closes, which precedes the ledger
 database closing the blob store.
+
+`buildIndexerWriter` also hands the IndexerDB a read-only view of the ledger's
+live UTxO set (`Database.SetLiveOutputs`), so a read of an active output, or of
+a datum or script inside one, still resolves after history expiry removed its
+block; inactive history returns `ErrHistoryExpired`.
 
 The IndexerDB keeps no copy of a payload its blocks carry. Its datum, script,
 metadata, label, protocol-parameter-update and Midnight datum columns hold

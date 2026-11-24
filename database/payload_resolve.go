@@ -69,6 +69,11 @@ func (d *Database) ResolvePayload(encoded []byte) ([]byte, error) {
 		)
 	}
 	if err != nil {
+		if live, liveErr := d.livePayloadFallback(
+			offset, err,
+		); liveErr == nil {
+			return live, nil
+		}
 		return nil, fmt.Errorf(
 			"read block %d for payload: %w", offset.BlockSlot, err,
 		)

@@ -429,7 +429,11 @@ func (s *Store) DeleteMidnightRegistrationsByBlock(
 	); err != nil {
 		return nil, err
 	}
-	return mapMidnightRegistrations(rows), nil
+	ret := mapMidnightRegistrations(rows)
+	if err := s.resolveRegistrations(ret); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 func (s *Store) DeleteMidnightDeregistrationsByBlock(
@@ -457,7 +461,11 @@ func (s *Store) DeleteMidnightDeregistrationsByBlock(
 	); err != nil {
 		return nil, err
 	}
-	return mapMidnightDeregistrations(rows), nil
+	ret := mapMidnightDeregistrations(rows)
+	if err := s.resolveDeregistrations(ret); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 func (s *Store) InsertMidnightGovernanceDatum(

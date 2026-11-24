@@ -1994,7 +1994,8 @@ type MetadataStore interface {
 
 	// DeleteMidnightRegistrationsByBlock removes all registration rows for
 	// the given block number and returns them so the caller can update the
-	// in-memory tracked-UTxO set. Used during chain rollback.
+	// in-memory tracked-UTxO set. Each row's FullDatum is the resolved datum
+	// and FullDatumOffset the stored offset. Used during chain rollback.
 	DeleteMidnightRegistrationsByBlock(
 		types.Txn,
 		uint64,
@@ -2002,7 +2003,8 @@ type MetadataStore interface {
 
 	// DeleteMidnightDeregistrationsByBlock removes all deregistration rows
 	// for the given block number and returns them so the caller can restore
-	// the in-memory tracked-UTxO set. Used during chain rollback.
+	// the in-memory tracked-UTxO set. Each row's FullDatum is the resolved
+	// datum and FullDatumOffset the stored offset. Used during chain rollback.
 	DeleteMidnightDeregistrationsByBlock(
 		types.Txn,
 		uint64,

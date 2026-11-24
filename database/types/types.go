@@ -583,6 +583,15 @@ type LiveUtxoSource interface {
 	) error
 }
 
+// LiveOutputReader is the read-only lookup of a live output's full CBOR in
+// the ledger's live UTxO set. The IndexerDB reads through it to answer for an
+// active output whose block history has expired.
+type LiveOutputReader interface {
+	// LiveUtxoCbor returns the CBOR of the live output at (txID, index), and
+	// false when the output is not live. txn may be nil.
+	LiveUtxoCbor(txn Txn, txID []byte, index uint32) ([]byte, bool, error)
+}
+
 // PointerStake is the lovelace in live outputs at pointer addresses naming
 // the certificate at (Slot, TxIndex, CertIndex).
 type PointerStake struct {

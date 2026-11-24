@@ -4504,7 +4504,7 @@ endorser block's slot and hash, positioned in the CBOR encoding of its raw
 transaction list in the LeiosDB (`Database.LeiosEndorserBacking`), which keeps
 a certified endorser block permanently. The writer and the Midnight indexer
 (`BlockPayloads`) use it for those transactions, and the IndexerDB reads the
-ledger's LeiosDB (`Database.ShareLeiosDB`).
+ledger's LeiosDB (`database.Stores.LeiosPeer`, installed before `init` runs).
 
 A read resolves the offset through the `types.PayloadResolver` that
 `database.New` installs on the store (`Database.ResolvePayload`): the block
@@ -4513,6 +4513,19 @@ and the ImmutableDB below it, and finally the retained body of a block a
 rollback removed from the chain. Every store reader returns the bytes the
 column named before, so the API responses are unchanged; only SQL read
 directly from the IndexerDB sees offsets.
+
+When an offset names a block whose history has expired, an active output is
+still readable: the node installs the ledger's live UTxO set on the IndexerDB's
+`Database` as a read-only `types.LiveOutputReader` (`Database.SetLiveOutputs`).
+`ResolveUtxoCbor` and `ResolveUtxoCborBatch` read the live output's CBOR from
+it, and `ResolvePayload` reads a datum or reference script from the live output
+of that block whose recorded range contains the offset, so the bytes equal
+those in the expired block. A spent output, and a payload no live output of the
+block contains (witness datums and scripts, metadata, protocol parameter
+updates), still returns `ErrHistoryExpired`, or goes through the archive when
+one is configured. A datum or script that a live output names only by hash and
+that was located in another transaction's witness set is not reachable this
+way. The lookup serves payload reads only; the writer reads no facts through it.
 
 A ledger rollback keeps the bodies of the blocks it removes as rolled-back
 bodies. `Database.ReleaseRolledBackBlocks` deletes them once no rollback intent
@@ -5711,8 +5724,8 @@ tables:
 | `FindUnspentMidnightRegistrations()` | Returns `midnight_registrations` rows with no matching `midnight_deregistrations` row. Used on startup to restore the in-memory registration UTxO set. Accelerated by `idx_midnight_registrations_utxo_lookup` and `idx_midnight_deregistrations_utxo_ref`. |
 | `DeleteMidnightAssetCreatesByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_creates` rows for the given block. Used during chain rollback; caller removes the returned UTxOs from the in-memory set. |
 | `DeleteMidnightAssetSpendsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_spends` rows for the given block. Used during chain rollback; caller restores the returned UTxOs to the in-memory set. |
-| `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block. Used during chain rollback. |
-| `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
+| `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block, with `FullDatum` resolved and the stored offset in `FullDatumOffset`. Used during chain rollback. |
+| `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block, with `FullDatum` resolved and the stored offset in `FullDatumOffset`. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
 | `FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)` | Returns `midnight_asset_creates` rows with `(block_number, tx_index) > (startBlock, startTxIndex)`, ordered `block_number ASC, tx_index ASC`, capped at `limit` (`limit <= 0` means no SQL LIMIT). May return more than `limit` rows: `(block_number, tx_index)` is not a unique key (one tx can write several rows to the same table), so a page that would otherwise end mid-key is extended, via `pagination.ExtendPageToFullTxGroup`, to include the rest of that key's rows — keeping the cursor gap-free instead of silently dropping the remainder on the next call. Backs the MidnightState `GetAssetCreates` RPC. |
 | `FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_asset_spends`. Backs `GetAssetSpends`. |
 | `FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_registrations`. Backs `GetRegistrations`. |

@@ -999,7 +999,20 @@ func TestDeregistration_Rollback(t *testing.T) {
 		restored,
 		"registration UTxO must be restored to memory after dereg rollback",
 	)
-	assert.NotEmpty(t, reg.FullDatum)
+	assert.Equal(
+		t, datumCbor, reg.FullDatum,
+		"the restored registration holds the datum, not its stored offset",
+	)
+	assert.NotEmpty(t, reg.FullDatumOffset)
+	assert.NotEqual(t, datumCbor, reg.FullDatumOffset)
+
+	// Re-applying the block must still be able to write the deregistration.
+	require.NoError(t, idx.processBlock(block2,
+		[]lcommon.Transaction{buildTx(t, deregTxHash,
+			[]lcommon.TransactionInput{buildInput(t, regTxHash, 0)},
+			[]lcommon.TransactionOutput{anyOutput(t)})},
+		2_000))
+	require.Len(t, allDeregistrations(t, store), 1)
 }
 
 // TestRollback_NoRecordedEvents verifies that rolling back a block that
