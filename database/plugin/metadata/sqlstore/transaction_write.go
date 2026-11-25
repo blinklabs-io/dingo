@@ -2002,18 +2002,8 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 			); err != nil {
 				return err
 			}
-			// A datum or script row is content-addressed and keeps the block
-			// that first carried it, which the insert never replaces. Once
-			// that block is abandoned, no canonical transaction carries the
-			// content, and a row left behind would name a body that is later
-			// released when the same transaction lands in another block.
-			for _, statement := range []string{
-				`DELETE FROM datum WHERE added_slot > ?`,
-				`DELETE FROM script WHERE created_slot > ?`,
-			} {
-				if _, err := db.ExecContext(ctx, statement, slot); err != nil {
-					return err
-				}
+			if err := s.rollbackContentRows(ctx, db, slot); err != nil {
+				return err
 			}
 			// A rolled-back transaction's identity row is deleted unless
 			// something still names it. Nothing that outlives the rollback

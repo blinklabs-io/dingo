@@ -4599,7 +4599,9 @@ while a `datum` row added at its slot is named by a live `utxo.datum_hash`, a
 `pparam_update` row added at its slot targets an epoch not before the current
 one (a classic proposal is enacted or discarded at the boundary into the epoch
 after its target, `selectClassicPParamUpdate`), an unspent
-`midnight_registrations` row carries its `block_hash`, or the latest
+`midnight_registrations` row carries its `block_hash` or a `full_datum` offset
+naming it (the migration gives a registration the `datum` table's offset of
+its datum, which can name another block), or the latest
 `midnight_ariadne_params` row or the newest `midnight_governance_datums` row of
 a type holds an offset naming it (bytes 13 to 44 of the stored offset are the
 block hash). A block is also held while a rollback could need its bytes: a
@@ -4608,11 +4610,28 @@ the IndexerDB tip names it (rolling back the spending block restores the
 registration's datum from the registration's block), and so does any
 `midnight_candidate_removals` or `midnight_ariadne_rollbacks` row, which the
 indexer prunes once older than that depth. A rollback therefore never reads an
-expired block. A rollback deletes the `datum` rows added and the `script` rows
-created above its point, in the transaction that deletes the transactions: the
-insert keeps the first block that carried the content, so a row left behind
-would name an abandoned block and, once that body is released, make the content
-unreadable after the same transaction lands in another block. Migration v76 adds the indexes these lookups use, each a point
+expired block.
+
+A `datum` or `script` row names one block that carries its bytes, while any
+number of canonical transactions may carry them. Its slot column follows the
+block it names. The row keeps the first block that carried it until that block
+expires: history expiry first calls `Database.PrepareBlockExpiry`
+(`PayloadExpiryPreparer`, the pruner's `BeforeExpire`), which re-points each
+row naming the block to the first other canonical carrier, found through
+`plutus_data`, `utxo.datum_hash`, `witness_scripts` and
+`utxo_reference_script`, whose block still holds the bytes, and leaves the rest
+as a `DEXP` marker naming the block. An insert of the same hash replaces a row
+holding a `DEXP` marker and keeps any other (`ON CONFLICT (hash) DO UPDATE ...
+WHERE` the stored value starts with `DEXP`; MySQL assigns each column through
+`IF`, slot first). A rollback settles the rows above its point, in the
+transaction that deletes the transactions: a row whose bytes a surviving
+transaction at or below the point carries was moved past that carrier because
+its block had expired, so the row becomes a `DEXP` marker naming the newest
+such carrier; any other row is deleted, so the same transaction applied in a
+replacement block writes it afresh rather than leaving it naming an abandoned
+body that is released later. A script carried only in auxiliary data or a
+sub-transaction output has no indexed carrier, so neither step finds it.
+Migration v76 adds the indexes these lookups use, each a point
 read at 1,000,000 `utxo` rows: `idx_utxo_live_datum_hash` (partial on live rows
 with a datum hash; MySQL keeps a `(datum_hash(32), deleted_slot)` index),
 `idx_script_created_slot` and `idx_midnight_registrations_block_hash`. Not
@@ -5653,10 +5672,10 @@ the stored blocks as they age past the window, as it does on any node.
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
-| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique `hash` (`uni_script_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `type` | API-mode de-duplicated scripts by hash. `content` is the `DOFF` offset of the script's raw bytes in the block that first carried it. The type index is unused by live query predicates and is rebuilt by background maintenance. |
+| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique `hash` (`uni_script_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `type` | API-mode de-duplicated scripts by hash. `content` is the `DOFF` offset of the script's raw bytes in a block that carries it, the first one until that block expires, or a `DEXP` marker (see "Payload columns"). The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. The tag and index filters are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears redeemers on replays. |
-| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. `raw_datum` is the `DOFF` offset of the datum's CBOR in the block that first carried it, as an inline output datum or a witness-set datum. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
+| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. `raw_datum` is the `DOFF` offset of the datum's CBOR in a block that carries it, as an inline output datum or a witness-set datum: the first one until that block expires, or a `DEXP` marker (see "Payload columns"). UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. Normal and Mithril gap-closure transaction writes use the same idempotent certificate upsert, preserving `slot`, `block_hash`, `block_index` (through the transaction), and `cert_index` for position-ordered readers. The transaction-id index remains resident for import cleanup. The slot index is rebuilt before rollback; block-hash, certificate-id, and certificate-type indexes are rebuilt by background maintenance. |
 
 Deferred-index bulk mode is shared by SQLite, PostgreSQL, and MySQL. InnoDB

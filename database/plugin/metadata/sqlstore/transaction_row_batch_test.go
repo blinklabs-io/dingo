@@ -1165,7 +1165,10 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				metadataLabelShape.suffix,
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES ($1, $2, $3), ($4, $5, $6)\n" +
-				"ON CONFLICT (hash) DO NOTHING",
+				"ON CONFLICT (hash) DO UPDATE SET " +
+				"raw_datum = excluded.raw_datum, " +
+				"added_slot = excluded.added_slot " +
+				"WHERE SUBSTR(datum.raw_datum, 1, 4) = $7",
 		},
 		"mysql": {
 			"INSERT INTO key_witness (vkey, signature, transaction_id, type) " +
@@ -1191,7 +1194,11 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				"    json_value = VALUES(json_value)",
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES (?, ?, ?), (?, ?, ?)\n" +
-				"ON DUPLICATE KEY UPDATE hash = hash",
+				"ON DUPLICATE KEY UPDATE " +
+				"added_slot = IF(SUBSTR(raw_datum, 1, 4) = ?, " +
+				"VALUES(added_slot), added_slot), " +
+				"raw_datum = IF(SUBSTR(raw_datum, 1, 4) = ?, " +
+				"VALUES(raw_datum), raw_datum)",
 		},
 	}
 	for dialect, statements := range want {

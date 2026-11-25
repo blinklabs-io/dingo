@@ -593,3 +593,31 @@ func TestPrunerKeepsCursorWhenHeldBlocksAreNotSaved(t *testing.T) {
 	assert.False(t, blockIsExpired(t, db, 8, heldHash))
 	assert.GreaterOrEqual(t, pruner.loadCursor(), uint64(8))
 }
+
+// BeforeExpire runs before its block expires, with the block still readable,
+// and a block whose BeforeExpire fails is not expired.
+func TestPrunerRunsBeforeExpireFirst(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := insertTestBlock(t, db, 5, 0x05)
+	second := insertTestBlock(t, db, 7, 0x07)
+
+	pruner := newTestPruner(db, 100, 5)
+	var seen []uint64
+	pruner.config.BeforeExpire = func(
+		_ context.Context, slot uint64, hash []byte,
+	) error {
+		require.False(t, blockIsExpired(t, db, slot, hash),
+			"BeforeExpire ran after its block expired")
+		seen = append(seen, slot)
+		if slot == 7 {
+			return errors.New("refuse")
+		}
+		return nil
+	}
+	pruner.prune(t.Context())
+	require.Equal(t, []uint64{5, 7}, seen)
+	require.True(t, blockIsExpired(t, db, 5, first))
+	require.False(t, blockIsExpired(t, db, 7, second),
+		"a block whose BeforeExpire failed was expired")
+}

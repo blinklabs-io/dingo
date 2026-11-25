@@ -142,13 +142,28 @@ func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 		prunerFreq = time.Hour
 	}
 	return historyexpiry.PrunerConfig{
-		LedgerState: n.ledgerState,
-		DB:          n.db,
-		Logger:      n.config.logger,
-		Frequency:   prunerFreq,
-		Ceiling:     n.historyExpiryCeiling,
-		Held:        n.historyExpiryHeld,
+		LedgerState:  n.ledgerState,
+		DB:           n.db,
+		Logger:       n.config.logger,
+		Frequency:    prunerFreq,
+		Ceiling:      n.historyExpiryCeiling,
+		Held:         n.historyExpiryHeld,
+		BeforeExpire: n.prepareIndexerBlockExpiry,
 	}
+}
+
+// prepareIndexerBlockExpiry moves the IndexerDB's datum and script rows that
+// name a block about to expire to another block that carries their bytes, or
+// marks them expired so that a later carrier replaces them.
+func (n *Node) prepareIndexerBlockExpiry(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) error {
+	if n.indexerDB == nil {
+		return nil
+	}
+	return n.indexerDB.PrepareBlockExpiry(ctx, slot, hash)
 }
 
 // historyExpiryHeld keeps a block while a payload column of the IndexerDB that

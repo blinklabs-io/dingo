@@ -51,6 +51,27 @@ func (d *Database) MigratePayloadOffsets(ctx context.Context) error {
 
 // slotPayloadSource reads the canonical block at a slot, keeping the last
 // one: the rows of a block are adjacent.
+// PrepareBlockExpiry runs before the block at (slot, hash) expires, so the
+// content rows of d's metadata store that name it move to another carrier or
+// are marked expired; see metadata.PayloadExpiryPreparer. A store without the
+// capability keeps no such rows.
+func (d *Database) PrepareBlockExpiry(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) error {
+	if err := d.requireStore("PrepareBlockExpiry"); err != nil {
+		return err
+	}
+	preparer, ok := d.metadata.(metadata.PayloadExpiryPreparer)
+	if !ok {
+		return nil
+	}
+	return preparer.PrepareBlockExpiry(
+		ctx, &slotPayloadSource{db: d}, slot, hash,
+	)
+}
+
 type slotPayloadSource struct {
 	db *Database
 	// decode, when set, replaces the ledger's block decoder.

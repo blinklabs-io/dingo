@@ -75,3 +75,18 @@ type PayloadColumnMigrator interface {
 	// output holds, is kept as an expired-payload marker naming the block.
 	MigratePayloadColumns(ctx context.Context, blocks PayloadBlockSource) error
 }
+
+// PayloadExpiryPreparer is implemented by metadata stores whose content rows,
+// datums and scripts, each name one of the blocks that carry their bytes.
+type PayloadExpiryPreparer interface {
+	// PrepareBlockExpiry runs before the block at (slot, hash) expires. It
+	// re-points each content row naming the block to another canonical
+	// carrier whose block, read from blocks, still holds the bytes, and marks
+	// the rest expired so that a later carrier replaces them.
+	PrepareBlockExpiry(
+		ctx context.Context,
+		blocks PayloadBlockSource,
+		slot uint64,
+		hash []byte,
+	) error
+}

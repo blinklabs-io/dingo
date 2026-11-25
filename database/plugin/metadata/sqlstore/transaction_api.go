@@ -676,14 +676,19 @@ func storeScriptContent[T lcommon.Script](
 	if err != nil {
 		return fmt.Errorf("locate script %s: %w", script.Hash(), err)
 	}
+	conflict, conflictArgs := expiredContentConflict(
+		queryerDialect(db), "script", "content", "created_slot",
+	)
 	if _, err := db.ExecContext(ctx, `-- name: InsertScriptIfAbsent :exec
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)
-ON CONFLICT (hash) DO NOTHING`,
-		script.Hash().Bytes(),
-		content,
-		slot,
-		scriptType,
+`+conflict,
+		append([]any{
+			script.Hash().Bytes(),
+			content,
+			slot,
+			scriptType,
+		}, conflictArgs...)...,
 	); err != nil {
 		return fmt.Errorf("create script content: %w", err)
 	}

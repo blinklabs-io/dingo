@@ -27,8 +27,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// bodyStore resolves payload offsets from the block bodies it holds, and
-// fails for a block whose body was released.
+// bodyStore resolves payload offsets from the block bodies it holds, fails
+// for a block whose body was released, and reports an expired-payload marker
+// as the expired block it names, as the database's resolver does.
 type bodyStore struct {
 	mu     sync.Mutex
 	bodies map[[32]byte][]byte
@@ -47,6 +48,13 @@ func (b *bodyStore) release(hash []byte) {
 }
 
 func (b *bodyStore) ResolvePayload(encoded []byte) ([]byte, error) {
+	if types.IsExpiredPayload(encoded) {
+		expired, err := types.DecodeExpiredPayload(encoded)
+		if err != nil {
+			return nil, err
+		}
+		return nil, expired
+	}
 	offset, err := types.DecodeCborOffset(encoded)
 	if err != nil {
 		return nil, err

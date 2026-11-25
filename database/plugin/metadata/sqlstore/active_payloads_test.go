@@ -248,3 +248,38 @@ VALUES (100, 1, 1, ?)`,
 	require.False(t, held(removalBlock), "the journal row was pruned")
 	require.False(t, held(ariadneBlock), "the journal row was pruned")
 }
+
+// The migration gives a Midnight registration the datum table's offset of its
+// datum, which can name a block other than the registration's own, so an
+// unspent registration holds the block its datum offset names too.
+func TestUnspentMidnightRegistrationHoldsItsDatumBlock(t *testing.T) {
+	t.Parallel()
+	store, db := newManagementTestStoreWithRawDB(t)
+	ownBlock := bytes.Repeat([]byte{0xe1}, 32)
+	datumBlock := bytes.Repeat([]byte{0xe2}, 32)
+	txID := bytes.Repeat([]byte{0xe3}, 32)
+	_, err := db.Exec(
+		`INSERT INTO midnight_registrations
+(full_datum, tx_hash, output_index, block_number, block_hash, tx_index, block_timestamp_ms)
+VALUES (?, ?, 0, 5, ?, 0, 0)`,
+		(&types.CborOffset{
+			BlockSlot: 3, BlockHash: [32]byte(datumBlock), ByteLength: 1,
+		}).Encode(),
+		txID, ownBlock,
+	)
+	require.NoError(t, err)
+	held, err := store.BlockHoldsActivePayloads(t.Context(), 3, datumBlock, 0)
+	require.NoError(t, err)
+	require.True(t, held, "the registration's datum names the block")
+
+	_, err = db.Exec(
+		`INSERT INTO midnight_deregistrations
+(full_datum, tx_hash, utxo_tx_hash, utxo_index, block_number, block_hash, tx_index, block_timestamp_ms)
+VALUES (?, ?, ?, 0, 6, ?, 0, 0)`,
+		[]byte{0x01}, bytes.Repeat([]byte{0xe4}, 32), txID, ownBlock,
+	)
+	require.NoError(t, err)
+	held, err = store.BlockHoldsActivePayloads(t.Context(), 3, datumBlock, 0)
+	require.NoError(t, err)
+	require.False(t, held, "a spent registration holds nothing")
+}

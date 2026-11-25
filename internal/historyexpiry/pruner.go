@@ -51,6 +51,10 @@ type PrunerConfig struct {
 	// and recorded, and checked again at the start of every later round, once
 	// what used it is gone. The scan cursor moves past it.
 	Held func(ctx context.Context, slot uint64, hash []byte) (bool, error)
+	// BeforeExpire, when set, runs before each block expires, for a store
+	// such as the IndexerDB whose rows name the block. An error leaves the
+	// block unexpired.
+	BeforeExpire func(ctx context.Context, slot uint64, hash []byte) error
 }
 
 type Pruner struct {
@@ -87,6 +91,11 @@ func (p *Pruner) pruneBlock(
 	ctx context.Context,
 	next *database.BlobBlockResult,
 ) error {
+	if p.config.BeforeExpire != nil {
+		if err := p.config.BeforeExpire(ctx, next.Slot, next.Hash); err != nil {
+			return fmt.Errorf("history expiry: %w", err)
+		}
+	}
 	if _, err := p.db.PruneBlock(ctx, next.Slot, next.Hash); err != nil {
 		return fmt.Errorf("history expiry: %w", err)
 	}

@@ -35,7 +35,7 @@ var activePayloadQueries = []struct {
 	floor bool
 }{
 	{
-		// A datum row names the block that first carried the datum. A live
+		// A datum row names a block that carries the datum. A live
 		// output names it by hash, inline or not, so the block must stay.
 		name: "datum named by a live output",
 		query: `SELECT EXISTS (SELECT 1 FROM datum d WHERE d.added_slot = ? AND
@@ -63,7 +63,15 @@ WHERE r.block_hash = ? AND NOT EXISTS (SELECT 1 FROM midnight_deregistrations g
 WHERE g.utxo_tx_hash = r.tx_hash AND g.utxo_index = r.output_index))`,
 	},
 	{
+		// The migration gives a registration the datum table's offset of its
+		// datum, which can name a block other than the registration's own.
 		// Bytes 13 to 44 of a stored offset are the hash of the block it names.
+		name: "datum of an unspent Midnight registration",
+		query: `SELECT EXISTS (SELECT 1 FROM midnight_registrations r
+WHERE SUBSTR(r.full_datum, 13, 32) = ? AND NOT EXISTS (SELECT 1 FROM midnight_deregistrations g
+WHERE g.utxo_tx_hash = r.tx_hash AND g.utxo_index = r.output_index))`,
+	},
+	{
 		name: "latest Midnight Ariadne parameters",
 		query: `SELECT EXISTS (SELECT 1 FROM midnight_ariadne_params p
 WHERE p.epoch = (SELECT MAX(epoch) FROM midnight_ariadne_params)
@@ -102,7 +110,8 @@ WHERE SUBSTR(r.previous_datum, 13, 32) = ?)`,
 // BlockHoldsActivePayloads reports whether a payload column that is still in
 // use names bytes of the block at (slot, hash): a datum or reference script
 // that a live output carries or names by hash, a protocol parameter update not
-// yet past currentEpoch, an unspent Midnight registration, the latest Midnight
+// yet past currentEpoch, an unspent Midnight registration or the datum it
+// names, the latest Midnight
 // Ariadne parameters or the current Midnight governance datum of a type. It
 // also reports a block a Midnight rollback could still read: one a
 // deregistration within MidnightRollbackDepth blocks of the tip names, or one
