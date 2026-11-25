@@ -2,6 +2,56 @@
 
 Use the Go version declared in [`go.mod`](../go.mod) and GNU Make.
 
+## Nix
+
+On x86_64 Linux, the flake provides pinned Go 1.26, GNU Make, a C compiler
+for race tests, gopls, golines, golangci-lint and a Nix formatter:
+
+```sh
+nix develop
+make build
+./dingo devnet
+```
+
+`GOTOOLCHAIN=local` keeps Go from downloading a different compiler. Commit
+`flake.lock` when updating inputs, and keep the selected Go version compatible
+with both `go.mod` and `sdk/go.mod`. With direnv installed, `direnv allow`
+activates the same shell through `.envrc`.
+
+To build just the node with all storage providers, or start a temporary local
+devnet directly:
+
+```sh
+nix build
+./result/bin/dingo --help
+nix run . -- devnet
+```
+
+`nix fmt` formats Nix files. Go formatting and validation remain the Makefile's
+responsibility. The Nix package skips Go tests; run the checks below in
+`nix develop`, including conformance and race tests.
+
+When dependencies change, update `vendorHash` in `perSystem/packages.nix`:
+temporarily set it to `lib.fakeHash`, run `nix build`, then replace it with the
+`got: sha256-...` hash from Nix's expected fixed-output mismatch and rebuild.
+The package builds only `cmd/dingo`; `make build` builds all command binaries.
+
+Network shortcuts use the same package and select the network explicitly:
+
+```sh
+nix run .#preview
+nix run .#preprod
+nix run .#mainnet
+nix run .#preview -- --help
+nix build .#preview # result/bin/dingo-preview
+```
+
+They default to `.dingo-preview`, `.dingo-preprod` and `.dingo-mainnet` under
+the working directory. `CARDANO_DATABASE_PATH` or `--data-dir` overrides that
+default. Other arguments pass through to Dingo; Ctrl+C reaches the node.
+The wrappers use Dingo's default ports, so concurrent networks need distinct
+listener and socket settings.
+
 ## Build and test
 
 From the repository root:

@@ -59,3 +59,8 @@ dingo.yaml
 !/internal/test/devnet/testdata/*.skey
 !/internal/devnetkeys/keys/*
 /bench-gate.txt
+
+# Nix development environment
+/.direnv/
+/result
+/result-*
