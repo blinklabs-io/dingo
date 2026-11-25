@@ -1164,13 +1164,6 @@ type LeiosClosureBatcher interface {
 	) error
 }
 
-// ValidatedBlockBatcher optionally defers API-only transaction indexes until
-// the end of a validated block. UTxOs, assets, datums, scripts and stake must
-// remain visible to the next transaction's validation.
-type ValidatedBlockBatcher interface {
-	NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator
-}
-
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.
@@ -3376,8 +3369,9 @@ type MetadataStore interface {
 
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
 	// retained snapshot window. This is the CORE storage-mode pruning path:
-	// it deletes both reward_stake_input and reward_account_output. See
-	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
+	// it deletes both reward_stake_input and reward_account_output, except a
+	// credited round's unfolded account outputs. See snapshot.Manager's
+	// cleanupOldSnapshots for the window.
 	DeleteRewardStateBeforeEpoch(context.Context, uint64, types.Txn) error
 
 	// Network state methods
@@ -3611,14 +3605,6 @@ type BackfillInputPrefetcher interface {
 	PrefetchBackfillInputs(context.Context, []models.UtxoId) error
 }
 
-// BulkLoadOptimizer is an optional interface that metadata stores can
-// implement to provide optimized settings for bulk loading operations.
-// The load command checks for this interface and uses it when available.
-type BulkLoadOptimizer interface {
-	SetBulkLoadPragmas() error
-	RestoreNormalPragmas() error
-}
-
 // LeiosClosureUtxoOverlay optionally batches plain certified-closure UTxO
 // writes in API mode while retaining spent rows and their address history.
 // Eligibility is established without mutations in the caller's transaction;
@@ -3674,18 +3660,6 @@ type IncrementalPlannerStatsUpdater interface {
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
-
-// RewardOutputPruner is the optional capability a metadata store offers to
-// prune reward account outputs while leaving the stake inputs untouched.
-type RewardOutputPruner interface {
-	// DeleteRewardAccountOutputsBeforeEpoch is the reward account output half
-	// of MetadataStore.DeleteRewardStateBeforeEpoch.
-	DeleteRewardAccountOutputsBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn types.Txn,
-	) error
-}
 
 // RewardSeedFailureSlotReader is implemented by a metadata store that returns
 // the slot an imported reward-basis failure was captured at with its reason.

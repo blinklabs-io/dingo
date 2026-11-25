@@ -1111,7 +1111,7 @@ func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 	var cause error
 	cfg.Hold = func() func() {
 		return func() {
-			// Stands in for an index rebuild several timeouts long.
+			// Stands in for an index rebuild two timeouts long.
 			rebuild := time.NewTimer(2 * timeout)
 			defer rebuild.Stop()
 			<-rebuild.C

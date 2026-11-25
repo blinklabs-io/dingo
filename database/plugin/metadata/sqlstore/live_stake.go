@@ -2145,23 +2145,6 @@ WHERE pool_key_hash IS NOT NULL AND LENGTH(pool_key_hash) > 0`)
 	return ret, rows.Err()
 }
 
-// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
-// credential in refs, recording slot as its update.
-func (s *Store) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn types.Txn,
-) error {
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			return s.refreshRewardLiveStakeRefs(
-				ctx, db, mergeStakeCredentialRefs(refs), slot,
-			)
-		},
-	)
-}
-
 // errLiveUtxoStakeIncomplete reports a stake read that would fall back to
 // summing utxo rows, in a store that keeps none: some credential has no
 // current reward_live_stake row, which the live UTxO set's rebuild of

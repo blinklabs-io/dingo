@@ -856,6 +856,33 @@ but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
 
+Chain selection does not make a competing suffix destructive on header
+evidence alone. Once a retained suffix wins selection, BlockFetch retrieves its
+exact body range into an isolated candidate buffer while the selected primary
+chain remains unchanged. The ledger then opens a rollback-only transaction,
+reconstructs state at the common ancestor, and runs the normal block envelope,
+transaction, certificate, governance, epoch-transition, and nonce processing
+over every candidate block. The transaction is always rolled back; validation
+does not persist candidate metadata or Leios endorser-block data. Every
+delta the validation applies, including each transaction's own delta and the
+block's donation delta, reads the candidate's consensus view (epoch cache,
+current epoch, era and protocol parameters), as do the reward-block and
+network-donation staging, not the published snapshot, so a candidate that
+crosses a boundary the selected chain has not reached validates. A staging
+failure during validation rejects the candidate; it never stops the live UTxO
+set. If installing a validated candidate fails after the rollback, the ledger
+clears the header queue and re-intersects with the peer. Headers the peer sends
+while the bodies are in flight extend the running candidate instead of
+restarting it. An incomplete,
+misordered, stale, or invalid candidate is discarded without changing the
+primary chain or ledger tip. A candidate still being fetched is also discarded
+when its connection closes, when a chainsync resync resets the header pipeline,
+when the ledger closes, or when its fetch outlasts the blockfetch busy timeout.
+A validated candidate may switch only while the
+primary tip and consensus generation still match the values used for selection
+and validation. That final check and the chain rollback share one mutation
+barrier, so a concurrent chain change cannot land between them.
+
 A deferred result other than the forecast horizon means local state was not
 ready (a block-apply commit or snapshot publication in progress, or published
 epoch data not yet covering the header's slot). For a header that does not
@@ -1086,15 +1113,16 @@ prevents re-queueing a header a rollback already invalidated.
 
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
-(`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
+(`chain.RollbackDeferredWithPreflight`, whose per-block deletions commit as they go) and
 rolls the ledger back second (`LedgerState.rollback`). A ledger failure after
 that point cannot be undone, so it is invalidated explicitly instead — the
 continuation-audit window is discarded and the failure is reported as
 `ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
 from the refusals that mean no state changed (`models.ErrBlockNotFound`,
 `chain.ErrRollbackExceedsSecurityParam`, `database.ErrRollbackBelowImmutableTip`,
-`ErrRollbackExceedsMithrilBoundary`), each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
-with a plain re-intersect; recovering that way here would resume from a ledger
+`ErrRollbackExceedsMithrilBoundary`), each of which `handleEventChainsyncRollback` recovers from
+with a plain re-intersect and a validated fork switch (`finishForkCandidate`)
+answers by dropping its candidate; recovering that way here would resume from a ledger
 tip whose block the chain has already deleted.
 
 That reporting is scoped to an actual split. `LedgerState.rollback` can also
@@ -1592,8 +1620,8 @@ not already hold it: every rollback entry point takes `chainsyncMutex` first
 and leaves the blockfetch mutex to the restart that follows. Bodies still
 arriving for an older generation are dropped instead of being handed to chain
 insertion:
-fork resolution rolls back, re-queues the winning peer's header path and only
-then restarts blockfetch, and a body from the losing fork reaching insertion
+a validated fork switch rolls back, re-queues the winning peer's header path and
+only then inserts the candidate's fetched bodies, and a body from the losing fork reaching insertion
 against that replacement queue would clear it. A batch that ends without
 extending the chain, while headers stay queued, feeds the same bounded
 same-range failure streak a `NoBlocks` reply feeds, so an unobtainable
@@ -2007,7 +2035,7 @@ dingo/
 │   ├── queries.go       # State queries
 │   ├── validation.go    # Transaction validation (Phase 1 UTXO rules)
 │   ├── verify_header.go # Block header validation (VRF/KES/OpCert)
-│   ├── chainsync.go     # Epoch nonce calculation, rollback handling
+│   ├── chainsync.go     # Chainsync/blockfetch event handling, rollback handling
 │   ├── candidate_nonce.go # Candidate nonce computation
 │   ├── certs.go         # Certificate processing
 │   ├── governance.go    # Governance action processing
@@ -3787,10 +3815,13 @@ run the phase between resolving the stores and `database.New`; every
 configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
 (`nodestorage.MigrateReleased`). `mithril sync` and the
-`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store. The phase opens the configured metadata
-provider on a plugin host of its own, opens the v0.94.2 database over it and
-the block store as `database.RoleReleased` (the role storage adoption also
-opens it with), reverts it to the block `k` blocks below its tip
+`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store.
+The phase opens the configured metadata
+provider on a plugin host of its own, opens the v0.94.2 database over it, the
+block store and the ImmutableDB provider the opener already resolved (which
+resolves the markers of promoted blocks; the phase records no ImmutableDB
+state) as `database.RoleReleased` (the role storage adoption also opens it
+with), reverts it to the block `k` blocks below its tip
 (`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
 (`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
 ledger-state family into the live UTxO set, checks the set holds them at the
@@ -4014,13 +4045,16 @@ the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
 and refuses to advance a complete API node database.
 
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
-opens the second metadata store, in API mode, as a `database.Database` over
-the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
-UTxO and transaction offsets under their own key prefix),
-after the ledger database is recovered and before the ledger starts. The writer
-starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
-fires, and stops before the IndexerDB closes, which precedes the ledger
-database closing the blob store.
+opens the second metadata store, in API mode, as a `database.Database` that
+reads blocks from the ledger database's blob store and keeps its UTxO and
+transaction CBOR offsets in its own metadata store
+(`database.NewIndexerBlobStore`: read transactions only on the ledger's store,
+offsets in the `utxo_offset` and `transaction_offset` tables, written in the
+IndexerDB transaction that writes their rows), after the ledger database is
+recovered and before the ledger starts. The IndexerDB writes nothing to the
+ledger's stores. The writer starts after the ledger, wakes when `ledger.tip`
+or `ledger.reward_facts` fires, and stops before the IndexerDB closes, which
+precedes the ledger database closing the blob store the IndexerDB reads.
 Failed passes retry with exponential backoff from one to thirty seconds,
 without requiring another ledger event. Wakes interrupt the retry delay and
 successful passes return to waiting for events.
@@ -4176,13 +4210,15 @@ ahead-of-tip rollback read as over-K and left the node rejecting every peer.
 Each of the three live callers classifies that propagated error itself,
 using whatever context it has available:
 
-- `handleEventChainsyncRollback` and `tryResolveFork` each already handle
-  a *direct* `ErrRollbackExceedsMithrilBoundary` (from their own initial
-  rollback attempt, before ever calling the reconciler) via the
-  peer-tip-based `ChainsyncResyncReasonRollbackExceedsMithril`/
+- `handleEventChainsyncRollback` already handles a *direct*
+  `ErrRollbackExceedsMithrilBoundary` (from its own initial rollback attempt,
+  before ever calling the reconciler) via the peer-tip-based
+  `ChainsyncResyncReasonRollbackExceedsMithril`/
   `ChainsyncResyncReasonPeerTipBehindMithril` classification described
-  above. That logic is now the shared `handleMithrilBoundaryRollback(e,
-  pending)` helper, and each caller's over-K branch calls it too when
+  above. `tryResolveFork` does not roll back itself (it only validates the
+  rollback point before fetching the candidate), so it meets this error only
+  from the reconciler. That logic is the shared `handleMithrilBoundaryRollback(e,
+  pending)` helper, and each caller's over-K branch calls it when
   `reconcileLivePrimaryChainLedgerDivergence` returns this error — the
   identical resync as a direct rollback hitting the same boundary.
 - The plateau watchdog (`internal/chainsyncrecycler`) has no pending
@@ -5799,7 +5835,8 @@ stops Ouroboros client ingest as well:
 - The first hold marks every tracked chainsync client through
   `LedgerStateConfig.NetworkIngestHoldTracker`, sets an atomic flag, then
   discards the queued headers, buffered peer headers and any blockfetch batch in
-  flight under the chainsync handler mutexes (`resetChainsyncResyncState`). On
+  flight, and any fork candidate being fetched, under the chainsync handler
+  mutexes (`resetChainsyncResyncState`). On
   return no handler that started before the hold is still running, and the chain
   holds no queued header. A client tracked while held is marked too.
 - While held, the ledger drops every chainsync header and rollback event and
@@ -7780,9 +7817,11 @@ epoch boundaries, so the block is kept queued for in-order re-verification once
 the applied tip advances into range, and the peer that served it is not
 recycled. Recycling honest peers on these benign past-horizon rejections would
 starve the peer pool the block and Leios endorser-block fetch depend on and
-deadlock catch-up at each epoch boundary. Candidate fork blockfetch begins after
-fork resolution has
-rolled the applied chain back to its common ancestor, so permitted epoch-nonce
+deadlock catch-up at each epoch boundary. Candidate fork bodies are fetched and
+validated before any rollback, but they reach ledger apply only after the
+validated switch has rolled the applied chain back to its common ancestor, and
+candidate validation does not consume the deferred-header marker, so permitted
+epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
 
@@ -9135,9 +9174,10 @@ dispatch's `BatchDone` resolution passes through, not in the callers that
 triggered the dispatch. That placement is load-bearing for the synchronous
 dispatch error a caller can still see (connection lookup failure, context
 cancellation, a protocol-shutdown race): every such caller treats it differently
-and several treat it as advisory — the two fork-resolution restarts in
-`tryResolveFork` log "failed to start blockfetch after fork rollback" (or
-"...after fork extension") and then report the fork resolved, the local-rollback
+and several treat it as advisory — the fork-extension restart in
+`tryResolveFork` retries on the active connection or clears the queue and
+re-intersects ("failed to start blockfetch after fork extension, ..."), the
+local-rollback
 recovery logs "failed to start blockfetch after local rollback recovery", and
 the await-reply path logs "failed to start blockfetch after await reply" at
 ERROR and publishes a `LedgerErrorEvent`. None of them retried and the pipeline
@@ -15328,8 +15368,10 @@ Mithril sync, `load`, and `serve` repair and resume work all receive that
 context, so cancellation reaches downloads, archive extraction, immutable
 copy, ledger-state import, and pre-startup database repair. An interrupted
 write keeps `sync_status=in_progress`, which selects the resume path on the
-next run. The same context continues into the node runtime, while remote
-lifecycle requests cancel a child of it.
+next run. A signal that cancels the pre-startup storage migration is a
+requested shutdown: the process exits 0 without logging an error, as it does
+for a signal received by a running node. The same context continues into the
+node runtime, while remote lifecycle requests cancel a child of it.
 Database cleanup uses a detached cancellation context so providers can close
 after operation cancellation. The Mithril operation attempts shutdown of each
 started metrics, health, and debug server with its own detached five-second
@@ -16965,32 +17007,22 @@ paths. Only indexes no import path filters on are eligible at all — an index a
 per-row import predicate needs stays resident, since dropping it turns that
 predicate into a full scan of a table the import is still growing. Those indexes
 are named in `deferred.Retained`, and every drop and rebuild path creates any of
-them that is absent — the critical rebuild included, since it is the last step
-before the node serves API writes and the full rebuild can finish much later.
-That repairs a database an older binary's manifest had already dropped them
+them that is absent. That repairs a database an older binary's manifest had already dropped them
 from; the versioned migration that created them is recorded complete and never
 re-runs. `DATABASE.md` records which indexes that rule keeps out of the
 manifest. The metadata plugin exposes `BuildCriticalDeferredIndexes` for the
-critical subset and `BuildDeferredIndexes` for the full manifest. Mithril sync
-rebuilds the critical subset before clearing `sync_status`, then leaves the
-pending sync-state marker set. API-mode `serve` verifies the critical subset
-before startup and runs the full lazy rebuild as background maintenance; the
-rebuild paths clear the marker only after the full manifest has been rebuilt.
-Mithril completion cleanup leaves the deferred-index marker, post-backfill
-statistics marker, and forge fences untouched, and deletes transient keys
-individually. It records the generic imported-ledger-state boundary after
-cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
-remain for database compatibility. This preserves the pending marker set by
-`BuildCritical` so a
-bootstrapped database still builds the lazy manifest. Core-mode startup still
-repairs the full manifest synchronously before serving. Both repair entry points
-also restore any missing critical index when no cycle is pending at all: the
-marker records that a cycle was interrupted, not which indexes exist, and a
-database bootstrapped by a binary that predates the marker being carried across
-the clear has the critical subset built, the lazy remainder dropped, and no
-record of either — it would otherwise carry that gap permanently, since the
-schema migration that created those indexes is recorded complete and never
-re-runs. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
+critical subset and `BuildDeferredIndexes` for the full manifest. The ledger's
+database has no metadata store, so a Mithril sync into it drops and rebuilds
+nothing. The IndexerDB writer drops the deferred indexes before it replays from
+the origin to a Mithril anchor and builds the full manifest at the anchor,
+before it checks the replayed rows against the imported ledger state
+(`internal/indexer/anchor.go`); the rebuild clears the pending marker only
+after the full manifest has been rebuilt. A restore rebuilds any deferred
+index missing from its staged metadata copy. Mithril completion cleanup
+deletes the transient import keys individually and records the generic
+imported-ledger-state boundary after cleanup. Its persisted
+`mithril_ledger_slot` and `mithril_ledger_hash` names remain for database
+compatibility. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
 so the dialect leaves those indexes in place while deferring the remaining
 manifest entries.
 
@@ -17127,6 +17159,13 @@ serve failures are logged, never fatal): Prometheus metrics on
 image; remote scraping requires setting `metricsBindAddr`; `metricsPort` `0` disables it here
 and in `dingo mithril sync`), pprof on `debugPort` when enabled, and the health
 listener on `healthPort` (default `12799`, `0` disables).
+
+`dingo serve` also binds the health and pprof listeners for its preflight, so
+the health probe answers live and not ready, and pprof is reachable, while
+database checks and ledger-state migrations run. A bind failure on either is
+logged and the preflight continues without that listener, as in `node.Run`.
+Both listeners, sockets included, are closed before `node.Run` binds the same
+addresses.
 
 The pprof mutex and block profiles stay empty unless `debugMutexProfileFraction`
 or `debugBlockProfileRate` is non-zero. Only the commands that start the
@@ -22755,7 +22794,7 @@ cleanup, whose per-key delete then re-tests membership and re-persists the
 marker for a point re-deferred in that window, so releasing the lock cannot
 strand a live deferred header without its durable marker): `prune` opens the
 single SQLite write connection, and block apply holds that connection before
-taking this same mutex via `consumeDeferredHeaderValidation`, so holding the
+taking this same mutex via `takeDeferredHeaderValidation`, so holding the
 mutex across `prune` inverts the lock order and deadlocks the node on the single
 write connection. The hazard is not this lock's own I/O — it has none — but the
 apply path holding the write connection while waiting for this mutex; a header
@@ -24878,10 +24917,12 @@ multi-thousand-header fork path) can make header arrival outrun block-apply
 throughput for long enough that the chain's queued-header backlog
 (`chain.Chain.headers`, capacity `MaxQueuedHeaders` — `max(2*securityParam,
 DefaultMaxQueuedHeaders)`, floor 10,000) reaches capacity. `tryResolveFork`
-(`ledger/chainsync.go`) resolves a fork by appending a reconstructed peer
-fork-path onto the chain one header at a time via `chain.AddBlockHeader`, in
-both its "ancestor is the local tip, extend without rollback" branch and its
-"roll back to common ancestor, then re-add the fork path" branch. A fork path
+(`ledger/chainsync.go`) resolves a fork whose ancestor is the local tip by
+appending the reconstructed peer fork-path onto the chain one header at a time
+via `chain.AddBlockHeader` ("extend without rollback"); a fork below the tip is
+re-queued the same way only after its candidate validates and the switch rolls
+back (`installForkCandidate`, `ledger/fork_candidate.go`), and a queue failure
+there clears the queue and re-intersects. A fork path
 longer than the remaining queue capacity fails partway through with
 `chain.ErrHeaderQueueFull`. Before this fix, both branches returned immediately
 on that failure without ever restarting blockfetch for whatever they (or an
@@ -24911,7 +24952,7 @@ threshold with no operator intervention. But a ~20-minute total-sync stall per
 occurrence, with nothing logged above `WARN` in the interim, is still a real
 liveness defect worth fixing directly rather than relying on that fallback.
 `ensureBlockfetchDrainingAfterForkQueueFailure` (`ledger/chainsync.go`) closes
-the gap at its source: called from both branches' failure paths, it restarts
+the gap at its source: called from the extension branch's failure path, it restarts
 blockfetch for the already-queued backlog immediately, but only when nothing is
 currently fetching (`chainsyncBlockfetchReadyChan == nil &&
 !blockfetchContinuationPending`) — deliberately not unconditionally, unlike
@@ -25046,8 +25087,9 @@ pipeline's only submitter — runs on its own goroutine, entirely decoupled
 from the goroutine that decides a rollback. That matters because
 `rollbackChainAndStateDeferred` (`ledger/state.go`), which physically removes
 blocks from `ls.chain` and truncates ledger metadata, is reached from
-chainsync per-connection event handling (`handleEventChainsyncRollback`,
-`tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
+chainsync per-connection event handling (`handleEventChainsyncRollback` in
+`ledger/chainsync.go`), the validated fork switch (`finishForkCandidate` in
+`ledger/fork_candidate.go`) and local forged-sibling adoption — never from `ledgerProcessBlocks`
 itself. Chain-selection can decide to abandon a fork while the reader
 goroutine has already gathered and submitted a batch of blocks — from that
 very fork — to the pipeline's decode workers and is blocked

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -364,9 +365,9 @@ func TestIndexerMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 			return nil
 		},
 		func(ctx context.Context) error {
-			if err := NewDeferredIndexRebuilder(
-				ctx, f.indexerDB, f.deps.Logger,
-			).BuildCritical(); err != nil {
+			builder, ok := f.indexerDB.Metadata().(metadata.ContextCriticalDeferredIndexBuilder)
+			require.True(t, ok)
+			if err := builder.BuildCriticalDeferredIndexesContext(ctx); err != nil {
 				return err
 			}
 			return errStopped

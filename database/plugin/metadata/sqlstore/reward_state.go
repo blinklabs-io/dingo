@@ -1566,26 +1566,6 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 	return nil
 }
 
-// DeleteRewardAccountOutputsBeforeEpoch prunes reward_account_output below
-// epoch as DeleteRewardStateBeforeEpoch does, without touching
-// reward_stake_input.
-func (s *Store) DeleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn types.Txn,
-) error {
-	if err := s.pruneRewardRowsBeforeEpoch(
-		ctx,
-		"reward_account_output",
-		rewardAccountOutputPrunePredicate,
-		epoch,
-		txn,
-	); err != nil {
-		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
-	}
-	return nil
-}
-
 // DeleteRewardStakeInputBeforeEpoch prunes reward_stake_input below epoch,
 // batched exactly as DeleteRewardStateBeforeEpoch describes.
 func (s *Store) DeleteRewardStakeInputBeforeEpoch(

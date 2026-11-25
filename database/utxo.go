@@ -148,6 +148,9 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 				"total", len(utxos),
 			)
 		}
+	} else if store, h, release, ok := indexerEntryWriter(txn); ok {
+		deleteBatch(store, h, utxos)
+		release()
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))
@@ -606,6 +609,11 @@ func repairUtxoBlob(
 	offset *CborOffset,
 ) error {
 	offsetData := EncodeUtxoOffset(offset)
+
+	if store, h, release, ok := indexerEntryWriter(txn); ok {
+		defer release()
+		return store.SetUtxo(h, txId, outputIdx, offsetData)
+	}
 
 	// Use the caller's blob txn when it is write-capable
 	if txn != nil && txn.Blob() != nil && txn.IsReadWrite() {

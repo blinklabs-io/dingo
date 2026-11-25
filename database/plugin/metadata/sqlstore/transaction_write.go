@@ -61,9 +61,8 @@ type transactionBatchAccumulator struct {
 	debitWithdrawals bool
 	// debitWithdrawalsSet records that the caller chose debitWithdrawals,
 	// which a certified closure honours: its default is to debit.
-	debitWithdrawalsSet  bool
-	validatedAPIRowsOnly bool
-	transactionInsert    *sql.Stmt
+	debitWithdrawalsSet bool
+	transactionInsert   *sql.Stmt
 	// store routes the applied-transaction statements through the Store's
 	// prepared statements; nil runs them unprepared.
 	store                *Store
@@ -965,22 +964,8 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	}
 }
 
-// NewValidatedBlockBatchAccumulator defers API indexes while keeping every
-// stateful transaction effect visible to subsequent validation.
-func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator {
-	if s.storageMode != types.StorageModeAPI {
-		return nil
-	}
-	return &transactionBatchAccumulator{
-		sqlite:               s.dialect.Name() == "sqlite",
-		validatedAPIRowsOnly: true,
-		sqlOperations:        s.sqlOperations,
-		store:                s,
-	}
-}
-
 func (a *transactionBatchAccumulator) apiRowsOnly() bool {
-	return a.leiosAPIRowsOnly || a.validatedAPIRowsOnly
+	return a.leiosAPIRowsOnly
 }
 
 // LeiosClosureRowsOnly identifies the ordered API-detail accumulator.

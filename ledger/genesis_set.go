@@ -48,11 +48,11 @@ func (ls *LedgerState) stageGenesisStaking(
 		return
 	}
 	if err := ls.stageGenesisAccounts(r, txn, stakeDelegations, keyDeposit); err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	if err := ls.stageGenesisPools(txn, pools, poolDeposit); err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 	}
 }
 
@@ -176,12 +176,12 @@ func (ls *LedgerState) stageGenesisGovernance(
 	dr := ls.drepReader(txn)
 	if dr != nil {
 		if err := ls.stageGenesisDReps(dr, txn, initialDReps); err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return
 		}
 	}
 	if err := ls.stageGenesisDelegations(r, dr, txn, delegs); err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 	}
 }
 

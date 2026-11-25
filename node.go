@@ -84,6 +84,11 @@ import (
 )
 
 type Node struct {
+	// blockfetchRangeOverride replaces the Ouroboros blockfetch range request
+	// when set, so a test can serve candidate bodies without a live peer.
+	blockfetchRangeOverride atomic.Pointer[func(
+		ouroboros.ConnectionId, ocommon.Point, ocommon.Point,
+	) (uint64, error)]
 	connManager *connmanager.ConnectionManager
 	peerGovMu   sync.RWMutex
 	peerGov     *peergov.PeerGovernor
