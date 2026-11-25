@@ -47,9 +47,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolInputs, 1)
-	require.NoError(t, seedDB(t, db).DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 
 	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		seedDB(t, db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
@@ -87,9 +85,7 @@ func TestEnsureRewardStakeInputsReadyReportsRejectedReconstruction(
 	// folded into the retained total.
 	poolInputs[0].DelegatedStake += types.Uint64(1_000_000_000_000)
 	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(poolInputs, nil))
-	require.NoError(t, seedDB(t, db).DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 	require.NoError(t, markRewardStakeInputsPending(
 		seedDB(t, db), nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
 	))
@@ -317,9 +313,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolInputs, 1)
-	require.NoError(t, seedDB(t, db).DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 
 	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		ls.ledgerDB(), nil, snapshotEpoch, rewardSnapshot, poolInputs,

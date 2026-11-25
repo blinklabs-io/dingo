@@ -421,13 +421,6 @@ type RewardStore interface {
 	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an
 	// epoch.
 	DeleteRewardOutputsForEpoch(epoch uint64, txn Txn) error
-	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
-	// below epoch, leaving reward_account_output intact.
-	DeleteRewardStakeInputBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) error
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
 	// retained snapshot window, in every storage mode: it deletes both
 	// reward_stake_input and reward_account_output.

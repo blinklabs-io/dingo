@@ -73,6 +73,22 @@ func seedDB(t testing.TB, db *database.Database) ledgerdb.LedgerDB {
 	return stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: seedLedgerOf(t, db)}
 }
 
+// pruneRewardStakeInputsBefore stages the prune of reward stake inputs
+// below epoch, leaving reward account outputs, as a test of a basis that
+// has aged out needs.
+func pruneRewardStakeInputsBefore(
+	t testing.TB,
+	db *database.Database,
+	epoch uint64,
+) {
+	t.Helper()
+	s := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: seedLedgerOf(t, db)}
+	s.stageRewardInput(nil, RewardInputChange{
+		Kind:       RewardInputPrune,
+		PruneBelow: epoch,
+	})
+}
+
 // seedBlockNonce is seedDB for a block nonce, which the ledger stages itself
 // rather than through its LedgerDB.
 func seedBlockNonce(

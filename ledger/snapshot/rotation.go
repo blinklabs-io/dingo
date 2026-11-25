@@ -1155,12 +1155,30 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 // default currentEpoch-3 window regardless.
 const poolSnapshotRetentionMaxDepth = ledgerdb.PoolSnapshotRetentionBackstopEpochs
 
+// RewardStateRetainedFrom returns the first epoch whose pool stake snapshots
+// and reward state cleanupOldSnapshots keeps once the boundary into
+// currentEpoch is processed. Rows of every epoch at or above it are still
+// held; rows below it may be gone.
+func RewardStateRetainedFrom(currentEpoch uint64) uint64 {
+	if currentEpoch < 3 {
+		return 0
+	}
+	return currentEpoch - 3
+}
+
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
 // delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
 // current, current-1, current-2 for Go, and current-3 so reward calculation can
 // be replayed after a rollback across the boundary where those rewards were
-// applied. It prunes the same way in every storage mode: history older than
-// the window is the IndexerDB's, which derives its own copy.
+// applied. It prunes the same way in every storage mode.
+//
+// reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
+// and is not needed once the epoch it snapshots has finished replaying, so it
+// is pruned to that 4-epoch window, together with the account reward outputs.
+// Through the ledger's staging LedgerDB the same prune also drops the live
+// set's derived reward rows, the pool outputs and precompute cursors. Reward
+// history older than the window is API data, which the IndexerDB derives and
+// holds.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1176,7 +1194,7 @@ func (m *Manager) cleanupOldSnapshots(
 		return nil // Not enough history to clean
 	}
 
-	deleteBeforeEpoch := currentEpoch - 3
+	deleteBeforeEpoch := RewardStateRetainedFrom(currentEpoch)
 
 	// Pool-stake snapshots may still be needed below the default window by a
 	// queued/deferred header that validates leader eligibility against an

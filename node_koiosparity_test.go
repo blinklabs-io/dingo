@@ -17,16 +17,20 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -75,7 +79,7 @@ func TestKoiosParityObserverRegistersThroughNodeRegistry(t *testing.T) {
 	err = node.config.promRegistry.Register(prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_koiosparity_epoch_result_total",
-			Help: "koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)",
+			Help: "koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error/not_checked)",
 		},
 		[]string{"queue", "status"},
 	))
@@ -119,18 +123,15 @@ func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
 	// ledger.
 	consensus.SetEpochSource(set)
 
-	_, err = (&Node{db: consensus}).koiosParitySource()
-	require.ErrorIs(t, err, errKoiosParityNeedsIndexerDB,
-		"a core node retains no history to validate against")
+	core, err := (&Node{db: consensus}).koiosParitySource()
+	require.NoError(t, err)
+	hashes, err := core.GetEpochTransactionHashes(ctx, 3, 20)
+	require.NoError(t, err)
+	require.Empty(t, hashes, "a core node retains no history to sample")
 
-	// The IndexerDB derives its own epochs.
-	require.NoError(t, dbadapter.New(indexerDB).SetEpoch(
-		1000, 3, nil, nil, nil, nil, 5, 1000, 500, nil,
-	))
 	api, err := (&Node{db: consensus, indexerDB: indexerDB}).
 		koiosParitySource()
 	require.NoError(t, err)
-
 	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
 	require.ErrorIs(t, err, koiosparity.ErrTransactionHistoryPending,
 		"the sample must be read from the IndexerDB, which is still empty")
@@ -140,15 +141,130 @@ func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
 	}, nil))
 	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
 	require.NoError(t, err)
+}
 
-	// The reward state is the IndexerDB's too: the ledger prunes it to a
-	// window the observer can fall behind.
-	_, err = api.GetLatestEpoch(ctx)
-	require.Error(t, err, "the IndexerDB holds no epoch summary yet")
-	require.NoError(t, indexerDB.Metadata().SaveEpochSummary(
-		&models.EpochSummary{Epoch: 2, BoundarySlot: 900}, nil,
-	))
-	latest, err := api.GetLatestEpoch(ctx)
+// TestKoiosParityObserverLeavesTheLedgerDBRewardWindowAlone verifies a core
+// node with the Koios parity observer enabled prunes reward outputs from its
+// LedgerDB exactly as one without it does. Reward history older than the
+// window is API data, so the observer must not keep it in the LedgerDB.
+func TestKoiosParityObserverLeavesTheLedgerDBRewardWindowAlone(t *testing.T) {
+	t.Parallel()
+
+	n, stop := bootSetNode(t, t.TempDir(), "preview")
+	defer stop()
+	n.config.koiosParity.Enabled = true
+	require.NoError(t, n.configureSnapshotManager())
+	require.NoError(t, n.snapshotMgr.Start(t.Context()))
+	defer func() { require.NoError(t, n.snapshotMgr.Stop()) }()
+
+	const currentEpoch = 10
+	for epoch := range uint64(currentEpoch + 1) {
+		require.NoError(t, n.utxoSet.ApplyLedgerChanges(
+			nil, ledger.LedgerChanges{
+				RewardDerived: []ledger.RewardDerivedChange{{
+					Kind:  ledger.RewardDerivedAccounts,
+					Epoch: epoch,
+					Accounts: []*models.RewardAccountOutput{{
+						StakingKey:  bytes.Repeat([]byte{0x01}, 28),
+						PoolKeyHash: bytes.Repeat([]byte{0x02}, 28),
+						RewardType:  "member",
+						Epoch:       epoch,
+						Amount:      types.Uint64(epoch + 1),
+						Spendable:   true,
+					}},
+				}},
+			},
+		))
+	}
+	ldb := n.ledgerState.LedgerDB()
+	rows, err := ldb.GetRewardAccountOutputs(0, nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), latest)
+	require.Len(t, rows, 1)
+
+	n.eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{
+				PreviousEpoch: currentEpoch - 1,
+				NewEpoch:      currentEpoch,
+			},
+		),
+	)
+	retainedFrom := uint64(currentEpoch - 3)
+	testutil.WaitForCondition(t, func() bool {
+		rows, err := ldb.GetRewardAccountOutputs(retainedFrom-1, nil)
+		return err == nil && len(rows) == 0
+	}, 5*time.Second,
+		"the LedgerDB must prune reward outputs below the window with the "+
+			"observer enabled")
+	for epoch := range retainedFrom {
+		rows, err := ldb.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err)
+		require.Empty(t, rows, "epoch %d is below the window", epoch)
+	}
+	for epoch := retainedFrom; epoch <= currentEpoch; epoch++ {
+		rows, err := ldb.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err)
+		require.Len(t, rows, 1, "epoch %d is inside the window", epoch)
+	}
+}
+
+// TestKoiosParitySourceReadsRewardStateFromTheIndexerDB verifies the source
+// an API node builds reads the reward state from its IndexerDB, which holds
+// epochs the LedgerDB's window no longer does. The LedgerDB here holds no
+// reward rows at all.
+func TestKoiosParitySourceReadsRewardStateFromTheIndexerDB(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	set := livesettest.OpenLedgerDB(t, consensus)
+	consensus.SetEpochSource(set)
+
+	poolKeyHash := bytes.Repeat([]byte{0x02}, 28)
+	const stakeEpoch = 2
+	txn := indexerDB.Transaction(ctx, true)
+	require.NoError(t, indexerDB.Metadata().SaveRewardPoolOutputs(
+		[]*models.RewardPoolOutput{{
+			Epoch:             stakeEpoch,
+			PoolKeyHash:       poolKeyHash,
+			MemberRewardTotal: types.Uint64(7),
+		}},
+		txn.Metadata(),
+	))
+	require.NoError(t, indexerDB.Metadata().SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput{{
+			StakingKey:  bytes.Repeat([]byte{0x01}, 28),
+			PoolKeyHash: poolKeyHash,
+			RewardType:  "member",
+			Epoch:       stakeEpoch,
+			Amount:      types.Uint64(7),
+			Spendable:   true,
+		}},
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+
+	api, err := (&Node{db: consensus, indexerDB: indexerDB}).
+		koiosParitySource()
+	require.NoError(t, err)
+	rows, err := api.GetRewardAccountOutputs(ctx, stakeEpoch)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	pools, err := api.GetPoolEpochDataMap(ctx, stakeEpoch, stakeEpoch+1)
+	require.NoError(t, err)
+	pool := pools[hex.EncodeToString(poolKeyHash)]
+	require.NotNil(t, pool)
+	require.True(t, pool.MemberRewardPresent)
+	require.Equal(t, "7", pool.MemberRewardTotal)
+	require.True(t, pool.SpendableMemberRewardPresent)
+	require.Equal(t, "7", pool.SpendableMemberRewardTotal)
 }

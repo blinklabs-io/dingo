@@ -1530,8 +1530,8 @@ func TestCompareMemberRewardsExcludesUnspendable(t *testing.T) {
 }
 
 // TestCompareMemberRewardsWithoutAccountOutputs covers a node whose
-// reward_account_output rows for the epoch are gone — cleanupOldSnapshots
-// retains them without bound only in api storage mode.
+// reward_account_output rows for the epoch are gone — the LedgerDB's
+// cleanupOldSnapshots prunes them below its reward window.
 //
 // Falling back to reward_pool_output.member_reward_total is sound exactly when
 // the row says nothing was withheld, because the pool's member total is then

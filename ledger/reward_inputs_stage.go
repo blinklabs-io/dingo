@@ -147,21 +147,6 @@ func (s stagingLedgerDB) DeleteRewardInputsForEpoch(
 	return nil
 }
 
-func (s stagingLedgerDB) DeleteRewardStakeInputBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	s.stageRewardInput( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		txn,
-		RewardInputChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-			Kind:       RewardInputPrune,
-			PruneBelow: epoch,
-		},
-	)
-	return nil
-}
-
 // DeleteRewardStateBeforeEpoch prunes the reward account outputs too, and the
 // derived reward rows of the set.
 func (s stagingLedgerDB) DeleteRewardStateBeforeEpoch(
