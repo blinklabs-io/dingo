@@ -133,32 +133,50 @@ func TestGDDLatestSlotClosesUpperBound(t *testing.T) {
 	})
 }
 
-// stageFrontier appends verified headers to a peer's staged frontier, the way
-// admission stages them while the ledger has not yet applied their parents.
+// stageFrontier appends headers to a peer's staged frontier and records the
+// matching pending admission candidates, the way admission stages them while
+// the ledger has not yet applied their parents. A verified header carries the
+// ledger snapshot generation that authorized it; an unverified one, whose
+// producer check was deferred, carries none.
 func stageFrontier(
 	t *testing.T,
 	f *gddFixture,
 	conn ouroboros.ConnectionId,
+	verified bool,
 	slots ...uint64,
 ) {
 	t.Helper()
 	f.cs.mutex.Lock()
 	defer f.cs.mutex.Unlock()
-	frontier := f.cs.clonePeerTipAdmissionFrontier(f.cs.peerTips[conn])
+	frontier := f.cs.pendingPeerTipFrontiers[conn]
+	if frontier == nil {
+		frontier = f.cs.clonePeerTipAdmissionFrontier(f.cs.peerTips[conn])
+	}
 	require.NotNil(t, frontier)
+	var generation uint64
+	if verified {
+		generation = 1
+	}
 	for _, slot := range slots {
 		prev := frontier.ObservedTip
-		f.cs.applyPeerTipAdmissionUpdateLocked(frontier, PeerTipUpdateEvent{
-			ConnectionId:     conn,
-			Tip:              genesisTip(1_000_000, "adv", prev.BlockNumber+2),
-			ObservedTip:      genesisTip(slot, fmt.Sprintf("h%d", slot), prev.BlockNumber+1),
-			ObservedPrevHash: prev.Point.Hash,
-		})
+		update := PeerTipUpdateEvent{
+			ConnectionId:                       conn,
+			Tip:                                genesisTip(1_000_000, "adv", prev.BlockNumber+2),
+			ObservedTip:                        genesisTip(slot, fmt.Sprintf("h%d", slot), prev.BlockNumber+1),
+			ObservedPrevHash:                   prev.Point.Hash,
+			AdmissionID:                        uint64(len(f.cs.pendingPeerTips[conn])) + 1,
+			HeaderCryptoVerificationGeneration: generation,
+		}
+		f.cs.applyPeerTipAdmissionUpdateLocked(frontier, update)
+		f.cs.pendingPeerTips[conn] = append(
+			f.cs.pendingPeerTips[conn],
+			peerTipAdmissionCandidate{update: update, plausible: true},
+		)
 	}
 	f.cs.pendingPeerTipFrontiers[conn] = frontier
 }
 
-// A peer whose headers sit in the staged frontier has them counted: the
+// A peer whose verified headers sit in the staged frontier has them counted: the
 // latest header past the window closes the upper bound at the staged count,
 // not at the admitted count.
 func TestGDDStagedHeadersCountTowardWindow(t *testing.T) {
@@ -170,7 +188,7 @@ func TestGDDStagedHeadersCountTowardWindow(t *testing.T) {
 		denseFork(t, f, dense)
 		f.deliver(t, honest, 0, 1000)
 		// 50 headers in the window, then one past it.
-		stageFrontier(t, f, honest, append(slotRange(1001, 1050), 1200)...)
+		stageFrontier(t, f, honest, true, append(slotRange(1001, 1050), 1200)...)
 		return f, honest
 	}
 
@@ -189,7 +207,7 @@ func TestGDDStagedHeadersCountTowardWindow(t *testing.T) {
 		dense, sparse := corrConn(1), corrConn(2)
 		denseFork(t, f, dense)
 		f.deliver(t, sparse, 0, 1000)
-		stageFrontier(t, f, sparse, 1010, 1200)
+		stageFrontier(t, f, sparse, true, 1010, 1200)
 
 		f.evaluate()
 
@@ -219,4 +237,69 @@ func TestForecastHeldSlotLifecycle(t *testing.T) {
 
 	f.cs.RemoveForecastHorizonWitness(update)
 	assert.NotContains(t, f.cs.forecastHeldSlots, conn)
+}
+
+// Staged headers whose producer check was deferred passed no cryptographic
+// verification, so they must not count toward a rival's density or its
+// offersMoreThanK qualification.
+func TestGDDUnverifiedStagedHeadersDoNotCount(t *testing.T) {
+	t.Parallel()
+
+	// honest is idle after one header in the window, so its bound is 1 and a
+	// rival offering more than k headers beats it.
+	setup := func(t *testing.T) (*gddFixture, ouroboros.ConnectionId, ouroboros.ConnectionId) {
+		f := newGDDFixture(t, true)
+		rival, honest := corrConn(1), corrConn(2)
+		f.deliver(t, rival, 0, 1000)
+		f.deliver(t, honest, 0, 1000, 1010)
+		f.cs.SetPeerIdling(honest, f.cs.GetPeerTip(honest).ObservedTip.Point)
+		return f, rival, honest
+	}
+
+	t.Run("unverified rival does not disconnect an honest peer", func(t *testing.T) {
+		t.Parallel()
+		f, rival, _ := setup(t)
+		stageFrontier(t, f, rival, false, slotRange(1001, 1041)...)
+
+		f.evaluate()
+
+		assert.Empty(t, f.disconnected())
+	})
+
+	t.Run("verified rival does", func(t *testing.T) {
+		t.Parallel()
+		f, rival, honest := setup(t)
+		stageFrontier(t, f, rival, true, slotRange(1001, 1041)...)
+
+		f.evaluate()
+
+		assert.Equal(t, []ouroboros.ConnectionId{honest}, f.disconnected())
+	})
+
+	t.Run("only the verified prefix counts", func(t *testing.T) {
+		t.Parallel()
+		f, rival, _ := setup(t)
+		// k headers are verified; the k+1th is not, so the rival does not
+		// offer more than k.
+		stageFrontier(t, f, rival, true, slotRange(1001, 1040)...)
+		stageFrontier(t, f, rival, false, 1041)
+
+		f.evaluate()
+
+		assert.Empty(t, f.disconnected())
+	})
+
+	t.Run("forecast-held slot does not close the bound past unverified headers", func(t *testing.T) {
+		t.Parallel()
+		f := newGDDFixture(t, true)
+		dense, sparse := corrConn(1), corrConn(2)
+		denseFork(t, f, dense)
+		f.deliver(t, sparse, 0, 1000, 1010)
+		stageFrontier(t, f, sparse, false, 1020)
+		forecastHorizonHeader(t, f, sparse, 1200)
+
+		f.evaluate()
+
+		assert.Empty(t, f.disconnected())
+	})
 }

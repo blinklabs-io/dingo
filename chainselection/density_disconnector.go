@@ -219,24 +219,20 @@ func (cs *ChainSelector) densityCandidatesLocked() []densityCandidate {
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		// Staged headers are verified, so they count toward density: the
-		// latest slot and the counted headers must come from one frontier.
-		frontier := peerTip
-		staged := cs.latestPeerTipCandidateLocked(connId)
-		if staged != nil && len(staged.observedPoints) > 0 {
-			frontier = staged
-		}
-		if len(frontier.observedPoints) == 0 {
+		points, baseBlock, unverifiedStaged := cs.verifiedFrontierLocked(
+			connId, peerTip,
+		)
+		if len(points) == 0 {
 			continue
 		}
 		candidates = append(candidates, densityCandidate{
 			connId:    connId,
-			points:    frontier.observedPoints,
-			baseBlock: frontier.observedPointBaseBlock,
+			points:    points,
+			baseBlock: baseBlock,
 			// A peer with staged headers has sent more since it idled.
-			idling:     peerTip.isIdling() && frontier == peerTip,
+			idling:     peerTip.isIdling() && len(cs.pendingPeerTips[connId]) == 0,
 			held:       peerTip.eagernessPaused > 0,
-			latestSlot: cs.latestHeaderSlotLocked(connId, frontier.observedPoints),
+			latestSlot: cs.latestHeaderSlotLocked(connId, points, unverifiedStaged),
 		})
 	}
 	slices.SortFunc(candidates, func(a, b densityCandidate) int {
@@ -319,15 +315,64 @@ func (cs *ChainSelector) markDensityDisconnectedLocked(
 	cs.genesisDensityDisconnected[connId] = struct{}{}
 }
 
+// verifiedFrontierLocked returns the header frontier density may count for
+// connId: the admitted points plus the staged points whose crypto verification
+// was not deferred. A staged header without a verification generation passed
+// no cryptographic check, so counting it would let one peer's unauthenticated
+// headers decide another peer's disconnect; the frontier stops before the
+// first such header. unverifiedStaged reports that staged headers remain
+// outside the returned points, in which case no later header follows the
+// frontier directly.
+func (cs *ChainSelector) verifiedFrontierLocked(
+	connId ouroboros.ConnectionId,
+	committed *PeerChainTip,
+) (points []ocommon.Point, baseBlock uint64, unverifiedStaged bool) {
+	points = committed.observedPoints
+	baseBlock = committed.observedPointBaseBlock
+	pending := cs.pendingPeerTips[connId]
+	if len(pending) == 0 {
+		return points, baseBlock, false
+	}
+	staged := cs.latestPeerTipCandidateLocked(connId)
+	if staged == nil || len(staged.observedPoints) == 0 {
+		return points, baseBlock, true
+	}
+	cut := len(staged.observedPoints)
+	for _, candidate := range pending {
+		if !candidate.plausible ||
+			candidate.update.HeaderCryptoVerificationGeneration != 0 {
+			continue
+		}
+		cut = -1
+		for i, p := range slices.Backward(staged.observedPoints) {
+			if pointsEqual(p, candidate.update.ObservedTip.Point) {
+				cut = i
+				break
+			}
+		}
+		break
+	}
+	switch {
+	case cut < 0 || cut == 0:
+		return points, baseBlock, true
+	case cut < len(staged.observedPoints):
+		return staged.observedPoints[:cut],
+			staged.observedPointBaseBlock, true
+	}
+	return staged.observedPoints, staged.observedPointBaseBlock, false
+}
+
 // latestHeaderSlotLocked returns the slot of the newest header connId has
-// sent: the head of points, the frontier the counted headers come from, or a
-// header held at the ledger forecast horizon, which is beyond that frontier.
+// sent beyond points, the counted frontier. A header held at the ledger
+// forecast horizon is the one uncounted header allowed to close the bound, and
+// only when nothing else is staged between it and points.
 func (cs *ChainSelector) latestHeaderSlotLocked(
 	connId ouroboros.ConnectionId,
 	points []ocommon.Point,
+	unverifiedStaged bool,
 ) uint64 {
 	latest := points[len(points)-1].Slot
-	if held, ok := cs.forecastHeldSlots[connId]; ok {
+	if held, ok := cs.forecastHeldSlots[connId]; ok && !unverifiedStaged {
 		latest = max(latest, held.slot)
 	}
 	return latest
