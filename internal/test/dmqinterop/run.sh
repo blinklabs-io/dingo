@@ -2,8 +2,8 @@
 # Runs the DMQ interoperability tests against a real Intersect dmq-node.
 #
 # It downloads a dmq-node release (checking its SHA-256), builds Linux builds
-# of Dingo and of the dmq-submit helper, starts Dingo's single-node devnet and
-# dmq-node together in one container, and runs the tests tagged
+# of Dingo and of this package's test binary, starts Dingo's single-node
+# devnet and dmq-node together in one container, and runs the tests tagged
 # dingo_dmq_interop against them. Docker and network access are required.
 #
 #   internal/test/dmqinterop/run.sh
@@ -113,7 +113,7 @@ if tar -tzf "$work/download/$asset.tar.gz" | grep -E '^/|(^|/)\.\.(/|$)'; then
 fi
 tar -xzf "$work/download/$asset.tar.gz" -C "$work/dmq-node"
 
-echo "== building dingo and dmq-submit for linux/$goarch"
+echo "== building dingo and the test binary for linux/$goarch"
 (
   cd "$root"
   if [ -n "${DMQ_INTEROP_CARDANO_BIN:-}" ]; then
@@ -123,7 +123,8 @@ echo "== building dingo and dmq-submit for linux/$goarch"
       go build -o "$work/bin/dingo" ./cmd/dingo
   fi
   GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 \
-    go build -o "$work/bin/dmq-submit" ./internal/test/dmqinterop/dmq-submit
+    go test -c -tags dingo_dmq_interop -o "$work/bin/dmqinterop.test" \
+      ./internal/test/dmqinterop/
 )
 
 echo "== starting the container"
@@ -196,7 +197,6 @@ start_node() {
   (
     cd "$root"
     go build -o "$work/bin/dingo-host" ./cmd/dingo
-    go build -o "$work/bin/dmq-submit-host" ./internal/test/dmqinterop/dmq-submit
   )
   # The devnet command writes the node's configuration and keys and starts
   # it. It strips every DINGO_ variable from the node's environment, so DMQ is
@@ -263,7 +263,6 @@ YAML
 if [ -n "${DMQ_INTEROP_NODE_MODE:-}" ]; then
   start_node
   export DMQ_INTEROP_NODE_SOCKET="$node_dir/dingo-dmq.socket"
-  export DMQ_INTEROP_NODE_SUBMIT="$work/bin/dmq-submit-host"
   export DMQ_INTEROP_NODE_METRICS="http://127.0.0.1:${metrics_port}/metrics"
 fi
 
@@ -280,8 +279,7 @@ if [ -n "${DMQ_INTEROP_SETUP_ONLY:-}" ]; then
     echo "export $v='${!v}'"
   done
   if [ -n "${DMQ_INTEROP_NODE_MODE:-}" ]; then
-    for v in DMQ_INTEROP_NODE_SOCKET DMQ_INTEROP_NODE_SUBMIT \
-      DMQ_INTEROP_NODE_METRICS; do
+    for v in DMQ_INTEROP_NODE_SOCKET DMQ_INTEROP_NODE_METRICS; do
       echo "export $v='${!v}'"
     done
     echo "# the node runs as process $node_pid; stop it with kill -TERM"

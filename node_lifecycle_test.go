@@ -2415,6 +2415,21 @@ func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
 	})
 }
 
+// requireLedgerAtChainTip waits for the ledger to apply every block on the
+// primary chain. The harness and a live truncate both start a ledger that
+// catches up from its stored tip in the background, so an epoch-boundary
+// test that truncates or adds blocks without this wait acts on whatever
+// prefix has been applied. A boundary block then finds the ledger still
+// in an earlier epoch and skips an epoch in one rollover, which publishes no
+// block-based transition event.
+func requireLedgerAtChainTip(t *testing.T, n *Node) {
+	t.Helper()
+	testutil.WaitForCondition(t, func() bool {
+		return n.ledgerState.Tip().Point.Slot ==
+			n.chainManager.PrimaryChain().Tip().Point.Slot
+	}, testutil.AsyncWait, "the ledger must apply the primary chain")
+}
+
 // addBlocksSerially waits for each block-based epoch transition to commit
 // before entering the next epoch. This orders ledger commits only; snapshot
 // events run in their own serial loop and reward precomputation coalesces
@@ -2426,6 +2441,7 @@ func addBlocksSerially(
 	epochLength uint64,
 ) {
 	t.Helper()
+	requireLedgerAtChainTip(t, n)
 	// With no upstream connection and reachedTip unlatched, the ledger loop
 	// holds each lone new block for about two seconds waiting for more. A
 	// live truncate or restore builds a new ledger with the flag clear, so
@@ -2501,6 +2517,7 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	// (block 20, slot 402), whose block-based epoch event confirms every
 	// preceding block committed.
 	target1 := points[9].Slot
+	requireLedgerAtChainTip(t, n)
 	_, err := n.Truncate(
 		context.Background(),
 		dblifecycle.TruncateTarget{Slot: &target1},

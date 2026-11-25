@@ -25,10 +25,15 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-var (
-	ledgerDirHookOnce sync.Once
-	ledgerDirGuards   sync.Map // cleaned data directory -> metadata.StatementGuard
-)
+// ledgerDirGuards maps a cleaned data directory to its metadata.StatementGuard.
+var ledgerDirGuards sync.Map
+
+// The driver's hook list is read by every connection open and unsynchronised
+// against a write, so the hook is registered before any test runs rather than
+// when the first guard is armed.
+func init() {
+	sqlite.RegisterConnectionHook(checkLedgerDirConnection)
+}
 
 // guardLedgerDir puts every SQLite connection opened on a file under dir
 // before guard. The ledger's database has no metadata store for a statement
@@ -45,9 +50,6 @@ func guardLedgerDir(
 			"a statement guard on the ledger's database needs a data directory",
 		)
 	}
-	ledgerDirHookOnce.Do(func() {
-		sqlite.RegisterConnectionHook(checkLedgerDirConnection)
-	})
 	dir = filepath.Clean(dir)
 	// A reopen of the same directory replaces the guard it was opened with.
 	ledgerDirGuards.Store(dir, guard)

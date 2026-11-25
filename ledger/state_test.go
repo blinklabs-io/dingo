@@ -8508,7 +8508,7 @@ func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 // not "repair" the first Praos epoch's nil lab to the last pre-Praos (Byron)
 // block's parent hash. cardano-ledger initializes praosStateLastEpochBlockNonce
 // to NeutralNonce at the Praos start (initialChainDepState csLabNonce =
-// NeutralNonce), and the initial-epoch branch of calculateEpochNonce stores a
+// NeutralNonce), and the initial-epoch branch of CalculateEpochNonce stores a
 // nil lab — rewriting it would diverge the next boundary's eta on any chain
 // with a Byron era (mainnet, preprod).
 func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
@@ -11265,7 +11265,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
 			t.Cleanup(func() { require.NoError(t, ls.Close()) })
-			cutoff, err := ls.rewardPrefilterSlot(ls.ledgerDB(), nil, 3)
+			cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 			require.NoError(t, err)
 			ancestor := chain.RawBlock{
 				Slot: cutoff + 1, Hash: testHashBytes("reward-ancestor"),
@@ -11304,7 +11304,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			require.Equal(t, uint64(1_200), outputs[0].BoundarySlot)
 			txn := db.Transaction(context.Background(), false)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				app, ok, err := ls.precomputedStakeRewardApplication(
+				app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 					context.Background(),
 					txn,
 					4,

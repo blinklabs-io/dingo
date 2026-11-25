@@ -81,8 +81,8 @@ github.com/aws/aws-sdk-go-v2 v1.48.0 h1:tFU7EJVm7MfyaXLsXdYTZ0Vd6vwt9OljCyqq0gqk
 github.com/aws/aws-sdk-go-v2 v1.48.0/go.mod h1:oeKU5p+TQBnpeLmU42WZLWvzv+ORLn+74n4QVLnm/Z0=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27 h1:3dMP9eEmHVosFN1QiD24IJBKVY8m6iUfVYXqRCT118Q=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27/go.mod h1:KH4PKcqtjy1m0656eqQV2v53xE04ddJzuNloEKqlHkI=
-github.com/aws/aws-sdk-go-v2/config v1.33.15 h1:eSO7lvznhY5nMN1K9xK+pPTwNNH0chVmCIzH3C5as+E=
-github.com/aws/aws-sdk-go-v2/config v1.33.15/go.mod h1:QLBxqEJFcgbrsw2dHaWMDW6DcIFWkHplXJMZGB/s2Ew=
+github.com/aws/aws-sdk-go-v2/config v1.33.21 h1:NY1d3yXmplUSYnUAue0sR88svD+SJiaI+YJGp8TxSNg=
+github.com/aws/aws-sdk-go-v2/config v1.33.21/go.mod h1:pVJNXUXaCLu9a/4/liTklg9zR3yO0xm/XBEQhgg5nzc=
 github.com/aws/aws-sdk-go-v2/credentials v1.21.3 h1:bh+9VoJ4eDzJVEY6jfdNTBa0Dx7tdr+lWSPNovU1vXc=
 github.com/aws/aws-sdk-go-v2/credentials v1.21.3/go.mod h1:4CNs0EBvjDEpyaXSYCdNeNRhFjHFX2Y373tFUaeTYXA=
 github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 h1:oH1E0tjN0g+ZRusbX1dsuat4FJ0z05l8hWaycSbDuNc=
@@ -443,8 +443,8 @@ github.com/spaolacci/murmur3 v1.1.0/go.mod h1:JwIasOWyU6f++ZhiEuf87xNszmSA2myDM2
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
-github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
-github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
+github.com/spf13/pflag v1.1.0 h1:6W6MbVUrnMb8PEhjkqwsVLY7ryuzRfFHF4mQd7L94ag=
+github.com/spf13/pflag v1.1.0/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/spiffe/go-spiffe/v2 v2.8.1 h1:eXZMLsu+3MLEPJyGJkolqtVrteZfQdUpOWj6LTiDl/E=
 github.com/spiffe/go-spiffe/v2 v2.8.1/go.mod h1:47Q0Q9/AqGha8QLHp+kxpH4Wca7X7EnOtlIJy3mxZ3U=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -1909,7 +1910,7 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			require.NoError(t, txn.Commit())
 			txn = ldb.Begin(t.Context(), true)
 			defer txn.Release()
-			require.NoError(t, h.ls.applyPoolReapRefunds(
+			require.NoError(t, h.ls.engine().ApplyPoolReapRefunds(
 				t.Context(), txn, epoch, boundarySlot,
 			))
 			require.NoError(t, txn.Commit())
@@ -2816,10 +2817,10 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			snapshotEpoch uint64,
 			capturedSlot uint64,
 		) bool {
-			app := &stakeRewardApplication{
-				epochs:               stakeRewardEpochs{snapshot: snapshotEpoch},
-				snapshotCapturedSlot: capturedSlot,
-				accountOutputs: []*models.RewardAccountOutput{{
+			app := &epochengine.StakeRewardApplication{
+				Epochs:               epochengine.StakeRewardEpochs{Snapshot: snapshotEpoch},
+				SnapshotCapturedSlot: capturedSlot,
+				AccountOutputs: []*models.RewardAccountOutput{{
 					CredentialTag: ref.Tag,
 					StakingKey:    ref.Key,
 				}},
@@ -2827,7 +2828,7 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), false)
 			defer txn.Release()
-			guarded, err := h.ls.guardedExpiredRewardCredentials(
+			guarded, err := h.ls.engine().GuardedExpiredRewardCredentials(
 				t.Context(), txn, app,
 			)
 			require.NoError(t, err)

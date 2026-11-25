@@ -16838,7 +16838,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	}
 
 	// Initial epoch should return genesis hash
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -16908,7 +16908,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	_, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -16939,7 +16939,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	_, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -17129,7 +17129,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				},
 			}
 
-			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+			nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 				nil,
 				0,
 				ls.currentEra,
@@ -17188,7 +17188,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	}
 
 	// Byron era returns nil nonce immediately without genesis validation
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -18073,7 +18073,7 @@ func loadByronGenesisForTest(
 //     = 0x99*32. The block at slot 245 is past the cutoff and does not
 //     contribute, so the latest pre-cutoff block is slot 230.
 //
-// The test asserts the correct value. Today, calculateEpochNonce passes
+// The test asserts the correct value. Today, CalculateEpochNonce passes
 // `currentEra.Id` (Babbage) into computeCandidateNonce — i.e. the
 // post-transition era — which selects the Praos window and produces the
 // buggy value. The fix is to pass `currentEpoch.EraId` (the source
@@ -18139,7 +18139,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 
 	// currentTipBlockNonce is intentionally left empty so the
 	// resume-from-tip optimisation in computeEpochNonceForSlot
-	// /calculateEpochNonce does not short-circuit and the candidate
+	// /CalculateEpochNonce does not short-circuit and the candidate
 	// is recomputed across the full epoch range from prevEvolvingNonce.
 	ls := &LedgerState{
 		db:         db,
@@ -18171,7 +18171,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 	// entered.
 	var candidate []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, _, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, _, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
 			eras.BabbageEraDesc,
@@ -18324,7 +18324,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 			return err
 		}
 		// importTip checkpoint at the snapshot tip — Branch B in
-		// calculateEpochNonce relies on this row to find the seam
+		// CalculateEpochNonce relies on this row to find the seam
 		// between imported state and post-import accumulation.
 		if err := seedBlockNonce(t, db,
 			hashAtSnap, snapTipSlot, importedNonce, true, txn,
@@ -18345,7 +18345,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 	// generateAndSaveEpochs at import time: EvolvingNonce and
 	// CandidateNonce both seeded from the snapshot's mid-epoch value.
 	// currentTipBlockNonce intentionally left empty so the
-	// resume-from-tip optimisation in calculateEpochNonce takes the
+	// resume-from-tip optimisation in CalculateEpochNonce takes the
 	// Branch B path (block_nonce row search).
 	ls := &LedgerState{
 		db:         db,
@@ -18370,7 +18370,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18504,7 +18504,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18540,7 +18540,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 // the operational hazard where a deployment was bootstrapped with an
 // importer that did not write the block_nonce checkpoint at the
 // snapshot tip slot. Branch B
-// in calculateEpochNonce searches for a block_nonce row matching
+// in CalculateEpochNonce searches for a block_nonce row matching
 // prevEpoch.EvolvingNonce; with no checkpoint that row does not
 // exist, and the resume seam is not found.
 //
@@ -18650,7 +18650,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18984,7 +18984,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 
 	var withEntropy, withoutParam []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, candidate, _, err := ls.calculateEpochNonce(context.Background(),
+		n, _, candidate, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		if err != nil {
@@ -18997,7 +18997,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 			"candidate nonce must freeze at the pre-cutoff block nonce",
 		)
 		withEntropy = n
-		n, _, _, _, err = ls.calculateEpochNonce(context.Background(),
+		n, _, _, _, err = ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, neutral,
 		)
 		withoutParam = n
@@ -19108,7 +19108,7 @@ func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
 
 	var nonce []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+		n, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		nonce = n
@@ -20973,7 +20973,7 @@ func TestApplyEpochDonations(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyEpochDonations(txn, 7, 80)
+		return ls.engine().ApplyEpochDonations(txn, 7, 80)
 	}))
 
 	treasury, reserves, slot := networkState(t, db)
@@ -20998,7 +20998,7 @@ func TestApplyEpochDonations_NoDonations(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyEpochDonations(txn, 7, 80)
+		return ls.engine().ApplyEpochDonations(txn, 7, 80)
 	}))
 
 	treasury, reserves, slot := networkState(t, db)
@@ -21048,7 +21048,7 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := ls.applyEpochDonations(txn, 7, 80); err != nil {
+		if err := ls.engine().ApplyEpochDonations(txn, 7, 80); err != nil {
 			return err
 		}
 		ls.stageUtxoSet(txn, &boundary.Point)

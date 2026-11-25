@@ -53,6 +53,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -11927,62 +11928,7 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 	era eras.EraDesc,
 	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	return ls.loadPersistedProtocolParametersWith(
-		epoch, era, era.DecodePParamsFunc, txn,
-	)
-}
-
-func (ls *LedgerState) loadPersistedProtocolParametersWith(
-	epoch uint64,
-	era eras.EraDesc,
-	decode func([]byte) (lcommon.ProtocolParameters, error),
-	txn ledgerdb.Txn,
-) (lcommon.ProtocolParameters, error) {
-	if decode == nil {
-		return nil, nil
-	}
-	pparams, err := ls.ledgerDB().GetPParams(
-		epoch,
-		era.Id,
-		decode,
-		txn,
-	)
-	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
-		return pparams, err
-	}
-	dijkstraPParams, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
-	if !ok || dijkstraPParams == nil {
-		return nil, fmt.Errorf(
-			"persisted Dijkstra pparams decoded as %T",
-			pparams,
-		)
-	}
-	if ls.config.CardanoNodeConfig != nil {
-		genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
-		if genesis != nil {
-			if dijkstraPParams.CommitteeStakeCoverage == nil {
-				dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
-					genesis.CommitteeStakeCoverage,
-				)
-			}
-			if dijkstraPParams.QuorumStakeThreshold == nil {
-				dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
-					genesis.QuorumStakeThreshold,
-				)
-			}
-		}
-	}
-	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
-		return nil, fmt.Errorf("validate persisted Dijkstra pparams: %w", err)
-	}
-	return dijkstraPParams, nil
-}
-
-func cloneGenesisRat(value *lcommon.GenesisRat) *cbor.Rat {
-	if value == nil || value.Rat == nil {
-		return nil
-	}
-	return &cbor.Rat{Rat: new(big.Rat).Set(value.Rat)}
+	return ls.engine().LoadPersistedProtocolParameters(epoch, era, txn)
 }
 
 // computeGenesisProtocolParameters bootstraps protocol parameters
@@ -12365,7 +12311,7 @@ func (ls *LedgerState) healEmptyLabNonces(ctx context.Context) {
 // recent epochs. Epoch labs are immutable historical data, and only the
 // resume-tip epoch's lab feeds a nonce the node computes at runtime: the
 // current epoch nonce mixes the previous epoch's lab, forward boundaries
-// recompute labs fresh in calculateEpochNonce, and rollbacks are bounded by the
+// recompute labs fresh in CalculateEpochNonce, and rollbacks are bounded by the
 // security parameter (well under one epoch on real networks). Re-deriving every
 // historical epoch's lab from the chain on every restart is one canonical-block
 // lookup per epoch, which on a large blob store costs many minutes for no
@@ -12507,7 +12453,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(
 			)
 			continue
 		}
-		expectedNonce, err := assembleEpochNonce(
+		expectedNonce, err := epochengine.AssembleEpochNonce(
 			candidateNonce,
 			labForEta,
 			extraEntropy,
@@ -12584,7 +12530,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(
 // Pre-Praos (Byron) epochs carry no lab, and the FIRST Praos epoch's carried
 // lab is NeutralNonce (nil): cardano-ledger initialChainDepState sets
 // csLabNonce = NeutralNonce, and the initial-epoch branch of
-// calculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
+// CalculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
 // block's parent hash would diverge the next boundary's eta on any chain with
 // a Byron era. For every other epoch the carried lab is prevHashToNonce of the
 // boundary block — regardless of which epoch that block fell in, since an

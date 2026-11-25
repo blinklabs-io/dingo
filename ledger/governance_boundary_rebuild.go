@@ -8,6 +8,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -307,8 +308,8 @@ func (ls *LedgerState) replayGovernanceBoundaryInTxn(
 		true,
 		replay,
 	); err != nil {
-		if errors.Is(err, errRequiredStakeRewardBasisUnavailable) ||
-			errors.Is(err, errRewardStakeInputsUnrecoverable) {
+		if errors.Is(err, epochengine.ErrRequiredStakeRewardBasisUnavailable) ||
+			errors.Is(err, epochengine.ErrRewardStakeInputsUnrecoverable) {
 			// Retention pruned the reward basis the boundary's reward
 			// round reads, so the stores cannot restore it.
 			return nil, fmt.Errorf(

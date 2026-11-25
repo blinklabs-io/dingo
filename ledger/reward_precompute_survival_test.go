@@ -56,7 +56,7 @@ func requirePrecomputeReusable(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	txn := ls.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, ok, err := ls.precomputedStakeRewardApplication(
+		_, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn, survivalNewEpoch, survivalBoundarySlot,
 		)
