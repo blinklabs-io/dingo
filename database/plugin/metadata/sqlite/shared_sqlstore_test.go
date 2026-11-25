@@ -821,10 +821,9 @@ func requireCascadeChildColumnsIndexed(
 // TestCascadeChildColumnsIndexedAfterCriticalRebuild is the manifest
 // classification this file exists for.
 //
-// mithril/sync.go rebuilds only the critical subset of the deferred-index
-// manifest before it marks the database ready, and the rollback sweep the node
-// runs from its first reconciliation onward deletes "transaction" rows whose
-// children cascade. A cascading child column left without an index at that
+// A rebuild stopped after the critical subset of the deferred-index manifest
+// leaves only that subset, and the rollback sweep deletes "transaction" rows
+// whose children cascade. A cascading child column left without an index at that
 // point turns each deleted parent row into a full scan of the child table:
 // measured on a preview relay, one 1,001-transaction rollback against a 3.2M
 // row utxo table took 556s with its transaction-id index absent and 0.095s
@@ -851,12 +850,8 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	)
 	requireCascadeChildColumnsIndexed(t, db, fks, "before deferring indexes")
 
-	// The Mithril bootstrap sequence: drop the manifest for the bulk load,
-	// then rebuild only the critical subset before the database is marked
-	// ready. The lazy remainder is finished by later maintenance, and on a
-	// database whose pending marker an older sync's blanket clear wiped,
-	// never — so whatever the rollback path needs has to be in this
-	// subset.
+	// Drop the manifest for a bulk load, then rebuild only the critical
+	// subset: whatever the rollback path needs has to be in it.
 	require.NoError(t, store.DropDeferredIndexes())
 	require.NoError(t, store.BuildCriticalDeferredIndexes())
 

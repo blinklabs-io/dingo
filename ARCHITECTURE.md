@@ -2007,7 +2007,7 @@ dingo/
 │   ├── queries.go       # State queries
 │   ├── validation.go    # Transaction validation (Phase 1 UTXO rules)
 │   ├── verify_header.go # Block header validation (VRF/KES/OpCert)
-│   ├── chainsync.go     # Epoch nonce calculation, rollback handling
+│   ├── chainsync.go     # Chainsync/blockfetch event handling, rollback handling
 │   ├── candidate_nonce.go # Candidate nonce computation
 │   ├── certs.go         # Certificate processing
 │   ├── governance.go    # Governance action processing
@@ -3788,10 +3788,13 @@ run the phase between resolving the stores and `database.New`; every
 configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
 (`nodestorage.MigrateReleased`). `mithril sync` and the
-`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store. The phase opens the configured metadata
-provider on a plugin host of its own, opens the v0.94.2 database over it and
-the block store as `database.RoleReleased` (the role storage adoption also
-opens it with), reverts it to the block `k` blocks below its tip
+`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store.
+The phase opens the configured metadata
+provider on a plugin host of its own, opens the v0.94.2 database over it, the
+block store and the ImmutableDB provider the opener already resolved (which
+resolves the markers of promoted blocks; the phase records no ImmutableDB
+state) as `database.RoleReleased` (the role storage adoption also opens it
+with), reverts it to the block `k` blocks below its tip
 (`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
 (`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
 ledger-state family into the live UTxO set, checks the set holds them at the
@@ -16966,32 +16969,22 @@ paths. Only indexes no import path filters on are eligible at all — an index a
 per-row import predicate needs stays resident, since dropping it turns that
 predicate into a full scan of a table the import is still growing. Those indexes
 are named in `deferred.Retained`, and every drop and rebuild path creates any of
-them that is absent — the critical rebuild included, since it is the last step
-before the node serves API writes and the full rebuild can finish much later.
-That repairs a database an older binary's manifest had already dropped them
+them that is absent. That repairs a database an older binary's manifest had already dropped them
 from; the versioned migration that created them is recorded complete and never
 re-runs. `DATABASE.md` records which indexes that rule keeps out of the
 manifest. The metadata plugin exposes `BuildCriticalDeferredIndexes` for the
-critical subset and `BuildDeferredIndexes` for the full manifest. Mithril sync
-rebuilds the critical subset before clearing `sync_status`, then leaves the
-pending sync-state marker set. API-mode `serve` verifies the critical subset
-before startup and runs the full lazy rebuild as background maintenance; the
-rebuild paths clear the marker only after the full manifest has been rebuilt.
-Mithril completion cleanup leaves the deferred-index marker, post-backfill
-statistics marker, and forge fences untouched, and deletes transient keys
-individually. It records the generic imported-ledger-state boundary after
-cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
-remain for database compatibility. This preserves the pending marker set by
-`BuildCritical` so a
-bootstrapped database still builds the lazy manifest. Core-mode startup still
-repairs the full manifest synchronously before serving. Both repair entry points
-also restore any missing critical index when no cycle is pending at all: the
-marker records that a cycle was interrupted, not which indexes exist, and a
-database bootstrapped by a binary that predates the marker being carried across
-the clear has the critical subset built, the lazy remainder dropped, and no
-record of either — it would otherwise carry that gap permanently, since the
-schema migration that created those indexes is recorded complete and never
-re-runs. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
+critical subset and `BuildDeferredIndexes` for the full manifest. The ledger's
+database has no metadata store, so a Mithril sync into it drops and rebuilds
+nothing. The IndexerDB writer drops the deferred indexes before it replays from
+the origin to a Mithril anchor and builds the full manifest at the anchor,
+before it checks the replayed rows against the imported ledger state
+(`internal/indexer/anchor.go`); the rebuild clears the pending marker only
+after the full manifest has been rebuilt. A restore rebuilds any deferred
+index missing from its staged metadata copy. Mithril completion cleanup
+deletes the transient import keys individually and records the generic
+imported-ledger-state boundary after cleanup. Its persisted
+`mithril_ledger_slot` and `mithril_ledger_hash` names remain for database
+compatibility. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
 so the dialect leaves those indexes in place while deferring the remaining
 manifest entries.
 

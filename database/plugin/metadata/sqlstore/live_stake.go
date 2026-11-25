@@ -2145,23 +2145,6 @@ WHERE pool_key_hash IS NOT NULL AND LENGTH(pool_key_hash) > 0`)
 	return ret, rows.Err()
 }
 
-// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
-// credential in refs, recording slot as its update.
-func (s *Store) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn types.Txn,
-) error {
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			return s.refreshRewardLiveStakeRefs(
-				ctx, db, mergeStakeCredentialRefs(refs), slot,
-			)
-		},
-	)
-}
-
 // eachRewardLiveStakePage is how many rows EachRewardLiveStake reads per
 // query.
 const eachRewardLiveStakePage = 1000
