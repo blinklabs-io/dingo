@@ -591,6 +591,33 @@ func newBlockNotFitChainOriginError(
 	)
 }
 
+// originAnchored reports whether the manager knows the network's genesis hash,
+// which is what lets the first header of an empty chain be held to the
+// reference's Origin rules even when the chain has never been mutated. A
+// manager without one -- the bulk importer, which establishes the first block
+// itself -- leaves a fresh chain unanchored.
+func (c *Chain) originAnchored() bool {
+	return c.manager != nil && c.manager.genesisHash.Load() != nil
+}
+
+// originHeaderPrevHashValid reports whether prevHash is acceptable on the first
+// header of an empty chain. A Byron header must name the configured genesis
+// hash; a later-era header must carry the null previous hash, which decodes to
+// the zero hash. Without a configured genesis hash nothing is checked, because
+// the Byron anchor cannot be known.
+func (c *Chain) originHeaderPrevHashValid(
+	eraId uint8,
+	prevHash []byte,
+) bool {
+	if !c.originAnchored() {
+		return true
+	}
+	if eraId == byron.EraIdByron {
+		return bytes.Equal(prevHash, *c.manager.genesisHash.Load())
+	}
+	return !slices.ContainsFunc(prevHash, func(b byte) bool { return b != 0 })
+}
+
 func (c *Chain) headerTip() ochainsync.Tip {
 	if len(c.headers) == 0 {
 		return c.currentTip
@@ -784,11 +811,22 @@ func (c *Chain) addBlockHeader(
 				parent.Slot,
 			)
 		}
-	} else if c.atOriginAfterMutation() &&
+	} else if (c.atOriginAfterMutation() ||
+		c.originAnchored()) &&
 		!firstBlockNumberValid(queued.blockNumber) {
-		// The chain was rolled back to origin, so there is no tip to chain
-		// onto and the checks above cannot run. Anchor the first header on
-		// its block number instead; see atOriginAfterMutation.
+		// There is no tip to chain onto, so the checks above cannot run.
+		// Anchor the first header on its block number instead; see
+		// atOriginAfterMutation and originAnchored.
+		return newBlockNotFitChainOriginError(
+			headerHash.String(),
+			headerPrevHash.String(),
+		)
+	} else if !c.originHeaderPrevHashValid(
+		header.Era().Id,
+		queued.prevHash,
+	) {
+		// The reference requires the genesis hash as the previous hash of
+		// the first header at Origin.
 		return newBlockNotFitChainOriginError(
 			headerHash.String(),
 			headerPrevHash.String(),
