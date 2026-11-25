@@ -1321,8 +1321,8 @@ func (e *Engine) applyDeferredStakeRewardRound(
 // a later witness may already have renewed that row by application time. This
 // is only exact if two from-genesis nodes retain the same witness history --
 // see historicalExpirationSQL's doc comment
-// (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
-// CIP-0163 section for why that holds today.
+// (database/plugin/metadata/sqlstore/historical_stake.go) for the retention
+// invariant that keeps that history equal.
 func (e *Engine) GuardedExpiredRewardCredentials(ctx context.Context,
 	txn ledgerdb.Txn,
 	app *StakeRewardApplication,

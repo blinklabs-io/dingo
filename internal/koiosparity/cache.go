@@ -1673,7 +1673,7 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 // never enables accounts sees no behavior change and never has an epoch queued
 // for recheck purely because its account coverage happens to be absent (which
 // is simply expected in that mode, not a discrepancy worth flagging). See
-// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection
+// README.md's "Per-account exact parity" section
 // for the full epoch-selection design this is part of.
 func (c *Cache) GetEpochsNeedingCheck(
 	network string,
@@ -1731,8 +1731,7 @@ func (c *Cache) GetEpochsNeedingCheck(
 // unions this into its epoch list only when cfg.AccountsEnabled, and skips
 // the redundant pool-history re-fetch for any epoch this returns that
 // GetUncachedEpochs did not also return (see fetchEpoch's caller in fetch.go).
-// See ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity"
-// subsection.
+// See README.md's "Per-account exact parity" section.
 func (c *Cache) GetEpochsMissingAccountCoverage(
 	network string,
 	from, through uint64,

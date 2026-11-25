@@ -91,7 +91,7 @@ groups:
         # still contribute to increase() for up to an hour afterwards.
         #
         # severity: warning, and for: 5m rather than 0m, deliberately: this
-        # tool's own design (see ARCHITECTURE.md's Node Parity section) is
+        # tool's own comparison contract is
         # that live cross-node disagreement is often transient (propagation
         # delay, short forks, the documented tip-sandwich race) rather than
         # a confirmed bug, and there is no fatal/strict mode precisely

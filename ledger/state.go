@@ -1198,15 +1198,13 @@ type LedgerStateConfig struct {
 	// before being handed to ledgerProcessBlocksFromSource exactly as
 	// today. Validation and apply are untouched -- this only changes how
 	// CBOR decode work is scheduled. Off by default: throughput and
-	// stability are still being proven. See
-	// ARCHITECTURE.md ("Block Processing Pipeline").
+	// stability are still being proven. See ledgerReadChainIterator.
 	//
 	// A rollback drains blockPipeline's in-flight decode/validate backlog
 	// (drainBlockPipelineBeforeRollback) before it
 	// proceeds, to shrink -- not eliminate -- the window in which an
 	// already-in-flight batch from an abandoned fork could otherwise be
-	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
-	// coordination").
+	// applied after the rollback. See drainBlockPipelineBeforeRollback.
 	BlockPipelineEnabled bool
 	// BlockPipelineValidateEnabled checks header cryptography serially in
 	// decodeReadChainBatch for blocks read back during replay; the pipeline
@@ -1219,8 +1217,7 @@ type LedgerStateConfig struct {
 	// VerifyBlock checks the OpCert cold signature ungated by any
 	// VerifyConfig Skip field, so the default serial path pays it too, where
 	// verifyBlockHeaderCrypto calls verifyBlockHeaderHex and
-	// verifyOpCertHeaderCrypto back to back. See ARCHITECTURE.md
-	// ("Operational Certificate Validation").
+	// verifyOpCertHeaderCrypto back to back.
 	// It enforces results only where the serial path has validation state:
 	// not trusted historical/Mithril replay and only with a cached epoch
 	// nonce. A rejection is returned as headerValidationError so the already-
@@ -1229,7 +1226,7 @@ type LedgerStateConfig struct {
 	// This is defense in depth, not a replacement for admission validation.
 	// Headers and blocks remain fully checked before entering ls.chain because
 	// that chain is served to downstream clients before ledger apply. See
-	// ARCHITECTURE.md ("Block Processing Pipeline").
+	// ledgerReadChainIterator.
 	//
 	// This flag's extra CPU cost (two dedicated VRF/KES workers) can make
 	// block-apply throughput fall behind header arrival during bursty
@@ -1244,9 +1241,7 @@ type LedgerStateConfig struct {
 	// tryResolveFork, not specific to this flag (reproduced live under
 	// this flag, under decode-only, and under the pre-pipeline baseline
 	// alike); the flag's throughput cost just makes it easier to reach.
-	// See ensureBlockfetchDrainingAfterForkQueueFailure and
-	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
-	// restart blockfetch") for the fix and the full explanation.
+	// See ensureBlockfetchDrainingAfterForkQueueFailure for the drain invariant.
 	BlockPipelineValidateEnabled bool
 	// LedgerPrefetchAheadEnabled resolves the input UTxOs of block k+1 on a
 	// separate goroutine, from a read-only transaction, while block k applies
@@ -2681,9 +2676,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// enabled, validated) results back into submission order, which
 		// is the whole job dingo needs from it.
 		//
-		// This is a recorded decision, not an unfinished pipeline phase:
-		// see ARCHITECTURE.md, "Why dingo's ledger apply is not wired into
-		// pipeline.ApplyFunc". Although the library now stops on rejection,
+		// Although the library stops on rejection,
 		// its per-item callback still cannot express Dingo's batch transaction,
 		// epoch rollover, and synchronous retry contract.
 		workerCount := blockPipelineWorkerCount()
@@ -7306,9 +7299,8 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 //     nonce. This is expected for Byron and can be transient for later eras;
 //     this function cannot inspect the item's era, so the log remains neutral.
 //   - errHeaderVerificationDeferred: the pipeline's epoch cache has not yet
-//     caught up with a block already committed to ls.chain. ARCHITECTURE.md
-//     ("Block Processing Pipeline") documents this as a transient race that
-//     resolves once the epoch cache catches up, so it is not lumped in with
+//     caught up with a block already committed to ls.chain. This transient
+//     race resolves once the epoch cache catches up, so it is not lumped in with
 //     genuine decode/validate/apply problems below.
 //   - context.Canceled/context.DeadlineExceeded: the pipeline context is
 //     cancelled by Stop() *before* it drains, so a stage worker that is

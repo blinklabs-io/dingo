@@ -33,8 +33,7 @@ import (
 // readCandidateChains :: STM m (Map peer (AnchoredFragment header)); see
 // ARCHITECTURE.md's "Ouroboros Genesis trust model" section. As with the
 // upstream contract, entries are derived only from headers that have already
-// passed chain-selection observation (see
-// LedgerState.ValidateChainSelectionHeaderCrypto in ARCHITECTURE.md), the
+// passed chain-selection observation and its ledger header-crypto gate. The
 // fragment may hold less than a full window, and its anchor is not required to
 // intersect the primary chain or any other peer's fragment.
 //
