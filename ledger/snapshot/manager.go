@@ -18,7 +18,6 @@
 package snapshot
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,17 +49,6 @@ type Manager struct {
 	delegatorInactivityEnabled bool
 	delegatorInactivityPeriod  uint64
 	configurationLocked        bool
-
-	// rewardAccountOutputRetentionUnbounded mirrors whether the in-process
-	// Koios parity observer is enabled, from node/load construction. When true,
-	// cleanupOldSnapshots retains reward_account_output without bound in CORE
-	// storage mode too, exactly as it already does unconditionally in API
-	// storage mode — see cleanupOldSnapshots's doc comment. Not
-	// consensus-affecting: it only widens local historical retention, so it
-	// carries no configurationLocked gate and may be changed at any time.
-	// Default false preserves CORE mode's existing pruning behavior when the
-	// observer is disabled.
-	rewardAccountOutputRetentionUnbounded bool
 
 	// deferRewardStakeInputs makes the authoritative boundary capture stage
 	// the per-credential reward inputs for its caller to write after the
@@ -400,38 +388,6 @@ func (m *Manager) inactivityPeriod() uint64 {
 	return m.delegatorInactivityPeriod
 }
 
-// SetRewardAccountOutputRetentionUnbounded mirrors whether the in-process
-// Koios parity observer is enabled into the snapshot manager's
-// cleanup path. When enabled is true, cleanupOldSnapshots retains
-// reward_account_output without bound in CORE storage mode, matching API
-// storage mode's existing unbounded retention.
-//
-// The Koios parity observer validates each closed epoch against Koios only
-// after fetching and comparing over the network, which can fall arbitrarily
-// far behind chain progression during a from-genesis or catch-up sync —
-// unlike the fixed, small rotation/reward-replay window CORE mode's
-// cleanupOldSnapshots otherwise prunes to. Without this, reward_account_output
-// for an epoch is routinely pruned before the observer ever reads it, and the
-// koios-parity check for that epoch fails permanently with a
-// reward_account_output row that genuinely no longer exists.
-//
-// Not consensus-affecting — it only widens local historical retention — so
-// unlike SetDelegatorInactivity this is not gated by configurationLocked and
-// may be called or changed at any time, including after Start.
-func (m *Manager) SetRewardAccountOutputRetentionUnbounded(enabled bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rewardAccountOutputRetentionUnbounded = enabled
-}
-
-// RewardAccountOutputRetentionUnbounded reports the current value set by
-// SetRewardAccountOutputRetentionUnbounded, for tests and diagnostics.
-func (m *Manager) RewardAccountOutputRetentionUnbounded() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.rewardAccountOutputRetentionUnbounded
-}
-
 // SetPromRegistry enables snapshot manager metrics.
 func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
 	if reg == nil {
@@ -655,7 +611,9 @@ func (m *Manager) epochTransitionLoop(
 	}
 }
 
-// handleEpochTransition processes an epoch boundary event.
+// handleEpochTransition rotates and prunes the snapshots after an epoch
+// boundary. The boundary's mark snapshot is captured by the ledger inside its
+// rollover transaction (CaptureEpochBoundarySnapshot), the only capture.
 func (m *Manager) handleEpochTransition(
 	ctx context.Context,
 	evt event.EpochTransitionEvent,
@@ -669,52 +627,10 @@ func (m *Manager) handleEpochTransition(
 		"snapshot_slot", evt.SnapshotSlot,
 	)
 
-	// 1. Capture new Mark snapshot (current stake distribution)
-	//
-	// The pre-check runs inside a short read-only transaction rather than
-	// passing a nil transaction directly. That keeps the metadata connection
-	// reserved for the complete read and avoids competing with other cold
-	// query preparations while the read pool is busy. The transaction still
-	// sees a fresh WAL snapshot when it begins.
-	m.mu.Lock()
-	_, deferred := m.deferredCaptures[evt.NewEpoch]
-	m.mu.Unlock()
-	if deferred {
-		m.logger.Debug(
-			"mark snapshot captured by the ledger after the boundary",
-			"component", "snapshot",
-			"epoch", evt.NewEpoch,
-		)
-		m.rotateSnapshots(ctx, evt.NewEpoch)
-		if err := m.cleanupOldSnapshots(ctx, evt.NewEpoch); err != nil {
-			return fmt.Errorf("cleanup old snapshots: %w", err)
-		}
-		return nil
-	}
-
-	preCheckTxn := m.db.Begin(ctx, false)
-	exists, err := m.authoritativeMarkRewardSnapshotExists(
-		evt,
-		preCheckTxn,
-	)
-	_ = preCheckTxn.Commit()
-	if err != nil {
-		return fmt.Errorf("check existing mark snapshot: %w", err)
-	}
-	if exists {
-		m.logger.Debug(
-			"mark snapshot already captured",
-			"component", "snapshot",
-			"epoch", evt.NewEpoch,
-		)
-	} else if err := m.captureMarkSnapshot(ctx, evt); err != nil {
-		return fmt.Errorf("capture mark snapshot: %w", err)
-	}
-
-	// 2. Rotate snapshots (Mark→Set→Go)
+	// Rotate snapshots (Mark→Set→Go)
 	m.rotateSnapshots(ctx, evt.NewEpoch)
 
-	// 3. Cleanup old snapshots (keep last 3 epochs)
+	// Cleanup old snapshots (keep last 3 epochs)
 	if err := m.cleanupOldSnapshots(ctx, evt.NewEpoch); err != nil {
 		return fmt.Errorf("cleanup old snapshots: %w", err)
 	}
@@ -726,52 +642,6 @@ func (m *Manager) handleEpochTransition(
 	)
 
 	return nil
-}
-
-// authoritativeMarkRewardSnapshotExists reports whether an authoritative
-// (reward_snapshot.authoritative = true) mark reward snapshot for evt.NewEpoch
-// already reflects the exact boundary described by evt (matching BoundarySlot
-// and, when both sides have one, EpochNonce). Provisional fallback rows return
-// false so a later block-based fallback can still refresh them.
-//
-// This is a best-effort pre-check (handleEpochTransition skips the fallback
-// capture when it returns true). It does not by itself close the
-// fallback-vs-authoritative race — that is handled inside saveSnapshotInTxn by
-// ClaimFallbackRewardSnapshot, which takes the reward_snapshot row lock. txn
-// scopes the read: nil reads a fresh, out-of-transaction view; passing an
-// open write transaction's metadata handle reads within that transaction.
-func (m *Manager) authoritativeMarkRewardSnapshotExists(
-	evt event.EpochTransitionEvent,
-	txn ledgerdb.Txn,
-) (bool, error) {
-	snapshot, err := m.db.GetRewardSnapshot(evt.NewEpoch, "mark", txn)
-	if err != nil {
-		return false, err
-	}
-	if snapshot == nil {
-		return false, nil
-	}
-	// Only an authoritative row (captured in the epoch-rollover transaction)
-	// counts as "already captured". A provisional fallback row must not block a
-	// later block-based fallback that carries the real epoch nonce.
-	if !snapshot.Authoritative {
-		return false, nil
-	}
-	if snapshot.CalculationVersion != models.RewardStakeCalculationVersion {
-		return false, nil
-	}
-	if snapshot.BoundarySlot != evt.BoundarySlot {
-		return false, nil
-	}
-	if len(snapshot.EpochNonce) == 0 && len(evt.EpochNonce) > 0 {
-		return false, nil
-	}
-	if len(snapshot.EpochNonce) > 0 &&
-		len(evt.EpochNonce) > 0 &&
-		!bytes.Equal(snapshot.EpochNonce, evt.EpochNonce) {
-		return false, nil
-	}
-	return true, nil
 }
 
 // ComputeEpochBoundarySnapshot computes the Mark snapshot's stake distribution
@@ -789,7 +659,7 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 //
 // Splitting the capture is what fixes that without subtracting those credits
 // back out: the stake read happens at the reference SNAP point (after
-// applyStakeRewards and applyMIRCerts, before applyPoolRetirements), while the
+// ApplyStakeRewards and ApplyMIRCerts, before ApplyPoolRetirements), while the
 // write stays at the end where the new epoch row, its nonce and the
 // post-enactment protocol version exist. Both phases run in the one rollover
 // transaction, so a rollback or replay of the boundary re-executes the same
@@ -929,12 +799,6 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		evt,
 		true,
 		true,
-		// checkAuthoritativeMark: false. This IS the authoritative capture,
-		// run synchronously inside the epoch-rollover write transaction at
-		// the exact SNAP point, so it must always be allowed to overwrite
-		// any provisional rows a fallback (event-driven) capture already
-		// wrote for this epoch.
-		false,
 		deferStakeInputs,
 		txn,
 	); err != nil {
@@ -951,9 +815,8 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	// transaction, so success must be reported only once that transaction
 	// commits: a rollback (including a failed commit) must not advance the
 	// success counter or the "latest snapshot" gauges to describe a snapshot
-	// that never persisted. Register them as an after-commit callback, which
-	// matches the fallback captureMarkSnapshot path whose own transaction has
-	// already committed by the time it records success. The duration histogram
+	// that never persisted. Register them as an after-commit callback. The
+	// duration histogram
 	// measures the capture work itself, so it is observed inline like the
 	// failure paths above.
 	if m.metrics != nil {
@@ -1018,8 +881,7 @@ type deferredCapture struct {
 // DeferEpochBoundaryCapture runs in the boundary transaction at the SNAP point,
 // before POOLREAP, when the ledger builds evt.NewEpoch's mark snapshot after
 // the boundary commits. POOLREAP clears the delegations to the pools it
-// retires, so it reads their stake rows now; it also stops the
-// epoch-transition handler capturing a fallback snapshot from later state.
+// retires, so it reads their stake rows now.
 func (m *Manager) DeferEpochBoundaryCapture(
 	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
@@ -1081,8 +943,7 @@ func (m *Manager) DeferEpochBoundaryCapture(
 
 // DiscardEpochBoundaryCapture forgets the SNAP-point capture
 // DeferEpochBoundaryCapture registered for epoch, for a boundary that captures
-// its mark snapshot itself after all. The epoch-transition handler then takes
-// its fallback capture when the boundary's own capture does not persist.
+// its mark snapshot itself after all.
 func (m *Manager) DiscardEpochBoundaryCapture(epoch uint64) {
 	m.mu.Lock()
 	delete(m.deferredCaptures, epoch)
@@ -1211,7 +1072,7 @@ func (d *DeferredEpochBoundarySnapshot) Write(txn ledgerdb.Txn) error {
 	deferStakeInputs := d.m.deferRewardStakeInputs
 	d.m.mu.RUnlock()
 	if err := d.m.writePreparedSnapshot(
-		d.prepared, false, deferStakeInputs, txn,
+		d.prepared, deferStakeInputs, txn,
 	); err != nil {
 		return fmt.Errorf("save mark snapshot: %w", err)
 	}
@@ -1306,85 +1167,6 @@ func (m *Manager) calculateSnapshotDistribution(
 	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, boundarySlot, expiryEpoch, m.inactivityPeriod(),
 	)
-}
-
-// captureMarkSnapshot captures the stake distribution as a Mark snapshot.
-func (m *Manager) captureMarkSnapshot(
-	ctx context.Context,
-	evt event.EpochTransitionEvent,
-) error {
-	m.lockConfiguration()
-	start := time.Now()
-
-	// Calculate canonical, slot-aware leader-election pool totals and attach
-	// RewardLiveStake credential inputs for reward capture.
-	distribution, err := m.calculateSnapshotDistribution(
-		ctx,
-		evt.SnapshotSlot,
-		evt.BoundarySlot,
-		m.expiryEpoch(evt.NewEpoch),
-	)
-	if err != nil {
-		if m.metrics != nil {
-			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(
-				time.Since(start).Seconds(),
-			)
-		}
-		return fmt.Errorf("calculate stake distribution: %w", err)
-	}
-
-	// Save as Mark snapshot for the new epoch. At a normal epoch
-	// transition live Pool/Account state matches the boundary, so
-	// the CIP-1694 reward-account auto-vote resolves correctly.
-	saved, err := m.saveSnapshot(
-		ctx,
-		evt.NewEpoch,
-		"mark",
-		distribution,
-		evt,
-		true, // resolveAutoVote: live state == boundary at this call site
-		true, // persistRewardInputs: live state == boundary at this call site
-		// checkAuthoritativeMark: true. This is the fallback (event-driven)
-		// capture path — the authoritative CaptureEpochBoundarySnapshot can
-		// commit concurrently while this method is still scanning the live
-		// aggregate above, so the write must re-verify, inside its own
-		// transaction, that it isn't about to clobber an authoritative
-		// snapshot that landed in the meantime.
-		true,
-	)
-	if err != nil {
-		if m.metrics != nil {
-			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(
-				time.Since(start).Seconds(),
-			)
-		}
-		return fmt.Errorf("save mark snapshot: %w", err)
-	}
-	if !saved {
-		return nil
-	}
-
-	if m.metrics != nil {
-		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
-		m.metrics.captureSuccessTotal.Inc()
-		m.metrics.capturePoolsTotal.Set(float64(len(distribution.PoolStakes)))
-		m.metrics.captureTotalStakeLovelace.Set(
-			float64(distribution.TotalStake),
-		)
-		m.metrics.lastSuccessfulEpoch.Set(float64(evt.NewEpoch))
-	}
-
-	m.logger.Info(
-		"captured mark snapshot",
-		"component", "snapshot",
-		"epoch", evt.NewEpoch,
-		"total_pools", len(distribution.PoolStakes),
-		"total_stake", distribution.TotalStake,
-	)
-
-	return nil
 }
 
 // ErrGenesisMarkUnavailable reports a database whose ledger state as of slot 0
@@ -1613,14 +1395,10 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// For post-Mithril bootstrap currentEpochId > 0 and `distribution`
 	// plus the live tables reflect that later epoch — passing true here
 	// would freeze today's delegation/reward map onto an epoch-0 row.
-	if _, err := m.saveSnapshot(
+	if err := m.saveSnapshot(
 		ctx, 0, "mark", distribution, evt,
 		currentEpochId == 0,
 		currentEpochId == 0,
-		// checkAuthoritativeMark: false. Genesis/bootstrap capture runs
-		// once at startup, before the epoch-transition event loop can be
-		// racing an in-flight epoch-boundary rollover.
-		false,
 	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
@@ -1670,14 +1448,10 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			// data as historical inputs. Those rows go in with
 			// RewardAccountAutoVoteResolved=false and no reward input
 			// bundle.
-			if _, err := m.saveSnapshot(
+			if err := m.saveSnapshot(
 				ctx, seedEpoch, "mark", distribution, seedEvt,
 				offset == 0,
 				offset == 0,
-				// checkAuthoritativeMark: false, same reasoning as the
-				// epoch-0 save above — bootstrap-time seeding, not racing
-				// a concurrent epoch-boundary rollover.
-				false,
 			); err != nil {
 				if m.metrics != nil {
 					m.metrics.captureFailureTotal.Inc()

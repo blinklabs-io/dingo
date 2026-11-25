@@ -31,6 +31,9 @@ func (d *Database) GetMidnightCandidates(
 	if err != nil {
 		return nil, fmt.Errorf("parse Midnight candidate address: %w", err)
 	}
+	if err := d.requireStore("GetMidnightCandidates"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightCandidates(addr, nil)
 }
 
@@ -41,6 +44,9 @@ func (d *Database) InsertMidnightGovernanceDatum(
 	ctx context.Context,
 	datum *models.MidnightGovernanceDatum,
 ) error {
+	if err := d.requireStore("InsertMidnightGovernanceDatum"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.InsertMidnightGovernanceDatum(
 			txn.Metadata(), datum,
@@ -57,6 +63,9 @@ func (d *Database) GetLatestMidnightGovernanceDatum(
 	datumType string,
 	blockNumber uint64,
 ) (*models.MidnightGovernanceDatum, error) {
+	if err := d.requireStore("GetLatestMidnightGovernanceDatum"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetLatestMidnightGovernanceDatum(
 		datumType,
 		blockNumber,
@@ -67,6 +76,9 @@ func (d *Database) GetLatestMidnightGovernanceDatum(
 // GetLatestMidnightAriadneParams returns the most recently stored Ariadne
 // parameters row (ordered by epoch DESC), or nil if none exist.
 func (d *Database) GetLatestMidnightAriadneParams() (*models.MidnightAriadneParams, error) {
+	if err := d.requireStore("GetLatestMidnightAriadneParams"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetLatestMidnightAriadneParams(nil)
 }
 
@@ -77,6 +89,9 @@ func (d *Database) UpsertMidnightAriadneParams(
 	ctx context.Context,
 	params *models.MidnightAriadneParams,
 ) error {
+	if err := d.requireStore("UpsertMidnightAriadneParams"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.UpsertMidnightAriadneParams(
 			txn.Metadata(), params,
@@ -92,6 +107,9 @@ func (d *Database) UpsertMidnightAriadneParams(
 func (d *Database) GetMidnightAriadneParamsAtOrBeforeEpoch(
 	epoch uint64,
 ) (*models.MidnightAriadneParams, error) {
+	if err := d.requireStore("GetMidnightAriadneParamsAtOrBeforeEpoch"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightAriadneParamsAtOrBeforeEpoch(epoch, nil)
 }
 
@@ -100,6 +118,9 @@ func (d *Database) GetMidnightAriadneParamsAtOrBeforeEpoch(
 func (d *Database) GetMidnightEpochCandidatesByEpoch(
 	epoch uint64,
 ) (*models.MidnightEpochCandidates, error) {
+	if err := d.requireStore("GetMidnightEpochCandidatesByEpoch"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightEpochCandidatesByEpoch(epoch, nil)
 }
 
@@ -108,6 +129,9 @@ func (d *Database) GetMidnightEpochCandidatesByEpoch(
 func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 	txHashes [][]byte,
 ) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	if err := d.requireStore("GetMidnightCommitteeCandidateRegistrationsByTxHashes"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 		txHashes,
 		nil,
@@ -120,6 +144,9 @@ func (d *Database) UpsertMidnightEpochCandidates(
 	ctx context.Context,
 	ec *models.MidnightEpochCandidates,
 ) error {
+	if err := d.requireStore("UpsertMidnightEpochCandidates"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.UpsertMidnightEpochCandidates(
 			txn.Metadata(), ec,

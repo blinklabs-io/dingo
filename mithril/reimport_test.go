@@ -27,10 +27,10 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/drainfix"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -99,7 +99,8 @@ func newReimportFixtureWith(
 		false, 1000, set, nil,
 	)
 	require.NoError(t, err)
-	drainfix.Drain(t, db, set)
+	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
+	set.ServeLedgerOnly()
 	return f
 }
 
@@ -157,8 +158,6 @@ func TestReimportLedgerStateImportsTheNewestStateOnTheLocalChain(t *testing.T) {
 	f.addArtifact("good", 2000)
 	f.addArtifact("older", 1800)
 	f.onChain[2000], f.onChain[1800] = true, true
-	latch, err := f.db.DrainedFamilies(t.Context())
-	require.NoError(t, err)
 
 	point, err := ReimportLedgerState(t.Context(), f.config(t, 2500))
 	require.NoError(t, err)
@@ -173,18 +172,15 @@ func TestReimportLedgerStateImportsTheNewestStateOnTheLocalChain(t *testing.T) {
 	sqlTip, err := f.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2000), sqlTip.Point.Slot)
-	mask, err := f.db.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, latch, mask, "the latch must be kept")
-	_, pending, err := f.db.DrainedImportPending(t.Context())
+	_, pending, err := f.set.ImportPending()
 	require.NoError(t, err)
 	require.False(t, pending)
 	for _, key := range []string{"sync_status", database.LedgerReimportSyncKey} {
-		v, err := f.db.GetSyncState(key, nil)
+		v, err := f.db.GetChainState(key, nil)
 		require.NoError(t, err)
 		require.Empty(t, v, key)
 	}
-	boundary, err := f.db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	boundary, err := f.db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "2000", boundary)
 }
@@ -203,7 +199,7 @@ func TestReimportLedgerStateNamesAMissingState(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1000), tip.Slot, "the set must be untouched")
 	for _, key := range []string{"sync_status", database.LedgerReimportSyncKey} {
-		v, err := f.db.GetSyncState(key, nil)
+		v, err := f.db.GetChainState(key, nil)
 		require.NoError(t, err)
 		require.Empty(t, v, key)
 	}
@@ -262,7 +258,7 @@ func TestReimportLedgerStateChecksTheBlocksBelowTheTrustBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2100), point.Slot)
 	require.Equal(t, []string{"pruned", "kept"}, f.pinned)
-	boundary, err := f.db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	boundary, err := f.db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "2200", boundary, "the later boundary stays")
 }
@@ -298,14 +294,14 @@ func TestReimportLedgerStateRecordsTheSwapBeforeItFinishes(t *testing.T) {
 	f := newReimportFixture(t)
 	f.addArtifact("good", 2000)
 	f.onChain[2000] = true
-	require.NoError(t, f.db.SetSyncState(
+	require.NoError(t, f.db.SetChainState(
 		database.LedgerReimportSwappedSyncKey, "stale", nil,
 	))
 	cfg := f.config(t, 2500)
 	var seenInCommit string
 	cfg.Commit = func(ctx context.Context, p ocommon.Point) error {
 		var err error
-		seenInCommit, err = f.db.GetSyncState(database.LedgerReimportSwappedSyncKey, nil)
+		seenInCommit, err = f.db.GetChainState(database.LedgerReimportSwappedSyncKey, nil)
 		if err != nil {
 			return err
 		}
@@ -318,7 +314,7 @@ func TestReimportLedgerStateRecordsTheSwapBeforeItFinishes(t *testing.T) {
 
 	require.ErrorContains(t, err, "does not match the ledger state")
 	require.Empty(t, seenInCommit, "a mark of an earlier run is cleared before the swap")
-	got, err := f.db.GetSyncState(database.LedgerReimportSwappedSyncKey, nil)
+	got, err := f.db.GetChainState(database.LedgerReimportSwappedSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, database.LedgerReimportPointMark(ocommon.Point{
 		Slot: 2000, Hash: stateHash(2000),
@@ -405,7 +401,7 @@ func TestReimportLedgerStateSelectsBelowTheImmutableDBTip(t *testing.T) {
 func requireReimportMarksCleared(t *testing.T, db *database.Database) {
 	t.Helper()
 	for _, key := range []string{"sync_status", database.LedgerReimportSyncKey} {
-		v, err := db.GetSyncState(key, nil)
+		v, err := db.GetChainState(key, nil)
 		require.NoError(t, err)
 		require.Empty(t, v, key)
 	}

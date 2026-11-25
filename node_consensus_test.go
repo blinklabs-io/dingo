@@ -94,14 +94,14 @@ func (s *consensusIdentityMemoryStore) GetTip(
 	return s.tip, nil
 }
 
-func (s *consensusIdentityMemoryStore) GetSyncState(
+func (s *consensusIdentityMemoryStore) GetChainState(
 	string,
 	*database.Txn,
 ) (string, error) {
 	return s.value, nil
 }
 
-func (s *consensusIdentityMemoryStore) SetSyncState(
+func (s *consensusIdentityMemoryStore) SetChainState(
 	_ string,
 	value string,
 	_ *database.Txn,

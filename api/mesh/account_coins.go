@@ -59,7 +59,7 @@ func (s *Server) handleAccountCoins(
 		return
 	}
 	stream := &coinStream{w: w, rc: http.NewResponseController(w)}
-	tip, err := s.config.LedgerState.ScanUtxosByAddress(
+	tip, err := s.config.Database.ScanUtxosByAddress(
 		r.Context(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},

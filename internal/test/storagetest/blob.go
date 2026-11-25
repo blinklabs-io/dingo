@@ -188,16 +188,6 @@ func RunBlobStoreConformance(
 		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 	})
 
-	t.Run("CommitTimestampRoundTrip", func(t *testing.T) {
-		txn := store.NewTransaction(true)
-		require.NoError(t, store.SetCommitTimestamp(424242, txn))
-		require.NoError(t, txn.Commit())
-
-		got, err := store.GetCommitTimestamp()
-		require.NoError(t, err)
-		require.Equal(t, int64(424242), got)
-	})
-
 	t.Run("BlockRoundTrip", func(t *testing.T) {
 		// Real, decodable block content (not arbitrary bytes): S3 and GCS
 		// re-verify a fetched block's content against its own hash and

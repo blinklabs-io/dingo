@@ -38,7 +38,7 @@ func TestGetPoolStakeSnapshotsByEpoch_RejectsInvalidSnapshotType(t *testing.T) {
 func TestGetPoolStakeSnapshotsByEpoch_AcceptsKnownTypes(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newIndexerTestDB(t, nil).indexer
 	for _, snapshotType := range []string{"mark", "set", "go", "actv"} {
 		rows, err := db.GetPoolStakeSnapshotsByEpoch(1, snapshotType, nil)
 		require.NoError(

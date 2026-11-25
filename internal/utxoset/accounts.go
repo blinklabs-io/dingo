@@ -18,13 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 )
@@ -89,26 +87,7 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	err = s.store.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
 		return ldb.IterateAccounts(txn, func(a *models.Account) error {
 			n++
-			s.merge.noteAccount(a.CredentialTag, a.StakingKey)
 			row := accountRow(*a)
-			if s.merge != nil && s.mergeOverDrained.Load() {
-				// The metadata store lost the rows a drain moved out, so the
-				// import wrote the account over none. One it holds keeps
-				// what an import of an account the ledger already holds does:
-				// its delegations, activity and reward update and the slots
-				// and expiry it was first written with stay.
-				held, ok, err := s.store.Account(row.Tag, row.Key)
-				if err != nil {
-					return err
-				}
-				if ok {
-					row.AddedSlot = held.AddedSlot
-					row.CreatedSlot = held.CreatedSlot
-					row.ExpirationEpoch = held.ExpirationEpoch
-					row.InactivityActivation = held.InactivityActivation
-					row.InactivityActivationEpoch = held.InactivityActivationEpoch
-				}
-			}
 			return put(row)
 		})
 	})
@@ -135,19 +114,16 @@ func (s *Set) ensureAccountInactivityActivation(
 	if loaded {
 		return nil
 	}
-	txn := ldb.Begin(ctx, false)
-	defer txn.Release()
-	raw, err := ldb.GetSyncState(database.DelegatorInactivityActivatedSyncKey, txn)
+	// The activation epoch is loaded before the accounts' membership.
+	epoch, ran, err := s.InactivityActivation(nil)
 	if err != nil {
 		return fmt.Errorf("utxoset: read delegator-inactivity activation: %w", err)
 	}
-	if raw == "" {
+	if !ran {
 		return s.store.LoadAccountInactivityActivation(0, 0, nil)
 	}
-	epoch, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return fmt.Errorf("utxoset: parse delegator-inactivity activation %q: %w", raw, err)
-	}
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
 	epochs, err := s.Epochs()
 	if err != nil {
 		return fmt.Errorf("utxoset: read activation epoch: %w", err)
@@ -175,7 +151,7 @@ func (s *Set) ensureAccountInactivityActivation(
 	}); err != nil {
 		return fmt.Errorf("utxoset: list accounts for activation provenance: %w", err)
 	}
-	if !s.store.LoadsRefusedFor(nodesettings.FamilyAccounts) {
+	if !s.store.LoadsRefused() {
 		for start := 0; start < len(refs); start += 400 {
 			end := min(start+400, len(refs))
 			batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
@@ -462,7 +438,7 @@ func (s *Set) ensureRewardRecords(
 				PostSnapshot: row.PostSnapshot,
 			})
 		})
-		if errors.Is(err, database.ErrFamilyDrained) {
+		if errors.Is(err, database.ErrNoMetadataStore) {
 			lost = true
 			return nil
 		}

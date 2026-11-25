@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -103,7 +102,7 @@ func newExternalIngestHarnessWith(
 	if securityParam != 0 {
 		cfg.ShelleyGenesis().SecurityParam = securityParam
 	}
-	set, closeSet := OpenUtxoOnlyLiveSetForTest(t, dataDir)
+	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
 	lsCfg := LedgerStateConfig{
 		Database:              db,
 		ChainManager:          cm,
@@ -250,15 +249,7 @@ func (h *externalIngestHarness) applyPaused(
 	t.Helper()
 	resume := h.ls.PauseChainIngest()
 	defer resume()
-	tip, err := h.ls.ApplyTrustedBatch(t.Context(), expected, blocks)
-	// The Mithril coordinator drains the owed cleanup before it resumes, so
-	// each call leaves the store a whole catch-up leaves. A test holding the
-	// cleanup flag stands for a run in flight, which the drain would wait
-	// for.
-	if !h.ls.cleanupConsumedUtxosRunning.Load() {
-		require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
-	}
-	return tip, err
+	return h.ls.ApplyTrustedBatch(t.Context(), expected, blocks)
 }
 
 // liveOutputs is the live UTxO set of h's ledger as tx_id:index strings,
@@ -377,35 +368,6 @@ func TestApplyTrustedBatchSingleCommit(t *testing.T) {
 	require.Equal(t, tip.Hash, stored.Point.Hash)
 }
 
-// withoutPruneFloor drops the consumed-UTxO prune floor from a digest, and
-// from its table's row count. The cleanup writes it from whatever tip it last
-// saw, so it records when cleanup ran, not what was applied.
-func withoutPruneFloor(digest string) string {
-	lines := strings.Split(digest, "\n")
-	kept := lines[:0]
-	header := -1
-	for _, line := range lines {
-		if strings.HasPrefix(line, "## ") {
-			header = len(kept)
-		}
-		if strings.HasPrefix(line, "sync_key=consumed_utxo_prune_floor|") {
-			var table string
-			var n int
-			_, err := fmt.Sscanf(kept[header], "## %s (%d)", &table, &n)
-			if err == nil {
-				kept[header] = fmt.Sprintf("## %s (%d)", table, n-1)
-			}
-			if n == 1 {
-				// An empty table still renders its blank row line.
-				kept = append(kept, "")
-			}
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.Join(kept, "\n")
-}
-
 // A batch Badger refuses as too big for one transaction is applied in halves,
 // each its own commit, down to what Badger accepts: the same blocks are
 // applied once each and the result matches one clean batch, and a single
@@ -449,8 +411,8 @@ func TestApplyTrustedBatchSplitsTxnTooBig(t *testing.T) {
 		assert.Equal(t, int64(len(committed)), commits.Load(),
 			"each sub-batch commits once")
 		assert.Equal(t,
-			withoutPruneFloor(rowBatchingDigest(t, clean.db)),
-			withoutPruneFloor(rowBatchingDigest(t, h.db)),
+			rowBatchingDigest(t, clean.db),
+			rowBatchingDigest(t, h.db),
 			"a split batch diverged from one clean batch",
 		)
 	})
@@ -519,48 +481,13 @@ func TestApplyTrustedBatchCrashBetweenStores(t *testing.T) {
 	)
 }
 
-// countBatchedWrites counts the transactions h's ledger writes through the
-// row-batching accumulator.
-func (h *externalIngestHarness) countBatchedWrites() *atomic.Int64 {
-	var n atomic.Int64
-	h.ls.afterBatchedTransactionWrite = func() { n.Add(1) }
-	return &n
-}
-
-// TestApplyTrustedBatchMatchesReplay is also the row-batching equivalence
-// check for trusted batches: ApplyTrustedBatch always writes through the
-// accumulator, and the reference replay, without ApplyRowBatchingEnabled,
-// never does.
-// dropCatchUpIndexes puts the store in the state a held node-managed
-// Mithril catch-up applies under: the lazy and catch-up droppable indexes
-// dropped.
-func dropCatchUpIndexes(t *testing.T, db *database.Database) {
-	t.Helper()
-	manager, ok := db.Metadata().(metadata.CatchUpIndexManager)
-	require.True(t, ok)
-	require.NoError(t, manager.DropCatchUpIndexesContext(t.Context()))
-	missing, err := db.Metadata().(metadata.MissingCriticalDeferredIndexLister).
-		MissingCriticalDeferredIndexes()
-	require.NoError(t, err)
-	require.NotEmpty(t, missing)
-}
-
+// TestApplyTrustedBatchMatchesReplay requires ApplyTrustedBatch to leave the
+// ledger as the trusted replay of the same blocks leaves it.
 func TestApplyTrustedBatchMatchesReplay(t *testing.T) {
 	t.Parallel()
-	for _, dropped := range []bool{false, true} {
-		t.Run(fmt.Sprintf("catchup_indexes_dropped=%t", dropped),
-			func(t *testing.T) {
-				t.Parallel()
-				testApplyTrustedBatchMatchesReplay(t, dropped)
-			})
-	}
-}
-
-func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 	blocks, _ := externalIngestBlocks(t, 4)
 
 	reference := newExternalIngestHarness(t, true)
-	referenceBatched := reference.countBatchedWrites()
 	for _, block := range blocks {
 		require.NoError(t, reference.cm.PrimaryChain().AddBlock(
 			t.Context(), block, nil,
@@ -574,27 +501,13 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 	))
 
 	h := newExternalIngestHarness(t, false)
-	if dropped {
-		dropCatchUpIndexes(t, h.db)
-	}
-	batched := h.countBatchedWrites()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
-	require.Zero(t, referenceBatched.Load(),
-		"the reference must take the unbatched path")
-	require.Positive(t, batched.Load(),
-		"a trusted batch must write through the row-batching accumulator")
 
-	if dropped {
-		// The run ends its cycle with the full rebuild; the digest
-		// compares rows, and the marker is one.
-		require.NoError(t, h.db.Metadata().(metadata.DeferredIndexManager).
-			BuildDeferredIndexes())
-	}
 	require.Equal(t,
-		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
-		withoutPruneFloor(rowBatchingDigest(t, h.db)),
+		rowBatchingDigest(t, reference.db),
+		rowBatchingDigest(t, h.db),
 		"external ingest diverged from the trusted replay path",
 	)
 }
@@ -668,8 +581,8 @@ func TestPauseChainIngestResumesFromExternalTip(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t,
-		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
-		withoutPruneFloor(rowBatchingDigest(t, h.db)),
+		rowBatchingDigest(t, reference.db),
+		rowBatchingDigest(t, h.db),
 		"the resumed loop diverged from applying the same blocks externally",
 	)
 }
@@ -798,7 +711,7 @@ func (h *externalIngestHarness) prepareRollover(t *testing.T) {
 	epoch := h.ls.currentEpoch
 	h.ls.publishSnapshotsLocked()
 	h.ls.Unlock()
-	require.NoError(t, h.db.SetEpoch(
+	require.NoError(t, seedDB(t, h.db).SetEpoch(
 		epoch.StartSlot, epoch.EpochId,
 		epoch.Nonce, epoch.EvolvingNonce, nil, nil,
 		epoch.EraId, epoch.SlotLength, epoch.LengthInSlots,
@@ -815,19 +728,6 @@ func (h *externalIngestHarness) prepareRollover(t *testing.T) {
 // the trusted replay path.
 func TestApplyTrustedBatchCrossesEpochMatchesReplay(t *testing.T) {
 	t.Parallel()
-	for _, dropped := range []bool{false, true} {
-		t.Run(fmt.Sprintf("catchup_indexes_dropped=%t", dropped),
-			func(t *testing.T) {
-				t.Parallel()
-				testApplyTrustedBatchCrossesEpochMatchesReplay(t, dropped)
-			})
-	}
-}
-
-func testApplyTrustedBatchCrossesEpochMatchesReplay(
-	t *testing.T,
-	dropped bool,
-) {
 	blocks, names := externalIngestBlocks(t, 0)
 	// Cross the slot-1000 boundary with empty blocks.
 	blocks = extendExternalIngestBlocks(t, blocks, 20, 50)
@@ -849,7 +749,6 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 
 	reference := newExternalIngestHarness(t, true)
 	reference.prepareRollover(t)
-	referenceBatched := reference.countBatchedWrites()
 	for _, block := range blocks {
 		require.NoError(t, reference.cm.PrimaryChain().AddBlock(
 			t.Context(), block, nil,
@@ -861,25 +760,14 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 	require.NoError(t, reference.ls.ProcessTrustedBlockBatches(
 		t.Context(), batches,
 	))
-	_, err := reference.db.UtxosDeleteConsumed(
-		t.Context(), blocks[len(blocks)-1].SlotNumber(), 1_000, nil,
-	)
-	require.NoError(t, err)
 
 	h := newExternalIngestHarness(t, false)
-	if dropped {
-		dropCatchUpIndexes(t, h.db)
-	}
 	h.prepareRollover(t)
 	var commits atomic.Int64
 	h.ls.afterLedgerWriteCommit = func() { commits.Add(1) }
-	batched := h.countBatchedWrites()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
-	require.Zero(t, referenceBatched.Load())
-	require.Positive(t, batched.Load(),
-		"a trusted batch must write through the row-batching accumulator")
 	require.GreaterOrEqual(t, commits.Load(), int64(3),
 		"the batch must split at the epoch boundary")
 	require.False(t, outputLive(t, h, names["chain"].hash, 0),
@@ -890,15 +778,9 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 	require.Positive(t, got.epoch.EpochId, "the batch did not roll over")
 	require.Equal(t, want, got,
 		"external ingest diverged from trusted replay in memory")
-	if dropped {
-		// The run ends its cycle with the full rebuild; the digest
-		// compares rows, and the marker is one.
-		require.NoError(t, h.db.Metadata().(metadata.DeferredIndexManager).
-			BuildDeferredIndexes())
-	}
 	require.Equal(t,
-		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
-		withoutPruneFloor(rowBatchingDigest(t, h.db)),
+		rowBatchingDigest(t, reference.db),
+		rowBatchingDigest(t, h.db),
 		"external ingest diverged from trusted replay across an epoch",
 	)
 }
@@ -966,6 +848,11 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 			restartDigest(t, h.db),
 			"replay after a restart diverged from an uninterrupted run",
 		)
+		require.Equal(t,
+			ledgerDBDigest(t, clean.ls),
+			ledgerDBDigest(t, h.ls),
+			"the LedgerDB state after a restart diverged from an uninterrupted run",
+		)
 	})
 
 	t.Run("live loop applies stored blocks", func(t *testing.T) {
@@ -993,6 +880,11 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 			restartDigest(t, clean.db),
 			restartDigest(t, h.db),
 			"the live loop after a restart diverged from an uninterrupted run",
+		)
+		require.Equal(t,
+			ledgerDBDigest(t, clean.ls),
+			ledgerDBDigest(t, h.ls),
+			"the LedgerDB state after a restart diverged from an uninterrupted run",
 		)
 	})
 }

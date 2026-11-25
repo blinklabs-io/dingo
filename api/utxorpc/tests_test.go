@@ -52,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -371,6 +372,8 @@ func stopUtxorpc(t *testing.T, u *Utxorpc) {
 // a released ephemeral address here could instead reach another package's
 // listener when the suite runs concurrently.
 func TestServerRebindsAfterStop(t *testing.T) {
+	t.Parallel()
+
 	u, addr := startOnFreePort(
 		t, t.Context(),
 		apiconfig.EffectiveTLS{},
@@ -399,6 +402,8 @@ func TestServerRebindsAfterStop(t *testing.T) {
 // already-published rejection comes from Publish -- so without this test the
 // BeginStart/EndStart pair can be removed from Start with the suite green.
 func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	u := NewUtxorpc(UtxorpcConfig{
@@ -435,6 +440,8 @@ func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
 // not this one, so without this test the listener.Watch call can be removed
 // from Start with the suite green.
 func TestServerShutdownOnContextCancel(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	_, addr := startOnFreePort(t, ctx, apiconfig.EffectiveTLS{})
 
@@ -513,6 +520,8 @@ func listServices[Req, Res any](
 // TestReflection_V1ListsBothApiVersions asserts the grpc.reflection.v1
 // ServerReflection service advertises every served service.
 func TestReflection_V1ListsBothApiVersions(t *testing.T) {
+	t.Parallel()
+
 	srv, httpClient := newReflectionTestServer(t)
 	got := listServices(
 		t,
@@ -540,6 +549,8 @@ func TestReflection_V1ListsBothApiVersions(t *testing.T) {
 // client speaking the older reflection wire protocol could not discover any
 // v1beta service.
 func TestReflection_V1AlphaListsBothApiVersions(t *testing.T) {
+	t.Parallel()
+
 	srv, httpClient := newReflectionTestServer(t)
 	got := listServices(
 		t,
@@ -576,6 +587,8 @@ func TestReflection_V1AlphaListsBothApiVersions(t *testing.T) {
 // TestServedServiceNames_CoversBothApiVersions pins the served set itself: both
 // API versions of all four services, and nothing else.
 func TestServedServiceNames_CoversBothApiVersions(t *testing.T) {
+	t.Parallel()
+
 	assert.ElementsMatch(t, []string{
 		"utxorpc.v1alpha.query.QueryService",
 		"utxorpc.v1beta.query.QueryService",
@@ -628,6 +641,8 @@ func sendHealthRequest(
 }
 
 func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
@@ -652,6 +667,8 @@ const testRequestBodyLimit = 1 << 20
 func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
@@ -685,6 +702,8 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
@@ -839,27 +858,10 @@ func newUtxorpcConnectHarness(
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
-	// These blocks are inserted directly (db.BlockCreate) rather than run
-	// through LedgerState's normal block-application path, so no
-	// block_nonce row exists for any of them -- unlike a really-synced
-	// chain, which writes one for every applied block including a
-	// per-epoch checkpoint. Without at least one checkpoint here,
-	// ls.Start below hits healTruncateGapBlockNonces with an empty tip
-	// nonce and nothing to reconstruct from -- correctly refused, but for
-	// this harness gap rather than a genuine unreconstructable truncate.
-	// The nonce value is a fixed placeholder, not folded from real VRF
-	// output: these tests assert Connect RPC behavior, not nonce
-	// correctness.
-	require.NoError(t, db.SetBlockNonce(
-		blocks[0].Hash,
-		blocks[0].Slot,
-		bytes.Repeat([]byte{0x5c}, 32),
-		true, // isCheckpoint
-		nil,
-	))
-	// The ledger's store holds the outputs its live UTxO set is seeded from;
-	// the IndexerDB holds the rows the QueryService reads.
-	indexFixtureTransactionsForReadTx(t, db, blocks, opts.skipIndexTxHash)
+	// The set is reconciled with the database at origin, before the
+	// fixture moves the tip, and then seeded as the ledger leaves it.
+	utxoSet := livesettest.OpenLedgerDB(t, db)
+	seedFixtureLedgerSet(t, utxoSet, blocks, opts.skipIndexTxHash)
 	indexerDB, err := dbtest.NewIndexerDatabase(
 		t, db, dbtest.IndexerOptions{},
 	)
@@ -901,7 +903,7 @@ func newUtxorpcConnectHarness(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               livesettest.NewFrom(t, db),
+		UtxoSet:               utxoSet,
 		ChainManager:          cm,
 		EventBus:              nil,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1017,6 +1019,73 @@ func indexFixtureTransactionsForReadTx(
 	return indexed
 }
 
+// seedFixtureLedgerSet writes into set the ledger state of blocks, which the
+// fixture stores directly rather than through block application: the live
+// outputs and index entries of their transactions, except skipTxHash's, and a
+// nonce checkpoint at the first block, without which ls.Start finds no nonce
+// to fold from.
+// The nonce is a fixed placeholder; these tests assert Connect RPC behavior,
+// not nonce correctness.
+func seedFixtureLedgerSet(
+	t *testing.T,
+	set *utxoset.Set,
+	blocks []models.Block,
+	skipTxHash []byte,
+) {
+	t.Helper()
+	changes := ledger.LedgerChanges{
+		Nonces: []models.BlockNonce{{
+			Hash:         blocks[0].Hash,
+			Slot:         blocks[0].Slot,
+			Nonce:        bytes.Repeat([]byte{0x5c}, 32),
+			IsCheckpoint: true,
+		}},
+	}
+	for i := range blocks {
+		mb := blocks[i]
+		blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+		if err != nil {
+			continue
+		}
+		point := ocommon.NewPoint(mb.Slot, mb.Hash)
+		for j, tx := range blk.Transactions() {
+			if bytes.Equal(tx.Hash().Bytes(), skipTxHash) {
+				continue
+			}
+			evt := ledger.UtxoEvent{
+				Point:   point,
+				Cause:   ledger.UtxoChangeTransaction,
+				TxIndex: uint32(j), //nolint:gosec // a block holds far fewer
+			}
+			for _, in := range tx.Consumed() {
+				evt.Removed = append(evt.Removed, models.UtxoId{
+					Hash: in.Id().Bytes(), Idx: in.Index(),
+				})
+			}
+			for _, u := range tx.Produced() {
+				evt.Added = append(evt.Added, ledger.UtxoOutput{
+					Ref: models.UtxoId{
+						Hash: u.Id.Id().Bytes(), Idx: u.Id.Index(),
+					},
+					Cbor: u.Output.Cbor(),
+				})
+			}
+			changes.Utxo = append(changes.Utxo, evt)
+			changes.TxIndex = append(changes.TxIndex, ledger.TxIndexEntry{
+				Hash:       tx.Hash().Bytes(),
+				BlockHash:  mb.Hash,
+				Slot:       mb.Slot,
+				BlockIndex: uint32(j),        //nolint:gosec // a block holds far fewer
+				Type:       uint8(tx.Type()), //nolint:gosec // era ids fit a byte
+				Valid:      tx.IsValid(),
+			})
+		}
+	}
+	tip := blocks[len(blocks)-1]
+	point := ocommon.NewPoint(tip.Slot, tip.Hash)
+	require.NoError(t, set.ApplyLedgerChanges(&point, changes))
+}
+
 // --- fixture helpers --------------------------------------------------------
 
 func firstTxInFixtureBlocks(
@@ -1068,6 +1137,8 @@ func firstTwoTxsInFixtureBlocks(
 // --- tests ------------------------------------------------------------------
 
 func TestConnect_ReadEraSummary(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1089,6 +1160,8 @@ func TestConnect_ReadEraSummary(t *testing.T) {
 }
 
 func TestConnect_FetchBlock(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 12})
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1115,6 +1188,8 @@ func TestConnect_FetchBlock(t *testing.T) {
 }
 
 func TestConnect_DumpHistory(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 25})
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1164,6 +1239,8 @@ func TestConnect_DumpHistory(t *testing.T) {
 }
 
 func TestConnect_DumpHistory_OmittedMaxItemsUsesDefaultPage(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
 		tune: func(cfg *UtxorpcConfig) {
@@ -1195,6 +1272,8 @@ func TestConnect_DumpHistory_OmittedMaxItemsUsesDefaultPage(t *testing.T) {
 }
 
 func TestConnect_DumpHistory_ByteBudgetReturnsContinuationToken(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
 		tune: func(cfg *UtxorpcConfig) {
@@ -1230,6 +1309,8 @@ func TestConnect_DumpHistory_ByteBudgetReturnsContinuationToken(t *testing.T) {
 }
 
 func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 10})
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1263,6 +1344,8 @@ func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {
 }
 
 func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks:       10,
 		maxHistoryItems: 50,
@@ -1288,6 +1371,8 @@ func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
 }
 
 func TestConnect_SearchUtxos(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1333,6 +1418,8 @@ func TestConnect_SearchUtxos(t *testing.T) {
 }
 
 func TestConnect_ReadUtxos(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1371,6 +1458,8 @@ func TestConnect_ReadUtxos(t *testing.T) {
 // in a single request via the batched UTxO lookup, returning exactly
 // one item per requested key.
 func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1431,6 +1520,8 @@ func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
 // pre-existing ReadUtxos error-on-miss contract (unlike the ledger-level
 // GetUTxOByTxIn query, which silently omits misses for batch lookups).
 func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1464,6 +1555,8 @@ func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
 }
 
 func TestConnect_ReadTx(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	cli := queryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1506,6 +1599,8 @@ func TestConnect_ReadTx(t *testing.T) {
 }
 
 func TestConnect_SubmitTx(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
 	cli := submitconnect.NewSubmitServiceClient(
@@ -1542,6 +1637,8 @@ func TestConnect_SubmitTx(t *testing.T) {
 }
 
 func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	cli := submitconnect.NewSubmitServiceClient(
 		h.Client,
@@ -1657,6 +1754,8 @@ func receiveWaitForTx(
 
 // Test that WaitForTx times out when the transaction is never seen.
 func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks:     5,
 		serverTimeout: 25 * time.Millisecond,
@@ -1692,6 +1791,8 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 
 // Test that WaitForTx stops when the client cancels first.
 func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks:     5,
 		serverTimeout: time.Hour,
@@ -1741,6 +1842,8 @@ func followTipStreamErr(
 }
 
 func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
+	t.Parallel()
+
 	const n = 8
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: n})
 	blocks := loadTestChainBlocks(t, n)
@@ -1812,6 +1915,8 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 }
 
 func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
+	t.Parallel()
+
 	// Load a long prefix to locate an empty block, then trim the harness chain
 	// so that empty block is the tip. Otherwise WatchTx keeps iterating forward
 	// and may hit transactions that panic in gouroboros Utxorpc().
@@ -1872,6 +1977,8 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 }
 
 func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
+	t.Parallel()
+
 	committedTx, _, pendingTx, eventBlock := firstTwoTxsInFixtureBlocks(t, 40)
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks:       40,
@@ -2023,6 +2130,8 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 }
 
 func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks:     40,
 		serverTimeout: time.Second,
@@ -2067,6 +2176,8 @@ func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
 }
 
 func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	txHash, txCbor, _ := firstTxInFixtureBlocks(t, 40)
 	txType, err := gledger.DetermineTransactionType(txCbor)
@@ -2146,27 +2257,37 @@ func seedBetaReadStatePool(
 ) lcommon.PoolKeyHash {
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, h.DB.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, h.DB.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: "mark",
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(stake),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	// The distribution is a ledger read, so the pool and its stake go into
+	// the ledger's LedgerDB set as a block registering the pool and the
+	// boundary capture after it would leave them.
+	set := livesettest.OpenLedgerDB(t, h.DB)
+	reg := ledger.CleanPoolRegistration(&models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  vrfKeyHash,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	})
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Pools: []ledger.PoolChange{{
+			Slot:  1,
+			State: ledger.PoolState{Pool: pkh.Bytes(), Params: reg},
+		}},
+		PoolEvents: []ledger.PoolEventChange{{
+			Pool:  pkh.Bytes(),
+			Event: ledger.PoolEvent{Slot: 1, Registration: reg},
+		}},
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:        snapshotEpoch,
+				SnapshotType: "mark",
+				PoolKeyHash:  pkh.Bytes(),
+				TotalStake:   dbtypes.Uint64(stake),
+				CapturedSlot: 1,
+			},
+		}},
+	}))
 	return pkh
 }
 
@@ -2176,6 +2297,8 @@ func seedBetaReadStatePool(
 // the alpha handler, since alpha has no such method -- and the answer it now
 // serves, over the same ledger the node-to-client GetPoolDistr2 query reads.
 func TestConnect_Beta_ReadState_StakePoolDistribution(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 
 	// The harness chain sits in epoch 0, and leader election reads the
@@ -2234,6 +2357,8 @@ func TestConnect_Beta_ReadState_StakePoolDistribution(t *testing.T) {
 // TestConnect_Beta_ReadState_PoolFilter covers the bounded request form over
 // the wire, and the rejection of a filter entry that is not a pool key hash.
 func TestConnect_Beta_ReadState_PoolFilter(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	pkh := seedBetaReadStatePool(
 		t, h,
@@ -2295,6 +2420,8 @@ func TestConnect_Beta_ReadState_PoolFilter(t *testing.T) {
 // query. It still has to reach the beta handler rather than the alpha one,
 // which has no ReadState method at all.
 func TestConnect_Beta_ReadState_RejectsEmptyRequest(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	cli := betaqueryconnect.NewQueryServiceClient(
 		h.Client,
@@ -2314,6 +2441,8 @@ func TestConnect_Beta_ReadState_RejectsEmptyRequest(t *testing.T) {
 // TestConnect_Beta_ReadTip drives a real v1beta SyncService call to confirm a
 // non-query service is served through rewriteVersionHandler onto v1alpha.
 func TestConnect_Beta_ReadTip(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
 	cli := betasyncconnect.NewSyncServiceClient(
 		h.Client,
@@ -2335,6 +2464,8 @@ func TestConnect_Beta_ReadTip(t *testing.T) {
 // streaming handler served through rewriteVersionHandler: an empty-ref
 // beta WaitForTx must open and cleanly close without frames, like v1alpha.
 func TestConnect_Beta_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
+	t.Parallel()
+
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	cli := betasubmitconnect.NewSubmitServiceClient(
 		h.Client,
@@ -2414,6 +2545,8 @@ func newTipHeightServers(
 // ledger tip already carries its block number, so the height never has to be
 // re-derived from storage and this state cannot arise.
 func TestReadTip_HeightComesFromTheLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	stub := &tipHeightLedgerStub{
 		tip: ochainsync.Tip{
 			Point:       ocommon.NewPoint(4321, []byte{0xBE, 0xEF}),
@@ -2441,6 +2574,8 @@ func TestReadTip_HeightComesFromTheLedgerTip(t *testing.T) {
 // answer at the origin, so the fix must not turn a genuine zero into an error
 // or a fabricated value.
 func TestReadTip_OriginTipStaysZero(t *testing.T) {
+	t.Parallel()
+
 	stub := &tipHeightLedgerStub{tip: ochainsync.Tip{}}
 	syncSrv, _ := newTipHeightServers(t, stub)
 
@@ -2458,6 +2593,8 @@ func TestReadTip_OriginTipStaysZero(t *testing.T) {
 // TestReadParams_LedgerTipHeightComesFromTheLedgerTip covers the same contract
 // on the query service, which reports the tip alongside the parameter set.
 func TestReadParams_LedgerTipHeightComesFromTheLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	stub := &shelleyLedgerStub{
 		byronLedgerStub: byronLedgerStub{
 			tip: ochainsync.Tip{
@@ -2486,6 +2623,8 @@ func TestReadParams_LedgerTipHeightComesFromTheLedgerTip(t *testing.T) {
 // point alone and left Height at the zero value, so every response claimed the
 // tip was the origin block.
 func TestReadData_LedgerTipHeightComesFromTheLedgerTip(t *testing.T) {
+	t.Parallel()
+
 	stub := &tipHeightLedgerStub{
 		tip: ochainsync.Tip{
 			Point:       ocommon.NewPoint(555, []byte{0x11, 0x22}),
@@ -2507,6 +2646,8 @@ func TestReadData_LedgerTipHeightComesFromTheLedgerTip(t *testing.T) {
 }
 
 func TestUtxorpcAnonymousPlaintextTLSAndCORS(t *testing.T) {
+	t.Parallel()
+
 	const origin = "https://wallet.example"
 	cert, key := testutil.GenerateTestTLSCertKey(t)
 	for _, tc := range []struct {
@@ -2593,6 +2734,8 @@ func healthCheckAnonymous(
 }
 
 func TestWaitForTxRejectsMalformedReferencesBeforeWork(t *testing.T) {
+	t.Parallel()
+
 	for _, size := range []int{0, 31, 33} {
 		for _, index := range []int{0, 1} {
 			t.Run(
@@ -2656,6 +2799,8 @@ func TestWaitForTxRejectsMalformedReferencesBeforeWork(t *testing.T) {
 }
 
 func TestWaitForTxReferenceAdmissionControls(t *testing.T) {
+	t.Parallel()
+
 	for _, refs := range [][][]byte{nil, {}, {bytes.Repeat([]byte{0x42}, 32)}} {
 		t.Run(
 			fmt.Sprintf("references_%d_nil_%t", len(refs), refs == nil),

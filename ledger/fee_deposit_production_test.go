@@ -169,14 +169,7 @@ func (f *feeProdFixture) seedOutput(
 	id := bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
 	encoded, err := cbor.Encode(output)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-			TxId: id, OutputIdx: 0, AddedSlot: 0,
-		}); err != nil {
-			return err
-		}
-		return f.db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-	}))
+	fxSeedOutput(t, f.db, id, 0, 0, encoded)
 	return id
 }
 
@@ -333,6 +326,16 @@ func (c feeProdCase) ledger(t *testing.T) *LedgerState {
 	c.fx.ls = newReplayTestLedger(
 		t, c.fx.db, c.block, c.blockType, c.era, c.pparams,
 	)
+	// The fee pot counts only in an epoch whose reward rows are open, as a
+	// rollover leaves the epoch it starts.
+	set, ok := c.fx.ls.config.UtxoSet.(LedgerChangesWriter)
+	require.True(t, ok)
+	require.NoError(t, set.ApplyLedgerChanges(
+		nil,
+		LedgerChanges{RewardBlocks: []RewardBlockChange{{
+			Epoch: c.fx.ls.currentEpoch.EpochId, Open: true,
+		}}},
+	))
 	return c.fx.ls
 }
 
@@ -477,27 +480,36 @@ var (
 	}
 )
 
-// requireOneBatchFeePersisted checks the transaction rows block application
-// stored: the enclosing transaction keeps the declared fee and each
-// sub-transaction body is stored with none.
+// requireOneBatchFeePersisted checks what block application recorded in the
+// LedgerDB: every level of the transaction is indexed as applied, and the
+// epoch's fee pot holds the enclosing transaction's fee once, with nothing
+// added for a sub-transaction body.
 func requireOneBatchFeePersisted(t *testing.T, c feeProdCase) {
 	t.Helper()
+	ls := c.fx.ls
 	for _, level := range TransactionLevels(c.tx) {
-		stored, err := c.fx.db.GetTransactionByHash(context.Background(), level.Hash().Bytes(), nil)
-		require.NoError(t, err)
-		require.NotNil(t, stored)
-		want := uint64(0)
-		if level.Hash() == c.tx.Hash() {
-			want = c.tx.Fee().Uint64()
-		}
-		require.Equal(
-			t,
-			types.Uint64(want),
-			stored.Fee,
-			"level %s",
-			level.Hash(),
+		stored, err := ls.ledgerDB().GetTransactionByHash(
+			context.Background(), level.Hash().Bytes(), nil,
 		)
+		require.NoError(t, err)
+		require.NotNil(t, stored, "level %s", level.Hash())
 	}
+	epoch, ok, err := ls.rewardEpochOfSlot(c.block.SlotNumber())
+	require.NoError(t, err)
+	require.True(t, ok)
+	reader := ls.rewardBlocksReader(nil)
+	require.NotNil(t, reader)
+	rows, err := reader.RewardBlocksEpoch(epoch.EpochId, nil)
+	require.NoError(t, err)
+	want := c.tx.Fee().Uint64()
+	if !c.tx.IsValid() {
+		// A phase-2 invalid transaction pays its collateral, here one
+		// seeded output with no collateral return.
+		require.Len(t, c.tx.Collateral(), 1)
+		require.Nil(t, c.tx.CollateralReturn())
+		want = feeProdUtxo
+	}
+	require.Equal(t, want, rows.Fees)
 }
 
 func requireFeeProdOutcome(t *testing.T, err error, accept bool) {
@@ -961,19 +973,14 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 					uint(lcommon.CredentialTypeAddrKeyHash),
 				)
 				require.NoError(t, err)
-				require.NoError(t, fx.db.Metadata().ImportDrep(
+				require.NoError(t, fxImporter(t, fx.db).ImportDrep(
 					&models.Drep{
 						CredentialTag: tag,
 						Credential:    fx.keyHash.Bytes(),
 						AddedSlot:     1,
 						Active:        true,
 					},
-					&models.RegistrationDrep{
-						CredentialTag:  tag,
-						DrepCredential: fx.keyHash.Bytes(),
-						AddedSlot:      1,
-						DepositAmount:  types.Uint64(drepDeposit),
-					},
+					drepDeposit,
 					nil,
 				))
 			},
@@ -1000,7 +1007,7 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				}}}
 			},
 			setup: func(t *testing.T, fx *feeProdFixture) {
-				require.NoError(t, fx.db.CreateAccount(context.Background(), nil, &models.Account{
+				require.NoError(t, seedCreateAccount(t, fx.db, context.Background(), nil, &models.Account{
 					StakingKey:    fx.keyHash.Bytes(),
 					CredentialTag: 0,
 					Active:        true,

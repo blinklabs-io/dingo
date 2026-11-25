@@ -99,7 +99,7 @@ func TestLeiosCertifyingBlockStoresBodyAfterClosureTransactions(t *testing.T) {
 	for _, tx := range append(append([]*dijkstra.DijkstraTransaction{}, closureTxs...), bodyTx) {
 		hashes = append(hashes, tx.Hash().Bytes())
 	}
-	stored, err := f.db.GetTransactionsByHashes(t.Context(), hashes, nil)
+	stored, err := f.ls.ledgerDB().GetTransactionsByHashes(t.Context(), hashes, nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 3, "closure and body transactions are all stored")
 	indexByHash := make(map[string]uint32, len(stored))

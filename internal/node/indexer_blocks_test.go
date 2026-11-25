@@ -22,9 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/indexer"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -46,12 +44,8 @@ func txHashesOf(t *testing.T, blocks []gledger.Block) [][][]byte {
 func TestIndexerWriterIndexesAndRollsBackTransactions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		StorageMode: types.StorageModeAPI,
-		Logger:      slog.Default(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	db := newIndexerTestDB(t)
+	consensus := consensusOf(t, db)
 
 	chain, err := testfixtures.GenerateConwayChainWithTransactions(4)
 	require.NoError(t, err)
@@ -62,14 +56,14 @@ func TestIndexerWriterIndexesAndRollsBackTransactions(t *testing.T) {
 	}
 	require.NotZero(t, total, "fixture must carry transactions")
 	for _, b := range chain {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, consensus.BlockCreate(models.Block{
 			Slot: b.SlotNumber(), Hash: b.Hash().Bytes(),
 			PrevHash: b.PrevHash().Bytes(), Number: b.BlockNumber(),
 			Cbor: b.Cbor(), Type: uint(b.Type()),
 		}, nil))
 	}
 	last := chain[len(chain)-1]
-	require.NoError(t, db.SetTip(ochainsync.Tip{
+	require.NoError(t, consensus.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{
 			Slot: last.SlotNumber(),
 			Hash: last.Hash().Bytes(),
@@ -83,7 +77,7 @@ func TestIndexerWriterIndexesAndRollsBackTransactions(t *testing.T) {
 	bf.SetDelegatorInactivityEnabled(false)
 	// Small batches make the second call continue from running state.
 	w := indexer.NewWriter(
-		store, indexer.NewDatabaseSource(db), bf, slog.Default(), 2,
+		store, indexer.NewDatabaseSource(consensus), bf, slog.Default(), 2,
 	)
 	require.NoError(t, w.CatchUp(ctx))
 

@@ -67,8 +67,8 @@ func (s *Set) Reimport(
 }
 
 // recoverUnreachable runs when the set's journal cannot bring it to the ledger,
-// which cause describes: the set is behind a Mithril trust boundary or the
-// consumed-output prune floor, a failed commit is older than the journal's
+// which cause describes: the set is behind a Mithril trust boundary, a failed
+// commit is older than the journal's
 // floor, or the ledger's tip is below the journal's floor. It tries, in order:
 //
 //  1. the newest checkpoint at or below the ledger's tip: the set is restored,

@@ -54,7 +54,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		}),
 		signFailures: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_kes_agent_sign_failure_total",
-			Help: "sign-mode requests that errored, timed out, or failed validation",
+			Help: "sign-mode requests that errored, timed out, or failed validation; excludes an expected already-signed refusal from a configured shared signer",
 		}),
 		signLatency: factory.NewHistogram(prometheus.HistogramOpts{
 			Name:    "dingo_kes_agent_sign_latency_seconds",

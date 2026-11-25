@@ -1089,83 +1089,6 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 		},
 		nil,
 	))
-	authoritativeClaim, err := store.ClaimFallbackRewardSnapshot(
-		&models.RewardSnapshot{
-			Epoch:        5,
-			SnapshotType: "mark",
-		},
-		nil,
-	)
-	require.NoError(t, err)
-	fallbackClaim, err := store.ClaimFallbackRewardSnapshot(
-		&models.RewardSnapshot{
-			Epoch:            6,
-			SnapshotType:     "mark",
-			TotalActiveStake: 200,
-			TotalPoolCount:   2,
-			TotalDelegators:  3,
-			CapturedSlot:     60,
-			BoundarySlot:     59,
-			EpochNonce:       []byte("fallback-one"),
-			ProtocolVersion:  10,
-		},
-		nil,
-	)
-	require.NoError(t, err)
-	fallbackClaim, err = store.ClaimFallbackRewardSnapshot(
-		&models.RewardSnapshot{
-			Epoch:            6,
-			SnapshotType:     "mark",
-			TotalActiveStake: 250,
-			TotalPoolCount:   3,
-			TotalDelegators:  4,
-			CapturedSlot:     61,
-			BoundarySlot:     60,
-			EpochNonce:       []byte("fallback-two"),
-			ProtocolVersion:  11,
-		},
-		nil,
-	)
-	require.NoError(t, err)
-
-	guardTxn := store.Transaction(t.Context())
-	guardCreated, guardID, err := store.ClaimFallbackRewardSnapshotGuard(
-		7,
-		"mark",
-		guardTxn,
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.ReleaseFallbackRewardSnapshotGuard(
-		guardID,
-		guardTxn,
-	))
-	require.NoError(t, guardTxn.Commit())
-
-	require.NoError(t, store.SaveRewardSnapshot(
-		&models.RewardSnapshot{
-			Epoch:        8,
-			SnapshotType: "mark",
-		},
-		nil,
-	))
-	provisionalTxn := store.Transaction(t.Context())
-	provisionalGuard, _, err := store.ClaimFallbackRewardSnapshotGuard(
-		8,
-		"mark",
-		provisionalTxn,
-	)
-	require.NoError(t, err)
-	require.NoError(t, provisionalTxn.Commit())
-
-	authoritativeTxn := store.Transaction(t.Context())
-	authoritativeGuard, _, err := store.ClaimFallbackRewardSnapshotGuard(
-		5,
-		"mark",
-		authoritativeTxn,
-	)
-	require.NoError(t, err)
-	require.NoError(t, authoritativeTxn.Commit())
-
 	require.NoError(t, store.SaveRewardPoolInputs(
 		[]*models.RewardPoolInput{
 			{
@@ -1257,16 +1180,7 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 		nil,
 	))
 
-	gotAuthoritativeClaim := authoritativeClaim
-	gotAuthoritativeGuard := authoritativeGuard
-	gotFallbackClaim := fallbackClaim
-	gotGuardCreated := guardCreated
-	gotProvisionalGuard := provisionalGuard
 	gotPots, err := store.GetRewardAdaPots(5, nil)
-	require.NoError(t, err)
-	gotFallback, err := store.GetRewardSnapshot(6, "mark", nil)
-	require.NoError(t, err)
-	gotGuardRemoved, err := store.GetRewardSnapshot(7, "mark", nil)
 	require.NoError(t, err)
 	gotPoolInputs, err := store.GetRewardPoolInputs(5, nil)
 	require.NoError(t, err)
@@ -1294,15 +1208,6 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	require.Equal(t, uint64(20), uint64(gotPots.Reserves))
 	require.Equal(t, uint64(30), uint64(gotPots.Fees))
 	require.Equal(t, uint64(40), uint64(gotPots.Rewards))
-	require.False(t, gotAuthoritativeClaim)
-	require.True(t, gotFallbackClaim)
-	require.NotNil(t, gotFallback)
-	require.Equal(t, uint64(250), uint64(gotFallback.TotalActiveStake))
-	require.Equal(t, uint64(60), gotFallback.BoundarySlot)
-	require.True(t, gotGuardCreated)
-	require.Nil(t, gotGuardRemoved)
-	require.True(t, gotProvisionalGuard)
-	require.False(t, gotAuthoritativeGuard)
 	require.Len(t, gotPoolInputs, 1)
 	require.Equal(t, []byte("pool-a"), gotPoolInputs[0].PoolKeyHash)
 	require.Equal(t, types.Uint64(100), gotPoolInputs[0].DelegatedStake)
@@ -1886,9 +1791,9 @@ SELECT hash, id FROM "transaction" WHERE id >= ? AND id < ?`,
 		_, err := db.Exec(statement, from, to)
 		require.NoError(t, err)
 	}
-	// Mirror node.RunPlannerStats, which Mithril runs immediately before
-	// backfill: the plan asserted below has to be the plan the planner picks
-	// with statistics present, not the one it picks in their absence.
+	// Collect statistics first: the plan asserted below has to be the plan
+	// the planner picks with statistics present, not the one it picks in
+	// their absence.
 	_, err = db.Exec("ANALYZE")
 	require.NoError(t, err)
 }

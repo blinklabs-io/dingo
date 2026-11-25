@@ -20,12 +20,16 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 // MidEpochEraSwitchSyncKey is the sync-state key recording the last era
 // translation applied inside an epoch rather than at its start.
-const MidEpochEraSwitchSyncKey = statedrain.EraSwitchSyncKey
+const MidEpochEraSwitchSyncKey = "mid_epoch_era_switch"
+
+// PendingRatificationSyncKey names the record of an epoch boundary whose
+// RATIFY decision or mark snapshot is not written yet. The LedgerDB set keeps
+// it; a v0.94.2 metadata store kept it in sync_state.
+const PendingRatificationSyncKey = "dingo:governance:ratify-pending"
 
 // MidEpochEraSwitch records an era translation applied before the block at
 // Slot, inside the epoch whose row Epoch names. The epoch's row carries ToEra
@@ -74,20 +78,19 @@ func ParseMidEpochEraSwitch(value string) (MidEpochEraSwitch, error) {
 	}, nil
 }
 
-// SetMidEpochEraSwitch records sw. It refuses once the era-switch family is
-// drained: the set is then the only copy of the record.
+// SetMidEpochEraSwitch records sw. It refuses on a database with no
+// metadata store: the set is then the only copy of the record.
 func (d *Database) SetMidEpochEraSwitch(sw MidEpochEraSwitch, txn *Txn) error {
-	if d.FamilyDrained(nodesettings.FamilyEraSwitch) {
-		return drainedWrite(nodesettings.FamilyEraSwitch)
+	if d.metadata == nil {
+		return errNoMetadataStore(nodesettings.FamilyEraSwitch)
 	}
 	return d.SetSyncState(MidEpochEraSwitchSyncKey, sw.encode(), txn)
 }
 
 // revertMidEpochEraSwitchAfterSlot undoes a recorded switch whose block lies
 // after slot: the switched epoch's row returns to its source era, if the
-// rollback left the row, and the record is dropped. A drained epochs family
-// has no row to rewrite and a drained era-switch family no record to drop;
-// the set reverts both in the same rollback.
+// rollback left the row, and the record is dropped. A database with no
+// metadata store has neither; the set reverts both in the same rollback.
 func (d *Database) revertMidEpochEraSwitchAfterSlot(
 	slot uint64,
 	txn *Txn,
@@ -99,7 +102,7 @@ func (d *Database) revertMidEpochEraSwitchAfterSlot(
 	if sw.Slot <= slot {
 		return nil
 	}
-	if !d.FamilyDrained(nodesettings.FamilyEpochs) {
+	if d.metadata != nil {
 		epochs, err := d.GetEpochs(txn)
 		if err != nil {
 			return fmt.Errorf("load epochs to revert era switch: %w", err)
@@ -124,7 +127,7 @@ func (d *Database) revertMidEpochEraSwitchAfterSlot(
 			}
 		}
 	}
-	if d.FamilyDrained(nodesettings.FamilyEraSwitch) {
+	if d.metadata == nil {
 		return nil
 	}
 	return d.DeleteSyncState(MidEpochEraSwitchSyncKey, txn)

@@ -27,6 +27,9 @@ func (d *Database) DeleteNetworkDonationsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteNetworkDonationsAfterSlot"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeleteNetworkDonationsAfterSlot(
 			slot,

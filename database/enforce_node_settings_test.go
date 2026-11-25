@@ -38,7 +38,7 @@ func TestEnforceNodeSettingsGenesisHashes(t *testing.T) {
 		"shelley_genesis_hash": "aaaa",
 		"conway_genesis_hash":  "bbbb",
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "aaaa", gates["shelley_genesis_hash"])
 
@@ -50,7 +50,7 @@ func TestEnforceNodeSettingsGenesisHashes(t *testing.T) {
 	// An earlier dingo did not know the dijkstra hash; a later one does.
 	require.NoError(t, enforce(nodesettings.Values{"dijkstra_genesis_hash": ""}))
 	require.NoError(t, enforce(nodesettings.Values{"dijkstra_genesis_hash": "dddd"}))
-	gates, err = db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err = db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "dddd", gates["dijkstra_genesis_hash"])
 	require.NoError(t, db.Close())
@@ -73,7 +73,7 @@ func TestEnforceNodeSettingsLedgerGateActivationRecordsEpochAndCannotBeDisabled(
 	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"pledge_leverage": on,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, on, gates["pledge_leverage"])
 
@@ -103,7 +103,7 @@ func TestEnforceNodeSettingsRecordsValidationTaintOnFirstStart(t *testing.T) {
 	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOn,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -151,7 +151,7 @@ func TestEnforceNodeSettingsKeepsTaintWhenValidationTightens(t *testing.T) {
 	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOff,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,

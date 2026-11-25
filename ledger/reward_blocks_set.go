@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -171,7 +172,7 @@ func (ls *LedgerState) rewardBlocksReader(txn ledgerdb.Txn) RewardBlocksReader {
 }
 
 // rewardBlocksServing returns the reader when reward block reads are
-// answered from the set, nil when they stay on the metadata store.
+// answered from the set, nil when the set does not serve them.
 func (ls *LedgerState) rewardBlocksServing(
 	txn ledgerdb.Txn,
 ) RewardBlocksReader {
@@ -229,7 +230,7 @@ func (ls *LedgerState) rewardBlocksView(
 	return view, nil
 }
 
-// rewardBlockCountsFromSet answers rewardBlockCounts from the set. The
+// rewardBlockCountsFromSet answers RewardBlockCounts from the set. The
 // totals count every block of the epoch, the pools only the ones asked for,
 // as the metadata store does. ok is false when the set holds no counts for
 // the epoch.
@@ -262,10 +263,9 @@ func sameCounts(a, b map[string]uint64) bool {
 	return true
 }
 
-// rewardEpochFeesFor is rewardEpochFees answered from the set when the set
+// rewardEpochFeesFor is epochengine.RewardEpochFees answered from the set when the set
 // serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(
-	meta ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 	epoch models.Epoch,
 ) (uint64, error) {
@@ -280,13 +280,9 @@ func (ls *LedgerState) rewardEpochFeesFor(
 		if view.FeesKnown {
 			return view.Fees, nil
 		}
-		if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
-			return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
-		}
-	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
-		return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	return rewardEpochFees(meta, txn, epoch)
+	return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published
@@ -328,7 +324,8 @@ func (ls *LedgerState) stageBlockMinted(
 	overlay := false
 	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
 		d := decentralizationParamRat(pparams)
-		overlay = d != nil && rewardIsOverlaySlot(epoch.StartSlot, d, slot)
+		overlay = d != nil &&
+			epochengine.RewardIsOverlaySlot(epoch.StartSlot, d, slot)
 	}
 	ls.stageLedgerChanges(
 		txn,
@@ -553,7 +550,7 @@ func rewardEpochBlocksFromStore(
 		allTotal++
 		allCounts[string(i.PoolKeyHash)]++
 		allNext = max(allNext, i.Slot+1)
-		if rewardIsOverlaySlot(start, d, i.Slot) {
+		if epochengine.RewardIsOverlaySlot(start, d, i.Slot) {
 			continue
 		}
 		total++
@@ -612,7 +609,7 @@ func rewardEpochBlocksFromStore(
 			}
 		}
 	}
-	fees, err := rewardEpochFees(ldb, txn, epoch)
+	fees, err := epochengine.RewardEpochFees(ldb, txn, epoch)
 	if err != nil {
 		return row, fmt.Errorf("sum fees: %w", err)
 	}

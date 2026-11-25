@@ -26,11 +26,11 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// ErrDrainedFamilyUnserved reports a read of a drained family that the live
-// UTxO set cannot answer. The metadata store holds no rows for the family,
-// so the read fails rather than return an empty answer.
-var ErrDrainedFamilyUnserved = errors.New(
-	"ledger-state family is drained and the live UTxO set cannot serve it",
+// ErrLedgerStateUnserved reports a ledger-state read that the live UTxO set
+// cannot answer. No other store holds the family, so the read fails rather
+// than return an empty answer.
+var ErrLedgerStateUnserved = errors.New(
+	"the live UTxO set cannot serve this ledger-state read",
 )
 
 // ErrUtxoSetUnserved reports a read that a configured live UTxO set cannot
@@ -40,33 +40,25 @@ var ErrUtxoSetUnserved = errors.New(
 	"live UTxO set cannot serve ledger-state family",
 )
 
-func drainedUnserved(f nodesettings.Family) error {
-	return fmt.Errorf("%w: %s", ErrDrainedFamilyUnserved, f)
+func ledgerStateUnserved(f nodesettings.Family) error {
+	return fmt.Errorf("%w: %s", ErrLedgerStateUnserved, f)
 }
 
 func (ls *LedgerState) setFamilyUnserved(f nodesettings.Family) error {
-	if ls.familyDrained(f) {
-		return drainedUnserved(f)
-	}
-	return fmt.Errorf("%w: %s", ErrUtxoSetUnserved, f)
+	return ledgerStateUnserved(f)
 }
 
-// drainedAccountsRefusal is drainedUnserved for an account read that falls
-// back to the metadata store, which refuses a drained accounts family with
-// database.ErrFamilyDrained; the error is both, so a caller matching either
-// sees it.
-func drainedAccountsRefusal() error {
+// accountsUnserved is ledgerStateUnserved for an account read that falls
+// back to the database, which refuses it with database.ErrNoMetadataStore;
+// the error is both, so a caller matching either sees it.
+func accountsUnserved() error {
 	return fmt.Errorf(
-		"%w: %w", database.ErrFamilyDrained,
-		drainedUnserved(nodesettings.FamilyAccounts),
+		"%w: %w", database.ErrNoMetadataStore,
+		ledgerStateUnserved(nodesettings.FamilyAccounts),
 	)
 }
 
-func (s stagingLedgerDB) noncesDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyNonces)
-}
-
-// GetBlockNonce reads from the set when the nonces family is drained.
+// GetBlockNonce reads from the set.
 func (s stagingLedgerDB) GetBlockNonce(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
@@ -83,15 +75,14 @@ func (s stagingLedgerDB) GetBlockNoncesInSlotRange(
 	return s.ls.blockNoncesInSlotRange(start, end, txn)
 }
 
-// GetLatestBlockNonce reads from the set when the nonces family is drained.
+// GetLatestBlockNonce reads from the set.
 func (s stagingLedgerDB) GetLatestBlockNonce(
 	txn ledgerdb.Txn,
 ) (models.BlockNonce, bool, error) {
 	return s.ls.latestBlockNonce(txn)
 }
 
-// SetBlockNonce skips the SQL write of a drained nonces family; callers stage
-// the same nonce for the set.
+// SetBlockNonce writes no SQL row; callers stage the same nonce for the set.
 func (s stagingLedgerDB) SetBlockNonce(
 	blockHash []byte,
 	slotNumber uint64,
@@ -99,47 +90,33 @@ func (s stagingLedgerDB) SetBlockNonce(
 	isCheckpoint bool,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.SetBlockNonce(
-		blockHash, slotNumber, nonce, isCheckpoint, txn,
-	)
+	return nil
 }
 
-// SetBlockNonces skips the SQL write of a drained nonces family.
+// SetBlockNonces writes no SQL row.
 func (s stagingLedgerDB) SetBlockNonces(
 	nonces []models.BlockNonce,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.SetBlockNonces(nonces, txn)
+	return nil
 }
 
-// DeleteBlockNoncesBeforeSlotWithoutCheckpoints skips the SQL delete of a
-// drained nonces family; the staged prune reaches the set.
+// DeleteBlockNoncesBeforeSlotWithoutCheckpoints issues no SQL delete; the
+// staged prune reaches the set.
 func (s stagingLedgerDB) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if s.noncesDrained() {
-		return nil
-	}
-	return s.LedgerDB.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(slot, txn)
+	return nil
 }
 
-// DeleteBlockNoncesAfterPoint, for a drained nonces family, only checks that
-// the set holds no nonce past point: startup reconciles the set to the
+// DeleteBlockNoncesAfterPoint only checks that the set holds no nonce past
+// point: startup reconciles the set to the
 // ledger tip, so a nonce beyond it means the set was not rewound.
 func (s stagingLedgerDB) DeleteBlockNoncesAfterPoint(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.noncesDrained() {
-		return s.LedgerDB.DeleteBlockNoncesAfterPoint(point, txn)
-	}
 	latest, ok, err := s.ls.latestBlockNonce(txn)
 	if err != nil {
 		return err
@@ -154,8 +131,7 @@ func (s stagingLedgerDB) DeleteBlockNoncesAfterPoint(
 	return nil
 }
 
-// drainedNonceSource serves a rollback's nonce reads from the set once the
-// nonces family is drained.
+// drainedNonceSource serves a rollback's nonce reads from the set.
 type drainedNonceSource struct {
 	ls *LedgerState
 }
@@ -178,9 +154,9 @@ func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 }
 
 // installNonceSource gives the database the set's nonces for the rollbacks it
-// runs once the nonces family is drained.
+// runs.
 func (ls *LedgerState) installNonceSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetNonceSource(drainedNonceSource{ls})
 	}
 }

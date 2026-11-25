@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -54,11 +53,12 @@ func newRegistrationHarnessWith(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	h := &registrationHarness{set: set}
-	var w ledger.UtxoSetWriter = set
+	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	if wrap != nil {
-		w = wrap(set)
+		h.scenario.WrapSet(func(ledger.UtxoSetWriter) ledger.UtxoSetWriter {
+			return wrap(set)
+		})
 	}
-	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, w)
 	h.store = dbadapter.New(h.scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
 	h.slots = h.scenario.Registrations()
@@ -251,88 +251,6 @@ func TestRegistrationHistoryRollsBackAcrossReRegistrations(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, all)
 
-}
-
-// TestRegistrationHistoryLoadsFromTheMetadataStore requires a set from before
-// it kept registration history to load every event and DRep deposit from the
-// metadata store, as the set that followed the certificates holds them.
-func TestRegistrationHistoryLoadsFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newRegistrationHarness(t)
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.RegistrationHistoryLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.RegistrationHistoryLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	s := h.slots
-	for _, key := range [][]byte{s.K, s.L, s.M} {
-		ref := models.NewStakeCredentialRef(0, key)
-		want, err := h.set.StakeHistory(ref)
-		require.NoError(t, err)
-		require.NotEmpty(t, want)
-		got, err := fresh.StakeHistory(ref)
-		require.NoError(t, err)
-		require.Len(t, got, len(want), "credential %x", key)
-		for i := range want {
-			// Which table a loaded registration came from is not in the
-			// history rows; the class is compared separately.
-			want[i].Class, got[i].Class = 0, 0
-			require.Equal(t, want[i], got[i], "credential %x event %d", key, i)
-		}
-	}
-	classes := func(key []byte) []ledger.StakeRegistrationClass {
-		events, err := fresh.StakeHistory(models.NewStakeCredentialRef(0, key))
-		require.NoError(t, err)
-		var out []ledger.StakeRegistrationClass
-		for _, e := range events {
-			if e.Registered {
-				out = append(out, e.Class)
-			}
-		}
-		return out
-	}
-	require.Equal(t, []ledger.StakeRegistrationClass{ledger.StakeClassLegacy}, classes(s.L),
-		"as many stake registrations as registrations")
-	require.Equal(t, []ledger.StakeRegistrationClass{ledger.StakeClassOther}, classes(s.M),
-		"no stake registration row")
-	require.Equal(t, []ledger.StakeRegistrationClass{
-		ledger.StakeClassUnknown, ledger.StakeClassUnknown, ledger.StakeClassUnknown,
-	}, classes(s.K), "one stake registration among three registrations")
-
-	for key, want := range map[string]*uint64{
-		string(s.D): ptr(600_000_000), string(s.E): ptr(700_000_000),
-	} {
-		got, err := fresh.DRepDeposit(0, []byte(key))
-		require.NoError(t, err)
-		require.Equal(t, want, got, "DRep %x", key)
-	}
-}
-
-// TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration pins
-// the set result when a registration exists only in metadata.
-func TestRegistrationHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
-	t.Parallel()
-	h := newRegistrationHarness(t)
-	cred := bytes.Repeat([]byte{0x7d}, 28)
-	require.NoError(t, h.scenario.DB.Metadata().ImportDrep(
-		&models.Drep{CredentialTag: 0, Credential: cred, AddedSlot: 5, Active: true},
-		&models.RegistrationDrep{
-			CredentialTag: 0, DrepCredential: cred, AddedSlot: 5,
-			DepositAmount: types.Uint64(123),
-		},
-		nil,
-	))
-	reached, _ := h.scenario.HideStoreReads("GetDrepLastRegistrationDeposit")
-	got, err := h.scenario.LedgerDB().GetDrepLastRegistrationDeposit(t.Context(), 0, cred, nil)
-	require.NoError(t, err)
-	require.Nil(t, got)
-	require.Zero(t, reached(), "registration history read reached the metadata store")
 }
 
 // TestRegistrationHistoryIsVisibleInsideAnOpenTransaction requires reads in a

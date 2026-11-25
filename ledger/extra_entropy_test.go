@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -70,11 +71,11 @@ func TestRecordedExtraEntropyForEpochTracksParameterHistory(t *testing.T) {
 	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 
 	_, entropyCbor := maryPParamsWithExtraEntropy(t, entropy)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		entropyCbor, 200, 259, eras.MaryEraDesc.Id, nil,
 	))
 	_, neutralCbor := maryPParamsWithExtraEntropy(t, nil)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		neutralCbor, 300, 260, eras.MaryEraDesc.Id, nil,
 	))
 
@@ -84,6 +85,7 @@ func TestRecordedExtraEntropyForEpochTracksParameterHistory(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 
 	for _, tc := range []struct {
 		name  string
@@ -163,7 +165,7 @@ func TestExtraEntropyFromPParamsStopsAtPraos(t *testing.T) {
 		require.Equal(
 			t,
 			tc.want,
-			extraEntropyFromPParams(tc.params),
+			epochengine.ExtraEntropyFromPParams(tc.params),
 			tc.name,
 		)
 	}
@@ -183,7 +185,7 @@ func TestAssembleEpochNonceNeutralCandidateReturnsEntropy(t *testing.T) {
 	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 	neutral := make([]byte, lcommon.Blake2b256Size)
 
-	got, err := assembleEpochNonce(neutral, nil, entropy)
+	got, err := epochengine.AssembleEpochNonce(neutral, nil, entropy)
 	require.NoError(t, err)
 	require.Equal(
 		t,

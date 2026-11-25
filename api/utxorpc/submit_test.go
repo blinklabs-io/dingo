@@ -42,6 +42,8 @@ import (
 )
 
 func TestWaitForTxConfirmedTransaction(t *testing.T) {
+	t.Parallel()
+
 	tx := &txPatternTestTx{}
 	testCases := []struct {
 		name      string
@@ -218,6 +220,8 @@ func (s *blockingWaitForTxLedgerStub) ExistingTransactionHashes(
 }
 
 func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	var txHashA common.Blake2b256
 	txHashA[0] = 0xa1
@@ -262,6 +266,8 @@ func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
 }
 
 func TestWaitForTxCommitDuringLookupIsConfirmedOnce(t *testing.T) {
+	t.Parallel()
+
 	for _, testCase := range []struct {
 		name         string
 		lookupResult *models.Transaction
@@ -336,6 +342,8 @@ func TestWaitForTxCommitDuringLookupIsConfirmedOnce(t *testing.T) {
 }
 
 func TestWaitForTxCommittedLookupError(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	lookupErr := errors.New("lookup failed")
 	ledgerState := &waitForTxLedgerStub{
@@ -372,6 +380,8 @@ func TestWaitForTxCommittedLookupError(t *testing.T) {
 }
 
 func TestWaitForTxWithoutLedgerStateUsesCommittedEvents(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
@@ -426,6 +436,8 @@ func TestWaitForTxWithoutLedgerStateUsesCommittedEvents(t *testing.T) {
 }
 
 func TestWaitForTxBlockedSendDoesNotStallEventDelivery(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
@@ -521,6 +533,8 @@ func TestWaitForTxBlockedSendDoesNotStallEventDelivery(t *testing.T) {
 }
 
 func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
@@ -549,6 +563,8 @@ func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
 func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	ledgerState := &blockingWaitForTxLedgerStub{
 		lookupStarted:  make(chan waitForTxLookupStart, 1),
@@ -602,6 +618,8 @@ func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(
 }
 
 func TestWaitForTxSendErrorUnsubscribesAfterOneSend(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
@@ -680,6 +698,8 @@ func (t *blockingHashTx) Hash() common.Blake2b256 {
 }
 
 func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
@@ -771,6 +791,8 @@ func TestWaitForTxUnsubscribeWaitsForInFlightCallback(t *testing.T) {
 }
 
 func TestWaitForTxRejectsFailedSubscription(t *testing.T) {
+	t.Parallel()
+
 	eb := newControlledWaitForTxEventBus()
 	eb.subID = 0
 	server := &submitServiceServer{
@@ -1716,6 +1738,8 @@ func TestMatchesTxPattern_HasCertificateMalformedPatternUnevaluable(
 }
 
 func TestMatchesTxPattern_SignedMint(t *testing.T) {
+	t.Parallel()
+
 	policy := common.Blake2b224{1}
 	name := []byte("asset")
 	for _, tc := range []struct {

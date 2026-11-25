@@ -22,8 +22,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/database/types"
 )
 
 type mockSyncStateStore struct {
@@ -38,21 +36,14 @@ func newMockSyncStateStore() *mockSyncStateStore {
 	}
 }
 
-func (m *mockSyncStateStore) GetSyncState(
-	key string,
-	txn types.Txn,
-) (string, error) {
+func (m *mockSyncStateStore) ChainStateValue(key string) (string, error) {
 	if m.getErr != nil {
 		return "", m.getErr
 	}
 	return m.values[key], nil
 }
 
-func (m *mockSyncStateStore) SetSyncState(
-	key string,
-	value string,
-	txn types.Txn,
-) error {
+func (m *mockSyncStateStore) SetChainStateSynced(key, value string) error {
 	if m.setErr != nil {
 		return m.setErr
 	}
@@ -66,7 +57,7 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	backingStore := newMockSyncStateStore()
-	store := NewSyncStateScheduleStore(backingStore)
+	store := NewChainStateScheduleStore(backingStore)
 
 	schedule := NewSchedule(42, poolId, 1000, 10000, electionTestNonce)
 	schedule.AddLeaderSlot(420)
@@ -113,13 +104,13 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	backingStore := newMockSyncStateStore()
-	key := syncStateScheduleKey(42, poolId)
+	key := chainStateScheduleKey(42, poolId)
 	// Hand-rolled legacy payload: no format_version key.
 	backingStore.values[key] = `{"epoch":42,"pool_id":"` +
 		hexEncode(poolId[:]) + `","pool_stake":1,"total_stake":1,` +
 		`"epoch_nonce":"","leader_slots":[1]}`
 
-	store := NewSyncStateScheduleStore(backingStore)
+	store := NewChainStateScheduleStore(backingStore)
 	loaded, err := store.LoadSchedule(42, poolId)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
@@ -137,7 +128,7 @@ func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	backingStore := newMockSyncStateStore()
-	backingStore.values[syncStateScheduleKey(42, poolId)] =
+	backingStore.values[chainStateScheduleKey(42, poolId)] =
 		fmt.Sprintf(
 			`{"format_version":%d,"epoch":42,"pool_id":"%s",`+
 				`"pool_stake":1,"total_stake":1,"epoch_nonce":"",`+
@@ -146,7 +137,7 @@ func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
 			hexEncode(poolId[:]),
 		)
 
-	loaded, err := NewSyncStateScheduleStore(backingStore).
+	loaded, err := NewChainStateScheduleStore(backingStore).
 		LoadSchedule(42, poolId)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
@@ -165,12 +156,12 @@ func TestSyncStateScheduleStoreSortsUnsortedRecord(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	backingStore := newMockSyncStateStore()
-	key := syncStateScheduleKey(42, poolId)
+	key := chainStateScheduleKey(42, poolId)
 	backingStore.values[key] = `{"format_version":1,"epoch":42,"pool_id":"` +
 		hexEncode(poolId[:]) + `","pool_stake":1,"total_stake":1,` +
 		`"epoch_nonce":"","leader_slots":[300,100,200,50]}`
 
-	store := NewSyncStateScheduleStore(backingStore)
+	store := NewChainStateScheduleStore(backingStore)
 	loaded, err := store.LoadSchedule(42, poolId)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)

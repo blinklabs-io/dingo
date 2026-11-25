@@ -130,3 +130,4 @@ start](https://docs.blinklabs.io/guides/dingo/002-quick-start-overview/).
 - [Benchmarks and profiling](docs/benchmarks.md)
 - [Monitoring dashboards](docs/dashboards/README.md)
 - [Badger garbage collection](docs/badger-gc.md)
+- [Container image policy](docs/container-image.md)

@@ -32,8 +32,8 @@ func (d *Database) CreateDrep(
 	txn *Txn,
 	drep *models.Drep,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	if txn != nil {
@@ -52,8 +52,8 @@ func (d *Database) RestoreDrepStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -79,8 +79,8 @@ func (d *Database) GetDrep(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -106,8 +106,8 @@ func (d *Database) GetDrepByCredential(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -131,8 +131,8 @@ func (d *Database) GetActiveDreps(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.Drep, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -155,6 +155,9 @@ func (d *Database) GetDrepLastRegistrationDeposit(
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetDrepLastRegistrationDeposit"); err != nil {
+		return nil, err
+	}
 	return d.governanceStore().GetDrepLastRegistrationDeposit(
 		credentialTag,
 		credential,
@@ -176,8 +179,8 @@ func (d *Database) InsertDrepIfAbsent(
 	active bool,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -210,12 +213,12 @@ func (d *Database) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (uint64, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return 0, err
 	}
 	if txn == nil {
@@ -240,8 +243,8 @@ func (d *Database) GetDRepDelegators(
 	drepCredential []byte,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -264,8 +267,8 @@ func (d *Database) GetDRepDelegatorsAtSlot(
 	slot uint64,
 	txn *Txn,
 ) (map[string][]models.StakeCredentialRef, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -287,8 +290,8 @@ func (d *Database) GetDrepsAtSlot(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.Drep, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -311,6 +314,9 @@ func (d *Database) GetDrepRegistrationDepositsAtSlot(
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetDrepRegistrationDepositsAtSlot"); err != nil {
+		return nil, err
+	}
 	return d.governanceStore().GetDrepRegistrationDepositsAtSlot(
 		refs,
 		slot,
@@ -327,12 +333,12 @@ func (d *Database) GetDRepVotingPowerBatch(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -364,12 +370,12 @@ func (d *Database) GetDRepVotingPowerByType(
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[uint64]uint64, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -403,8 +409,8 @@ func (d *Database) UpdateDRepActivity(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -432,8 +438,8 @@ func (d *Database) BumpDormantDRepExpiries(
 	slot uint64,
 	txn *Txn,
 ) (int, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return 0, err
 	}
 	var affected int
@@ -452,8 +458,8 @@ func (d *Database) BumpDormantDRepExpiries(
 }
 
 func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return 0, err
 	}
 	if txn == nil {
@@ -464,8 +470,8 @@ func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, 
 }
 
 func (d *Database) ResetDormantDRepEpochs(ctx context.Context, slot uint64, txn *Txn) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -484,8 +490,8 @@ func (d *Database) SetImportedDormantDRepEpochs(
 	dormantEpochs uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -511,8 +517,8 @@ func (d *Database) RecordDRepActivityEpoch(
 	activityEpoch uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -538,8 +544,8 @@ func (d *Database) GetExpiredDReps(
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.Drep, error) {
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return nil, err
 	}
 	if txn == nil {
@@ -560,6 +566,9 @@ func (d *Database) GetDrepLastRegistrationDeposits(
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetDrepLastRegistrationDeposits"); err != nil {
+		return nil, err
 	}
 	return d.governanceStore().GetDrepLastRegistrationDeposits(txn.Metadata())
 }

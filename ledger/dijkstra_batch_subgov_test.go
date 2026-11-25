@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dijkstrabatchfixture"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -58,6 +59,7 @@ func newSubGovLedger(t *testing.T) (*LedgerState, *database.Database) {
 			TrustedReplay:     true,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	publishGovernanceTestEpoch(ls, 12, eras.DijkstraEraDesc)
 	return ls, db
 }
@@ -213,7 +215,12 @@ func applySubGovBlock(
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
 	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		return delta.apply(context.Background(), ls, txn)
+		if err := delta.apply(context.Background(), ls, txn); err != nil {
+			return err
+		}
+		// The set journals the block under its point, as the block loop does.
+		ls.stageUtxoSet(dbadapter.Txn(txn), &delta.Point)
+		return nil
 	})
 }
 
@@ -223,7 +230,7 @@ func requireSubGovProposal(
 	id common.Blake2b256,
 ) *models.GovernanceProposal {
 	t.Helper()
-	got, err := db.GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
+	got, err := seedDB(t, db).GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, id.Bytes(), got.TxHash)
 	return got
@@ -235,7 +242,7 @@ func requireNoSubGovProposal(
 	id common.Blake2b256,
 ) {
 	t.Helper()
-	_, err := db.GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
+	_, err := seedDB(t, db).GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 }
 
@@ -272,7 +279,7 @@ func TestDijkstraBatchChildVoteOnExistingProposal(t *testing.T) {
 	})
 	require.NoError(t, applySubGovBlock(t, ls, 2, tx))
 
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, drep.Hash[:], votes[0].VoterCredential)
@@ -300,7 +307,7 @@ func TestDijkstraBatchLaterChildVotesOnEarlierChildProposal(t *testing.T) {
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
 	proposal := requireSubGovProposal(t, db, child1ID)
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, drep.Hash[:], votes[0].VoterCredential)
@@ -349,7 +356,7 @@ func TestDijkstraBatchTopLevelVoteOnChildProposal(t *testing.T) {
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
 	proposal := requireSubGovProposal(t, db, childID)
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 }
@@ -456,7 +463,7 @@ func requireSharedSubGovState(
 	require.Equal(t, fixture.RootID.Bytes(), child.ParentTxHash)
 	require.NotNil(t, child.ParentActionIdx)
 	require.Zero(t, *child.ParentActionIdx)
-	votes, err := db.GetGovernanceVotes(context.Background(), root.ID, nil)
+	votes, err := seedDB(t, db).GetGovernanceVotes(context.Background(), root.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 2)
 	voters := make(map[byte]bool, len(votes))
@@ -586,11 +593,11 @@ func TestDijkstraBatchChildDRepRegistrationAndChildVote(t *testing.T) {
 	tx := subGovTx(t, true, nil, proposing, registering, voting)
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
-	got, err := db.GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
+	got, err := seedDB(t, db).GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
 	require.NoError(t, err)
 	require.Equal(t, anchor.Url, got.AnchorURL)
 	proposal := requireSubGovProposal(t, db, proposalID)
-	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	votes, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 }
@@ -612,23 +619,21 @@ func TestDijkstraBatchChildGovernanceRollbackAndReapply(t *testing.T) {
 		TxVotingProcedures: subGovVote(drep, proposalID, 0),
 	}
 	tx := subGovTx(t, true, nil, proposing, voting)
+	parent := ocommon.Point{Slot: 4, Hash: bytes.Repeat([]byte{0x04}, 32)}
+	ls.stageUtxoSet(nil, &parent)
 	require.NoError(t, applySubGovBlock(t, ls, 5, tx))
 	before := requireSubGovProposal(t, db, proposalID)
-	votesBefore, err := db.GetGovernanceVotes(context.Background(), before.ID, nil)
+	votesBefore, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), before.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votesBefore, 1)
 
-	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		if err := db.DeleteGovernanceVotesAfterSlot(context.Background(), 4, txn); err != nil {
-			return err
-		}
-		return db.DeleteGovernanceProposalsAfterSlot(context.Background(), 4, txn)
-	}))
+	ls.stageUtxoSetRollback(nil, parent)
+	require.False(t, ls.utxoSetFailed.Load())
 	requireNoSubGovProposal(t, db, proposalID)
 
 	require.NoError(t, applySubGovBlock(t, ls, 5, tx))
 	after := requireSubGovProposal(t, db, proposalID)
-	votesAfter, err := db.GetGovernanceVotes(context.Background(), after.ID, nil)
+	votesAfter, err := ls.ledgerDB().GetGovernanceVotes(context.Background(), after.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votesAfter, 1)
 	require.Equal(t, before.ActionType, after.ActionType)
@@ -660,6 +665,6 @@ func TestDijkstraBatchPhase2InvalidPersistsNoChildGovernance(t *testing.T) {
 	tx := subGovTx(t, false, nil, proposing, voting)
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 	requireNoSubGovProposal(t, db, proposalID)
-	_, err := db.GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
+	_, err := seedDB(t, db).GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
 	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }

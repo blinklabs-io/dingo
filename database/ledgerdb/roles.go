@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -31,23 +30,6 @@ import (
 
 // UtxoStore resolves and maintains the live UTxO set consensus reads.
 type UtxoStore interface {
-	// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep
-	// has hard-deleted spent rows at or below, or 0 when nothing has been
-	// swept. Rolling back below this slot cannot restore the UTxOs consumed
-	// above it.
-	//
-	// It fails closed: a read or parse failure is returned rather than reported
-	// as "nothing swept", because callers use it to refuse a destructive
-	// rollback and a floor that cannot be verified must not read as absent.
-	ConsumedUtxoPruneFloor(txn Txn) (uint64, error)
-	// CountUtxosConsumedUpTo counts, up to limit, the spent UTxO rows that
-	// UtxosDeleteConsumed with the same slot would remove. It reads at most
-	// limit rows, so a result equal to limit means at least that many.
-	CountUtxosConsumedUpTo(
-		ctx context.Context,
-		slot uint64,
-		limit int,
-	) (int, error)
 	// GetLiveUtxoLovelace returns the total lovelace of every live
 	// (unspent) UTxO.
 	GetLiveUtxoLovelace(txn Txn) (uint64, error)
@@ -79,62 +61,6 @@ type UtxoStore interface {
 		ctx context.Context,
 		txn Txn,
 		fn func(*models.Utxo) error,
-	) error
-	// IterateUtxoRefsAsOf is IterateLiveUtxoRefs' historical counterpart: it
-	// invokes fn once for each UTxO row live as of atSlot rather than live
-	// right now, and likewise does not resolve u.Cbor (see
-	// ledger.queryShelleyUtxoWhole, its only caller as of this writing, which
-	// resolves CBOR itself across a worker pool). As with IterateLiveUtxoRefs,
-	// the callback receives a pointer to a row whose underlying buffer is
-	// reused between callbacks -- copy out anything you intend to retain past
-	// the current call. When txn is nil a read transaction is opened
-	// internally.
-	//
-	// Callers pinning atSlot should check checkUtxoRetentionWindow (or the
-	// equivalent guarantee for their own use) first: a slot older than this
-	// node's spent-UTxO retention floor cannot be answered correctly by this
-	// query, since the rows it would need may already be pruned -- see
-	// IterateUtxosAsOf's doc comment on the MetadataStore interface.
-	IterateUtxoRefsAsOf(
-		ctx context.Context,
-		atSlot uint64,
-		txn Txn,
-		fn func(*models.Utxo) error,
-	) error
-	// IterateUtxoRefsAsOfPaged invokes fn once for each UTxO live as of atSlot,
-	// like IterateUtxoRefsAsOf, but reads pageSize rows per short read
-	// transaction instead of holding one for the whole walk. Over SQLite a
-	// transaction held for a whole-UTxO walk -- minutes on a large chain --
-	// keeps the WAL from restarting, and one walk after another keeps it
-	// growing.
-	//
-	// The pages agree with one another without sharing a snapshot because of
-	// how UTxO rows change. Blocks applied after atSlot add rows with a later
-	// added_slot and spend rows at a later slot, and the as-of predicate
-	// already excludes the first and includes the second. Spent-row pruning
-	// removes only rows spent before the prune floor, which an acquired-point
-	// pin holds at or below atSlot. Rows keep their id, so paging on it neither
-	// repeats nor skips a row. The one change that alters the as-of set is a
-	// rollback below atSlot, which noteUtxoRollback reports: this returns
-	// ErrUtxoHistoryRolledBack and the caller decides whether to retry. Callers
-	// must hold pruning at or below atSlot themselves.
-	IterateUtxoRefsAsOfPaged(
-		ctx context.Context,
-		atSlot uint64,
-		pageSize int,
-		fn func(database.UtxoRef) error,
-	) error
-	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
-	// refs as deleted at atSlot. Refs that don't match any live row are
-	// silently ignored; rollback un-deletion is handled by the existing
-	// rollback path (SetUtxosNotDeletedAfterSlot). When txn is nil a
-	// write transaction is opened, committed on success and rolled back
-	// on error via Txn.Do.
-	MarkUtxosDeletedAtSlot(
-		ctx context.Context,
-		txn Txn,
-		refs []types.UtxoKey,
-		atSlot uint64,
 	) error
 	// UtxoByRef returns the unspent output txId#outputIdx, or
 	// database.ErrUtxoNotFound when it does not exist or is spent.
@@ -178,40 +104,12 @@ type UtxoStore interface {
 		maxResults int,
 		txn Txn,
 	) ([]models.Utxo, error)
-	// UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
-	// the metadata store's GetUtxosByAddressAsOf). Rows spent at or before
-	// atSlot and later removed by consumed-UTxO cleanup are missing, so callers
-	// must reject a point below their retention floor first.
-	UtxosByAddressAsOf(
-		ctx context.Context,
-		addrs []ledger.Address,
-		atSlot uint64,
-		maxResults int,
-		txn Txn,
-	) ([]models.Utxo, error)
 	// UtxosByRefs returns the live UTxOs matching the given references in a
 	// single batch. Refs with no matching live UTxO are simply absent from the
 	// result.
 	UtxosByRefs(
 		ctx context.Context,
 		refs []models.UtxoId,
-		txn Txn,
-	) ([]models.Utxo, error)
-	// UtxosByRefsAsOf returns the UTxOs matching refs as they stood at atSlot:
-	// a ref is included when it was created at-or-before atSlot and is either
-	// still live or was spent strictly after atSlot. As with UtxosByRefs, a
-	// ref with no matching row is simply absent from the result -- but unlike
-	// UtxosByRefs, that absence is ambiguous once atSlot is older than this
-	// node's spent-UTxO retention floor: it could mean "genuinely never live
-	// at atSlot" or "was live at atSlot but its spend record has since been
-	// hard-deleted by the periodic stability-window cleanup"
-	// (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
-	// node-parity) must reject that case themselves before
-	// calling this -- see ledger's checkUtxoRetentionWindow.
-	UtxosByRefsAsOf(
-		ctx context.Context,
-		refs []models.UtxoId,
-		atSlot uint64,
 		txn Txn,
 	) ([]models.Utxo, error)
 	// UtxosByRefsBounded is UtxosByRefs with a cap on the CBOR it will load.
@@ -228,26 +126,6 @@ type UtxoStore interface {
 		maxBytes int64,
 		txn Txn,
 	) ([]models.Utxo, error)
-	// UtxosDeleteConsumed hard-deletes up to limit outputs consumed at or
-	// before slot and returns how many it removed.
-	UtxosDeleteConsumed(
-		ctx context.Context,
-		slot uint64,
-		limit int,
-		txn Txn,
-	) (int, error)
-	// UtxosDeleteSpentInBatch removes the rows of outputs that one trusted
-	// batch both created and spent, inside the transaction that applied it, so
-	// they are never committed. Every id must name a row the same transaction
-	// has already marked spent. slot is the last slot the transaction applied;
-	// the consumed-UTxO prune floor is raised to it, as UtxosDeleteConsumed
-	// does, because a rollback below it could not restore the removed rows.
-	UtxosDeleteSpentInBatch(ids []models.UtxoId, slot uint64, txn Txn) error
-	// UtxosDropSpentInBatchBlobs is UtxosDeleteSpentInBatch for a batch whose
-	// metadata rows a batch UTxO overlay already handled: it deletes the blob
-	// offset keys of ids and raises the consumed-UTxO prune floor to slot the
-	// same way, but deletes no metadata row.
-	UtxosDropSpentInBatchBlobs(ids []models.UtxoId, slot uint64, txn Txn) error
 }
 
 // AccountStore holds stake accounts, registrations, delegations and deposits.
@@ -279,18 +157,6 @@ type AccountStore interface {
 		maxSlot uint64,
 		txn Txn,
 	) (map[string]uint64, error)
-	// AccountsWitnessedAfterSlot returns the distinct reward-account
-	// credentials witnessed (via a stake-witnessing certificate or a reward
-	// withdrawal) at a slot greater than the given slot — the CIP-0163 rollback
-	// affected set. It must be called before rolled-back certificate and
-	// reward-delta rows are deleted. When txn is nil a read transaction is
-	// opened for the query; pass an existing txn to read within a wider unit of
-	// work.
-	AccountsWitnessedAfterSlot(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) ([]models.StakeCredentialRef, error)
 	// GetAccountByCredential returns an account by staking credential tag and
 	// key.
 	GetAccountByCredential(
@@ -374,6 +240,12 @@ type AccountStore interface {
 		txn Txn,
 		fn func(models.StakeDelegationEventRow) error,
 	) error
+	// IterateAppliedTransactions invokes fn for each transaction the
+	// metadata store records as applied, in unspecified order.
+	IterateAppliedTransactions(
+		txn Txn,
+		fn func(models.AppliedTransaction) error,
+	) error
 	// IterateLeiosClosureUtxoEffects invokes fn for each staked output a Leios
 	// closure transaction created or spent at a context slot before the slot
 	// it was applied at.
@@ -436,18 +308,6 @@ type AccountStore interface {
 		stakingKey []byte,
 		txn Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
-	// RenewAccountExpirations sets the CIP-0163 expirationEpoch for the given
-	// reward-account credentials. See the metadata store implementation for
-	// semantics (refs with no matching account row are ignored). When txn is
-	// nil a write transaction is opened, committed on success and rolled back
-	// on error via Txn.Do; pass an existing write txn to participate in a
-	// wider unit of work.
-	RenewAccountExpirations(
-		ctx context.Context,
-		refs []models.StakeCredentialRef,
-		expirationEpoch uint64,
-		txn Txn,
-	) error
 	// SetGenesisStakingWithDeposits stores genesis staking with the key and
 	// pool deposits that the reference ledger retains for later refunds.
 	SetGenesisStakingWithDeposits(
@@ -458,34 +318,10 @@ type AccountStore interface {
 		blockHash []byte,
 		txn Txn,
 	) error
-	// StampAllActiveAccountExpirations sets the CIP-0163 expirationEpoch for
-	// every active account row. Used once at activation to give every
-	// pre-existing account a full inactivity window from the activation epoch,
-	// including accounts witnessed before activation. Returns the number of
-	// rows stamped. When txn is nil a write transaction is opened, committed on
-	// success and rolled back on error via Txn.Do; pass an existing write txn
-	// to participate in a wider unit of work.
-	StampAllActiveAccountExpirations(
-		ctx context.Context,
-		expirationEpoch uint64,
-		txn Txn,
-	) (int64, error)
 }
 
 // RewardStore holds reward calculation inputs, outputs, pots and credit rounds.
 type RewardStore interface {
-	// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of
-	// each credential in refs, recording slot as its update. With a live
-	// UTxO source, a rollback calls it for the credentials of the outputs
-	// the rollback changes, which the metadata store cannot find itself.
-	RefreshRewardLiveStakeRefs(
-		refs []models.StakeCredentialRef,
-		slot uint64,
-		txn Txn,
-	) error
-	// RebuildRewardLiveStake recomputes the live reward aggregate of every
-	// credential as of slot.
-	RebuildRewardLiveStake(slot uint64, txn Txn) error
 	// MergeImportedPoolBlockCounts combines the per-pool block counts
 	// observed for epoch from epochStartSlot with those imported from a
 	// ledger-state snapshot, returning the merged counts and epoch total. The
@@ -562,25 +398,6 @@ type RewardStore interface {
 		sourceHash []byte,
 		txn Txn,
 	) error
-	// ClaimFallbackRewardSnapshot atomically reserves the (epoch,
-	// snapshot_type) reward snapshot marker for a fallback (non-authoritative)
-	// capture, returning false when an authoritative snapshot already occupies
-	// it so the caller abandons the fallback rather than overwriting the
-	// authoritative row. See rewardstate.ClaimFallbackSnapshot.
-	ClaimFallbackRewardSnapshot(
-		snapshot *models.RewardSnapshot,
-		txn Txn,
-	) (bool, error)
-	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that
-	// cannot persist reward inputs against the authoritative epoch-rollover
-	// capture. It returns proceed=false when an authoritative row already
-	// exists. A non-zero guard ID identifies a temporary row that the caller
-	// must delete in the same transaction before commit.
-	ClaimFallbackRewardSnapshotGuard(
-		epoch uint64,
-		snapshotType string,
-		txn Txn,
-	) (bool, uint, error)
 	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
 	// one stake credential in the credited rounds folded and returns them,
 	// for the caller to write to the account in the same transaction.
@@ -604,24 +421,6 @@ type RewardStore interface {
 	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an
 	// epoch.
 	DeleteRewardOutputsForEpoch(epoch uint64, txn Txn) error
-	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
-	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the Koios-parity pruning path, used so the observer
-	// can read reward_account_output behind the tip. API storage mode prunes
-	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
-	DeleteRewardStakeInputBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) error
-	// DeleteRewardAccountOutputsBeforeEpoch is the reward account output half
-	// of DeleteRewardStateBeforeEpoch, for a database that drained the stake
-	// inputs.
-	DeleteRewardAccountOutputsBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) error
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
 	// retained snapshot window. This is the CORE storage-mode pruning path:
 	// it deletes both reward_stake_input and reward_account_output. See
@@ -702,28 +501,6 @@ type RewardStore interface {
 	) ([]*models.AccountRewardDelta, error)
 	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
 	GetRewardAdaPots(epoch uint64, txn Txn) (*models.RewardAdaPots, error)
-	// SaveRewardLikelihoodState installs the non-myopic state visible from a
-	// completed reward boundary.
-	SaveRewardLikelihoodState(
-		state *models.RewardLikelihoodState,
-		pools []*models.RewardPoolLikelihood,
-		txn Txn,
-	) error
-	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
-	GetRewardLikelihoodStateBeforeEpoch(
-		epoch uint64,
-		txn Txn,
-	) (*models.RewardLikelihoodState, error)
-	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
-	GetRewardLikelihoodStateAtSlot(
-		slot uint64,
-		txn Txn,
-	) (*models.RewardLikelihoodState, error)
-	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
-	GetRewardPoolLikelihoods(
-		epoch uint64,
-		txn Txn,
-	) ([]*models.RewardPoolLikelihood, error)
 	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
 	GetRewardPoolInputs(
 		epoch uint64,
@@ -776,10 +553,6 @@ type RewardStore interface {
 		snapshotEpoch uint64,
 		txn Txn,
 	) (bool, error)
-	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
-	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
-	// that claimed the guard.
-	ReleaseFallbackRewardSnapshotGuard(guardID uint, txn Txn) error
 	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
 	SaveRewardAccountOutputs(
 		outputs []*models.RewardAccountOutput,
@@ -801,6 +574,33 @@ type RewardStore interface {
 	// TakeRewardEligibilityRecheck returns and clears the credentials whose
 	// registration a rollback restored since the last call.
 	TakeRewardEligibilityRecheck(txn Txn) ([]models.StakeCredentialRef, error)
+}
+
+// RewardLikelihoodStore holds the non-myopic pool-ranking state the reward
+// updates install. Only the ledger's own LedgerDB keeps it.
+type RewardLikelihoodStore interface {
+	// SaveRewardLikelihoodState installs the non-myopic state visible from a
+	// completed reward boundary.
+	SaveRewardLikelihoodState(
+		state *models.RewardLikelihoodState,
+		pools []*models.RewardPoolLikelihood,
+		txn Txn,
+	) error
+	// GetRewardLikelihoodStateBeforeEpoch returns the latest earlier state.
+	GetRewardLikelihoodStateBeforeEpoch(
+		epoch uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardLikelihoodStateAtSlot returns the state visible at a chain point.
+	GetRewardLikelihoodStateAtSlot(
+		slot uint64,
+		txn Txn,
+	) (*models.RewardLikelihoodState, error)
+	// GetRewardPoolLikelihoods returns one state's per-pool likelihoods.
+	GetRewardPoolLikelihoods(
+		epoch uint64,
+		txn Txn,
+	) ([]*models.RewardPoolLikelihood, error)
 }
 
 // PoolStore holds stake pool registrations, retirements, VRF keys and
@@ -1177,17 +977,6 @@ type PoolStore interface {
 		slot uint64,
 		txn Txn,
 	) error
-	// UpdatePoolOpCertSequenceBatched queues an observed op-cert sequence in
-	// acc. FlushBatch writes every queued observation and advances each pool's
-	// denormalized maximum inside txn.
-	UpdatePoolOpCertSequenceBatched(
-		ctx context.Context,
-		pkh lcommon.PoolKeyHash,
-		sequence uint64,
-		slot uint64,
-		acc database.BatchAccumulator,
-		txn Txn,
-	) error
 }
 
 // SnapshotStore holds per-epoch pool stake snapshots and the live stake inputs
@@ -1528,13 +1317,6 @@ type GovernanceStore interface {
 		epoch uint64,
 		txn Txn,
 	) ([]*models.GovernanceProposal, error)
-	// GetExpiredDReps returns all active DReps whose expiry epoch is at
-	// or before the given epoch.
-	GetExpiredDReps(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) ([]*models.Drep, error)
 	// GetExpiredGovernanceProposalsAt returns proposals expired at the exact
 	// epoch-boundary slot. Used by epoch replay to restore deposit-return
 	// effects.
@@ -1895,17 +1677,6 @@ type EpochStore interface {
 	// proposals that target epoch or the epoch before it, newest row
 	// first.
 	GetPParamUpdates(epoch uint64, txn Txn) ([]models.PParamUpdate, error)
-	// ReconcileAlonzoPParamsUnitAfterRecovery repairs a conservative v20
-	// classification only when commit-timestamp recovery removed every
-	// persisted Alonzo protocol-parameter row. The migration must initially
-	// treat any such row as legacy because releases before gouroboros v0.205.7
-	// stored a lossy per-byte value. Once recovery has rolled all of those rows
-	// back, however, there is no incompatible value left to protect and a
-	// genesis replay can safely persist the corrected per-word representation.
-	//
-	// Missing and unknown markers are never inferred here. They remain hard
-	// failures in checkAlonzoPParamsUnit rather than being silently blessed.
-	ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) error
 	// SaveEpochSummary saves an epoch summary.
 	SaveEpochSummary(summary *models.EpochSummary, txn Txn) error
 	// SetBlockNonce records the nonce of the block blockHash at slotNumber.
@@ -1998,14 +1769,16 @@ type ChainStore interface {
 	// intended for primary-chain membership checks that need only the canonical
 	// slot and hash at an internal block index.
 	BlockPointByIndex(blockIndex uint64, txn Txn) (common.Point, error)
+	// DeferredHeaderFloor returns the slot below which evicted
+	// deferred-header markers no longer exist, and whether one is recorded.
+	DeferredHeaderFloor() (uint64, bool, error)
 	// DeleteDeferredHeaderMarker removes the marker for key. Deleting an absent
 	// marker is not an error.
 	DeleteDeferredHeaderMarker(key string) error
 	// DeleteSyncState removes a sync state key.
 	DeleteSyncState(key string, txn Txn) error
 	// EnsureBlockInventory creates the retained-block inventory when it is
-	// absent. It is safe to call during commit-timestamp recovery and is a
-	// no-op after the inventory has been initialized.
+	// absent. It is a no-op after the inventory has been initialized.
 	EnsureBlockInventory() error
 	// GetDeferredHeaderMarkerValue returns a copy of a marker's opaque payload.
 	// found is false when no marker exists for key.
@@ -2029,12 +1802,18 @@ type ChainStore interface {
 	// state loaded without replaying the blocks below it. It fails closed on
 	// unreadable or malformed persisted state.
 	ImportedLedgerStateBoundarySlotStrict(txn Txn) (uint64, error)
+
+	// ImportedLedgerStateBoundaryHash returns, as hex, the block hash
+	// recorded with that boundary, or the empty string when none is.
+	ImportedLedgerStateBoundaryHash() (string, error)
 	// OldestRetainedSlot returns the slot of the oldest block whose body is
 	// still stored, as last computed by RefreshOldestRetainedSlot. ok is false
 	// before the first refresh, when history expiry has never run, when the
 	// bound could not be found, and after the block at or below the bound was
 	// expired or deleted, until the next refresh. It reads only memory.
 	OldestRetainedSlot() (uint64, bool)
+	// SetDeferredHeaderFloor records slot as the deferred-header floor.
+	SetDeferredHeaderFloor(slot uint64) error
 	// SetDeferredHeaderMarkerWithValue records an opaque marker payload with
 	// the same durability and isolation as SetDeferredHeaderMarker. The
 	// one-byte payload used by SetDeferredHeaderMarker remains the legacy
@@ -2107,29 +1886,6 @@ type Applier interface {
 	// BlockBatchTxnContext starts a serialized blob-only block transaction. ctx
 	// can cancel inventory admission before the backend transaction opens.
 	BlockBatchTxnContext(ctx context.Context) (Txn, error)
-	// EnableBatchUtxoOverlay attaches a batch UTxO overlay to acc for the rest
-	// of txn when the metadata plugin supports one (see
-	// metadata.BatchUtxoOverlay). It reports false, and changes nothing, when
-	// it does not.
-	EnableBatchUtxoOverlay(
-		acc database.BatchAccumulator,
-		txn Txn,
-		inputs []models.UtxoId,
-		deleteOnSpend []models.UtxoId,
-		producers [][]byte,
-	) (bool, error)
-	// FlushBatch writes accumulated metadata rows for the active metadata
-	// plugin.
-	FlushBatch(acc database.BatchAccumulator, txn Txn) error
-	// FlushBatchStakeDeltas applies pending live-stake changes while leaving
-	// the accumulator's other batched rows queued for FlushBatch.
-	FlushBatchStakeDeltas(acc database.BatchAccumulator, txn Txn) error
-	// NewBatchAccumulator creates an accumulator for the configured metadata
-	// plugin.
-	NewBatchAccumulator() database.BatchAccumulator
-	// NewValidatedBlockBatchAccumulator creates an API-detail accumulator whose
-	// consensus state remains immediate. Unsupported providers return nil.
-	NewValidatedBlockBatchAccumulator() database.BatchAccumulator
 	// PersistTransactionOffsets writes the transaction offset and produced-UTxO
 	// offset blob entries of txs from offsets, for a caller that then applies
 	// the same transactions with BatchedTxIngestOpts.OffsetsPersisted.
@@ -2155,21 +1911,6 @@ type Applier interface {
 		txs []lcommon.Transaction,
 		offsets *database.BlockIngestionResult,
 		afterBatch func() error,
-	) error
-	// SetTransactionBatchedWithOpts is the option-aware form of
-	// SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
-	SetTransactionBatchedWithOpts(
-		ctx context.Context,
-		tx lcommon.Transaction,
-		point common.Point,
-		idx uint32,
-		updateEpoch uint64,
-		pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
-		certDeposits map[int]uint64,
-		offsets *database.BlockIngestionResult,
-		acc database.BatchAccumulator,
-		txn Txn,
-		opts database.BatchedTxIngestOpts,
 	) error
 	// SetTransactionWithOpts is SetTransaction with control over UTxO ingest
 	// behavior via opts. Certified Leios endorser-block closure application
@@ -2207,6 +1948,13 @@ type TxHistory interface {
 		hash []byte,
 		txn Txn,
 	) (*models.Transaction, error)
+	// GetTransactionSlotByHash returns the slot of the applied transaction
+	// with hash, or false when the hash has no applied transaction row.
+	GetTransactionSlotByHash(
+		ctx context.Context,
+		hash []byte,
+		txn Txn,
+	) (uint64, bool, error)
 	// GetTransactionsByHashes returns transactions for the provided hashes.
 	GetTransactionsByHashes(
 		ctx context.Context,
@@ -2297,18 +2045,6 @@ type LeiosStore interface {
 	// selected provider, but a canceled caller will not continue scanning later
 	// records.
 	MaxLeiosEBSlotContext(ctx context.Context) (uint64, error)
-	// NewLeiosClosureBatchAccumulator creates an API-detail accumulator when
-	// the metadata provider supports ordered closure application; nil selects
-	// the existing immediate path.
-	NewLeiosClosureBatchAccumulator() database.BatchAccumulator
-	// PrepareLeiosClosureBatch prepares the next ordered closure window.
-	// Providers without window support retain the complete-closure batching
-	// behavior.
-	PrepareLeiosClosureBatch(
-		acc database.BatchAccumulator,
-		txn Txn,
-		transactions []lcommon.Transaction,
-	) (int, error)
 	// SetLeiosEB persists an endorser block's manifest and, when txsRaw is
 	// non-nil, its transaction bodies in a SINGLE blob-store transaction (one
 	// commit), merging what SetLeiosEBManifest + SetLeiosEBTxs do in two, for
@@ -2340,8 +2076,9 @@ type ImportedBlockRows struct {
 }
 
 // ImportedBlockRowsReader is implemented by a LedgerDB that lists every epoch
-// the metadata store holds imported block counts for. A drained store holds
-// none and the read fails with database.ErrFamilyDrained.
+// the metadata store holds imported block counts for. A database with no
+// metadata store holds none and the read fails with
+// database.ErrNoMetadataStore.
 type ImportedBlockRowsReader interface {
 	ImportedBlockRows(txn Txn) (map[uint64]ImportedBlockRows, error)
 }
@@ -2359,8 +2096,8 @@ type RewardJournalRow struct {
 }
 
 // RewardJournalReader is implemented by a LedgerDB that lists the reward
-// journal in the order it was written. A drained store holds none and the read
-// fails with database.ErrFamilyDrained.
+// journal in the order it was written. A database with no metadata store
+// holds none and the read fails with database.ErrNoMetadataStore.
 type RewardJournalReader interface {
 	EachRewardJournalRow(txn Txn, fn func(RewardJournalRow) error) error
 }
@@ -2409,8 +2146,8 @@ type DRepHistoryRows struct {
 }
 
 // DRepHistoryRowsReader is implemented by a LedgerDB that lists the DRep
-// history tables. A drained store holds none and the read fails with
-// database.ErrFamilyDrained.
+// history tables. A database with no metadata store holds none and the read
+// fails with database.ErrNoMetadataStore.
 type DRepHistoryRowsReader interface {
 	DRepHistoryRows(txn Txn) (DRepHistoryRows, error)
 }

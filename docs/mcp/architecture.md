@@ -10,7 +10,7 @@ subsystem.
 
 The visual topology below illustrates the Dingo MCP subsystem architecture,
 including ingress transports, security barriers, tool registries, live node
-services, and SQLite metadata. The editable diagram source is
+services, and the IndexerDB's SQLite store. The editable diagram source is
 [`architecture.excalidraw`](architecture.excalidraw); the SVG is its
 documentation preview.
 
@@ -20,7 +20,8 @@ documentation preview.
 
 Cardano tools use both injected node services and the read-only SQL pool.
 Exact-address queries also resolve output CBOR through the injected database
-and its configured blob provider. The SQL pool reads the active metadata file.
+and its configured blob provider. The SQL pool reads the IndexerDB's file; a
+core node has no IndexerDB and no SQL store to read.
 
 > **Diagram source:** Edit `architecture.excalidraw` in Excalidraw, then export
 > it as SVG to `architecture.svg` to update this preview.
@@ -60,7 +61,7 @@ api/mcp/
   as `8088` enables it in either storage mode. This makes the endpoint opt-in
   without restricting callers. Zero does not select an ephemeral port.
 - **Connection Management**: Opens a separate read-only pool at the active
-  metadata provider's `SQLitePath()` using `modernc.org/sqlite`, `mode=ro`,
+  IndexerDB's metadata provider's `SQLitePath()` using `modernc.org/sqlite`, `mode=ro`,
   `_pragma=query_only(1)`, and `_pragma=busy_timeout(5000)`. This reads the live
   database file, not a replica. Providers without a file-backed SQLite path
   leave SQL-dependent tools unavailable.
@@ -185,7 +186,7 @@ investigative and diagnostic procedures via `prompts/list` and `prompts/get`:
 
 | Prompt | Title | Key Arguments | Workflow Summary |
 | :--- | :--- | :--- | :--- |
-| `diagnose_node_health` | Diagnose Cardano Node Sync & Health | `detailed` (bool) | Inspects the reported ledger or metadata tip, sync status, protocol minor 69 fingerprint, and any forge fence in `sync_state`; it does not calculate epoch progress or assess storage health. |
+| `diagnose_node_health` | Diagnose Cardano Node Sync & Health | `detailed` (bool) | Inspects the reported ledger or metadata tip, sync status, protocol minor 69 fingerprint, and the IndexerDB's sync progress; the forge fence is block-store chain state that no MCP tool reads. It does not calculate epoch progress or assess storage health. |
 | `simulate_and_diagnose_tx` | Simulate and Diagnose Plutus Transaction | `tx_cbor` (required), `purpose` (optional) | Dry-runs Plutus redeemers in CEK VM, evaluates CPU/memory steps, checks collateral, and validates datums. |
 | `audit_pool_rewards` | Audit Stake Pool Performance & Rewards | `pool_id` (required), `epoch` (optional) | Audits recorded block/reward snapshots and queries the current active account count for the pool. The account table does not provide delegated stake totals. |
 | `track_asset_portfolio` | Track Cardano Native Asset & Circulation | `policy_id` (required 56-hex), `asset_name` (optional, max 32 bytes) | Reads asset metadata and pages matching UTxOs. The asset-info count is holding UTxOs, not unique addresses; it does not calculate holder concentration. |
@@ -218,7 +219,7 @@ around four concrete semantic axes:
    distinguishing state carriers (UTxOs/Datums), state transitions
    (Transactions/Redeemers), and state machine guards (Plutus scripts / CIP-1694
    governance).
-4. **Execution Cost**: Tools read live services, query SQLite metadata, load
+4. **Execution Cost**: Tools read live services, query the IndexerDB, load
    output CBOR through the database layer, or evaluate Plutus scripts. Cost
    depends on the query, retained data, and node load; these categories provide
    no latency guarantees.
@@ -284,7 +285,9 @@ When updating MCP tools or architecture:
 
 ## Metadata ownership and transport safeguards
 
-Composition injects the active database into MCP. The SQLite provider records
+Composition injects the database the node gives its APIs into MCP: the
+IndexerDB on an API node, and on a core node the ledger's database, which
+opens no SQL store. The SQLite provider records
 its resolved file location on `sqlstore.Store`; MCP uses its optional
 `SQLitePath()` capability to open a separate `mode=ro`, `query_only` connection.
 It never reconstructs a file location from the global database directory. MCP

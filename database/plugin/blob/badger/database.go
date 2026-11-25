@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/internal/badgermem"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -478,9 +479,17 @@ func (db *BlobStoreBadger) open() error {
 			WithValueThreshold(db.valueThreshold).
 			WithCompression(db.badgerCompression()).
 			WithZSTDCompressionLevel(db.compressionLevel)
-		blobDb, err = badger.Open(badgerOpts)
+		var retried bool
+		blobDb, retried, err = badgermem.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open on-disk: %w", err)
+		}
+		// The store opens before init installs the discard logger.
+		if retried && db.logger != nil {
+			db.logger.Warn(
+				"reopened badger store after an empty memtable file left by an interrupted shutdown",
+				"dir", blobDir,
+			)
 		}
 	}
 	db.db = blobDb

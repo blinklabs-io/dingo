@@ -1519,7 +1519,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -1604,7 +1604,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger:       logger,
 	})
@@ -2183,28 +2183,9 @@ func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
 	require.Equal(t, int32(total), handled.Load())
 }
 
-// TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates covers the one
-// piece of the phase 2 gate-enforcement wiring that is reachable without
-// booting a full Node: nodeSettingsGateValues, the assembly function Run
-// calls from both the normal-startup call site and the deferred,
-// post-recovery call site. Testing it here is exactly what makes "factor
-// so both call sites use the same values" a real guarantee rather than an
-// aspiration -- a future edit that changes one call site's inputs without
-// updating this function would be caught here.
-//
-// This does not, and cannot without booting a real Node through Run,
-// exercise the control flow itself: that dbNeedsRecovery defers the call
-// rather than skipping it, and that the deferred call runs immediately
-// after RecoverCommitTimestampConflict and before history expiry, the
-// Midnight indexer, or any network listener starts. Run is a single large
-// method whose body constructs the ledger state, event bus, chain
-// selector, and every network listener as a side effect of reaching that
-// code, so isolating just the recovery-then-enforce sequence would require
-// either duplicating most of Run's setup or refactoring Run to extract a
-// narrower seam -- out of scope for this fix. That gap is a known,
-// explicitly accepted one (see the coordinator's note deferring a
-// DevNet/integration-level test of the real Node.Run wiring), not a gap
-// this test is pretending to close.
+// TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates covers
+// nodeSettingsGateValues, the phase 2 gate values Run passes to
+// EnforceNodeSettings.
 func TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates(t *testing.T) {
 	t.Parallel()
 
@@ -2397,7 +2378,7 @@ func newStartupCleanupProducerNodeWithGenesisStart(
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      chainManager,
 		EventBus:          eventBus,
 		CardanoNodeConfig: cardanoCfg,
@@ -2677,75 +2658,6 @@ func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
 	require.Equal(t, "", effectiveBarkHost("", false))
 	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
 	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
-}
-
-func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x51
-	missingStakeKey := make([]byte, 28)
-	missingStakeKey[0] = 0x52
-	_, err = raw.Exec(`
-INSERT INTO account (staking_key, pool, added_slot, active)
-VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
-		stakeKey, make([]byte, 28),
-		missingStakeKey, make([]byte, 28),
-	)
-	require.NoError(t, err)
-	// Simulate a post-upgrade write that populated only one credential. The
-	// startup check must detect the missing canonical credential, not merely
-	// test whether reward_live_stake is empty.
-	_, err = raw.Exec(`
-INSERT INTO reward_live_stake
-    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
-     registered, updated_slot)
-VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
-		stakeKey,
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
-
-	n := &Node{
-		db: db,
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	n.utxoSetReconciled = true
-	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
-
-	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.False(t, needed)
-	for _, key := range [][]byte{stakeKey, missingStakeKey} {
-		var live models.RewardLiveStake
-		require.NoError(t, raw.QueryRow(`
-SELECT staking_key, credential_tag, registered, updated_slot
-FROM reward_live_stake
-WHERE credential_tag = ? AND staking_key = ?`,
-			0, key,
-		).Scan(
-			&live.StakingKey,
-			&live.CredentialTag,
-			&live.Registered,
-			&live.UpdatedSlot,
-		))
-		require.Equal(t, uint64(100), live.UpdatedSlot)
-	}
 }
 
 func newNodeTestConnId(id uint) ouroboros.ConnectionId {
@@ -4415,109 +4327,42 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	)
 }
 
-// seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
-// reward_live_stake aggregate covers only one of two registered credentials,
-// which is the state RewardLiveStakeNeedsBackfill is meant to detect.
-func seedIncompleteRewardLiveStake(
-	t *testing.T,
-	db *database.Database,
-) {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x51
-	missingStakeKey := make([]byte, 28)
-	missingStakeKey[0] = 0x52
-	_, err = raw.Exec(`
-INSERT INTO account (staking_key, pool, added_slot, active)
-VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
-		stakeKey, make([]byte, 28),
-		missingStakeKey, make([]byte, 28),
-	)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO reward_live_stake
-    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
-     registered, updated_slot)
-VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
-		stakeKey,
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-}
-
-// TestBackfillRewardLiveStakeSkipsScanWhenConfigured pins the opt-out: with
-// the flag set the whole-UTxO consistency scan must not run, so a database
-// that genuinely needs a backfill is left untouched rather than rebuilt.
-// Without the flag the sibling test above rebuilds the same fixture, so this
-// fails if the flag ever stops being honored.
-func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
+// TestCheckStakeSnapshotProvenanceRefusesOlderAccounting pins that a LedgerDB
+// holding a stake snapshot from an older accounting version fails closed,
+// because such a database cannot be safely reconstructed.
+func TestCheckStakeSnapshotProvenanceRefusesOlderAccounting(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	seedIncompleteRewardLiveStake(t, db)
-
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
+	set := openTestUtxoSet(t)
+	tip := ocommon.NewPoint(100, make([]byte, 32))
+	require.NoError(t, set.ApplyLedgerChanges(&tip, ledger.LedgerChanges{
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:              650,
+				SnapshotType:       models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:        make([]byte, 28),
+				CapturedSlot:       100,
+				CalculationVersion: models.RewardStakeCalculationVersion - 1,
+			},
+		}},
+	}))
 
 	n := &Node{
-		db: db,
+		db:      db,
+		utxoSet: set,
 		config: Config{
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
 			),
-			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
 	n.utxoSetReconciled = true
-	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
-
-	// Still needed: the scan was skipped, so no rebuild happened.
-	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
-}
-
-// TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping pins the boundary
-// of the opt-out: the flag suppresses only the reward_live_stake scan, never
-// the stake-snapshot provenance probe, which fails closed because such a
-// database cannot be safely reconstructed.
-func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_stake_snapshot
-    (epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-     delegator_count, captured_slot, calculation_version)
-VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
-		650, make([]byte, 28), models.RewardStakeCalculationVersion-1,
-	)
-	require.NoError(t, err)
-
-	n := &Node{
-		db: db,
-		config: Config{
-			logger: slog.New(
-				slog.NewTextHandler(io.Discard, nil),
-			),
-			skipRewardLiveStakeBackfillCheck: true,
-		},
-	}
-	n.utxoSetReconciled = true
-	err = n.backfillRewardLiveStake(context.Background())
+	err = n.checkStakeSnapshotProvenance()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
 }
@@ -4603,6 +4448,39 @@ func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
 	)
 	assert.True(t, cfg.AdvertisedTipStale(staleTip), "older than the window")
 	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
+}
+
+func TestChainsyncConfigDemotesPraosPeerFarBehindLocalTip(t *testing.T) {
+	t.Parallel()
+
+	const securityParam = uint64(20)
+	n := &Node{config: NewConfig()}
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			SecurityParam:             securityParam,
+			DisableEventSubscriptions: true,
+		},
+	)
+	n.chainSelector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(1000, []byte("local")),
+		BlockNumber: 1000,
+	})
+	state := chainsync.NewStateWithConfig(nil, nil, n.chainsyncConfig())
+	connId := newNodeTestConnId(3105)
+	require.True(t, state.AddClientConnId(connId))
+	require.True(t, state.RecordClientAdvertisedTip(connId, ochainsync.Tip{
+		Point:       ocommon.NewPoint(979, []byte("lagging")),
+		BlockNumber: 979,
+	}))
+
+	assert.Equal(
+		t,
+		[]ouroboros.ConnectionId{connId},
+		state.DemoteStaleAdvertisingClients(),
+	)
+	observabilityOnly, tracked := state.ClientObservabilityOnly(connId)
+	require.True(t, tracked)
+	assert.True(t, observabilityOnly)
 }
 
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.

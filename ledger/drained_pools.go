@@ -45,8 +45,8 @@ type poolBook struct {
 	lister PoolHistoryLister
 }
 
-// poolBook returns the book for a drained pools-history family, or
-// ErrDrainedFamilyUnserved when the set cannot answer every read.
+// poolBook returns the set's pool book, or
+// ErrLedgerStateUnserved when the set cannot answer every read.
 func (ls *LedgerState) poolBook(txn ledgerdb.Txn) (*poolBook, error) {
 	state := ls.poolServing(txn)
 	hist := ls.poolHistoryServes(txn)
@@ -677,7 +677,7 @@ func (b *poolBook) effective(
 	return out, nil
 }
 
-// retiringAtEpoch is GetPoolsRetiringAtEpoch for a drained family. A retiring
+// retiringAtEpoch is GetPoolsRetiringAtEpoch read from the set. A retiring
 // pool whose state is gone cannot be refunded from the set.
 func (b *poolBook) retiringAtEpoch(
 	epoch, boundary uint64,
@@ -693,7 +693,7 @@ func (b *poolBook) retiringAtEpoch(
 			return err
 		}
 		if st == nil {
-			return drainedUnserved(nodesettings.FamilyPoolsHistory)
+			return ledgerStateUnserved(nodesettings.FamilyPoolsHistory)
 		}
 		var held uint64
 		if st.DepositHeld != nil {
@@ -711,8 +711,8 @@ func (b *poolBook) retiringAtEpoch(
 }
 
 // leiosCertifies reports whether the chain may hold a Leios certified pool
-// registration or retirement, which takes effect at a certifying slot the set
-// does not keep, so pool reads stay on the metadata store. Certificates exist
+// registration or retirement, which takes effect at a certifying slot the
+// pool states do not keep. Certificates exist
 // only from the Dijkstra era on: every node configures a certificate
 // validator, so the validator alone does not mean one was ever applied. A
 // ledger that has published no era yet is treated as certifying.

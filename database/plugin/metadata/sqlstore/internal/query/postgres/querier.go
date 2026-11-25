@@ -6,17 +6,14 @@ package postgresquery
 
 import (
 	"context"
-	"database/sql"
 )
 
 type Querier interface {
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
-	GetCommitTimestamp(ctx context.Context) (sql.NullInt64, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
 	GetNodeSettingsGates(ctx context.Context) ([]GetNodeSettingsGatesRow, error)
 	InsertNodeSettings(ctx context.Context, arg InsertNodeSettingsParams) (int64, error)
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
-	SetCommitTimestamp(ctx context.Context, timestamp sql.NullInt64) error
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
 }
 

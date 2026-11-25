@@ -29,8 +29,10 @@ type MeshChain interface {
 	Tip() ochainsync.Tip
 }
 
-// MeshDatabase is the subset of database.Database needed by the Mesh server.
-// All calls implicitly use a nil transaction (auto-transaction per method).
+// MeshDatabase is the subset of database.Database needed by the Mesh server:
+// blocks, transactions and the address UTxO reads, all served from the
+// IndexerDB. All calls implicitly use a nil transaction (auto-transaction per
+// method).
 type MeshDatabase interface {
 	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	// BlockByIndex looks up a block by its Cardano block height, which is
@@ -40,20 +42,13 @@ type MeshDatabase interface {
 	BlockByIndex(ctx context.Context, height uint64) (models.Block, error)
 	GetTransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	GetTransactionsByBlockHash(ctx context.Context, hash []byte) ([]models.Transaction, error)
-}
-
-// MeshLedgerState is the subset of ledger.LedgerState needed by the Mesh server.
-type MeshLedgerState interface {
-	GetCurrentPParams() lcommon.ProtocolParameters
-	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
-	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(
 		ctx context.Context,
 		addrs []lcommon.Address,
 	) ([]models.Utxo, error)
 	// ScanUtxosByAddress visits every UTxO matching q's exact address
 	// patterns in bounded pages from one snapshot and returns the tip stored
-	// in that snapshot, as ledger.LedgerState.ScanUtxosByAddress does.
+	// in that snapshot.
 	ScanUtxosByAddress(
 		ctx context.Context,
 		q *models.UtxoWithOrderingQuery,
@@ -68,6 +63,13 @@ type MeshLedgerState interface {
 		addr lcommon.Address,
 		slot uint64,
 	) (models.AddressBalance, error)
+}
+
+// MeshLedgerState is the subset of ledger.LedgerState needed by the Mesh server.
+type MeshLedgerState interface {
+	GetCurrentPParams() lcommon.ProtocolParameters
+	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
+	SlotToTime(slot uint64) (time.Time, error)
 }
 
 // MeshSyncProgress is an optional ledger capability for network/status.

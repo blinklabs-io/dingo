@@ -346,9 +346,6 @@ func (s *Store) GetPointerStakeInputsForPools(
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
-	if err := s.refuseDrained("account", "stake_registration"); err != nil {
-		return nil, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(

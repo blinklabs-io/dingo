@@ -33,7 +33,7 @@ func TestTruncateAfterSlotKeepsImportedUtxoAtMithrilFloor(t *testing.T) {
 	const anchor, target = uint64(100), uint64(50)
 	truncate := func(t *testing.T, floor uint64) bool {
 		t.Helper()
-		db := newOnDiskTestDB(t)
+		db := newOnDiskTestDBAs(t, RoleReleased)
 		block := testIndexedBlock(target, 1, 0x15)
 		require.NoError(t, db.BlockCreate(block, nil))
 		imported := models.Utxo{
@@ -52,7 +52,7 @@ func TestTruncateAfterSlotKeepsImportedUtxoAtMithrilFloor(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *Txn) error {
-			_, _, err := db.TruncateAfterSlot(
+			_, _, err := db.RevertStoredLedgerAfterSlot(
 				context.Background(),
 				ocommon.Point{Slot: target, Hash: block.Hash},
 				floor,

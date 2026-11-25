@@ -78,17 +78,10 @@ func (s *reservingSnapshotMetadata) GetTip(
 	return s.tip, nil
 }
 
-// Transaction and SetCommitTimestamp exist only so the tests below can open
+// Transaction exists only so the tests below can open
 // and commit an ordinary read-write Txn against this store.
 func (s *reservingSnapshotMetadata) Transaction(context.Context) types.Txn {
 	return &commitFailingTxn{}
-}
-
-func (*reservingSnapshotMetadata) SetCommitTimestamp(
-	int64,
-	types.Txn,
-) error {
-	return nil
 }
 
 // reservingSnapshotBlob records into the same ordered event list as the
@@ -96,6 +89,7 @@ func (*reservingSnapshotMetadata) SetCommitTimestamp(
 type reservingSnapshotBlob struct {
 	blob.BlobStore
 	owner *reservingSnapshotMetadata
+	tip   ochainsync.Tip
 }
 
 func (b *reservingSnapshotBlob) NewTransaction(readWrite bool) types.Txn {
@@ -105,8 +99,11 @@ func (b *reservingSnapshotBlob) NewTransaction(readWrite bool) types.Txn {
 	return &commitFailingTxn{}
 }
 
-func (*reservingSnapshotBlob) SetCommitTimestamp(int64, types.Txn) error {
-	return nil
+// Get answers the snapshot's tip read.
+func (b *reservingSnapshotBlob) Get(types.Txn, []byte) ([]byte, error) {
+	b.owner.record("blob tip")
+	value, err := encodeTip(b.tip)
+	return []byte(value), err
 }
 
 func (*reservingSnapshotBlob) Sync() error { return nil }
@@ -135,10 +132,12 @@ func TestNewReadSnapshotContextBeginsTheReservedReadTransaction(t *testing.T) {
 	t.Parallel()
 
 	wantTip := ochainsync.Tip{BlockNumber: 42}
-	store := &reservingSnapshotMetadata{tip: wantTip}
+	store := &reservingSnapshotMetadata{}
 	db := &Database{
 		metadata: store,
-		blobRef:  newBlobStoreRef(&reservingSnapshotBlob{owner: store}),
+		blobRef: newBlobStoreRef(
+			&reservingSnapshotBlob{owner: store, tip: wantTip},
+		),
 	}
 
 	txn, tip, err := NewReadSnapshotContext(t.Context(), db)
@@ -150,8 +149,8 @@ func TestNewReadSnapshotContextBeginsTheReservedReadTransaction(t *testing.T) {
 		[]string{
 			"reserve read",
 			"begin reserved",
-			"metadata tip",
 			"blob transaction",
+			"blob tip",
 		},
 		store.recorded(),
 		"a reserving store must be anchored through its reservation, not through ReadTransaction",
@@ -222,8 +221,8 @@ func TestNewReadSnapshotContextReservesBeforeTakingCommitBarrier(
 		[]string{
 			"reserve read",
 			"begin reserved",
-			"metadata tip",
 			"blob transaction",
+			"blob tip",
 		},
 		store.recorded(),
 	)

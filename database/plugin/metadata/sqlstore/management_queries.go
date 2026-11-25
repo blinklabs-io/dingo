@@ -16,7 +16,6 @@ package sqlstore
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	mysqlquery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/mysql"
@@ -25,8 +24,6 @@ import (
 )
 
 type managementQueries interface {
-	getCommitTimestamp(context.Context) (sql.NullInt64, error)
-	setCommitTimestamp(context.Context, sql.NullInt64) error
 	getNodeSettings(context.Context) (string, string, error)
 	insertNodeSettings(context.Context, string, string) (int64, error)
 	backfillNodeSettingsNetwork(
@@ -72,19 +69,6 @@ func newManagementQueries(
 
 type sqliteManagementQueries struct {
 	queries *sqlitequery.Queries
-}
-
-func (q sqliteManagementQueries) getCommitTimestamp(
-	ctx context.Context,
-) (sql.NullInt64, error) {
-	return q.queries.GetCommitTimestamp(ctx)
-}
-
-func (q sqliteManagementQueries) setCommitTimestamp(
-	ctx context.Context,
-	timestamp sql.NullInt64,
-) error {
-	return q.queries.SetCommitTimestamp(ctx, timestamp)
 }
 
 func (q sqliteManagementQueries) getNodeSettings(
@@ -175,19 +159,6 @@ type postgresManagementQueries struct {
 	queries *postgresquery.Queries
 }
 
-func (q postgresManagementQueries) getCommitTimestamp(
-	ctx context.Context,
-) (sql.NullInt64, error) {
-	return q.queries.GetCommitTimestamp(ctx)
-}
-
-func (q postgresManagementQueries) setCommitTimestamp(
-	ctx context.Context,
-	timestamp sql.NullInt64,
-) error {
-	return q.queries.SetCommitTimestamp(ctx, timestamp)
-}
-
 func (q postgresManagementQueries) getNodeSettings(
 	ctx context.Context,
 ) (string, string, error) {
@@ -274,19 +245,6 @@ func (q postgresManagementQueries) insertNodeSettingsGateIfAbsent(
 
 type mysqlManagementQueries struct {
 	queries *mysqlquery.Queries
-}
-
-func (q mysqlManagementQueries) getCommitTimestamp(
-	ctx context.Context,
-) (sql.NullInt64, error) {
-	return q.queries.GetCommitTimestamp(ctx)
-}
-
-func (q mysqlManagementQueries) setCommitTimestamp(
-	ctx context.Context,
-	timestamp sql.NullInt64,
-) error {
-	return q.queries.SetCommitTimestamp(ctx, timestamp)
 }
 
 func (q mysqlManagementQueries) getNodeSettings(

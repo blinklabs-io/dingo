@@ -24,14 +24,14 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-const syncStateSchedulePrefix = "leader_schedule"
-
-type syncStateStore interface {
-	GetSyncState(key string, txn types.Txn) (string, error)
-	SetSyncState(key, value string, txn types.Txn) error
+// chainStateStore is the block store's chain state, where the schedules are
+// kept beside the blocks they lead.
+type chainStateStore interface {
+	ChainStateValue(name string) (string, error)
+	SetChainStateSynced(name, value string) error
 }
 
-type syncStateScheduleRecord struct {
+type chainStateScheduleRecord struct {
 	FormatVersion          int      `json:"format_version"`
 	ConsensusIdentity      string   `json:"consensus_identity,omitempty"`
 	Epoch                  uint64   `json:"epoch"`
@@ -46,29 +46,30 @@ type syncStateScheduleRecord struct {
 	LeaderSlots            []uint64 `json:"leader_slots"`
 }
 
-// syncStateScheduleStore persists schedules in metadata sync state.
-type syncStateScheduleStore struct {
-	store syncStateStore
+// chainStateScheduleStore persists schedules in the block store's chain state.
+type chainStateScheduleStore struct {
+	store chainStateStore
 }
 
-// NewSyncStateScheduleStore creates a ScheduleStore backed by sync state.
-func NewSyncStateScheduleStore(store syncStateStore) ScheduleStore {
+// NewChainStateScheduleStore creates a ScheduleStore backed by the block
+// store's chain state.
+func NewChainStateScheduleStore(store chainStateStore) ScheduleStore {
 	if store == nil {
 		return nil
 	}
-	return &syncStateScheduleStore{store: store}
+	return &chainStateScheduleStore{store: store}
 }
 
 // LoadSchedule returns a previously persisted leader schedule, if present.
-func (s *syncStateScheduleStore) LoadSchedule(
+func (s *chainStateScheduleStore) LoadSchedule(
 	epoch uint64,
 	poolId lcommon.PoolKeyHash,
 ) (*Schedule, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	key := syncStateScheduleKey(epoch, poolId)
-	raw, err := s.store.GetSyncState(key, nil)
+	key := chainStateScheduleKey(epoch, poolId)
+	raw, err := s.store.ChainStateValue(key)
 	if err != nil {
 		return nil, fmt.Errorf("load schedule %q: %w", key, err)
 	}
@@ -76,7 +77,7 @@ func (s *syncStateScheduleStore) LoadSchedule(
 		return nil, nil
 	}
 
-	var record syncStateScheduleRecord
+	var record chainStateScheduleRecord
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return nil, fmt.Errorf("decode schedule %q: %w", key, err)
 	}
@@ -143,11 +144,11 @@ func (s *syncStateScheduleStore) LoadSchedule(
 }
 
 // SaveSchedule persists a computed leader schedule.
-func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
+func (s *chainStateScheduleStore) SaveSchedule(schedule *Schedule) error {
 	if s == nil || s.store == nil || schedule == nil {
 		return nil
 	}
-	record := syncStateScheduleRecord{
+	record := chainStateScheduleRecord{
 		FormatVersion:     schedule.FormatVersion,
 		ConsensusIdentity: schedule.ConsensusIdentity,
 		Epoch:             schedule.Epoch,
@@ -171,20 +172,20 @@ func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
 			err,
 		)
 	}
-	key := syncStateScheduleKey(schedule.Epoch, schedule.PoolId)
-	if err := s.store.SetSyncState(key, string(payload), nil); err != nil {
+	key := chainStateScheduleKey(schedule.Epoch, schedule.PoolId)
+	if err := s.store.SetChainStateSynced(key, string(payload)); err != nil {
 		return fmt.Errorf("save schedule %q: %w", key, err)
 	}
 	return nil
 }
 
-func syncStateScheduleKey(
+func chainStateScheduleKey(
 	epoch uint64,
 	poolId lcommon.PoolKeyHash,
 ) string {
 	return fmt.Sprintf(
-		"%s:%s:%d",
-		syncStateSchedulePrefix,
+		"%s%s:%d",
+		types.LeaderScheduleChainStatePrefix,
 		hex.EncodeToString(poolId[:]),
 		epoch,
 	)

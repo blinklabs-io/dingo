@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -39,9 +38,8 @@ import (
 type DingoDBConfig struct {
 	// Plugin is the metadata storage backend: "sqlite" (default), "postgres", or "mysql".
 	Plugin string
-	// DataDir is the Dingo node data directory.
-	// For SQLite this must contain metadata.sqlite; for other plugins it is only
-	// used to resolve the default cache path and is not required for DB access.
+	// DataDir is the directory of the SQLite IndexerDB, which must contain
+	// metadata.sqlite. Other plugins do not read it.
 	DataDir string
 	// DSN is the connection string for postgres and mysql plugins.
 	// Examples:
@@ -73,8 +71,8 @@ type DingoEpochData struct {
 	Fees         string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
-	// epoch — see ledger/reward_calculation.go:389,1955 and
-	// ledger/rewards/rewards.go's Pots type, which carries no "rewards" field
+	// epoch — see ledger/epochengine/reward_calculation.go, where each round
+	// writes it, and ledger/rewards/rewards.go's Pots type, which carries no "rewards" field
 	// forward between epochs). Koios's /totals.reward, by contrast, is a
 	// monotonically increasing cumulative accumulator (verified against live
 	// preview data — see CompareEpochTotals), not a per-epoch snapshot. Since
@@ -175,7 +173,7 @@ type DingoPoolEpochData struct {
 	// decimal string) at the stake epoch (K-1) — reward_pool_output and the
 	// reward_pool_input row it was computed alongside always share the same
 	// Epoch value in Dingo's schema (see reward_calculation.go's
-	// stakeRewardEpochsForNewEpoch: both are read/written at
+	// StakeRewardEpochsForNewEpoch: both are read/written at
 	// epochs.snapshot).
 	MemberRewardTotal string
 	// PoolUnspendable is reward_pool_output.unspendable at the stake epoch:
@@ -190,13 +188,13 @@ type DingoPoolEpochData struct {
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
 	// spendable member reward, rather than the table having been pruned out
-	// from under the read (cleanupOldSnapshots retains reward_account_output
-	// without bound only in api storage mode).
+	// from under the read (the IndexerDB keeps every epoch's rows; the
+	// LedgerDB keeps only its reward window).
 	SpendableMemberRewardPresent bool
 	// SpendableMemberRewardTotal is the sum of reward_account_output.amount
 	// over the stake epoch's member rows the ledger actually credits —
 	// spendable and not guarded by CIP-0163 expiry, the same pair
-	// applyStakeRewards tests before crediting. It is compared with the sum of
+	// ApplyStakeRewards tests before crediting. It is compared with the sum of
 	// Koios's per-account member reward rows for the pool (CompareMemberRewards),
 	// not with pool_history.member_rewards, which is a cached total that can
 	// include rewards the ledger forfeited.
@@ -239,8 +237,9 @@ type DingoPoolEpochData struct {
 // "leader" row. Matches Koios /account_reward_history's own "member" type.
 const rewardTypeMember = "member"
 
-// DingoDB reads reward state directly from Dingo's metadata database.
-// It supports all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
+// DingoDB reads reward state directly from the tables of Dingo's IndexerDB,
+// which the IndexerDB writer fills from the ledger on an API node. It supports
+// all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
 type DingoDB struct {
 	db      *sql.DB
 	dialect string
@@ -291,65 +290,7 @@ func OpenDingoDB(cfg DingoDBConfig) (*DingoDB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping dingo metadata: %w", err)
 	}
-	if err := refuseDrainedReads(db, cfg.Plugin); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	return &DingoDB{db: db, dialect: cfg.Plugin}, nil
-}
-
-func gateTableExists(db *sql.DB) bool {
-	var probe int
-	err := db.QueryRow(`SELECT 1 FROM node_settings_gate LIMIT 1`).Scan(&probe)
-	return err == nil || errors.Is(err, sql.ErrNoRows)
-}
-
-// ErrDrainedDatabase is returned by OpenDingoDB for a database that has
-// deleted the SQL rows of a ledger-state family DingoDB reads.
-var ErrDrainedDatabase = errors.New(
-	"the metadata database has drained a ledger-state family this source reads",
-)
-
-// dingoDBFamilies are the families whose tables DingoDB queries directly.
-var dingoDBFamilies = nodesettings.FamilyMask(0).
-	With(nodesettings.FamilyEpochs).
-	With(nodesettings.FamilySummaries).
-	With(nodesettings.FamilyEraSwitch).
-	With(nodesettings.FamilyPParamsUpdates).
-	With(nodesettings.FamilyPoolsHistory).
-	With(nodesettings.FamilyAccounts).
-	With(nodesettings.FamilyGovernance).
-	With(nodesettings.FamilyRewardInputs).
-	With(nodesettings.FamilyRewardOutputs)
-
-// refuseDrainedReads reads the drain latch and refuses a database that has
-// deleted rows DingoDB would read as empty. A database whose gate table does
-// not exist predates the latch and has drained nothing.
-func refuseDrainedReads(db *sql.DB, dialect string) error {
-	var value string
-	err := db.QueryRow(
-		rebind(`SELECT value FROM node_settings_gate WHERE name = ?`, dialect),
-		nodesettings.LedgerStateDrainedGateName,
-	).Scan(&value)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
-		if !gateTableExists(db) {
-			return nil
-		}
-		return fmt.Errorf("read ledger-state latch: %w", err)
-	}
-	mask, err := nodesettings.DecodeFamilyMask(value)
-	if err != nil {
-		return err
-	}
-	if hit := mask & dingoDBFamilies; hit != 0 {
-		return fmt.Errorf(
-			"%w: %v", ErrDrainedDatabase, hit.Families(),
-		)
-	}
-	return nil
 }
 
 // Close releases the database connection.
@@ -638,7 +579,7 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 //     active-stake/reward-calculation basis for K. reward_pool_input's
 //     DelegatedStake/DelegatorCount/Margin/FixedCost and
 //     reward_pool_output's MemberRewardTotal are all read at this epoch — reward_calculation.go's
-//     stakeRewardEpochsForNewEpoch computes both from the same
+//     StakeRewardEpochsForNewEpoch computes both from the same
 //     epochs.snapshot value, so input and output always share one Epoch.
 //   - paramEpoch (K+1): reward_pool_input's BlocksProduced is captured onto
 //     the row for the epoch *after* the one it describes — see
@@ -659,9 +600,11 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 // independent of pool count. ctx is forwarded to the DB driver so that a
 // cancelled context aborts the query.
 // GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
-// mark pool_stake_snapshot rows for epoch. See the interface doc comment for
-// why this, and not epoch_summary.SnapshotReady, is the per-pool evidence of
-// pool-set membership.
+// mark rows for epoch of the IndexerDB's pool_stake_snapshot table, beside
+// the reward_pool_input rows GetPoolEpochDataMap reads from the same store.
+// See the interface doc comment for why this, and not
+// epoch_summary.SnapshotReady, is the per-pool evidence of pool-set
+// membership.
 func (d *DingoDB) GetPoolStakeSnapshotMembers(
 	ctx context.Context,
 	epoch uint64,
@@ -1014,8 +957,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // a pool's members, which reward_pool_output's own member_reward_total is not
 // (see DingoPoolEpochData). It is the Dingo side of CompareMemberRewards.
 //
-// The predicate matches what the ledger actually credits: applyStakeRewards
-// (ledger/reward_calculation.go) skips a reward that is not spendable and one
+// The predicate matches what the ledger actually credits: ApplyStakeRewards
+// (ledger/epochengine/reward_calculation.go) skips a reward that is not spendable and one
 // whose reward account is guarded by CIP-0163 expiry, so both are excluded
 // from the sum — but not from the presence test, which asks only whether the
 // epoch's rows survive at all.
@@ -1026,11 +969,10 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // hundred rows per epoch, and the observer only runs on those two networks.
 //
 // Presence is epoch-level. A pool with no spendable member row legitimately
-// earned nothing, but only if the table holds the epoch at all —
-// cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and in core mode too when the node's
-// koios-parity observer is enabled; it prunes the table to a 4-epoch window
-// otherwise, so an empty read must not be reported as a pool-wide zero.
+// earned nothing, but only if the table holds the epoch at all — the
+// IndexerDB keeps every epoch's rows, but a database that prunes the table to
+// its reward window reads a pruned epoch back empty, so an empty read must not
+// be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
 	ctx context.Context,
 	m map[string]*DingoPoolEpochData,

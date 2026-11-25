@@ -26,7 +26,7 @@ import (
 // depends on -- can resolve any rollback slot this file seeds.
 func newSyntheticCostModelTestDatabase(t *testing.T) *Database {
 	t.Helper()
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir(), Role: RoleReleased})
 	require.NoError(t, err)
 	for i := range uint64(10) {
 		require.NoError(t, db.SetEpoch(

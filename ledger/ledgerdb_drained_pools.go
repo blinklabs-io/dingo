@@ -53,7 +53,7 @@ func (s stagingLedgerDB) ListPoolKeyHashes(
 	})
 }
 
-// GetPools reads from the set when the pools-history family is drained.
+// GetPools reads from the set.
 func (s stagingLedgerDB) GetPools(
 	ctx context.Context,
 	pkhs []lcommon.PoolKeyHash,
@@ -149,8 +149,7 @@ func (s stagingLedgerDB) GetRetiringPools(
 	})
 }
 
-// GetPoolKeyHashesRetiredByEpoch reads from the set when the pools-history
-// family is drained.
+// GetPoolKeyHashesRetiredByEpoch reads from the set.
 func (s stagingLedgerDB) GetPoolKeyHashesRetiredByEpoch(
 	epoch uint64,
 	boundarySlot uint64,
@@ -161,8 +160,7 @@ func (s stagingLedgerDB) GetPoolKeyHashesRetiredByEpoch(
 	})
 }
 
-// drainedPoolSource serves the database's pool reads from the set once the
-// pools-history family is drained. It reads the committed set with no
+// drainedPoolSource serves the database's pool reads from the set. It reads the committed set with no
 // transaction: a caller holding a staged write reads through the ledger's
 // LedgerDB instead.
 type drainedPoolSource struct {
@@ -275,10 +273,10 @@ func (d drainedPoolSource) PoolsRetiringAtEpoch(
 
 var _ database.PoolSource = drainedPoolSource{}
 
-// installPoolSource gives the database the set's pools for the reads it makes
-// once the pools-history family is drained.
+// installPoolSource gives the database the set's pools for the reads it
+// makes.
 func (ls *LedgerState) installPoolSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetPoolSource(drainedPoolSource{ls})
 	}
 }
@@ -324,8 +322,7 @@ func poolStatusFromEvents(
 	return status
 }
 
-// GetPoolStatus reads from the set when the pools-history family is drained,
-// answering as the metadata store does from the pool's events.
+// GetPoolStatus reads from the set, answering from the pool's events.
 func (s stagingLedgerDB) GetPoolStatus(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,

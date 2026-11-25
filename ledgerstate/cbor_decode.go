@@ -64,13 +64,12 @@ import (
 //     streamed entry.
 //     Unlike the definite-length path, the running check can only
 //     reject after entries below the cap have already been streamed
-//     to importUTxOs's batch callback and committed to the database.
-//     That is safe by construction rather than by accident: every
-//     UTxO write goes through an idempotent "insert if absent" upsert
-//     (see ImportUtxos/CreateUtxoIfAbsent), and ImportLedgerState
+//     into the live UTxO set. That is safe by construction rather than
+//     by accident: the set's import mark records its outputs complete
+//     only once the whole map is loaded, so a re-run replaces them
+//     whole (badgerutxo.Store.BootstrapImport), and ImportLedgerState
 //     never marks the UTxO phase checkpoint or advances the chain tip
-//     when this check fails, so a re-run (checkpoint-resumed or from
-//     scratch) safely redoes the phase without duplicating rows, and
+//     when this check fails, and
 //     nothing downstream treats the partially-imported database as a
 //     complete ledger state. A preflight full count or a transaction
 //     wrapping the whole phase were both considered and rejected: the

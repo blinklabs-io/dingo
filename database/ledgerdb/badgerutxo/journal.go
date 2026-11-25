@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -188,6 +189,43 @@ func readTip(txn *badger.Txn) (ocommon.Point, bool, error) {
 	return p, true, err
 }
 
+// topSeeks counts the scans of the journal and the state journal that
+// latestRecord and rollbackRowsWithin start at the top of their prefix. Each
+// such scan walks every entry deleted there since the last compaction, so a
+// rollback that starts one per undone record costs time quadratic in the
+// records; tests read it to show a rollback starts a bounded number.
+var topSeeks atomic.Uint64
+
+// journalSeekBelow returns the key a newest-first scan of the journal may start
+// at after the record keyed undone was deleted, or nil when it must start at
+// the top. Deleting a record leaves the next sequence number alone, so the scan
+// may skip what was deleted only while the next sequence number is the one the
+// rollback first saw: a later one means a newer record may exist. It returns
+// the next sequence number it read.
+func journalSeekBelow(
+	txn *badger.Txn,
+	undone []byte,
+	firstNext uint64,
+) (below []byte, next uint64, err error) {
+	item, err := txn.Get(seqKey)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := item.Value(func(v []byte) error {
+		next = binary.BigEndian.Uint64(v)
+		return nil
+	}); err != nil {
+		return nil, 0, err
+	}
+	if len(undone) != 9 || next != firstNext {
+		return nil, next, nil
+	}
+	return undone, next, nil
+}
+
 func appendJournal(txn *badger.Txn, rec journalRecord) error {
 	var seq uint64
 	item, err := txn.Get(seqKey)
@@ -209,26 +247,43 @@ func appendJournal(txn *badger.Txn, rec journalRecord) error {
 	return txn.Set(seqKey, binary.BigEndian.AppendUint64(nil, seq+1))
 }
 
-// latestRecord returns the newest journal record and its key.
-func latestRecord(txn *badger.Txn) ([]byte, journalRecord, bool, error) {
+// latestRecord returns the newest journal record and its key. It reads one
+// item, so the iterator does not prefetch values, which costs a goroutine per
+// prefetched item.
+//
+// below, when not nil, is the key of a record the caller has just deleted and
+// that was the newest at the time. The scan starts there rather than at the
+// top of the prefix, which would walk every entry the caller has deleted since
+// the journal last compacted. The caller must pass nil when a record newer
+// than below may exist.
+func latestRecord(
+	txn *badger.Txn,
+	below []byte,
+) ([]byte, journalRecord, bool, error) {
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Reverse = true
 	opts.Prefix = []byte{JournalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
-	it.Seek(
-		append(
-			[]byte{JournalTag},
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-		),
-	)
+	if below != nil {
+		it.Seek(below)
+	} else {
+		topSeeks.Add(1)
+		it.Seek(
+			append(
+				[]byte{JournalTag},
+				0xff,
+				0xff,
+				0xff,
+				0xff,
+				0xff,
+				0xff,
+				0xff,
+				0xff,
+			),
+		)
+	}
 	if !it.Valid() {
 		return nil, journalRecord{}, false, nil
 	}
@@ -389,6 +444,7 @@ func journalReachesSlot(txn *badger.Txn, slot uint64) error {
 // oldestRecord returns the oldest journal record.
 func oldestRecord(txn *badger.Txn) (journalRecord, bool, error) {
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Prefix = []byte{JournalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
@@ -427,6 +483,7 @@ func visitJournalAfter(
 	targetIsTip := samePoint(tip, point)
 
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Reverse = true
 	opts.Prefix = []byte{JournalTag}
 	it := txn.NewIterator(opts)
@@ -488,6 +545,23 @@ func visitJournalAfter(
 		return ErrRollbackBeyondJournal
 	}
 	return ErrPointNotInJournal
+}
+
+// RollbackReaches reports whether the journal reaches back to point: false
+// when Rollback(point) would return ErrRollbackBeyondJournal. A point that is
+// ahead of the tip, or that the retained lineage does not hold, is not one
+// the journal is too short for.
+func (s *Store) RollbackReaches(point ocommon.Point) (bool, error) {
+	err := s.view(func(txn *badger.Txn) error {
+		return rollbackReaches(txn, point)
+	})
+	switch {
+	case err == nil, errors.Is(err, ErrPointNotInJournal):
+		return true, nil
+	case errors.Is(err, ErrRollbackBeyondJournal):
+		return false, nil
+	}
+	return false, err
 }
 
 // Rollback undoes, newest first, every journaled batch after point in the
@@ -585,6 +659,8 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 		return RollbackResult{}, err
 	}
 	hook := s.newStepHook()
+	// cur is where the state journal scan resumes between transactions.
+	var cur rowsCursor
 	if marked || len(prefixes) > 0 || heavy {
 		if !marked {
 			if err := s.update(func(txn *badger.Txn) error {
@@ -606,9 +682,11 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 		s.gate.Lock()
 		defer s.gate.Unlock()
 		if heavy {
-			if err := s.drainRows(point.Slot, entries, maxBytes, hook); err != nil {
+			last, err := s.drainRows(point.Slot, entries, maxBytes, hook)
+			if err != nil {
 				return RollbackResult{}, err
 			}
+			cur.below = last
 		}
 	}
 	// before is each output's state before the rollback, recorded the first
@@ -620,14 +698,34 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 	before := make(map[Ref]state)
 	after := make(map[Ref]state)
 	var order []Ref
+	// undone is the key of the record the last committed transaction deleted.
+	var (
+		undone    []byte
+		firstNext uint64
+	)
 	for {
 		done := false
+		var (
+			deleted []byte
+			seen    uint64
+		)
 		err := s.update(func(txn *badger.Txn) error {
+			deleted = nil
 			current, hasTip, err := readTip(txn)
 			if err != nil {
 				return err
 			}
-			key, rec, ok, err := latestRecord(txn)
+			from, next, err := journalSeekBelow(txn, undone, firstNext)
+			if err != nil {
+				return err
+			}
+			seen = next
+			if undone != nil && from == nil {
+				// A record newer than the last undone may exist, and with it
+				// state journal entries newer than the ones undone.
+				cur.below = nil
+			}
+			key, rec, ok, err := latestRecord(txn, from)
 			if err != nil {
 				return err
 			}
@@ -641,7 +739,8 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 				done = true
 				// Each undone record already moved the tip back to the tip
 				// before it, so the tip is point.
-				if err := rollbackLedgerState(txn, point.Slot); err != nil {
+				err := rollbackLedgerState(txn, point.Slot, &cur)
+				if err != nil {
 					return err
 				}
 				if marked {
@@ -707,12 +806,13 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 			if err := txn.Delete(key); err != nil {
 				return err
 			}
+			deleted = key
 			if !rec.advancesTip {
 				return nil
 			}
 			if rec.hadTip {
 				// Nonces above the restored tip belong to undone blocks.
-				err := rollbackLedgerState(txn, rec.prevTip.Slot)
+				err := rollbackLedgerState(txn, rec.prevTip.Slot, &cur)
 				if err != nil {
 					return err
 				}
@@ -727,6 +827,13 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 		}
 		if done {
 			break
+		}
+		if undone == nil {
+			firstNext = seen
+		}
+		undone = deleted
+		if cur.undone != nil {
+			cur.below = cur.undone
 		}
 		if marked {
 			if err := hook(); err != nil {
@@ -798,6 +905,9 @@ func (s *Store) PruneJournal(slot uint64) error {
 	if err := s.pruneRewardRecords(slot); err != nil {
 		return err
 	}
+	if err := s.pruneGovernanceBoundaries(slot); err != nil {
+		return err
+	}
 	return s.pruneClosureUtxoEffects(slot)
 }
 
@@ -840,6 +950,7 @@ func visitJournalAfterSlot(
 		return err
 	}
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Reverse = true
 	opts.Prefix = []byte{JournalTag}
 	it := txn.NewIterator(opts)
@@ -1064,15 +1175,22 @@ func (s *Store) drainRows(
 	slot uint64,
 	entries, maxBytes int64,
 	step func() error,
-) error {
+) ([]byte, error) {
+	// undone is the last state journal entry a committed transaction undid.
+	var undone []byte
 	for {
-		var more bool
+		var (
+			more bool
+			last []byte
+		)
 		err := s.update(func(txn *badger.Txn) error {
 			if err := bumpRollbackSeq(txn); err != nil {
 				return err
 			}
 			var err error
-			more, err = rollbackRowsWithin(txn, slot, entries, maxBytes)
+			more, last, err = rollbackRowsWithin(
+				txn, slot, undone, entries, maxBytes,
+			)
 			if err != nil || more {
 				return err
 			}
@@ -1086,13 +1204,18 @@ func (s *Store) drainRows(
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("badgerutxo: rollback to slot %d: %w", slot, err)
+			return nil, fmt.Errorf(
+				"badgerutxo: rollback to slot %d: %w", slot, err,
+			)
+		}
+		if last != nil {
+			undone = last
 		}
 		if err := step(); err != nil {
-			return err
+			return nil, err
 		}
 		if !more {
-			return nil
+			return undone, nil
 		}
 	}
 }
@@ -1163,7 +1286,7 @@ func (s *Store) beginBatchRollback(slot uint64) (*priorMark, error) {
 	if heavy {
 		s.gate.Lock()
 		defer s.gate.Unlock()
-		if err := s.drainRows(slot, entries, maxBytes, hook); err != nil {
+		if _, err := s.drainRows(slot, entries, maxBytes, hook); err != nil {
 			return nil, err
 		}
 	}

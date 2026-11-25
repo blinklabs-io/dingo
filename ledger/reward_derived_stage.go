@@ -18,26 +18,24 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // RewardPrecomputeCursorKey is the sync_state key of the precompute cursor of
 // a snapshot epoch.
 func RewardPrecomputeCursorKey(snapshotEpoch uint64) string {
-	return rewardPrecomputeCursorKey(snapshotEpoch)
+	return epochengine.RewardPrecomputeCursorKey(snapshotEpoch)
 }
 
 func isRewardCursorKey(key string) bool {
-	return strings.HasPrefix(key, rewardPrecomputeCursorPrefix)
-}
-
-func (s stagingLedgerDB) rewardOutputsDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyRewardOutputs)
+	return strings.HasPrefix(key, models.RewardPrecomputeCursorPrefix)
 }
 
 // rewardOutputsServed returns the configured set reader or an error when the
@@ -55,9 +53,6 @@ func (s stagingLedgerDB) stageDerived(
 	txn ledgerdb.Txn,
 	changes ...RewardDerivedChange,
 ) {
-	if !s.rewardOutputsDrained() && s.ls.rewardDerivedReader(txn) == nil {
-		return
-	}
 	s.ls.stageLedgerChanges(
 		txn,
 		LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
@@ -93,11 +88,6 @@ func (s stagingLedgerDB) SaveRewardPoolOutputs(
 	outputs []*models.RewardPoolOutput,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.rewardOutputsDrained() {
-		if err := s.LedgerDB.SaveRewardPoolOutputs(outputs, txn); err != nil {
-			return err
-		}
-	}
 	byEpoch := map[uint64][]*models.RewardPoolOutput{}
 	var order []uint64
 	for _, o := range outputs {
@@ -204,15 +194,12 @@ func (s stagingLedgerDB) GetRewardAccountOutputsForEligibility(
 	return read(v)
 }
 
-// TakeRewardEligibilityRecheck is empty once the family is drained: the
+// TakeRewardEligibilityRecheck is empty: the
 // durable rollback counter the precompute cursor records replaces the list.
 func (s stagingLedgerDB) TakeRewardEligibilityRecheck(
 	txn ledgerdb.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if s.rewardOutputsDrained() {
-		return nil, nil
-	}
-	return s.LedgerDB.TakeRewardEligibilityRecheck(txn)
+	return nil, nil
 }
 
 // DeleteRewardOutputsBeforeEpoch stages the prune of the derived rows below
@@ -232,7 +219,7 @@ func (s stagingLedgerDB) cursorRead(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, bool, error) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return "", false, nil
 	}
@@ -248,7 +235,7 @@ func (s stagingLedgerDB) cursorWrite(
 	key, value string,
 	txn ledgerdb.Txn,
 ) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return
 	}
@@ -273,7 +260,7 @@ func (s stagingLedgerDB) claimPendingFromSet(
 		return nil, err
 	}
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	if len(key) == 0 {
 		return nil, nil
@@ -290,8 +277,8 @@ func (s stagingLedgerDB) claimPendingFromSet(
 	return out, nil
 }
 
-// claimUnfoldedFromSet is ClaimUnfoldedRewardCredits for a drained family:
-// up to limit unfolded credits of one credited round, in credential order.
+// claimUnfoldedFromSet is ClaimUnfoldedRewardCredits read from the set: up
+// to limit unfolded credits of one credited round, in credential order.
 func (s stagingLedgerDB) claimUnfoldedFromSet(
 	txn ledgerdb.Txn,
 	epoch uint64,
@@ -302,7 +289,7 @@ func (s stagingLedgerDB) claimUnfoldedFromSet(
 		return nil, err
 	}
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	credited, err := s.ls.rewardRoundSeenBy(r, txn, epoch)
 	if err != nil || !credited || limit <= 0 {
@@ -408,18 +395,18 @@ func (ls *LedgerState) epochRewardOutputRefs(
 	return out, nil
 }
 
-// getCursor reads a precompute cursor from the set when available; cursor
-// metadata otherwise remains in the metadata store.
+// getCursor reads a precompute cursor from the set, the only place one is
+// written.
 func (s stagingLedgerDB) getCursor(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, error) {
-	if raw, served, err := s.cursorRead(key, txn); served || err != nil {
-		return raw, err
-	}
-	want, err := s.LedgerDB.GetSyncState(key, txn)
+	raw, served, err := s.cursorRead(key, txn)
 	if err != nil {
-		return want, err
+		return "", err
 	}
-	return want, nil
+	if !served {
+		return "", fmt.Errorf("malformed reward precompute cursor key %q", key)
+	}
+	return raw, nil
 }

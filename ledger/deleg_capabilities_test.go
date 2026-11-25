@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -51,28 +52,28 @@ func mirReaderView(
 
 func TestLedgerViewInstantaneousRewardsTotals(t *testing.T) {
 	t.Parallel()
-	ls, db, gdb := newMIRTestLedger(t)
+	ls, db, _ := newMIRTestLedger(t)
 	// A distribution from before the epoch is not pending.
-	seedMIRDistribution(t, gdb, mirPotReserves, 50,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 50,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(1_000)},
 		})
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 7, 50)
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 7, 50)
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 			{Credential: mirCred28(2), Amount: big.NewInt(20)},
 		})
-	seedMIRDistribution(t, gdb, mirPotReserves, 160,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 		})
-	seedMIRDistribution(t, gdb, mirPotTreasury, 170,
+	seedMIRDistribution(t, db, epochengine.MIRPotTreasury, 170,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(100)},
 		})
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 300, 180)
-	seedMIRPotTransfer(t, gdb, mirPotTreasury, 40, 190)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 300, 180)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotTreasury, 40, 190)
 
 	read := func(
 		t *testing.T,
@@ -84,16 +85,16 @@ func TestLedgerViewInstantaneousRewardsTotals(t *testing.T) {
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			lv := mirReaderView(ls, txn, epochStartSlot, protocolMajor)
 			var err error
-			reserves, err = lv.InstantaneousRewardsTotal(mirPotReserves)
+			reserves, err = lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 			require.NoError(t, err)
-			treasury, err = lv.InstantaneousRewardsTotal(mirPotTreasury)
+			treasury, err = lv.InstantaneousRewardsTotal(epochengine.MIRPotTreasury)
 			require.NoError(t, err)
-			reservesMoved, err = lv.InstantaneousPotTransfer(mirPotReserves)
+			reservesMoved, err = lv.InstantaneousPotTransfer(epochengine.MIRPotReserves)
 			require.NoError(t, err)
-			treasuryMoved, err = lv.InstantaneousPotTransfer(mirPotTreasury)
+			treasuryMoved, err = lv.InstantaneousPotTransfer(epochengine.MIRPotTreasury)
 			require.NoError(t, err)
 			credit, err = lv.PendingInstantaneousRewards(
-				mirPotReserves, mirTestCredential(0, 1),
+				epochengine.MIRPotReserves, mirTestCredential(0, 1),
 			)
 			require.NoError(t, err)
 			return nil
@@ -217,14 +218,14 @@ func TestLedgerViewGenesisDelegationRegistry(t *testing.T) {
 	const window = 25_920
 	nextCertID := uint(1)
 	seed := func(g byte, delegate byte, vrf byte, slot uint64, certIndex uint) {
-		seedGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
+		lv.ls.stageLedgerChanges(nil, LedgerChanges{GenesisDelegations: []models.GenesisDelegation{{
 			GenesisHash:         genesisKey(g).Bytes(),
 			GenesisDelegateHash: bytes.Repeat([]byte{delegate}, 28),
 			VrfKeyHash:          bytes.Repeat([]byte{vrf}, 32),
 			AddedSlot:           slot,
 			CertIndex:           certIndex,
 			CertificateID:       nextCertID,
-		})
+		}}})
 		nextCertID++
 	}
 	// Genesis key 0x11 certifies twice in slot 100; the later certificate
@@ -296,7 +297,7 @@ func TestLedgerViewGenesisDelegationRegistry(t *testing.T) {
 func TestLedgerViewAdaPotsReportReservesAndTreasury(t *testing.T) {
 	t.Parallel()
 	ls, db, _ := newMIRTestLedger(t)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 5_000, 100, nil))
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := mirReaderView(ls, txn, 100, 5)
@@ -329,7 +330,7 @@ func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ls, db, gdb := newMIRTestLedger(t)
+			ls, db, _ := newMIRTestLedger(t)
 			withMIRCutoffEpoch(t, ls, models.Epoch{
 				EpochId: 1, StartSlot: 100, LengthInSlots: 432_000,
 			})
@@ -338,16 +339,16 @@ func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
 			ls.currentPParams = pp
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
-			require.NoError(t, db.Metadata().SetNetworkState(0, 100, 100, nil))
+			require.NoError(t, seedDB(t, db).SetNetworkState(0, 100, 100, nil))
 			// 60 is pending for the credential from an earlier transaction.
-			seedMIRDistribution(t, gdb, mirPotReserves, 150,
+			seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 				[]models.MoveInstantaneousRewardsReward{
 					{Credential: mirCred28(0x31), Amount: big.NewInt(60)},
 				})
 			cred := mirTestCredential(0, 0x31)
 			cert := &lcommon.MoveInstantaneousRewardsCertificate{
 				Reward: lcommon.MoveInstantaneousRewardsCertificateReward{
-					Source: mirPotReserves,
+					Source: epochengine.MIRPotReserves,
 					Rewards: map[*lcommon.Credential]*big.Int{
 						&cred: big.NewInt(90),
 					},
@@ -405,10 +406,10 @@ func TestLedgerViewMIRFoldFailsClosedWithoutEra(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
-		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		_, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 		require.ErrorContains(t, err, "MIR rewards fold is unknown")
 		_, err = lv.PendingInstantaneousRewards(
-			mirPotReserves, mirTestCredential(0, 1),
+			epochengine.MIRPotReserves, mirTestCredential(0, 1),
 		)
 		require.ErrorContains(t, err, "MIR rewards fold is unknown")
 		return nil
@@ -425,7 +426,7 @@ func TestLedgerViewMIRFoldTypedNilPParamsFailsClosed(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := (&LedgerView{ls: ls, txn: txn, epochStartSlot: 100}).
 			pinCommitteeState(0, (*shelley.ShelleyProtocolParameters)(nil))
-		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		_, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 		require.ErrorContains(t, err, "MIR rewards fold is unknown")
 		return nil
 	}))

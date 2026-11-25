@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -359,7 +360,7 @@ var _ eras.Phase2ResultCacheProvider = (*LedgerView)(nil)
 type mirPendingState struct {
 	// credits holds the per-credential pending rewards, the reference's
 	// iRReserves and iRTreasury.
-	credits map[mirPendingKey]*big.Int
+	credits map[epochengine.MIRPendingKey]*big.Int
 	// totals is the sum of credits per pot.
 	totals [2]*big.Int
 	// transfers is the net pot-to-pot transfer into each pot, the
@@ -389,10 +390,10 @@ func (lv *LedgerView) PendingInstantaneousRewards(
 	if err != nil {
 		return nil, err
 	}
-	total, ok := state.credits[mirPendingKey{
-		pot:        source,
-		tag:        uint8(cred.CredType), // #nosec G115 -- bounded above
-		credential: string(cred.Credential[:]),
+	total, ok := state.credits[epochengine.MIRPendingKey{
+		Pot:        source,
+		Tag:        uint8(cred.CredType), // #nosec G115 -- bounded above
+		Credential: string(cred.Credential[:]),
 	}]
 	if !ok {
 		return nil, nil
@@ -406,7 +407,7 @@ func (lv *LedgerView) PendingInstantaneousRewards(
 func (lv *LedgerView) InstantaneousRewardsTotal(
 	source uint,
 ) (*big.Int, error) {
-	if source > mirPotTreasury {
+	if source > epochengine.MIRPotTreasury {
 		return nil, fmt.Errorf("invalid MIR source pot: %d", source)
 	}
 	state, err := lv.mirPendingState()
@@ -423,7 +424,7 @@ func (lv *LedgerView) InstantaneousRewardsTotal(
 func (lv *LedgerView) InstantaneousPotTransfer(
 	source uint,
 ) (*big.Int, error) {
-	if source > mirPotTreasury {
+	if source > epochengine.MIRPotTreasury {
 		return nil, fmt.Errorf("invalid MIR source pot: %d", source)
 	}
 	state, err := lv.mirPendingState()
@@ -496,14 +497,14 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 		return nil, err
 	}
 	state := &mirPendingState{
-		credits: make(map[mirPendingKey]*big.Int),
+		credits: make(map[epochengine.MIRPendingKey]*big.Int),
 		totals:  [2]*big.Int{new(big.Int), new(big.Int)},
 		transfers: [2]*big.Int{
 			new(big.Int), new(big.Int),
 		},
 	}
 	for _, effect := range effects {
-		if effect.Pot > mirPotTreasury {
+		if effect.Pot > epochengine.MIRPotTreasury {
 			return nil, fmt.Errorf("invalid MIR source pot: %d", effect.Pot)
 		}
 		if effect.OtherPot > 0 {
@@ -523,10 +524,10 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 			); err != nil {
 				return nil, fmt.Errorf("MIR reward credential: %w", err)
 			}
-			key := mirPendingKey{
-				pot:        effect.Pot,
-				tag:        reward.CredentialTag,
-				credential: string(reward.Credential),
+			key := epochengine.MIRPendingKey{
+				Pot:        effect.Pot,
+				Tag:        reward.CredentialTag,
+				Credential: string(reward.Credential),
 			}
 			total, ok := state.credits[key]
 			switch {
@@ -1401,7 +1402,7 @@ func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
 	if lv.ls == nil || lv.ls.db == nil {
 		return lcommon.AdaPots{}, ErrNotImplemented
 	}
-	treasury, reserves, err := lv.ls.readNetworkState(lv.txn)
+	treasury, reserves, err := lv.ls.engine().ReadNetworkState(lv.txn)
 	if err != nil {
 		return lcommon.AdaPots{}, lv.storageFault("read ada pots: %w", err)
 	}
@@ -1490,7 +1491,7 @@ func (lv *LedgerView) RewardAccountBalance(
 	if err != nil {
 		return nil, lv.storageFault("get pending reward credit: %w", err)
 	}
-	balance, overflow := addRewardUint64(uint64(account.Reward), pending)
+	balance, overflow := epochengine.AddRewardUint64(uint64(account.Reward), pending)
 	if overflow {
 		return nil, lv.storageFault(
 			"decode stored reward account balance: %w",
@@ -3308,19 +3309,6 @@ func (lv *LedgerView) GetDRepVotingPower(
 		Key: drepCredential,
 	}.MapKey()]
 	return power, nil
-}
-
-// GetExpiredDReps returns all active DReps whose expiry epoch is at or
-// before the given epoch.
-func (lv *LedgerView) GetExpiredDReps(
-	epoch uint64,
-) ([]*models.Drep, error) {
-	dreps, err := lv.ls.ledgerDB().
-		GetExpiredDReps(lv.EvaluationContext(), epoch, lv.txn)
-	if err != nil {
-		return nil, lv.storageFault("get expired dreps: %w", err)
-	}
-	return dreps, nil
 }
 
 // GetCommitteeAuthorizedCount returns the number of seated, non-resigned

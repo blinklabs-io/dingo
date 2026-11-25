@@ -31,18 +31,17 @@ import (
 	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
-	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -51,8 +50,8 @@ import (
 )
 
 // conformanceSlotsPerEpoch is the slots-per-epoch constant used by the
-// conformance state manager to translate between epochs and the slot
-// values stored in deleted_slot / added_slot columns. Conformance tests
+// conformance state manager to translate between epochs and the slots
+// state is written at. Conformance tests
 // use it purely as a monotonic marker -- the real slot count for a
 // given network is irrelevant here -- so a single fixed value is fine.
 const conformanceSlotsPerEpoch uint64 = 432000
@@ -69,8 +68,8 @@ const (
 // syntheticTxSeedAddress is a syntactically valid mainnet address used only
 // to satisfy MockTransaction.Build()'s "at least one input/output" rule for
 // synthetic seed transactions built purely to drive real certificate
-// persistence (see seedAuthCommitteeHot). It is never read back by
-// anything: SetTransactionMetadataOnly discards inputs/outputs entirely.
+// persistence (see seedInitialCommitteeStatus). It is never read back: only
+// the certificates of such a transaction are imported.
 const syntheticTxSeedAddress = "addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd"
 
 func conformanceCredentialTag(credential common.Credential) uint8 {
@@ -83,16 +82,13 @@ func conformanceCredentialTag(credential common.Credential) uint8 {
 	return credentialTag
 }
 
-// DingoStateManager implements conformance.StateManager against a real
-// Dingo database.Database (sqlite/postgres/mysql metadata store plus a
-// local Badger blob store), composed the same way the production node
-// composes its storage plugins at startup. UTxOs, certificates, and
-// governance state are all read from and written to this real backend --
-// see ApplyTransaction, ProcessEpochBoundary, and state_provider.go --
-// reusing dingo's own production persistence code
-// (database.SetTransactionMetadataOnly, ledger/governance) rather than
-// hand-rolling a second implementation against the raw metadata.MetadataStore
-// interface.
+// DingoStateManager implements conformance.StateManager against the
+// ledger's database and its LedgerDB set, opened the way the node opens them
+// for a Mithril import. A vector's initial state is written through the
+// LedgerDB the ledger-state import uses, its transactions through that
+// LedgerDB's transaction writer and ledger/governance, and every read the
+// provider makes goes to the same LedgerDB or to the set (see
+// state_provider.go).
 //
 // govState mirrors the subset of state (proposal votes/thresholds,
 // pending-committee bookkeeping) the upstream conformance harness reads
@@ -106,17 +102,17 @@ func conformanceCredentialTag(credential common.Credential) uint8 {
 // governance.EnactProposal / Database.SetGovernanceProposal rather than
 // mutating only this in-memory mirror.
 type DingoStateManager struct {
-	db   *database.Database
-	host *hostplugin.Host
+	backend *ledgerBackend
+	ldb     *dledger.ImportLedgerDB
 
-	// dataDir is the backend's local data directory (Badger blob files,
-	// plus the sqlite metadata file for the default backend). reopen
-	// recreates a fresh backend at the same opts (used by Reset for
-	// backends -- i.e. sqlite -- whose metadata.Resettable.Reset is a
-	// documented no-op). ownsDataDir controls whether Close removes it.
+	// dataDir holds the backend's files; Reset empties it. ownsDataDir
+	// controls whether Close removes it.
 	dataDir     string
 	ownsDataDir bool
-	reopen      func() (*database.Database, *hostplugin.Host, error)
+
+	// utxoChanges are the output changes of the open transaction, applied to
+	// the set once it commits.
+	utxoChanges []dledger.UtxoEvent
 
 	// protocolParams holds the current protocol parameters
 	protocolParams common.ProtocolParameters
@@ -150,7 +146,6 @@ type DingoStateManager struct {
 	// committeeQuorums tracks the new quorum of pending UpdateCommittee
 	// proposals, keyed by gov action id, consumed at enactment.
 	committeeQuorums map[string]*big.Rat
-	utxoIDs          map[string]struct{}
 	stakeDeposits    map[mockledger.RewardAccountKey]uint64
 
 	// lastSlot/blockIndex give each transaction within the same slot a
@@ -159,65 +154,31 @@ type DingoStateManager struct {
 	// ordering" invariant).
 	lastSlot   uint64
 	blockIndex uint32
-
-	// wipeMetadata, when set, destructively clears the remote metadata
-	// store's own state (schema/database) before Reset reopens the
-	// backend. The local sqlite backend has no need for it: its metadata
-	// lives in the same dataDir the reopen path already wipes. postgres
-	// and mysql set it because their metadata lives on a remote server
-	// dataDir wiping never touches -- see state_manager_postgres.go and
-	// state_manager_mysql.go.
-	wipeMetadata func() error
-
-	// wipeBlob, when set, empties the local blob store in place. It pairs
-	// with wipeMetadata: database.New checks that the blob store's commit
-	// timestamp and the metadata store's agree, so a Reset that emptied one
-	// side and not the other would leave a pairing neither side caused.
-	// Only the sqlite backend sets it -- the remote backends deliberately
-	// share one process-wide blob directory across every vector (see
-	// state_manager_postgres.go's postgresProcessBlobDir).
-	wipeBlob func() error
-
-	// closeExtra, when set, releases backend-scoped resources the manager
-	// owns beyond its database -- currently the long-lived admin connection
-	// backendResetter holds so Reset does not reconnect per vector (see
-	// reset_cost.go). Close joins its error.
-	closeExtra func() error
 }
 
-// newDingoStateManager opens a real backend per opts and wraps it in a
-// fresh DingoStateManager. Shared by NewDingoStateManager,
-// NewDingoPostgresStateManager, and NewDingoMysqlStateManager.
-func newDingoStateManager(opts realBackendOptions) (*DingoStateManager, error) {
-	db, host, err := openRealDatabase(opts)
-	if err != nil {
-		return nil, err
-	}
-	return &DingoStateManager{
-		db:      db,
-		host:    host,
-		dataDir: opts.dataDir,
-		reopen: func() (*database.Database, *hostplugin.Host, error) {
-			return openRealDatabase(opts)
-		},
+// newDingoStateManagerAt creates a DingoStateManager rooted at an explicit,
+// caller-owned data directory. Tests that close one manager and open a second
+// at the same path use it to prove state survives a restart.
+func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
+	m := &DingoStateManager{
+		dataDir:           dataDir,
 		govState:          conformance.NewGovernanceState(),
 		committeeRemovals: make(map[string]map[common.Blake2b224]struct{}),
 		committeeQuorums:  make(map[string]*big.Rat),
-		utxoIDs:           make(map[string]struct{}),
 		stakeDeposits:     make(map[mockledger.RewardAccountKey]uint64),
-	}, nil
+	}
+	if err := m.openBackend(); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
-// NewDingoStateManager creates a DingoStateManager backed by a real, local
-// SQLite metadata store (plus a local Badger blob store), composed through
-// the same plugin.Resolve path the production node uses at startup.
+// NewDingoStateManager creates a DingoStateManager over a ledger backend in a
+// temporary directory it owns.
 func NewDingoStateManager() (*DingoStateManager, error) {
-	dataDir, err := os.MkdirTemp("", "dingo-conformance-sqlite-*")
+	dataDir, err := os.MkdirTemp("", "dingo-conformance-*")
 	if err != nil {
-		return nil, fmt.Errorf(
-			"create sqlite conformance data dir: %w",
-			err,
-		)
+		return nil, fmt.Errorf("create conformance data dir: %w", err)
 	}
 	m, err := newDingoStateManagerAt(dataDir)
 	if err != nil {
@@ -228,42 +189,20 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 	return m, nil
 }
 
-// newDingoStateManagerAt creates a sqlite-backed DingoStateManager rooted at
-// an explicit, caller-owned data directory. Used directly by tests that
-// close one manager and open a second at the same path to prove state
-// survives a restart (see state_manager_test.go); NewDingoStateManager
-// uses it with a manager-owned temp directory.
-func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
-	m, err := newDingoStateManager(realBackendOptions{
-		dataDir:          dataDir,
-		metadataName:     "sqlite",
-		registerMetadata: sqlite.RegisterProvider,
-	})
+func (m *DingoStateManager) openBackend() error {
+	backend, err := openLedgerBackend(m.dataDir)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := installSqliteResetHooks(m, dataDir); err != nil {
-		return nil, errors.Join(err, m.Close())
-	}
-	return m, nil
+	m.backend = backend
+	m.ldb = backend.ldb
+	return nil
 }
 
-// Close releases state-manager resources: the database, its provider host,
-// and -- for a manager-owned data directory (the plain NewDingoStateManager
-// constructor) -- the directory itself. It never drops a remote schema or
-// database: NewDingoPostgresStateManager/NewDingoMysqlStateManager share one
-// schema/database across every call in their process (see
-// postgresProcessSchema's doc comment in state_manager_postgres.go and
-// mysqlProcessDatabase's in state_manager_mysql.go), so an individual
-// manager's Close must not drop a resource a sibling manager elsewhere in
-// the same process may still be using -- that cleanup belongs to TestMain
-// (conformance_postgres_test.go), once, after every test in the process has
-// finished.
+// Close releases the backend and, for a manager-owned data directory, the
+// directory itself.
 func (m *DingoStateManager) Close() error {
-	err := closeRealDatabase(m.db, m.host)
-	if m.closeExtra != nil {
-		err = errors.Join(err, m.closeExtra())
-	}
+	err := m.backend.close()
 	if m.ownsDataDir && m.dataDir != "" {
 		if rmErr := os.RemoveAll(m.dataDir); rmErr != nil {
 			err = errors.Join(err, rmErr)
@@ -272,9 +211,9 @@ func (m *DingoStateManager) Close() error {
 	return err
 }
 
-// Reset implements conformance.StateManager.Reset. It clears the
-// pre-validation govState mirror and empties the real backend so the next
-// vector starts from a genuinely clean database, not just clean bookkeeping.
+// Reset implements conformance.StateManager.Reset. It clears the govState
+// mirror and replaces the backend with an empty one, so the next vector
+// starts from an empty set rather than from clean bookkeeping alone.
 func (m *DingoStateManager) Reset() error {
 	m.protocolParams = nil
 	m.currentEpoch = 0
@@ -283,94 +222,50 @@ func (m *DingoStateManager) Reset() error {
 	m.govState = conformance.NewGovernanceState()
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
-	m.utxoIDs = make(map[string]struct{})
 	m.stakeDeposits = make(map[mockledger.RewardAccountKey]uint64)
+	m.utxoChanges = nil
 	m.lastSlot = 0
 	m.blockIndex = 0
 
-	// Deliberately not using metadata.Resettable.Reset here: every
-	// backend's Reset callback (see database/plugin/metadata/{postgres,
-	// mysql}/backup.go's resetDatabase) drops its tables outright rather
-	// than clearing rows -- it exists to prepare a target for
-	// RestoreFrom, not to clear-and-continue against the same live store
-	// -- and postgres's version scans every non-system schema, not just
-	// this suite's own, so calling it here would also destroy
-	// database/plugin/metadata/postgres's own concurrently running
-	// tests' tables in the shared dingo_test database.
-	//
-	// wipeMetadata truncates every dirty table in this suite's own
-	// schema/database in place, over the live connection pool, and does not
-	// close/reopen the store: a full close-and-reopen re-runs real
-	// migrations, and at one Reset per vector across the whole corpus that
-	// is far too slow. For postgres/mysql each migration statement is a real
-	// network round trip; for sqlite it is ~260 local DDL statements (80
-	// CREATE TABLE, 180 CREATE INDEX). Measured under -race before this
-	// path existed, sqlite's Reset averaged 712ms with a CPU profile
-	// attributing 76.9% to migrations.Run/execDDL; in place it averages
-	// 12ms, and the package fell from 656s to 178s.
-	//
-	// sqlite pairs wipeMetadata with wipeBlob because it owns its blob
-	// store: the two must be emptied together or database.New's
-	// blob-versus-metadata commit-timestamp check sees a pairing neither
-	// side caused. The remote backends set no wipeBlob -- they share one
-	// process-wide blob directory across every vector by design (see
-	// state_manager_postgres.go).
-	//
-	// reopenBackend remains the fallback for any future backend that sets
-	// neither hook.
-	// The two hooks are checked independently: a backend that sets only one
-	// still gets that half emptied, rather than silently skipping it because
-	// its partner is nil.
-	if m.wipeMetadata != nil || m.wipeBlob != nil {
-		var errs []error
-		if m.wipeMetadata != nil {
-			errs = append(errs, m.wipeMetadata())
-		}
-		// Runs even when wipeMetadata failed: leaving the blob store
-		// populated as well would compound a half-cleared backend.
-		if m.wipeBlob != nil {
-			errs = append(errs, m.wipeBlob())
-		}
-		return errors.Join(errs...)
-	}
-	return m.reopenBackend()
-}
-
-// reopenBackend closes the current backend, destructively clears the
-// remote metadata store's own state via wipeMetadata (if set -- see its
-// field doc comment), clears the local data directory, and opens a fresh
-// backend at the same location/DSN via reopen (which re-runs real
-// migrations, since it goes through the same plugin.Resolve path
-// construction did).
-func (m *DingoStateManager) reopenBackend() error {
-	if m.reopen == nil {
-		return errors.New(
-			"conformance: state manager has no backend reopen hook",
-		)
-	}
-	if err := closeRealDatabase(m.db, m.host); err != nil {
+	err := m.backend.close()
+	m.backend, m.ldb = nil, nil
+	if err != nil {
 		return fmt.Errorf("close backend for reset: %w", err)
 	}
-	if m.wipeMetadata != nil {
-		if err := m.wipeMetadata(); err != nil {
-			return fmt.Errorf("wipe metadata store for reset: %w", err)
-		}
+	if err := os.RemoveAll(m.dataDir); err != nil {
+		return fmt.Errorf("clear data dir for reset: %w", err)
 	}
-	if m.dataDir != "" {
-		if err := os.RemoveAll(m.dataDir); err != nil {
-			return fmt.Errorf("clear data dir for reset: %w", err)
-		}
-		if err := os.MkdirAll(m.dataDir, 0o700); err != nil {
-			return fmt.Errorf("recreate data dir for reset: %w", err)
-		}
+	if err := os.MkdirAll(m.dataDir, 0o700); err != nil {
+		return fmt.Errorf("recreate data dir for reset: %w", err)
 	}
-	db, host, err := m.reopen()
-	if err != nil {
+	if err := m.openBackend(); err != nil {
 		return fmt.Errorf("reopen backend for reset: %w", err)
 	}
-	m.db = db
-	m.host = host
 	return nil
+}
+
+// begin opens a read-write LedgerDB transaction. Output changes recorded
+// under it reach the set only through commit.
+func (m *DingoStateManager) begin() ledgerdb.Txn {
+	m.utxoChanges = nil
+	return m.ldb.Begin(context.Background(), true)
+}
+
+// commit commits txn, applies its output changes to the set, and reports a
+// write the set refused. A refused write stops the set following the
+// staged changes without failing the commit, so it is checked here.
+func (m *DingoStateManager) commit(txn ledgerdb.Txn) error {
+	changes := m.utxoChanges
+	m.utxoChanges = nil
+	if err := txn.Commit(); err != nil {
+		return err
+	}
+	if len(changes) > 0 {
+		if err := m.backend.set.ApplyUtxoChanges(nil, changes); err != nil {
+			return fmt.Errorf("apply output changes to the set: %w", err)
+		}
+	}
+	return m.ldb.Err()
 }
 
 // LoadInitialState implements conformance.StateManager.LoadInitialState.
@@ -384,7 +279,6 @@ func (m *DingoStateManager) LoadInitialState(
 	m.committeeEpochStartSlot = 0
 	m.lastSlot = 0
 	m.blockIndex = 0
-	m.utxoIDs = make(map[string]struct{})
 	m.stakeDeposits = make(map[mockledger.RewardAccountKey]uint64)
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
@@ -395,15 +289,14 @@ func (m *DingoStateManager) LoadInitialState(
 	// below drives the same seed data through real backend writes.
 	m.govState = conformance.NewGovernanceState()
 	m.govState.LoadFromParsedState(state)
-	for id, parsedUtxo := range state.Utxos {
-		if parsedUtxo.Output != nil {
-			m.utxoIDs[id] = struct{}{}
-		}
-	}
 	maps.Copy(m.stakeDeposits, state.StakeCredentialDeposits)
 	m.syncRewardBalanceMirrors()
 
-	txn := m.db.Transaction(context.Background(), true)
+	if err := m.importInitialUtxos(state); err != nil {
+		return err
+	}
+
+	txn := m.begin()
 	defer txn.Release()
 
 	// A vector's initial-state registration has no registration certificate
@@ -442,9 +335,9 @@ func (m *DingoStateManager) LoadInitialState(
 			//nolint:gosec // conformance DRep types are bounded ledger enums.
 			account.DrepType = uint64(drep.Type)
 		}
-		if err := m.db.Metadata().ImportAccount(
+		if err := m.ldb.ImportAccount(
 			account,
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf("seed account: %w", err)
 		}
@@ -454,11 +347,10 @@ func (m *DingoStateManager) LoadInitialState(
 		if !registered {
 			continue
 		}
-		if err := m.db.ImportPool(
-			context.Background(),
-			txn,
-			&models.Pool{PoolKeyHash: hash[:]},
+		if err := m.ldb.ImportPool(
 			&models.PoolRegistration{PoolKeyHash: hash[:]},
+			false,
+			txn,
 		); err != nil {
 			return fmt.Errorf("seed pool: %w", err)
 		}
@@ -503,12 +395,7 @@ func (m *DingoStateManager) LoadInitialState(
 		if expiry, ok := state.DRepExpiries[credential]; ok {
 			drep.ExpiryEpoch = expiry
 		}
-		registration := &models.RegistrationDrep{
-			DrepCredential: drep.Credential,
-			CredentialTag:  drep.CredentialTag,
-			DepositAmount:  types.Uint64(depositAmount),
-		}
-		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
+		if err := m.ldb.ImportDrep(drep, depositAmount, txn); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
 		}
 	}
@@ -536,12 +423,7 @@ func (m *DingoStateManager) LoadInitialState(
 		if expiry, ok := state.DRepExpiries[credential]; ok {
 			drep.ExpiryEpoch = expiry
 		}
-		registration := &models.RegistrationDrep{
-			DrepCredential: drep.Credential,
-			CredentialTag:  credentialTag,
-			DepositAmount:  types.Uint64(depositAmount),
-		}
-		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
+		if err := m.ldb.ImportDrep(drep, depositAmount, txn); err != nil {
 			return fmt.Errorf("seed legacy drep: %w", err)
 		}
 	}
@@ -579,7 +461,7 @@ func (m *DingoStateManager) LoadInitialState(
 		for _, member := range membersByCredential {
 			members = append(members, member)
 		}
-		if err := m.db.SetCommitteeMembers(context.Background(), members, txn); err != nil {
+		if err := m.ldb.SetCommitteeMembers(context.Background(), members, txn); err != nil {
 			return fmt.Errorf("seed committee members: %w", err)
 		}
 	}
@@ -599,7 +481,7 @@ func (m *DingoStateManager) LoadInitialState(
 	// Slot 0 matches the other seeds here, so a rollback to any vector
 	// slot never prunes it.
 	if state.Constitution != nil {
-		if err := m.db.SetConstitution(
+		if err := m.ldb.SetConstitution(
 			&models.Constitution{
 				AnchorURL:  state.Constitution.AnchorURL,
 				AnchorHash: state.Constitution.AnchorHash,
@@ -614,28 +496,118 @@ func (m *DingoStateManager) LoadInitialState(
 
 	for id, proposal := range state.Proposals {
 		govProposal := m.proposalToModel(id, proposal)
-		if err := m.db.SetGovernanceProposal(context.Background(), &govProposal, txn); err != nil {
+		if err := m.ldb.SetGovernanceProposal(context.Background(), &govProposal, txn); err != nil {
 			return fmt.Errorf("seed governance proposal: %w", err)
 		}
 	}
 
-	for utxoId, parsedUtxo := range state.Utxos {
-		if parsedUtxo.Output == nil {
-			continue
-		}
-		var txHash common.Blake2b256
-		copy(txHash[:], parsedUtxo.TxHash)
-		input := &dingoTransactionInput{
-			txId:  txHash,
-			index: parsedUtxo.Index,
-		}
-		utxo := common.Utxo{Id: input, Output: parsedUtxo.Output}
-		if err := m.createUtxo(txn, utxo, 0); err != nil {
-			return fmt.Errorf("seed utxo %s: %w", utxoId, err)
-		}
+	if err := m.storeProtocolParameters(
+		pp, 0, state.CurrentEpoch, txn,
+	); err != nil {
+		return fmt.Errorf("seed protocol parameters: %w", err)
 	}
 
-	return txn.Commit()
+	// The import ends by recording its point as the ledger's tip, which the
+	// set's tip matches, so a restart over the same directory keeps the set.
+	if err := m.ldb.SetTip(
+		ochainsync.Tip{Point: m.pointForSlot(0)},
+		txn,
+	); err != nil {
+		return fmt.Errorf("record initial state tip: %w", err)
+	}
+	if err := m.commit(txn); err != nil {
+		return err
+	}
+	if err := m.backend.set.FinishImport(); err != nil {
+		return fmt.Errorf("finish initial state import: %w", err)
+	}
+	return m.loadProtocolParameters()
+}
+
+// pparamsEra returns the era whose protocol parameters pp are, or nil for
+// parameters of an era the set is not seeded with.
+func pparamsEra(pp common.ProtocolParameters) *eras.EraDesc {
+	switch pp.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		return &eras.DijkstraEraDesc
+	case *conway.ConwayProtocolParameters:
+		return &eras.ConwayEraDesc
+	}
+	return nil
+}
+
+// storeProtocolParameters writes pp to the set as the parameters in effect
+// from epoch, encoded as the ledger encodes them.
+func (m *DingoStateManager) storeProtocolParameters(
+	pp common.ProtocolParameters,
+	slot, epoch uint64,
+	txn ledgerdb.Txn,
+) error {
+	era := pparamsEra(pp)
+	if era == nil {
+		return nil
+	}
+	encoded, err := cbor.Encode(&pp)
+	if err != nil {
+		return fmt.Errorf("encode protocol parameters: %w", err)
+	}
+	return m.ldb.SetPParams(encoded, slot, epoch, era.Id, txn)
+}
+
+// loadProtocolParameters replaces the parameters the harness validates with
+// the ones the set holds for the current epoch, decoded by their era.
+func (m *DingoStateManager) loadProtocolParameters() error {
+	era := pparamsEra(m.protocolParams)
+	if era == nil {
+		return nil
+	}
+	pp, err := m.ldb.GetPParams(
+		m.currentEpoch, era.Id, era.DecodePParamsFunc, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("read protocol parameters: %w", err)
+	}
+	if pp == nil {
+		return errors.New("the set holds no protocol parameters")
+	}
+	m.protocolParams = pp
+	return nil
+}
+
+// importInitialUtxos loads the vector's initial outputs into the set as a
+// ledger-state import loads a snapshot's UTxO table, at the point the rest of
+// the initial state is written at. The import stays open until
+// LoadInitialState has written that state.
+func (m *DingoStateManager) importInitialUtxos(
+	state *conformance.ParsedInitialState,
+) error {
+	ids := make([]string, 0, len(state.Utxos))
+	for id, parsedUtxo := range state.Utxos {
+		if parsedUtxo.Output != nil {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	err := m.backend.set.LoadUtxoSet(
+		m.pointForSlot(0),
+		func(put func(txID []byte, index uint32, cbor []byte) error) error {
+			for _, id := range ids {
+				parsedUtxo := state.Utxos[id]
+				if err := put(
+					parsedUtxo.TxHash,
+					parsedUtxo.Index,
+					parsedUtxo.Output.Cbor(),
+				); err != nil {
+					return fmt.Errorf("seed utxo %s: %w", id, err)
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("import initial outputs: %w", err)
+	}
+	return nil
 }
 
 func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
@@ -714,11 +686,11 @@ func resolveInitialStakeRegistrations(
 	return regs
 }
 
-// seedInitialCommitteeStatus persists the initial state's hot-key
-// authorizations and resignations through the real certificate-application
-// path. The metadata store has no direct import path for either certificate.
+// seedInitialCommitteeStatus imports the initial state's hot-key
+// authorizations and resignations as certificates, the way a ledger-state
+// import applies certificates it holds no rows for.
 func (m *DingoStateManager) seedInitialCommitteeStatus(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	state *conformance.ParsedInitialState,
 ) error {
 	type committeeSeed struct {
@@ -790,27 +762,18 @@ func (m *DingoStateManager) seedInitialCommitteeStatus(
 	if err != nil {
 		return fmt.Errorf("build synthetic committee-state tx: %w", err)
 	}
-	point := ocommon.Point{Slot: 0, Hash: syntheticBlockHash(0)}
-	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
-	if err != nil {
-		return fmt.Errorf("resolve protocol major: %w", err)
-	}
-	if err := m.db.SetTransactionMetadataOnly(
-		context.Background(),
-		tx, point, 0, map[int]uint64{}, txn, protocolMajor,
-	); err != nil {
-		return fmt.Errorf("seed auth committee hot: %w", err)
+	if err := m.ldb.ImportCertificates(tx, m.pointForSlot(0), txn); err != nil {
+		return fmt.Errorf("seed committee hot keys and resignations: %w", err)
 	}
 	return nil
 }
 
 // syntheticTransaction builds a minimal, otherwise-inert lcommon.Transaction
-// carrying certs, for driving real certificate persistence
-// (SetTransactionMetadataOnly) outside of a decoded vector transaction --
-// e.g. seeding pre-existing state that a vector's initial_state describes
-// but has no originating transaction bytes for. The dummy input/output only
-// satisfy MockTransaction.Build()'s non-empty requirement;
-// SetTransactionMetadataOnly discards both.
+// carrying certs, for driving real certificate persistence outside of a
+// decoded vector transaction -- e.g. seeding pre-existing state that a
+// vector's initial_state describes but has no originating transaction bytes
+// for. The dummy input/output only satisfy MockTransaction.Build()'s
+// non-empty requirement; importing the certificates ignores both.
 func syntheticTransaction(
 	seed string,
 	certs []common.Certificate,
@@ -872,72 +835,73 @@ func (m *DingoStateManager) nextBlockIndex(slot uint64) uint32 {
 	return m.blockIndex
 }
 
-// createUtxo persists a produced UTxO through the real backend: the
-// metadata row via Database.CreateUtxo (reusing
-// models.UtxoLedgerToModel, the same conversion the production
-// block-application path uses), and the output's raw CBOR via the blob
-// store's existing legacy (non-offset) UTxO format, so a later read can
-// reconstruct a full common.Utxo{Output: ...} for ledger-rule validation
-// -- not just prove metadata existence. See database/utxo.go's loadCbor
-// for the non-offset fallback this relies on.
-func (m *DingoStateManager) createUtxo(
-	txn *database.Txn,
-	utxo common.Utxo,
-	slot uint64,
-) error {
+// createUtxo records a produced output for the set, which receives it when
+// the transaction commits.
+func (m *DingoStateManager) createUtxo(utxo common.Utxo, slot uint64) {
 	if utxo.Output == nil {
-		return nil
+		return
 	}
-	utxoModel, err := models.UtxoLedgerToModel(utxo, slot)
-	if err != nil {
-		return fmt.Errorf("convert utxo to model: %w", err)
-	}
-	if err := m.db.CreateUtxo(context.Background(), txn, &utxoModel); err != nil {
-		return fmt.Errorf("create utxo metadata: %w", err)
-	}
-	// The transaction's own store, so the handle and the store it is used
-	// with always come from the same installation.
-	if blobStore := txn.BlobStore(); blobStore != nil {
-		if err := blobStore.SetUtxo(
-			txn.Blob(), utxoModel.TxId, utxoModel.OutputIdx,
-			utxo.Output.Cbor(),
-		); err != nil {
-			return fmt.Errorf("create utxo blob: %w", err)
-		}
-	}
-	return nil
+	id := utxo.Id.Id()
+	m.utxoChanges = append(m.utxoChanges, dledger.UtxoEvent{
+		Point: m.pointForSlot(slot),
+		Cause: dledger.UtxoChangeTransaction,
+		Added: []dledger.UtxoOutput{{
+			Ref:  models.UtxoId{Hash: id.Bytes(), Idx: utxo.Id.Index()},
+			Cbor: utxo.Output.Cbor(),
+		}},
+	})
 }
 
-// spendUtxos marks the referenced UTxOs deleted at slot (the real store's
-// spend representation -- see Database.MarkUtxosDeletedAtSlot), mirroring
-// what production does when a transaction consumes inputs/collateral.
+// spendUtxos records the referenced outputs as spent at slot, for the set to
+// remove when the transaction commits.
 func (m *DingoStateManager) spendUtxos(
-	txn *database.Txn,
 	inputs []common.TransactionInput,
 	slot uint64,
-) error {
-	if len(inputs) == 0 {
-		return nil
-	}
-	refs := make([]types.UtxoKey, 0, len(inputs))
+) {
+	removed := make([]models.UtxoId, 0, len(inputs))
 	for _, input := range inputs {
 		if input == nil {
 			continue
 		}
-		inputId := input.Id()
-		refs = append(refs, types.UtxoKey{
-			TxId:      inputId.Bytes(),
-			OutputIdx: input.Index(),
+		id := input.Id()
+		removed = append(removed, models.UtxoId{
+			Hash: id.Bytes(), Idx: input.Index(),
 		})
 	}
-	if len(refs) == 0 {
-		return nil
+	if len(removed) == 0 {
+		return
 	}
-	return m.db.MarkUtxosDeletedAtSlot(context.Background(), txn, refs, slot)
+	m.utxoChanges = append(m.utxoChanges, dledger.UtxoEvent{
+		Point:   m.pointForSlot(slot),
+		Cause:   dledger.UtxoChangeTransaction,
+		Removed: removed,
+	})
+}
+
+// unstoredBlockOffsets returns the block offsets of tx and its produced
+// outputs for a transaction that no stored block holds. The block store
+// refuses a transaction without an offset for it and each output; the
+// offsets are empty, and OffsetsPersisted keeps them from being written.
+func unstoredBlockOffsets(
+	tx common.Transaction,
+) *database.BlockIngestionResult {
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			[32]byte(tx.Hash()): {},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	for _, utxo := range tx.Produced() {
+		offsets.UtxoOffsets[database.UtxoRef{
+			TxId:      [32]byte(utxo.Id.Id()),
+			OutputIdx: utxo.Id.Index(),
+		}] = database.CborOffset{}
+	}
+	return offsets
 }
 
 // certDepositsFor builds the per-certificate-index deposit map
-// SetTransactionMetadataOnly requires for deposit-bearing certificate
+// SetTransactionWithOpts requires for deposit-bearing certificate
 // types. Conway-era certs that carry an explicit deposit amount
 // (RegistrationCertificate and its delegation/DRep variants) use that
 // amount; the legacy StakeRegistrationCertificate and
@@ -1002,19 +966,15 @@ func (m *DingoStateManager) ApplyTransaction(
 	idx := m.nextBlockIndex(slot)
 	m.appliedSlotMax = max(m.appliedSlotMax, slot)
 
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 
 	if !tx.IsValid() {
-		if err := m.applyInvalidTransaction(txn, tx, slot); err != nil {
+		if err := m.applyInvalidTransaction(tx, slot); err != nil {
 			return err
 		}
-		if err := txn.Commit(); err != nil {
+		if err := m.commit(txn); err != nil {
 			return err
-		}
-		m.removeUtxoIDs(tx.Collateral())
-		if tx.CollateralReturn() != nil {
-			m.addUtxoID(tx.Hash(), len(tx.Outputs()))
 		}
 		return nil
 	}
@@ -1054,21 +1014,15 @@ func (m *DingoStateManager) ApplyTransaction(
 			context.Background(),
 			level,
 			point,
-			dbadapter.New(m.db),
-			dbadapter.Txn(txn),
+			m.ldb,
+			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"reset DRep dormancy before certificates: %w",
 				err,
 			)
 		}
-		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
-			return fmt.Errorf(
-				"spend transaction body %d inputs: %w",
-				levelIndex,
-				err,
-			)
-		}
+		m.spendUtxos(level.Inputs(), slot)
 		levelHash := level.Hash()
 		for outIdx, output := range level.Outputs() {
 			input := &dingoTransactionInput{
@@ -1078,23 +1032,22 @@ func (m *DingoStateManager) ApplyTransaction(
 				), //nolint:gosec // idx bounded by tx outputs
 			}
 			utxo := common.Utxo{Id: input, Output: output}
-			if err := m.createUtxo(txn, utxo, slot); err != nil {
-				return fmt.Errorf(
-					"create transaction body %d output %d: %w",
-					levelIndex,
-					outIdx,
-					err,
-				)
-			}
+			m.createUtxo(utxo, slot)
 		}
-		if err := m.db.SetTransactionMetadataOnly(
+		if err := m.ldb.SetTransactionWithOpts(
 			context.Background(),
 			level,
 			point,
 			storageIndex,
+			m.currentEpoch,
+			nil,
 			m.certDepositsFor(level.Certificates()),
+			unstoredBlockOffsets(level),
 			txn,
-			protocolMajor,
+			database.BatchedTxIngestOpts{
+				ProtocolMajor:    protocolMajor,
+				OffsetsPersisted: true,
+			},
 		); err != nil {
 			return fmt.Errorf(
 				"store transaction body %d metadata: %w",
@@ -1116,10 +1069,10 @@ func (m *DingoStateManager) ApplyTransaction(
 		directDepositEffects[levelIndex] = effects
 		if err := dledger.ApplyDijkstraDirectDeposits(
 			context.Background(),
-			dbadapter.New(m.db),
+			m.ldb,
 			level,
 			slot,
-			dbadapter.Txn(txn),
+			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"apply transaction body %d direct deposits: %w",
@@ -1137,8 +1090,8 @@ func (m *DingoStateManager) ApplyTransaction(
 			drepInactivityPeriod,
 			govActionLifetime,
 			protocolMajor,
-			dbadapter.New(m.db),
-			dbadapter.Txn(txn),
+			m.ldb,
+			txn,
 			m.protocolParams,
 			&proposalsValidated,
 		); err != nil {
@@ -1156,7 +1109,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		}
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err := m.commit(txn); err != nil {
 		return err
 	}
 	for levelIndex, level := range levels {
@@ -1172,10 +1125,6 @@ func (m *DingoStateManager) ApplyTransaction(
 				levelIndex,
 				err,
 			)
-		}
-		m.removeUtxoIDs(level.Inputs())
-		for outIdx := range level.Outputs() {
-			m.addUtxoID(level.Hash(), outIdx)
 		}
 	}
 	return nil
@@ -1221,17 +1170,13 @@ func (m *DingoStateManager) applyRewardWithdrawals(tx common.Transaction) {
 // applyInvalidTransaction handles a phase-2-invalid transaction: only
 // collateral is consumed, and the collateral-return output (if any) is
 // produced. Certificates/proposals/votes on an invalid transaction have no
-// on-chain effect and are skipped, matching production
-// (SetTransactionMetadataOnly's underlying SetTransaction only applies
-// certificates when the transaction IsValid()).
+// on-chain effect and are skipped, matching production, whose transaction
+// writer stages certificates only when the transaction IsValid().
 func (m *DingoStateManager) applyInvalidTransaction(
-	txn *database.Txn,
 	tx common.Transaction,
 	slot uint64,
 ) error {
-	if err := m.spendUtxos(txn, tx.Collateral(), slot); err != nil {
-		return fmt.Errorf("spend collateral: %w", err)
-	}
+	m.spendUtxos(tx.Collateral(), slot)
 	collateralReturn := tx.CollateralReturn()
 	if collateralReturn == nil {
 		return nil
@@ -1241,15 +1186,13 @@ func (m *DingoStateManager) applyInvalidTransaction(
 	returnIdx := uint32(outputCount) //nolint:gosec // bounded by max tx size
 	input := &dingoTransactionInput{txId: txHash, index: returnIdx}
 	utxo := common.Utxo{Id: input, Output: collateralReturn}
-	if err := m.createUtxo(txn, utxo, slot); err != nil {
-		return fmt.Errorf("create collateral return utxo: %w", err)
-	}
+	m.createUtxo(utxo, slot)
 	return nil
 }
 
 // updateGovStateForCertificate keeps the pre-validation govState mirror in
-// step with a certificate that was just persisted to the real backend via
-// SetTransactionMetadataOnly above. It performs no database writes itself.
+// step with a certificate that was just staged through
+// SetTransactionWithOpts above. It performs no writes itself.
 func (m *DingoStateManager) updateGovStateForCertificate(
 	cert common.Certificate,
 ) {
@@ -1523,8 +1466,8 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // ProcessEpochBoundary implements conformance.StateManager.ProcessEpochBoundary.
 //
 // Pool retirement has no separate real-database write here: a pool's
-// PoolRetirementCertificate is already persisted (pool + pool_retirement
-// rows) at certificate-application time via SetTransactionMetadataOnly in
+// PoolRetirementCertificate is already written to the set at
+// certificate-application time via SetTransactionWithOpts in
 // ApplyTransaction, and DingoStateProvider.PoolCurrentState/IsPoolRegistered
 // determine registered-vs-retired status by comparing that stored
 // retirement epoch against the current epoch at read time -- so there is
@@ -1535,8 +1478,8 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // Most action types still use the vector-validated vote-shape heuristic the
 // harness has always used; NoConfidence and UpdateCommittee are the
 // exception (see committeeActionRatified), deciding ratification with a
-// real stake-weighted DRep/SPO tally against the database's live stake
-// distribution via credentialVotingStake/GetControlledAmountByCredential.
+// real stake-weighted DRep/SPO tally against the set's live stake
+// distribution via credentialVotingStake.
 // The rest of ProcessEpoch's real orchestration -- committee/SPO/DRep
 // denominators computed once per epoch tick, parent-chain and per-purpose
 // bookkeeping -- is not invoked here, and synthetic per-vector seed data
@@ -1558,7 +1501,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 
 	boundarySlot := newEpoch * conformanceSlotsPerEpoch
 
-	txn := m.db.Transaction(context.Background(), true)
+	txn := m.begin()
 	defer txn.Release()
 
 	// Phase 1: enact proposals that were ratified in previous epochs.
@@ -1602,11 +1545,11 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
-	if err := txn.Commit(); err != nil {
+	if err := m.commit(txn); err != nil {
 		return err
 	}
 	m.committeeEpochStartSlot = m.appliedSlotMax + 1
-	return nil
+	return m.loadProtocolParameters()
 }
 
 // pruneCommitteeResignations drops the resignation recorded for a cold
@@ -1647,7 +1590,7 @@ func (m *DingoStateManager) pruneCommitteeResignations() {
 // governance.ProcessEpoch's full orchestration) -- and persists each
 // ratification decision to the real backend row.
 func (m *DingoStateManager) ratifyProposals(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	boundarySlot uint64,
 ) error {
@@ -1772,7 +1715,7 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // committeeActionRatified evaluates NoConfidence/UpdateCommittee
 // ratification with a real stake-weighted DRep/SPO tally: it builds a
 // deposit-inclusive governance.ProposalTally itself (reading UTxO stake from
-// the real backend via m.db, since this state manager -- unlike
+// the set, since this state manager -- unlike
 // MockStateManager -- has no in-memory UTxO set) and hands the actual
 // ratification decision to ledger/governance's real ShouldRatify. That keeps
 // threshold selection (MotionNoConfidence vs. CommitteeNormal/
@@ -1786,7 +1729,7 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // backend and adds active proposal deposits to the return account's voting
 // stake, matching CIP-1694.
 func (m *DingoStateManager) committeeActionRatified(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	proposal *conformance.ProposalState,
 	currentEpoch uint64,
 ) (bool, error) {
@@ -1804,13 +1747,13 @@ func (m *DingoStateManager) committeeActionRatified(
 	}
 	deposits := m.activeProposalDeposits(activeProposalEpoch)
 	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
-		txn, proposal, deposits, currentEpoch,
+		proposal, deposits, currentEpoch,
 	)
 	if err != nil {
 		return false, err
 	}
 	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
-		txn, proposal, deposits,
+		proposal, deposits,
 	)
 	if err != nil {
 		return false, err
@@ -1861,7 +1804,7 @@ func (m *DingoStateManager) committeeActionRatified(
 }
 
 func (m *DingoStateManager) committeePurposeRoot(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*models.GovernanceProposal, error) {
 	rootID := m.govState.Roots.ConstitutionalCommittee
 	if rootID == nil {
@@ -1920,14 +1863,12 @@ func (m *DingoStateManager) activeProposalDeposits(
 // manager -- unlike MockStateManager -- has no in-memory UTxO set) plus its
 // reward balance plus any active-proposal deposits routed to it.
 func (m *DingoStateManager) credentialVotingStake(
-	txn *database.Txn,
 	credential mockledger.RewardAccountKey,
 	deposits map[mockledger.RewardAccountKey]uint64,
 ) (uint64, error) {
 	tag := conformanceCredentialTag(credential.AsCredential())
-	utxoStake, err := m.db.GetControlledAmountByCredential(
-		context.Background(),
-		tag, credential.Credential[:], txn,
+	utxoStake, err := m.backend.set.CredentialStake(
+		tag, credential.Credential[:],
 	)
 	if err != nil {
 		return 0, err
@@ -1949,7 +1890,6 @@ func (m *DingoStateManager) credentialVotingStake(
 // and an explicit Abstain vote on this proposal excludes its delegated
 // stake from the total.
 func (m *DingoStateManager) drepStakeForCommitteeAction(
-	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
 	currentEpoch uint64,
@@ -1962,7 +1902,7 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 		case common.DrepTypeAbstain:
 			continue
 		case common.DrepTypeNoConfidence:
-			stake, err := m.credentialVotingStake(txn, credential, deposits)
+			stake, err := m.credentialVotingStake(credential, deposits)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -1989,7 +1929,7 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 			) {
 				continue
 			}
-			stake, err := m.credentialVotingStake(txn, credential, deposits)
+			stake, err := m.credentialVotingStake(credential, deposits)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -2033,7 +1973,6 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // tallySPOVotes PoolRewardAccountAutoVoteNoConfidence handling); every other
 // silent pool counts as an implicit No.
 func (m *DingoStateManager) spoStakeForCommitteeAction(
-	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	deposits map[mockledger.RewardAccountKey]uint64,
 ) (uint64, uint64, error) {
@@ -2042,7 +1981,7 @@ func (m *DingoStateManager) spoStakeForCommitteeAction(
 		if !m.govState.IsPoolRegistered(pool) {
 			continue
 		}
-		stake, err := m.credentialVotingStake(txn, credential, deposits)
+		stake, err := m.credentialVotingStake(credential, deposits)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -2118,7 +2057,7 @@ func bigIntToUint64(v *big.Int, name string) (uint64, error) {
 // initial-state seed with no originating transaction) is left as an
 // in-memory-only decision -- there is nothing to persist for it.
 func (m *DingoStateManager) persistRatification(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	id string,
 	epoch uint64,
 	boundarySlot uint64,
@@ -2131,7 +2070,7 @@ func (m *DingoStateManager) persistRatification(
 	ratifiedSlot := boundarySlot
 	proposal.RatifiedEpoch = &ratifiedEpoch
 	proposal.RatifiedSlot = &ratifiedSlot
-	return m.db.SetGovernanceProposal(context.Background(), proposal, txn)
+	return m.ldb.SetGovernanceProposal(context.Background(), proposal, txn)
 }
 
 // enactProposal applies a ratified proposal's effects to the pre-validation
@@ -2141,7 +2080,7 @@ func (m *DingoStateManager) persistRatification(
 // committee/protocol-parameter/constitution/treasury side effects via
 // production code, not a second hand-rolled implementation of them.
 func (m *DingoStateManager) enactProposal(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	id string,
 	proposal *conformance.ProposalState,
 	boundarySlot uint64,
@@ -2198,7 +2137,7 @@ func (m *DingoStateManager) enactProposal(
 // (when the row carries a decodable action) or, failing that, just records
 // the enactment epoch for read-side visibility.
 func (m *DingoStateManager) persistEnactment(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	id string,
 	boundarySlot uint64,
 ) error {
@@ -2221,7 +2160,11 @@ func (m *DingoStateManager) persistEnactment(
 	if skipSideEffect {
 		enactedEpoch := m.currentEpoch
 		dbProposal.EnactedEpoch = &enactedEpoch
-		return m.db.SetGovernanceProposal(context.Background(), dbProposal, txn)
+		return m.ldb.SetGovernanceProposal(
+			context.Background(),
+			dbProposal,
+			txn,
+		)
 	}
 
 	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
@@ -2238,8 +2181,8 @@ func (m *DingoStateManager) persistEnactment(
 	result, err := governance.EnactProposal(
 		context.Background(),
 		&governance.EnactmentContext{
-			DB:                 dbadapter.New(m.db),
-			Txn:                dbadapter.Txn(txn),
+			DB:                 m.ldb,
+			Txn:                txn,
 			Epoch:              m.currentEpoch,
 			Slot:               boundarySlot,
 			PrevEpochStartSlot: m.committeeEpochStartSlot,
@@ -2253,6 +2196,9 @@ func (m *DingoStateManager) persistEnactment(
 	}
 	if result.PParamsChanged {
 		m.protocolParams = result.UpdatedPParams
+		return m.storeProtocolParameters(
+			m.protocolParams, boundarySlot, m.currentEpoch, txn,
+		)
 	}
 	return nil
 }
@@ -2269,7 +2215,7 @@ func stateManagerPParamsUpdateFunc(
 // expireGovernanceProposal marks the real governance_proposal row expired
 // at newEpoch.
 func (m *DingoStateManager) expireGovernanceProposal(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	id string,
 	newEpoch uint64,
 ) error {
@@ -2281,7 +2227,7 @@ func (m *DingoStateManager) expireGovernanceProposal(
 	expiredSlot := newEpoch * conformanceSlotsPerEpoch
 	dbProposal.ExpiredEpoch = &expiredEpoch
 	dbProposal.ExpiredSlot = &expiredSlot
-	return m.db.SetGovernanceProposal(context.Background(), dbProposal, txn)
+	return m.ldb.SetGovernanceProposal(context.Background(), dbProposal, txn)
 }
 
 // lookupGovernanceProposal fetches the real governance_proposal row for a
@@ -2292,12 +2238,12 @@ func (m *DingoStateManager) expireGovernanceProposal(
 // corresponding real row (see the synthetic-seed cases above). Any other
 // error is a real failure and is propagated.
 func (m *DingoStateManager) lookupGovernanceProposal(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	id string,
 ) (*models.GovernanceProposal, error) {
 	txHash := parseProposalTxHash(id)
 	actionIdx := parseProposalActionIdx(id)
-	proposal, err := m.db.GetGovernanceProposal(
+	proposal, err := m.ldb.GetGovernanceProposal(
 		context.Background(),
 		txHash,
 		actionIdx,
@@ -2322,14 +2268,19 @@ func (m *DingoStateManager) GetGovernanceState() *conformance.GovernanceState {
 	return m.govState
 }
 
-// GetStateSnapshot implements conformance.StateSnapshotProvider. The
-// conformance harness compares only observable ledger state; the database
-// remains authoritative for validation while this projection tracks the
-// committed UTxO identities alongside the same writes.
+// GetStateSnapshot implements conformance.StateSnapshotProvider. Its live
+// outputs are read from the set. A set that cannot be read reports a nil
+// output list, which never equals the empty list an expected state with no
+// outputs carries.
 func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
-	utxoIDs := make([]string, 0, len(m.utxoIDs))
-	for id := range m.utxoIDs {
-		utxoIDs = append(utxoIDs, id)
+	utxoIDs := []string{}
+	if err := m.backend.set.EachUtxo(
+		func(txID []byte, index uint32, _ []byte) error {
+			utxoIDs = append(utxoIDs, fmt.Sprintf("%x#%d", txID, index))
+			return nil
+		},
+	); err != nil {
+		utxoIDs = nil
 	}
 	sort.Strings(utxoIDs)
 	return &conformance.StateSnapshot{
@@ -2349,16 +2300,6 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 	}
 }
 
-func (m *DingoStateManager) addUtxoID(hash common.Blake2b256, index int) {
-	m.utxoIDs[fmt.Sprintf("%x#%d", hash[:], index)] = struct{}{}
-}
-
-func (m *DingoStateManager) removeUtxoIDs(inputs []common.TransactionInput) {
-	for _, input := range inputs {
-		delete(m.utxoIDs, input.String())
-	}
-}
-
 // SetRewardBalances implements conformance.StateManager.SetRewardBalances.
 //
 // Reward-account balances are injected by the harness itself (precomputed
@@ -2369,7 +2310,7 @@ func (m *DingoStateManager) removeUtxoIDs(inputs []common.TransactionInput) {
 // primitive for an absolute reward-balance set (only
 // Database.Add*AccountRewardByCredential, which credits a delta and can't
 // express a decrease). Real reward calculation
-// (ledger/chainsync.go's applyStakeRewards) is explicitly out of scope for
+// (ledger/epochengine/reward_calculation.go's ApplyStakeRewards) is explicitly out of scope for
 // this harness. Balances therefore stay in the govState mirror, matching
 // how the upstream harness already treats them as synthetic validation
 // input rather than application state.

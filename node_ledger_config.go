@@ -122,7 +122,6 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
-		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
 		// Start blockfetch at one range of queued headers while far from
 		// the peer tip. Not consensus-affecting; off by default.
 		BlockfetchLowWatermarkEnabled: n.config.blockfetchLowWatermarkEnabled,

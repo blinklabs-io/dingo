@@ -33,8 +33,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
-// ErrFactTableUnserved reports a fact table whose family is drained from the
-// metadata store and whose rows the live UTxO set cannot yet export. It is
+// ErrFactTableUnserved reports a fact table the metadata store no longer
+// holds and whose rows the live UTxO set cannot yet export. It is
 // returned instead of an empty answer, since the metadata store holds no rows
 // for the table.
 var ErrFactTableUnserved = errors.New(
@@ -121,15 +121,7 @@ func factSetServes(name string) bool {
 // FactTableDrained reports whether the metadata store no longer holds table's
 // rows.
 func (ls *LedgerState) FactTableDrained(name string) bool {
-	return ls.familiesDrained(familyMaskOf(factTableFamilies[name]))
-}
-
-func familyMaskOf(families []nodesettings.Family) nodesettings.FamilyMask {
-	var mask nodesettings.FamilyMask
-	for _, f := range families {
-		mask = mask.With(f)
-	}
-	return mask
+	return len(factTableFamilies[name]) != 0
 }
 
 // UnservedFactTables lists the drained fact tables the live UTxO set cannot
@@ -146,9 +138,8 @@ func (ls *LedgerState) UnservedFactTables() []string {
 }
 
 // ReadFactRows implements metadata.FactRowStore's read side over the ledger:
-// a table whose family is drained is exported from the live UTxO set, by
-// natural key and as it stood at through, and any other table is read from the
-// metadata store. A drained table the set cannot export fails with
+// every fact table is exported from the LedgerDB set, by natural key and as
+// it stood at through. A table the set cannot export fails with
 // ErrFactTableUnserved.
 //
 // The set is read as committed, so a caller must ask only for slots the ledger
@@ -161,17 +152,6 @@ func (ls *LedgerState) ReadFactRows(
 	limit int,
 	txn types.Txn,
 ) (metadata.FactRows, int64, error) {
-	if !ls.FactTableDrained(table.Name) {
-		store, ok := ls.db.Metadata().(metadata.FactRowStore)
-		if !ok {
-			return metadata.FactRows{}, 0, errors.New(
-				"ledger metadata store cannot export facts",
-			)
-		}
-		return store.ReadFactRows(
-			ctx, table, from, through, cursor, limit, txn,
-		)
-	}
 	if page := factSetPagers[table.Name]; page != nil {
 		if limit <= 0 {
 			return metadata.FactRows{}, 0, errors.New(
@@ -477,7 +457,7 @@ func (ls *LedgerState) epochFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.epochStateReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilyEpochs)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilyEpochs)
 	}
 	view, err := ls.epochStateView(r, nil)
 	if err != nil {
@@ -515,7 +495,7 @@ func (ls *LedgerState) epochSummaryFactRows(
 	er, sr, _ := ls.epochSummaryReader(nil)
 	lister, ok := sr.(EpochSummaryLister)
 	if er == nil || sr == nil || !ok {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilySummaries)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilySummaries)
 	}
 	ls.utxoSetApplyMu.RLock()
 	view, err := ls.summaryListViewLocked(er, lister, nil)
@@ -554,7 +534,7 @@ func (ls *LedgerState) networkStateFactRows(
 	r, _ := ls.networkStateReader(nil)
 	lister, ok := r.(networkStateLister)
 	if r == nil || !ok {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyNetworkDonations,
 		)
 	}
@@ -587,7 +567,7 @@ func (ls *LedgerState) networkDonationFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.networkStateReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyNetworkDonations,
 		)
 	}
@@ -618,7 +598,7 @@ func (ls *LedgerState) pparamsFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.pparamsReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyPParamsUpdates,
 		)
 	}

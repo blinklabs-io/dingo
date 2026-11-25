@@ -1040,11 +1040,13 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 
 	releaseDest()
 
+	// Stop also closes the stores after the handler returns, which takes
+	// seconds on a loaded machine; only its returning is asserted here.
 	testutil.RequireReceive(
 		t,
 		stopDone,
-		time.Second,
-		"Stop must return promptly once the in-flight handler actually finishes",
+		snapshotWait,
+		"Stop must return once the in-flight handler actually finishes",
 	)
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -82,7 +83,7 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)),
 	)
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 1, nil))
 
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
@@ -104,18 +105,18 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		Point: ocommon.NewPoint(60, tipHash),
 	}, nil))
 
-	likelihood := rewardPoolLikelihood(1, 100, 0.05)
-	encoded, err := encodeRewardLikelihood(likelihood)
+	likelihood := epochengine.RewardPoolLikelihood(1, 100, 0.05)
+	encoded, err := epochengine.EncodeRewardLikelihood(likelihood)
 	require.NoError(t, err)
-	perfA, err := rewardPerformanceEstimate(likelihood)
+	perfA, err := epochengine.RewardPerformanceEstimate(likelihood)
 	require.NoError(t, err)
-	perfDefault, err := rewardPerformanceEstimate(
-		make([]float32, rewardLikelihoodSampleCount),
+	perfDefault, err := epochengine.RewardPerformanceEstimate(
+		make([]float32, epochengine.RewardLikelihoodSampleCount),
 	)
 	require.NoError(t, err)
 	require.NotEqual(t, perfA, perfDefault)
 
-	require.NoError(t, db.Metadata().SaveRewardLikelihoodState(
+	require.NoError(t, ls.rewardLikelihoodDB().SaveRewardLikelihoodState(
 		&models.RewardLikelihoodState{
 			Epoch:        0,
 			RewardPot:    dbtypes.Uint64(nonMyopicFirstPot),
@@ -131,7 +132,7 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		}},
 		nil,
 	))
-	require.NoError(t, db.Metadata().SaveRewardLikelihoodState(
+	require.NoError(t, ls.rewardLikelihoodDB().SaveRewardLikelihoodState(
 		&models.RewardLikelihoodState{
 			Epoch:        1,
 			RewardPot:    dbtypes.Uint64(nonMyopicSecondPot),

@@ -36,7 +36,7 @@ import (
 // room for.
 //
 // The read/evaluate/persist/verify body is shared with CheckNodeSettings via
-// evaluateAndPersistGates (database/commit_timestamp.go); this is just that
+// evaluateAndPersistGates (database/node_settings.go); this is just that
 // call with phase 2's configured map.
 func (d *Database) EnforceNodeSettings(ctx context.Context, values nodesettings.Values) error {
 	return d.evaluateAndPersistGates(ctx, values)

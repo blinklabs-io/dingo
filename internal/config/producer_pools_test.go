@@ -197,6 +197,39 @@ func TestValidateBlockProducerPools(t *testing.T) {
 			},
 			wantErr: "invalid blockProducerPools[0].shelleyKesAgentMode",
 		},
+		{
+			name: "shared signer without an agent",
+			modify: func(c *Config) {
+				c.BlockProducerPools = []BlockProducerPool{{
+					ShelleyVRFKey:                 "/keys/a/vrf.skey",
+					ShelleyKESKey:                 "/keys/a/kes.skey",
+					ShelleyOperationalCertificate: "/keys/a/node.cert",
+					ShelleyKESAgentShared:         true,
+				}}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentShared requires a KES agent in sign mode",
+		},
+		{
+			name: "shared serve-key agent",
+			modify: func(c *Config) {
+				c.BlockProducerPools = []BlockProducerPool{{
+					ShelleyVRFKey:                 "/keys/a/vrf.skey",
+					ShelleyOperationalCertificate: "/keys/a/node.cert",
+					ShelleyKESAgentSocket:         "/run/kes-agent.sock",
+					ShelleyKESAgentMode:           "serve-key",
+					ShelleyKESAgentShared:         true,
+				}}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentShared requires a KES agent in sign mode",
+		},
+		{
+			name: "shared sign-mode agent",
+			modify: func(c *Config) {
+				p := remotePool("a")
+				p.ShelleyKESAgentShared = true
+				c.BlockProducerPools = []BlockProducerPool{p}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,6 +392,7 @@ blockProducerPools:
     shelleyKesAgentClientKeyFile: /keys/kes-client.key
     shelleyKesAgentServerSpkiSha256: `+strings.Repeat("cd", 32)+`
     shelleyKesAgentProfile: pool-a
+    shelleyKesAgentShared: true
   - shelleyVrfKey: /keys/b/vrf.skey
     shelleyOperationalCertificate: /keys/b/node.cert
     shelleyKesAgentSocket: /run/kes-b.sock
@@ -369,6 +403,7 @@ blockProducerPools:
 	require.Equal(t, "serve-key", cfg.BlockProducerPools[1].ShelleyKESAgentMode)
 	require.Equal(t, "/run/kes-b.sock", cfg.BlockProducerPools[1].ShelleyKESAgentSocket)
 	require.Equal(t, "pool-a", cfg.BlockProducerPools[0].ShelleyKESAgentProfile)
+	require.True(t, cfg.BlockProducerPools[0].ShelleyKESAgentShared)
 }
 
 func TestValidateRemoteKESAgentAddresses(t *testing.T) {

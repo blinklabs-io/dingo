@@ -60,9 +60,8 @@ func seedInterruptedImport(t *testing.T, dataDir, digest string, epoch uint64) {
 	})
 	require.NoError(t, err)
 	require.NoError(
-		t, db.SetSyncState("sync_status", syncStatusInProgress, nil),
+		t, db.SetChainState("sync_status", syncStatusInProgress, nil),
 	)
-	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
 	if digest != "" {
 		require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
 			Backend:             BackendV2,
@@ -71,12 +70,9 @@ func seedInterruptedImport(t *testing.T, dataDir, digest string, epoch uint64) {
 			Epoch:               epoch,
 			ImmutableFileNumber: 0,
 		}))
-		require.NoError(t, db.Metadata().SetImportCheckpoint(
-			&models.ImportCheckpoint{
-				ImportKey: importKeyFor(digest, fixtureLedgerStateSlot),
-				Phase:     models.ImportPhaseUTxO,
-			},
-			nil,
+		require.NoError(t, db.SetImportCheckpoint(
+			importKeyFor(digest, fixtureLedgerStateSlot),
+			models.ImportPhaseUTxO,
 		))
 	}
 	require.NoError(t, dbtest.CloseDatabase(db))
@@ -213,23 +209,22 @@ func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
 	)
 
 	db := openSyncedDB(t, dataDir)
-	pinnedCheckpoint, err := db.Metadata().GetImportCheckpoint(
-		importKeyFor(pinned.Hash, fixtureLedgerStateSlot), nil,
+	pinnedPhase, err := db.ImportCheckpoint(
+		importKeyFor(pinned.Hash, fixtureLedgerStateSlot),
 	)
 	require.NoError(t, err)
-	require.NotNil(
-		t, pinnedCheckpoint,
+	assert.Equal(
+		t, models.ImportPhaseTip, pinnedPhase,
 		"the pinned artifact's import checkpoint must be the one carried "+
 			"forward",
 	)
-	assert.Equal(t, models.ImportPhaseTip, pinnedCheckpoint.Phase)
 
-	newerCheckpoint, err := db.Metadata().GetImportCheckpoint(
-		importKeyFor(newer.Hash, fixtureLedgerStateSlot), nil,
+	newerPhase, err := db.ImportCheckpoint(
+		importKeyFor(newer.Hash, fixtureLedgerStateSlot),
 	)
 	require.NoError(t, err)
-	assert.Nil(
-		t, newerCheckpoint,
+	assert.Empty(
+		t, newerPhase,
 		"no import may have run under the newer artifact's key",
 	)
 }
@@ -309,7 +304,7 @@ func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetSyncState("sync_status", syncStatusInProgress, nil),
+		db.SetChainState("sync_status", syncStatusInProgress, nil),
 	)
 	require.NoError(t, dbtest.CloseDatabase(db))
 

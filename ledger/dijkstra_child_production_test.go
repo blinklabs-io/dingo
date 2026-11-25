@@ -213,18 +213,7 @@ func newChildProdFixture(
 	} {
 		outputCbor, err := cbor.Encode(keys.output(seed.amount))
 		require.NoError(t, err)
-		require.NoError(
-			t,
-			db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId:      seed.id,
-					OutputIdx: 0,
-				}); err != nil {
-					return err
-				}
-				return db.Blob().SetUtxo(txn.Blob(), seed.id, 0, outputCbor)
-			}),
-		)
+		fxSeedOutput(t, db, seed.id, 0, 0, outputCbor)
 	}
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"

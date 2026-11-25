@@ -117,7 +117,7 @@ func TestSnapshotDeleteBeyondOneTransactionCommits(t *testing.T) {
 		require.NoError(t, err)
 		slot++
 	}
-	rows, err := s.Snapshots(1, "mark")
+	rows, err := s.Snapshots(1, "mark", 0)
 	require.NoError(t, err)
 	require.Len(t, rows, pools)
 
@@ -130,7 +130,7 @@ func TestSnapshotDeleteBeyondOneTransactionCommits(t *testing.T) {
 	})
 	require.NoError(t, err)
 	requireTip(t, s, tip)
-	rows, err = s.Snapshots(1, "mark")
+	rows, err = s.Snapshots(1, "mark", 0)
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }

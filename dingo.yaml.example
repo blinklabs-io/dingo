@@ -729,6 +729,11 @@
 #   # The agent profile to sign for, named when the agent admits a session.
 #   # An agent with one profile needs none.
 #   # shelleyKesAgentProfile: "pool-a"
+#   # When the same pool signs through this agent from several producers, set
+#   # this on every producer. A shared-agent producer forges only with a live
+#   # upstream, so a disconnected producer cannot take the agent's first
+#   # signature for a slot from a synced producer.
+#   # shelleyKesAgentShared: true
 #   # Or forge for several pools, each with its own keys and KES source
 #   # (replaces the shelley* settings above; YAML only, not with Leios
 #   # forging):
@@ -747,6 +752,7 @@
 #   #     shelleyOperationalCertificate: "/keys/pool-c/opcert.cert"
 #   #     shelleyKesAgentAddress: "kes-agent.example:3443"
 #   #     shelleyKesAgentProfile: "pool-c"
+#   #     shelleyKesAgentShared: true
 #   #   - shelleyVrfKey: "/keys/pool-d/vrf.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-d/opcert.cert"
 #   #     shelleyKesAgentAddress: "kes-agent.example:3443"
@@ -907,19 +913,27 @@
 # CLI: --immutable-db-path
 # immutableDbPath: ""
 
+# Accepted for configuration compatibility and has no effect: the IndexerDB
+# writer sizes its own batches.
+#
+# Can be overridden with the DINGO_BACKFILL_BATCH_SIZE environment variable
+# CLI: --backfill-batch-size
+# backfillBatchSize: 200
+
 # Validate historical blocks during ledger processing (default: true).
 # Set false only when intentionally syncing from a non-genesis intersection
 # whose source does not provide the complete historical state.
 # validateHistorical: true
 
 # Decode blocks in the chainsync replay loop with a small parallel worker
-# pool instead of one at a time (default: false). Not consensus-affecting --
-# only changes how CBOR decode work is scheduled, not validation or apply
-# behavior. See ARCHITECTURE.md ("Block Processing Pipeline").
+# pool instead of one at a time (default: true in core mode, false in API mode
+# and on Musashi). Not consensus-affecting -- only changes how CBOR decode work
+# is scheduled, not validation or apply behavior. See ARCHITECTURE.md ("Block
+# Processing Pipeline").
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
-# blockPipelineEnabled: false
+# blockPipelineEnabled: true
 
 # Also validate VRF/KES and OpCert crypto during block-pipeline replay with a
 # parallel worker pool (default: false). Requires blockPipelineEnabled.
@@ -991,13 +1005,8 @@
 # CLI: --ledger-validate-ahead-enabled
 # ledgerValidateAheadEnabled: true
 
-# In core storage mode, write the accumulated deltas of blocks that are not
-# validated with multi-row batched inserts instead of one statement group per
-# row (default: false), as API storage mode already does. Validated blocks,
-# Leios endorser-block applies, and batches applied with closure context keep
-# the per-transaction path in every storage mode. Not
-# consensus-affecting -- the stored state is identical either way. See
-# ARCHITECTURE.md ("Block Processing Pipeline").
+# Accepted so released configurations keep loading; it has no effect. The
+# ledger writes its state to the LedgerDB, which has no batched row path.
 #
 # Can be overridden with the DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED
 # environment variable
@@ -1542,11 +1551,11 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
-# SQLite only: keep planner statistics current with PRAGMA optimize, run
-# before block processing starts and after each epoch rollover. A database
-# synced from genesis otherwise never has statistics and some queries scan most
-# of a large table. The first run on a large database can take minutes; later
-# runs are near-free. Escape hatch only.
+# SQLite only: keep planner statistics current with a bounded ANALYZE, run
+# before block processing starts, after each epoch rollover and once a minute.
+# A database synced from genesis otherwise never has statistics and some
+# queries scan most of a large table. Each run samples at most 1000 rows per
+# index, so it stays short on a large database. Escape hatch only.
 # Default: true
 # CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
 # plannerStatsRefreshEnabled: true

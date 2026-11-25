@@ -49,12 +49,16 @@ func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
 		t.Run(fmt.Sprintf("blocked=%t", blocked), func(t *testing.T) {
 			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 			require.NoError(t, err)
+			indexerDB, err := dbtest.NewIndexerDatabase(
+				t, db, dbtest.IndexerOptions{},
+			)
+			require.NoError(t, err)
 			bus := event.NewEventBus(nil, nil)
 			defer bus.Close()
 			entered, release := make(chan struct{}), make(chan struct{})
 			defer close(release)
 			idx, err := midnightindexer.New(midnightindexer.Config{
-				EventBus: bus, Metadata: db.Metadata(),
+				EventBus: bus, Metadata: indexerDB.Metadata(),
 				FatalErrorFunc: func(error) { close(entered); <-release },
 			})
 			require.NoError(t, err)
@@ -65,7 +69,12 @@ func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
 				testutil.RequireReceive(t, entered, time.Second, "indexer handler did not start")
 			}
 			// The indexer's independently owned bus isolates its drain result.
-			n := &Node{config: NewConfig(WithShutdownTimeout(time.Second)), db: db, midnightIndexer: idx}
+			n := &Node{
+				config:          NewConfig(WithShutdownTimeout(time.Second)),
+				db:              db,
+				indexerDB:       indexerDB,
+				midnightIndexer: idx,
+			}
 			n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 			err = n.Stop()
 			if blocked {
@@ -73,7 +82,9 @@ func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
 					t.Fatalf("shutdown omitted the indexer drain sentinel: %v", err)
 				}
 				require.ErrorIs(t, err, context.DeadlineExceeded)
-				_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+				_, readErr := indexerDB.Metadata().GetBackfillCheckpoint("midnight", nil)
+				require.NoError(t, readErr, "storage must remain open while the indexer is using it")
+				_, readErr = db.GetTip(nil)
 				require.NoError(t, readErr, "storage must remain open while the indexer is using it")
 			} else {
 				require.NoError(t, err)
@@ -360,7 +371,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",
@@ -442,7 +453,7 @@ func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",
@@ -691,7 +702,7 @@ func TestNodeStopKeepsStorageOpenWhilePromotionLookupRuns(t *testing.T) {
 	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	err = n.Stop()
 	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
-	_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+	_, readErr := db.GetTip(nil)
 	require.NoError(t, readErr, "storage must remain open while the lookup runs")
 }
 

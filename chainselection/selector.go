@@ -894,12 +894,24 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 	) < wall
 }
 
-// AdvertisedTipStale reports whether a peer advertising tip is excluded by the
-// stale-tip rule (see advertisedTipStaleLocked), so it can never be selected.
+// AdvertisedTipStale reports whether a peer advertising tip can never be
+// selected: it is excluded by the stale-tip rule (see
+// advertisedTipStaleLocked), or in any selection mode it advertises a block
+// more than k below the applied local tip, which candidate eligibility rejects
+// as unable to extend the local chain.
 func (cs *ChainSelector) AdvertisedTipStale(tip ochainsync.Tip) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	return cs.advertisedTipStaleLocked(&PeerChainTip{Tip: tip})
+	if cs.advertisedTipStaleLocked(&PeerChainTip{Tip: tip}) {
+		return true
+	}
+	return cs.localTipKnown &&
+		cs.tipBlockFarBehindLocalLocked(tip.BlockNumber)
+}
+
+func (cs *ChainSelector) tipBlockFarBehindLocalLocked(blockNumber uint64) bool {
+	return cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+		safeAddUint64(blockNumber, cs.securityParam) < cs.localTip.BlockNumber
 }
 
 // staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
@@ -2270,7 +2282,10 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// network tip has no upper bound over a node that is far behind, and
 		// recorded references only lag the peers delivering the chain.
 		referenceAheadOfCatchUpFloor := referenceBlock > catchUpFloor
-		if observedReject && cs.localTip.BlockNumber > 0 &&
+		// An empty local chain is bounded as block 0, not exempted: from
+		// genesis the node is as far behind as it can be, and without the
+		// relaxation one header batch past K refuses every honest peer.
+		if observedReject &&
 			(referenceStale || referenceAheadOfCatchUpFloor) {
 			maxPlausibleBlock = max(maxPlausibleBlock, catchUpCeiling)
 			observedReject = observedBlock > maxPlausibleBlock
@@ -3650,9 +3665,7 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	// frontier: selection compares the delivered block number, and each
 	// delivered header is bounded by checkPeerTipPlausibleLocked.
 	if peerTip.awaitingFirstHeader {
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
-				cs.localTip.BlockNumber {
+		if cs.tipBlockFarBehindLocalLocked(peerTip.Tip.BlockNumber) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping rollback-registered peer advertising a tip "+
@@ -3666,9 +3679,7 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 			return false
 		}
 	} else {
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
-				cs.localTip.BlockNumber {
+		if cs.tipBlockFarBehindLocalLocked(selectionTip.BlockNumber) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping implausibly-behind peer",

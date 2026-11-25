@@ -77,7 +77,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 		Logger:  logger,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
+	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	err = checkMithrilInactivityCompat(cfg, logger)
@@ -109,7 +109,7 @@ func TestCheckMithrilInactivityCompatLegacyMarker(t *testing.T) {
 		Logger:  logger,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "12345678", nil))
+	require.NoError(t, db.SetChainState("mithril_ledger_slot", "12345678", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	err = checkMithrilInactivityCompat(cfg, logger)
@@ -154,9 +154,9 @@ func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetSyncState("mithril_immutable_stream_only", "1", nil),
+		db.SetChainState("mithril_immutable_stream_only", "1", nil),
 	)
-	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
+	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))

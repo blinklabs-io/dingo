@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/dbinfo"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
@@ -470,7 +471,7 @@ func hasRestoreWorkDirPrefix(name string) bool {
 // Restore populates targetDataDir (which must not already exist, or must
 // be empty) from the snapshot at snapshotDir, then opens the result with
 // database.New to confirm it passes the same startup consistency checks
-// (CheckNodeSettings, checkCommitTimestamp) any other dingo startup does,
+// (CheckNodeSettings) any other dingo startup does,
 // and that its tip matches what the manifest recorded. The opened database
 // is closed again before returning — the caller is responsible for
 // (re)opening it for real use.
@@ -880,20 +881,22 @@ func restoreValidated(
 		}
 	}
 
-	rollback.metadataMutated = rollback.metadataPath != ""
-	if err := restoreMetadataStore(
-		ctx,
-		host,
-		manifest,
-		filepath.Join(snapshotDir, MetadataBackupFileName),
-		stagingDir,
-		storageConfig.Metadata,
-		staging,
-	); err != nil {
-		return Manifest{}, err
-	}
-	if err := staging.checkNamed(); err != nil {
-		return Manifest{}, err
+	if manifest.hasMetadataPayload() {
+		rollback.metadataMutated = rollback.metadataPath != ""
+		if err := restoreMetadataStore(
+			ctx,
+			host,
+			manifest,
+			filepath.Join(snapshotDir, MetadataBackupFileName),
+			stagingDir,
+			storageConfig.Metadata,
+			staging,
+		); err != nil {
+			return Manifest{}, err
+		}
+		if err := staging.checkNamed(); err != nil {
+			return Manifest{}, err
+		}
 	}
 	// File-backed metadata restore recreates stagingDir. Restore the marker
 	// before opening the blob provider so it resolves the same namespace that
@@ -1410,78 +1413,13 @@ func prepareRestore(
 		return restoreRollback{}, err
 	}
 
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		ctx,
-		host,
-		plugin.CapabilityStorageMetadata,
-		manifest.MetadataPlugin,
-		storageConfig.Metadata,
-		metadata.ProviderDependencies{
-			CoreNamespace: manifest.StorageMode == "core" &&
-				manifest.Gates["indexer_layout"] == "split",
-			DataDir:     targetDataDir,
-			StorageMode: manifest.StorageMode,
-		},
-	)
-	if err != nil {
-		return cleanupOnError(fmt.Errorf(
-			"resolve metadata plugin %q for restore preflight: %w",
-			manifest.MetadataPlugin, err,
-		))
-	}
-	metadataBackupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
-	if _, ok := metadataStore.(metadata.Restorer); !ok {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-		return cleanupOnError(fmt.Errorf(
-			"metadata plugin %q does not support restore",
-			manifest.MetadataPlugin,
-		))
-	}
-	if _, err := os.Stat(metadataBackupPath); err != nil {
-		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-		return cleanupOnError(fmt.Errorf(
-			"backup %q: %w", metadataBackupPath, err,
-		))
-	}
-	if validator, ok := metadataStore.(metadata.BackupValidator); ok {
-		if err := validator.ValidateBackup(ctx, metadataBackupPath); err != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-			return cleanupOnError(fmt.Errorf(
-				"validate metadata backup %q: %w", metadataBackupPath, err,
-			))
+	if manifest.hasMetadataPayload() {
+		if err := prepareMetadataRestore(
+			ctx, host, manifest, snapshotDir, targetDataDir, storageConfig,
+			&rollback,
+		); err != nil {
+			return cleanupOnError(err)
 		}
-	}
-	metadataDestructive := false
-	if destructive, ok := metadataStore.(interface {
-		HasDestructiveReset() bool
-	}); ok {
-		metadataDestructive = destructive.HasDestructiveReset()
-	}
-	if metadataDestructive && metadata.ResetOfPopulatedTargetAllowed(ctx) {
-		backuper, ok := metadataStore.(metadata.Backuper)
-		if !ok {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-			return cleanupOnError(fmt.Errorf(
-				"metadata plugin %q cannot retain a rollback backup",
-				manifest.MetadataPlugin,
-			))
-		}
-		rollback.metadataPath = filepath.Join(
-			rollback.dir, MetadataBackupFileName,
-		)
-		if err := backuper.BackupTo(ctx, rollback.metadataPath); err != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-			return cleanupOnError(fmt.Errorf(
-				"backup original metadata store before restore: %w", err,
-			))
-		}
-	}
-	if err := host.StopCapability(
-		ctx, plugin.CapabilityStorageMetadata,
-	); err != nil {
-		return cleanupOnError(fmt.Errorf(
-			"stop metadata plugin after restore preflight: %w", err,
-		))
 	}
 
 	if err := prepareIndexerRollback(ctx, host, manifest, snapshotDir, targetDataDir, storageConfig.Metadata, &rollback); err != nil {
@@ -2080,6 +2018,94 @@ func selectBlobNamespace(dir, namespace string) error {
 	return syncDir(dir)
 }
 
+// prepareMetadataRestore checks the metadata store a snapshot's metadata
+// backup restores into and, where the restore resets a populated store,
+// backs that store up into rollback first.
+func prepareMetadataRestore(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	snapshotDir string,
+	targetDataDir string,
+	storageConfig RestoreStorageConfig,
+	rollback *restoreRollback,
+) error {
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		manifest.MetadataPlugin,
+		storageConfig.Metadata,
+		metadata.ProviderDependencies{
+			CoreNamespace: manifest.StorageMode == "core" &&
+				manifest.Gates["indexer_layout"] == "split",
+			DataDir:     targetDataDir,
+			StorageMode: manifest.StorageMode,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve metadata plugin %q for restore preflight: %w",
+			manifest.MetadataPlugin, err,
+		)
+	}
+	metadataBackupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
+	if _, ok := metadataStore.(metadata.Restorer); !ok {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		return fmt.Errorf(
+			"metadata plugin %q does not support restore",
+			manifest.MetadataPlugin,
+		)
+	}
+	if _, err := os.Stat(metadataBackupPath); err != nil {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+		return fmt.Errorf(
+			"backup %q: %w", metadataBackupPath, err,
+		)
+	}
+	if validator, ok := metadataStore.(metadata.BackupValidator); ok {
+		if err := validator.ValidateBackup(ctx, metadataBackupPath); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"validate metadata backup %q: %w", metadataBackupPath, err,
+			)
+		}
+	}
+	metadataDestructive := false
+	if destructive, ok := metadataStore.(interface {
+		HasDestructiveReset() bool
+	}); ok {
+		metadataDestructive = destructive.HasDestructiveReset()
+	}
+	if metadataDestructive && metadata.ResetOfPopulatedTargetAllowed(ctx) {
+		backuper, ok := metadataStore.(metadata.Backuper)
+		if !ok {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"metadata plugin %q cannot retain a rollback backup",
+				manifest.MetadataPlugin,
+			)
+		}
+		rollback.metadataPath = filepath.Join(
+			rollback.dir, MetadataBackupFileName,
+		)
+		if err := backuper.BackupTo(ctx, rollback.metadataPath); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"backup original metadata store before restore: %w", err,
+			)
+		}
+	}
+	if err := host.StopCapability(
+		ctx, plugin.CapabilityStorageMetadata,
+	); err != nil {
+		return fmt.Errorf(
+			"stop metadata plugin after restore preflight: %w", err,
+		)
+	}
+	return nil
+}
+
 // restoreMetadataStore resolves the manifest-recorded metadata plugin
 // against targetDataDir just long enough to construct it (plugin.Resolve
 // always constructs and starts a provider together — there is no
@@ -2455,9 +2481,25 @@ func rebuildRestoredDeferredIndexes(
 	return nil
 }
 
+// writeRestoredNodeSettings records the snapshot's node settings in the
+// restored data directory's dbinfo file, where the ledger keeps them. The
+// metadata backup does not carry them: the source kept them in its own file.
+// A manifest whose gates are absent leaves the file to the open, which moves
+// a v0.94.2 store's settings out of its metadata store.
+func writeRestoredNodeSettings(manifest Manifest, targetDataDir string) error {
+	if len(manifest.Gates) == 0 {
+		return nil
+	}
+	gates := nodesettings.Persisted(manifest.Gates)
+	if err := dbinfo.WriteGates(targetDataDir, gates); err != nil {
+		return fmt.Errorf("record restored node settings: %w", err)
+	}
+	return nil
+}
+
 // validateRestoredDatabase opens the restored store the same way a normal
-// dingo startup would, letting database.New's own CheckNodeSettings and
-// checkCommitTimestamp checks validate internal consistency, then confirms
+// dingo startup would, letting database.New's own CheckNodeSettings
+// validate internal consistency, then confirms
 // the restored tip matches what the manifest recorded before closing it.
 func validateRestoredDatabase(
 	ctx context.Context,
@@ -2484,36 +2526,41 @@ func validateRestoredDatabase(
 	defer host.StopCapability( //nolint:errcheck
 		context.WithoutCancel(ctx), plugin.CapabilityStorageBlob,
 	)
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		ctx,
-		host,
-		plugin.CapabilityStorageMetadata,
-		manifest.MetadataPlugin,
-		storageConfig.Metadata,
-		metadata.ProviderDependencies{
-			CoreNamespace: manifest.StorageMode == "core" &&
-				manifest.Gates["indexer_layout"] == "split",
-			DataDir:     targetDataDir,
-			StorageMode: manifest.StorageMode,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"resolve metadata plugin %q for validation: %w",
-			manifest.MetadataPlugin,
-			err,
-		)
-	}
-	defer host.StopCapability( //nolint:errcheck
-		context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
-	)
-	if manager, ok := metadataStore.(metadata.DeferredIndexManager); ok {
-		if err := rebuildRestoredDeferredIndexes(
+	// Only a v0.94.2 snapshot carries a metadata backup. A snapshot of the
+	// ledger's database has none, and its database opens without one.
+	var metadataStore metadata.MetadataStore
+	if manifest.hasMetadataPayload() {
+		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
 			ctx,
-			manager,
-			storageConfig.Logger,
-		); err != nil {
-			return err
+			host,
+			plugin.CapabilityStorageMetadata,
+			manifest.MetadataPlugin,
+			storageConfig.Metadata,
+			metadata.ProviderDependencies{
+				CoreNamespace: manifest.StorageMode == "core" &&
+					manifest.Gates["indexer_layout"] == "split",
+				DataDir:     targetDataDir,
+				StorageMode: manifest.StorageMode,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve metadata plugin %q for validation: %w",
+				manifest.MetadataPlugin,
+				err,
+			)
+		}
+		defer host.StopCapability( //nolint:errcheck
+			context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
+		)
+		if manager, ok := metadataStore.(metadata.DeferredIndexManager); ok {
+			if err := rebuildRestoredDeferredIndexes(
+				ctx,
+				manager,
+				storageConfig.Logger,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	immutableProvider := immplugin.ProviderNameForBlob(manifest.BlobPlugin)
@@ -2572,14 +2619,30 @@ func validateRestoredDatabase(
 			}
 		}
 	}
+	if err := writeRestoredNodeSettings(manifest, targetDataDir); err != nil {
+		return err
+	}
+	ledgerState, err := database.ReadLedgerStoreState(blobStore)
+	if err != nil {
+		return fmt.Errorf("read the restored ledger store state: %w", err)
+	}
+	role := ""
+	var validationMetadata metadata.MetadataStore
+	if ledgerState == database.LedgerStoreReleased {
+		// The node moves a restored v0.94.2 database's ledger state out of
+		// its metadata store when it opens it.
+		role = database.RoleReleased
+		validationMetadata = metadataStore
+	}
 	db, err := database.New(ctx, &database.Config{
+		Role:                      role,
 		DataDir:                   targetDataDir,
 		StorageMode:               manifest.StorageMode,
 		Network:                   manifest.Network,
 		AlonzoLovelacePerUtxoWord: storageConfig.AlonzoLovelacePerUtxoWord,
 	}, database.Stores{
 		Blob:      blobStore,
-		Metadata:  metadataStore,
+		Metadata:  validationMetadata,
 		Immutable: immutableStore,
 	})
 	if db != nil {

@@ -133,14 +133,12 @@ func newSplitLifecycleTestNodeAtBlock(
 	require.NoError(t, n.openUtxoSet())
 	// The latch a split node's first start writes; the harness database was
 	// created before the layout was known.
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, n.db.SetNodeSettingsGates(
 		t.Context(),
 		nodesettings.Values{
 			"indexer_layout": internalconfig.IndexerLayoutSplit,
 		},
-		0, 0,
-	),
-	)
+	))
 	writers := &lifecycleIndexerWriters{rollbackTo: rollbackTo}
 	n.config.splitIndexer = true
 	n.config.indexerWriterFactory = writers.build
@@ -259,7 +257,7 @@ func TestLiveTruncateOnSplitRefusedByTheLedgerLeavesTheIndexerUntouched(
 	const numBlocks = 12
 	n, points, writers := newSplitLifecycleTestNode(t, numBlocks, nil)
 	// A trust boundary above the target: the ledger refuses the truncate.
-	require.NoError(t, n.db.SetSyncState(
+	require.NoError(t, n.db.SetChainState(
 		"mithril_ledger_slot",
 		strconv.FormatUint(points[numBlocks-1].Slot, 10),
 		nil,

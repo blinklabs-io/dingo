@@ -26,125 +26,189 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
-	// Snapshot only reads the database, so every injected failure shares one.
-	db := newRestoreInternalTestDB(t)
-	require.NoError(
-		t,
-		db.BlockCreate(newRestoreInternalTestBlock(), nil),
+// snapshotSource is a database to snapshot, the options its snapshot takes,
+// and the backup file the snapshot writes beside the block store's.
+type snapshotSource struct {
+	db      *database.Database
+	opts    []ManifestOption
+	payload string
+}
+
+func (src snapshotSource) snapshot(
+	ctx context.Context, dir string,
+) (Manifest, error) {
+	return Snapshot(
+		ctx, src.db, dir, TriggerManual, "test", "badger", "sqlite",
+		src.opts...,
 	)
-	for _, failAt := range []string{"", BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
-		t.Run("failure_"+failAt, func(t *testing.T) {
-			base := snapshotTestParent(t)
-			dir := filepath.Join(base, "snapshot")
-			originalFileSync, originalDirSync := syncSnapshotFile, syncDir
-			t.Cleanup(
-				func() { syncSnapshotFile, syncDir = originalFileSync, originalDirSync },
-			)
-			injected := errors.New("snapshot durability failure")
-			var calls []string
-			check := func(stage string) error {
-				calls = append(calls, stage)
-				_, err := ReadManifest(dir)
+}
+
+// newLedgerInternalSnapshotSource opens a ledger database holding block 1
+// and a live UTxO set at block 1, which its snapshot carries.
+func newLedgerInternalSnapshotSource(t *testing.T) snapshotSource {
+	t.Helper()
+	db := newRestoreInternalTestDB(t)
+	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
+	store, err := badgerutxo.Open(t.TempDir())
+	require.NoError(t, err)
+	closing := store
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		_ = target.Close()
+	})
+	block := newRestoreInternalTestBlock()
+	_, err = store.Apply(
+		ocommon.NewPoint(block.Slot, block.Hash),
+		[]badgerutxo.Output{{
+			Ref:  badgerutxo.NewRef(block.Hash, 0),
+			Cbor: []byte{0x80, 0x01},
+		}},
+		nil,
+	)
+	require.NoError(t, err)
+	return snapshotSource{
+		db:      db,
+		opts:    []ManifestOption{WithUtxoSetBackup(store)},
+		payload: UtxoSetBackupFileName,
+	}
+}
+
+// newReleasedInternalSnapshotSource opens a v0.94.2 database holding block
+// 1 in dir, seeded from templatePath when it is set. Its snapshot carries
+// its metadata store.
+func newReleasedInternalSnapshotSource(
+	t *testing.T, dir, templatePath string,
+) snapshotSource {
+	t.Helper()
+	if templatePath != "" {
+		raw, err := os.ReadFile(templatePath)
+		require.NoError(t, err)
+		require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, raw))
+	}
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
+	return snapshotSource{db: db, payload: MetadataBackupFileName}
+}
+
+func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
+	// Snapshot only reads the database, so every injected failure shares
+	// one source of each kind.
+	sources := map[string]snapshotSource{
+		"ledger":   newLedgerInternalSnapshotSource(t),
+		"released": newReleasedInternalSnapshotSource(t, t.TempDir(), ""),
+	}
+	for _, kind := range []string{"ledger", "released"} {
+		src := sources[kind]
+		db := src.db
+		for _, failAt := range []string{"", BlobBackupFileName, src.payload, "directory", "parent"} {
+			t.Run(kind+"/failure_"+failAt, func(t *testing.T) {
+				base := snapshotTestParent(t)
+				dir := filepath.Join(base, "snapshot")
+				originalFileSync, originalDirSync := syncSnapshotFile, syncDir
+				t.Cleanup(
+					func() { syncSnapshotFile, syncDir = originalFileSync, originalDirSync },
+				)
+				injected := errors.New("snapshot durability failure")
+				var calls []string
+				check := func(stage string) error {
+					calls = append(calls, stage)
+					_, err := ReadManifest(dir)
+					require.ErrorIs(
+						t,
+						err,
+						os.ErrNotExist,
+						"manifest published before backup durability",
+					)
+					// Persistence no longer needs the snapshot's commit pause.
+					ctx, cancel := context.WithTimeout(
+						context.Background(),
+						5*time.Second,
+					)
+					defer cancel()
+					resume, err := db.PauseCommitsContext(ctx)
+					require.NoError(
+						t,
+						err,
+						"durability work retained the commit barrier",
+					)
+					resume()
+					if stage == failAt {
+						return injected
+					}
+					return nil
+				}
+				syncSnapshotFile = func(file *os.File) error {
+					info, err := file.Stat()
+					require.NoError(t, err)
+					require.Positive(
+						t,
+						info.Size(),
+						"sync must follow completed backup",
+					)
+					if err := check(filepath.Base(file.Name())); err != nil {
+						return err
+					}
+					return originalFileSync(file)
+				}
+				syncDir = func(path string) error {
+					stage := "directory"
+					if path == base {
+						stage = "parent"
+					}
+					if err := check(stage); err != nil {
+						return err
+					}
+					return originalDirSync(path)
+				}
+				_, err := src.snapshot(context.Background(), dir)
+				if failAt == "" {
+					require.NoError(t, err)
+					require.Equal(
+						t,
+						[]string{
+							BlobBackupFileName,
+							src.payload,
+							"directory",
+							"parent",
+						},
+						calls,
+					)
+					entries, err := ListSnapshots(base)
+					require.NoError(t, err)
+					require.Len(t, entries, 1)
+					syncSnapshotFile, syncDir = originalFileSync, originalDirSync
+					_, err = Restore(
+						context.Background(),
+						newRestoreInternalTestHost(t),
+						nil,
+						dir,
+						filepath.Join(t.TempDir(), "restored"),
+						RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+					)
+					require.NoError(t, err)
+					return
+				}
 				require.ErrorIs(
 					t,
 					err,
-					os.ErrNotExist,
-					"manifest published before backup durability",
+					injected,
+					"snapshot accepted an unsynchronized backup",
 				)
-				// Persistence no longer needs the snapshot's commit pause.
-				ctx, cancel := context.WithTimeout(
-					context.Background(),
-					5*time.Second,
-				)
-				defer cancel()
-				resume, err := db.PauseCommitsContext(ctx)
-				require.NoError(
-					t,
-					err,
-					"durability work retained the commit barrier",
-				)
-				resume()
-				if stage == failAt {
-					return injected
-				}
-				return nil
-			}
-			syncSnapshotFile = func(file *os.File) error {
-				info, err := file.Stat()
-				require.NoError(t, err)
-				require.Positive(
-					t,
-					info.Size(),
-					"sync must follow completed backup",
-				)
-				if err := check(filepath.Base(file.Name())); err != nil {
-					return err
-				}
-				return originalFileSync(file)
-			}
-			syncDir = func(path string) error {
-				stage := "directory"
-				if path == base {
-					stage = "parent"
-				}
-				if err := check(stage); err != nil {
-					return err
-				}
-				return originalDirSync(path)
-			}
-			_, err := Snapshot(
-				context.Background(),
-				db,
-				dir,
-				TriggerManual,
-				"test",
-				"badger",
-				"sqlite",
-			)
-			if failAt == "" {
-				require.NoError(t, err)
-				require.Equal(
-					t,
-					[]string{
-						BlobBackupFileName,
-						MetadataBackupFileName,
-						"directory",
-						"parent",
-					},
-					calls,
-				)
+				require.NoDirExists(t, dir)
 				entries, err := ListSnapshots(base)
 				require.NoError(t, err)
-				require.Len(t, entries, 1)
-				syncSnapshotFile, syncDir = originalFileSync, originalDirSync
-				_, err = Restore(
-					context.Background(),
-					newRestoreInternalTestHost(t),
-					nil,
-					dir,
-					filepath.Join(t.TempDir(), "restored"),
-					RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
-				)
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorIs(
-				t,
-				err,
-				injected,
-				"snapshot accepted an unsynchronized backup",
-			)
-			require.NoDirExists(t, dir)
-			entries, err := ListSnapshots(base)
-			require.NoError(t, err)
-			require.Empty(t, entries)
-		})
+				require.Empty(t, entries)
+			})
+		}
 	}
 }
 
@@ -202,41 +266,25 @@ func requireMetadataTemplateSentinel(t *testing.T, db *database.Database) {
 	)
 }
 
-// newRestoreInternalTestDBWithTemplate is newRestoreInternalTestDB, but
-// seeds the database's data directory from templatePath (see
-// writeMetadataTemplateWithSentinel) before construction when templatePath
-// is non-empty, instead of letting dbtest.NewDatabase build and cache its
-// own migrated template in this process.
-func newRestoreInternalTestDBWithTemplate(
-	t *testing.T, templatePath string,
-) *database.Database {
-	t.Helper()
-	dir := t.TempDir()
-	if templatePath != "" {
-		raw, err := os.ReadFile(templatePath)
-		require.NoError(t, err)
-		require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, raw))
-	}
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
-	require.NoError(t, err)
-	return db
-}
-
 // A process exit bypasses Snapshot's cleanup, leaving an interrupted directory
 // on disk. A fresh reader must neither catalog nor restore that incomplete copy.
 func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 	if stage := os.Getenv("DINGO_SNAPSHOT_INTERRUPT_STAGE"); stage != "" {
-		templatePath := os.Getenv("DINGO_SNAPSHOT_INTERRUPT_METADATA_TEMPLATE")
-		db := newRestoreInternalTestDBWithTemplate(t, templatePath)
-		if templatePath != "" {
-			requireMetadataTemplateSentinel(t, db)
+		var src snapshotSource
+		if stage == MetadataBackupFileName {
+			src = newReleasedInternalSnapshotSource(
+				t, t.TempDir(),
+				os.Getenv("DINGO_SNAPSHOT_INTERRUPT_METADATA_TEMPLATE"),
+			)
+			requireMetadataTemplateSentinel(t, src.db)
 			require.False(
 				t, dbtest.MetadataTemplateBuilt(),
 				"child ran its own metadata migration despite the "+
 					"template the parent process provided",
 			)
+		} else {
+			src = newLedgerInternalSnapshotSource(t)
 		}
-		require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
 		syncSnapshotFile = func(file *os.File) error {
 			if filepath.Base(file.Name()) == stage {
 				os.Exit(23)
@@ -251,29 +299,25 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 			}
 			return originalDirSync(path)
 		}
-		_, err := Snapshot(
-			context.Background(),
-			db,
-			os.Getenv("DINGO_SNAPSHOT_INTERRUPT_DIR"),
-			TriggerManual,
-			"test",
-			"badger",
-			"sqlite",
+		_, err := src.snapshot(
+			context.Background(), os.Getenv("DINGO_SNAPSHOT_INTERRUPT_DIR"),
 		)
 		require.NoError(t, err)
 		t.Fatal("snapshot did not reach interruption boundary")
 	}
 
 	// Build the migrated metadata template once, in this process, and hand
-	// it to every forked child below instead of letting each of the four
-	// repeat the same one-per-process migration cost in its own fresh
-	// process -- see dbtest.MetadataTemplateBytes' doc comment. The
-	// sentinel table lets the child assertion above tell whether it
-	// actually reused these bytes.
+	// it to the v0.94.2 child below instead of letting it repeat the
+	// one-per-process migration cost in its own fresh process -- see
+	// dbtest.MetadataTemplateBytes' doc comment. The sentinel table lets the
+	// child assertion above tell whether it actually reused these bytes.
 	templatePath := filepath.Join(t.TempDir(), "metadata-template.sqlite")
 	writeMetadataTemplateWithSentinel(t, templatePath)
 
-	for _, stage := range []string{BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
+	for _, stage := range []string{
+		BlobBackupFileName, UtxoSetBackupFileName, MetadataBackupFileName,
+		"directory", "parent",
+	} {
 		t.Run(stage, func(t *testing.T) {
 			base := snapshotTestParent(t)
 			dir := filepath.Join(base, "interrupted")
@@ -326,7 +370,7 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 }
 
 func TestSnapshotRepairsCatalogAfterDurableManifestWrite(t *testing.T) {
-	db := newRestoreInternalTestDB(t)
+	src := newLedgerInternalSnapshotSource(t)
 	base := snapshotTestParent(t)
 	require.NoError(t, EnsureSnapshotCatalog(base))
 	require.NoError(t, os.WriteFile(
@@ -334,12 +378,10 @@ func TestSnapshotRepairsCatalogAfterDurableManifestWrite(t *testing.T) {
 	))
 	dir := filepath.Join(base, "complete")
 
-	_, err := Snapshot(
-		t.Context(), db, dir, TriggerManual, "test", "badger", "sqlite",
-	)
+	_, err := src.snapshot(t.Context(), dir)
 	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, BlobBackupFileName))
-	require.FileExists(t, filepath.Join(dir, MetadataBackupFileName))
+	require.FileExists(t, filepath.Join(dir, UtxoSetBackupFileName))
 	_, readErr := ReadManifest(dir)
 	require.NoError(t, readErr)
 	entries, _, listErr := ListAvailableSnapshotPageContext(

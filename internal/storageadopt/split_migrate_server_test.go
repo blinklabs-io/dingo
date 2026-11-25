@@ -101,6 +101,29 @@ func serverMigrationHost(
 	}
 }
 
+// resolveReleasedStores resolves the stores of a v0.94.2 database on host:
+// ResolveStorage's and, when it does not resolve one, the metadata store
+// that database keeps its state in.
+func resolveReleasedStores(
+	t *testing.T,
+	host *plugin.Host,
+	selections internalplugins.StorageSelections,
+	deps internalplugins.StorageDependencies,
+) database.Stores {
+	t.Helper()
+	stores, err := internalplugins.ResolveStorage(
+		t.Context(), host, selections, deps,
+	)
+	require.NoError(t, err)
+	if stores.Metadata == nil {
+		stores.Metadata, err = internalplugins.ResolveMetadata(
+			t.Context(), host, selections, deps,
+		)
+		require.NoError(t, err)
+	}
+	return stores
+}
+
 func seedServerMigration(
 	t *testing.T,
 	provider string,
@@ -134,13 +157,7 @@ func seedServerMigration(
 	// The released layout: one API store on the configured database.
 	released := m.selections()
 	released.SplitIndexer = false
-	stores, err := internalplugins.ResolveStorage(
-		t.Context(),
-		host,
-		released,
-		deps,
-	)
-	require.NoError(t, err)
+	stores := resolveReleasedStores(t, host, released, deps)
 	db, err := database.New(t.Context(), m.databaseConfig("api", ""), stores)
 	require.NoError(t, err)
 	cm, err := chain.NewManager(t.Context(), db, nil)
@@ -154,7 +171,9 @@ func seedServerMigration(
 	}
 	require.NoError(
 		t,
-		db.SetTip(ochainsync.Tip{Point: last, BlockNumber: 3}, nil),
+		db.Metadata().SetTip(
+			ochainsync.Tip{Point: last, BlockNumber: 3}, nil,
+		),
 	)
 	require.NoError(
 		t,

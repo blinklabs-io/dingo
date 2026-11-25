@@ -29,6 +29,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +59,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
 	rewardAccount := cbor.NewByteString(append([]byte{0xe0}, stakeKey...))
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -72,6 +73,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	view := &LedgerView{ls: ls}
 
 	deposit := dijkstraTxFromBodyFields(t, map[uint]any{
@@ -89,7 +91,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 		)
 	}
 	balance := func() dbtypes.Uint64 {
-		account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
+		account, err := ls.ledgerDB().GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 		require.NoError(t, err)
 		return account.Reward
 	}
@@ -99,12 +101,22 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	require.ErrorAs(t, validate(startingObserver), &outside)
 	require.Equal(t, dbtypes.Uint64(5), balance())
 
+	// The set journals a block's changes under the block's point, so the
+	// rollback below has a record at slot 1 to return to.
+	parent := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	ls.stageUtxoSet(nil, &parent)
+	applied := ocommon.Point{Slot: 2, Hash: bytes.Repeat([]byte{0x02}, 32)}
 	apply := func() {
 		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-			return ApplyDijkstraDirectDeposits(
-				context.Background(), dbadapter.New(db), deposit, 2,
+			err := ApplyDijkstraDirectDeposits(
+				context.Background(), ls.ledgerDB(), deposit, 2,
 				dbadapter.Txn(txn),
 			)
+			if err != nil {
+				return err
+			}
+			ls.stageUtxoSet(dbadapter.Txn(txn), &applied)
+			return nil
 		}))
 	}
 	apply()
@@ -112,7 +124,8 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	require.NoError(t, validate(observer))
 	require.NoError(t, validate(startingObserver))
 
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(context.Background(), 1, nil))
+	ls.stageUtxoSetRollback(nil, parent)
+	require.False(t, ls.utxoSetFailed.Load())
 	require.Equal(t, dbtypes.Uint64(5), balance())
 	require.ErrorAs(t, validate(observer), &outside)
 

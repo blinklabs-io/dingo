@@ -262,7 +262,11 @@ func (s *Store) WriteLegacyRewardRecordsForTest(recs []RewardRecord) error {
 		for _, r := range recs {
 			v := make([]byte, rewardRecordAmountLen)
 			v[7] = byte(r.Amount) //nolint:gosec // a small test amount
-			if err := txn.Set(rewardRecordKey(r), v); err != nil {
+			k, err := rewardRecordKey(r)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(k, v); err != nil {
 				return err
 			}
 		}
@@ -369,4 +373,10 @@ func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
 // below the floor, before it looks up the family's index.
 func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
 	s.added.beforeIndex = fn
+}
+
+// TopSeeksForTest returns how many journal and state journal scans have
+// started at the top of their prefix since the process began.
+func TopSeeksForTest() uint64 {
+	return topSeeks.Load()
 }

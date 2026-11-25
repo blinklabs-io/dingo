@@ -73,10 +73,23 @@ type StorageDependencies struct {
 	TracingEnabled bool
 	// StatementGuard is forwarded to metadata.ProviderDependencies.
 	StatementGuard metadata.StatementGuard
+	// MigrateReleased, when set, is run by OpenDatabase before it opens a
+	// ledger database: it moves the ledger state of a v0.94.2 database out of
+	// the metadata store openMetadata opens (see nodestorage.ReleasedMigration).
+	// The resolved stores include the provider needed by existing ImmutableDB
+	// markers; their lifecycle remains owned by the host.
+	// Without it, a v0.94.2 database fails to open.
+	MigrateReleased func(
+		ctx context.Context,
+		stores database.Stores,
+		openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
+	) error
 }
 
-// ResolveStorage starts the selected storage providers in dependency order.
-// The supplied host owns their lifecycle; callers must stop it if resolution
+// ResolveStorage starts the stores of the ledger's database, the block store
+// and the ImmutableDB, in dependency order. The ledger's database keeps no
+// metadata store; ResolveMetadata starts one for the databases that do. The
+// supplied host owns their lifecycle; callers must stop it if resolution
 // fails after one provider has started.
 func ResolveStorage(
 	ctx context.Context,
@@ -100,31 +113,6 @@ func ResolveStorage(
 	)
 	if err != nil {
 		return database.Stores{}, fmt.Errorf("resolve blob storage: %w", err)
-	}
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		ctx,
-		host,
-		plugin.CapabilityStorageMetadata,
-		selections.Metadata.Provider,
-		selections.Metadata.Config,
-		metadata.ProviderDependencies{
-			CoreNamespace: selections.SplitIndexer &&
-				(selections.Metadata.Provider == "postgres" || selections.Metadata.Provider == "mysql"),
-			DataDir:             deps.DataDir,
-			StorageMode:         deps.StorageMode,
-			MaxConnections:      deps.MaxConnections,
-			Logger:              deps.Logger,
-			PromRegistry:        deps.PromRegistry,
-			TracingEnabled:      deps.TracingEnabled,
-			GenesisStakingEmpty: deps.GenesisStakingEmpty,
-			StatementGuard:      deps.StatementGuard,
-		},
-	)
-	if err != nil {
-		return database.Stores{}, fmt.Errorf(
-			"resolve metadata storage: %w",
-			err,
-		)
 	}
 	immutableProvider := immplugin.ProviderNameForBlob(selections.Blob.Provider)
 	var immutableObjects blob.ImmutableObjects
@@ -159,9 +147,74 @@ func ResolveStorage(
 	}
 	return database.Stores{
 		Blob:      blobStore,
-		Metadata:  metadataStore,
 		Immutable: immutableStore,
 	}, nil
+}
+
+// ResolveMetadata starts the selected metadata provider on host: on a server
+// provider in the consensus namespace when the selection says the API store
+// beside it was adopted as the IndexerDB.
+func ResolveMetadata(
+	ctx context.Context,
+	host *plugin.Host,
+	selections StorageSelections,
+	deps StorageDependencies,
+) (metadata.MetadataStore, error) {
+	store, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		selections.Metadata.Provider,
+		selections.Metadata.Config,
+		metadata.ProviderDependencies{
+			CoreNamespace: selections.SplitIndexer &&
+				(selections.Metadata.Provider == "postgres" || selections.Metadata.Provider == "mysql"),
+			DataDir:             deps.DataDir,
+			StorageMode:         deps.StorageMode,
+			MaxConnections:      deps.MaxConnections,
+			Logger:              deps.Logger,
+			PromRegistry:        deps.PromRegistry,
+			TracingEnabled:      deps.TracingEnabled,
+			GenesisStakingEmpty: deps.GenesisStakingEmpty,
+			StatementGuard:      deps.StatementGuard,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve metadata storage: %w", err)
+	}
+	return store, nil
+}
+
+// ReleasedMetadataOpener returns the function nodestorage.ReleasedMigration
+// opens a v0.94.2 metadata store with: the configured metadata provider, on a
+// host of its own that closing the store stops. A v0.94.2 database holds its
+// ledger state where the configured provider puts it, and on a server
+// provider in the consensus namespace an adopted API store moved it to.
+func ReleasedMetadataOpener(
+	selections StorageSelections,
+	deps StorageDependencies,
+) func(context.Context) (metadata.MetadataStore, func() error, error) {
+	return func(
+		ctx context.Context,
+	) (metadata.MetadataStore, func() error, error) {
+		host, err := NewHost()
+		if err != nil {
+			return nil, nil, err
+		}
+		// The ledger's database registers the store's collectors once it
+		// opens; this store is gone by then.
+		deps.PromRegistry = nil
+		deps.StatementGuard = nil
+		store, err := ResolveMetadata(ctx, host, selections, deps)
+		if err != nil {
+			return nil, nil, errors.Join(
+				err, host.Stop(context.WithoutCancel(ctx)),
+			)
+		}
+		return store, func() error {
+			return host.Stop(context.WithoutCancel(ctx))
+		}, nil
+	}
 }
 
 // IndexerDirName is the directory under the data directory holding a SQLite
@@ -249,8 +302,7 @@ const (
 // OpenIndexerDatabase composes the IndexerDB: its own metadata store, opened
 // in API mode on host, over the consensus database's blob store. The blob
 // view is read-only for blocks and keeps the IndexerDB's offsets under their
-// own key prefix. The IndexerDB keeps no commit timestamp, and its metrics
-// carry role="indexer" and an indexer_ name prefix so they register beside
+// own key prefix. Its metrics carry role="indexer" and an indexer_ name prefix so they register beside
 // the consensus database's.
 //
 // The caller closes the returned database before the host stops, and before
@@ -298,22 +350,10 @@ func OpenIndexerDatabase(
 // DatabaseRuntime is a composed database plus the plugin host that owns its
 // injected stores. Close preserves database-before-store shutdown ordering.
 type DatabaseRuntime struct {
-	Database      *database.Database
-	Host          *plugin.Host
-	once          sync.Once
-	err           error
-	recoveryError error
-}
-
-// RecoveryError reports a recoverable error encountered while opening the
-// database. OpenDatabase returns these errors on the owned runtime instead of
-// as its error result, so a non-nil returned error always means there is no
-// live runtime for the caller to close.
-func (r *DatabaseRuntime) RecoveryError() error {
-	if r == nil {
-		return nil
-	}
-	return r.recoveryError
+	Database *database.Database
+	Host     *plugin.Host
+	once     sync.Once
+	err      error
 }
 
 // Close stops database-owned resources before provider-owned stores.
@@ -334,8 +374,7 @@ func (r *DatabaseRuntime) Close(ctx context.Context) error {
 
 // OpenDatabase explicitly composes a fresh host, storage providers, and a
 // database. A non-nil error is returned only after all started resources have
-// been stopped. Recoverable database initialization errors are exposed through
-// DatabaseRuntime.RecoveryError on the successfully owned runtime.
+// been stopped.
 func OpenDatabase(
 	ctx context.Context,
 	dbConfig *database.Config,
@@ -351,6 +390,24 @@ func OpenDatabase(
 		_ = host.Stop(context.WithoutCancel(ctx))
 		return nil, err
 	}
+	if dbConfig != nil && dbConfig.Role != "" {
+		store, err := ResolveMetadata(ctx, host, selections, deps)
+		if err != nil {
+			_ = host.Stop(context.WithoutCancel(ctx))
+			return nil, err
+		}
+		stores.Metadata = store
+	}
+	if deps.MigrateReleased != nil && dbConfig != nil && dbConfig.Role == "" {
+		if err := deps.MigrateReleased(
+			ctx, stores, ReleasedMetadataOpener(selections, deps),
+		); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("migrate the v0.94.2 ledger state: %w", err),
+				host.Stop(context.WithoutCancel(ctx)),
+			)
+		}
+	}
 	db, err := database.New(ctx, dbConfig, stores) //nolint:contextcheck
 	runtime := &DatabaseRuntime{Database: db, Host: host}
 	if db == nil {
@@ -364,10 +421,6 @@ func OpenDatabase(
 		)
 	}
 	if err != nil {
-		if _, ok := errors.AsType[database.CommitTimestampError](err); ok {
-			runtime.recoveryError = err
-			return runtime, nil
-		}
 		return nil, errors.Join(
 			err,
 			runtime.Close(context.WithoutCancel(ctx)),

@@ -32,6 +32,9 @@ import (
 type IndexerService struct {
 	writer *indexer.Writer
 	store  *indexerdb.Store
+	// ledgerless is set for a service given no ledger facts: it can roll the
+	// IndexerDB back and cannot follow the ledger.
+	ledgerless bool
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -81,13 +84,16 @@ func NewIndexerService(
 	if err != nil {
 		return nil, err
 	}
+	w.WithSparseBatches()
 	// Recorded before the factory returns, so no reader finds the IndexerDB
 	// ready for a chain whose anchor it has not been told about. A single
 	// small write.
 	if err := w.Prepare(context.Background()); err != nil {
 		return nil, fmt.Errorf("record indexer anchor: %w", err)
 	}
-	return &IndexerService{writer: w, store: store}, nil
+	return &IndexerService{
+		writer: w, store: store, ledgerless: deps.FactRows == nil,
+	}, nil
 }
 
 // newIndexerWriter assembles the writer over src. Tests substitute a source
@@ -103,14 +109,7 @@ func newIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
-	var facts *indexer.MetadataFacts
-	if deps.FactRows != nil {
-		facts, err = indexer.NewFactsOver(
-			deps.Consensus, deps.FactRows, deps.Indexer,
-		)
-	} else {
-		facts, err = indexer.NewMetadataFacts(deps.Consensus, deps.Indexer)
-	}
+	facts, err := indexer.NewMetadataFacts(deps.FactRows, deps.Indexer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,6 +154,9 @@ func (s *IndexerService) Start(ctx context.Context) error {
 	defer s.mu.Unlock()
 	if s.started {
 		return errors.New("indexer service already started")
+	}
+	if s.ledgerless {
+		return indexer.ErrNoLedger
 	}
 	s.started = true
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

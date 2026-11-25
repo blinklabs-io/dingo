@@ -33,6 +33,7 @@ import (
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/google/uuid"
@@ -313,6 +314,31 @@ type operation struct {
 	cancelRequested    bool
 	snapshotID         string // CreateSnapshot only
 	blocksRemoved      uint64 // Truncate only
+
+	// changed is called with each status the operation enters, after mu is
+	// released. Status changes for one operation happen in sequence, so the
+	// calls arrive in order.
+	changed func(DatabaseOperationEvent)
+}
+
+// eventLocked describes the operation's current status. Must be called with
+// mu held.
+func (o *operation) eventLocked() DatabaseOperationEvent {
+	evt := DatabaseOperationEvent{
+		OperationID: o.id,
+		Type:        o.opType,
+		Status:      o.status,
+	}
+	if o.status == databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED {
+		evt.Error = o.message
+	}
+	return evt
+}
+
+func (o *operation) notify(evt DatabaseOperationEvent) {
+	if o.changed != nil {
+		o.changed(evt)
+	}
 }
 
 func (o *operation) setRunning() {
@@ -320,7 +346,9 @@ func (o *operation) setRunning() {
 	o.status = databasev1alpha1.OperationStatus_OPERATION_STATUS_RUNNING
 	o.message = "running"
 	o.updatedAt = time.Now()
+	evt := o.eventLocked()
 	o.mu.Unlock()
+	o.notify(evt)
 }
 
 // complete records the terminal outcome of the operation. An error that
@@ -347,7 +375,9 @@ func (o *operation) complete(err error, blocksRemoved uint64) {
 		o.status = databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED
 		o.message = err.Error()
 	}
+	evt := o.eventLocked()
 	o.mu.Unlock()
+	o.notify(evt)
 }
 
 // requestCancel cancels the operation's context and marks it as having
@@ -463,8 +493,6 @@ func (h *databaseServiceHandler) startOperation(
 func (h *databaseServiceHandler) registerOperation(
 	opType databasev1alpha1.OperationType,
 ) (*operation, context.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	op := &operation{
 		id:        uuid.NewString(),
@@ -475,10 +503,30 @@ func (h *databaseServiceHandler) registerOperation(
 		status:    databasev1alpha1.OperationStatus_OPERATION_STATUS_PENDING,
 		message:   "pending",
 		updatedAt: time.Now(),
+		changed:   h.publishOperation,
 	}
+	h.mu.Lock()
 	h.operations[op.id] = op
 	h.pruneOperations()
+	h.mu.Unlock()
+	op.mu.Lock()
+	evt := op.eventLocked()
+	op.mu.Unlock()
+	op.notify(evt)
 	return op, ctx
+}
+
+// publishOperation reports an operation's status change on the node's
+// EventBus, which is set only when the EventService is mounted.
+func (h *databaseServiceHandler) publishOperation(evt DatabaseOperationEvent) {
+	bus := h.bark.config.EventBus
+	if bus == nil {
+		return
+	}
+	bus.Publish(
+		DatabaseOperationEventType,
+		event.NewEvent(DatabaseOperationEventType, evt),
+	)
 }
 
 // maxRetainedOperations bounds how many operations GetOperationHistory
@@ -1800,11 +1848,14 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 			blobSize,
 		) //nolint:gosec // G115: guarded by blobSize > 0 above
 	}
-	if metadataSize, err := db.Metadata().DiskSize(); err == nil &&
-		metadataSize > 0 {
-		sizeBytes += uint64(
-			metadataSize,
-		) //nolint:gosec // G115: guarded by metadataSize > 0 above
+	// The ledger's database keeps no metadata store.
+	if store := db.Metadata(); store != nil {
+		if metadataSize, err := store.DiskSize(); err == nil &&
+			metadataSize > 0 {
+			sizeBytes += uint64(
+				metadataSize,
+			) //nolint:gosec // G115: guarded by metadataSize > 0 above
+		}
 	}
 
 	resp := &databasev1alpha1.GetDatabaseInfoResponse{

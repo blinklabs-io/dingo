@@ -16,20 +16,19 @@ package ledger
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
@@ -46,10 +45,46 @@ func creditedRewardRound(t *testing.T) *epochBoundaryBenchFixture {
 	))
 	f.rollover(t)
 	f.ls.waitEpochBoundaryBenchBackground()
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
+	rounds, err := seedDB(t, f.db).GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
 	require.Len(t, rounds, 1, "the boundary must record its round credited")
 	return f
+}
+
+// journaledRewardRound is creditedRewardRound with the boundary committed as
+// the first block of the next epoch, after a block ending the epoch, so a
+// rollback to the returned point undoes the boundary along the set's journal.
+func journaledRewardRound(
+	t *testing.T,
+) (*epochBoundaryBenchFixture, ocommon.Point) {
+	t.Helper()
+	shape := epochBoundaryDumpShape()
+	shape.delegators = 60
+	f := newEpochBoundaryBenchFixture(t, shape, "")
+	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+		epochBoundaryBenchPrecomputeEvent(),
+	))
+	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
+	lastOfEpoch := fxPoint(boundary - 1)
+	fxTip(t, f.ls, lastOfEpoch)
+	f.ls.fenceRewardPrecompute()
+	fxBlock(t, f.ls, fxPoint(boundary), func(
+		_ ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
+		_, err := f.ls.processEpochRollover(
+			context.Background(),
+			dbadapter.Unwrap(txn),
+			f.epochs[epochBoundaryBenchEndedEpoch],
+			eras.ConwayEraDesc,
+			f.pparams,
+		)
+		return err
+	})
+	f.ls.waitEpochBoundaryBenchBackground()
+	rounds, err := seedDB(t, f.db).GetPendingRewardCreditRounds(nil)
+	require.NoError(t, err)
+	require.Len(t, rounds, 1, "the boundary must record its round credited")
+	return f, lastOfEpoch
 }
 
 // rewardedCredentials returns every credential the round credits, with the
@@ -59,7 +94,7 @@ func rewardedCredentials(
 	f *epochBoundaryBenchFixture,
 ) map[string]uint64 {
 	t.Helper()
-	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+	outputs, err := seedDB(t, f.db).GetRewardAccountOutputs(8, nil)
 	require.NoError(t, err)
 	credits := make(map[string]uint64)
 	for _, output := range outputs {
@@ -79,7 +114,7 @@ func accountRewards(
 	t.Helper()
 	ret := make(map[string]uint64, len(keys))
 	for key := range keys {
-		account, err := f.db.GetAccountByCredential(
+		account, err := seedDB(t, f.db).GetAccountByCredential(
 			context.Background(),
 			0,
 			[]byte(key),
@@ -161,18 +196,21 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 	)
 	require.NoError(t, err)
 	balance := stored[key] + credits[key]
-	tx := &conway.ConwayTransaction{Body: conway.ConwayTransactionBody{
-		TxWithdrawals: map[*lcommon.Address]uint64{&address: balance},
-	}}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxWithdrawals: map[*lcommon.Address]uint64{&address: balance},
+		},
+		TxIsValid: true,
+	}
 	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := f.ls.foldRewardCreditsForWithdrawals(context.Background(), tx, txn); err != nil {
 			return err
 		}
-		return f.db.Metadata().ApplyAccountRewardWithdrawal(
-			0, []byte(key), balance,
+		return f.ls.stageAccountTransaction(
+			dbadapter.Txn(txn), tx,
 			epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)+5,
-			make([]byte, 32), txn.Metadata(),
+			0, make([]byte, 32), database.BatchedTxIngestOpts{}, nil,
 		)
 	}))
 	var hash lcommon.Blake2b224
@@ -190,7 +228,7 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 		return nil
 	}))
 	settleRewardCredits(t, f.ls)
-	account, err := f.db.GetAccountByCredential(
+	account, err := seedDB(t, f.db).GetAccountByCredential(
 		context.Background(),
 		0,
 		[]byte(key),
@@ -207,54 +245,39 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 // leaves the surviving outputs unfolded for the boundary to credit again.
 func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 	t.Parallel()
-	f := creditedRewardRound(t)
+	f, lastOfEpoch := journaledRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
-	raw := rewardCalcSQLDB(t, f.db)
-	var outputsBefore int
-	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8`,
-	).Scan(&outputsBefore))
+	outputsBefore := unfoldedCreditCount(t, f)
 	require.Positive(t, outputsBefore)
 	// Some credits are folded, as by withdrawals, before the rollback.
-	txn := f.db.Transaction(context.Background(), true)
+	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
 	folded := 0
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+	fxBlock(t, f.ls, fxPoint(boundary+1), func(
+		_ ledgerdb.LedgerDB, txn ledgerdb.Txn,
+	) error {
 		for key := range credits {
 			if folded == 5 {
 				break
 			}
 			folded++
-			if err := f.ls.foldRewardCreditFor(context.Background(), txn, 0, []byte(key)); err != nil {
+			if err := f.ls.foldRewardCreditFor(
+				context.Background(), txn, 0, []byte(key),
+			); err != nil {
 				return err
 			}
 		}
 		return nil
-	}))
-	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
-	txn = f.db.Transaction(context.Background(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := f.db.DeleteAccountRewardsAfterSlot(context.Background(), boundary-1, txn); err != nil {
-			return err
-		}
-		return f.db.DeleteRewardStateAfterSlot(boundary-1, txn)
-	}))
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
+	})
+	require.Equal(t, outputsBefore-folded, unfoldedCreditCount(t, f),
+		"control: the folded credits left the round")
+	fxRollback(t, f.ls, lastOfEpoch)
+	rounds, err := seedDB(t, f.db).GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
 	require.Empty(t, rounds, "a rollback below the boundary drops the round")
 	require.Equal(t, stored, accountRewards(t, f, credits),
 		"a rollback below the boundary reverts folded credits")
-	var outputsAfter int
-	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8`,
-	).Scan(&outputsAfter))
-	require.Equal(t, outputsBefore, outputsAfter,
-		"rollback must preserve outputs that the re-applied boundary needs")
-	var stillFolded int
-	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8 AND folded`,
-	).Scan(&stillFolded))
-	require.Zero(t, stillFolded,
+	require.Equal(t, outputsBefore, unfoldedCreditCount(t, f),
 		"a reapplied round must count its outputs as unfolded again")
 }
 
@@ -265,7 +288,7 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
@@ -274,74 +297,29 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 	done, err := ls.stakeRewardPrecomputeChunkStep(round)
 	require.NoError(t, err)
 	require.True(t, done, "a fenced chunk must stop")
-	outputs, err := db.Metadata().
+	outputs, err := seedDB(t, db).
 		GetRewardPoolOutputs(survivalSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Empty(t, outputs, "a fenced chunk must not write")
 }
 
-// TestPendingRewardStakeInputsHoldBackTheRound pins the deferred-write guard:
-// while a snapshot's reward_stake_input rows are still being written, a
-// precompute of a round that reads them does not start.
+// TestPendingRewardStakeInputsHoldBackTheRound pins the incomplete-basis
+// guard: while a snapshot's reward_stake_input rows are marked incomplete, a
+// read-only resolution of a round that reads them does not start it.
 func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return markRewardStakeInputsPending(
-			dbadapter.New(db), txn, survivalSnapshotEpoch, 100,
+			ls.ledgerDB(), txn, survivalSnapshotEpoch, 100,
 		)
 	}))
-	ls.rewardPrecomputeMu.Lock()
-	ls.deferredStakeInputsWriting = map[uint64]struct{}{
-		survivalSnapshotEpoch: {},
-	}
-	ls.rewardPrecomputeMu.Unlock()
-	_, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	_, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
 	require.False(t, ok, "a round must wait for its snapshot's inputs")
-}
-
-// TestDeferredStakeInputWriteRetriesAfterError pins the deferred stake-input
-// writer: a failed write is retried until the snapshot's rows are written,
-// without a reader having to rebuild them.
-func TestDeferredStakeInputWriteRetriesAfterError(t *testing.T) {
-	t.Parallel()
-	stakeInputs := func(t *testing.T, fail bool) string {
-		f := newEpochBoundaryBenchFixture(t, smallEpochBoundaryBenchShape(), "")
-		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
-			epochBoundaryBenchPrecomputeEvent(),
-		))
-		var failures atomic.Int32
-		if fail {
-			f.ls.deferredStakeInputsFailHook = func() error {
-				if failures.Add(1) == 1 {
-					return errors.New("transient write failure")
-				}
-				return nil
-			}
-		}
-		f.rollover(t)
-		f.ls.waitEpochBoundaryBenchBackground()
-		if fail {
-			require.GreaterOrEqual(t, failures.Load(), int32(2),
-				"the failed write must be attempted again")
-		}
-		pending, err := loadRewardStakeInputsPending(dbadapter.New(f.db), nil)
-		require.NoError(t, err)
-		require.Empty(t, pending.Entries,
-			"the retried write must complete the snapshot's rows")
-		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-		require.NoError(t, err)
-		defer raw.Close()
-		dump := dumpEpochBoundaryState(t, raw)
-		i := strings.Index(dump, "== reward_stake_input")
-		require.GreaterOrEqual(t, i, 0)
-		return dump[i:]
-	}
-	require.Equal(t, stakeInputs(t, false), stakeInputs(t, true))
 }
 
 // TestPrecomputeLeavesCreditedRoundAlone pins that a precompute run for a
@@ -358,10 +336,12 @@ func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
 	))
 	// Deregistrations after the precompute make the boundary correct the
 	// outputs, so a later precompute no longer matches them.
-	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-	require.NoError(t, err)
-	defer raw.Close()
-	deregisterEpochBoundaryDelegators(t, raw, shape.delegators, 11)
+	for d := 0; d < shape.delegators; d += 11 {
+		fxDeregisterStake(
+			t, f.db, epochBoundaryBenchHash(0x30, uint64(d)+1),
+			epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch)+1_000+uint64(d),
+		)
+	}
 	f.rollover(t)
 	f.ls.waitEpochBoundaryBenchBackground()
 	credits := rewardedCredentials(t, f)
@@ -391,13 +371,11 @@ func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
 type pendingRoundReads struct {
 	liveInputs     string
 	boundaryStake  string
-	stakeAtSlot    string
 	localStateDist string
 	drepPower      string
 	drepSingle     string
 	// Readers with no reward term, which a pending round cannot move.
-	utxoStake  string
-	controlled string
+	utxoStake string
 }
 
 func renderStakeMaps(stakes, delegators map[string]uint64) string {
@@ -415,14 +393,13 @@ func observePendingRoundReaders(
 	credits map[string]uint64,
 ) pendingRoundReads {
 	t.Helper()
-	meta := f.db.Metadata()
-	pools, err := meta.GetDelegatedPoolKeyHashes(nil)
+	pools, err := seedDB(t, f.db).GetDelegatedPoolKeyHashes(nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, pools)
 	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
 	var ret pendingRoundReads
 
-	inputs, err := meta.GetLiveStakeInputsForPools(pools, 0, nil)
+	inputs, err := seedDB(t, f.db).GetLiveStakeInputsForPools(pools, 0, nil)
 	require.NoError(t, err)
 	lines := make([]string, 0, len(inputs))
 	for _, input := range inputs {
@@ -433,29 +410,23 @@ func observePendingRoundReaders(
 	sort.Strings(lines)
 	ret.liveInputs = strings.Join(lines, "\n")
 
-	stakes, delegators, err := meta.GetEpochBoundaryStakeByPools(
+	stakes, delegators, err := seedDB(t, f.db).GetEpochBoundaryStakeByPools(
 		pools, boundary-1, boundary, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	ret.boundaryStake = renderStakeMaps(stakes, delegators)
-
-	stakes, delegators, err = meta.GetStakeByPoolsAtSlot(
-		pools, boundary+10, 0, 0, nil,
-	)
-	require.NoError(t, err)
-	ret.stakeAtSlot = renderStakeMaps(stakes, delegators)
 
 	dist, err := f.ls.queryShelleyStakeDistribution(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	ret.localStateDist = fmt.Sprintf("%+v", dist)
 
 	ret.drepPower = dumpDRepVotingPower(t, f)
-	dreps, err := f.db.GetActiveDreps(context.Background(), nil)
+	dreps, err := seedDB(t, f.db).GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	singles := make([]string, 0, len(dreps))
 	for _, drep := range dreps {
-		power, err := meta.GetDRepVotingPower(
-			drep.CredentialTag, drep.Credential, 0, nil,
+		power, err := seedDB(t, f.db).GetDRepVotingPower(
+			t.Context(), drep.CredentialTag, drep.Credential, 0, nil,
 		)
 		require.NoError(t, err)
 		singles = append(singles, fmt.Sprintf("%x=%d", drep.Credential, power))
@@ -463,17 +434,9 @@ func observePendingRoundReaders(
 	sort.Strings(singles)
 	ret.drepSingle = strings.Join(singles, "\n")
 
-	stakes, delegators, err = meta.GetStakeByPools(pools, nil)
+	stakes, delegators, err = seedDB(t, f.db).GetStakeByPools(t.Context(), pools, nil)
 	require.NoError(t, err)
 	ret.utxoStake = renderStakeMaps(stakes, delegators)
-	amounts := make([]string, 0, len(credits))
-	for key := range credits {
-		amount, err := f.db.GetControlledAmountByCredential(context.Background(), 0, []byte(key), nil)
-		require.NoError(t, err)
-		amounts = append(amounts, fmt.Sprintf("%x=%d", key, amount))
-	}
-	sort.Strings(amounts)
-	ret.controlled = strings.Join(amounts, "\n")
 	return ret
 }
 
@@ -523,8 +486,6 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 			"%s: live stake inputs", name)
 		require.Equal(t, after.boundaryStake, got.boundaryStake,
 			"%s: boundary stake reconstruction", name)
-		require.Equal(t, after.stakeAtSlot, got.stakeAtSlot,
-			"%s: stake at slot reconstruction", name)
 		require.Equal(t, after.localStateDist, got.localStateDist,
 			"%s: local state query stake distribution", name)
 		require.Equal(t, after.drepPower, got.drepPower,
@@ -533,8 +494,6 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 			"%s: single DRep voting power", name)
 		require.Equal(t, after.utxoStake, got.utxoStake,
 			"%s: UTxO-only pool stake", name)
-		require.Equal(t, after.controlled, got.controlled,
-			"%s: controlled amount", name)
 	}
 }
 
@@ -546,7 +505,7 @@ func TestPendingRewardRoundPinnedQuery(t *testing.T) {
 	f := creditedRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
+	rounds, err := seedDB(t, f.db).GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
 	require.Len(t, rounds, 1)
 	boundary := rounds[0].BoundarySlot

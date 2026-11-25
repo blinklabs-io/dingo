@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -168,6 +169,9 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 			)
 			require.NoError(t, err)
 			t.Cleanup(func() { dbtest.CloseDatabase(db) })
+			// A set that opens later loads nonces only up to its tip, and
+			// this fixture has none.
+			OpenLiveSetForTest(t, db)
 			cm, err := chain.NewManager(t.Context(), db, nil)
 			require.NoError(t, err)
 			for i, block := range []gledger.Block{preStored, cutoffStored, anchorStored, tailStored} {
@@ -178,7 +182,7 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 				if i < 3 && (i != 0 || tc.prefix) {
 					require.NoError(
 						t,
-						db.SetBlockNonce(
+						seedBlockNonce(t, db,
 							block.Hash().Bytes(),
 							block.SlotNumber(),
 							nonces[i],
@@ -210,6 +214,7 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 					),
 				},
 			}
+			attachTestLiveSet(t, ls)
 			ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 			n = anchor.block.BlockNumber() + 1
 			fork := createTestBlockWithNonceAtSlotsAndBlockNumber(
@@ -244,7 +249,11 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 				eras.BabbageEraDesc.Id,
 			)
 			require.NoError(t, err)
-			targetNonce, err := assembleEpochNonce(candidate, nil, extra)
+			targetNonce, err := epochengine.AssembleEpochNonce(
+				candidate,
+				nil,
+				extra,
+			)
 			require.NoError(t, err)
 			n++
 			target := createTestBlockWithNonceAtSlotsAndBlockNumber(
@@ -399,11 +408,14 @@ func TestFrozenCandidatePrefixFollowsIntersectionAncestry(t *testing.T) {
 					)
 					require.NoError(t, err)
 					t.Cleanup(func() { dbtest.CloseDatabase(db) })
+					// A set that opens later loads nonces only up to its
+					// tip, and this fixture has none.
+					OpenLiveSetForTest(t, db)
 					for _, block := range []models.Block{prefix, excluded, ancestor, sibling} {
 						require.NoError(t, db.BlockCreate(block, nil))
 						require.NoError(
 							t,
-							db.SetBlockNonce(
+							seedBlockNonce(t, db,
 								block.Hash,
 								block.Slot,
 								bytes.Repeat(block.Hash[:1], 32),
@@ -416,6 +428,7 @@ func TestFrozenCandidatePrefixFollowsIntersectionAncestry(t *testing.T) {
 						db:     db,
 						config: LedgerStateConfig{CardanoNodeConfig: cfg},
 					}
+					attachTestLiveSet(t, ls)
 					actualCutoff, ready := ls.nextEpochNonceReadyCutoffSlot(
 						epoch,
 					)

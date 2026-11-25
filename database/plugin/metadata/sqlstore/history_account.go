@@ -37,9 +37,6 @@ func (s *Store) GetAccountStakeHistory(
 	txn types.Txn,
 ) ([]models.AccountStakeHistoryRow, int, error) {
 	ret := []models.AccountStakeHistoryRow{}
-	if err := s.refuseDrained("reward_stake_input"); err != nil {
-		return nil, 0, err
-	}
 	if len(stakingKey) == 0 {
 		return ret, 0, nil
 	}
@@ -96,9 +93,6 @@ WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE
 func (s *Store) GetEarliestRewardStakeInputEpoch(
 	txn types.Txn,
 ) (epoch uint64, ok bool, err error) {
-	if err := s.refuseDrained("reward_stake_input"); err != nil {
-		return 0, false, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err

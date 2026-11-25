@@ -37,11 +37,11 @@ func newSkippedEntriesImportConfig(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-	return ImportConfig{
+	return importTargetForTest(t, ImportConfig{
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    state,
-	}
+	})
 }
 
 // badCredentialMap is a one-entry map whose key is not a credential, so a
@@ -177,7 +177,7 @@ func TestImportCertStateRejectsSkippedAccount(t *testing.T) {
 		&RawLedgerState{Epoch: 2, CertStateData: data},
 	)
 
-	_, _, err = importCertState(
+	_, err = importCertState(
 		context.Background(),
 		cfg,
 		100,

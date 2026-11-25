@@ -26,6 +26,26 @@ import (
 // value is opaque and is only ever compared for equality.
 var blobStoreIDKey = []byte("nodesettings/storeid")
 
+// recordedBlobStoreID returns the blob store's identity without minting one,
+// or the empty string when the store has none yet.
+func (d *Database) recordedBlobStoreID() (string, error) {
+	store, releaseBlob := d.PinBlob()
+	defer releaseBlob()
+	if store == nil {
+		return "", types.ErrBlobStoreUnavailable
+	}
+	readTxn := store.NewTransaction(false)
+	defer func() { _ = readTxn.Rollback() }()
+	existing, err := store.Get(readTxn, blobStoreIDKey)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read blob store id: %w", err)
+	}
+	return string(existing), nil
+}
+
 // blobStoreID returns the blob store's identity, minting and persisting one
 // on first use.
 //

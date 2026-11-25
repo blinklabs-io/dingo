@@ -259,3 +259,19 @@ func Gates() []Gate {
 		},
 	}
 }
+
+// Persisted returns the subset of values that are node settings: the gates
+// Gates registers and the Alonzo protocol-parameter unit marker. Other rows a
+// metadata store keeps beside them are not.
+func Persisted(values Values) Values {
+	out := make(Values, len(values))
+	for _, gate := range Gates() {
+		if value, ok := values[gate.Name]; ok {
+			out[gate.Name] = value
+		}
+	}
+	if value, ok := values[AlonzoPParamsUnitGateName]; ok {
+		out[AlonzoPParamsUnitGateName] = value
+	}
+	return out
+}

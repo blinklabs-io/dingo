@@ -22,32 +22,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
-
-// poolTables are the tables of the pools-history family, and the current-state
-// tables the drain empties through their foreign key to pool.
-var poolTables = []string{
-	"pool", "pool_registration", "pool_registration_owner",
-	"pool_registration_relay", "pool_retirement",
-	"pool_current_state", "pool_current_event",
-}
-
-// poolRun is what p4DrainRun observed.
-type poolRun struct {
-	reads map[string][]string
-	guard *statedrain.TripGuard
-	db    *database.Database
-	slots ledger.PoolSlots
-}
 
 func renderPool(p *models.Pool, err error) string {
 	if err != nil {
@@ -278,137 +258,8 @@ func requireDrainedPoolAnswers(
 	require.Nil(t, pool, "the rotated-away key is free")
 }
 
-// p4DrainRun registers a pool, rotates its VRF key, retires another pool and
-// reaps it at the boundary, rolls back before all of it and replays it. With
-// drain set the pools-history family is drained before
-// the first certificate.
-func p4DrainRun(
-	t *testing.T,
-	drain bool,
-	corruptBeforeDrain func(*database.Database),
-) (poolRun, error) {
-	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = set.Close() })
-	guard := statedrain.NewTripGuard()
-	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, guard,
-	)
-	run := poolRun{reads: map[string][]string{}, guard: guard, db: scenario.DB}
-	require.NoError(
-		t, set.LoadLedgerState(t.Context(), dbadapter.New(scenario.DB)),
-	)
-	if drain {
-		if corruptBeforeDrain != nil {
-			corruptBeforeDrain(scenario.DB)
-		}
-		src := drainTestSource{set: set, db: scenario.DB}
-		var entries []statedrain.Entry
-		for _, e := range statedrain.Graduated(src) {
-			if e.Family == nodesettings.FamilyPoolsHistory {
-				entries = append(entries, e)
-			}
-		}
-		require.Len(t, entries, 1)
-		if err := statedrain.Run(t.Context(), statedrain.Env{
-			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard,
-		}, entries); err != nil {
-			return run, err
-		}
-	}
-	var refunds []models.PoolRetirementRefund
-	apply := func() ledger.PoolSlots {
-		return scenario.Pools(func() {
-			epochs, err := dbadapter.New(scenario.DB).GetEpochs(nil)
-			if err != nil {
-				epochs, err = scenario.DB.GetEpochs(nil)
-			}
-			require.NoError(t, err)
-			var cur models.Epoch
-			for _, e := range epochs {
-				if e.EpochId > cur.EpochId {
-					cur = e
-				}
-			}
-			refunds, err = scenario.LedgerDB().GetPoolsRetiringAtEpoch(
-				t.Context(), cur.EpochId+1, cur.StartSlot+23, nil,
-			)
-			require.NoError(t, err)
-		})
-	}
-	// The op-cert write keeps the pool row's counter in step in the metadata
-	// store, which a drained family has no row for.
-	scenario.OpCerts()
-	run.slots = apply()
-	require.Len(t, refunds, 1)
-	require.Equal(t, run.slots.Retired, refunds[0].PoolKeyHash)
-	// An undrained run reads the metadata store's rows alone, which the
-	// drained run's answers must equal.
-	var ldb ledgerdb.LedgerDB = dbadapter.New(scenario.DB)
-	if drain {
-		ldb = scenario.LedgerDB()
-	}
-	read := func() []string {
-		return readPools(t, ldb, scenario.DB, run.slots)
-	}
-	run.reads["registered"] = read()
-	if drain {
-		requireDrainedPoolAnswers(t, scenario.LedgerDB(), run.slots)
-	}
-	tip, err := scenario.DB.GetTip(nil)
-	require.NoError(t, err)
-	scenario.RollbackBeforeBoundary()
-	run.reads["rolled back"] = read()
-	run.slots = apply()
-	// The replay does not apply blocks, so the tip stays at the rollback
-	// target; the metadata store's reads of the current epoch follow it.
-	require.NoError(t, scenario.DB.SetTip(tip, nil))
-	run.reads["replay"] = read()
-	return run, nil
-}
-
-// A drained pools-history family answers every pool read as an undrained run
-// does across a registration, a re-registration that rotates the VRF key, a
-// retirement and its reap, a rollback and a replay, with the guard armed and
-// the tables empty.
-func TestPoolsHistoryDrainMatchesAnUndrainedRun(t *testing.T) {
-	t.Parallel()
-	undrained, err := p4DrainRun(t, false, nil)
-	require.NoError(t, err)
-	drained, err := p4DrainRun(t, true, nil)
-	require.NoError(t, err)
-	require.Empty(t, drained.guard.Trips(), "a drained table was touched")
-
-	raw, err := dbtest.RawSQLiteMetadata(t, drained.db)
-	require.NoError(t, err)
-	rawPlain, err := dbtest.RawSQLiteMetadata(t, undrained.db)
-	require.NoError(t, err)
-	for _, table := range poolTables {
-		require.Positive(
-			t,
-			tableRows(t, rawPlain, table),
-			"undrained %s",
-			table,
-		)
-		require.Zero(t, tableRows(t, raw, table), "drained %s", table)
-	}
-	mask, err := drained.db.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.True(t, mask.Has(nodesettings.FamilyPoolsHistory))
-	for name, want := range undrained.reads {
-		require.NotEmpty(t, want, name)
-		requireSameLines(t, name, want, drained.reads[name])
-	}
-	require.NotEqual(
-		t, undrained.reads["registered"], undrained.reads["rolled back"],
-		"the rollback must change the pool reads",
-	)
-}
-
-// With the family drained and the set not holding it, the LedgerDB and the
-// database fail the read rather than answer from the empty SQL tables.
+// With the set failed, the LedgerDB and the database fail the read rather
+// than answer from the empty SQL tables.
 func TestDrainedPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
@@ -417,56 +268,41 @@ func TestDrainedPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
 		t, set,
 	)
-	// The set never loads the metadata store's rows.
-	require.NoError(t, scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyPoolsHistory,
-	))
-	scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyPoolsHistory),
-	)
+	// A failed set serves no read.
+	scenario.FailSet()
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
 	pool := lcommon.PoolKeyHash(make([]byte, 28))
 	_, err = ldb.ListPoolKeyHashes(nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPool(ctx, pool, true, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPools(ctx, []lcommon.PoolKeyHash{pool}, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolVrfState(ctx, pool, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolRegistrations(pool, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolStatus(pool, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolByVrfKeyHash(ctx, make([]byte, 32), 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetFuturePoolByLeiosKey(ctx, make([]byte, 96), 1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActivePoolKeyHashes(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetActivePoolRelays(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolDepositsHeld([]lcommon.PoolKeyHash{pool}, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetRetiringPools(1, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = ldb.GetPoolsRetiringAtEpoch(ctx, 1, 10, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 
 	// The database's own reads come from the same source.
 	_, err = scenario.DB.GetPools(ctx, []lcommon.PoolKeyHash{pool}, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, err = scenario.DB.GetActivePoolRelays(ctx, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-	require.ErrorIs(
-		t,
-		scenario.DB.ImportPool(
-			ctx,
-			nil,
-			&models.Pool{},
-			&models.PoolRegistration{},
-		),
-		database.ErrFamilyDrained,
-	)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }

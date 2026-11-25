@@ -203,7 +203,7 @@ func TestLedgerProcessBlockOpCertCounterAppliesToHistoricalPeers(
 			ls := newOpCertBaselineLedgerState(t, 0)
 			ls.config.TrustedReplay = tc.trustedReplay
 			poolKeyHash := lcommon.PoolKeyHash(opCertBaselineIssuer().Hash())
-			require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+			require.NoError(t, seedDB(t, ls.db).UpdatePoolOpCertSequence(
 				context.Background(), poolKeyHash, 5, 1, nil,
 			))
 
@@ -234,7 +234,7 @@ func newOpCertBaselineLedgerState(
 	t.Helper()
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
-	return &LedgerState{
+	ls := &LedgerState{
 		db:                newTestDB(t),
 		mithrilLedgerSlot: mithrilLedgerSlot,
 		config: LedgerStateConfig{
@@ -242,6 +242,8 @@ func newOpCertBaselineLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
+	return ls
 }
 
 func opCertBaselineRecorded(
@@ -250,7 +252,7 @@ func opCertBaselineRecorded(
 ) (uint64, bool) {
 	t.Helper()
 	issuer := opCertBaselineIssuer()
-	stored, found, err := ls.db.LatestPoolOpCertSequence(
+	stored, found, err := seedDB(t, ls.db).LatestPoolOpCertSequence(
 		context.Background(),
 		lcommon.PoolKeyHash(issuer.Hash()),
 		nil,
@@ -338,7 +340,7 @@ func TestLedgerProcessBlockOpCertMithrilPoolWithoutCertifiedCounter(
 			)
 			require.NoError(
 				t,
-				ls.db.UpdatePoolOpCertSequence(
+				seedDB(t, ls.db).UpdatePoolOpCertSequence(
 					context.Background(),
 					otherPool, 7, boundarySlot, nil,
 				),
@@ -366,7 +368,7 @@ func TestLedgerProcessBlockOpCertRejectsBoundaryCounterConflict(t *testing.T) {
 	const boundarySlot = uint64(100)
 	ls := newOpCertBaselineLedgerState(t, boundarySlot)
 	poolKeyHash := lcommon.PoolKeyHash(opCertBaselineIssuer().Hash())
-	require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+	require.NoError(t, seedDB(t, ls.db).UpdatePoolOpCertSequence(
 		context.Background(),
 		poolKeyHash,
 		0,

@@ -14,7 +14,7 @@ file is only what isn't derivable.
 - Top-level tests call `t.Parallel()` in most packages, including every one that
   dominates the suite; new tests there should too. Keep a test sequential — with
   a `// Not t.Parallel: ...` comment — when it reaches process-global state:
-  swapping a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
+  swapping a package-level seam (`syncDir`,
   `deliveryStallWarnInterval`, `leiosPersistShutdownDrainTimeout`) or another
   package's variable (`ledger.Close*Timeout`), replacing a process-global
   (`slog.SetDefault`, `config.PublishConfig`), asserting a delta of a
@@ -22,9 +22,9 @@ file is only what isn't derivable.
   (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`,
   `goleak.VerifyNone`). A fixture that serializes for the whole test instead —
   `database/lifecycle`'s `setFakeCloudBackingDir` holds `fakeCloudFixtureMu`
-  until `t.Cleanup` — is parallel-safe. `internal/settingsresolve` and
-  `bark/database_test.go` stay fully sequential: their fixtures rewrite a
-  process-global (`globalConfig`, `barkFakeCloudDir`) with no such gate.
+  until `t.Cleanup` — is parallel-safe, as is `bark`'s per-test fake cloud
+  bucket. `internal/settingsresolve` stays fully sequential: its fixture
+  rewrites a process-global (`globalConfig`) with no such gate.
 - Live two-node lifecycle integration tests use the shared
   `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - The default `make` target formats and builds; tests are a separate target.

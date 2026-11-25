@@ -117,7 +117,7 @@ func (ls *LedgerState) AcquireQueryView(
 		// record in the snapshot is the authority: when one is still there
 		// the snapshot froze a half-written boundary, so drop it and wait
 		// for the job to settle.
-		pending, err := loadPendingRatification(ls.db, txn)
+		pending, err := loadPendingRatification(ls.ledgerDB(), txn)
 		if err != nil {
 			txn.Release()
 			cancelView()
@@ -166,7 +166,7 @@ func (ls *LedgerState) waitPendingBoundaryJob(
 		select {
 		case <-ticker.C:
 			// The record may have been consumed by the next boundary.
-			current, err := loadPendingRatification(ls.db, nil)
+			current, err := loadPendingRatification(ls.ledgerDB(), nil)
 			if err != nil {
 				return err
 			}

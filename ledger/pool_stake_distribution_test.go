@@ -49,16 +49,13 @@ func seedUnregisteredPoolStake(
 ) lcommon.PoolKeyHash {
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(stake),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	require.NoError(t, fxSeedSnapshot(t, db, &models.PoolStakeSnapshot{
+		Epoch:        snapshotEpoch,
+		SnapshotType: snapshotTypeMark,
+		PoolKeyHash:  pkh.Bytes(),
+		TotalStake:   dbtypes.Uint64(stake),
+		CapturedSlot: 1,
+	}))
 	return pkh
 }
 
@@ -67,24 +64,18 @@ func TestPoolStakeDistributionBoundedRejectsBeforeFullSnapshotLoad(
 ) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	const snapshotEpoch = 0
-	seedPoolDistr2Fixture(
-		t,
-		db,
-		repeatedBytes(28, 0x11),
-		repeatedBytes(32, 0xAA),
-		3_000_000,
-		snapshotEpoch,
-	)
-	seedPoolDistr2Fixture(
-		t,
-		db,
-		repeatedBytes(28, 0x22),
-		repeatedBytes(32, 0xBB),
-		1_000_000,
-		snapshotEpoch,
-	)
+	for _, pool := range []struct{ key, vrf byte }{{0x11, 0xAA}, {0x22, 0xBB}} {
+		seedPoolDistr2Fixture(
+			t,
+			db,
+			repeatedBytes(28, pool.key),
+			repeatedBytes(32, pool.vrf),
+			1_000_000,
+			snapshotEpoch,
+		)
+	}
 	ls := newPoolDistr2Ledger(t, db)
 
 	_, err := ls.PoolStakeDistributionBounded(
@@ -110,7 +101,7 @@ func TestPoolStakeDistributionBoundedRejectsBeforeFullSnapshotLoad(
 func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	const snapshotEpoch = 0
 	// Seeded high key hash first so a passing test cannot be explained by the
@@ -162,7 +153,7 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	vrfA := repeatedBytes(32, 0xAA)
 	const snapshotEpoch = 0
@@ -218,7 +209,7 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	seedPoolDistr2Fixture(
 		t, db,
 		repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
@@ -262,7 +253,7 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	const snapshotEpoch = 0
 	pkhA := seedPoolDistr2Fixture(
@@ -297,7 +288,7 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 
 	const snapshotEpoch = 0
 	pkhA := seedPoolDistr2Fixture(
@@ -329,7 +320,7 @@ func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 func TestPoolStakeDistribution_EmptySnapshotDoesNotDivide(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := fxOpenDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
 	dist, err := ls.PoolStakeDistribution(t.Context(), nil, QueryPoint{}, nil)

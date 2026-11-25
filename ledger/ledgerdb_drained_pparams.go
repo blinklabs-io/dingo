@@ -15,10 +15,14 @@
 package ledger
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // SyncMarkerReader serves the protocol parameter sync markers from a live
@@ -29,37 +33,32 @@ type SyncMarkerReader interface {
 	SyncMarker(name string) (string, bool, error)
 }
 
-func (s stagingLedgerDB) pparamsDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyPParamsUpdates)
-}
-
 // drainedPParamsSource serves the database's own protocol parameter reads,
-// and a rollback's, from the committed rows of the set once the
-// pparams-updates family is drained.
+// and a rollback's, from the committed rows of the set.
 type drainedPParamsSource struct {
 	ls *LedgerState
 }
 
 func (d drainedPParamsSource) pparams() (PParamsReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamsReader)
-	if !ok {
-		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
+	if !ok || d.ls.utxoSetFailed.Load() {
+		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
 }
 
 func (d drainedPParamsSource) updates() (PParamUpdateReader, error) {
 	r, ok := d.ls.readSet(nil).(PParamUpdateReader)
-	if !ok {
-		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
+	if !ok || d.ls.utxoSetFailed.Load() {
+		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
 }
 
 func (d drainedPParamsSource) markers() (SyncMarkerReader, error) {
 	r, ok := d.ls.readSet(nil).(SyncMarkerReader)
-	if !ok {
-		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
+	if !ok || d.ls.utxoSetFailed.Load() {
+		return nil, ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	return r, nil
 }
@@ -117,10 +116,9 @@ func (d drainedPParamsSource) SyncMarker(name string) (string, bool, error) {
 }
 
 // installPParamsSource gives the database the set's protocol parameters,
-// proposals and sync markers for the reads it makes once the pparams-updates
-// family is drained.
+// proposals and sync markers for the reads it makes.
 func (ls *LedgerState) installPParamsSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetPParamsSource(drainedPParamsSource{ls})
 	}
 }
@@ -134,15 +132,15 @@ func (ls *LedgerState) syncMarkerView(
 	name string,
 ) (string, error) {
 	r, ok := ls.readSet(txn).(SyncMarkerReader)
-	if !ok {
-		return "", drainedUnserved(nodesettings.FamilyPParamsUpdates)
+	if !ok || ls.utxoSetFailed.Load() {
+		return "", ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	loaded, err := r.SyncMarkersLoaded()
 	if err != nil {
 		return "", err
 	}
 	if !loaded {
-		return "", drainedUnserved(nodesettings.FamilyPParamsUpdates)
+		return "", ledgerStateUnserved(nodesettings.FamilyPParamsUpdates)
 	}
 	ls.utxoSetApplyMu.RLock()
 	defer ls.utxoSetApplyMu.RUnlock()
@@ -165,49 +163,51 @@ func (ls *LedgerState) syncMarkerView(
 	return value, nil
 }
 
-// GetSyncState reads a protocol parameter sync marker from the set once the
-// pparams-updates family is drained.
+// GetSyncState reads from the set the sync_state keys that name ledger
+// state: the protocol parameter sync markers, the reward precompute cursors,
+// the incomplete stake input snapshots, the pending ratification record and
+// the delegator inactivity activation.
 func (s stagingLedgerDB) GetSyncState(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, error) {
-	if database.IsPParamsSyncMarker(key) && s.pparamsDrained() {
+	if database.IsPParamsSyncMarker(key) {
 		return s.ls.syncMarkerView(txn, key)
 	}
 	if isRewardCursorKey(key) {
 		return s.getCursor(key, txn)
 	}
-	if key == rewardStakeInputsPendingKey && s.rewardInputsDrained() {
+	switch {
+	case key == epochengine.RewardStakeInputsPendingKey:
 		return s.getPendingStakeInputs(txn)
+	case key == pendingRatificationSyncKey:
+		return s.ratifyPendingState(txn)
+	case isInactivityMarker(key):
+		return s.inactivityMarker(txn)
 	}
-	return s.LedgerDB.GetSyncState(key, txn)
+	return "", fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 }
 
-// SetSyncState stages a write of a protocol parameter sync marker for the
-// set, and skips the metadata store's write once the family is drained.
+// SetSyncState stages for the set a write of a sync_state key that names
+// ledger state.
 func (s stagingLedgerDB) SetSyncState(
 	key, value string,
 	txn ledgerdb.Txn,
 ) error {
 	if isRewardCursorKey(key) {
-		if !s.rewardOutputsDrained() {
-			if err := s.LedgerDB.SetSyncState(key, value, txn); err != nil {
-				return err
-			}
-		}
 		s.cursorWrite(key, value, txn)
 		return nil
 	}
-	if key == rewardStakeInputsPendingKey {
+	switch {
+	case key == epochengine.RewardStakeInputsPendingKey:
 		return s.setPendingStakeInputs(value, txn)
-	}
-	if !database.IsPParamsSyncMarker(key) {
-		return s.LedgerDB.SetSyncState(key, value, txn)
-	}
-	if !s.pparamsDrained() {
-		if err := s.LedgerDB.SetSyncState(key, value, txn); err != nil {
-			return err
-		}
+	case key == pendingRatificationSyncKey:
+		s.setRatifyPending(value, txn)
+		return nil
+	case isInactivityMarker(key):
+		return errInactivityMarkerWrite
+	case !database.IsPParamsSyncMarker(key):
+		return fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		SyncMarkers: []SyncMarkerChange{{Name: key, Value: value}},
@@ -215,26 +215,73 @@ func (s stagingLedgerDB) SetSyncState(
 	return nil
 }
 
-// DeleteSyncState stages the deletion of a protocol parameter sync marker
-// for the set, and skips the metadata store's delete once the family is
-// drained.
+// DeleteSyncState stages for the set the deletion of a sync_state key that
+// names ledger state.
 func (s stagingLedgerDB) DeleteSyncState(
 	key string,
 	txn ledgerdb.Txn,
 ) error {
-	if key == rewardStakeInputsPendingKey {
-		return s.deletePendingStakeInputs(txn)
+	if isRewardCursorKey(key) {
+		return s.deleteCursor(key, txn)
 	}
-	if !database.IsPParamsSyncMarker(key) {
-		return s.LedgerDB.DeleteSyncState(key, txn)
-	}
-	if !s.pparamsDrained() {
-		if err := s.LedgerDB.DeleteSyncState(key, txn); err != nil {
-			return err
-		}
+	switch {
+	case key == epochengine.RewardStakeInputsPendingKey:
+		return s.setPendingStakeInputs("", txn)
+	case key == pendingRatificationSyncKey:
+		return s.deleteRatifyPending(txn)
+	case isInactivityMarker(key):
+		return errInactivityMarkerWrite
+	case !database.IsPParamsSyncMarker(key):
+		return fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
 	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		SyncMarkers: []SyncMarkerChange{{Name: key, Delete: true}},
 	})
 	return nil
 }
+
+// GetSyncStateBounded refuses every key: no ledger-state key is read this
+// way.
+func (s stagingLedgerDB) GetSyncStateBounded(
+	key string,
+	_ int,
+	_ ledgerdb.Txn,
+) (string, error) {
+	return "", fmt.Errorf("%w: %q", errSyncStateKeyUnowned, key)
+}
+
+// ListSyncStateKeysByPrefix refuses every prefix: the ledger lists no
+// sync_state keys.
+func (s stagingLedgerDB) ListSyncStateKeysByPrefix(
+	prefix string,
+	_ ledgerdb.Txn,
+) ([]string, error) {
+	return nil, fmt.Errorf("%w: prefix %q", errSyncStateKeyUnowned, prefix)
+}
+
+// deleteCursor accepts the deletion of a reward precompute cursor that txn
+// has already removed with its epoch's outputs (DeleteRewardOutputsForEpoch
+// stages both); the set keeps no cursor apart from the outputs it describes.
+func (s stagingLedgerDB) deleteCursor(key string, txn ledgerdb.Txn) error {
+	raw, err := s.getCursor(key, txn)
+	if err != nil {
+		return err
+	}
+	if raw != "" {
+		return fmt.Errorf(
+			"%w: delete the reward outputs of the cursor's epoch with it",
+			errCursorDeleteAlone,
+		)
+	}
+	return nil
+}
+
+var errCursorDeleteAlone = errors.New(
+	"a reward precompute cursor is deleted only with its epoch's outputs",
+)
+
+// errSyncStateKeyUnowned refuses a sync_state key that names no ledger state
+// the LedgerDB set keeps.
+var errSyncStateKeyUnowned = errors.New(
+	"sync_state key is not LedgerDB state",
+)

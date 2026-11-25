@@ -30,7 +30,7 @@ func foldImportedRewardCredits(
 	cfg ImportConfig,
 	slot uint64,
 ) error {
-	rounds, err := cfg.Database.Metadata().GetPendingRewardCreditRounds(nil)
+	rounds, err := cfg.LedgerDB.GetPendingRewardCreditRounds(nil)
 	if err != nil {
 		return fmt.Errorf("reading covered reward rounds: %w", err)
 	}
@@ -47,10 +47,10 @@ func foldImportedRewardCredits(
 				return err
 			}
 			done, err := func() (bool, error) {
-				tx := cfg.Database.MetadataTxn(ctx, true)
+				tx := cfg.LedgerDB.Begin(ctx, true)
 				defer tx.Release()
-				outputs, err := cfg.Database.Metadata().
-					ClaimUnfoldedRewardCredits(round.SnapshotEpoch, batchSize, tx.Metadata())
+				outputs, err := cfg.LedgerDB.
+					ClaimUnfoldedRewardCredits(round.SnapshotEpoch, batchSize, tx)
 				if err != nil {
 					return false, err
 				}

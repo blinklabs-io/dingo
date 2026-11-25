@@ -257,7 +257,7 @@ func TestSetLeiosEBLeavesSharedBlobStoreUntouched(t *testing.T) {
 func TestTruncateAfterSlotRollsBackLeiosPins(t *testing.T) {
 	t.Parallel()
 
-	d := newTestDB(t)
+	d := newReleasedTestDB(t)
 	const rollbackSlot = uint64(1_500)
 	target := testIndexedBlock(rollbackSlot, 1, 0x15)
 	require.NoError(t, d.BlockCreate(target, nil))
@@ -283,7 +283,7 @@ func TestTruncateAfterSlotRollsBackLeiosPins(t *testing.T) {
 	_, err = store.GarbageCollect(t.Context(), 1_505)
 	require.NoError(t, err)
 
-	_, _, err = d.TruncateAfterSlot(
+	_, _, err = d.RevertStoredLedgerAfterSlot(
 		t.Context(),
 		ocommon.Point{Slot: rollbackSlot, Hash: target.Hash},
 		0,
@@ -339,6 +339,9 @@ func TestOffsetResolutionFallsBackToLeiosClosure(t *testing.T) {
 	hash := randomHash(t)
 	closure := []byte("0123456789")
 	require.NoError(t, store.PutClosure(leiosdb.Ref{Slot: 12, Hash: hash}, closure))
+	canUse, err := d.CanUseLeiosTransactionBacking(12, hash)
+	require.NoError(t, err)
+	require.False(t, canUse)
 
 	txn := d.BlobTxn(false)
 	defer txn.Release()
@@ -348,10 +351,17 @@ func TestOffsetResolutionFallsBackToLeiosClosure(t *testing.T) {
 
 	legacyHash := randomHash(t)
 	require.NoError(t, d.SetGenesisCbor(13, legacyHash, []byte("legacy"), nil))
+	canUse, err = d.CanUseLeiosTransactionBacking(13, legacyHash)
+	require.NoError(t, err)
+	require.False(t, canUse)
 	require.NoError(t, store.PutClosure(leiosdb.Ref{Slot: 13, Hash: legacyHash}, []byte("leiosdb")))
 	got, err = cache.getBlockCbor(d.Blob(), d.BlobTxn(false).Blob(), 13, legacyHash)
 	require.NoError(t, err)
 	require.Equal(t, []byte("legacy"), got)
+
+	canUse, err = d.CanUseLeiosTransactionBacking(15, randomHash(t))
+	require.NoError(t, err)
+	require.True(t, canUse)
 
 	_, err = cache.getBlockCbor(d.Blob(), d.BlobTxn(false).Blob(), 14, randomHash(t))
 	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)

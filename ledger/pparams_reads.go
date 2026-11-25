@@ -28,17 +28,17 @@ import (
 // keeps them.
 type PParamsReader interface {
 	// PParamsLoaded reports whether the reader holds every protocol
-	// parameter row; until it does, reads stay on the metadata store.
+	// parameter row; until it does, the set does not serve the reads.
 	PParamsLoaded() (bool, error)
 	// PParamsForEra returns era's rows in the order they were written.
 	PParamsForEra(era uint) ([]models.PParams, error)
 }
 
 // pparamsReader returns the set's protocol parameter reader and the read
-// mode, or false when these reads stay on the metadata store.
+// mode, or false when the set does not serve them.
 func (ls *LedgerState) pparamsReader(txn ledgerdb.Txn) (PParamsReader, bool) {
 	_, mode := ls.utxoSetReader()
-	if !mode {
+	if !mode || ls.utxoSetFailed.Load() {
 		return nil, false
 	}
 	r, ok := ls.readSet(txn).(PParamsReader)

@@ -26,7 +26,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -277,7 +276,7 @@ func runLeiosCertEpochBoundaryCase(
 		Nonce:         nonce,
 		EvolvingNonce: nonce,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId,
 		nonce, nonce, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
@@ -311,7 +310,7 @@ func runLeiosCertEpochBoundaryCase(
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -365,10 +364,10 @@ func runLeiosCertEpochBoundaryCase(
 			_ event.EpochTransitionEvent,
 		) error {
 			boundarySnapshots++
-			tx, err := db.GetTransactionByHash(
+			tx, err := ls.ledgerDB().GetTransactionByHash(
 				t.Context(),
 				closureTx.Hash().Bytes(),
-				dbadapter.Unwrap(txn),
+				txn,
 			)
 			if err != nil {
 				return err
@@ -393,7 +392,7 @@ func runLeiosCertEpochBoundaryCase(
 			"the rejected certifying block must leave the primary chain",
 		)
 		require.Less(t, ls.currentTip.Point.Slot, certifier.SlotNumber())
-		storedTx, err := db.GetTransactionByHash(
+		storedTx, err := ls.ledgerDB().GetTransactionByHash(
 			t.Context(),
 			closureTx.Hash().Bytes(),
 			nil,
@@ -571,13 +570,13 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	}
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	epoch := models.Epoch{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 1000, EraId: eras.DijkstraEraDesc.Id, Nonce: nonce, EvolvingNonce: nonce}
-	require.NoError(t, db.SetEpoch(0, 0, nonce, nonce, nil, nil, epoch.EraId, epoch.SlotLength, epoch.LengthInSlots, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(0, 0, nonce, nonce, nil, nil, epoch.EraId, epoch.SlotLength, epoch.LengthInSlots, nil))
 	cfg := newTestShelleyGenesisCfg(t)
 	cfg.ShelleyGenesis().NetworkId = "Testnet"
 	cfg.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, CardanoNodeConfig: cfg,
-		UtxoSet: NewMemLiveSetForTest(),
+		UtxoSet: OpenLiveSetForTest(t, db),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
 		EnableDijkstra: true, ManualBlockProcessing: true, TrustedReplay: true,
 		EndorserBlockProvider: func(hash []byte, _ uint64) ([]cbor.RawMessage, bool) {
@@ -602,7 +601,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	}
 	close(batches)
 	require.NoError(t, ls.ProcessTrustedBlockBatches(t.Context(), batches))
-	stored, err := db.GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	inputs := spender.Inputs()
@@ -658,7 +657,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 		Nonce:         nonce,
 		EvolvingNonce: nonce,
 	}
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch0.StartSlot, epoch0.EpochId,
 		nonce, nonce, nil, nil,
 		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
@@ -673,7 +672,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 	certChecks := 0
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               NewMemLiveSetForTest(),
+		UtxoSet:               OpenLiveSetForTest(t, db),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),

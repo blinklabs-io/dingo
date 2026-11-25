@@ -16,12 +16,11 @@ package ledger_test
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -61,262 +60,10 @@ func accountRow(a *models.Account) string {
 	return fmt.Sprintf("%+v", c)
 }
 
-// requireAccountReads reads every account the metadata store holds, and one
-// it does not, through the ledger's LedgerDB, and requires the answers to be
-// the store's.
-func requireAccountReads(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	stage string,
-) int {
-	t.Helper()
-	var accounts []*models.Account
-	require.NoError(
-		t,
-		store.IterateAccounts(nil, func(a *models.Account) error {
-			c := *a
-			accounts = append(accounts, &c)
-			return nil
-		}),
-	)
-	missing := models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x99}, 28))
-	refs := []models.StakeCredentialRef{missing}
-	for _, a := range accounts {
-		refs = append(
-			refs,
-			models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey),
-		)
-	}
-	_, err := ldb.GetAccountByCredential(
-		t.Context(), missing.Tag, missing.Key, true, nil,
-	)
-	require.ErrorIs(t, err, models.ErrAccountNotFound, stage)
-	for _, inactive := range []bool{false, true} {
-		want, err := store.GetAccountsByCredential(
-			t.Context(),
-			refs,
-			inactive,
-			nil,
-		)
-		require.NoError(t, err, stage)
-		got, err := ldb.GetAccountsByCredential(
-			t.Context(),
-			refs,
-			inactive,
-			nil,
-		)
-		require.NoError(t, err, stage)
-		require.Len(t, got, len(want), "%s inactive=%t", stage, inactive)
-		for _, a := range accounts {
-			ref := models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
-			one, err := ldb.GetAccountByCredential(
-				t.Context(), a.CredentialTag, a.StakingKey, inactive, nil,
-			)
-			w := want[ref.MapKey()]
-			if w == nil {
-				require.ErrorIs(t, err, models.ErrAccountNotFound, stage)
-				require.NotContains(t, got, ref.MapKey(), stage)
-				continue
-			}
-			require.NoError(t, err, stage)
-			require.Equal(t, accountRow(w), accountRow(one), stage)
-			require.Equal(
-				t,
-				accountRow(w),
-				accountRow(got[ref.MapKey()]),
-				stage,
-			)
-		}
-	}
-	return len(accounts)
-}
-
-// TestAccountReadsFromTheLiveUtxoSet reads accounts through the ledger's
-// LedgerDB from the live set with every metadata store account read failing, across
-// the writes that change accounts and their rollback, and requires the
-// answers to be the store's. A read that reached the store would fail.
-func TestAccountReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	storeReads, _ := scenario.HideStoreReads(
-		"GetAccountByCredential", "GetAccountsByCredential",
-	)
-	ldb := scenario.LedgerDB()
-	require.Positive(t, requireAccountReads(t, ldb, store, "before"))
-	scenario.ApplyBoundary()
-	requireAccountReads(t, ldb, store, "after the boundary")
-	var ref models.StakeCredentialRef
-	var pool []byte
-	require.NoError(
-		t,
-		store.IterateAccounts(nil, func(a *models.Account) error {
-			if a.Active && ref.Key == nil {
-				ref = models.NewStakeCredentialRef(
-					a.CredentialTag,
-					a.StakingKey,
-				)
-			}
-			if a.Active && len(a.Pool) > 0 && pool == nil {
-				pool = a.Pool
-			}
-			return nil
-		}),
-	)
-	require.NotNil(t, ref.Key)
-	require.NotNil(t, pool)
-	scenario.Credit(ref, 7)
-	requireAccountReads(t, ldb, store, "after credits")
-	require.NoError(t, scenario.Withdraw(ref, 5))
-	requireAccountReads(t, ldb, store, "after a withdrawal")
-	scenario.Reap(pool)
-	requireAccountReads(t, ldb, store, "after a pool reap")
-	scenario.Expire(ref)
-	requireAccountReads(t, ldb, store, "after expirations")
-	scenario.Governance(ref, 9)
-	requireAccountReads(t, ldb, store, "after governance")
-	scenario.RollbackBeforeBoundary()
-	requireAccountReads(t, ldb, store, "after the rollback")
-	require.Zero(t, storeReads(), "an account read reached the metadata store")
-}
-
 func drepRow(d *models.Drep) string {
 	c := *d
 	c.ID, c.Delegators = 0, nil
 	return fmt.Sprintf("%+v", c)
-}
-
-// requireDrepReads reads every DRep the metadata store holds, and some it
-// does not, the active set and the dormancy counter through the ledger's
-// LedgerDB, and requires the answers to be the store's. It returns how many
-// DReps are active.
-func requireDrepReads(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	stage string,
-) int {
-	t.Helper()
-	ctx := t.Context()
-	keys := [][]byte{
-		bytes.Repeat([]byte{0x5d}, 28), bytes.Repeat([]byte{0x5e}, 28),
-		bytes.Repeat([]byte{0x98}, 28),
-	}
-	require.NoError(t, store.IterateDreps(nil, func(d *models.Drep) error {
-		keys = append(keys, d.Credential)
-		return nil
-	}))
-	for _, key := range keys {
-		for _, tag := range []uint8{0, 1} {
-			for _, inactive := range []bool{false, true} {
-				want, wantErr := store.GetDrepByCredential(
-					ctx,
-					tag,
-					key,
-					inactive,
-					nil,
-				)
-				got, err := ldb.GetDrepByCredential(
-					ctx,
-					tag,
-					key,
-					inactive,
-					nil,
-				)
-				if errors.Is(wantErr, models.ErrDrepNotFound) {
-					require.ErrorIs(t, err, models.ErrDrepNotFound, stage)
-					continue
-				}
-				require.NoError(t, wantErr, stage)
-				require.NoError(t, err, "%s %x", stage, key)
-				require.Equal(t, drepRow(want), drepRow(got), stage)
-			}
-		}
-	}
-	want, err := store.GetActiveDreps(ctx, nil)
-	require.NoError(t, err)
-	got, err := ldb.GetActiveDreps(ctx, nil)
-	require.NoError(t, err, stage)
-	rows := func(ds []*models.Drep) []string {
-		var out []string
-		for _, d := range ds {
-			out = append(out, drepRow(d))
-		}
-		return out
-	}
-	require.ElementsMatch(t, rows(want), rows(got), stage)
-	wantDormant, err := store.GetDormantDRepEpochs(ctx, nil)
-	require.NoError(t, err)
-	gotDormant, err := ldb.GetDormantDRepEpochs(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wantDormant, gotDormant, stage)
-	return len(want)
-}
-
-// TestDrepReadsFromTheLiveUtxoSet reads DReps through the ledger's LedgerDB
-// from the live set with every metadata store DRep read failing, across
-// registration, activity, dormancy, deregistration and the rollback, and
-// requires the answers to be the store's.
-func TestDrepReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	storeReads, hide := scenario.HideStoreReads(
-		"GetDrepByCredential", "GetActiveDreps", "GetDormantDRepEpochs",
-	)
-	ldb := scenario.LedgerDB()
-	// BumpDormantDRepExpiries reads the dormancy counter from the store
-	// before and after its write to learn whether the store applied it.
-	readsOnly := func(fn func()) {
-		hide(true)
-		defer hide(false)
-		fn()
-	}
-	hide(false)
-	readsOnly(
-		func() { require.Zero(t, requireDrepReads(t, ldb, store, "before")) },
-	)
-	scenario.ApplyBoundary()
-	var ref models.StakeCredentialRef
-	require.NoError(
-		t,
-		store.IterateAccounts(nil, func(a *models.Account) error {
-			if a.Active && ref.Key == nil {
-				ref = models.NewStakeCredentialRef(
-					a.CredentialTag,
-					a.StakingKey,
-				)
-			}
-			return nil
-		}),
-	)
-	require.NotNil(t, ref.Key)
-	scenario.VoteDelegate(ref, bytes.Repeat([]byte{0x5e}, 28), 0, 3)
-	readsOnly(func() {
-		require.Equal(
-			t,
-			1,
-			requireDrepReads(t, ldb, store, "after a registration"),
-		)
-	})
-	scenario.Governance(ref, 9)
-	readsOnly(func() {
-		require.Equal(t, 1, requireDrepReads(t, ldb, store,
-			"after activity, dormancy and a deregistration"))
-	})
-	scenario.RollbackBeforeBoundary()
-	readsOnly(func() { requireDrepReads(t, ldb, store, "after the rollback") })
-	require.Zero(t, storeReads(), "a DRep read reached the metadata store")
-}
-
-func latestEpoch(t *testing.T, store ledgerdb.LedgerDB) models.Epoch {
-	t.Helper()
-	epochs, err := store.GetEpochs(nil)
-	require.NoError(t, err)
-	var cur models.Epoch
-	for _, e := range epochs {
-		if e.EpochId > cur.EpochId {
-			cur = e
-		}
-	}
-	return cur
 }
 
 func poolRegistrationRow(r *models.PoolRegistration) string {
@@ -349,163 +96,6 @@ func poolRegistrationRow(r *models.PoolRegistration) string {
 	)
 }
 
-// requirePoolReads reads the registration in effect now of pools in the
-// latest epoch through the ledger's LedgerDB and requires the answer to be
-// the metadata store's. It returns how many pools have one.
-func requirePoolReads(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	pools [][]byte,
-	stage string,
-) int {
-	t.Helper()
-	cur := latestEpoch(t, store)
-	pkhs := []lcommon.PoolKeyHash{
-		lcommon.PoolKeyHash(bytes.Repeat([]byte{0x9a}, 28)),
-	}
-	for _, p := range pools {
-		pkhs = append(pkhs, lcommon.PoolKeyHash(p))
-	}
-	want, err := store.GetPoolRegistrationsEffectiveForEpoch(
-		pkhs, cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-	)
-	require.NoError(t, err)
-	got, err := ldb.GetPoolRegistrationsEffectiveForEpoch(
-		pkhs, cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-	)
-	require.NoError(t, err, stage)
-	rows := func(rs []models.PoolRegistration) []string {
-		var out []string
-		for i := range rs {
-			out = append(out, poolRegistrationRow(&rs[i]))
-		}
-		return out
-	}
-	require.ElementsMatch(t, rows(want), rows(got), stage)
-	return len(want)
-}
-
-// TestPoolReadsFromTheLiveUtxoSet reads the registration in effect now of
-// pools through the ledger's LedgerDB from the live set with the metadata store's
-// read failing, and requires the answers to be the store's: a pool
-// registered before the epoch, a registration that took effect at a
-// boundary and a pool retired by one. A pool that registered after the
-// epoch began is a case the set cannot answer, and reaches the store.
-func TestPoolReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	reached, hide := scenario.HideStoreReads(
-		"GetPoolRegistrationsEffectiveForEpoch",
-	)
-	ldb := scenario.LedgerDB()
-	var harnessPool []byte
-	poolHashes, err := store.ListPoolKeyHashes(nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, poolHashes)
-	harnessPool = poolHashes[0]
-	newPool := bytes.Repeat([]byte{0x6a}, 28)
-	pools := [][]byte{harnessPool, newPool}
-	require.Equal(t, 1, requirePoolReads(t, ldb, store, pools, "before"))
-	scenario.ApplyBoundary()
-	// The boundary's snapshot reads registrations at a bounded slot, which
-	// the store answers.
-	atBoundary := reached()
-	require.Equal(
-		t,
-		1,
-		requirePoolReads(t, ldb, store, pools, "after the boundary"),
-	)
-	require.Equal(
-		t,
-		atBoundary,
-		reached(),
-		"a pool read reached the metadata store",
-	)
-	scenario.Pools(func() {
-		// The new pool registered after the epoch began: the set keeps no
-		// earlier registration, so the store answers.
-		cur := latestEpoch(t, store)
-		read := func(pool []byte) ([]models.PoolRegistration, error) {
-			return ldb.GetPoolRegistrationsEffectiveForEpoch(
-				[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(pool)},
-				cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-			)
-		}
-		want, err := store.GetPoolRegistrationsEffectiveForEpoch(
-			[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(newPool)},
-			cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-		)
-		require.NoError(t, err)
-		before := reached()
-		served, err := read(harnessPool)
-		require.NoError(t, err)
-		require.Len(
-			t,
-			served,
-			1,
-			"a registration from before the epoch is the set's",
-		)
-		require.Equal(t, before, reached())
-		served, err = read(newPool)
-		require.NoError(t, err)
-		require.Equal(t, len(want), len(served))
-		if len(want) > 0 {
-			require.Equal(t, ledger.CleanPoolRegistration(&want[0]), ledger.CleanPoolRegistration(&served[0]))
-		}
-		require.Equal(t, before, reached(),
-			"the set served the effective registration")
-		hide(false)
-		require.Equal(
-			t,
-			2,
-			requirePoolReads(t, ldb, store, pools, "a mid-epoch registration"),
-		)
-		hide(true)
-	})
-	require.Equal(
-		t,
-		1,
-		requirePoolReads(
-			t,
-			ldb,
-			store,
-			pools,
-			"after a promotion and a retirement",
-		),
-	)
-	scenario.RollbackBeforeBoundary()
-	require.Equal(
-		t,
-		1,
-		requirePoolReads(t, ldb, store, pools, "after the rollback"),
-	)
-}
-
-// TestPoolReadsUseTheSetForLeiosCertifications requires effective pool
-// registrations to agree with the store without reading it through the ledger.
-func TestPoolReadsUseTheSetForLeiosCertifications(t *testing.T) {
-	t.Parallel()
-	scenario, _, _ := setModeScenario(t)
-	scenario.CertifyLeios()
-	store := dbadapter.New(scenario.DB)
-	cur := latestEpoch(t, store)
-	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0xd1}, 28))
-	pools := []lcommon.PoolKeyHash{pool}
-	want, err := store.GetPoolRegistrationsEffectiveForEpoch(
-		pools, cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-	)
-	require.NoError(t, err)
-	reached, _ := scenario.HideStoreReads("GetPoolRegistrationsEffectiveForEpoch")
-	got, err := scenario.LedgerDB().GetPoolRegistrationsEffectiveForEpoch(
-		pools, cur.StartSlot, cur.EpochId, math.MaxInt64, nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, want, 1)
-	require.Len(t, got, 1)
-	require.Equal(t, ledger.CleanPoolRegistration(&want[0]), ledger.CleanPoolRegistration(&got[0]))
-	require.Zero(t, reached(), "the effective registration read uses only the set")
-}
-
 var opCertReadNames = []string{
 	"LatestPoolOpCertSequence", "LatestPoolOpCertSequenceAfter",
 	"LatestPoolOpCertSequenceAtOrBefore", "LatestPoolOpCertSequenceInRange",
@@ -517,155 +107,170 @@ type opCertAnswer struct {
 	found    bool
 }
 
-// opCertReadsMatchStore runs each read of pool through the ledger's LedgerDB
-// with the metadata store hidden, falling back to the store unhidden for a
-// read the set cannot answer, requires every answer to be the store's, and
-// returns the reads that reached the store.
-func opCertReadsMatchStore(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	hide func(bool),
-	slots ledger.OpCertSlots,
-	pool []byte,
-) []string {
-	t.Helper()
-	ctx := t.Context()
-	pkh := lcommon.PoolKeyHash(pool)
-	reads := map[string]func(ledgerdb.LedgerDB) (uint64, bool, error){
-		"latest": func(l ledgerdb.LedgerDB) (uint64, bool, error) {
-			return l.LatestPoolOpCertSequence(ctx, pkh, nil)
-		},
-	}
-	for _, slot := range []uint64{slots.Base, slots.Raised, slots.Lowered, slots.Batched} {
-		reads[fmt.Sprintf("after %d", slot)] = func(l ledgerdb.LedgerDB) (uint64, bool, error) {
-			return l.LatestPoolOpCertSequenceAfter(ctx, pkh, slot, nil)
-		}
-	}
-	for _, slot := range []uint64{
-		slots.Base - 1, slots.Base, slots.Raised, slots.Repeated,
-		slots.Lowered, slots.Batched, slots.Batched + 1,
-	} {
-		reads[fmt.Sprintf("at or before %d", slot)] = func(l ledgerdb.LedgerDB) (uint64, bool, error) {
-			return l.LatestPoolOpCertSequenceAtOrBefore(ctx, pkh, slot, nil)
-		}
-	}
-	for _, r := range [][2]uint64{
-		{slots.Base, slots.Batched}, {slots.Raised, slots.Lowered},
-		{slots.Repeated, slots.Lowered}, {slots.Lowered + 1, slots.Batched},
-		{slots.Batched, slots.Base},
-	} {
-		reads[fmt.Sprintf("in %d..%d", r[0], r[1])] = func(l ledgerdb.LedgerDB) (uint64, bool, error) {
-			return l.LatestPoolOpCertSequenceInRange(ctx, pkh, r[0], r[1], nil)
-		}
-	}
-	var viaStore []string
-	for what, read := range reads {
-		ws, wf, err := read(store)
-		require.NoError(t, err, what)
-		hide(true)
-		gs, gf, err := read(ldb)
-		hide(false)
-		if err != nil {
-			require.ErrorIs(t, err, ledger.ErrUtxoSetUnserved, what)
-			viaStore = append(viaStore, what)
-			continue
-		}
-		require.Equal(
-			t,
-			opCertAnswer{ws, wf},
-			opCertAnswer{gs, gf},
-			"%x %s",
-			pool,
-			what,
-		)
-	}
-	return viaStore
-}
-
-// TestOpCertReadsFromTheLiveUtxoSet reads op-cert counters through the
-// ledger's LedgerDB from the live set with metadata reads blocked. It checks the
-// set's answers and requires unsupported ranges to fail closed.
+// TestOpCertReadsFromTheLiveUtxoSet reads each pool's counter, latest, after
+// a slot, as of a slot and within a range, over counters that rise, repeat,
+// drop and are batched. A range the set cannot answer fails closed.
 func TestOpCertReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	_, hide := scenario.HideStoreReads(opCertReadNames...)
-	hide(false)
+	scenario, _, _ := setModeScenario(t)
 	ldb := scenario.LedgerDB()
 	slots := scenario.OpCerts()
-	viaStore := opCertReadsMatchStore(t, ldb, store, hide, slots, slots.Pool)
-	require.Equal(
-		t,
-		[]string{fmt.Sprintf("in %d..%d", slots.Repeated, slots.Lowered)},
-		viaStore,
+	ctx := t.Context()
+	none := opCertAnswer{}
+	seq := func(n uint64) opCertAnswer { return opCertAnswer{n, true} }
+	answer := func(sequence uint64, found bool, err error) opCertAnswer {
+		t.Helper()
+		require.NoError(t, err)
+		return opCertAnswer{sequence, found}
+	}
+	type slotWant struct {
+		slot uint64
+		want opCertAnswer
+	}
+	type rangeWant struct {
+		start, end uint64
+		want       opCertAnswer
+	}
+	for _, tc := range []struct {
+		name     string
+		pool     []byte
+		latest   opCertAnswer
+		after    []slotWant
+		atOrUpTo []slotWant
+		ranges   []rangeWant
+	}{
+		{
+			name: "pool", pool: slots.Pool, latest: seq(6),
+			after: []slotWant{
+				{slots.Base, seq(6)}, {slots.Raised, seq(6)},
+				{slots.Lowered, seq(6)}, {slots.Batched, none},
+			},
+			atOrUpTo: []slotWant{
+				{slots.Base - 1, none}, {slots.Base, seq(3)},
+				{slots.Raised, seq(5)}, {slots.Repeated, seq(5)},
+				{slots.Lowered, seq(5)}, {slots.Batched, seq(6)},
+				{slots.Batched + 1, seq(6)},
+			},
+			ranges: []rangeWant{
+				{slots.Base, slots.Batched, seq(6)},
+				{slots.Raised, slots.Lowered, seq(5)},
+				{slots.Lowered + 1, slots.Batched, seq(6)},
+				{slots.Batched, slots.Base, none},
+			},
+		},
+		{
+			name: "other", pool: slots.Other, latest: seq(2),
+			after: []slotWant{
+				{slots.Base, seq(2)}, {slots.Raised, seq(2)},
+				{slots.Lowered, none}, {slots.Batched, none},
+			},
+			atOrUpTo: []slotWant{
+				{slots.Base - 1, none}, {slots.Base, none},
+				{slots.Raised, none}, {slots.Repeated, seq(2)},
+				{slots.Lowered, seq(2)}, {slots.Batched, seq(2)},
+				{slots.Batched + 1, seq(2)},
+			},
+			ranges: []rangeWant{
+				{slots.Base, slots.Batched, seq(2)},
+				{slots.Raised, slots.Lowered, seq(2)},
+				{slots.Repeated, slots.Lowered, seq(2)},
+				{slots.Lowered + 1, slots.Batched, none},
+				{slots.Batched, slots.Base, none},
+			},
+		},
+	} {
+		pkh := lcommon.PoolKeyHash(tc.pool)
+		require.Equal(t, tc.latest,
+			answer(ldb.LatestPoolOpCertSequence(ctx, pkh, nil)), tc.name)
+		for _, w := range tc.after {
+			require.Equal(t, w.want,
+				answer(ldb.LatestPoolOpCertSequenceAfter(ctx, pkh, w.slot, nil)),
+				"%s after %d", tc.name, w.slot)
+		}
+		for _, w := range tc.atOrUpTo {
+			require.Equal(t, w.want,
+				answer(ldb.LatestPoolOpCertSequenceAtOrBefore(
+					ctx, pkh, w.slot, nil,
+				)),
+				"%s at or before %d", tc.name, w.slot)
+		}
+		for _, w := range tc.ranges {
+			require.Equal(t, w.want,
+				answer(ldb.LatestPoolOpCertSequenceInRange(
+					ctx, pkh, w.start, w.end, nil,
+				)),
+				"%s in %d..%d", tc.name, w.start, w.end)
+		}
+	}
+	// The pool's highest counter was reached before this range and a lower
+	// one follows inside it, which the set does not record.
+	_, _, err := ldb.LatestPoolOpCertSequenceInRange(
+		ctx, lcommon.PoolKeyHash(slots.Pool),
+		slots.Repeated, slots.Lowered, nil,
 	)
-	require.Empty(
-		t,
-		opCertReadsMatchStore(t, ldb, store, hide, slots, slots.Other),
-	)
-	hide(true)
-	got, err := ldb.LatestPoolOpCertSequences(t.Context(), nil)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
+	all, err := ldb.LatestPoolOpCertSequences(ctx, nil)
 	require.NoError(t, err)
-	want, err := store.LatestPoolOpCertSequences(t.Context(), nil)
-	require.NoError(t, err)
-	require.Equal(t, want, got)
+	require.Equal(t, map[string]uint64{
+		string(slots.Pool): 6, string(slots.Other): 2,
+	}, all)
+
 	// A counter reached and repeated: after its first observation the only
-	// later row holds the same sequence, which the set knows because the
+	// later one holds the same sequence, which the set knows because the
 	// pool's latest observation repeats its highest counter.
 	repeated := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x6f}, 28))
 	for _, slot := range []uint64{slots.Batched + 2, slots.Batched + 3} {
-		txn := ldb.Begin(t.Context(), true)
+		txn := ldb.Begin(ctx, true)
 		require.NoError(t, ldb.UpdatePoolOpCertSequence(
-			t.Context(), repeated, 7, slot, txn,
+			ctx, repeated, 7, slot, txn,
 		))
 		require.NoError(t, txn.Commit())
 		txn.Release()
 	}
-	hide(true)
-	seq, found, err := ldb.LatestPoolOpCertSequenceAfter(
-		t.Context(), repeated, slots.Batched+2, nil,
-	)
-	require.NoError(t, err, "the latest observation repeats the highest")
-	require.True(t, found)
-	require.Equal(t, uint64(7), seq)
-	hide(true)
-	_, found, err = ldb.LatestPoolOpCertSequenceAfter(
-		t.Context(), repeated, slots.Batched+1, nil,
-	)
-	require.NoError(t, err, "the counter first reached after the slot")
-	require.True(t, found)
-	scenario.OpCertsInsideTxn(slots.Pool, 9, slots.Batched+1)
-	hide(false)
+	require.Equal(t, seq(7), answer(ldb.LatestPoolOpCertSequenceAfter(
+		ctx, repeated, slots.Batched+2, nil,
+	)), "the latest observation repeats the highest")
+	require.Equal(t, seq(7), answer(ldb.LatestPoolOpCertSequenceAfter(
+		ctx, repeated, slots.Batched+1, nil,
+	)), "the counter first reached after the slot")
+
 	scenario.RollbackBeforeBoundary()
-	require.Empty(
-		t,
-		opCertReadsMatchStore(t, ldb, store, hide, slots, slots.Pool),
-		"after the rollback the counter from before it is one observation",
-	)
+	pkh := lcommon.PoolKeyHash(slots.Pool)
+	require.Equal(t, seq(3),
+		answer(ldb.LatestPoolOpCertSequence(ctx, pkh, nil)),
+		"after the rollback the counter from before it is the only one")
+	require.Equal(t, none, answer(ldb.LatestPoolOpCertSequenceAfter(
+		ctx, pkh, slots.Base, nil,
+	)))
+	require.Equal(t, seq(3), answer(ldb.LatestPoolOpCertSequenceInRange(
+		ctx, pkh, slots.Base, slots.Lowered, nil,
+	)))
 }
 
 // TestOpCertReadsBeforeTheSetsRecordUseItsBaseline requires reads of slots
 // before the set's recorded observations to be answered from the counters it
-// was loaded with, without a metadata fallback.
+// was loaded with.
 func TestOpCertReadsBeforeTheSetsRecordUseItsBaseline(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set,
-	)
-	store := dbadapter.New(scenario.DB)
 	poolA := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x41}, 28))
 	poolB := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x42}, 28))
-	for _, w := range []struct {
-		pool           lcommon.PoolKeyHash
-		sequence, slot uint64
-	}{{poolA, 4, 100}, {poolB, 3, 150}, {poolA, 6, 200}} {
-		require.NoError(t, store.UpdatePoolOpCertSequence(
-			t.Context(), w.pool, w.sequence, w.slot, nil,
-		))
-	}
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	// Counters an earlier release left in its tables: the set takes over
+	// each pool's latest.
+	scenario := ledger.NewSeededBoundaryEpochStateScenarioForTest(
+		t, set, nil, func(db *database.Database) {
+			for _, w := range []struct {
+				pool           lcommon.PoolKeyHash
+				sequence, slot uint64
+			}{{poolA, 4, 100}, {poolB, 3, 150}, {poolA, 6, 200}} {
+				require.NoError(t, dbadapter.New(db).UpdatePoolOpCertSequence(
+					t.Context(), w.pool, w.sequence, w.slot, nil,
+				))
+			}
+		},
+	)
 	reached, _ := scenario.HideStoreReads(opCertReadNames...)
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
@@ -728,242 +333,10 @@ func committeeAuthRows(as []*models.AuthCommitteeHot) []string {
 	return out
 }
 
-// requireCommitteeStoreReads reads every committee and constitution query
-// through the ledger's LedgerDB and requires the answers to be the metadata
-// store's, rows' IDs and order aside.
-func requireCommitteeStoreReads(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	slots ledger.CommitteeSlots,
-	stage string,
-) {
-	t.Helper()
-	ctx := t.Context()
-	wc, err := store.GetConstitution(nil)
-	require.NoError(t, err)
-	gc, err := ldb.GetConstitution(nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wc == nil, gc == nil, stage)
-	if wc != nil {
-		wc.ID, gc.ID = 0, 0
-		require.Equal(t, wc, gc, stage)
-	}
-	wq, err := store.GetCommitteeQuorum(ctx, nil)
-	require.NoError(t, err)
-	gq, err := ldb.GetCommitteeQuorum(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wq == nil, gq == nil, stage)
-	if wq != nil {
-		require.Zero(t, wq.Cmp(gq), stage)
-	}
-	wm, err := store.GetCommitteeMembers(ctx, nil)
-	require.NoError(t, err)
-	gm, err := ldb.GetCommitteeMembers(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, committeeMemberRows(wm), committeeMemberRows(gm), stage)
-	wa, err := store.GetCommitteeMembersIncludeDeleted(ctx, nil)
-	require.NoError(t, err)
-	ga, err := ldb.GetCommitteeMembersIncludeDeleted(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, committeeMemberRows(wa), committeeMemberRows(ga), stage)
-	wh, err := store.GetActiveCommitteeMembers(ctx, nil)
-	require.NoError(t, err)
-	gh, err := ldb.GetActiveCommitteeMembers(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, committeeAuthRows(wh), committeeAuthRows(gh), stage)
-	wn, err := store.GetCommitteeAuthorizedCount(ctx, nil)
-	require.NoError(t, err)
-	gn, err := ldb.GetCommitteeAuthorizedCount(ctx, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wn, gn, stage)
-	for _, from := range []uint64{0, slots.Reauth, slots.Reauth + 1} {
-		ws, err := store.GetCommitteeHotAuthorizationsSince(ctx, from, nil)
-		require.NoError(t, err)
-		gs, err := ldb.GetCommitteeHotAuthorizationsSince(ctx, from, nil)
-		require.NoError(t, err, stage)
-		require.Equal(
-			t,
-			committeeAuthRows(ws),
-			committeeAuthRows(gs),
-			"%s since %d",
-			stage,
-			from,
-		)
-	}
-	for _, cold := range [][]byte{slots.A, slots.B, slots.C} {
-		for _, term := range []uint64{0, slots.Update} {
-			w, werr := store.GetCommitteeMember(ctx, 0, cold, term, nil)
-			g, gerr := ldb.GetCommitteeMember(ctx, 0, cold, term, nil)
-			if errors.Is(werr, models.ErrCommitteeMemberNotFound) {
-				require.ErrorIs(
-					t,
-					gerr,
-					models.ErrCommitteeMemberNotFound,
-					stage,
-				)
-			} else {
-				require.NoError(t, werr)
-				require.NoError(t, gerr, stage)
-				require.Equal(t, committeeAuthRows([]*models.AuthCommitteeHot{w}),
-					committeeAuthRows([]*models.AuthCommitteeHot{g}), stage)
-			}
-			wr, err := store.IsCommitteeMemberResigned(ctx, 0, cold, term, nil)
-			require.NoError(t, err)
-			gr, err := ldb.IsCommitteeMemberResigned(ctx, 0, cold, term, nil)
-			require.NoError(t, err, stage)
-			require.Equal(t, wr, gr, stage)
-		}
-	}
-	creds := []models.CommitteeCredential{
-		{
-			Credential: slots.A,
-		}, {Credential: slots.B, TermStartSlot: slots.Update},
-		{Credential: slots.B}, {Credential: slots.C},
-	}
-	wr, err := store.GetResignedCommitteeMembers(ctx, creds, nil)
-	require.NoError(t, err)
-	gr, err := ldb.GetResignedCommitteeMembers(ctx, creds, nil)
-	require.NoError(t, err, stage)
-	require.Equal(t, wr, gr, stage)
-}
-
-// TestCommitteeReadsFromTheLiveUtxoSet reads the committee and constitution
-// through the ledger's LedgerDB from the live set with every metadata store
-// committee read failing, after the committee writes, inside a transaction
-// that writes more and after the rollback, and requires the answers to be
-// the store's.
-func TestCommitteeReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	reached, _ := scenario.HideStoreReads(
-		"GetConstitution", "GetCommitteeQuorum", "GetCommitteeMembers",
-		"GetCommitteeMembersIncludeDeleted", "GetCommitteeMember",
-		"IsCommitteeMemberResigned", "GetResignedCommitteeMembers",
-		"GetActiveCommitteeMembers", "GetCommitteeAuthorizedCount",
-		"GetCommitteeHotAuthorizationsSince",
-	)
-	ldb := scenario.LedgerDB()
-	slots := scenario.Committee()
-	requireCommitteeStoreReads(t, ldb, store, slots, "after the writes")
-	scenario.CommitteeInsideTxn(slots.NoConfidence + 1)
-	requireCommitteeStoreReads(t, ldb, store, slots, "after an abandoned write")
-	scenario.RollbackBeforeBoundary()
-	requireCommitteeStoreReads(t, ldb, store, slots, "after the rollback")
-	require.Zero(t, reached(), "a committee read reached the metadata store")
-}
-
-// requireLastEnacted requires the ledger's LedgerDB to name the proposal the
-// metadata store names as the last enacted of actionTypes, row ID included.
-func requireLastEnacted(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	actionTypes []uint8,
-	stage string,
-) *models.GovernanceProposal {
-	t.Helper()
-	want, err := store.GetLastEnactedGovernanceProposal(
-		t.Context(),
-		actionTypes,
-		nil,
-	)
-	require.NoError(t, err)
-	got, err := ldb.GetLastEnactedGovernanceProposal(
-		t.Context(),
-		actionTypes,
-		nil,
-	)
-	require.NoError(t, err, stage)
-	require.Equal(t, want == nil, got == nil, stage)
-	if want != nil {
-		require.Equal(t, want.ID, got.ID, stage)
-		require.Equal(t, want.TxHash, got.TxHash, stage)
-		require.Equal(t, want.ActionIndex, got.ActionIndex, stage)
-		require.Equal(t, want.ActionType, got.ActionType, stage)
-		require.Equal(t, want.EnactedEpoch, got.EnactedEpoch, stage)
-		require.Equal(t, want.EnactedSlot, got.EnactedSlot, stage)
-	}
-	return got
-}
-
-// TestLastEnactedProposalReadsFromTheLiveUtxoSet reads the last enacted
-// proposal through the ledger's LedgerDB from the live set with the metadata
-// store's read failing, while the proposal is written, enacted and rolled
-// back, and requires the answers to be the store's.
-func TestLastEnactedProposalReadsFromTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, _, store := setModeScenario(t)
-	reached, _ := scenario.HideStoreReads("GetLastEnactedGovernanceProposal")
-	ldb := scenario.LedgerDB()
-	require.Nil(t, requireLastEnacted(t, ldb, store, []uint8{1}, "before"))
-	slots := scenario.Proposals()
-	enacted := requireLastEnacted(
-		t,
-		ldb,
-		store,
-		[]uint8{1},
-		"after the enactment",
-	)
-	require.NotNil(t, enacted)
-	require.Equal(t, slots.P1, enacted.TxHash)
-	require.Nil(
-		t,
-		requireLastEnacted(t, ldb, store, []uint8{0, 2}, "another purpose"),
-	)
-	scenario.ProposalsInsideTxn(slots.Enact + 1)
-	requireLastEnacted(t, ldb, store, []uint8{1}, "after an abandoned write")
-	scenario.RollbackBeforeBoundary()
-	require.Nil(
-		t,
-		requireLastEnacted(t, ldb, store, []uint8{1}, "after the rollback"),
-	)
-	require.Zero(t, reached(), "the read reached the metadata store")
-}
-
 var liveStakeReadNames = []string{
 	"GetLiveStakeInputsForPools", "GetDelegatedPoolKeyHashes",
 	"GetStakeByPools", "GetDRepVotingPower", "GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
-}
-
-// TestLiveStakeReadsUseSetStateWithoutRewardRows requires live stake reads
-// to use set state when pending reward rows are unavailable to the set.
-func TestLiveStakeReadsUseSetStateWithoutRewardRows(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarnessReads(t,
-		func(s *utxoset.Set) ledger.UtxoSetWriter {
-			return unloadedRewardSet{s}
-		},
-		"set",
-	)
-	round := h.round(11)
-	h.write(t, func(ldb ledgerdb.LedgerDB, txn ledgerdb.Txn) {
-		require.NoError(t, ldb.AddAppliedRewardCreditRound(round, txn))
-		require.NoError(t, ldb.SaveRewardAccountOutputs(
-			[]*models.RewardAccountOutput{
-				h.output(h.deleg, 11, 9, h.base, round.BoundarySlot),
-			}, txn))
-	})
-	reached, _ := h.scenario.HideStoreReads(liveStakeReadNames...)
-	ldb := h.scenario.LedgerDB()
-	ctx := t.Context()
-	pools := [][]byte{h.pool}
-	in, err := ldb.GetLiveStakeInputsForPools(pools, 0, nil)
-	require.NoError(t, err)
-	got, ok := stakeOf(in, h.deleg)
-	require.True(t, ok)
-	require.Equal(t, uint64(20_000_000), got)
-	_, err = ldb.GetDRepVotingPower(ctx, 0, h.owner.Key, 0, nil)
-	require.NoError(t, err)
-	_, err = ldb.GetDRepVotingPowerBatch(ctx, nil, 0, nil)
-	require.NoError(t, err)
-	_, err = ldb.GetDRepVotingPowerByType(ctx, []uint64{2, 3}, 0, nil)
-	require.NoError(t, err)
-	require.Zero(t, reached(), "live-stake reads use only the set")
-	_, _, err = ldb.GetStakeByPools(ctx, pools, nil)
-	require.NoError(t, err, "stake by pools counts no credits")
-	_, err = ldb.GetDelegatedPoolKeyHashes(nil)
-	require.NoError(t, err)
-	require.Zero(t, reached(), "live-stake reads use only the set")
 }
 
 // TestLiveStakeReadsCountPendingCreditsFromTheLiveUtxoSet requires the reads
@@ -1189,20 +562,4 @@ func boundaryOutcome(t *testing.T, hideStore bool) map[string][]string {
 		require.Zero(t, reached(), "a read the set serves reached the store")
 	}
 	return out
-}
-
-// TestBoundaryScenariosHaveTheSameOutcomeInSetMode runs the boundary, reward,
-// DRep, pool, op-cert, committee and governance scenarios and their rollback
-// with metadata reads available and failing, and requires the same ledger outcome
-// after every phase: the same accounts, DReps, epochs, snapshots, pots, pools,
-// counters, committee rows, proposals and votes, row IDs included.
-func TestBoundaryScenariosHaveTheSameOutcomeInSetMode(t *testing.T) {
-	t.Parallel()
-	baseline := boundaryOutcome(t, false)
-	setMode := boundaryOutcome(t, true)
-	require.NotEmpty(t, baseline["boundary/accounts"])
-	require.Equal(t, len(baseline), len(setMode))
-	for phase, want := range baseline {
-		require.Equal(t, want, setMode[phase], phase)
-	}
 }

@@ -27,7 +27,7 @@ import (
 const IndexerKeyPrefix = "ix:"
 
 // ErrIndexerReadOnly is returned for a write that is not an IndexerDB offset
-// entry: blocks, their indexes and the commit timestamp belong to the ledger.
+// entry: blocks and their indexes belong to the ledger.
 var ErrIndexerReadOnly = errors.New(
 	"blob: the indexer view of the shared blob store cannot write this key",
 )
@@ -123,10 +123,6 @@ func (s *indexerStore) DeleteBlock(types.Txn, uint64, []byte, uint64) error {
 }
 
 func (s *indexerStore) TombstoneBlock(types.Txn, uint64, []byte) error {
-	return ErrIndexerReadOnly
-}
-
-func (s *indexerStore) SetCommitTimestamp(int64, types.Txn) error {
 	return ErrIndexerReadOnly
 }
 

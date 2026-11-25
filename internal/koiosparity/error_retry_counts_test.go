@@ -337,7 +337,7 @@ func TestObserverSeedsErrorRetriesForTheOwningPhase(t *testing.T) {
 			source, err := NewDatabaseSource(db)
 			require.NoError(t, err)
 			require.NoError(t, db.SetEpoch(1000, 4, nil, nil, nil, nil, 5, 20, 432000, nil))
-			require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+			require.NoError(t, db.SetChainState("mithril_ledger_slot", "1000", nil))
 			require.NoError(t, sourceSQLDB(t, db).Create(&models.EpochSummary{Epoch: 6, SnapshotReady: true}).Error)
 			o, err := NewObserver(ObserverConfig{Network: "preview", Source: source, CachePath: filepath.Join(t.TempDir(), "cache.db"), AccountsEnabled: true})
 			require.NoError(t, err)

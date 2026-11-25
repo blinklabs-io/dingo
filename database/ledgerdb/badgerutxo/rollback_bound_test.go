@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,12 @@ func journaledRows(slot uint64, epoch byte, n int, value byte) []badgerutxo.RowP
 // transaction holds, and the rollback of a block after it must still run.
 func TestRollbackRestoresMoreJournaledRowsThanOneTransactionHolds(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine rollback over 70k journaled rows at "+
+			"Badger's real transaction limit; the small-budget "+
+			"rollback tests keep the chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	start := point(0, 0)
@@ -199,6 +206,12 @@ func TestSmallRollbackLeavesNoMark(t *testing.T) {
 // transaction holds undoes them in bounded transactions first.
 func TestBatchRollbackUndoesMoreJournaledRowsThanOneTransactionHolds(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine batch rollback over 70k journaled rows "+
+			"at Badger's real transaction limit; the small-budget "+
+			"rollback tests keep the chunking under -race",
+	)
 	s := open(t, t.TempDir())
 	defer s.Close()
 	bootstrap(t, s, point(0, 0))
@@ -268,4 +281,45 @@ func TestBatchRollbackStoppedBetweenChunksLeavesAMarkThatRewindsToTheTarget(t *t
 	_, err = s.Rollback(before)
 	require.NoError(t, err)
 	requireRolledBackToMid(t, s, mid)
+}
+
+// RollbackReaches answers, without changing the store, whether Rollback would
+// refuse a point as older than the journal. A point the lineage never held is
+// refused by Rollback for another reason, and is not reported as too old.
+func TestRollbackReachesAgreesWithRollbackOnJournalDepth(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	start := point(0, 0)
+	bootstrap(t, s, start)
+	mid, tip := point(10, 0x0a), point(20, 0x14)
+	for _, p := range []ocommon.Point{mid, tip} {
+		_, err := s.ApplyLedgerBatch(&p, badgerutxo.LedgerBatch{
+			Rows: journaledRows(p.Slot, 7, 3, 1),
+		})
+		require.NoError(t, err)
+	}
+	reaches := func(p ocommon.Point) bool {
+		ok, err := s.RollbackReaches(p)
+		require.NoError(t, err)
+		return ok
+	}
+	require.True(t, reaches(start))
+	require.True(t, reaches(mid))
+	require.True(t, reaches(tip))
+
+	// The journal now starts at the commit that moved the tip off mid.
+	require.NoError(t, s.PruneJournal(mid.Slot+1))
+	require.True(t, reaches(tip))
+	require.True(t, reaches(mid))
+	require.False(t, reaches(start))
+	require.True(t, reaches(point(15, 0x0f)),
+		"a point the lineage never held is not one the journal is too short for")
+	requireTip(t, s, tip)
+
+	_, err := s.Rollback(start)
+	require.ErrorIs(t, err, badgerutxo.ErrRollbackBeyondJournal)
+	_, err = s.Rollback(mid)
+	require.NoError(t, err)
+	requireTip(t, s, mid)
 }

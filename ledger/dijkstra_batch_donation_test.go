@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -56,11 +57,18 @@ func (h *stateBatchHarness) processAndApply(
 			eras.DijkstraEraDesc, pparams, nil,
 			0, 0, false,
 		)
-		if err != nil || delta == nil {
+		if err != nil {
 			return err
 		}
-		defer delta.Release()
-		return delta.apply(context.Background(), h.ls, txn)
+		if delta != nil {
+			defer delta.Release()
+			if err := delta.apply(context.Background(), h.ls, txn); err != nil {
+				return err
+			}
+		}
+		// The set journals the block under its point, as the block loop does.
+		h.ls.stageUtxoSet(dbadapter.Txn(txn), &point)
+		return nil
 	})
 }
 
@@ -80,7 +88,7 @@ func TestDijkstraBatchDonationsRecordedOncePerLevelAcrossPaths(t *testing.T) {
 				Hash: parent,
 				Type: gledger.BlockTypeDijkstra,
 			}, nil))
-			require.NoError(t, h.db.SetBlockNonce(
+			require.NoError(t, seedBlockNonce(t, h.db,
 				parent, 1, bytes.Repeat([]byte{0x02}, 32), true, nil,
 			))
 			childIn := batchRef{seed: 0xd5}
@@ -88,6 +96,8 @@ func TestDijkstraBatchDonationsRecordedOncePerLevelAcrossPaths(t *testing.T) {
 			for _, ref := range []batchRef{childIn, topIn} {
 				h.seedUtxo(t, ref, 5_000_000)
 			}
+			parentPoint := ocommon.Point{Slot: 1, Hash: parent}
+			h.ls.stageUtxoSet(nil, &parentPoint)
 			tx := buildStateBatch(t,
 				[]batchLevel{
 					{
@@ -106,7 +116,7 @@ func TestDijkstraBatchDonationsRecordedOncePerLevelAcrossPaths(t *testing.T) {
 			)
 			recorded := func() uint64 {
 				t.Helper()
-				sum, err := h.db.Metadata().SumNetworkDonationsForEpoch(0, nil)
+				sum, err := h.ls.ledgerDB().SumNetworkDonationsForEpoch(0, nil)
 				require.NoError(t, err)
 				return sum
 			}
@@ -118,12 +128,14 @@ func TestDijkstraBatchDonationsRecordedOncePerLevelAcrossPaths(t *testing.T) {
 			require.NoError(
 				t,
 				h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+					h.ls.stageUtxoSetRollback(dbadapter.Txn(txn), parentPoint)
 					_, _, err := h.db.TruncateAfterSlot(
-						context.Background(), ocommon.Point{Slot: 1, Hash: parent}, 0, txn,
+						context.Background(), parentPoint, 0, txn,
 					)
 					return err
 				}),
 			)
+			require.False(t, h.ls.utxoSetFailed.Load())
 			require.Zero(t, recorded(), "rollback drops the block's donations")
 
 			require.NoError(t, h.processAndApply(t, tx, validate))

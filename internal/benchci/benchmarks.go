@@ -60,9 +60,12 @@ var CuratedBenchmarks = []string{
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
 
+	// utxorpc request latency.
+	"BenchmarkReadParamsRequest", // api/utxorpc/benchmark_test.go
+
 	// Query latency. Each of these seeds the record it queries from the
 	// immutable fixture and fails if the query does not hit, so a
-	// benchcheck delta here is a query-cost change rather than a miss
+	// benchmark-check delta here is a query-cost change rather than a miss
 	// timed under a RealData name (ledger/benchmark_test.go).
 	"BenchmarkUtxoLookupByAddressRealData",
 	"BenchmarkUtxoLookupByRefRealData",
@@ -103,8 +106,22 @@ var LockContentionBenchmarks = []string{
 // TrackedBenchmarks is the full set of benchmarks compared for CI regression
 // detection: CuratedBenchmarks plus LockContentionBenchmarks. The Makefile
 // bench-ci target concatenates both `go test` invocations' output into a
-// single run file, so benchcheck compares against this combined list.
+// single run file, so the weekly check compares against this combined list.
 var TrackedBenchmarks = append(
 	append([]string{}, CuratedBenchmarks...),
 	LockContentionBenchmarks...,
 )
+
+// GateBenchmarks is the small subset compared on every pull request that
+// touches node code: base and head are built and run interleaved on one
+// runner (.github/scripts/bench-gate.sh) and compared with
+// GateRegressionThresholdPercent. Each entry is also in CuratedBenchmarks, so
+// the weekly run keeps its history. Keep this list in sync with the
+// BENCH_REGEX in bench-gate.sh.
+var GateBenchmarks = []string{
+	"BenchmarkChainSyncFromGenesis",                // sync throughput, ledger/benchmark_test.go
+	"BenchmarkRealBlockProcessing",                 // sync of real blocks, ledger/benchmark_test.go
+	"BenchmarkBlockProcessingThroughput",           // block-apply latency, ledger/benchmark_test.go
+	"BenchmarkBlockProcessingThroughputPredecoded", // block-apply latency, ledger/benchmark_test.go
+	"BenchmarkReadParamsRequest",                   // utxorpc request latency, api/utxorpc/benchmark_test.go
+}

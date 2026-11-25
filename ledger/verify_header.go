@@ -20,10 +20,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math/big"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
@@ -32,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -323,12 +326,33 @@ func (ls *LedgerState) ValidatePeerChainSelectionHeaderCrypto(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) error {
+	return ls.validatePeerChainSelectionHeaderCrypto(
+		context.Background(), connId, header,
+	)
+}
+
+func (ls *LedgerState) validatePeerChainSelectionHeaderCrypto(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+) error {
+	mu := ls.peerHeaderVerificationLock(connId)
+	mu.Lock()
+	defer mu.Unlock()
 	return ls.validateChainSelectionHeaderCrypto(
-		context.Background(),
+		ctx,
 		connId,
 		header,
 		true,
 	)
+}
+
+func (ls *LedgerState) peerHeaderVerificationLock(
+	connId ouroboros.ConnectionId,
+) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(connIdKey(connId)))
+	return &ls.peerHeaderVerificationMutex[hash.Sum32()%64]
 }
 
 func (ls *LedgerState) validateChainSelectionHeaderCrypto(
@@ -520,8 +544,18 @@ func (ls *LedgerState) ValidatePeerChainSelectionHeaderCryptoWithGeneration(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) (uint64, error) {
+	return ls.validatePeerChainSelectionHeaderCryptoWithGeneration(
+		context.Background(), connId, header,
+	)
+}
+
+func (ls *LedgerState) validatePeerChainSelectionHeaderCryptoWithGeneration(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+) (uint64, error) {
 	return ls.withStableHeaderVerificationContext(func() error {
-		return ls.ValidatePeerChainSelectionHeaderCrypto(connId, header)
+		return ls.validatePeerChainSelectionHeaderCrypto(ctx, connId, header)
 	})
 }
 
@@ -4012,7 +4046,7 @@ func (ls *LedgerState) validateEpochCacheForecastTo(
 
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
 // and lastEpochBlockNonce for a new epoch starting at epochStartSlot. This
-// mirrors calculateEpochNonce but uses non-transactional DB lookups
+// mirrors CalculateEpochNonce but uses non-transactional DB lookups
 // since we're not inside the ledger processing pipeline.
 //
 // Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
@@ -4042,7 +4076,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// (nil): cardano-ledger initializes praosStateLastEpochBlockNonce to
 	// NeutralNonce at genesis, so the first from-genesis boundary uses the
 	// identity (eta = candidate ⭒ NeutralNonce = candidate). Do NOT seed this
-	// with the genesis nonce. Mirrors calculateEpochNonce; the Mithril
+	// with the genesis nonce. Mirrors CalculateEpochNonce; the Mithril
 	// bootstrap path imports a non-nil lastEpochBlockNonce and never takes this
 	// branch.
 	if len(prevEpoch.Nonce) == 0 {
@@ -4140,7 +4174,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// last-block-of-previous-epoch nonce (cardano-ledger
 	// praosStateLastEpochBlockNonce), i.e. prevEpoch.LastEpochBlockNonce — NOT
 	// the last block of the epoch being closed. This must match the rollover
-	// path (calculateEpochNonce);
+	// path (CalculateEpochNonce);
 	//   epochNonce(N+1) = candidateNonce(N) ⭒ prevEpoch(N).LastEpochBlockNonce
 	labForEta := cloneNonce(prevEpoch.LastEpochBlockNonce)
 
@@ -4176,7 +4210,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		// the currently published ledger view rather than a chain of
 		// per-epoch forecasts.
 		if consensusState != nil {
-			extraEntropy = extraEntropyFromPParams(
+			extraEntropy = epochengine.ExtraEntropyFromPParams(
 				consensusState.currentPParams,
 			)
 		}
@@ -4207,7 +4241,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	result, err := assembleEpochNonce(
+	result, err := epochengine.AssembleEpochNonce(
 		candidateNonce,
 		labForEta,
 		extraEntropy,

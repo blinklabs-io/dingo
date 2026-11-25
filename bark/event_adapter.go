@@ -15,6 +15,7 @@
 package bark
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/blinklabs-io/bark/eventtype"
@@ -22,10 +23,14 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -39,6 +44,12 @@ type eventAdapter struct {
 	// does not carry. Either may be nil, which leaves the field zero.
 	epochForSlot    func(slot uint64) (uint64, error)
 	eraNameForEpoch func(epoch uint64) (string, error)
+
+	// The event hub calls convert from one goroutine. Keep the highest epoch
+	// exported there so the provisional, nonce-bearing, and rollback-replay
+	// copies on the internal bus remain one external boundary event.
+	highestEpoch    uint64
+	hasHighestEpoch bool
 }
 
 // sourceTypes lists the internal event types the adapter consumes.
@@ -51,6 +62,9 @@ func (a *eventAdapter) sourceTypes() []string {
 		string(mempool.RemoveTransactionEventType),
 		connmanager.InboundConnectionEventType,
 		connmanager.ConnectionClosedEventType,
+		string(ledger.SyncStateEventType),
+		string(ledger.ProtocolParamsEventType),
+		string(DatabaseOperationEventType),
 	}
 }
 
@@ -91,7 +105,9 @@ func (a *eventAdapter) convert(
 			Rollback: chainRollback(d),
 		})
 	case event.EpochTransitionEvent:
-		add(eventtype.EpochTransition, a.epochTransition(d))
+		if a.shouldExportEpoch(d.NewEpoch) {
+			add(eventtype.EpochTransition, a.epochTransition(d))
+		}
 	case mempool.AddTransactionEvent:
 		add(eventtype.MempoolAddTx, &eventv1alpha1.TransactionEventData{
 			TxHash:    d.Hash,
@@ -115,8 +131,75 @@ func (a *eventAdapter) convert(
 		})
 	case connmanager.ConnectionClosedEvent:
 		add(eventtype.ConnManagerConnClosed, a.connectionClosed(d))
+	case ledger.SyncStateEvent:
+		add(eventtype.LedgerSyncState, &eventv1alpha1.SyncStateEventData{
+			PreviousState: syncState(d.Previous),
+			CurrentState:  syncState(d.Current),
+			TipSlot:       d.TipSlot,
+			SlotsBehind:   d.SlotsBehind,
+		})
+	case ledger.ProtocolParamsEvent:
+		if data, err := a.protocolParams(d); err != nil {
+			logger.Warn("event service could not convert protocol parameters",
+				"epoch", d.Epoch, "error", err)
+		} else {
+			add(eventtype.LedgerProtocolParams, data)
+		}
+	case DatabaseOperationEvent:
+		add(eventtype.DatabaseOperation, &eventv1alpha1.DatabaseOperationEventData{
+			OperationId: d.OperationID,
+			Type:        d.Type,
+			Status:      d.Status,
+			Error:       d.Error,
+		})
 	}
 	return out
+}
+
+func syncState(s ledger.SyncState) eventv1alpha1.SyncState {
+	switch s {
+	case ledger.SyncStateSyncing:
+		return eventv1alpha1.SyncState_SYNC_STATE_SYNCING
+	case ledger.SyncStateCaughtUp:
+		return eventv1alpha1.SyncState_SYNC_STATE_CAUGHT_UP
+	}
+	return eventv1alpha1.SyncState_SYNC_STATE_UNSPECIFIED
+}
+
+// protocolParams reports the complete parameter set in its era's own shape,
+// as Bark specifies for parameters_json; era names that shape.
+func (a *eventAdapter) protocolParams(
+	d ledger.ProtocolParamsEvent,
+) (*eventv1alpha1.ProtocolParametersEventData, error) {
+	if d.Params == nil {
+		return nil, errors.New("no protocol parameters")
+	}
+	encoded, err := ledger.ProtocolParamsJSON(d.Params)
+	if err != nil {
+		return nil, err
+	}
+	version := protocolVersion(d.Params)
+	data := &eventv1alpha1.ProtocolParametersEventData{
+		Epoch:          d.Epoch,
+		ProtocolMajor:  uint64(version.Major),
+		ProtocolMinor:  uint64(version.Minor),
+		ParametersJson: string(encoded),
+	}
+	if a.eraNameForEpoch != nil {
+		if name, err := a.eraNameForEpoch(d.Epoch); err == nil {
+			data.Era = name
+		}
+	}
+	return data, nil
+}
+
+func (a *eventAdapter) shouldExportEpoch(epoch uint64) bool {
+	if a.hasHighestEpoch && epoch <= a.highestEpoch {
+		return false
+	}
+	a.highestEpoch = epoch
+	a.hasHighestEpoch = true
+	return true
 }
 
 func (a *eventAdapter) chainUpdate(
@@ -140,7 +223,9 @@ func (a *eventAdapter) chainUpdate(
 	return data
 }
 
-func chainRollback(d chain.ChainRollbackEvent) *eventv1alpha1.ChainRollbackEventData {
+func chainRollback(
+	d chain.ChainRollbackEvent,
+) *eventv1alpha1.ChainRollbackEventData {
 	fromSlot := d.Point.Slot
 	if len(d.RolledBackBlocks) > 0 {
 		// RolledBackBlocks is newest first, so its head was the old tip.
@@ -210,4 +295,28 @@ func eraNameForBlockType(blockType uint) string {
 		return "dijkstra"
 	}
 	return ""
+}
+
+// protocolVersion reads the version from the era type directly. The utxorpc
+// form is not used: its conversion fails on parameters it cannot represent,
+// such as a rational with a denominator above 2^32, which would drop the
+// event for that epoch.
+func protocolVersion(
+	params lcommon.ProtocolParameters,
+) lcommon.ProtocolParametersProtocolVersion {
+	switch p := params.(type) {
+	case lcommon.ProtocolParametersProtocolVersionProvider:
+		return p.ProtocolParametersProtocolVersion()
+	case *dijkstra.DijkstraProtocolParameters:
+		return p.ProtocolVersion
+	case *conway.ConwayProtocolParameters:
+		return p.ProtocolVersion
+	}
+	if u, err := params.Utxorpc(); err == nil {
+		return lcommon.ProtocolParametersProtocolVersion{
+			Major: uint(u.GetProtocolVersion().GetMajor()),
+			Minor: uint(u.GetProtocolVersion().GetMinor()),
+		}
+	}
+	return lcommon.ProtocolParametersProtocolVersion{}
 }

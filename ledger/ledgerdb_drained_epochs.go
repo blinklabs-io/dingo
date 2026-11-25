@@ -21,8 +21,7 @@ import (
 )
 
 // drainedEpochSource serves a rollback's epoch and era switch reads, and the
-// database's own epoch reads, from the set once the epochs or era-switch
-// family is drained. It reads the committed set with no transaction: a
+// database's own epoch reads, from the set. It reads the committed set with no transaction: a
 // rollback runs before the set applies its own.
 type drainedEpochSource struct {
 	ls *LedgerState
@@ -31,7 +30,7 @@ type drainedEpochSource struct {
 func (d drainedEpochSource) Epochs() ([]models.Epoch, error) {
 	r, _ := d.ls.epochStateReader(nil)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyEpochs)
+		return nil, ledgerStateUnserved(nodesettings.FamilyEpochs)
 	}
 	view, err := d.ls.epochStateView(r, nil)
 	if err != nil {
@@ -43,16 +42,16 @@ func (d drainedEpochSource) Epochs() ([]models.Epoch, error) {
 func (d drainedEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
 	r, _ := d.ls.epochStateReader(nil)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyEraSwitch)
+		return nil, ledgerStateUnserved(nodesettings.FamilyEraSwitch)
 	}
 	_, sw, err := d.ls.epochStateViewWithSwitch(r, nil)
 	return sw, err
 }
 
 // installEpochSource gives the database the set's epochs and era switch for
-// the reads and rollbacks it runs once those families are drained.
+// the reads and rollbacks it runs.
 func (ls *LedgerState) installEpochSource() {
-	if ls.db != nil && ls.keepsEpochState() {
+	if ls.db != nil {
 		ls.db.SetEpochSource(drainedEpochSource{ls})
 	}
 }

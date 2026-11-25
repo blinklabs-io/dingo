@@ -15,14 +15,12 @@
 package ledger_test
 
 import (
-	"bytes"
 	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -201,74 +199,4 @@ func TestPoolHistoryRollsBackAcrossAReRegistration(t *testing.T) {
 	require.False(t, found)
 	_, found = vrfAt(t, h.scenario.LedgerDB(), s.Retired, s.Boundary, false)
 	require.True(t, found)
-}
-
-// TestPoolHistoryLoadsFromTheMetadataStore requires a set from before it kept
-// pool history to load every registration and retirement from the metadata
-// store, as the set that followed the certificates holds them.
-func TestPoolHistoryLoadsFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newPoolHistoryHarness(t)
-	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = fresh.Close() })
-	loaded, err := fresh.PoolHistoryLoaded()
-	require.NoError(t, err)
-	require.False(t, loaded)
-	require.NoError(t, fresh.LoadLedgerState(t.Context(), h.store))
-	loaded, err = fresh.PoolHistoryLoaded()
-	require.NoError(t, err)
-	require.True(t, loaded)
-
-	type shape struct {
-		slot       uint64
-		vrf        []byte
-		retirement bool
-		epoch      uint64
-	}
-	shapes := func(set *utxoset.Set, pool []byte) []shape {
-		t.Helper()
-		events, err := set.PoolHistory(pool)
-		require.NoError(t, err)
-		var out []shape
-		for _, e := range events {
-			sh := shape{slot: e.Slot, retirement: e.Registration == nil, epoch: e.RetiringEpoch}
-			if e.Registration != nil {
-				sh.vrf = e.Registration.VrfKeyHash
-			}
-			out = append(out, sh)
-		}
-		return out
-	}
-	for _, pool := range [][]byte{h.slots.Pool, h.slots.Retired} {
-		want := shapes(h.set, pool)
-		require.NotEmpty(t, want)
-		require.Equal(t, want, shapes(fresh, pool), "pool %x", pool)
-	}
-	require.Equal(t, []shape{
-		{slot: h.slots.Register, vrf: h.slots.VrfA},
-		{slot: h.slots.Rotate, vrf: h.slots.VrfB},
-	}, shapes(fresh, h.slots.Pool))
-}
-
-// TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration pins the set
-// result when a registration exists only in metadata.
-func TestPoolHistoryReadUsesSetStateAfterAnUntrackedRegistration(t *testing.T) {
-	t.Parallel()
-	h := newPoolHistoryHarness(t)
-	pool := bytes.Repeat([]byte{0x7e}, 28)
-	vrf := bytes.Repeat([]byte{0x7f}, 32)
-	require.NoError(t, h.scenario.DB.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pool, VrfKeyHash: vrf},
-		&models.PoolRegistration{
-			PoolKeyHash: pool, VrfKeyHash: vrf, AddedSlot: 5,
-			Pledge: types.Uint64(1), Cost: types.Uint64(1),
-		},
-		nil,
-	))
-	reached, _ := h.scenario.HideStoreReads("GetPoolVrfKeyHashAtSlot")
-	got, found := vrfAt(t, h.scenario.LedgerDB(), pool, 10, false)
-	require.False(t, found)
-	require.Nil(t, got)
-	require.Zero(t, reached(), "pool history read reached the metadata store")
 }

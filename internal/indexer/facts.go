@@ -78,18 +78,12 @@ const maxCursorRestarts = 3
 // factPageRows bounds the rows read from the ledger store per statement.
 const factPageRows = 5000
 
-// MetadataFacts is the FactsSource over a ledger database's metadata store.
+// MetadataFacts is the FactsSource that copies the ledger's facts into an
+// IndexerDB's metadata store.
 type MetadataFacts struct {
-	src     *database.Database
-	srcRows metadata.FactRowStore
+	ledger  metadata.LedgerFacts
 	dstRows metadata.FactRowStore
 	dst     *database.Database
-	// anchorOps, when set, serves the op-cert counters certified at the
-	// anchor in place of src's metadata store.
-	anchorOps metadata.AnchorOpCertSource
-	// anchorState, when set, serves the imported accounts, the reward journal
-	// and the UTxO digest at the anchor in place of src's metadata store.
-	anchorState metadata.AnchorStateSource
 	// journal, when set, is the reader's reward journal retention: it is told
 	// which records the committed batches have copied.
 	journal JournalRetainer
@@ -135,14 +129,15 @@ func (f *MetadataFacts) AckFacts() error {
 	return nil
 }
 
-// NewMetadataFacts copies facts from src's metadata store into dst's. Both
-// stores must implement metadata.FactRowStore.
-func NewMetadataFacts(src, dst *database.Database) (*MetadataFacts, error) {
-	srcRows, ok := src.Metadata().(metadata.FactRowStore)
-	if !ok {
-		return nil, errors.New(
-			"indexer: ledger metadata store cannot export facts",
-		)
+// NewMetadataFacts copies the facts ledger serves into dst's metadata store,
+// which must implement metadata.FactRowStore. A nil ledger serves a writer
+// that only rolls dst back: every read of it fails with ErrNoLedger.
+func NewMetadataFacts(
+	ledger metadata.LedgerFacts,
+	dst *database.Database,
+) (*MetadataFacts, error) {
+	if ledger == nil {
+		ledger = noLedger{}
 	}
 	dstRows, ok := dst.Metadata().(metadata.FactRowStore)
 	if !ok {
@@ -155,62 +150,57 @@ func NewMetadataFacts(src, dst *database.Database) (*MetadataFacts, error) {
 			"indexer: indexer metadata store cannot fold reward outputs",
 		)
 	}
-	return &MetadataFacts{
-		src:     src,
-		srcRows: srcRows,
-		dst:     dst,
-		dstRows: dstRows,
-	}, nil
-}
-
-// NewFactsOver is NewMetadataFacts reading the ledger's fact rows from rows
-// instead of from src's metadata store, for a ledger whose families are
-// drained from it. src still supplies the rows that stay in the store.
-func NewFactsOver(
-	src *database.Database,
-	rows metadata.FactRowReader,
-	dst *database.Database,
-) (*MetadataFacts, error) {
-	f, err := NewMetadataFacts(src, dst)
-	if err != nil {
-		return nil, err
-	}
-	f.srcRows = readOnlyFactRows{FactRowReader: rows}
-	if ops, ok := rows.(metadata.AnchorOpCertSource); ok {
-		f.anchorOps = ops
-	}
-	if st, ok := rows.(metadata.AnchorStateSource); ok {
-		f.anchorState = st
-	}
-	if j, ok := rows.(JournalRetainer); ok {
+	f := &MetadataFacts{ledger: ledger, dst: dst, dstRows: dstRows}
+	if j, ok := ledger.(JournalRetainer); ok {
 		f.journal = j
 	}
 	return f, nil
 }
 
-// readOnlyFactRows lets a FactRowReader stand where the copy reads its source:
-// the source is never written.
-type readOnlyFactRows struct{ metadata.FactRowReader }
+// ErrNoLedger is returned by a read of the ledger's facts through a writer
+// that was given no ledger.
+var ErrNoLedger = errors.New("indexer: no ledger to read facts from")
 
-var errFactSourceReadOnly = errors.New("indexer: the fact source is read-only")
+type noLedger struct{}
 
-func (readOnlyFactRows) WriteFactRows(
-	metadata.FactTable, metadata.FactRows, types.Txn,
-) error {
-	return errFactSourceReadOnly
+func (noLedger) ReadFactRows(
+	context.Context, metadata.FactTable, uint64, uint64, int64, int, types.Txn,
+) (metadata.FactRows, int64, error) {
+	return metadata.FactRows{}, 0, ErrNoLedger
 }
 
-func (readOnlyFactRows) DeleteFactRowsAfter(
-	metadata.FactTable, uint64, types.Txn,
-) error {
-	return errFactSourceReadOnly
+func (noLedger) RewardStakeInputsPendingState() (string, error) {
+	return "", ErrNoLedger
 }
 
-// pending returns the reader's pending-record capability,
-// and reports ok false for a reader that keeps none.
-func (r readOnlyFactRows) pending() (metadata.PendingStakeInputsReader, bool) {
-	p, ok := r.FactRowReader.(metadata.PendingStakeInputsReader)
-	return p, ok
+func (noLedger) RewardPrecomputeCursors() (map[uint64]string, error) {
+	return nil, ErrNoLedger
+}
+
+func (noLedger) AnchorOpCertCounters(
+	context.Context, uint64,
+) ([]metadata.OpCertCounter, error) {
+	return nil, ErrNoLedger
+}
+
+func (noLedger) AnchorStateReady(context.Context) error { return ErrNoLedger }
+
+func (noLedger) AnchorImportedAccounts(
+	context.Context, uint64, []byte, int,
+) ([]metadata.ImportedAccount, []byte, error) {
+	return nil, nil, ErrNoLedger
+}
+
+func (noLedger) EachAnchorRewardJournal(
+	context.Context, uint64, func(metadata.RewardJournalEntry) error,
+) error {
+	return ErrNoLedger
+}
+
+func (noLedger) AnchorUtxoDigest(
+	context.Context, uint64,
+) (metadata.UtxoSetDigest, error) {
+	return metadata.UtxoSetDigest{}, ErrNoLedger
 }
 
 var _ FactsSource = (*MetadataFacts)(nil)
@@ -229,7 +219,7 @@ func (f *MetadataFacts) Boundaries(
 	var out []uint64
 	var cursor int64
 	for {
-		rows, next, err := f.srcRows.ReadFactRows(
+		rows, next, err := f.ledger.ReadFactRows(
 			ctx, epochTable, from, through, cursor, factPageRows, nil,
 		)
 		if err != nil {
@@ -360,7 +350,7 @@ func (f *MetadataFacts) copyTable(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rows, next, err := f.srcRows.ReadFactRows(
+		rows, next, err := f.ledger.ReadFactRows(
 			ctx, table, from, through, cursor, factPageRows, nil,
 		)
 		if errors.Is(err, metadata.ErrFactCursorLost) && restarts < maxCursorRestarts {
@@ -486,7 +476,7 @@ func (f *MetadataFacts) applyJournalRange(
 	}
 	cursor, last := after, after
 	for {
-		rows, next, err := f.srcRows.ReadFactRows(
+		rows, next, err := f.ledger.ReadFactRows(
 			ctx, table, from, through, cursor, factPageRows, nil,
 		)
 		if err != nil {

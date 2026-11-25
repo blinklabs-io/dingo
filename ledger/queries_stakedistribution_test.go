@@ -105,7 +105,7 @@ func seedLiveStakeFixtureWithPledge(
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
 	stakingKey := make([]byte, 28)
 	copy(stakingKey, poolKeyHash)
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
@@ -122,7 +122,7 @@ func seedLiveStakeFixtureWithPledge(
 	))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: stakingKey,
 			Pool:       pkh.Bytes(),
 			AddedSlot:  slot,
@@ -138,24 +138,12 @@ func seedLiveStakeFixtureWithPledge(
 		stakingKey,
 	)
 	require.NoError(t, err)
-	addressBytes, err := address.Bytes()
-	require.NoError(t, err)
 	encoded, err := cbor.Encode(&babbage.BabbageTransactionOutput{
 		OutputAddress: address,
 		OutputAmount:  mary.MaryTransactionOutputValue{Amount: stake},
 	})
 	require.NoError(t, err)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		StakingKey: stakingKey,
-		Address:    addressBytes,
-		Amount:     dbtypes.Uint64(stake),
-		AddedSlot:  slot,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded))
-	require.NoError(t, txn.Commit())
+	fxSeedOutput(t, db, txId, 0, slot, encoded)
 	return pkh
 }
 
@@ -208,7 +196,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 0, 1, nil))
 
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
@@ -378,7 +366,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 	// Half the genesis supply sits in reserves, undelegated: circulation is
 	// 8_000_000 - 4_000_000 = 4_000_000, twice the 2_000_000 the two pools
 	// hold delegated between them.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 4_000_000, 1, nil))
 
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = cfg
@@ -501,12 +489,12 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 
 	// As of slot 100 (the pinned point): reserves 4_000_000, so circulation
 	// is 8_000_000 - 4_000_000 = 4_000_000 and pool A's 1_000_000 is 1/4.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 4_000_000, 100, nil))
 	// As of slot 200 (the live tip, seeded later so it is the latest row):
 	// reserves drop to 2_000_000, so live circulation is 6_000_000 and pool
 	// A's own fraction would be 1/6 if this handler wrongly used live
 	// reserves for the slot-100 pin instead of the historical row above.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 2_000_000, 200, nil))
 
 	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
@@ -580,7 +568,7 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 
 	// The only network_state row is at slot 200 -- after the slot-100 pin,
 	// so GetNetworkStateAsOfSlot(100) finds nothing.
-	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 2_000_000, 200, nil))
 
 	_, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
@@ -613,7 +601,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	pkhA := seedLiveStakeFixture(t, db, poolAHash, vrfOld, 1_000_000, 1)
 	// Re-registers the same pool with a new VRF key at slot 150 -- after the
 	// slot-100 pin below, but before the live tip.
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolAHash, VrfKeyHash: vrfNew},
@@ -636,7 +624,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(200, tipHash),
 	}, nil))
-	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 2_000_000, 100, nil))
 
 	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
