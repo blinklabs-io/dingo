@@ -67,6 +67,12 @@ itself distinguish which of the two classes above produced it.
 
 ## Storage provider ownership
 
+The released ledger-state migration borrows the already-resolved ImmutableDB
+provider while reading its source database. Promoted block markers remain
+resolvable during rewind and copying; the migration does not create a new
+ImmutableDB when none was recorded. The storage host retains provider ownership
+across migration and normal ledger startup.
+
 The `chainstate/consensus_provider_identity` block-store value
 (`database.ConsensusProviderIdentityKey`) binds a database to the
 versioned consensus semantics that created it. A database with no stored tip and
