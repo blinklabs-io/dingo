@@ -16,13 +16,17 @@ package chain_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,7 +84,10 @@ func conwayOriginHeader(blockNumber uint64, prevHash string) *MockBlock {
 	}
 }
 
-func byronOriginHeader(blockNumber uint64, prevHash []byte) *mockByronOriginHeader {
+func byronMainOriginHeader(
+	blockNumber uint64,
+	prevHash []byte,
+) *mockByronOriginHeader {
 	return &mockByronOriginHeader{
 		hash:        bytes32(0x11),
 		prevHash:    prevHash,
@@ -89,9 +96,27 @@ func byronOriginHeader(blockNumber uint64, prevHash []byte) *mockByronOriginHead
 	}
 }
 
+// byronEBBOriginHeader is an epoch-0 epoch boundary header. It is the real
+// gouroboros type, not a wrapper, because the chain recognises a boundary
+// header by its concrete type.
+func byronEBBOriginHeader(
+	blockNumber uint64,
+	prevHash []byte,
+) *byron.ByronEpochBoundaryBlockHeader {
+	h := &byron.ByronEpochBoundaryBlockHeader{
+		PrevBlock: common.NewBlake2b256(prevHash),
+	}
+	h.ConsensusData.Difficulty.Value = blockNumber
+	return h
+}
+
 func requireOriginReject(t *testing.T, err error) {
 	t.Helper()
-	require.Error(t, err, "header accepted as the first header of an empty chain")
+	require.Error(
+		t,
+		err,
+		"header accepted as the first header of an empty chain",
+	)
 	_, ok := errors.AsType[chain.BlockNotFitChainTipError](err)
 	require.Truef(t, ok, "want BlockNotFitChainTipError, got %T: %v", err, err)
 }
@@ -111,17 +136,21 @@ func TestAddBlockHeaderAtOriginAcceptsFirstHeader(t *testing.T) {
 		c := freshOriginChain(t, true)
 		require.NoError(t, c.AddBlockHeader(
 			context.Background(),
-			byronOriginHeader(0, originTestGenesisHash),
+			byronEBBOriginHeader(0, originTestGenesisHash),
 		))
 		require.Equal(t, 1, c.HeaderCount())
 	})
-	t.Run("genesis hash not configured leaves a fresh chain open", func(t *testing.T) {
-		t.Parallel()
-		c := freshOriginChain(t, false)
-		require.NoError(t, c.AddBlockHeader(
-			context.Background(), conwayOriginHeader(7, testHashPrefix+"0001"),
-		))
-	})
+	t.Run(
+		"genesis hash not configured leaves a fresh chain open",
+		func(t *testing.T) {
+			t.Parallel()
+			c := freshOriginChain(t, false)
+			require.NoError(t, c.AddBlockHeader(
+				context.Background(),
+				conwayOriginHeader(7, testHashPrefix+"0001"),
+			))
+		},
+	)
 }
 
 func TestAddBlockHeaderAtOriginRejectsWrongBlockNumber(t *testing.T) {
@@ -135,7 +164,7 @@ func TestAddBlockHeaderAtOriginRejectsWrongBlockNumber(t *testing.T) {
 			))
 			requireOriginReject(t, c.AddBlockHeader(
 				context.Background(),
-				byronOriginHeader(n, originTestGenesisHash),
+				byronEBBOriginHeader(n, originTestGenesisHash),
 			))
 			require.Zero(t, c.HeaderCount())
 		})
@@ -156,7 +185,7 @@ func TestAddBlockHeaderAtOriginRejectsWrongPrevHash(t *testing.T) {
 		t.Parallel()
 		c := freshOriginChain(t, true)
 		requireOriginReject(t, c.AddBlockHeader(
-			context.Background(), byronOriginHeader(0, bytes32(0x55)),
+			context.Background(), byronEBBOriginHeader(0, bytes32(0x55)),
 		))
 		require.Zero(t, c.HeaderCount())
 	})
@@ -164,7 +193,49 @@ func TestAddBlockHeaderAtOriginRejectsWrongPrevHash(t *testing.T) {
 		t.Parallel()
 		c := freshOriginChain(t, true)
 		requireOriginReject(t, c.AddBlockHeader(
-			context.Background(), byronOriginHeader(0, bytes32(0x00)),
+			context.Background(), byronEBBOriginHeader(0, bytes32(0x00)),
 		))
 	})
+}
+
+// A Byron main block always names a block as its previous hash, so the
+// reference never accepts one at Origin, even one carrying the genesis hash
+// bytes; only an epoch boundary block can start a Byron chain.
+func TestAddBlockHeaderAtOriginRejectsByronMainHeader(t *testing.T) {
+	t.Parallel()
+	c := freshOriginChain(t, true)
+	requireOriginReject(t, c.AddBlockHeader(
+		context.Background(),
+		byronMainOriginHeader(0, originTestGenesisHash),
+	))
+	require.Zero(t, c.HeaderCount())
+}
+
+// The preview fixture starts in a Shelley-based era at slot 0, so its first
+// block is the real-bytes case of a post-Byron chain start.
+func TestAddBlockHeaderAtOriginAcceptsPreviewFirstHeader(t *testing.T) {
+	t.Parallel()
+	imm, err := immutable.New("../database/immutable/testdata")
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err)
+	defer iter.Close()
+	immBlock, err := iter.Next()
+	require.NoError(t, err)
+	require.NotNil(t, immBlock)
+	block, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+	require.NoError(t, err)
+	require.NotEqual(t, uint8(byron.EraIdByron), block.Era().Id)
+
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
+	require.NoError(t, err)
+	// Preview's ByronGenesisHash from config/cardano/preview/config.json.
+	previewGenesisHash, err := hex.DecodeString(
+		"83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
+	)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetGenesisHash(previewGenesisHash))
+	c := cm.PrimaryChain()
+	require.NoError(t, c.AddBlockHeader(context.Background(), block.Header()))
+	require.Equal(t, 1, c.HeaderCount())
 }

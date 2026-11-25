@@ -554,9 +554,9 @@ const originTipHash = "origin"
 // a matching queued header, which this same check anchored when the header was
 // queued.)
 //
-// A chain that has never been mutated is deliberately excluded. It has no
-// anchor yet -- the chain package does not know the network's genesis hash --
-// and it is the state the bulk block importer fills from a local immutable
+// A chain that has never been mutated is deliberately excluded. Without a
+// genesis hash on the manager (see originAnchored) it has no anchor yet, and
+// it is the state the bulk block importer fills from a local immutable
 // database, which legitimately establishes the chain's first block itself.
 func (c *Chain) atOriginAfterMutation() bool {
 	return c.tipBlockIndex < initialBlockIndex &&
@@ -566,12 +566,11 @@ func (c *Chain) atOriginAfterMutation() bool {
 // firstBlockNumberValid reports whether blockNumber is the one a chain emptied
 // back to origin may accept as its first block.
 //
-// The chain package has no knowledge of the network's genesis hash, so the
-// prev-hash half of the continuity check cannot be applied at origin. The block
-// number is the whole of the anchor available here: it closes the truncated
-// prefix, but a candidate that carries block number 0 is still
-// accepted whatever its hash and prev hash say. Binding the first block's hash
-// as well needs the genesis hash, which belongs to the ledger, not here.
+// The block number closes the truncated prefix. It is the whole anchor for a
+// raw block, and for a header on a manager without a genesis hash: a candidate
+// that carries block number 0 is then accepted whatever its prev hash says.
+// Headers on a manager with a genesis hash also have their prev hash checked;
+// see originHeaderPrevHashValid.
 func firstBlockNumberValid(blockNumber uint64) bool {
 	return blockNumber == firstBlockNumber
 }
@@ -600,20 +599,23 @@ func (c *Chain) originAnchored() bool {
 	return c.manager != nil && c.manager.genesisHash.Load() != nil
 }
 
-// originHeaderPrevHashValid reports whether prevHash is acceptable on the first
-// header of an empty chain. A Byron header must name the configured genesis
-// hash; a later-era header must carry the null previous hash, which decodes to
-// the zero hash. Without a configured genesis hash nothing is checked, because
-// the Byron anchor cannot be known.
+// originHeaderPrevHashValid reports whether header may be the first header of
+// an empty chain by its previous hash. A Byron chain starts with an epoch
+// boundary header naming the configured genesis hash; a Byron main header
+// always names a block, so it never starts a chain. A later-era header must
+// carry the null previous hash, which decodes to the zero hash. Without a
+// configured genesis hash nothing is checked, because the Byron anchor cannot
+// be known.
 func (c *Chain) originHeaderPrevHashValid(
-	eraId uint8,
+	header ledger.BlockHeader,
 	prevHash []byte,
 ) bool {
 	if !c.originAnchored() {
 		return true
 	}
-	if eraId == byron.EraIdByron {
-		return bytes.Equal(prevHash, *c.manager.genesisHash.Load())
+	if header.Era().Id == byron.EraIdByron {
+		return IsByronBoundaryHeader(header) &&
+			bytes.Equal(prevHash, *c.manager.genesisHash.Load())
 	}
 	return !slices.ContainsFunc(prevHash, func(b byte) bool { return b != 0 })
 }
@@ -821,10 +823,7 @@ func (c *Chain) addBlockHeader(
 			headerHash.String(),
 			headerPrevHash.String(),
 		)
-	} else if !c.originHeaderPrevHashValid(
-		header.Era().Id,
-		queued.prevHash,
-	) {
+	} else if !c.originHeaderPrevHashValid(header, queued.prevHash) {
 		// The reference requires the genesis hash as the previous hash of
 		// the first header at Origin.
 		return newBlockNotFitChainOriginError(
