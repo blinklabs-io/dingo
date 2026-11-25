@@ -67,6 +67,12 @@ itself distinguish which of the two classes above produced it.
 
 ## Storage provider ownership
 
+The released ledger-state migration borrows the already-resolved ImmutableDB
+provider while reading its source database. Promoted block markers remain
+resolvable during rewind and copying; the migration does not create a new
+ImmutableDB when none was recorded. The storage host retains provider ownership
+across migration and normal ledger startup.
+
 The `chainstate/consensus_provider_identity` block-store value
 (`database.ConsensusProviderIdentityKey`) binds a database to the
 versioned consensus semantics that created it. A database with no stored tip and
@@ -434,11 +440,12 @@ set. Query and scan failures return tool errors, not empty proposal lists or
 zero vote counts. These reads do not alter the schema or stored governance
 state. With a ledger state, `get_epoch_summary`, `get_governance_state` and
 `get_governance_proposal` read through the ledger's `LedgerDB`
-(`GetEpochs`, `GetEpoch`, `GetEpochSummary`, `GetBlockNoncesInSlotRange`,
-`GetConstitution`, `LatestCommitteeQuorum`, `GetCommitteeMembers`,
+(`GetEpochs`, `GetEpoch`, `GetEpochSummary`, `GetConstitution`, `LatestCommitteeQuorum`, `GetCommitteeMembers`,
 `GetActiveDreps`, `GetDrepByCredential`, `GetGovernanceProposal`,
 `GetAllGovernanceProposals`, `GetGovernanceVotes`) and print what the SQL reads
-print. `LedgerDB` also carries `GetLatestEpochSummary`,
+print. `get_epoch_summary`'s block count comes from the IndexerDB's
+`block_nonce` rows on a node with an IndexerDB, and otherwise from
+`GetBlockNoncesInSlotRange`, which covers only the window the ledger retains. `LedgerDB` also carries `GetLatestEpochSummary`,
 `GetPoolKeyHashesRetiredByEpoch`, `GetGovernanceProposalsRefundedAt` and
 `GetPostSnapshotRewardCreditEvents`, which the in-process Koios parity source
 reads through it. MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a
@@ -3996,10 +4003,12 @@ Readers outside the ledger's LedgerDB:
 
 | Reader | Behavior |
 |---|---|
-| MCP tools | With a ledger state the tools read through its LedgerDB. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
+| MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses from it; on a core node it pages them from the live UTxO set (`LedgerState.UtxosByAddressBoundedPage`). On a node with an IndexerDB, `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
 | `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
+| `api/mesh` | Reads blocks, address UTxOs and transaction history from the IndexerDB through `mesh.MeshDatabase`, which the node builds over it. |
+| `api/utxorpc` | Reads through `utxorpc.QueryDatabase`. On an API node that is the IndexerDB. On a core node, `utxorpc.NewLedgerQueryDatabase` reads UTxOs by reference and address and inline datums from the live UTxO set, and refuses a transaction lookup with `ErrQueryNeedsAPIStorage`. |
 
 ### Live UTxO set failure and recovery
 
@@ -4011,7 +4020,8 @@ Badger directory so it needs no metadata-store write and survives a restore of
 the set.
 
 A ledger commit larger than one Badger transaction is applied in several by
-`Store.ApplyLedgerBatch` (`database/ledgerdb/badgerutxo/chunk.go`). A batch
+`Store.ApplyLedgerBatch`, through `applyChunked`
+(`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
 transaction but the last writes UTxO changes with one journal record per
@@ -8470,22 +8480,6 @@ JOIN applied_transaction a ON a.tx_id = t.id
 WHERE t.hash = decode($1, 'hex');
 ```
 
-### `GetExistingTransactionHashes`
-
-Answers which of the given hashes have a transaction record, reading only the
-`hash` column and loading no associations. Hashes are bound in chunks of the
-dialect's parameter limit (999 on SQLite), all inside the caller's read
-transaction; `Database.GetExistingTransactionHashes` opens one context-bound
-read transaction for the whole set. The result is unordered. UTxO RPC
-`WaitForTx` uses it to find already-committed references.
-
-```sql
--- Postgres: one chunk
-SELECT hash
-FROM "transaction"
-WHERE hash IN (decode($1, 'hex'), decode($2, 'hex'));
-```
-
 ### `SumTransactionFeesInSlotRange`
 
 Fees use the inclusive execution-slot range: valid transactions contribute
@@ -8908,14 +8902,13 @@ arbitrary-precision parsing. Step and inverse operations share those rules.
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`. The
 coordinated `Database.UtxosByAddress` builds one exact-address pattern per input
 address and applies the same exact-address CBOR filtering as the single-address
-case. This backs the Ouroboros local-state-query `GetUTxOByAddress` handler
-(`ledger.queryShelleyUtxoByAddress`), whose wire request already carries a set
-of addresses.
+case. Mesh's current-tip `/account/balance` reads it from the IndexerDB
+through `MeshDatabase.UtxosByAddress`.
 
-`GetUtxosByAddress` (and `Database.UtxosByAddress`) require an explicit,
-positive `maxResults` bound: a broad pattern set, or a single address with an
-unusually large UTxO set, would otherwise force the database layer to
-materialize an unbounded result. Every SQL chunk is queried with the same
+`GetUtxosByAddress` (and `Database.UtxosByAddress`) take an optional
+`maxResults` bound for a caller that cannot afford an unbounded result: a
+broad pattern set, or a single address with an unusually large UTxO set,
+would otherwise force the database layer to materialize all of it. Every SQL chunk is queried with the same
 fixed `LIMIT maxResults+1`, deliberately not shrunk by the deduplicated
 count already collected: a physical UTxO can be matched by more than one
 chunk's OR-expression, so a shrinking limit could let a chunk full of

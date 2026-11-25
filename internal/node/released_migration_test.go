@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -62,12 +61,13 @@ func releasedOpen(
 			DataDir: dir, StorageMode: "core",
 			MigrateReleased: func(
 				ctx context.Context,
-				blobStore blob.BlobStore,
+				stores database.Stores,
 				openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
 			) error {
 				_, err := nodestorage.ReleasedMigration{
 					Config:       dbConfig,
-					Blob:         blobStore,
+					Blob:         stores.Blob,
+					Immutable:    stores.Immutable,
 					OpenMetadata: openMetadata,
 					UtxoSet: nodestorage.UtxoSetConfig{
 						DataDir:             dir,
@@ -215,4 +215,47 @@ func TestReleasedMigrationLeavesAStoreV0942Refuses(t *testing.T) {
 
 	_, err = dbtest.ReleasedMetadataSyncStatus(dir)
 	require.ErrorIs(t, err, migrations.ErrNewerSchema)
+}
+
+func TestReleasedMigrationReadsPromotedBlocks(t *testing.T) {
+	t.Parallel()
+	dir := adoptedReleasedDatabase(t)
+	cfg := parityConfig(dir)
+	dbConfig := &database.Config{
+		Role:    database.RoleReleased,
+		DataDir: dir, StorageMode: "core", Network: "preview",
+		IndexerLayout:  config.IndexerLayoutSplit,
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		Immutable:      database.ImmutableConfig{Enabled: true, ChunkSlots: 4320, CanContainEBB: true},
+	}
+	rt, err := internalplugins.OpenDatabase(t.Context(), dbConfig,
+		internalplugins.ConfiguredStorageSelections(cfg),
+		internalplugins.StorageDependencies{DataDir: dir, StorageMode: "core"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close(context.Background())) })
+	want, err := rt.Database.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, want.Cbor)
+	promoted, err := rt.Database.PromoteThrough(t.Context(), 1<<20)
+	require.NoError(t, err)
+	// Past the rewind target (SecurityParam blocks below the tip), so the
+	// migration resolves a promoted marker on its rewind read.
+	require.Greater(t, promoted.Promoted, 432)
+	require.NoError(t, rt.Close(context.Background()))
+	dbConfig.Role = ""
+	dbConfig.Immutable = database.ImmutableConfig{}
+	for range 2 {
+		reopened, err := internalplugins.OpenDatabase(t.Context(), dbConfig,
+			internalplugins.ConfiguredStorageSelections(cfg),
+			internalplugins.StorageDependencies{DataDir: dir, StorageMode: "core",
+				MigrateReleased: nodestorage.MigrateReleased(cfg, dbConfig, previewNodeConfig(t), nil)})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, reopened.Close(context.Background())) })
+		got, err := reopened.Database.BlockByIndex(1, nil)
+		require.NoError(t, err)
+		require.Equal(t, want.Hash, got.Hash)
+		require.Equal(t, want.Cbor, got.Cbor)
+		require.NoError(t, reopened.Close(context.Background()))
+	}
 }

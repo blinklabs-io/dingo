@@ -12,18 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package database_test
 
 import (
+	"bytes"
+	"compress/gzip"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTxPayloadSizeHandlesCBORHeaderBoundaries(t *testing.T) {
@@ -251,4 +262,195 @@ func TestBurstLoadStopsWhileWaitingForNextBurst(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("burstLoad kept sleeping after stop")
 	}
+}
+
+type countedEBReader struct {
+	reads atomic.Int64
+	err   error
+}
+
+func (r *countedEBReader) GetLeiosEBManifest(
+	hash []byte,
+	slot uint64,
+) ([]byte, error) {
+	r.reads.Add(1)
+	return []byte{hash[0], byte(slot)}, r.err
+}
+
+func (r *countedEBReader) GetLeiosEBTxs(
+	hash []byte,
+	slot uint64,
+) ([]cbor.RawMessage, error) {
+	r.reads.Add(1)
+	return []cbor.RawMessage{{hash[0]}, {byte(slot)}, {0x82, 1, 2}}, r.err
+}
+
+func TestCachedReadsShareConcurrentStorageLoads(t *testing.T) {
+	t.Parallel()
+	reader := &countedEBReader{}
+	hash := []byte{42}
+	cache := newEBReadCache(reader, hash, 7)
+	hash[0] = 99
+	eb := &benchEb{readCache: cache}
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() {
+			manifest, err := cache.manifest()
+			if err != nil || !bytes.Equal(manifest, []byte{42, 7}) {
+				t.Errorf(
+					"manifest = %v, %v; want original occurrence",
+					manifest,
+					err,
+				)
+			}
+			txs, err := readEBTxs(nil, eb, 7, txRange{1, 3})
+			if err != nil || len(txs) != 2 || !bytes.Equal(txs[0], []byte{7}) {
+				t.Errorf("selected transactions = %v, %v", txs, err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := reader.reads.Load(); got != 2 {
+		t.Fatalf(
+			"concurrent cache readers issued %d storage reads, want one manifest and one closure read",
+			got,
+		)
+	}
+}
+
+func TestCachedReadsPreserveReturnedOwnershipAndOccurrence(t *testing.T) {
+	t.Parallel()
+	reader := &countedEBReader{}
+	eb := &benchEb{readCache: newEBReadCache(reader, []byte{42}, 7)}
+	txs, err := readEBTxs(nil, eb, 7, txRange{1, 3})
+	if err != nil || len(txs) != 2 {
+		t.Fatalf("selected closure = %v, %v", txs, err)
+	}
+	txs[0][0] = 99
+	txs[1] = nil
+	again, err := readEBTxs(nil, eb, 7, txRange{end: -1})
+	if err != nil || len(again) != 3 || !bytes.Equal(again[1], []byte{7}) ||
+		!bytes.Equal(again[2], []byte{0x82, 1, 2}) {
+		t.Fatalf("returned mutation changed cached closure: %v, %v", again, err)
+	}
+	other := &benchEb{readCache: newEBReadCache(reader, []byte{42}, 8)}
+	txs, err = readEBTxs(nil, other, 8, txRange{1, 2})
+	if err != nil || len(txs) != 1 || !bytes.Equal(txs[0], []byte{8}) {
+		t.Fatalf("different occurrence reused old closure: %v, %v", txs, err)
+	}
+}
+
+func TestCachedReadsDoNotHideStorageFailure(t *testing.T) {
+	t.Parallel()
+	want := errors.New("storage read failed")
+	eb := &benchEb{
+		readCache: newEBReadCache(&countedEBReader{err: want}, []byte{42}, 7),
+	}
+	if _, err := readEBTxs(nil, eb, 7, txRange{0, 1}); !errors.Is(err, want) {
+		t.Fatalf("closure error = %v, want storage error", err)
+	}
+	if _, err := eb.readCache.manifest(); !errors.Is(err, want) {
+		t.Fatalf("manifest error = %v, want storage error", err)
+	}
+}
+
+func TestCachedReadPackedTransactionsKeepIndependentCapacity(t *testing.T) {
+	t.Parallel()
+	eb := &benchEb{readCache: &ebReadCache{
+		txs: func() ([]cbor.RawMessage, error) {
+			return []cbor.RawMessage{nil, {}, {1}, {2}}, nil
+		},
+	}}
+	txs, err := readEBTxs(nil, eb, 0, txRange{end: -1})
+	if err != nil || len(txs) != 4 {
+		t.Fatalf("packed transactions = %v, %v", txs, err)
+	}
+	if txs[0] != nil || txs[1] == nil || len(txs[1]) != 0 {
+		t.Fatalf("nil and empty transaction distinction lost: %v", txs)
+	}
+	appended := append(txs[2], 99)
+	if !bytes.Equal(appended, []byte{1, 99}) ||
+		!bytes.Equal(txs[3], []byte{2}) {
+		t.Fatalf("append overwrote adjacent transaction: %v", txs)
+	}
+}
+
+// countingLeiosReads counts the reads the benchmark makes of the Leios store,
+// where endorser blocks live.
+type countingLeiosReads struct {
+	leiosdb.Store
+	reads atomic.Int64
+}
+
+func (s *countingLeiosReads) Get(eb leiosdb.Ref) (leiosdb.Content, error) {
+	s.reads.Add(1)
+	return s.Store.Get(eb)
+}
+
+func TestRunBenchCachedReadsReduceActualStorageRequests(t *testing.T) {
+	t.Parallel()
+	for _, cached := range []bool{false, true} {
+		t.Run(
+			map[bool]string{false: "database", true: "cached"}[cached],
+			func(t *testing.T) {
+				t.Parallel()
+				db, err := dbtest.NewDatabase(
+					t,
+					&database.Config{DataDir: t.TempDir()},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				base, err := db.LeiosDB()
+				if err != nil {
+					t.Fatal(err)
+				}
+				counter := &countingLeiosReads{Store: base}
+				db.SetLeiosDB(counter)
+				config := validTestConfig()
+				const peers = 5
+				config.downstreamPeers = peers
+				config.cachedReads = cached
+				if err := runBench(db, config); err != nil {
+					t.Fatal(err)
+				}
+				// one manifest and closure read per peer, vote and apply
+				want := int64(2*peers + 2)
+				if cached {
+					want = 2
+				}
+				if got := counter.reads.Load(); got != want {
+					t.Fatalf(
+						"cached=%v issued %d Leios store reads, want %d",
+						cached,
+						got,
+						want,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestMemoryProfileWritesCompressedProfile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "heap.pprof")
+	stop := startMemoryProfile(path)
+	require.NoError(t, stop())
+	file, err := os.Open(path)
+	require.NoError(t, err)
+	defer file.Close() //nolint:errcheck
+	reader, err := gzip.NewReader(file)
+	require.NoError(t, err)
+	defer reader.Close() //nolint:errcheck
+	data, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
+}
+
+func TestMemoryProfileReportsCreateError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "absent", "heap.pprof")
+	stop := startMemoryProfile(path)
+	require.ErrorIs(t, stop(), os.ErrNotExist)
 }

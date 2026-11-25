@@ -405,7 +405,7 @@ func (b *Bark) Start(ctx context.Context) error {
 	var eventHub *eventHub
 	if b.config.EventBus != nil {
 		eventHub = newEventHub(b.config)
-		eventPath, eventHandler := eventconnect.NewEventServiceHandler(
+		eventPath, eventHandler := newEventServiceHTTPHandler(
 			&eventServiceHandler{
 				hub:            eventHub,
 				publishEnabled: b.config.EventPublishEnabled,
