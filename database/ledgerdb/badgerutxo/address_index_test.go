@@ -15,6 +15,8 @@
 package badgerutxo_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -138,4 +140,27 @@ func TestIndexReadRefusedWithoutAnIndexer(t *testing.T) {
 	err := s.EachIndexed([][]byte{{'t', 0xAA}}, nil,
 		func(badgerutxo.Output) (bool, error) { return false, nil })
 	require.ErrorIs(t, err, badgerutxo.ErrAddressIndexUnavailable)
+}
+
+// A backup of a store that kept no index, loaded into one that does, leaves
+// every output live but unindexed until Restore builds the index.
+func TestRestoreBuildsTheIndex(t *testing.T) {
+	t.Parallel()
+	plain := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, plain.Close()) })
+	bootstrap(t, plain, point(1, 0x01), out(0xAA, 0), out(0xBB, 0))
+	var buf bytes.Buffer
+	require.NoError(t, plain.Backup(context.Background(), &buf))
+
+	s, err := openIndexed(t, t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	require.NoError(t, s.Reset())
+	require.NoError(t, s.Restore(context.Background(), &buf))
+
+	ok, err := s.AddressIndexed()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []badgerutxo.Ref{ref(0xAA, 0)}, indexed(t, s, 0xAA, nil))
+	require.Equal(t, []badgerutxo.Ref{ref(0xBB, 0)}, indexed(t, s, 0xBB, nil))
 }

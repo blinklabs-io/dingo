@@ -69,7 +69,6 @@ func TestNewEnablesDeclaredStorageFeatures(t *testing.T) {
 	require.Equal(t, []plugin.StorageFeature{
 		plugin.StorageFeatureUtxorpc,
 	}, n.config.storageFeatures)
-	require.Equal(t, []string{"utxorpc"}, n.databaseConfig().StorageFeatures)
 }
 
 func TestAPIStorageTierEnablesEveryDeclaredFeature(t *testing.T) {

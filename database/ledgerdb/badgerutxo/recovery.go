@@ -297,7 +297,12 @@ func (s *Store) Restore(ctx context.Context, r io.Reader) error {
 		return err
 	}
 	defer s.rewriteRows()()
-	return s.db.Load(r, 256)
+	if err := s.db.Load(r, 256); err != nil {
+		return err
+	}
+	// A backup written by a store without an index, or before it existed,
+	// carries outputs with no index rows and no completion marker.
+	return s.ensureAddressIndex()
 }
 
 // backupBatchBytes is how much row data goes into one KVList of a checkpoint
