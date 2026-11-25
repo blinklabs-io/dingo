@@ -51,7 +51,7 @@ func migrateTestLogger() *slog.Logger {
 
 // seedAPIStore builds the data directory of a v0.94.2 node holding
 // numBlocks blocks in the given storage mode, and returns the configuration
-// of a split node over it.
+// of an API node over it.
 func seedAPIStore(
 	t *testing.T,
 	storageMode string,
@@ -75,7 +75,7 @@ func seedAPIStore(
 		},
 		Indexer: config.IndexerConfig{MaxReadyLagBlocks: 10},
 	}
-	m := &splitMigration{cfg: cfg, logger: migrateTestLogger()}
+	m := &indexerMigration{cfg: cfg, logger: migrateTestLogger()}
 	deps, err := m.dependencies(storageMode)
 	require.NoError(t, err)
 	rt, err := internalplugins.OpenDatabase(
@@ -126,22 +126,22 @@ func indexerDirOf(cfg *config.Config) string {
 	return filepath.Join(cfg.DatabasePath, internalplugins.IndexerDirName)
 }
 
-// requireSplitStores checks what a split node finds after a migration: the
+// requireIndexerDBStores checks what an API node finds after a migration: the
 // consensus store opens as a core store with the layout latched, and the
 // IndexerDB opens at the ledger tip with the API rows the store held.
-func requireSplitStores(
+func requireIndexerDBStores(
 	t *testing.T,
 	cfg *config.Config,
 	tip ocommon.Point,
 	blocks uint64,
 ) {
 	t.Helper()
-	m := &splitMigration{cfg: cfg, logger: migrateTestLogger()}
+	m := &indexerMigration{cfg: cfg, logger: migrateTestLogger()}
 	apiDeps, err := m.dependencies("api")
 	require.NoError(t, err)
 	if stale, err := internalplugins.OpenDatabase(
 		t.Context(),
-		m.databaseConfig("api", config.IndexerLayoutSplit),
+		m.databaseConfig("api", config.IndexerLayoutIndexerDB),
 		m.selections(), apiDeps,
 	); err == nil {
 		_ = stale.Close(context.Background())
@@ -151,7 +151,7 @@ func requireSplitStores(
 	require.NoError(t, err)
 	rt, err := internalplugins.OpenDatabase(
 		t.Context(),
-		m.databaseConfig("core", config.IndexerLayoutSplit),
+		m.databaseConfig("core", config.IndexerLayoutIndexerDB),
 		m.selections(), deps,
 	)
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func requireSplitStores(
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	idx, err := internalplugins.OpenIndexerDatabase(
 		t.Context(), host, rt.Database,
-		m.databaseConfig("core", config.IndexerLayoutSplit),
+		m.databaseConfig("core", config.IndexerLayoutIndexerDB),
 		m.selections(), deps,
 	)
 	require.NoError(t, err)
@@ -232,21 +232,21 @@ func requireNoMigrationWork(t *testing.T, cfg *config.Config) {
 	}
 }
 
-func TestMigrateToSplitMovesAnAPIStoreInPlace(t *testing.T) {
+func TestMigrateToIndexerDBMovesAnAPIStoreInPlace(t *testing.T) {
 	t.Parallel()
 	cfg, tip := seedAPIStore(t, "api", 5)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()))
 
 	require.FileExists(t, filepath.Join(indexerDirOf(cfg), "metadata.sqlite"))
 	requireNoMigrationWork(t, cfg)
-	requireSplitStores(t, cfg, tip, 5)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+	requireIndexerDBStores(t, cfg, tip, 5)
+	require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()),
 		"a migrated directory is left alone")
 }
 
 // A migration that stops after any step is finished by the next start, and a
 // stop before the rename leaves the original store as it was.
-func TestMigrateToSplitResumesAfterAStopAtEachStep(t *testing.T) {
+func TestMigrateToIndexerDBResumesAfterAStopAtEachStep(t *testing.T) {
 	t.Parallel()
 	for _, step := range []string{
 		migrateStepCopied, migrateStepRenamed, migrateStepLatched,
@@ -255,7 +255,7 @@ func TestMigrateToSplitResumesAfterAStopAtEachStep(t *testing.T) {
 			t.Parallel()
 			cfg, tip := seedAPIStore(t, "api", 4)
 			stop := errors.New("stopped after " + step)
-			m := &splitMigration{
+			m := &indexerMigration{
 				cfg: cfg, logger: migrateTestLogger(),
 				afterStep: func(s string) error {
 					if s == step {
@@ -276,18 +276,18 @@ func TestMigrateToSplitResumesAfterAStopAtEachStep(t *testing.T) {
 			))
 
 			require.NoError(
-				t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+				t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()),
 			)
 			requireNoMigrationWork(t, cfg)
-			requireSplitStores(t, cfg, tip, 4)
+			requireIndexerDBStores(t, cfg, tip, 4)
 		})
 	}
 }
 
-func TestMigrateToSplitRefusesTooLittleFreeSpace(t *testing.T) {
+func TestMigrateToIndexerDBRefusesTooLittleFreeSpace(t *testing.T) {
 	t.Parallel()
 	cfg, _ := seedAPIStore(t, "api", 2)
-	m := &splitMigration{
+	m := &indexerMigration{
 		cfg: cfg, logger: migrateTestLogger(),
 		availableBytes: func(string) (uint64, error) { return 1024, nil },
 	}
@@ -295,41 +295,41 @@ func TestMigrateToSplitRefusesTooLittleFreeSpace(t *testing.T) {
 	require.ErrorContains(t, err, "not enough free disk space")
 	require.NoDirExists(t, indexerDirOf(cfg))
 	requireNoMigrationWork(t, cfg)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()),
+	require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()),
 		"the original store is untouched and migrates once there is space")
 }
 
-func TestMigrateToSplitLeavesWhatItCannotMigrate(t *testing.T) {
+func TestMigrateToIndexerDBLeavesWhatItCannotMigrate(t *testing.T) {
 	t.Parallel()
 	logger := migrateTestLogger()
 	t.Run("core store", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "core", 2)
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, logger))
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
 	t.Run("no chain state", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 0)
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, logger))
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
 	t.Run("fresh directory", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 0)
 		require.NoError(t, os.RemoveAll(cfg.DatabasePath))
-		require.NoError(t, MigrateToSplit(t.Context(), cfg, logger))
+		require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, logger))
 	})
 }
 
-func TestMigrateToSplitRefusesWhatDoesNotMatch(t *testing.T) {
+func TestMigrateToIndexerDBRefusesWhatDoesNotMatch(t *testing.T) {
 	t.Parallel()
 	logger := migrateTestLogger()
 	t.Run("network mismatch", func(t *testing.T) {
 		t.Parallel()
 		cfg, _ := seedAPIStore(t, "api", 2)
 		cfg.Network = "preprod"
-		require.ErrorContains(t, MigrateToSplit(t.Context(), cfg, logger),
+		require.ErrorContains(t, MigrateToIndexerDB(t.Context(), cfg, logger),
 			"the database is for network")
 		require.NoDirExists(t, indexerDirOf(cfg))
 	})
@@ -341,7 +341,7 @@ func TestMigrateToSplitRefusesWhatDoesNotMatch(t *testing.T) {
 			filepath.Join(indexerDirOf(cfg), "metadata.sqlite"),
 			nil, 0o600,
 		))
-		err := MigrateToSplit(t.Context(), cfg, logger)
+		err := MigrateToIndexerDB(t.Context(), cfg, logger)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "IndexerDB")
 	})
@@ -364,12 +364,12 @@ func markInterruptedBackfill(t *testing.T, dir string) *sql.DB {
 // An API store whose v0.94.2 backfill did not finish holds API history only
 // up to the backfill's last block. Adopting it would record the IndexerDB at
 // the ledger tip, so the migration refuses it and copies nothing.
-func TestMigrateToSplitRefusesAnInterruptedBackfill(t *testing.T) {
+func TestMigrateToIndexerDBRefusesAnInterruptedBackfill(t *testing.T) {
 	t.Parallel()
 	cfg, _ := seedAPIStore(t, "api", 3)
 	raw := markInterruptedBackfill(t, cfg.DatabasePath)
 
-	err := MigrateToSplit(t.Context(), cfg, migrateTestLogger())
+	err := MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger())
 	require.ErrorIs(t, err, errInterruptedBackfill)
 
 	require.NoDirExists(t, indexerDirOf(cfg))
@@ -388,22 +388,22 @@ func TestMigrateToSplitRefusesAnInterruptedBackfill(t *testing.T) {
 	// A store without the status migrates.
 	_, err = raw.Exec(`DELETE FROM sync_state WHERE sync_key='sync_status'`)
 	require.NoError(t, err)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()))
 	require.FileExists(t, filepath.Join(indexerDirOf(cfg), "metadata.sqlite"))
 }
 
-func TestMigrateToSplitRecordsCheckpointsBelowTheTip(t *testing.T) {
+func TestMigrateToIndexerDBRecordsCheckpointsBelowTheTip(t *testing.T) {
 	t.Parallel()
 	const numBlocks = 500
 	cfg, _ := seedAPIStore(t, "api", numBlocks)
-	require.NoError(t, MigrateToSplit(t.Context(), cfg, migrateTestLogger()))
+	require.NoError(t, MigrateToIndexerDB(t.Context(), cfg, migrateTestLogger()))
 
-	m := &splitMigration{cfg: cfg, logger: migrateTestLogger()}
+	m := &indexerMigration{cfg: cfg, logger: migrateTestLogger()}
 	deps, err := m.dependencies("core")
 	require.NoError(t, err)
 	rt, err := internalplugins.OpenDatabase(
 		t.Context(),
-		m.databaseConfig("core", config.IndexerLayoutSplit),
+		m.databaseConfig("core", config.IndexerLayoutIndexerDB),
 		m.selections(), deps,
 	)
 	require.NoError(t, err)
@@ -413,7 +413,7 @@ func TestMigrateToSplitRecordsCheckpointsBelowTheTip(t *testing.T) {
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	idx, err := internalplugins.OpenIndexerDatabase(
 		t.Context(), host, rt.Database,
-		m.databaseConfig("core", config.IndexerLayoutSplit),
+		m.databaseConfig("core", config.IndexerLayoutIndexerDB),
 		m.selections(), deps,
 	)
 	require.NoError(t, err)
@@ -439,7 +439,7 @@ func TestMigrateToSplitRecordsCheckpointsBelowTheTip(t *testing.T) {
 // The startup test covers the caller's recovery ordering with the same
 // persisted fixture as the migration tests.
 var (
-	SeedAPIStore       = seedAPIStore
-	MigrateTestLogger  = migrateTestLogger
-	RequireSplitStores = requireSplitStores
+	SeedAPIStore           = seedAPIStore
+	MigrateTestLogger      = migrateTestLogger
+	RequireIndexerDBStores = requireIndexerDBStores
 )

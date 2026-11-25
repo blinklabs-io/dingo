@@ -81,13 +81,13 @@ func requireSameLines(t *testing.T, phase string, want, got []string) {
 	var diff []string
 	for _, l := range want {
 		if count[l] > 0 {
-			diff = append(diff, "undrained only: "+l)
+			diff = append(diff, "want only: "+l)
 			count[l]--
 		}
 	}
 	for _, l := range got {
 		if count[l] < 0 {
-			diff = append(diff, "drained only: "+l)
+			diff = append(diff, "got only: "+l)
 			count[l]++
 		}
 	}
@@ -197,7 +197,7 @@ func readPools(
 				renderPool(ldb.GetFuturePoolByVrfKeyHash(ctx, key, start, nil)))
 		}
 	}
-	// The database answers the same reads through its source once drained.
+	// The database answers the same reads through its pool source.
 	dbPools, err := db.GetPools(ctx, pools, nil)
 	add("db pools %d %v", len(dbPools), err)
 	for i := range dbPools {
@@ -212,11 +212,11 @@ func readPools(
 	return out
 }
 
-// requireDrainedPoolAnswers asserts the answers of a drained run that the
-// metadata store's SQL cannot give in the harness, whose tip sits outside its
+// requireSetPoolAnswers asserts the answers of a set run that a scenario
+// cannot give in the harness, whose tip sits outside its
 // epoch rows: the active pools, the relays, and the registration of a pool
 // whose retirement has not ended.
-func requireDrainedPoolAnswers(
+func requireSetPoolAnswers(
 	t *testing.T,
 	ldb ledgerdb.LedgerDB,
 	slots ledger.PoolSlots,
@@ -259,8 +259,8 @@ func requireDrainedPoolAnswers(
 }
 
 // With the set failed, the LedgerDB and the database fail the read rather
-// than answer from the empty SQL tables.
-func TestDrainedPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
+// than answer nothing.
+func TestPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)

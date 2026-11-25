@@ -68,30 +68,6 @@ func TestSetTransactionRecordsPhaseRegions(t *testing.T) {
 	)
 }
 
-// The overlay resolves inputs and returns before the SQL path's spend and
-// stake phases, so it marks its own.
-//
-// Not t.Parallel: only one execution trace can run per process.
-func TestSetTransactionOverlayRecordsPhaseRegions(t *testing.T) {
-	chain := buildOverlayChain(t, 1)
-	store := newMigratedSQLiteStore(t)
-	seedOverlayChain(t, store, chain)
-
-	trace := tracetest.Capture(t, func() {
-		applyOverlayChain(t, store, chain, true)
-	})
-
-	tracetest.RequireRegionOrder(
-		t,
-		trace,
-		"dingo.sqlstore.tx.prepare",
-		"dingo.sqlstore.tx.identity",
-		"dingo.sqlstore.tx.produced",
-		"dingo.sqlstore.tx.spend",
-		"dingo.sqlstore.tx.supply_stake",
-	)
-}
-
 // Not t.Parallel: testing.AllocsPerRun measures the whole process.
 func TestRegionsDoNotAllocateWhenTracingIsOff(t *testing.T) {
 	tracetest.SkipIfTracing(t)

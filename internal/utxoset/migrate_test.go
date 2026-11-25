@@ -142,9 +142,9 @@ func (f *sqlFixture) env(hook func(string) error) utxoset.MigrationEnv {
 	}
 }
 
-func openOnly(t *testing.T, dir string) *utxoset.Set {
+func openMigrationSet(t *testing.T, dir string) *utxoset.Set {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{Dir: dir, Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: dir})
 	require.NoError(t, err)
 	return set
 }
@@ -163,7 +163,7 @@ func requireMigrated(
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, f.tip, tip)
-	require.True(t, f.marked, "the set-only mark")
+	require.True(t, f.marked, "the migrated mark")
 	require.Equal(
 		t, outputs, f.remaining(), "the metadata store keeps its rows",
 	)
@@ -175,23 +175,20 @@ func TestMigrateFromSQLMovesTheUtxoSet(t *testing.T) {
 	t.Parallel()
 	const outputs = 25
 	f := newSQLFixture(outputs)
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 	requireMigrated(t, set, f, outputs)
 }
 
-// A migration whose progress is committed and whose mark is durable resumes on
-// a set that serves the ledger, because it never reads the SQL rows again; an
-// uncommitted one must refuse, since no metadata store is its source.
-func TestMigrateFromSQLResumesCommittedMigrationOnASetServingTheLedger(
-	t *testing.T,
-) {
+// A migration that stopped after it committed its progress and before the
+// mark finishes on the next run.
+func TestMigrateFromSQLFinishesAMigrationStoppedBeforeTheMark(t *testing.T) {
 	t.Parallel()
 	const outputs = 25
 	errCrash := errors.New("crash")
 	f := newSQLFixture(outputs)
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
 	require.ErrorIs(t, set.MigrateFromSQL(t.Context(), f, f.env(
 		func(step string) error {
@@ -201,25 +198,10 @@ func TestMigrateFromSQLResumesCommittedMigrationOnASetServingTheLedger(
 			return nil
 		},
 	)), errCrash)
-	set.ServeLedgerOnly()
 
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 	requireMigrated(t, set, f, outputs)
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)), "finished")
-}
-
-func TestMigrateFromSQLRefusesUnmarkedMigrationOnASetServingTheLedger(t *testing.T) {
-	t.Parallel()
-	f := newSQLFixture(5)
-	set := openOnly(t, t.TempDir())
-	t.Cleanup(func() { _ = set.Close() })
-	set.ServeLedgerOnly()
-
-	err := set.MigrateFromSQL(t.Context(), f, f.env(nil))
-
-	require.ErrorContains(t, err, "serves the ledger")
-	require.Equal(t, 5, f.remaining())
-	require.False(t, f.marked)
 }
 
 // A stop between any two steps, as a crash would cause, leaves the metadata
@@ -235,7 +217,7 @@ func TestMigrateFromSQLResumesAfterACrashAtEveryStep(t *testing.T) {
 			t.Parallel()
 			f := newSQLFixture(outputs)
 			dir := t.TempDir()
-			set := openOnly(t, dir)
+			set := openMigrationSet(t, dir)
 			err := set.MigrateFromSQL(t.Context(), f, f.env(
 				func(s string) error {
 					if s == step {
@@ -254,7 +236,7 @@ func TestMigrateFromSQLResumesAfterACrashAtEveryStep(t *testing.T) {
 			}
 			require.NoError(t, set.Close())
 
-			set = openOnly(t, dir)
+			set = openMigrationSet(t, dir)
 			t.Cleanup(func() { _ = set.Close() })
 			require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 			requireMigrated(t, set, f, outputs)
@@ -270,7 +252,7 @@ func TestMigrateFromSQLRebuildsAKeptSetThatDiffers(t *testing.T) {
 	errCrash := errors.New("crash")
 	f := newSQLFixture(outputs)
 	dir := t.TempDir()
-	set := openOnly(t, dir)
+	set := openMigrationSet(t, dir)
 	require.ErrorIs(t, set.MigrateFromSQL(t.Context(), f, f.env(
 		func(s string) error {
 			if s == "bootstrapped" {
@@ -289,7 +271,7 @@ func TestMigrateFromSQLRebuildsAKeptSetThatDiffers(t *testing.T) {
 		}},
 	}}))
 	require.NoError(t, set.Close())
-	set = openOnly(t, dir)
+	set = openMigrationSet(t, dir)
 	t.Cleanup(func() { _ = set.Close() })
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 	requireMigrated(t, set, f, outputs)
@@ -301,7 +283,7 @@ func TestMigrateFromSQLRefusesToMarkAMismatch(t *testing.T) {
 	t.Parallel()
 	f := newSQLFixture(8)
 	f.flaky = true
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
 	err := set.MigrateFromSQL(t.Context(), f, f.env(nil))
 	require.ErrorContains(t, err, "does not match")
@@ -315,7 +297,7 @@ func TestMigrateFromSQLRefusesToMarkAMismatch(t *testing.T) {
 func TestMigrateFromSQLChecksFreeSpace(t *testing.T) {
 	t.Parallel()
 	f := newSQLFixture(8)
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
 	env := f.env(nil)
 	env.FreeBytes = func() (uint64, error) { return 1, nil }
@@ -352,7 +334,7 @@ func TestMigrateFromSQLKeepsAMatchingSetAndItsJournal(t *testing.T) {
 	t.Parallel()
 	const outputs = 6
 	f := newSQLFixture(outputs)
-	set := openOnly(t, t.TempDir())
+	set := openMigrationSet(t, t.TempDir())
 	t.Cleanup(func() { _ = set.Close() })
 	applyFixtureRows(t, set, f)
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
@@ -371,7 +353,7 @@ func TestMigrateFromSQLCountsTheBuiltSetInItsSpaceCheck(t *testing.T) {
 	const outputs = 400
 	f := newSQLFixture(outputs)
 	dir := t.TempDir()
-	set := openOnly(t, dir)
+	set := openMigrationSet(t, dir)
 	applyFixtureRows(t, set, f)
 	// One extra output makes the kept set differ, so it is rebuilt.
 	tip := f.tip
@@ -384,7 +366,7 @@ func TestMigrateFromSQLCountsTheBuiltSetInItsSpaceCheck(t *testing.T) {
 	}}))
 	// Reopening flushes the data to table files, which the size counts.
 	require.NoError(t, set.Close())
-	set = openOnly(t, dir)
+	set = openMigrationSet(t, dir)
 	t.Cleanup(func() { _ = set.Close() })
 	env := f.env(nil)
 	env.FreeBytes = func() (uint64, error) { return 0, nil }
@@ -393,7 +375,7 @@ func TestMigrateFromSQLCountsTheBuiltSetInItsSpaceCheck(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// A migration interrupted after it recorded its commit and before the set-only
+// A migration interrupted after it recorded its commit and before the migrated
 // mark ran while the node may have written to the metadata store in between,
 // so the set is checked and rebuilt again before it is marked and the rows go.
 func TestMigrateFromSQLChecksAgainWhenResumedFromCommitBeforeTheMark(t *testing.T) {
@@ -402,7 +384,7 @@ func TestMigrateFromSQLChecksAgainWhenResumedFromCommitBeforeTheMark(t *testing.
 	errCrash := errors.New("crash")
 	f := newSQLFixture(outputs)
 	dir := t.TempDir()
-	set := openOnly(t, dir)
+	set := openMigrationSet(t, dir)
 	require.ErrorIs(t, set.MigrateFromSQL(t.Context(), f, f.env(
 		func(s string) error {
 			if s == "committed" {
@@ -422,7 +404,7 @@ func TestMigrateFromSQLChecksAgainWhenResumedFromCommitBeforeTheMark(t *testing.
 	}}))
 	require.NoError(t, set.Close())
 
-	set = openOnly(t, dir)
+	set = openMigrationSet(t, dir)
 	t.Cleanup(func() { _ = set.Close() })
 	require.NoError(t, set.MigrateFromSQL(t.Context(), f, f.env(nil)))
 	requireMigrated(t, set, f, outputs)

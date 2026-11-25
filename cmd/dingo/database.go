@@ -47,7 +47,7 @@ func newCLIDestinationRegistry() *lifecycle.DestinationRegistry {
 // configured data directory (like `load`/`mithril`) and must not be run
 // against a data directory a `dingo serve` process currently has open.
 // newDatabaseService builds the lifecycle service the offline commands share.
-// On the split layout a truncate rolls the IndexerDB back through the same
+// On the IndexerDB layout a truncate rolls the IndexerDB back through the same
 // writer the node runs.
 func newDatabaseService(
 	cfg *config.Config,

@@ -193,7 +193,7 @@ func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
 	gates, err := runtime.Database.NodeSettingsGates(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "split", gates["indexer_layout"],
-		"a split bootstrap fills the layout gate on the empty database")
+		"an API node bootstrap fills the layout gate on the empty database")
 	require.NoError(t, runtime.Database.BlockCreate(models.Block{
 		Slot:     42,
 		Hash:     bytes.Repeat([]byte{0xaa}, 32),
@@ -205,5 +205,5 @@ func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
 	require.NoError(t, runtime.Close(ctx))
 
 	_, err = Sync(ctx, cfg)
-	require.ErrorIs(t, err, errSplitCatchUp)
+	require.ErrorIs(t, err, errIndexerDBCatchUp)
 }

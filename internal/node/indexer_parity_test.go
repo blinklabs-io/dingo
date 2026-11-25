@@ -749,7 +749,7 @@ func requireMigratedNodeMatchesFresh(
 	// before anything opens the consensus store, and the node then moves the
 	// UTxO set and the ledger state into the LedgerDB and the blocks into the
 	// ImmutableDB.
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(legacyDir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -772,8 +772,7 @@ func requireMigratedNodeMatchesFresh(
 	)
 
 	// The migrated directory is left as a node writes one: the ledger and
-	// the live UTxO set at the tip, and every graduated ledger-state family
-	// drained from the metadata store.
+	// the live UTxO set at the tip.
 	tipHash, err := hex.DecodeString(ids.latestHash)
 	require.NoError(t, err)
 	migrated.stop()
@@ -794,9 +793,9 @@ func requireMigratedNodeMatchesFresh(
 	require.NoError(t, repaired.Close())
 	require.NotZero(t, applied)
 	set, err := utxoset.Open(utxoset.Config{
-		Dir:    utxoset.DirFor(legacyDir),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Only:   true, RetainRewardRecords: parityConfig(legacyDir).SplitIndexer(),
+		Dir:                 utxoset.DirFor(legacyDir),
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetainRewardRecords: parityConfig(legacyDir).HasIndexerDB(),
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()

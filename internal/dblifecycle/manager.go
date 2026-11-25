@@ -135,7 +135,7 @@ func (m *Manager) SetUtxoSetSource(source func() lifecycle.UtxoSetBackuper) {
 }
 
 // SetIndexerPayloadSource makes every automatic snapshot carry the IndexerDB
-// of a split node, taken before the ledger snapshot. Start then refuses the
+// of an API node, taken before the ledger snapshot. Start then refuses the
 // configurations the payload does not cover. It must be called before Start.
 func (m *Manager) SetIndexerPayloadSource(src *IndexerPayloadSource) {
 	m.mu.Lock()

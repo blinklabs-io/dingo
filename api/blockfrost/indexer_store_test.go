@@ -77,7 +77,7 @@ func (s fixedTipState) GetSyncState(string, *database.Txn) (string, error) {
 	return s.value, nil
 }
 
-func TestDataTipIsTheIndexerTipOnSplit(t *testing.T) {
+func TestDataTipIsTheIndexerTip(t *testing.T) {
 	t.Parallel()
 	hash := bytes.Repeat([]byte{0xab}, 32)
 	store, err := indexerdb.NewStore(
@@ -96,7 +96,7 @@ func TestDataTipIsTheIndexerTipOnSplit(t *testing.T) {
 	require.Equal(t, hash, tip.Point.Hash)
 }
 
-// On the split layout the block store holds blocks the IndexerDB has not
+// On the IndexerDB layout the block store holds blocks the IndexerDB has not
 // indexed. A slot lookup answers for a block at or below the IndexerDB tip and
 // reports not found above it, as a lookup by hash or height does.
 func TestBlockAtSlotHidesBlocksAboveTheIndexerTip(t *testing.T) {

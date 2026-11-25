@@ -997,7 +997,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
-	if n.storageSelections().SplitIndexer {
+	if n.storageSelections().IndexerDB {
 		if err := n.checkServerAdopted(n.ctx, deps); err != nil {
 			return err
 		}

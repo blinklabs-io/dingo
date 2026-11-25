@@ -25,10 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newDrainableRewardRoundRun is a ledger whose boundary into epoch 6 applies a
-// real reward round over blocks a Mithril anchor leaves imported, so every
-// graduated family can be drained from it.
-func newDrainableRewardRoundRun(
+// newRewardRoundRun is a ledger whose boundary into epoch 6 applies a
+// real reward round over blocks a Mithril anchor leaves imported.
+func newRewardRoundRun(
 	t *testing.T,
 	g metadata.StatementGuard,
 ) *rewardBlocksRun {
@@ -59,16 +58,15 @@ func newDrainableRewardRoundRun(
 	return r
 }
 
-// drainedRewardRoundRun is a reward round over a ledger with every graduated
-// family drained and the statement guard armed.
-func drainedRewardRoundRun(
+// setRewardRoundRun is a reward round over a ledger whose set serves the
+// ledger alone.
+func setRewardRoundRun(
 	t *testing.T,
 ) *rewardBlocksRun {
 	t.Helper()
-	r := newDrainableRewardRoundRun(t, nil)
+	r := newRewardRoundRun(t, nil)
 	s := r.scenario
-	s.InstallDrainedSources()
-	r.set.ServeLedgerOnly()
+	s.InstallSetSources()
 	return r
 }
 
@@ -94,14 +92,14 @@ func requireMemberUnspendable(
 	require.Zero(t, pending)
 }
 
-// With every graduated family drained, the boundary that applies a
+// With the set serving the ledger alone, the boundary that applies a
 // precomputed reward round finds a credential that deregistered after the
 // round began from the registration events the set keeps.
-func TestEveryGraduatedFamilyDrainedRewardRoundRechecksRegistrations(
+func TestRewardRoundRechecksRegistrationsFromTheSet(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r := drainedRewardRoundRun(t)
+	r := setRewardRoundRun(t)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.DeregisterMemberInSet()
@@ -112,11 +110,11 @@ func TestEveryGraduatedFamilyDrainedRewardRoundRechecksRegistrations(
 // The same after a rollback between the precompute and the boundary, which
 // moves the set's rollback counter, so the recheck also rereads every
 // credential with an output.
-func TestEveryGraduatedFamilyDrainedRewardRoundRechecksAfterARollback(
+func TestRewardRoundRechecksRegistrationsAfterARollback(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r := drainedRewardRoundRun(t)
+	r := setRewardRoundRun(t)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.RollbackBeforeBoundary()

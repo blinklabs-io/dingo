@@ -124,11 +124,11 @@ func commonRun(
 	)
 	// Before any command opens the consensus store: opening an API-mode store
 	// in core mode would otherwise latch the mode before its rows are copied.
-	if err := node.MigrateToSplit(ctx, cfg, logger); err != nil {
+	if err := node.MigrateToIndexerDB(ctx, cfg, logger); err != nil {
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 			return nil, errShutdownRequested
 		}
-		return nil, fmt.Errorf("migrate to the split indexer layout: %w", err)
+		return nil, fmt.Errorf("migrate to the IndexerDB layout: %w", err)
 	}
 	return logger, nil
 }

@@ -24,9 +24,10 @@ import (
 	"github.com/blinklabs-io/dingo/internal/storageadopt"
 )
 
-// MigrateToSplit recovers any interrupted restore before adopting API storage.
-// SQLite copies the API store into the IndexerDB directory. PostgreSQL and
-// MySQL keep the API store in place and provision a separate consensus database.
+// MigrateToIndexerDB recovers any interrupted restore before adopting API
+// storage. SQLite copies the API store into the IndexerDB directory. PostgreSQL
+// and MySQL keep the API store in place and provision a separate consensus
+// database.
 //
 // The store is copied through <databasePath>/.indexer-migrate-*, the copy
 // gets the ledger tip as its tip and checkpoint plus the layout latch, and a
@@ -35,7 +36,7 @@ import (
 // on disk unread. Every step is resumable: before the rename the original is
 // untouched and the next start copies again; after it, the next start finds
 // the latched IndexerDB and completes the consensus store's latches.
-func MigrateToSplit(
+func MigrateToIndexerDB(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
@@ -47,5 +48,5 @@ func MigrateToSplit(
 	if err := dingo.ReconcileInterruptedRestore(ctx, nodeCfg); err != nil {
 		return fmt.Errorf("recover interrupted restore before storage migration: %w", err)
 	}
-	return storageadopt.MigrateToSplit(ctx, cfg, logger)
+	return storageadopt.MigrateToIndexerDB(ctx, cfg, logger)
 }

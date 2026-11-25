@@ -181,14 +181,6 @@ func (ls *LedgerState) donationList(
 	return out, nil
 }
 
-func sameNetworkState(a, b *models.NetworkState) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Slot == b.Slot && a.Treasury == b.Treasury &&
-		a.Reserves == b.Reserves
-}
-
 func (s stagingLedgerDB) GetNetworkState(
 	txn ledgerdb.Txn,
 ) (*models.NetworkState, error) {

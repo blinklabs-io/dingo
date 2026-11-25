@@ -32,7 +32,7 @@ func TestIndexerDefaults(t *testing.T) {
 }
 
 // API storage mode always uses a separate IndexerDB, including in-memory nodes.
-func TestSplitIndexerFollowsStorageMode(t *testing.T) {
+func TestHasIndexerDBFollowsStorageMode(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name          string
@@ -49,7 +49,7 @@ func TestSplitIndexerFollowsStorageMode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := &Config{StorageMode: tt.mode, DatabasePath: tt.databasePath}
-			require.Equal(t, tt.wantSplit, cfg.SplitIndexer())
+			require.Equal(t, tt.wantSplit, cfg.HasIndexerDB())
 			require.Equal(t, tt.wantConsensus, cfg.ConsensusStorageMode())
 		})
 	}

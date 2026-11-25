@@ -125,7 +125,7 @@ type Store struct {
 
 // ErrLoadsRefused reports a family load refused by RefuseLoads.
 var ErrLoadsRefused = errors.New(
-	"badgerutxo: a row family cannot be reloaded from a source that has lost rows",
+	"badgerutxo: a row family cannot be reloaded while the set holds its rows",
 )
 
 // RefuseLoads makes a Load* method fail with ErrLoadsRefused, changing
@@ -135,12 +135,6 @@ var ErrLoadsRefused = errors.New(
 // holds no row loses none.
 func (s *Store) RefuseLoads() {
 	s.loadsRefused.Store(true)
-}
-
-// LoadsRefused reports whether RefuseLoads was called. In-place upgrades of
-// the set's rows use it to avoid querying a source that holds none.
-func (s *Store) LoadsRefused() bool {
-	return s.loadsRefused.Load()
 }
 
 // Open opens or creates the store in dir.

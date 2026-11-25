@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -53,9 +52,6 @@ type RewardRecordRetainer interface {
 	// RewardConsumedSlot returns the slot through which the consumer has
 	// copied the reward rows; ok is false without a consumer.
 	RewardConsumedSlot() (slot uint64, ok bool, err error)
-	// RewardRecordsLost reports records the metadata store drained before the
-	// set could load them.
-	RewardRecordsLost() (bool, error)
 }
 
 // RewardJournalHigh returns the sequence number the set's next reward record
@@ -118,19 +114,6 @@ func (ls *LedgerState) accountRewardCreditPage(
 	r, ok := ls.readSet(nil).(RewardRecordReader)
 	if !ok || ls.accountReader(nil) == nil {
 		return metadata.FactRows{}, 0, ledgerStateUnserved(nodesettings.FamilyAccounts)
-	}
-	if keeper, ok := r.(RewardRecordRetainer); ok {
-		lost, err := keeper.RewardRecordsLost()
-		if err != nil {
-			return metadata.FactRows{}, 0, err
-		}
-		if lost {
-			return metadata.FactRows{}, 0, fmt.Errorf(
-				"%w: the reward journal was drained before the set held it, "+
-					"and its credits before then are in neither store",
-				ledgerStateUnserved(nodesettings.FamilyAccounts),
-			)
-		}
 	}
 	out := metadata.FactRows{Columns: []string{
 		"staking_key", "credential_tag", "tx_hash", "amount", "added_slot",

@@ -38,22 +38,22 @@ import (
 // StorageSelections identifies the providers and provider-owned
 // configuration for the selectable storage capabilities.
 type StorageSelections struct {
-	// SplitIndexer keeps a client/server API database in place as IndexerDB
+	// IndexerDB keeps a client/server API database in place as IndexerDB
 	// and selects the provider-owned consensus namespace beside it.
-	SplitIndexer bool
-	Blob         plugin.Selection
-	Metadata     plugin.Selection
+	IndexerDB bool
+	Blob      plugin.Selection
+	Metadata  plugin.Selection
 }
 
 // ConfiguredStorageSelections returns the storage selections of cfg. Every
 // open of a node's own stores goes through it: a selection that omits
-// SplitIndexer opens an adopted PostgreSQL or MySQL IndexerDB as the
+// IndexerDB opens an adopted PostgreSQL or MySQL IndexerDB as the
 // consensus store, which latches core mode into it.
 func ConfiguredStorageSelections(cfg *config.Config) StorageSelections {
 	return StorageSelections{
-		SplitIndexer: cfg.SplitIndexer() || cfg.ServerCoreNamespace,
-		Blob:         cfg.Plugins.Storage.Blob,
-		Metadata:     cfg.Plugins.Storage.Metadata,
+		IndexerDB: cfg.HasIndexerDB() || cfg.ServerCoreNamespace,
+		Blob:      cfg.Plugins.Storage.Blob,
+		Metadata:  cfg.Plugins.Storage.Metadata,
 	}
 }
 
@@ -167,7 +167,7 @@ func ResolveMetadata(
 		selections.Metadata.Provider,
 		selections.Metadata.Config,
 		metadata.ProviderDependencies{
-			CoreNamespace: selections.SplitIndexer &&
+			CoreNamespace: selections.IndexerDB &&
 				(selections.Metadata.Provider == "postgres" || selections.Metadata.Provider == "mysql"),
 			DataDir:             deps.DataDir,
 			StorageMode:         deps.StorageMode,
@@ -225,7 +225,7 @@ const IndexerDirName = "indexer"
 // from the released metadata selection. SQLite gets its own directory. On
 // server stores the released database remains the IndexerDB while
 // ResolveStorage selects the provider-owned consensus namespace, so a
-// selection without SplitIndexer would share its tables with the consensus
+// selection without IndexerDB would share its tables with the consensus
 // store and is refused.
 func IndexerMetadataSelection(
 	selections StorageSelections,
@@ -243,7 +243,7 @@ func IndexerMetadataSelection(
 		if dataDir != "" {
 			indexerDir = filepath.Join(dataDir, IndexerDirName)
 		}
-	} else if !selections.SplitIndexer {
+	} else if !selections.IndexerDB {
 		return plugin.Selection{}, "", fmt.Errorf(
 			"the %s IndexerDB needs the consensus store in its own "+
 				"namespace: the storage selection does not select it",

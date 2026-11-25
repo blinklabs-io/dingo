@@ -241,7 +241,7 @@ func (f *anchorFixture) requireTablesAt(
 	requireSameTables(t, want, got)
 }
 
-func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
+func TestIndexerMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	t.Parallel()
 	f := newAnchorFixture(t)
 	ctx := context.Background()
@@ -308,7 +308,7 @@ func (f *anchorFixture) lazyIndexExists(t *testing.T) bool {
 	)
 }
 
-func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
+func TestIndexerMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -407,7 +407,7 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	requireSameTables(t, atAnchor, got)
 }
 
-func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
+func TestIndexerMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -482,7 +482,7 @@ func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 // given the ledger to read them through finds neither the imported balances
 // nor the journal the anchor state is rebuilt from, and an empty IndexerDB
 // refuses the bootstrap rather than take over an empty state.
-func TestSplitMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
+func TestIndexerMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
 	t *testing.T,
 ) {
 	t.Parallel()

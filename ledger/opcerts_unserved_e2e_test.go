@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -80,8 +79,8 @@ func renderOpCerts(
 }
 
 // With the set failed, the LedgerDB and the database fail every read rather
-// than answer from the empty SQL tables.
-func TestP3DrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
+// than answer nothing.
+func TestOpCertAndCommitteeReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -145,8 +144,8 @@ func TestP3DrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 }
 
 // A drained op-cert read for a slot the set has no record of fails rather
-// than answer from the empty table.
-func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
+// than answer nothing.
+func TestOpCertReadOutsideTheSetsRecordFails(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -165,9 +164,6 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 		t.Context(), lcommon.PoolKeyHash(slots.Pool), 5, slots.Batched+1, lower,
 	))
 	require.NoError(t, lower.Commit())
-	scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyOpCerts),
-	)
 	ldb := scenario.LedgerDB()
 	pkh := lcommon.PoolKeyHash(slots.Pool)
 	seq, found, err := ldb.LatestPoolOpCertSequenceAtOrBefore(
@@ -186,13 +182,10 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 // bootstrapped from Mithril, and the drained op-cert rows cannot answer it, so
 // the set answers when the pool's latest observation repeats its highest
 // counter: the highest after the slot is then that counter. A lower counter
-// observed last still reaches the emptied table and fails.
-func TestOpCertRepeatedCounterIsAnsweredByTheDrainedSet(t *testing.T) {
+// observed last still fails.
+func TestOpCertRepeatedCounterIsAnsweredByTheSet(t *testing.T) {
 	t.Parallel()
 	scenario, _, _ := setModeScenario(t)
-	scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyOpCerts),
-	)
 	ldb := scenario.LedgerDB()
 	ctx := t.Context()
 	write := func(pool lcommon.PoolKeyHash, sequence, slot uint64) {

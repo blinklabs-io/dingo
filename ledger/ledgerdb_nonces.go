@@ -34,8 +34,8 @@ var ErrLedgerStateUnserved = errors.New(
 )
 
 // ErrUtxoSetUnserved reports a read that a configured live UTxO set cannot
-// answer. An attached set is authoritative, so the read does not fall back
-// to the metadata store.
+// answer. No other store holds the set, so the read fails rather than fall
+// back.
 var ErrUtxoSetUnserved = errors.New(
 	"live UTxO set cannot serve ledger-state family",
 )
@@ -66,8 +66,7 @@ func (s stagingLedgerDB) GetBlockNonce(
 	return s.ls.blockNonce(point, txn)
 }
 
-// GetBlockNoncesInSlotRange reads from the set when the nonces family is
-// drained.
+// GetBlockNoncesInSlotRange reads from the set.
 func (s stagingLedgerDB) GetBlockNoncesInSlotRange(
 	start, end uint64,
 	txn ledgerdb.Txn,
@@ -131,16 +130,16 @@ func (s stagingLedgerDB) DeleteBlockNoncesAfterPoint(
 	return nil
 }
 
-// drainedNonceSource serves a rollback's nonce reads from the set.
-type drainedNonceSource struct {
+// setNonceSource serves a rollback's nonce reads from the set.
+type setNonceSource struct {
 	ls *LedgerState
 }
 
-func (d drainedNonceSource) BlockNonceAt(point ocommon.Point) ([]byte, error) {
+func (d setNonceSource) BlockNonceAt(point ocommon.Point) ([]byte, error) {
 	return d.ls.blockNonce(point, nil)
 }
 
-func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
+func (d setNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 	rows, err := d.ls.blockNoncesInSlotRange(0, slot+1, nil)
 	if err != nil {
 		return false, err
@@ -157,6 +156,6 @@ func (d drainedNonceSource) HasCheckpointAtOrBefore(slot uint64) (bool, error) {
 // runs.
 func (ls *LedgerState) installNonceSource() {
 	if ls.db != nil {
-		ls.db.SetNonceSource(drainedNonceSource{ls})
+		ls.db.SetNonceSource(setNonceSource{ls})
 	}
 }

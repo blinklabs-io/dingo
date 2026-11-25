@@ -38,11 +38,11 @@ var ErrAnchorMismatch = errors.New(
 	"indexer: rows at the anchor do not match the imported ledger state",
 )
 
-// ErrAnchorUnserved is returned when the ledger no longer holds the state a
-// snapshot import established at the anchor in its metadata store, so an empty
-// IndexerDB cannot take it over.
+// ErrAnchorUnserved is returned when the ledger no longer holds the account
+// state a snapshot import established at the anchor, so an empty IndexerDB
+// cannot take it over.
 var ErrAnchorUnserved = errors.New(
-	"indexer: the ledger has drained the imported account state the " +
+	"indexer: the ledger no longer holds the imported account state the " +
 		"IndexerDB takes over at the Mithril anchor",
 )
 

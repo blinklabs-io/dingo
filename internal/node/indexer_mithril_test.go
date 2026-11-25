@@ -39,7 +39,7 @@ import (
 func TestMithrilBootstrapMatchesAGenesisIndex(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
-		"it replays real chunks into a reference and a set-only node, "+
+		"it replays real chunks into a reference and a node, "+
 			"minutes instrumented; the writer under race is covered by "+
 			"TestIndexerWriterRollbackMatchesAFreshIndex",
 	)
@@ -55,12 +55,12 @@ func TestMithrilBootstrapMatchesAGenesisIndex(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runSetOnlyMithrilBootstrap(t, tc.anchor, tc.chain)
+			runLedgerDBMithrilBootstrap(t, tc.anchor, tc.chain)
 		})
 	}
 }
 
-func runSetOnlyMithrilBootstrap(
+func runLedgerDBMithrilBootstrap(
 	t *testing.T,
 	anchorAt, chunks int,
 ) {
@@ -100,8 +100,8 @@ func runSetOnlyMithrilBootstrap(
 	// The node's data directory, as `mithril sync` leaves it: the whole chain
 	// applied, the ledger state in the live UTxO set, and the anchor
 	// recorded.
-	splitDir := loadParityChain(t, chainDir)
-	dbConfig, selections, deps := storeConfig(splitDir)
+	ledgerDBDir := loadParityChain(t, chainDir)
+	dbConfig, selections, deps := storeConfig(ledgerDBDir)
 	runtime, err := internalplugins.OpenDatabase(
 		t.Context(), dbConfig, selections, deps,
 	)
@@ -114,18 +114,18 @@ func runSetOnlyMithrilBootstrap(
 	}
 	require.NoError(t, runtime.Close(t.Context()))
 
-	split := startParityNode(t, "split", splitDir, cardanoCfg, warnLogger(t))
+	apiNode := startParityNode(t, "api", ledgerDBDir, cardanoCfg, warnLogger(t))
 	wantHash := hex.EncodeToString(wantTip.Point.Hash)
 	testutil.WaitForCondition(t, func() bool {
 		var got struct {
 			Hash string `json:"hash"`
 		}
-		return split.getJSON(t, "/api/v0/blocks/latest", &got) &&
+		return apiNode.getJSON(t, "/api/v0/blocks/latest", &got) &&
 			got.Hash == wantHash
-	}, 10*time.Minute, "the split node serves the chain tip once its IndexerDB is ready")
+	}, 10*time.Minute, "the API node serves the chain tip once its IndexerDB is ready")
 
 	indexerRaw := openRaw(t, filepath.Join(
-		splitDir, internalplugins.IndexerDirName, "metadata.sqlite",
+		ledgerDBDir, internalplugins.IndexerDirName, "metadata.sqlite",
 	))
 	var digests int
 	require.NoError(t, indexerRaw.QueryRow(

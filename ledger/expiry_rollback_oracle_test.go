@@ -20,15 +20,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func p5ExpireDrive(t *testing.T) p5Drive {
+func expireDrive(t *testing.T) setDrive {
 	t.Helper()
-	for _, d := range p5Drives {
+	for _, d := range setDrives {
 		if d.name == "CIP-0163 expiry" {
 			return d
 		}
 	}
 	require.FailNow(t, "no CIP-0163 expiry drive")
-	return p5Drive{}
+	return setDrive{}
 }
 
 // TestExpiryRollbackMatchesAFreshRunStoppedAtTheRollbackPoint requires the
@@ -37,18 +37,18 @@ func p5ExpireDrive(t *testing.T) p5Drive {
 // stopped.
 func TestExpiryRollbackMatchesAFreshRunStoppedAtTheRollbackPoint(t *testing.T) {
 	t.Parallel()
-	expire := p5ExpireDrive(t)
-	idle := p5Drive{
+	expire := expireDrive(t)
+	idle := setDrive{
 		name: "no activity",
-		drive: func(*testing.T, *p5Harness) p5Touched {
-			return p5Touched{dreps: p5DRepKeys[:2]}
+		drive: func(*testing.T, *setHarness) setTouched {
+			return setTouched{dreps: setDRepKeys[:2]}
 		},
 	}
-	fresh, _ := p5AccountsRun(t, nil, nil, idle)
+	fresh, _ := accountsRun(t, idle)
 	want := fresh["applied"]
 	require.NotEmpty(t, want)
 
-	got, _ := p5AccountsRun(t, nil, nil, expire)
+	got, _ := accountsRun(t, expire)
 	require.NotEqual(t, want, got["applied"], "the expiry changes the reads")
 	require.Equal(t, want, got["rolled back"])
 }

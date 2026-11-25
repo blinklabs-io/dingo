@@ -32,10 +32,10 @@ func TestLiveStakeFollowsBlocksARollbackAndAResume(t *testing.T) {
 	t.Parallel()
 	run := func() (ledger.ShadowScenario, *utxoset.Set, func() map[string]string) {
 		t.Helper()
-		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = set.Close() })
-		scenario := ledger.RunUtxoSetOnlyScenarioForTest(
+		scenario := ledger.RunLedgerDBScenarioForTest(
 			t, set, func(*database.Database) {},
 		)
 		return scenario, set, func() map[string]string {

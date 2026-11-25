@@ -48,7 +48,7 @@ func TestLiveTruncateReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				t.Parallel()
 
 				const numBlocks = 20
-				n, points, _ := newSplitLifecycleTestNodeAtBlock(
+				n, points, _ := newIndexerLifecycleTestNodeAtBlock(
 					t, numBlocks, nil, 0,
 				)
 				n.config.midnight = MidnightConfig{Enabled: enabled}
@@ -90,7 +90,7 @@ func TestLiveRestoreReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				t.Parallel()
 
 				const numBlocks = 20
-				n, points, _ := newSplitLifecycleTestNodeAtBlock(
+				n, points, _ := newIndexerLifecycleTestNodeAtBlock(
 					t, numBlocks, nil, 0,
 				)
 				snapshotDir := snapshotTestDir(t, "snapshot")

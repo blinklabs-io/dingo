@@ -110,9 +110,6 @@ func TestAssetHoldingsRoundTripOnEngines(t *testing.T) {
 
 	for _, engine := range []string{"postgres", "mysql"} {
 		for _, path := range parityPaths() {
-			if path.coreOnly {
-				continue
-			}
 			t.Run(engine+"/"+path.name, func(t *testing.T) {
 				t.Parallel()
 				store := newAssetIntegrationStore(t, engine)

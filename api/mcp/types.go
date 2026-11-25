@@ -49,7 +49,7 @@ type ProviderDependencies struct {
 	Host               string
 	Network            string
 	CORSAllowedOrigins []string
-	// Ready gates data routes on a split layout until the IndexerDB is
+	// Ready gates data routes with an IndexerDB until the IndexerDB is
 	// ready. Nil serves everything.
 	Ready apiready.Check
 }
