@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -106,16 +107,16 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch)
+		return ls.engine().EnsureRewardStakeInputsReady(txn, rewardSnapshotEpoch)
 	})
-	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.ErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "returned no rows")
 
 	inputs, err := seedDB(t, db).GetRewardStakeInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1, "empty reconstruction must not delete partial inputs")
 	require.Equal(t, partial.Stake, inputs[0].Stake)
-	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), nil)
+	pending, err := epochengine.LoadRewardStakeInputsPending(ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
 }
@@ -137,18 +138,18 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 	}
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.engine().ApplyStakeRewards(
 			context.Background(),
 			txn, survivalNewEpoch, survivalBoundarySlot,
 			false,
 		)
 	})
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
-	require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, fatalErr, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
 
-	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), nil)
+	pending, err := epochengine.LoadRewardStakeInputsPending(ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the unrecoverable snapshot must remain marked incomplete")
@@ -173,20 +174,20 @@ func TestApplyStakeRewardsValidationOnlyDoesNotStopNode(t *testing.T) {
 
 			txn := db.Transaction(context.Background(), true)
 			err := txn.Do(func(txn *database.Txn) error {
-				return ls.applyStakeRewards(
+				return ls.engine().ApplyStakeRewards(
 					context.Background(),
 					txn, survivalNewEpoch, survivalBoundarySlot,
 					validationOnly,
 				)
 			})
-			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+			require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 			require.ErrorIs(t, err, errHaltLedgerPipeline)
 			skipped := testutil.ToFloat64(ls.metrics.skippedStakeRewardRounds)
 			if validationOnly {
 				require.NoError(t, fatalErr)
 				require.Zero(t, skipped)
 			} else {
-				require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
+				require.ErrorIs(t, fatalErr, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 				require.Equal(t, float64(1), skipped)
 			}
 		})
@@ -458,8 +459,8 @@ func TestChunkedRewardPrecomputeMatchesAcrossChunkSizes(t *testing.T) {
 
 // TestChunkedRewardPrecomputeMatchesMonolithicCalculation proves the
 // chunked precompute reproduces exactly what the pre-existing, still-current
-// monolithic path (calculateStakeRewardApplication +
-// applyStakeRewardApplication, what applyStakeRewards falls back to inline at
+// monolithic path (CalculateStakeRewardApplication +
+// ApplyStakeRewardApplication, what ApplyStakeRewards falls back to inline at
 // the boundary) persists for the same reward round: every pool output, every
 // account output, and the credited account_reward_delta/network_state
 // mutations. The rewards-package test proves the arithmetic is equivalent in
@@ -483,13 +484,13 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 	)
 	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		app, ok, err := monolithic.calculateStakeRewardApplication(
+		app, ok, err := monolithic.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
 		require.True(t, ok, "fixture must produce a calculable reward round")
-		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
+		return monolithic.engine().ApplyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	monolithicResult := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -535,7 +536,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 	// transactions, never mid-transaction (the transaction itself is atomic),
 	// so calling stakeRewardPrecomputeChunkStep once and abandoning the round
 	// is the faithful simulation, not an injected panic.
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		rewardSnapshotEpoch+3, eventBoundarySlot, 1_200,
 	)
 	require.NoError(t, err)
@@ -613,7 +614,7 @@ func TestChunkedRewardPrecomputeAdoptsCursorCapturedSlot(t *testing.T) {
 	)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
 
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, firstSlot, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -670,7 +671,7 @@ func TestChunkedRewardPrecomputeRestartKeepsRoundSlot(t *testing.T) {
 	)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
 
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, firstSlot, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -678,22 +679,22 @@ func TestChunkedRewardPrecomputeRestartKeepsRoundSlot(t *testing.T) {
 	done, err := ls.stakeRewardPrecomputeChunkStep(round)
 	require.NoError(t, err)
 	require.False(t, done)
-	require.NoError(t, deleteUncreditedRewardOutputs(
+	require.NoError(t, epochengine.DeleteUncreditedRewardOutputs(
 		seedDB(t, db), nil, rewardSnapshotEpoch,
 	))
 
-	resumed, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	resumed, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, laterSlot, boundarySlot,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
+	cursor, startIndex, err := ls.engine().ResumableRewardPrecomputeCursor(
 		seedDB(t, db), nil, resumed,
 	)
 	require.NoError(t, err)
 	require.Nil(t, cursor, "a cursor without its rows must not be resumed")
 	require.Zero(t, startIndex)
-	require.Equal(t, laterSlot, resumed.capturedSlot,
+	require.Equal(t, laterSlot, resumed.CapturedSlot,
 		"a discarded cursor must not replace the round's captured slot")
 }
 
@@ -716,7 +717,7 @@ func TestEpochBoundaryReusesBackgroundChunkAtOneSlot(t *testing.T) {
 	)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
 
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, backgroundSlot, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -727,7 +728,7 @@ func TestEpochBoundaryReusesBackgroundChunkAtOneSlot(t *testing.T) {
 
 	boundaryTxn := ls.ledgerDB().Begin(context.Background(), true)
 	require.NoError(t, ls.ledgerDB().Run(boundaryTxn, func(txn ledgerdb.Txn) error {
-		_, _, err := ls.boundaryStakeRewardApplication(
+		_, _, err := ls.engine().BoundaryStakeRewardApplication(
 			ls.lifecycleContext(), txn, newEpoch, boundarySlot,
 		)
 		return err
@@ -781,7 +782,7 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	) rewardPrecomputeOutputsSnapshot {
 		t.Helper()
 		ls.rewardPrecomputeChunkPoolsOverride = 2
-		round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 			newEpoch, capturedSlot, boundarySlot,
 		)
 		require.NoError(t, err)
@@ -798,7 +799,7 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 		t, poolCount, delegatorsPerPool, 7,
 	)
 	resumed.rewardPrecomputeChunkPoolsOverride = 2
-	oldRound, ok, err := resumed.resolveStakeRewardPrecomputeRound(
+	oldRound, ok, err := resumed.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -806,18 +807,18 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	done, err := resumed.stakeRewardPrecomputeChunkStep(oldRound)
 	require.NoError(t, err)
 	require.False(t, done)
-	oldCursor, err := loadRewardPrecomputeCursor(
+	oldCursor, err := epochengine.LoadRewardPrecomputeCursor(
 		seedDB(t, resumedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, oldCursor)
 	mutateInput(t, resumedDB)
-	newRound, ok, err := resumed.resolveStakeRewardPrecomputeRound(
+	newRound, ok, err := resumed.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot, boundarySlot,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
+	require.NotEqual(t, oldCursor.InputFingerprint, newRound.InputFingerprint)
 	got := buildChangedPartial(t, resumed, resumedDB)
 	require.Len(t, got.poolOutputs, 2, "changed inputs must discard old chunk progress")
 
@@ -846,7 +847,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 	ls.config.DelegatorInactivityEnabled = true
 	ls.config.DelegatorInactivity = 5
 
-	oldRound, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	oldRound, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -858,7 +859,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 			break
 		}
 	}
-	oldCursor, err := loadRewardPrecomputeCursor(
+	oldCursor, err := epochengine.LoadRewardPrecomputeCursor(
 		ls.ledgerDB(), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
@@ -868,13 +869,13 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 	// A restart may retain this database and cursor while changing the CIP-0163
 	// inactivity window.
 	ls.config.DelegatorInactivity = 6
-	newRound, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	newRound, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot, boundarySlot,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
-	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
+	require.NotEqual(t, oldCursor.InputFingerprint, newRound.InputFingerprint)
+	cursor, startIndex, err := ls.engine().ResumableRewardPrecomputeCursor(
 		ls.ledgerDB(), nil, newRound,
 	)
 	require.NoError(t, err)
@@ -976,13 +977,13 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	monolithic, monolithicDB := degenerate(t)
 	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		app, ok, err := monolithic.calculateStakeRewardApplication(
+		app, ok, err := monolithic.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
+		return monolithic.engine().ApplyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	want := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -996,7 +997,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.NoError(t, chunked.runChunkedStakeRewardPrecompute(
 		newEpoch, capturedSlot, boundarySlot,
 	))
-	cursor, err := loadRewardPrecomputeCursor(
+	cursor, err := epochengine.LoadRewardPrecomputeCursor(
 		seedDB(t, chunkedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
@@ -1004,7 +1005,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.True(t, cursor.Done, "a degenerate round finishes in one step")
 	writeTxn = chunkedDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return chunked.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return chunked.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, chunked)
 	require.Equal(t, want, snapshotRewardPrecomputeOutputs(
@@ -1045,7 +1046,7 @@ func TestRewardPrecomputeChunkEndBoundsDelegators(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := rewardPrecomputeChunkEnd(
+			got := epochengine.RewardPrecomputeChunkEnd(
 				test.pools, test.start, test.maxPools, test.maxMembers,
 			)
 			if got != test.want {
@@ -1088,7 +1089,7 @@ func TestChunkedRewardPrecomputeLeavesCreditedRoundOutputs(t *testing.T) {
 	require.NotEmpty(t, inputs)
 	inputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 5)}
 	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(inputs, nil))
-	retry, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	retry, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		newEpoch, capturedSlot+500, boundarySlot,
 	)
 	require.NoError(t, err)
@@ -1113,7 +1114,7 @@ func TestChunkedRewardPrecomputeLeavesCreditedRoundOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
-		_, err := ls.stakeRewardPrecomputeChunksInTxn(
+		_, err := ls.engine().StakeRewardPrecomputeChunksInTxn(
 			context.Background(), txn, retry, 1,
 		)
 		return err

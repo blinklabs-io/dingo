@@ -136,6 +136,7 @@ func TestCoreNodeResolvesNoMetadataStore(t *testing.T) {
 	tail := loadRawLiveLifecycleTestBlocks(t, numBlocks)[10:]
 
 	target := points[9].Slot
+	requireLedgerAtChainTip(t, n)
 	_, err := n.Truncate(
 		t.Context(), dblifecycle.TruncateTarget{Slot: &target},
 	)

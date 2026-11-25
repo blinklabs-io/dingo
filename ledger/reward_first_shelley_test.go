@@ -78,7 +78,7 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 	}, nil))
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.engine().ApplyStakeRewards(
 			context.Background(), txn, firstShelley+1,
 			(firstShelley+1)*epochLength,
 			false,
