@@ -1180,13 +1180,10 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 }
 
 // TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks covers
-// the specific caller observed wedging on DevNet. After a slot battle,
-// tryResolveFork rolls back to the common ancestor, re-queues the winning
-// peer's headers and calls restartQueuedBlockfetchAfterForkLocked; if that
-// returns an error the fork handler only logs
-// "failed to start blockfetch after fork rollback" and reports the fork
-// resolved. Nothing else retries, so the queued header stays latched and
-// block production stops until an unrelated event clears the queue.
+// the specific caller observed wedging on DevNet: tryResolveFork queues a
+// fork's headers and calls restartQueuedBlockfetchAfterForkLocked. If that
+// restart fails and nothing else retries, the queued header stays latched
+// and block production stops until an unrelated event clears the queue.
 func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	t *testing.T,
 ) {

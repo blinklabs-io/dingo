@@ -10052,3 +10052,12 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEp
 			"%s: mark[39], the frozen distribution, must be retained", tc.name)
 	}
 }
+
+// consumeDeferredHeaderValidation removes point's deferred marker and reports
+// whether there was one.
+func (ls *LedgerState) consumeDeferredHeaderValidation(
+	point ocommon.Point,
+) bool {
+	_, ok := ls.takeDeferredHeaderValidation(point)
+	return ok
+}

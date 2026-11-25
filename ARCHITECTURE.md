@@ -875,7 +875,10 @@ clears the header queue and re-intersects with the peer. Headers the peer sends
 while the bodies are in flight extend the running candidate instead of
 restarting it. An incomplete,
 misordered, stale, or invalid candidate is discarded without changing the
-primary chain or ledger tip. A validated candidate may switch only while the
+primary chain or ledger tip. A candidate still being fetched is also discarded
+when its connection closes, when a chainsync resync resets the header pipeline,
+when the ledger closes, or when its fetch outlasts the blockfetch busy timeout.
+A validated candidate may switch only while the
 primary tip and consensus generation still match the values used for selection
 and validation. That final check and the chain rollback share one mutation
 barrier, so a concurrent chain change cannot land between them.
@@ -1110,15 +1113,16 @@ prevents re-queueing a header a rollback already invalidated.
 
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
-(`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
+(`chain.RollbackDeferredWithPreflight`, whose per-block deletions commit as they go) and
 rolls the ledger back second (`LedgerState.rollback`). A ledger failure after
 that point cannot be undone, so it is invalidated explicitly instead — the
 continuation-audit window is discarded and the failure is reported as
 `ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
 from the refusals that mean no state changed (`models.ErrBlockNotFound`,
 `chain.ErrRollbackExceedsSecurityParam`, `database.ErrRollbackBelowImmutableTip`,
-`ErrRollbackExceedsMithrilBoundary`), each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
-with a plain re-intersect; recovering that way here would resume from a ledger
+`ErrRollbackExceedsMithrilBoundary`), each of which `handleEventChainsyncRollback` recovers from
+with a plain re-intersect and a validated fork switch (`finishForkCandidate`)
+answers by dropping its candidate; recovering that way here would resume from a ledger
 tip whose block the chain has already deleted.
 
 That reporting is scoped to an actual split. `LedgerState.rollback` can also
@@ -1616,8 +1620,8 @@ not already hold it: every rollback entry point takes `chainsyncMutex` first
 and leaves the blockfetch mutex to the restart that follows. Bodies still
 arriving for an older generation are dropped instead of being handed to chain
 insertion:
-fork resolution rolls back, re-queues the winning peer's header path and only
-then restarts blockfetch, and a body from the losing fork reaching insertion
+a validated fork switch rolls back, re-queues the winning peer's header path and
+only then inserts the candidate's fetched bodies, and a body from the losing fork reaching insertion
 against that replacement queue would clear it. A batch that ends without
 extending the chain, while headers stay queued, feeds the same bounded
 same-range failure streak a `NoBlocks` reply feeds, so an unobtainable
@@ -4197,13 +4201,15 @@ ahead-of-tip rollback read as over-K and left the node rejecting every peer.
 Each of the three live callers classifies that propagated error itself,
 using whatever context it has available:
 
-- `handleEventChainsyncRollback` and `tryResolveFork` each already handle
-  a *direct* `ErrRollbackExceedsMithrilBoundary` (from their own initial
-  rollback attempt, before ever calling the reconciler) via the
-  peer-tip-based `ChainsyncResyncReasonRollbackExceedsMithril`/
+- `handleEventChainsyncRollback` already handles a *direct*
+  `ErrRollbackExceedsMithrilBoundary` (from its own initial rollback attempt,
+  before ever calling the reconciler) via the peer-tip-based
+  `ChainsyncResyncReasonRollbackExceedsMithril`/
   `ChainsyncResyncReasonPeerTipBehindMithril` classification described
-  above. That logic is now the shared `handleMithrilBoundaryRollback(e,
-  pending)` helper, and each caller's over-K branch calls it too when
+  above. `tryResolveFork` does not roll back itself (it only validates the
+  rollback point before fetching the candidate), so it meets this error only
+  from the reconciler. That logic is the shared `handleMithrilBoundaryRollback(e,
+  pending)` helper, and each caller's over-K branch calls it when
   `reconcileLivePrimaryChainLedgerDivergence` returns this error — the
   identical resync as a direct rollback hitting the same boundary.
 - The plateau watchdog (`internal/chainsyncrecycler`) has no pending
@@ -5820,7 +5826,8 @@ stops Ouroboros client ingest as well:
 - The first hold marks every tracked chainsync client through
   `LedgerStateConfig.NetworkIngestHoldTracker`, sets an atomic flag, then
   discards the queued headers, buffered peer headers and any blockfetch batch in
-  flight under the chainsync handler mutexes (`resetChainsyncResyncState`). On
+  flight, and any fork candidate being fetched, under the chainsync handler
+  mutexes (`resetChainsyncResyncState`). On
   return no handler that started before the hold is still running, and the chain
   holds no queued header. A client tracked while held is marked too.
 - While held, the ledger drops every chainsync header and rollback event and
@@ -7801,9 +7808,11 @@ epoch boundaries, so the block is kept queued for in-order re-verification once
 the applied tip advances into range, and the peer that served it is not
 recycled. Recycling honest peers on these benign past-horizon rejections would
 starve the peer pool the block and Leios endorser-block fetch depend on and
-deadlock catch-up at each epoch boundary. Candidate fork blockfetch begins after
-fork resolution has
-rolled the applied chain back to its common ancestor, so permitted epoch-nonce
+deadlock catch-up at each epoch boundary. Candidate fork bodies are fetched and
+validated before any rollback, but they reach ledger apply only after the
+validated switch has rolled the applied chain back to its common ancestor, and
+candidate validation does not consume the deferred-header marker, so permitted
+epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
 
@@ -9156,9 +9165,10 @@ dispatch's `BatchDone` resolution passes through, not in the callers that
 triggered the dispatch. That placement is load-bearing for the synchronous
 dispatch error a caller can still see (connection lookup failure, context
 cancellation, a protocol-shutdown race): every such caller treats it differently
-and several treat it as advisory — the two fork-resolution restarts in
-`tryResolveFork` log "failed to start blockfetch after fork rollback" (or
-"...after fork extension") and then report the fork resolved, the local-rollback
+and several treat it as advisory — the fork-extension restart in
+`tryResolveFork` retries on the active connection or clears the queue and
+re-intersects ("failed to start blockfetch after fork extension, ..."), the
+local-rollback
 recovery logs "failed to start blockfetch after local rollback recovery", and
 the await-reply path logs "failed to start blockfetch after await reply" at
 ERROR and publishes a `LedgerErrorEvent`. None of them retried and the pipeline
@@ -22756,7 +22766,7 @@ cleanup, whose per-key delete then re-tests membership and re-persists the
 marker for a point re-deferred in that window, so releasing the lock cannot
 strand a live deferred header without its durable marker): `prune` opens the
 single SQLite write connection, and block apply holds that connection before
-taking this same mutex via `consumeDeferredHeaderValidation`, so holding the
+taking this same mutex via `takeDeferredHeaderValidation`, so holding the
 mutex across `prune` inverts the lock order and deadlocks the node on the single
 write connection. The hazard is not this lock's own I/O — it has none — but the
 apply path holding the write connection while waiting for this mutex; a header
@@ -24879,10 +24889,12 @@ multi-thousand-header fork path) can make header arrival outrun block-apply
 throughput for long enough that the chain's queued-header backlog
 (`chain.Chain.headers`, capacity `MaxQueuedHeaders` — `max(2*securityParam,
 DefaultMaxQueuedHeaders)`, floor 10,000) reaches capacity. `tryResolveFork`
-(`ledger/chainsync.go`) resolves a fork by appending a reconstructed peer
-fork-path onto the chain one header at a time via `chain.AddBlockHeader`, in
-both its "ancestor is the local tip, extend without rollback" branch and its
-"roll back to common ancestor, then re-add the fork path" branch. A fork path
+(`ledger/chainsync.go`) resolves a fork whose ancestor is the local tip by
+appending the reconstructed peer fork-path onto the chain one header at a time
+via `chain.AddBlockHeader` ("extend without rollback"); a fork below the tip is
+re-queued the same way only after its candidate validates and the switch rolls
+back (`installForkCandidate`, `ledger/fork_candidate.go`), and a queue failure
+there clears the queue and re-intersects. A fork path
 longer than the remaining queue capacity fails partway through with
 `chain.ErrHeaderQueueFull`. Before this fix, both branches returned immediately
 on that failure without ever restarting blockfetch for whatever they (or an
@@ -24912,7 +24924,7 @@ threshold with no operator intervention. But a ~20-minute total-sync stall per
 occurrence, with nothing logged above `WARN` in the interim, is still a real
 liveness defect worth fixing directly rather than relying on that fallback.
 `ensureBlockfetchDrainingAfterForkQueueFailure` (`ledger/chainsync.go`) closes
-the gap at its source: called from both branches' failure paths, it restarts
+the gap at its source: called from the extension branch's failure path, it restarts
 blockfetch for the already-queued backlog immediately, but only when nothing is
 currently fetching (`chainsyncBlockfetchReadyChan == nil &&
 !blockfetchContinuationPending`) — deliberately not unconditionally, unlike
@@ -25047,8 +25059,9 @@ pipeline's only submitter — runs on its own goroutine, entirely decoupled
 from the goroutine that decides a rollback. That matters because
 `rollbackChainAndStateDeferred` (`ledger/state.go`), which physically removes
 blocks from `ls.chain` and truncates ledger metadata, is reached from
-chainsync per-connection event handling (`handleEventChainsyncRollback`,
-`tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
+chainsync per-connection event handling (`handleEventChainsyncRollback` in
+`ledger/chainsync.go`), the validated fork switch (`finishForkCandidate` in
+`ledger/fork_candidate.go`) and local forged-sibling adoption — never from `ledgerProcessBlocks`
 itself. Chain-selection can decide to abandon a fork while the reader
 goroutine has already gathered and submitted a batch of blocks — from that
 very fork — to the pipeline's decode workers and is blocked

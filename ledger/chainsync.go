@@ -724,14 +724,6 @@ func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) consumeDeferredHeaderValidation(
-	point ocommon.Point,
-) bool {
-	_, ok := ls.takeDeferredHeaderValidation(point)
-	return ok
-}
-
 // takeDeferredHeaderValidation removes point's deferred marker and returns the
 // connection that supplied its block.
 func (ls *LedgerState) takeDeferredHeaderValidation(
@@ -750,7 +742,7 @@ func (ls *LedgerState) takeDeferredHeaderValidation(
 
 // evictStaleDeferredHeadersLocked drops deferred-header entries that are
 // provably abandoned. A canonical deferred header is consumed by
-// consumeDeferredHeaderValidation when its block is applied, so an entry still
+// takeDeferredHeaderValidation when its block is applied, so an entry still
 // present once the cursor has passed its slot is on a fork; keeping it forever
 // would pin its epoch's pool_stake_snapshot rows forever.
 //
@@ -836,7 +828,7 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	// The membership test is taken under the lock, but the lock is released
 	// before the delete, so no durable write is made while holding a mutex
 	// block apply takes inside its transaction
-	// (consumeDeferredHeaderValidation). A point
+	// (takeDeferredHeaderValidation). A point
 	// re-deferred (and re-persisted) between the membership test
 	// and the delete keeps its live pin in the in-memory set for the running
 	// process, so the retention floor still covers it; only its durable marker
@@ -6601,7 +6593,8 @@ func (ls *LedgerState) addForkPathHeaderPinned(
 // a fresh FindIntersect on that connection rather than repeated mismatch
 // counting.
 //
-// Returns true if the fork was resolved (chain rolled back or a re-sync was
+// Returns true if the fork was handled (headers extended the local tip,
+// fetching and validating a candidate below it started, or a re-sync was
 // requested), false if the common ancestor was not found yet. Unexpected
 // internal failures are returned as errors so callers do not treat them as
 // ordinary header mismatches.
@@ -7451,10 +7444,10 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 // already-queued headers when nothing is currently fetching them. The main
 // header path does the same through ensureBlockfetchDrainingQueuedHeaders
 // when it rejects a header with ErrHeaderQueueFull. This entry point is
-// called after tryResolveFork fails to append a fork-resolution header path
-// onto the chain's header queue (most commonly because the queue is already
-// at ErrHeaderQueueFull capacity): the success paths in tryResolveFork
-// restart blockfetch via restartQueuedBlockfetchAfterForkLocked, but a
+// called after tryResolveFork's fork-extension branch fails to append a
+// header path onto the chain's header queue (most commonly because the queue
+// is already at ErrHeaderQueueFull capacity): its success path restarts
+// blockfetch via restartQueuedBlockfetchAfterForkLocked, but a
 // partial failure previously just returned without doing so. Once the queue
 // is completely full and no blockfetch is in flight, every later header --
 // from any peer, fork or not -- fails chain.AddBlockHeader's capacity check
