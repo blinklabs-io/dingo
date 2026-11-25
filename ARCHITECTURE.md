@@ -2011,7 +2011,7 @@ dingo/
 │   ├── queries.go       # State queries
 │   ├── validation.go    # Transaction validation (Phase 1 UTXO rules)
 │   ├── verify_header.go # Block header validation (VRF/KES/OpCert)
-│   ├── chainsync.go     # Epoch nonce calculation, rollback handling
+│   ├── chainsync.go     # Chainsync/blockfetch event handling, rollback handling
 │   ├── candidate_nonce.go # Candidate nonce computation
 │   ├── certs.go         # Certificate processing
 │   ├── governance.go    # Governance action processing
@@ -3792,10 +3792,13 @@ run the phase between resolving the stores and `database.New`; every
 configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
 (`nodestorage.MigrateReleased`). `mithril sync` and the
-`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store. The phase opens the configured metadata
-provider on a plugin host of its own, opens the v0.94.2 database over it and
-the block store as `database.RoleReleased` (the role storage adoption also
-opens it with), reverts it to the block `k` blocks below its tip
+`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store.
+The phase opens the configured metadata
+provider on a plugin host of its own, opens the v0.94.2 database over it, the
+block store and the ImmutableDB provider the opener already resolved (which
+resolves the markers of promoted blocks; the phase records no ImmutableDB
+state) as `database.RoleReleased` (the role storage adoption also opens it
+with), reverts it to the block `k` blocks below its tip
 (`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
 (`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
 ledger-state family into the live UTxO set, checks the set holds them at the
@@ -4019,13 +4022,16 @@ the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
 and refuses to advance a complete split database.
 
 The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
-opens the second metadata store, in API mode, as a `database.Database` over
-the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
-UTxO and transaction offsets under their own key prefix),
-after the ledger database is recovered and before the ledger starts. The writer
-starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
-fires, and stops before the IndexerDB closes, which precedes the ledger
-database closing the blob store.
+opens the second metadata store, in API mode, as a `database.Database` that
+reads blocks from the ledger database's blob store and keeps its UTxO and
+transaction CBOR offsets in its own metadata store
+(`database.NewIndexerBlobStore`: read transactions only on the ledger's store,
+offsets in the `utxo_offset` and `transaction_offset` tables, written in the
+IndexerDB transaction that writes their rows), after the ledger database is
+recovered and before the ledger starts. The IndexerDB writes nothing to the
+ledger's stores. The writer starts after the ledger, wakes when `ledger.tip`
+or `ledger.reward_facts` fires, and stops before the IndexerDB closes, which
+precedes the ledger database closing the blob store the IndexerDB reads.
 Failed passes retry with exponential backoff from one to thirty seconds,
 without requiring another ledger event. Wakes interrupt the retry delay and
 successful passes return to waiting for events.
@@ -15326,17 +15332,28 @@ its database with the network's chunk geometry
 copy is off, because adoption moves chunks out of the extracted tree. For each
 certified chunk, in order, it renames the three files into
 `<dataDir>/immutable`, reads them there through a digest-verified
-`immutable.ImmutableDb` bound to that directory, fsyncs them and the
-directory, advances `im_state` to the chunk's last block (startup
-reconciliation cuts chunk bytes beyond the recorded tip, so the tip covers the
-whole chunk before its markers commit), and only then commits the chunk's index
+`immutable.ImmutableDb` bound to that directory, advances `im_state` to the
+chunk's last block (startup reconciliation cuts chunk bytes beyond the recorded
+tip, so the tip covers the whole chunk before its markers commit), and only
+then commits the chunk's index
 entries, `DIM1` markers and API-mode UTxO offsets (the offsets come from the
 inner block CBOR, which is the chunk bytes after unwrapping `[type, cbor]`). A marker's chunk, offset, size and CRC come from the
 verified read of the moved chunk. Only chunks whose three files are all in the
 certificate's digest list are adopted; the ancillary archive's in-progress
 chunk is not, and its blocks reach the blob store through the normal copy.
-After each chunk the blob store is synced and `mithril_immutable_retired_below`
-advances to the next chunk. A resume takes a chunk already in the ImmutableDB
+Chunks are adopted in groups of up to 64. The adopt record is written before
+the group's first rename; every file in the group is fsynced and the directory
+synced once before any tip covers them. A rename that crosses file systems
+copies through a temporary name and fsyncs the copy and its directory before
+removing the source, so a crash leaves one durable copy. `im_state` and the
+block records commit to the same blob store in order, so a crash that drops
+unsynced commits drops a suffix and the tip still precedes the blocks it
+covers without a sync between them. Those commits are not durable until the
+blob store syncs, so the record is cleared only after the group's blob sync;
+then `mithril_immutable_retired_below` advances past the group. A failure
+inside a group moves the later chunks' files back to the source directory,
+finishes the chunks already committed, and, when the tip covers the failed
+chunk, syncs the blob store before clearing the record. A resume takes a chunk already in the ImmutableDB
 directory as it is, verifies it again, and continues after the chain tip when
 that lies inside the chunk, including the first one (`im_state` already covers
 the chunk, so startup reconciliation leaves its files alone); a digest mismatch after a move removes that
@@ -16999,32 +17016,22 @@ paths. Only indexes no import path filters on are eligible at all — an index a
 per-row import predicate needs stays resident, since dropping it turns that
 predicate into a full scan of a table the import is still growing. Those indexes
 are named in `deferred.Retained`, and every drop and rebuild path creates any of
-them that is absent — the critical rebuild included, since it is the last step
-before the node serves API writes and the full rebuild can finish much later.
-That repairs a database an older binary's manifest had already dropped them
+them that is absent. That repairs a database an older binary's manifest had already dropped them
 from; the versioned migration that created them is recorded complete and never
 re-runs. `DATABASE.md` records which indexes that rule keeps out of the
 manifest. The metadata plugin exposes `BuildCriticalDeferredIndexes` for the
-critical subset and `BuildDeferredIndexes` for the full manifest. Mithril sync
-rebuilds the critical subset before clearing `sync_status`, then leaves the
-pending sync-state marker set. API-mode `serve` verifies the critical subset
-before startup and runs the full lazy rebuild as background maintenance; the
-rebuild paths clear the marker only after the full manifest has been rebuilt.
-Mithril completion cleanup leaves the deferred-index marker, post-backfill
-statistics marker, and forge fences untouched, and deletes transient keys
-individually. It records the generic imported-ledger-state boundary after
-cleanup. Its persisted `mithril_ledger_slot` and `mithril_ledger_hash` names
-remain for database compatibility. This preserves the pending marker set by
-`BuildCritical` so a
-bootstrapped database still builds the lazy manifest. Core-mode startup still
-repairs the full manifest synchronously before serving. Both repair entry points
-also restore any missing critical index when no cycle is pending at all: the
-marker records that a cycle was interrupted, not which indexes exist, and a
-database bootstrapped by a binary that predates the marker being carried across
-the clear has the critical subset built, the lazy remainder dropped, and no
-record of either — it would otherwise carry that gap permanently, since the
-schema migration that created those indexes is recorded complete and never
-re-runs. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
+critical subset and `BuildDeferredIndexes` for the full manifest. The ledger's
+database has no metadata store, so a Mithril sync into it drops and rebuilds
+nothing. The IndexerDB writer drops the deferred indexes before it replays from
+the origin to a Mithril anchor and builds the full manifest at the anchor,
+before it checks the replayed rows against the imported ledger state
+(`internal/indexer/anchor.go`); the rebuild clears the pending marker only
+after the full manifest has been rebuilt. A restore rebuilds any deferred
+index missing from its staged metadata copy. Mithril completion cleanup
+deletes the transient import keys individually and records the generic
+imported-ledger-state boundary after cleanup. Its persisted
+`mithril_ledger_slot` and `mithril_ledger_hash` names remain for database
+compatibility. On MySQL, InnoDB requires indexes supporting foreign-key child columns,
 so the dialect leaves those indexes in place while deferring the remaining
 manifest entries.
 

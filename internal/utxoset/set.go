@@ -828,8 +828,9 @@ func (s *Set) beginReconcile(ctx context.Context) error {
 }
 
 // LoadLedgerState loads into the set the ledger-state families it lacks, from
-// the metadata store of a v0.94.2 database that kept them there.
-// ReconcileReleased calls it once the outputs agree with that database.
+// the metadata store of a v0.94.2 database that kept them there. It is the
+// family load ReconcileReleased runs once the outputs agree with that
+// database, without the output reconciliation.
 func (s *Set) LoadLedgerState(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	return s.loadFamilies(ctx, ldb)
 }

@@ -58,6 +58,8 @@ var coreCopyAPITables = []string{
 	"asset_identity",
 	"redeemer_script",
 	"transaction_metadata_label",
+	"transaction_offset",
+	"utxo_offset",
 }
 
 // coreCopyFixedExclusions are tables a consensus copy never carries: the

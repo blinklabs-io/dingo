@@ -16,11 +16,9 @@ package database
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -211,22 +209,4 @@ func (d *Database) CountRewardAccountOutputsByCredential(
 		)
 	}
 	return count, nil
-}
-
-// DeleteRewardAccountOutputsBeforeEpoch prunes the reward account outputs
-// below epoch and leaves the stake inputs.
-func (d *Database) DeleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn *Txn,
-) error {
-	store, meta := d.metadata, types.Txn(nil)
-	if txn != nil {
-		store, meta = txn.db.metadata, txn.Metadata()
-	}
-	pruner, ok := store.(metadata.RewardOutputPruner)
-	if !ok {
-		return errors.New("the metadata store cannot prune reward outputs alone")
-	}
-	return pruner.DeleteRewardAccountOutputsBeforeEpoch(ctx, epoch, meta)
 }

@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -345,7 +346,6 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 	baseline := baselineCopy(t, chunks)
 	dir, digests := adoptSource(t, chunks)
 	blocks := fixtureBlocks(t, dir)
-	chunk0 := blocksBelow(blocks, 4320)
 	db := newAdoptDB(t, datatypes.StorageModeAPI)
 
 	killed := errors.New("killed mid-move")
@@ -360,9 +360,15 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 		}
 	})
 	require.ErrorIs(t, err, killed)
-	require.Equal(t, uint64(1), bound, "only chunk 0 was committed")
-	requireTipAt(t, db, chunk0[len(chunk0)-1], len(chunk0))
-	for _, name := range []string{"00001.chunk", "00001.primary"} {
+	// A group moves every chunk in before committing any of them, so the
+	// kill lands before chunk 0 commits.
+	require.Zero(t, bound, "no chunk was committed")
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	require.False(t, st.HasTip, "no tip covers the moved chunks")
+	for _, name := range []string{
+		"00000.chunk", "00001.chunk", "00001.primary",
+	} {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), name))
 		require.NoError(t, err, name)
 	}
@@ -373,7 +379,7 @@ func TestAdoptImmutableChunksResumesAfterKilledMove(t *testing.T) {
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
-	require.Equal(t, len(blocks)-len(chunk0), res.BlocksCopied)
+	require.Equal(t, len(blocks), res.BlocksCopied)
 	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
 	requireBlocksMatch(t, baseline, db, blocks)
 	requireOffsetsMatch(t, baseline, db, blocks)
@@ -673,7 +679,8 @@ func TestAdoptImmutableChunksPlacesChunkBeforeCommit(t *testing.T) {
 	pending, ok, err := db.ImmutableAdoptPending()
 	require.NoError(t, err)
 	require.True(t, ok, "the adoption is recorded as pending")
-	require.Equal(t, uint64(1), pending)
+	require.Equal(t, uint64(0), pending,
+		"the record names its group's first chunk")
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
@@ -936,4 +943,269 @@ func TestAdoptImmutableChunksKeepsTipChunkFilesOnDigestMismatch(t *testing.T) {
 		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00001"+ext))
 		require.NoError(t, err, "committed markers name 00001%s", ext)
 	}
+}
+
+// A chunk that stops after its tip was recorded, with later chunks of its
+// group returned to the source, leaves no file past the recorded tip, so the
+// adopt record is cleared and the ImmutableDB writer can open.
+func TestAdoptImmutableChunksMidGroupStopAfterTipClearsRecord(t *testing.T) {
+	t.Parallel()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	chunk0 := blocksBelow(blocks, 4320)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnProgress = func(p LoadBlobsProgress) {
+			if p.BlocksCopied >= len(chunk0)+loadBlockBatchSize {
+				cancel()
+			}
+		}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	chunk1 := blocksBelow(blocks, 2*4320)
+	require.Equal(t, uint64(len(chunk1)), st.TipIndex,
+		"the tip covers chunk 1")
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending, "the recorded tip covers every adopted file")
+	for _, ext := range chunkFileExts {
+		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00002"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist,
+			"chunk 2 left the ImmutableDB")
+	}
+	require.NoError(t, db.ReconcileImmutable())
+
+	res, err := adopt(t, context.Background(), db, dir, digests, nil)
+	require.NoError(t, err)
+	require.Less(t, res.BlocksCopied, len(blocks)-len(chunk0))
+	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
+}
+
+// A chunk that fails inside a group returns the chunks after it to the source
+// directory and finishes the chunks before it: their blobs are synced, their
+// source files removed and the committed callback reports them.
+func TestAdoptImmutableChunksMidGroupFailureReturnsLaterChunks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	killed := errors.New("killed before commit")
+	var committed []uint64
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.BeforeCommit = func(chunk uint64) error {
+			if chunk == 1 {
+				return killed
+			}
+			return nil
+		}
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.ErrorIs(t, err, killed)
+	require.Equal(t, []uint64{1}, committed, "chunk 0 was finished")
+	for _, ext := range chunkFileExts {
+		_, err := os.Stat(filepath.Join(dir, "00000"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist, "chunk 0 source removed")
+		_, err = os.Stat(filepath.Join(dir, "00002"+ext))
+		require.NoError(t, err, "chunk 2 returned to the source")
+		_, err = os.Stat(filepath.Join(db.ImmutableDir(), "00002"+ext))
+		require.ErrorIs(t, err, os.ErrNotExist, "chunk 2 left the ImmutableDB")
+	}
+}
+
+// Not t.Parallel: swaps the package-level adoptGroupChunks seam.
+//
+// Each group of chunks carries its own adopt record, naming its first chunk,
+// and reports once, after its last chunk. A run stopped in a later group
+// keeps the earlier group's chunks and resumes with the rest.
+func TestAdoptImmutableChunksSpansGroups(t *testing.T) {
+	prior := adoptGroupChunks
+	t.Cleanup(func() { adoptGroupChunks = prior })
+	adoptGroupChunks = 2
+
+	ctx := context.Background()
+	const chunks = 4
+	baseline := baselineCopy(t, chunks)
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	killed := errors.New("killed in the second group")
+	records := map[uint64]uint64{}
+	var committed []uint64
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.BeforeCommit = func(chunk uint64) error {
+			rec, pending, err := db.ImmutableAdoptPending()
+			require.NoError(t, err)
+			require.True(t, pending, "chunk %d is under a record", chunk)
+			records[chunk] = rec
+			if chunk == 2 {
+				for _, ext := range chunkFileExts {
+					_, err := os.Stat(filepath.Join(dir, "00001"+ext))
+					require.ErrorIs(t, err, os.ErrNotExist,
+						"the first group finished before the second")
+					_, err = os.Stat(
+						filepath.Join(db.ImmutableDir(), "00003"+ext),
+					)
+					require.NoError(t, err,
+						"chunk 3 moved in with its group")
+				}
+				return killed
+			}
+			return nil
+		}
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.ErrorIs(t, err, killed)
+	require.Equal(t, map[uint64]uint64{0: 0, 1: 0, 2: 2}, records)
+	require.Equal(t, []uint64{2}, committed,
+		"the first group reports once, past its last chunk")
+	first := blocksBelow(blocks, 2*4320)
+	requireTipAt(t, db, first[len(first)-1], len(first))
+
+	committed = nil
+	res, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnChunkCommitted = func(firstUnadopted uint64) error {
+			committed = append(committed, firstUnadopted)
+			return nil
+		}
+	})
+	require.NoError(t, err)
+	require.Equal(t, len(blocks)-len(first), res.BlocksCopied)
+	require.Equal(t, []uint64{4}, committed)
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
+	requireBlocksMatch(t, baseline, db, blocks)
+	requireOffsetsMatch(t, baseline, db, blocks)
+}
+
+// recordBlobSyncs swaps the blob-sync seam for one that notes, at each sync,
+// whether the adopt record is still on disk.
+func recordBlobSyncs(t *testing.T, db *database.Database) *[]string {
+	t.Helper()
+	prior := syncAdoptedBlobs
+	t.Cleanup(func() { syncAdoptedBlobs = prior })
+	var events []string
+	syncAdoptedBlobs = func(d *database.Database) error {
+		_, pending, err := db.ImmutableAdoptPending()
+		require.NoError(t, err)
+		events = append(events, fmt.Sprintf("sync pending=%t", pending))
+		return prior(d)
+	}
+	return &events
+}
+
+// Not t.Parallel: swaps the package-level syncAdoptedBlobs seam.
+//
+// The recorded tip that covers a group's files is a blob-store write, durable
+// only once the blob store syncs. The adopt record must outlive that sync, or a
+// crash between them leaves moved files past a lost tip with nothing to stop
+// reconciliation cutting them.
+func TestAdoptImmutableChunksKeepsRecordUntilBlobSync(t *testing.T) {
+	ctx := context.Background()
+	dir, digests := adoptSource(t, 2)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+	events := recordBlobSyncs(t, db)
+
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnChunkCommitted = func(uint64) error {
+			_, pending, err := db.ImmutableAdoptPending()
+			require.NoError(t, err)
+			*events = append(
+				*events,
+				fmt.Sprintf("committed pending=%t", pending),
+			)
+			return nil
+		}
+	})
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"sync pending=true", "committed pending=false"}, *events,
+		"the record is cleared after the group's blob sync")
+}
+
+// Not t.Parallel: swaps the package-level syncAdoptedBlobs seam.
+//
+// A chunk that stops after its tip was recorded, with no earlier chunk of its
+// group to finish, clears the adopt record only after a blob sync makes that
+// tip durable.
+func TestAdoptImmutableChunksStopAfterTipSyncsBeforeClear(t *testing.T) {
+	dir, digests := adoptSource(t, 2)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+	events := recordBlobSyncs(t, db)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnProgress = func(p LoadBlobsProgress) {
+			if p.BlocksCopied >= loadBlockBatchSize {
+				cancel()
+			}
+		}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []string{"sync pending=true"}, *events,
+		"the tip over chunk 0 is synced while the record still stands")
+	_, pending, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, pending, "the durable tip covers every adopted file")
+}
+
+// Not t.Parallel: swaps the package-level renameFile and syncDir seams.
+//
+// A move across file systems copies, then removes the source. The copy and its
+// directory entry must be durable first, or a crash can persist the removal
+// and lose both.
+func TestMoveChunkFileAcrossFileSystemsSyncsBeforeRemove(t *testing.T) {
+	priorRename, priorSync := renameFile, syncDir
+	t.Cleanup(func() { renameFile, syncDir = priorRename, priorSync })
+	srcDir, dstDir := t.TempDir(), t.TempDir()
+	src := filepath.Join(srcDir, "00000.chunk")
+	dst := filepath.Join(dstDir, "00000.chunk")
+	data := []byte("chunk bytes")
+	require.NoError(t, os.WriteFile(src, data, 0o600))
+
+	renameFile = func(oldpath, newpath string) error {
+		if oldpath == src {
+			return &os.LinkError{
+				Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV,
+			}
+		}
+		return priorRename(oldpath, newpath)
+	}
+	var synced []string
+	syncDir = func(d string) error {
+		if d == dstDir {
+			_, err := os.Stat(src)
+			require.NoError(t, err, "the source outlives the destination sync")
+			got, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			require.Equal(t, data, got)
+		}
+		synced = append(synced, d)
+		return priorSync(d)
+	}
+
+	require.NoError(t, moveChunkFile(src, dst))
+	require.Equal(t, []string{dstDir}, synced)
+	_, err := os.Stat(src)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	got, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
 }

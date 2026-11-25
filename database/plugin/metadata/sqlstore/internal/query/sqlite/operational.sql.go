@@ -1020,6 +1020,31 @@ func (q *Queries) DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, 
 	return err
 }
 
+const deleteTransactionOffset = `-- name: DeleteTransactionOffset :exec
+DELETE FROM transaction_offset
+WHERE hash = ?
+`
+
+func (q *Queries) DeleteTransactionOffset(ctx context.Context, hash []byte) error {
+	_, err := q.db.ExecContext(ctx, deleteTransactionOffset, hash)
+	return err
+}
+
+const deleteUtxoOffset = `-- name: DeleteUtxoOffset :exec
+DELETE FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?
+`
+
+type DeleteUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+}
+
+func (q *Queries) DeleteUtxoOffset(ctx context.Context, arg DeleteUtxoOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, deleteUtxoOffset, arg.TxID, arg.OutputIdx)
+	return err
+}
+
 const findMidnightAriadneRollbacksByBlock = `-- name: FindMidnightAriadneRollbacksByBlock :many
 SELECT id, block_number, epoch, previous_exists, previous_datum
 FROM midnight_ariadne_rollbacks
@@ -3356,6 +3381,19 @@ func (q *Queries) GetTransactionMetadataByHash(ctx context.Context, hash []byte)
 	return metadata, err
 }
 
+const getTransactionOffset = `-- name: GetTransactionOffset :one
+SELECT data
+FROM transaction_offset
+WHERE hash = ?
+`
+
+func (q *Queries) GetTransactionOffset(ctx context.Context, hash []byte) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getTransactionOffset, hash)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
 const getTransactionSlotByHash = `-- name: GetTransactionSlotByHash :one
 SELECT a.slot
 FROM "transaction" AS t
@@ -3426,6 +3464,24 @@ func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []by
 		return nil, err
 	}
 	return items, nil
+}
+
+const getUtxoOffset = `-- name: GetUtxoOffset :one
+SELECT data
+FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?
+`
+
+type GetUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+}
+
+func (q *Queries) GetUtxoOffset(ctx context.Context, arg GetUtxoOffsetParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getUtxoOffset, arg.TxID, arg.OutputIdx)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
 }
 
 const getUtxoRefsBySlot = `-- name: GetUtxoRefsBySlot :many
@@ -4651,6 +4707,39 @@ type SetTipParams struct {
 
 func (q *Queries) SetTip(ctx context.Context, arg SetTipParams) error {
 	_, err := q.db.ExecContext(ctx, setTip, arg.Hash, arg.Slot, arg.BlockNumber)
+	return err
+}
+
+const setTransactionOffset = `-- name: SetTransactionOffset :exec
+INSERT INTO transaction_offset (hash, data)
+VALUES (?, ?)
+ON CONFLICT (hash) DO UPDATE SET data = excluded.data
+`
+
+type SetTransactionOffsetParams struct {
+	Hash []byte
+	Data []byte
+}
+
+func (q *Queries) SetTransactionOffset(ctx context.Context, arg SetTransactionOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, setTransactionOffset, arg.Hash, arg.Data)
+	return err
+}
+
+const setUtxoOffset = `-- name: SetUtxoOffset :exec
+INSERT INTO utxo_offset (tx_id, output_idx, data)
+VALUES (?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO UPDATE SET data = excluded.data
+`
+
+type SetUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+	Data      []byte
+}
+
+func (q *Queries) SetUtxoOffset(ctx context.Context, arg SetUtxoOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, setUtxoOffset, arg.TxID, arg.OutputIdx, arg.Data)
 	return err
 }
 
