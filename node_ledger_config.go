@@ -120,8 +120,6 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 		// Verify validated blocks' witness signatures ahead of the apply
 		// loop. Not consensus-affecting; on by default.
 		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
-		// Core-mode batched metadata writes for blocks that are not
-		// validated. Not consensus-affecting; off by default.
 		// Start blockfetch at one range of queued headers while far from
 		// the peer tip. Not consensus-affecting; off by default.
 		BlockfetchLowWatermarkEnabled: n.config.blockfetchLowWatermarkEnabled,

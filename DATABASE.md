@@ -293,13 +293,7 @@ the position columns and runs the cleanup. Imports and recovered inputs create
 only the identity row of a producer they have to name (`transactionIdentityIDs`
 in `utxo_identity.go`) and never an application row. An output an import stored
 before its producer was applied is one row under the producer's id; applying
-the producer repairs only the collateral-return marker. The trusted-batch
-overlay writes identity and application rows with explicit ids. It reads the
-identity rows of the batch's producers when it is enabled: an imported
-producer's row is reused and only its application row is written, as the
-per-row path does. A producer that is already applied, or that produces an
-index an import already stored, is a `types.ErrBatchUtxoOverlayConflict`, which
-its caller answers by applying the batch on the per-row path.
+the producer repairs only the collateral-return marker.
 
 `"transaction".id` is `AUTOINCREMENT` on SQLite (an identity sequence on
 PostgreSQL and MySQL) and that is load-bearing: `utxo.tx_id`,
@@ -4351,9 +4345,11 @@ restore or truncate, `dingo load`, the `serve` preflight checks and the offline
 lifecycle service (`StorageDependencies.MigrateReleased`). The phase opens the
 v0.94.2 metadata store on a plugin host of its own, with the configured
 provider (on PostgreSQL or MySQL, the consensus namespace step 1 built), opens
-the v0.94.2 database over it as `database.RoleReleased`, and closes both when
-it finishes. Opening that database is what moves the node settings into
-`dingo.dbinfo` and the chain state into the block store (see below). Each step
+the v0.94.2 database over it, the block store and the opener's ImmutableDB
+provider (see "Storage provider ownership") as `database.RoleReleased`, and
+closes the database and the metadata store when it finishes. Opening that
+database is what moves the node settings into `dingo.dbinfo` and the chain
+state into the block store (see below). Each step
 resumes from the metadata store's `sync_state` rows or the set's own markers;
 the set is synced before the marker is written, and the marker is written
 last, so a stop at any step reruns the phase and every finished step finds its
@@ -5584,18 +5580,14 @@ Snapshot restore validates the staged metadata store before it atomically
 activates the restored directory. During that validation, stores that support
 deferred indexes rebuild the complete manifest idempotently. This repairs a
 backup made while a prior bulk-load cycle had removed indexes, even though its
-recorded migrations are already complete. Normal startup makes the same full
-repair when no deferred-index marker is present; an active marker still builds
-only the critical subset before traffic and leaves the lazy remainder to its
-existing deferred-rebuild path.
+recorded migrations are already complete.
 
 That rebuild runs on the restore's own context where the store implements
 `metadata.ContextDeferredIndexBuilder`, so a cancelled restore is not held for
 the length of a full index build. Every repair path names the entries it is
-about to build before starting — `metadata.MissingDeferredIndexLister` for the
-full manifest, `metadata.MissingCriticalDeferredIndexLister` for the critical
-subset — and reports the elapsed time afterwards, because the build itself
-emits nothing while it runs.
+about to build before starting, through `metadata.MissingDeferredIndexLister`,
+and reports the elapsed time afterwards, because the build itself emits nothing
+while it runs.
 
 ### Midnight Indexer
 

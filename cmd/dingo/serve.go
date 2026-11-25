@@ -109,11 +109,6 @@ func checkSyncState(
 		return fmt.Errorf("checking sync state: %w", err)
 	}
 	if val == "" || val == syncStatusBackfill {
-		// metadata_indexes_pending can still be set if a prior
-		// run dropped the deferred indexes and crashed before
-		// the rebuild. serveRun repairs it so the operator does
-		// not have to re-bootstrap just to recreate secondary
-		// indexes.
 		return nil
 	}
 	pendingRepair, err := mithril.RewardStateRepairPending(db)
