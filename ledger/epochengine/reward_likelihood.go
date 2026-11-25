@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package epochengine
 
 import (
 	"errors"
@@ -24,17 +24,19 @@ import (
 	"github.com/blinklabs-io/dingo/internal/rewardlikelihood"
 )
 
-const rewardLikelihoodSampleCount = rewardlikelihood.SampleCount
+const RewardLikelihoodSampleCount = rewardlikelihood.SampleCount
 
-func encodeRewardLikelihood(values []float32) ([]byte, error) {
+func EncodeRewardLikelihood(values []float32) ([]byte, error) {
 	return rewardlikelihood.Encode(values)
 }
 
-func decodeRewardLikelihood(data []byte) ([]float32, error) {
+func DecodeRewardLikelihood(data []byte) ([]float32, error) {
 	return rewardlikelihood.Decode(data)
 }
 
-func rewardLeaderProbability(activeSlotsCoeff, relativeStake, decentralization float64) float64 {
+func RewardLeaderProbability(
+	activeSlotsCoeff, relativeStake, decentralization float64,
+) float64 {
 	return rewardlikelihood.LeaderProbability(
 		activeSlotsCoeff,
 		relativeStake,
@@ -42,7 +44,7 @@ func rewardLeaderProbability(activeSlotsCoeff, relativeStake, decentralization f
 	)
 }
 
-func rewardPoolLikelihood(
+func RewardPoolLikelihood(
 	blocks uint64,
 	slots uint64,
 	leaderProbability float64,
@@ -50,11 +52,11 @@ func rewardPoolLikelihood(
 	return rewardlikelihood.Pool(blocks, slots, leaderProbability)
 }
 
-func combineRewardLikelihood(previous, current []float32) ([]float32, error) {
+func CombineRewardLikelihood(previous, current []float32) ([]float32, error) {
 	return rewardlikelihood.Combine(previous, current)
 }
 
-func rewardPerformanceEstimate(likelihood []float32) (float64, error) {
+func RewardPerformanceEstimate(likelihood []float32) (float64, error) {
 	return rewardlikelihood.Performance(likelihood)
 }
 
@@ -63,28 +65,28 @@ func rewardRatFloat64(r interface{ Float64() (float64, bool) }) float64 {
 	return value
 }
 
-func rewardLikelihoodHistoryComplete(
+func RewardLikelihoodHistoryComplete(
 	previous *models.RewardLikelihoodState,
 	epoch uint64,
-	epochs stakeRewardEpochs,
+	epochs StakeRewardEpochs,
 ) bool {
 	if previous != nil {
 		return previous.Complete
 	}
 	return epoch == 1 ||
-		(epochs.bootstrap && epochs.snapshot == epochs.pots)
+		(epochs.Bootstrap && epochs.Snapshot == epochs.Pots)
 }
 
-func (ls *LedgerState) saveRewardLikelihoodForApplication(
-	app *stakeRewardApplication,
+func (e *Engine) SaveRewardLikelihoodForApplication(
+	app *StakeRewardApplication,
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) error {
 	if app == nil {
 		return errors.New("save reward likelihood: application is nil")
 	}
-	ldb := ls.rewardLikelihoodDB()
-	epoch := app.epochs.pots + 1
+	ldb := e.host.RewardLikelihoodDB()
+	epoch := app.Epochs.Pots + 1
 	previousState, err := ldb.GetRewardLikelihoodStateBeforeEpoch(epoch, txn)
 	if err != nil {
 		return fmt.Errorf("get previous reward likelihood state: %w", err)
@@ -96,57 +98,65 @@ func (ls *LedgerState) saveRewardLikelihoodForApplication(
 			return fmt.Errorf("get previous reward pool likelihoods: %w", err)
 		}
 		for _, row := range rows {
-			values, err := decodeRewardLikelihood(row.LogWeights)
+			values, err := DecodeRewardLikelihood(row.LogWeights)
 			if err != nil {
-				return fmt.Errorf("decode likelihood for pool %x: %w", row.PoolKeyHash, err)
+				return fmt.Errorf(
+					"decode likelihood for pool %x: %w",
+					row.PoolKeyHash,
+					err,
+				)
 			}
 			previous[string(row.PoolKeyHash)] = values
 		}
 	}
-	activeSlotsCoeff := rewardRatFloat64(app.params.ActiveSlotsCoeff)
-	decentralization := rewardRatFloat64(app.params.Decentralization)
-	rows := make([]*models.RewardPoolLikelihood, 0, len(app.likelihoodPoolInputs))
-	for _, pool := range app.likelihoodPoolInputs {
+	activeSlotsCoeff := rewardRatFloat64(app.Params.ActiveSlotsCoeff)
+	decentralization := rewardRatFloat64(app.Params.Decentralization)
+	rows := make(
+		[]*models.RewardPoolLikelihood,
+		0,
+		len(app.LikelihoodPoolInputs),
+	)
+	for _, pool := range app.LikelihoodPoolInputs {
 		if pool == nil {
 			continue
 		}
 		relativeStake := 0.0
-		if app.totalCirculation != 0 {
+		if app.TotalCirculation != 0 {
 			relativeStake = float64(pool.DelegatedStake) /
-				float64(app.totalCirculation)
+				float64(app.TotalCirculation)
 		}
-		probability := rewardLeaderProbability(
+		probability := RewardLeaderProbability(
 			activeSlotsCoeff,
 			relativeStake,
 			decentralization,
 		)
-		blocks := app.likelihoodBlockCounts[string(pool.PoolKeyHash)]
-		if blocks > app.params.EpochLength {
+		blocks := app.LikelihoodBlockCounts[string(pool.PoolKeyHash)]
+		if blocks > app.Params.EpochLength {
 			return fmt.Errorf(
 				"reward likelihood for pool %x: %d blocks exceed %d epoch slots",
 				pool.PoolKeyHash,
 				blocks,
-				app.params.EpochLength,
+				app.Params.EpochLength,
 			)
 		}
-		current := rewardPoolLikelihood(
+		current := RewardPoolLikelihood(
 			blocks,
-			app.params.EpochLength,
+			app.Params.EpochLength,
 			probability,
 		)
 		old := previous[string(pool.PoolKeyHash)]
 		if old == nil {
-			old = make([]float32, rewardLikelihoodSampleCount)
+			old = make([]float32, RewardLikelihoodSampleCount)
 		}
-		combined, err := combineRewardLikelihood(old, current)
+		combined, err := CombineRewardLikelihood(old, current)
 		if err != nil {
 			return err
 		}
-		encoded, err := encodeRewardLikelihood(combined)
+		encoded, err := EncodeRewardLikelihood(combined)
 		if err != nil {
 			return err
 		}
-		estimate, err := rewardPerformanceEstimate(combined)
+		estimate, err := RewardPerformanceEstimate(combined)
 		if err != nil {
 			return err
 		}
@@ -159,13 +169,13 @@ func (ls *LedgerState) saveRewardLikelihoodForApplication(
 	}
 	state := &models.RewardLikelihoodState{
 		Epoch:        epoch,
-		RewardPot:    types.Uint64(app.availableRewards),
-		CapturedSlot: app.pots.CapturedSlot,
+		RewardPot:    types.Uint64(app.AvailableRewards),
+		CapturedSlot: app.Pots.CapturedSlot,
 		BoundarySlot: boundarySlot,
-		Complete: rewardLikelihoodHistoryComplete(
+		Complete: RewardLikelihoodHistoryComplete(
 			previousState,
 			epoch,
-			app.epochs,
+			app.Epochs,
 		),
 	}
 	if err := ldb.SaveRewardLikelihoodState(state, rows, txn); err != nil {

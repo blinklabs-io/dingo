@@ -65,7 +65,7 @@ var CuratedBenchmarks = []string{
 
 	// Query latency. Each of these seeds the record it queries from the
 	// immutable fixture and fails if the query does not hit, so a
-	// benchcheck delta here is a query-cost change rather than a miss
+	// benchmark-check delta here is a query-cost change rather than a miss
 	// timed under a RealData name (ledger/benchmark_test.go).
 	"BenchmarkUtxoLookupByAddressRealData",
 	"BenchmarkUtxoLookupByRefRealData",
@@ -106,7 +106,7 @@ var LockContentionBenchmarks = []string{
 // TrackedBenchmarks is the full set of benchmarks compared for CI regression
 // detection: CuratedBenchmarks plus LockContentionBenchmarks. The Makefile
 // bench-ci target concatenates both `go test` invocations' output into a
-// single run file, so benchcheck compares against this combined list.
+// single run file, so the weekly check compares against this combined list.
 var TrackedBenchmarks = append(
 	append([]string{}, CuratedBenchmarks...),
 	LockContentionBenchmarks...,

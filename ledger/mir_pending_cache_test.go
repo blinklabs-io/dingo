@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -72,7 +73,7 @@ func mirTestCredential(credType uint, seed byte) lcommon.Credential {
 func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 	t.Parallel()
 	ls, db, _ := newMIRTestLedger(t)
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 			{Credential: mirCred28(2), Amount: big.NewInt(6)},
@@ -84,7 +85,7 @@ func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 		lv.onMIRCertsLoad = func() { loads++ }
 		for i := range 50 {
 			_, err := lv.PendingInstantaneousRewards(
-				mirPotReserves, mirTestCredential(0, byte(1+i%3)),
+				epochengine.MIRPotReserves, mirTestCredential(0, byte(1+i%3)),
 			)
 			require.NoError(t, err)
 		}
@@ -96,11 +97,11 @@ func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 	t.Parallel()
 	ls, db, _ := newMIRTestLedger(t)
-	seedMIRDistribution(t, db, mirPotReserves, 50,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 50,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(1_000)},
 		})
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 			{Credential: mirCred28(2), Amount: big.NewInt(20)},
@@ -109,15 +110,15 @@ func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 				Amount: big.NewInt(30),
 			},
 		})
-	seedMIRDistribution(t, db, mirPotReserves, 160,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(7)},
 		})
-	seedMIRDistribution(t, db, mirPotTreasury, 170,
+	seedMIRDistribution(t, db, epochengine.MIRPotTreasury, 170,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(100)},
 		})
-	seedMIRPotTransfer(t, db, mirPotTreasury, 999, 180)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotTreasury, 999, 180)
 	creds := []lcommon.Credential{
 		mirTestCredential(0, 1),
 		mirTestCredential(0, 2),
@@ -128,7 +129,7 @@ func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := mirReaderView(ls, txn, 100, 5)
-		for _, pot := range []uint{mirPotReserves, mirPotTreasury, 2} {
+		for _, pot := range []uint{epochengine.MIRPotReserves, epochengine.MIRPotTreasury, 2} {
 			for _, cred := range creds {
 				want := uncachedPendingInstantaneousRewards(
 					t, ls, txn, 100, pot, cred,
@@ -166,18 +167,18 @@ func TestLedgerViewPendingInstantaneousRewardsSeesLaterStoredCert(t *testing.T) 
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			lv := mirReaderView(ls, txn, 100, 5)
 			var err error
-			got, err = lv.PendingInstantaneousRewards(mirPotReserves, cred)
+			got, err = lv.PendingInstantaneousRewards(epochengine.MIRPotReserves, cred)
 			return err
 		}))
 		return got
 	}
 	require.Nil(t, read())
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(10)},
 		})
 	require.Zero(t, big.NewInt(10).Cmp(read()))
-	seedMIRDistribution(t, db, mirPotReserves, 160,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 160,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: mirCred28(1), Amount: big.NewInt(5)},
 		})
