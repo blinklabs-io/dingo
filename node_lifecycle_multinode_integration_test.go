@@ -222,6 +222,9 @@ func newDevnetForgerNode(
 		WithCardanoNodeConfig(cardanoCfg),
 		WithListeners(ListenerConfig{Listener: ln}),
 		WithShutdownTimeout(5*time.Second),
+		// UTxO RPC starts on core nodes at a fixed default port, which the
+		// two nodes in this process would both claim.
+		WithUtxorpcPort(0),
 		WithBlockProducer(true),
 		WithShelleyVRFKey(vrfPath),
 		WithShelleyKESKey(kesPath),
@@ -264,6 +267,7 @@ func newDevnetSyncNode(
 			},
 		}),
 		WithShutdownTimeout(5*time.Second),
+		WithUtxorpcPort(0),
 	)
 	n, err := New(cfg)
 	require.NoError(t, err)
@@ -272,12 +276,20 @@ func newDevnetSyncNode(
 
 // runNodeInBackground starts n.Run in a goroutine and registers cleanup to
 // stop it, mirroring how cmd/dingo actually runs a node (Run blocks until
-// shutdown).
+// shutdown). A Run that returns before cleanup fails the test with its
+// error, so a startup failure is reported as itself rather than as a later
+// wait timing out.
 func runNodeInBackground(t *testing.T, n *Node) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- n.Run(ctx) }()
+	go func() {
+		err := n.Run(ctx)
+		if ctx.Err() == nil {
+			t.Errorf("node Run returned before cleanup: %v", err)
+		}
+		done <- err
+	}()
 	t.Cleanup(func() {
 		cancel()
 		_ = n.Stop()
@@ -349,6 +361,9 @@ func startTwoNodeDevnet(
 func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 	t.Helper()
 	require.Eventually(t, func() bool {
+		if t.Failed() {
+			return true
+		}
 		n.liveLifecycleMu.Lock()
 		db := n.db
 		n.liveLifecycleMu.Unlock()
@@ -361,6 +376,9 @@ func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 		}
 		return tip.Point.Slot >= minSlot
 	}, liveNodeSyncTimeout, 20*time.Millisecond)
+	if t.Failed() {
+		t.FailNow()
+	}
 }
 
 // requireInboundListenerAcceptsConnections dials ln's own resolved address
