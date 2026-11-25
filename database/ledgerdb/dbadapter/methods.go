@@ -531,18 +531,6 @@ func (a Adapter) DeleteRewardOutputsForEpoch(
 	return a.db.Metadata().DeleteRewardOutputsForEpoch(epoch, metaTxn(txn))
 }
 
-func (a Adapter) DeleteRewardStakeInputBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	if err := a.requireMetadata(nodesettings.FamilyRewardInputs); err != nil {
-		return err
-	}
-	return a.db.Metadata().
-		DeleteRewardStakeInputBeforeEpoch(ctx, epoch, metaTxn(txn))
-}
-
 func (a Adapter) DeleteRewardStateBeforeEpoch(
 	ctx context.Context,
 	epoch uint64,

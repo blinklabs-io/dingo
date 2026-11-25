@@ -352,7 +352,7 @@ func IsPreStakingEpoch(network string, epoch uint64) bool {
 // (ledger/snapshot/rotation.go's saveSnapshotInTxn, called with
 // epoch=evt.NewEpoch), while the same row's DelegatedStake/DelegatorCount are
 // the "go" stake distribution reward_calculation.go's
-// stakeRewardEpochsForNewEpoch actually consumes one epoch later, at
+// StakeRewardEpochsForNewEpoch actually consumes one epoch later, at
 // epochs.snapshot = epochs.performance - 1 (performance being the true,
 // unambiguous calendar epoch whose blocks are being measured — the same
 // epoch Koios reports the corresponding pool_history/epoch_info row under).
@@ -582,6 +582,19 @@ func checkEpoch(
 			Status:        StatusPass,
 			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
+	}
+
+	if result, err := prunedEpochResult(
+		ctx, dingo, network, epoch, accountsEnabled,
+	); result != nil || err != nil {
+		return result, err
+	}
+	if retention, ok := dingo.(rewardRetention); ok {
+		if _, err := waitForHistory(ctx, func() (struct{}, error) {
+			return struct{}{}, retention.rewardHistoryReady(ctx, epoch)
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	var allMismatches []CheckMismatch
@@ -1140,6 +1153,15 @@ func checkEpoch(
 	}
 	status := MergeCheckStatus(aggregateStatus, accountStatus)
 
+	// The LedgerDB's retention floor only rises, so a floor still at or below
+	// the stake epoch now was there for every read above: none of them saw a
+	// partly pruned epoch.
+	if result, err := prunedEpochResult(
+		ctx, dingo, network, epoch, accountsEnabled,
+	); result != nil || err != nil {
+		return result, err
+	}
+
 	// Every fallible read above has already succeeded by this point, so it's
 	// safe to replace prior evidence now. CommitEpochMismatches deletes and
 	// (re)inserts in one transaction: if the insert fails partway through,
@@ -1239,7 +1261,7 @@ func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
 // stakeEpoch is the Dingo epoch reward_account_output rows for Koios
 // reporting epoch `epoch` actually live under — the same koiosStakeEpoch
 // (K-1) offset reward_pool_output already uses, since both are written from
-// app.epochs.snapshot in the same ledger/reward_calculation.go call (see
+// app.epochs.snapshot in the same ledger/epochengine/reward_calculation.go call (see
 // koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
 // section).
 func compareEpochAccounts(
@@ -1433,7 +1455,7 @@ func compareEpochAccounts(
 // ledger actually credited.
 //
 // reward_account_output records every reward the calculation produced,
-// credited or not. The ledger's own application (ledger/reward_calculation.go)
+// credited or not. The ledger's own application (ledger/epochengine/reward_calculation.go)
 // skips a reward that is not spendable and one whose reward account is guarded
 // by CIP-0163 expiry, so neither ever reaches an account balance and Koios
 // never reports either. Comparing them makes Dingo look like it paid a reward
@@ -1584,20 +1606,25 @@ func accountLifecycleMismatches(
 		// tests) pass nil rather than a throwaway source implementation.
 		return out
 	}
-	if _, prunable := dingo.(*DatabaseSource); prunable {
-		// DatabaseSource (the in-process observer's reward source) reads
-		// reward_account_output through core-mode's rolling pruning window
-		// (see DatabaseSource.GetRewardAccountOutputs) and cannot
-		// distinguish "the previous stake epoch genuinely had no reward
-		// accounts" from "its rows have since been pruned" — an empty,
-		// error-free result either way. Treating a pruned-empty result as a
-		// complete previous-epoch universe would make every account in the
-		// current epoch look newly registered. Only *DingoDB (the
-		// standalone CLI's full, unpruned copy) can be trusted for this
-		// diff; skip it entirely for a prunable source rather than report a
-		// false lifecycle signal. Zero-reward reporting above is unaffected
-		// — it doesn't depend on any historical epoch's data.
-		return out
+	if retention, ok := dingo.(rewardRetention); ok {
+		// A source with a retention window cannot tell "the previous stake
+		// epoch had no reward accounts" from "its rows were pruned": both
+		// read back empty, and an empty previous universe would make every
+		// current account look newly registered.
+		_, bounded, err := retention.RewardStateRetainedFrom(ctx)
+		if err != nil {
+			return append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "reward_account_output",
+				DingoValue: fmt.Sprintf("error: %v", err),
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+		}
+		if bounded {
+			return out
+		}
 	}
 	previousOutputs, err := dingo.GetRewardAccountOutputs(ctx, stakeEpoch-1)
 	if err != nil {
@@ -1761,6 +1788,64 @@ func aggregateAccountLifecycleMismatchCount(
 	}
 }
 
+// rewardRetention is implemented by a source whose reward state is kept only
+// for a window behind the tip, or is filled behind the ledger.
+type rewardRetention interface {
+	RewardStateRetainedFrom(
+		ctx context.Context,
+	) (epoch uint64, bounded bool, err error)
+	rewardHistoryReady(ctx context.Context, epoch uint64) error
+}
+
+// prunedEpochResult returns a NOT_CHECKED result when source has pruned the
+// reward state a check of epoch reads, and nil when the check can run. An
+// epoch below the node's earliest available one is left to checkEpoch, which
+// passes it as having nothing to compare.
+func prunedEpochResult(
+	ctx context.Context,
+	source RewardParitySource,
+	network string,
+	epoch uint64,
+	accountsEnabled bool,
+) (*EpochCompareResult, error) {
+	retention, ok := source.(rewardRetention)
+	if !ok {
+		return nil, nil
+	}
+	stakeEpoch, hasStakeEpoch := koiosStakeEpoch(network, epoch)
+	if !hasStakeEpoch {
+		return nil, nil
+	}
+	earliest, haveEarliest, err := source.GetEarliestAvailableEpoch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get earliest available epoch: %w", err)
+	}
+	if haveEarliest && epoch < earliest {
+		return nil, nil
+	}
+	retainedFrom, bounded, err := retention.RewardStateRetainedFrom(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reward state retention: %w", err)
+	}
+	if !bounded || stakeEpoch >= retainedFrom {
+		return nil, nil
+	}
+	return &EpochCompareResult{
+		Network:          network,
+		Epoch:            epoch,
+		Status:           StatusNotChecked,
+		CheckedScopes:    checkedScopes(accountsEnabled),
+		NotCheckedReason: NotCheckedRewardStatePruned,
+	}, nil
+}
+
+// historyPending reports whether err is a read of an IndexerDB that has not
+// reached the epoch yet.
+func historyPending(err error) bool {
+	return errors.Is(err, ErrTransactionHistoryPending) ||
+		errors.Is(err, ErrRewardHistoryPending)
+}
+
 // transactionHistoryPoll and transactionHistoryWait bound how long a check
 // waits for the IndexerDB to index the epoch it samples. At an epoch boundary
 // the IndexerDB usually trails the ledger by seconds to minutes; waiting here
@@ -1782,8 +1867,7 @@ func waitForHistory[T any](
 	deadline := time.Now().Add(transactionHistoryWait)
 	for {
 		v, err := read()
-		if !errors.Is(err, ErrTransactionHistoryPending) ||
-			!time.Now().Before(deadline) {
+		if !historyPending(err) || !time.Now().Before(deadline) {
 			return v, err
 		}
 		timer := time.NewTimer(transactionHistoryPoll)

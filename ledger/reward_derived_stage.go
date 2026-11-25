@@ -25,16 +25,17 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // RewardPrecomputeCursorKey is the sync_state key of the precompute cursor of
 // a snapshot epoch.
 func RewardPrecomputeCursorKey(snapshotEpoch uint64) string {
-	return rewardPrecomputeCursorKey(snapshotEpoch)
+	return epochengine.RewardPrecomputeCursorKey(snapshotEpoch)
 }
 
 func isRewardCursorKey(key string) bool {
-	return strings.HasPrefix(key, rewardPrecomputeCursorPrefix)
+	return strings.HasPrefix(key, models.RewardPrecomputeCursorPrefix)
 }
 
 // rewardOutputsServed returns the configured set reader or an error when the
@@ -204,7 +205,7 @@ func (s stagingLedgerDB) cursorRead(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, bool, error) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return "", false, nil
 	}
@@ -220,7 +221,7 @@ func (s stagingLedgerDB) cursorWrite(
 	key, value string,
 	txn ledgerdb.Txn,
 ) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return
 	}

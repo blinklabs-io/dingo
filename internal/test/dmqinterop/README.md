@@ -18,8 +18,9 @@ waiting for the devnet's second epoch change. `run.sh`:
 1. downloads a dmq-node release and checks its SHA-256 against the one the
    release publishes (`DMQ_NODE_VERSION`, default 0.7.2.1; the Linux binary
    runs in a container, never on the host);
-2. builds Linux builds of Dingo and of `dmq-submit`, a small client that
-   submits a message to a dmq-node local socket;
+2. builds Linux builds of Dingo and of this package's test binary, whose
+   `TestSubmitHelper` submits a message to a dmq-node local socket from inside
+   the container;
 3. starts Dingo's single-node devnet (network magic 42) and dmq-node in one
    container, with dmq-node using the devnet as its Cardano node, so the
    devnet pool's stake is the real thing dmq-node checks;

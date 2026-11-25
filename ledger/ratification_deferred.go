@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -27,31 +26,21 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // pendingRatificationSyncKey names the record of a boundary whose RATIFY
-// decision or mark snapshot has not been written yet. The boundary
-// transaction writes it; whichever of the background job or the next boundary
-// writes them deletes it in the same transaction. The LedgerDB set keeps it,
-// journaled at the boundary's slot.
+// decision or mark snapshot has not been written yet. The LedgerDB set keeps
+// it, journaled at the boundary's slot.
 const pendingRatificationSyncKey = database.PendingRatificationSyncKey
 
-type pendingRatificationRecord struct {
-	Epoch        uint64 `json:"epoch"`
-	BoundarySlot uint64 `json:"boundary_slot"`
-	ID           uint64 `json:"id"`
-	// Snapshot is set when the boundary left mark[Epoch] to the job.
-	Snapshot bool `json:"snapshot,omitempty"`
-}
+type pendingRatificationRecord = epochengine.PendingRatificationRecord
 
 // DeferredBoundarySnapshot is a boundary's mark snapshot prepared on a read
 // transaction pinned at the boundary's commit, written through another.
-type DeferredBoundarySnapshot interface {
-	SPOStakeRows() []*models.PoolStakeSnapshot
-	Write(txn ledgerdb.Txn) error
-}
+type DeferredBoundarySnapshot = epochengine.DeferredBoundarySnapshot
 
 // ratificationJob builds one boundary's deferred mark snapshot and decides its
 // RATIFY on a read transaction pinned at that boundary's commit.
@@ -78,18 +67,7 @@ func loadPendingRatification(
 	ldb ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 ) (*pendingRatificationRecord, error) {
-	raw, err := ldb.GetSyncState(pendingRatificationSyncKey, txn)
-	if err != nil {
-		return nil, err
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	var rec pendingRatificationRecord
-	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
-		return nil, fmt.Errorf("decode pending ratification: %w", err)
-	}
-	return &rec, nil
+	return epochengine.LoadPendingRatification(ldb, txn)
 }
 
 // deferBoundaryJob records the boundary's pending work in its transaction
@@ -108,13 +86,7 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 		ID:           ls.ratificationSeq.Add(1),
 		Snapshot:     snapshotEvt != nil,
 	}
-	raw, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("encode pending ratification: %w", err)
-	}
-	if err := ls.ledgerDB().SetSyncState(
-		pendingRatificationSyncKey, string(raw), txn,
-	); err != nil {
+	if err := ls.engine().SavePendingRatification(txn, rec); err != nil {
 		return err
 	}
 	job := &ratificationJob{
@@ -177,12 +149,11 @@ func (ls *LedgerState) runRatificationJob(ctx context.Context,
 		prepared, err = ls.prepareDeferredBoundarySnapshot(
 			snapshot, *job.snapshotEvt,
 		)
-		if err == nil && job.plan != nil {
-			job.plan.SetBoundarySPOState(spoVotingState(prepared.SPOStakeRows()))
-		}
 	}
 	if err == nil && job.plan != nil {
-		decision, err = job.plan.Decide(ctx, snapshot)
+		decision, err = ls.engine().DecideRatification(
+			ctx, snapshot, job.plan, prepared,
+		)
 	}
 	snapshot.Release()
 	ls.ratificationMu.Lock()
@@ -267,36 +238,21 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 	job *ratificationJob,
 	validationOnly bool,
 ) error {
-	rec, err := loadPendingRatification(ls.ledgerDB(), txn)
-	if err != nil {
-		return err
+	var takeStakeInputs func(ledgerdb.Txn) error
+	if !validationOnly {
+		takeStakeInputs = ls.takeDeferredRewardStakeInputs
 	}
-	if rec == nil || *rec != job.record {
-		return nil
-	}
-	if job.snapshot != nil {
-		if err := job.snapshot.Write(txn); err != nil {
-			return fmt.Errorf(
-				"write mark snapshot for epoch %d: %w", rec.Epoch, err,
-			)
-		}
-		if !validationOnly {
-			if err := ls.takeDeferredRewardStakeInputs(txn); err != nil {
-				return fmt.Errorf(
-					"stage reward stake inputs for epoch %d: %w",
-					rec.Epoch, err,
-				)
-			}
-		}
-	}
-	if job.plan != nil {
-		if _, err := job.plan.Apply(ctx, job.decision, txn); err != nil {
-			return fmt.Errorf(
-				"apply ratification for epoch %d: %w", rec.Epoch, err,
-			)
-		}
-	}
-	if err := ls.ledgerDB().DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
+	applied, err := ls.engine().ApplyDecidedRatification(
+		ctx, txn,
+		epochengine.DecidedRatification{
+			Record:   job.record,
+			Plan:     job.plan,
+			Decision: job.decision,
+			Snapshot: job.snapshot,
+		},
+		takeStakeInputs,
+	)
+	if err != nil || !applied {
 		return err
 	}
 	txn.AfterCommit(job.settle)
@@ -610,14 +566,4 @@ func (ls *LedgerState) prepareDeferredBoundarySnapshot(
 		return nil, fmt.Errorf("prepare mark snapshot: %w", err)
 	}
 	return prepared, nil
-}
-
-func spoVotingState(
-	rows []*models.PoolStakeSnapshot,
-) *governance.SPOVotingState {
-	var total uint64
-	for _, r := range rows {
-		total += uint64(r.TotalStake)
-	}
-	return &governance.SPOVotingState{Dist: rows, TotalStake: total}
 }

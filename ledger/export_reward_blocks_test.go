@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -374,7 +375,7 @@ func NewRewardBlocksScenarioForTest(
 				{PoolKeyHash: poolA}, {PoolKeyHash: poolB},
 				{PoolKeyHash: poolIdle},
 			}
-			return h.ls.rewardBlockCounts(
+			return h.ls.engine().RewardBlockCounts(
 				h.ls.LedgerDB(), nil, epoch, inputs,
 			)
 		},
@@ -570,7 +571,7 @@ func readOutputs(ldb ledgerdb.LedgerDB, epoch uint64) RewardOutputsAnswer {
 	if a.Accounts, a.Err = ldb.GetRewardAccountOutputs(epoch, nil); a.Err != nil {
 		return a
 	}
-	if a.Cursor, a.Err = ldb.GetSyncState(rewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
+	if a.Cursor, a.Err = ldb.GetSyncState(epochengine.RewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
 		return a
 	}
 	a.Rounds, a.Err = ldb.GetPendingRewardCreditRounds(nil)

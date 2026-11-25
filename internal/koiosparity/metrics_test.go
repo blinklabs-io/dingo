@@ -97,7 +97,7 @@ func TestNewMetricsReusesCollectorsOnReregistration(t *testing.T) {
 	})
 
 	expected := `
-# HELP dingo_koiosparity_epoch_result_total koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)
+# HELP dingo_koiosparity_epoch_result_total koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error/not_checked)
 # TYPE dingo_koiosparity_epoch_result_total counter
 dingo_koiosparity_epoch_result_total{queue="aggregate",status="pass"} 2
 `
