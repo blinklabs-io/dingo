@@ -411,10 +411,11 @@ func TestEventAckDetachesClientThatStopsReading(t *testing.T) {
 	waitActive(t, f, 0)
 }
 
-// appendBlockingBatch fills a 64-slot ring with 1 MiB events under one lock,
-// so the handler reads them as a single batch. A client that does not read
-// cannot take 64 MiB, so Send blocks part-way through that batch, before the
-// handler can return to its lag check.
+// appendBlockingBatch fills a 64-slot ring under one lock, so the handler reads
+// it as a single batch. The small first event reaches the client promptly and
+// proves that batch is in flight. A client that stops there cannot take the
+// remaining 63 MiB, so Send blocks before the handler can return to its lag
+// check.
 func appendBlockingBatch(f *eventFixture) {
 	// Random bytes: the stream is gzip-compressed, so zeros would shrink to
 	// nothing and never fill the window.
@@ -423,7 +424,8 @@ func appendBlockingBatch(f *eventFixture) {
 	payload := &anypb.Any{TypeUrl: "type.test/blob", Value: blob}
 	f.hub.mu.Lock()
 	defer f.hub.mu.Unlock()
-	for range 64 {
+	f.hub.appendLocked(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+	for range 63 {
 		f.hub.appendLocked(&eventv1alpha1.Event{
 			EventType: eventtype.PeerChurn,
 			TypedData: payload,
