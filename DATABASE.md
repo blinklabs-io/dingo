@@ -2868,7 +2868,23 @@ Validation reads the set alone. Every key
 tag and marker is declared once, in `database/ledgerdb/badgerutxo/keys.go`;
 `TestKeyFamiliesDoNotOverlap` fails when two families share a first byte or a
 key is a prefix of another, and the bytes are persisted in existing stores, so
-they never change. A read inside an open write transaction sees that transaction's staged
+they never change. The set keeps an output index under the marker namespace
+(`mai <body> <txid:32> <index:4 BE>`, no value): a payment credential body
+(`p` + 28 bytes; the whole address `a` + bytes for an address with no payment
+credential), a stake credential body (`s` + 28 bytes) and an inline datum hash
+body (`d` + 32 bytes), each derived from the output's CBOR by
+`ledger.UtxoIndexBodies`. Every write of an output row writes or deletes its
+index rows in the same Badger transaction (apply, remove and rollback replay),
+and a bootstrap writes them in the write batch that writes the outputs, so the
+index follows the journal and a bootstrap drops it with the outputs. A reader loads the output an index row names and never trusts the row
+alone. A set from before the index is indexed when it opens, before the ledger
+follows the chain: transactions of 500 outputs each write their rows and the
+last output indexed (`mxaiafter`), a stopped build resumes after it, and
+`mxaidone` marks the index complete; a resync is never required. Address reads
+use it to find the outputs of one address, stake credential or datum, and the
+UTxO RPC QueryService and MCP serve address reads of a core node from it.
+
+A read inside an open write transaction sees that transaction's staged
 changes over the set's committed state, as a SQLite read sees the
 transaction's own writes, so a multi-block commit can validate a block
 against the blocks before it.
@@ -3996,11 +4012,12 @@ Readers outside the ledger's LedgerDB:
 
 | Reader | Behavior |
 |---|---|
-| MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses and `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
+| MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses from it; on a core node it pages them from the live UTxO set (`LedgerState.UtxosByAddressBoundedPage`). On a node with an IndexerDB, `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
 | `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
-| `api/mesh`, `api/utxorpc` | Read address UTxOs, datums and transaction history from the IndexerDB through `mesh.MeshDatabase` and `utxorpc.QueryDatabase`, which the node builds over it. The ledger forwards none of these reads. |
+| `api/mesh` | Reads blocks, address UTxOs and transaction history from the IndexerDB through `mesh.MeshDatabase`, which the node builds over it. |
+| `api/utxorpc` | Reads through `utxorpc.QueryDatabase`. On an API node that is the IndexerDB. On a core node, `utxorpc.NewLedgerQueryDatabase` reads UTxOs by reference and address and inline datums from the live UTxO set, and refuses a transaction lookup with `ErrQueryNeedsAPIStorage`. |
 
 ### Live UTxO set failure and recovery
 
@@ -4012,7 +4029,8 @@ Badger directory so it needs no metadata-store write and survives a restore of
 the set.
 
 A ledger commit larger than one Badger transaction is applied in several by
-`Store.ApplyLedgerBatch` (`database/ledgerdb/badgerutxo/chunk.go`). A batch
+`Store.ApplyLedgerBatch`, through `applyChunked`
+(`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
 transaction but the last leaves the tip and the nonces alone: the leading ones

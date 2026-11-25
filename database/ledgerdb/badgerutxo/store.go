@@ -86,6 +86,11 @@ type ApplyResult struct {
 type Store struct {
 	db  *badger.DB
 	agg Aggregator
+	// indexer derives the output index rows; nil keeps no index.
+	indexer Indexer
+	// afterIndexBatch observes the output index build between its
+	// transactions; an error stops it there. Only tests set it.
+	afterIndexBatch func(done int) error
 	// snap is set on a store returned by Snapshot: every read goes through
 	// its transaction and every write is refused.
 	snap *snapshot
@@ -171,6 +176,10 @@ func Open(dir string, options ...Option) (*Store, error) {
 		}
 		return txn.Set(formatKey, []byte{formatVersion})
 	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureAddressIndex(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
@@ -401,6 +410,11 @@ func (s *Store) bootstrap(
 	err := feed(func(o Output) error {
 		n++
 		s.addOutput(sums, o.Cbor, 1)
+		for _, k := range s.indexKeys(o.Ref, o.Cbor) {
+			if err := wb.Set(k, nil); err != nil {
+				return err
+			}
+		}
 		return wb.Set(utxoKey(o.Ref), o.Cbor)
 	})
 	if err != nil {
@@ -433,6 +447,9 @@ func (s *Store) bootstrap(
 			return err
 		}
 		if err := txn.Set(formatKey, []byte{formatVersion}); err != nil {
+			return err
+		}
+		if err := s.markAddressIndexed(txn); err != nil {
 			return err
 		}
 		if importing {
@@ -772,6 +789,9 @@ func (s *Store) applyLedgerTxn(
 			if err := txn.Delete(utxoKey(r)); err != nil {
 				return err
 			}
+			if err := s.deleteIndex(txn, r, v); err != nil {
+				return err
+			}
 			s.addOutput(sums, v, -1)
 			count--
 		}
@@ -782,11 +802,17 @@ func (s *Store) applyLedgerTxn(
 			}
 			if live {
 				res.Duplicate = append(res.Duplicate, o.Ref)
+				if err := s.deleteIndex(txn, o.Ref, v); err != nil {
+					return err
+				}
 				s.addOutput(sums, v, -1)
 			} else {
 				count++
 			}
 			if err := txn.Set(utxoKey(o.Ref), o.Cbor); err != nil {
+				return err
+			}
+			if err := s.setIndex(txn, o.Ref, o.Cbor); err != nil {
 				return err
 			}
 			s.addOutput(sums, o.Cbor, 1)
@@ -933,6 +959,9 @@ func (s *Store) RemoveOutputs(
 					continue
 				}
 				if err := txn.Delete(utxoKey(r)); err != nil {
+					return err
+				}
+				if err := s.deleteIndex(txn, r, v); err != nil {
 					return err
 				}
 				s.addOutput(sums, v, -1)

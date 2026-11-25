@@ -28,8 +28,9 @@ import (
 )
 
 // QueryDatabase is the store the QueryService reads UTxOs, datums and
-// transaction records from: the IndexerDB, whose tip and readiness the service
-// reports and honors. Sync, watch, submit and evaluation stay on the ledger.
+// transaction records from. An API-tier node uses the IndexerDB; a core-tier
+// node uses the ledger's live UTxO set (NewLedgerQueryDatabase). Sync, watch,
+// submit and evaluation stay on the ledger.
 type QueryDatabase interface {
 	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	TransactionByHash(
@@ -54,7 +55,7 @@ type QueryDatabase interface {
 }
 
 // indexerQueryDatabase reads UTxOs, datums and transactions from the
-// IndexerDB and reports its tip.
+// IndexerDB db, reporting store's tip and ready's readiness.
 type indexerQueryDatabase struct {
 	db    *database.Database
 	store *indexerdb.Store
@@ -114,6 +115,9 @@ func (q *indexerQueryDatabase) Tip() (ochainsync.Tip, error) {
 }
 
 func (q *indexerQueryDatabase) Ready(kind indexerdb.Kind) (bool, error) {
+	if q.ready == nil {
+		return true, nil
+	}
 	return q.ready(kind)
 }
 
@@ -148,3 +152,92 @@ func (s *queryServiceServer) queryTip() (ochainsync.Tip, error) {
 }
 
 var errIndexerNotReady = errors.New("indexer is not ready for this endpoint")
+
+// QueryLedger is the ledger state a core-tier QueryService reads: the live
+// outputs of the ledger's UTxO set by reference, by address and by inline
+// datum, and the ledger tip.
+type QueryLedger interface {
+	UtxosByRefsBounded(
+		ctx context.Context,
+		refs []models.UtxoId,
+		maxBytes int64,
+	) ([]models.Utxo, error)
+	UtxosByAddressBoundedPage(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
+	InlineDatums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
+	Tip() ochainsync.Tip
+}
+
+// ErrQueryNeedsAPIStorage refuses a query a core-tier node cannot answer: it
+// keeps only the live UTxO set, with no transaction history, which the
+// IndexerDB of api storage mode holds.
+var ErrQueryNeedsAPIStorage = errors.New(
+	"this query needs api storage mode: a core node keeps no transaction history",
+)
+
+// ledgerQueryDatabase serves a core-tier node's QueryService from the ledger.
+type ledgerQueryDatabase struct {
+	ledger QueryLedger
+}
+
+// NewLedgerQueryDatabase returns the QueryDatabase of a node without an
+// IndexerDB: reads of outputs by reference or address, of inline datums and
+// of the tip come from ledger's live UTxO set, and the ledger is always
+// ready. Outputs are ordered by reference, not by creation, and datums that
+// only a transaction witness set carried are not found. Transactions are
+// refused with ErrQueryNeedsAPIStorage.
+func NewLedgerQueryDatabase(ledger QueryLedger) QueryDatabase {
+	return &ledgerQueryDatabase{ledger: ledger}
+}
+
+func needsAPIStorage() error {
+	return connect.NewError(
+		connect.CodeFailedPrecondition,
+		ErrQueryNeedsAPIStorage,
+	)
+}
+
+func (q *ledgerQueryDatabase) Datums(
+	ctx context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	return q.ledger.InlineDatums(ctx, hashes)
+}
+
+func (q *ledgerQueryDatabase) TransactionByHash(
+	context.Context,
+	[]byte,
+) (*models.Transaction, error) {
+	return nil, needsAPIStorage()
+}
+
+func (q *ledgerQueryDatabase) UtxosByRefsBounded(
+	ctx context.Context,
+	refs []models.UtxoId,
+	maxBytes int64,
+) ([]models.Utxo, error) {
+	return q.ledger.UtxosByRefsBounded(ctx, refs, maxBytes)
+}
+
+func (q *ledgerQueryDatabase) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	query *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return q.ledger.UtxosByAddressBoundedPage(
+		ctx, query, maxCandidates, maxBytes,
+	)
+}
+
+func (q *ledgerQueryDatabase) Tip() (ochainsync.Tip, error) {
+	return q.ledger.Tip(), nil
+}
+
+func (q *ledgerQueryDatabase) Ready(indexerdb.Kind) (bool, error) {
+	return true, nil
+}

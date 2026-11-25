@@ -435,7 +435,7 @@ func nodeHealthChecks(d *dingo.Node) []health.Check {
 //
 // Two properties are covered by tests:
 //
-//  1. It is not gated on storage mode. Client API listeners require
+//  1. It is not gated on storage mode. API-tier client listeners require
 //     storageMode.IsAPI(), while health probes must remain available in core
 //     mode so an orchestrator can verify node state.
 //  2. It binds cfg.BindAddr, the address the relay and metrics listeners
@@ -656,7 +656,7 @@ func Run(
 		"mode", string(storageMode),
 		"blockfrost", apiMode && blockfrostPort > 0,
 		"kupo", apiMode && kupoPort > 0,
-		"utxorpc", apiMode && utxorpcPort > 0,
+		"utxorpc", utxorpcPort > 0,
 		"mesh", apiMode && meshPort > 0,
 		"mcp", mcpPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && apiMode,
