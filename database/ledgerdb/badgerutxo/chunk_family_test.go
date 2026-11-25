@@ -328,3 +328,73 @@ func TestEpochBoundaryBatchBeyondOneTransactionCommits(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }
+
+// Reward block ops apply after the batch's rows, as in one transaction, when
+// the ops need transactions of their own and the rows do not: a fee row a
+// row put creates takes the fees of the ops that follow it.
+func TestRewardBlockOpsBeyondOneTransactionFollowRows(t *testing.T) {
+	t.Parallel()
+	s := smallTxnStore(t)
+	bootstrap(t, s, point(1, 0x01))
+	ops := make([]badgerutxo.RewardBlockOp, 0, familyOps)
+	for i := range familyOps {
+		ops = append(ops, badgerutxo.RewardBlockOp{
+			Slot: uint64(10 + i), Epoch: 1, Fee: 1, //nolint:gosec // index
+		})
+	}
+	tip := point(10+familyOps, 0x77)
+	_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+		Rows: []badgerutxo.RowPut{{
+			Slot:  5,
+			Key:   badgerutxo.RewardBlockFeesKey(1),
+			Value: badgerutxo.EncodeRewardBlockCount(0),
+		}},
+		RewardBlocks: ops,
+	})
+	require.NoError(t, err)
+	requireTip(t, s, tip)
+	require.Equal(t, uint64(familyOps), readBlockRows(t, s, 1, nil).fees)
+}
+
+// A batch whose rows are estimated over one transaction beside its other
+// writes, with no snapshot or reward block op to move out, still applies
+// its rollback: the nonce above the rollback slot is deleted.
+func TestOverBudgetBatchWithoutOpsKeepsRollback(t *testing.T) {
+	t.Parallel()
+	for _, withChange := range []bool{true, false} {
+		s, err := badgerutxo.Open(t.TempDir())
+		require.NoError(t, err)
+		bootstrap(t, s, point(1, 0x01))
+		stale := point(15, 0x0f)
+		tip1 := point(20, 0x14)
+		_, err = s.ApplyLedgerBatch(&tip1, badgerutxo.LedgerBatch{
+			Nonces: []badgerutxo.Nonce{{Point: stale, Nonce: []byte{0xaa}}},
+		})
+		require.NoError(t, err)
+
+		const rows = 10
+		puts := make([]badgerutxo.RowPut, 0, rows)
+		for i := range rows {
+			puts = append(puts, badgerutxo.RowPut{
+				Slot: 12, Key: []byte{0xf0, byte(i)}, Value: []byte{1},
+			})
+		}
+		// The rows alone fill the budget; the family estimate adds to them.
+		s.SetBudgetForTest(2*3*rows, 1<<30)
+		rollbackTo := uint64(10)
+		tip := point(12, 0x0c)
+		batch := badgerutxo.LedgerBatch{DeleteNoncesAfter: &rollbackTo, Rows: puts}
+		if withChange {
+			batch.Changes = []badgerutxo.Change{{
+				Point: tip, Added: []badgerutxo.Output{out(3, 0)},
+			}}
+		}
+		_, err = s.ApplyLedgerBatch(&tip, batch)
+		require.NoError(t, err)
+		requireTip(t, s, tip)
+		_, ok, err := s.Nonce(stale)
+		require.NoError(t, err)
+		require.False(t, ok, "with a change: %v", withChange)
+		require.NoError(t, s.Close())
+	}
+}

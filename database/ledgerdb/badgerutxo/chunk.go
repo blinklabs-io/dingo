@@ -193,7 +193,25 @@ func (s *Store) applyChunked(
 	}
 	rowsTotal = rowsTotal.add(accountsCost(batch.Accounts)).
 		add(recordsCost(batch.RewardRecords))
-	if !rowsTotal.fits(entries, bytes) {
+	opsTotal, err := s.opsCost(batch.SnapshotOps, batch.RewardBlocks)
+	if err != nil {
+		return err
+	}
+	// Snapshot and reward block ops that do not fit beside the family rows go
+	// in transactions of their own, in order, after the batch's rollback. A
+	// delete among them runs in as many transactions as its rows need. The
+	// rows go ahead of them as well, since a reward block op reads the rows
+	// the batch wrote before it.
+	extractOps := len(batch.SnapshotOps)+len(batch.RewardBlocks) > 0
+	if extractOps {
+		stripped := stripOps(batch)
+		if !rowsTotal.fits(entries, bytes) {
+			stripped.Rows, stripped.Accounts, stripped.RewardRecords =
+				nil, nil, nil
+		}
+		extractOps = !opsTotal.add(familyCost(stripped)).fits(entries, bytes)
+	}
+	if extractOps || !rowsTotal.fits(entries, bytes) {
 		rows, leadRollback = batch.Rows, batch.DeleteNoncesAfter
 		accounts, records = batch.Accounts, batch.RewardRecords
 		batch.Rows, batch.DeleteNoncesAfter = nil, nil
@@ -202,23 +220,11 @@ func (s *Store) applyChunked(
 	var (
 		snaps  = []SnapshotOp{}
 		blocks = []RewardBlockOp{}
+		family cost
 	)
-	opsTotal, err := s.opsCost(batch.SnapshotOps, batch.RewardBlocks)
-	if err != nil {
-		return err
-	}
-	// Snapshot and reward block ops that do not fit beside the family rows go
-	// in transactions of their own, in order, after the batch's rollback. A
-	// delete among them runs in as many transactions as its rows need.
-	var family cost
-	if stripped := stripOps(batch); !opsTotal.add(familyCost(stripped)).
-		fits(entries, bytes) {
+	if extractOps {
 		snaps, blocks = batch.SnapshotOps, batch.RewardBlocks
-		if batch.DeleteNoncesAfter != nil {
-			leadRollback = batch.DeleteNoncesAfter
-		}
-		batch = stripped
-		batch.DeleteNoncesAfter = nil
+		batch = stripOps(batch)
 		family = familyCost(batch)
 	} else {
 		family = familyCost(batch).add(opsTotal)

@@ -3060,12 +3060,15 @@ epoch's prefix first, so rows the stopped attempt wrote and the new one does
 not are gone.
 
 Snapshot and reward block ops that do not fit beside the batch's other rows
-follow, in order, in transactions of their own before the last. Each is
-weighed by its writes; a snapshot delete or reward block prune by the rows it
+follow, in order, in transactions of their own before the last. The batch's
+accounts, rows and reward records then go ahead of them in transactions of
+their own too, so a reward block op reads the rows the batch wrote, as it
+does in one transaction. Each op is weighed by its writes; a snapshot delete or reward block prune by the rows it
 finds, and it deletes them in as many transactions as they need. Neither
 delete is journaled, so a stopped attempt leaves it part done and the next
 application finishes it. The other ops write state journal entries at their
-slots, which the startup rewind to the tip undoes.
+slots, which the startup rewind to the tip undoes, except snapshot puts: a
+put is not journaled, and the next application writes the same rows again.
 
 The live set computes account transitions rather than copying `account` rows.
 The store keeps
