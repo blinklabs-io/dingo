@@ -120,9 +120,11 @@ type BlobStore interface {
 // compaction happens to cover both versions, which on a node that writes a
 // few MiB an hour is weeks away.
 type SpaceReclaimer interface {
-	// ReclaimSpace forces the compaction that drops superseded versions
-	// committed before the call. It returns once the work is done and is
-	// safe to call while the store is serving reads and writes.
+	// ReclaimSpace starts the compaction that drops superseded versions
+	// committed before the call. A store may leave versions that only a
+	// rewrite of most of its data would reach to its own compaction, when
+	// they are a small share of it. It is safe to call while the store is
+	// serving reads and writes.
 	ReclaimSpace() error
 }
 

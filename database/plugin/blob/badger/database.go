@@ -357,6 +357,10 @@ type BlobStoreBadger struct {
 	gcInterval           time.Duration
 	gcDiscardRatio       float64
 	deferOpen            bool // when true, Badger is opened in Start() not New()
+	// reclaimSince is the read timestamp of the last ReclaimSpace, or the
+	// store's highest version when it opened: ReclaimSpace weighs only the
+	// versions written after it.
+	reclaimSince atomic.Uint64
 }
 
 // DetectsWriteConflicts reports that Badger rejects a transaction when a key
@@ -493,6 +497,7 @@ func (db *BlobStoreBadger) open() error {
 		}
 	}
 	db.db = blobDb
+	db.reclaimSince.Store(blobDb.MaxVersion())
 	if err := db.init(); err != nil {
 		return err
 	}
