@@ -84,6 +84,8 @@ type Querier interface {
 	DeleteRewardStakeInputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteSyncState(ctx context.Context, syncKey string) error
 	DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, slot sql.NullInt64) error
+	DeleteTransactionOffset(ctx context.Context, hash []byte) error
+	DeleteUtxoOffset(ctx context.Context, arg DeleteUtxoOffsetParams) error
 	FindMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) ([]MidnightAriadneRollback, error)
 	FindMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) ([]MidnightCandidateRemoval, error)
 	FindUnspentMidnightAssetCreates(ctx context.Context) ([]MidnightAssetCreate, error)
@@ -174,8 +176,10 @@ type Querier interface {
 	GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error)
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
 	GetTransactionMetadataByHash(ctx context.Context, hash []byte) ([]byte, error)
+	GetTransactionOffset(ctx context.Context, hash []byte) ([]byte, error)
 	GetTransactionSlotByHash(ctx context.Context, hash []byte) (sql.NullInt64, error)
 	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error)
+	GetUtxoOffset(ctx context.Context, arg GetUtxoOffsetParams) ([]byte, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
 	ImportDrep(ctx context.Context, arg ImportDrepParams) (int64, error)
@@ -218,6 +222,8 @@ type Querier interface {
 	SetPParams(ctx context.Context, arg SetPParamsParams) error
 	SetSyncState(ctx context.Context, arg SetSyncStateParams) error
 	SetTip(ctx context.Context, arg SetTipParams) error
+	SetTransactionOffset(ctx context.Context, arg SetTransactionOffsetParams) error
+	SetUtxoOffset(ctx context.Context, arg SetUtxoOffsetParams) error
 	SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot sql.NullInt64) error
 	SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error
 	SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) ([]string, error)

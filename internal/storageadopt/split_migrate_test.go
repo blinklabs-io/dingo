@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
@@ -191,6 +192,17 @@ func requireSplitStores(
 	gotTx, err := idx.Blob().GetTx(blobTxn, migrateOffsetTx)
 	require.NoError(t, err, "the IndexerDB serves the ledger's transaction entries")
 	require.Equal(t, migrateOffsetTxValue, gotTx)
+	offsets, ok := idx.Metadata().(metadata.IndexerOffsetStore)
+	require.True(t, ok)
+	storedUtxo, found, err := offsets.GetUtxoOffset(nil, migrateOffsetTx, 3)
+	require.NoError(t, err)
+	require.True(t, found, "the output entry is in the IndexerDB's own store")
+	require.Equal(t, migrateOffsetUtxoValue, storedUtxo)
+	storedTx, found, err := offsets.GetTransactionOffset(nil, migrateOffsetTx)
+	require.NoError(t, err)
+	require.True(t, found,
+		"the transaction entry is in the IndexerDB's own store")
+	require.Equal(t, migrateOffsetTxValue, storedTx)
 	deferred, err := idx.Metadata().GetSyncState(
 		indexer.DeferredStakeInputsKey, nil,
 	)

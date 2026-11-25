@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
 )
@@ -211,7 +210,11 @@ func validateIndexerMetadata(ctx context.Context, host *plugin.Host, m Manifest,
 	cfg.Role = database.RoleIndexer
 	cfg.StorageMode = "api"
 	cfg.DataDir = filepath.Join(dataDir, "indexer")
-	idx, err := database.New(ctx, &cfg, database.Stores{Metadata: store, Blob: blob.NewIndexerStore(core.Blob())})
+	blocks, err := database.NewIndexerBlobStore(core.Blob(), store)
+	if err != nil {
+		return err
+	}
+	idx, err := database.New(ctx, &cfg, database.Stores{Metadata: store, Blob: blocks})
 	if idx != nil {
 		defer idx.Close()
 	}
