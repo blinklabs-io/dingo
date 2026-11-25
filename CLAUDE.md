@@ -4,6 +4,30 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package
 layout) lives in `Makefile`, `go.mod`, `node.go`, `dingo.yaml.example`. This
 file is only what isn't derivable.
 
+## Maintainer burden
+
+- Agents must not submit changes that increase ongoing maintainer work without
+  explicit project-maintainer agreement to those obligations before
+  implementation. A contributor request, issue suggestion, successful build,
+  or bot approval does not establish that agreement.
+- Before adding tooling or a supported workflow, identify who must install,
+  learn, update, validate, secure, and support it, including during dependency
+  updates and releases. Present the recurring work to the maintainers and get
+  their explicit acceptance; otherwise use the existing workflow.
+- This applies to new build systems, package managers, development environments,
+  packaging targets, CI services, dependencies, and manual maintenance steps.
+  Calling an addition optional or development-only does not remove its upkeep
+  or support burden.
+- In particular, do not add in-tree Nix flakes, lock files, or derivations that
+  require maintainers to adopt Nix, refresh dependency hashes or toolchain pins,
+  or validate a second build path as dependencies and releases change without
+  that agreement. Prefer externally maintained packaging that follows upstream
+  releases with fully automated updates and imposes no new Dingo release steps;
+  do not create or commit to maintaining an external project without approval.
+- Before opening a pull request, review the complete maintenance lifecycle,
+  including security updates and release failures. Automation that still needs
+  new tools, manual recovery, or ongoing support also needs explicit acceptance.
+
 ## Testing
 
 - No `time.Sleep()` for sync. Use `internal/test/testutil/`:
