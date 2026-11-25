@@ -4018,8 +4018,10 @@ A ledger commit larger than one Badger transaction is applied in several by
 `Store.ApplyLedgerBatch` (`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
-transaction but the last writes UTxO changes with one journal record per
-point and leaves the tip, the nonces and the other state rows alone; the last writes the remaining changes, those rows and the
+transaction but the last leaves the tip and the nonces alone: the leading ones
+write the rows, accounts, reward records and snapshot and reward block ops too
+many for the last, and the rest write UTxO changes with one journal record per
+point; the last writes the remaining changes, the other state rows and the
 tip. The first transaction also writes the `mfailed` marker at the batch's
 first slot and the last removes it (or restores a lower mark already there),
 so a batch that stopped between transactions, by error or by crash, starts
