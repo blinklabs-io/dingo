@@ -738,3 +738,30 @@ func TestSparseBatchesKeepReadPrefixWhenContinuationFails(t *testing.T) {
 	require.NoError(t, w.CatchUp(t.Context()))
 	requireMatchesChain(t, store, chain.fakeChain)
 }
+
+// An empty IndexerDB over a block history that starts after genesis, as a
+// Mithril restore that kept only recent blocks leaves, cannot be derived: the
+// writer refuses it, and Run stops and reports it rather than retrying.
+func TestWriterRefusesABlockHistoryThatDoesNotStartAtGenesis(t *testing.T) {
+	t.Parallel()
+	chain := newFakeChain(8, "a")
+	chain.mu.Lock()
+	chain.canonical = chain.canonical[3:]
+	chain.mu.Unlock()
+	store := newTestStore(t)
+	fatal := make(chan error, 1)
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 2).
+		WithFatal(func(err error) { fatal <- err })
+
+	require.ErrorIs(t, w.CatchUp(t.Context()), ErrChainNotFromGenesis)
+	require.Empty(t, rows(t, store), "nothing is indexed past the gap")
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(t.Context()) }()
+	require.ErrorIs(t,
+		testutil.RequireReceive(t, done, 5*time.Second, "Run must stop"),
+		ErrChainNotFromGenesis)
+	require.ErrorIs(t,
+		testutil.RequireReceive(t, fatal, time.Second, "the stop is reported"),
+		ErrChainNotFromGenesis)
+}

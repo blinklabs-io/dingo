@@ -64,8 +64,6 @@ func (h deriveHost) SlotToEpoch(slot uint64) (models.Epoch, error) {
 
 func (deriveHost) StagePoolBoundary(ledgerdb.Txn, uint64, uint64) {}
 
-func (deriveHost) PublishRewardFacts(ledgerdb.Txn, uint64, uint64) {}
-
 func (deriveHost) QueueRewardCreditCompaction(context.Context) {}
 
 func (deriveHost) IncSkippedStakeRewardRounds() {}

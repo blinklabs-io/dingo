@@ -101,9 +101,6 @@ type Host interface {
 	// StagePoolBoundary records the POOLREAP boundary of newEpoch for the
 	// host's derived stores.
 	StagePoolBoundary(txn ledgerdb.Txn, newEpoch, boundarySlot uint64)
-	// PublishRewardFacts announces, after txn commits, that the reward facts
-	// of snapshotEpoch captured at slot are available.
-	PublishRewardFacts(txn ledgerdb.Txn, snapshotEpoch, slot uint64)
 	// QueueRewardCreditCompaction schedules compaction of credited rounds.
 	QueueRewardCreditCompaction(ctx context.Context)
 	// IncSkippedStakeRewardRounds counts a reward round that cannot be applied.

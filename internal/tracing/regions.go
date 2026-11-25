@@ -40,13 +40,12 @@ const (
 	// RegionIndexerReadBlocks covers the indexer reading a batch of
 	// canonical blocks from the ledger.
 	RegionIndexerReadBlocks = "dingo.indexer.read_blocks"
-	// RegionIndexerCopyFacts covers copying ledger facts for a segment.
+	// RegionIndexerCopyFacts covers deriving the ledger facts of an epoch
+	// boundary the indexer crosses.
 	RegionIndexerCopyFacts = "dingo.indexer.copy_facts"
 	// RegionIndexerIndexBlocks covers decoding a segment's blocks and
 	// writing their rows.
 	RegionIndexerIndexBlocks = "dingo.indexer.index_blocks"
-	// RegionIndexerPatchFacts covers patching ledger facts after a segment.
-	RegionIndexerPatchFacts = "dingo.indexer.patch_facts"
 	// RegionIndexerBatch covers one indexer batch transaction, rows and
 	// commit; the commit is what the stage regions inside it leave over.
 	RegionIndexerBatch = "dingo.indexer.batch"

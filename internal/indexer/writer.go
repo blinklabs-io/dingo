@@ -134,6 +134,8 @@ type Writer struct {
 	// ancestorLost is called when a rollback is refused with
 	// ErrNoRollbackAncestor.
 	ancestorLost func()
+	// fatal is called once when Run stops with ErrChainNotFromGenesis.
+	fatal func(error)
 	// failures is called after each Run pass with the number of
 	// consecutive passes that failed with the same error, zero on success.
 	failures   func(int)
@@ -200,6 +202,14 @@ func (w *Writer) WithRollbackAncestorLost(fn func()) *Writer {
 	return w
 }
 
+// WithFatal sets a function Run calls when it stops on an error that no retry
+// can clear, ErrChainNotFromGenesis, so the node can stop rather than serve
+// an IndexerDB that will never catch up.
+func (w *Writer) WithFatal(fn func(error)) *Writer {
+	w.fatal = fn
+	return w
+}
+
 // WithFailureReport sets a function called after each Run pass with the count
 // of consecutive passes that failed with the same error, and zero once a pass
 // succeeds. A batch the IndexerDB cannot take stalls the writer behind the
@@ -235,13 +245,21 @@ func (w *Writer) Wake() {
 }
 
 // Run catches up, then again after each Wake, until ctx ends. A pass that
-// fails is logged and retried with bounded backoff, or on the next wake.
+// fails is logged and retried with bounded backoff, or on the next wake,
+// except one that fails with ErrChainNotFromGenesis, which ends Run.
 func (w *Writer) Run(ctx context.Context) error {
 	var lastErr string
 	var consecutive int
 	delay := time.Second
 	for {
 		err := w.CatchUp(ctx)
+		if errors.Is(err, ErrChainNotFromGenesis) {
+			w.logger.Error("indexer cannot start", "error", err)
+			if w.fatal != nil {
+				w.fatal(err)
+			}
+			return err
+		}
 		switch {
 		case err == nil:
 			lastErr, consecutive = "", 0
@@ -280,6 +298,27 @@ func (w *Writer) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// ErrChainNotFromGenesis is returned when the IndexerDB is empty and the first
+// block the ledger's database holds is not the chain's first block, as after a
+// Mithril restore that kept only recent block history. The IndexerDB derives
+// every fact by replaying blocks from genesis, so it cannot be built without
+// the earlier blocks.
+var ErrChainNotFromGenesis = errors.New(
+	"indexer: the block history does not start at genesis, so the IndexerDB " +
+		"cannot be derived; restore a snapshot with full block history",
+)
+
+// isNullHash reports a header's previous-hash field that names no block: the
+// decoder reads a null field as the all-zero hash.
+func isNullHash(h []byte) bool {
+	for _, c := range h {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // errForked reports that the chain changed under a batch.
@@ -382,7 +421,16 @@ func (w *Writer) step(ctx context.Context) (bool, error) {
 		Hash:        last.Hash,
 	}
 	// The chain always starts at genesis: a Mithril bootstrap is replayed
-	// from the first block, never from an imported ledger state.
+	// from the first block, never from an imported ledger state. The chain's
+	// first block is a Byron block 0, or a later era's block with no previous
+	// header hash; an empty IndexerDB that starts at any other block would
+	// miss every fact the earlier blocks carry.
+	if tip.IsZero() && blocks[0].Number != 0 && !isNullHash(blocks[0].PrevHash) {
+		return false, fmt.Errorf(
+			"%w: first stored block is number %d at slot %d",
+			ErrChainNotFromGenesis, blocks[0].Number, blocks[0].Slot,
+		)
+	}
 	seed := tip.IsZero() && w.genesis != nil
 	if d, ok := w.idx.(WithdrawalDebiter); ok {
 		d.DebitWithdrawals(true)

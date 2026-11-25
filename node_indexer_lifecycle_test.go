@@ -643,26 +643,3 @@ func TestIndexerRollbackForTruncateHonoursTheUtxoSetRefusal(t *testing.T) {
 	require.ErrorContains(t, err, "journal floor")
 	requireIndexerTip(t, n, current)
 }
-
-// The writer derives reward facts from the blocks it replays, so a reward
-// round the ledger completed is no reason to wake it.
-func TestIndexerWriterDoesNotWakeForTheLedgersRewardFacts(t *testing.T) {
-	t.Parallel()
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Close()
-	writer := &lifecycleIndexerWriter{wakes: make(chan struct{}, 8)}
-	n := &Node{eventBus: bus, indexerWriter: writer}
-	require.NoError(t, n.startIndexerWriter(t.Context()))
-	defer n.stopIndexerWriter(context.Background()) //nolint:errcheck
-	testutil.RequireReceive(t, writer.wakes, 5*time.Second, "initial wake")
-	bus.Publish(ledger.RewardFactsEventType, event.NewEvent(
-		ledger.RewardFactsEventType,
-		ledger.RewardFactsEvent{SnapshotEpoch: 12, CapturedSlot: 300},
-	))
-	testutil.RequireNoReceive(
-		t,
-		writer.wakes,
-		50*time.Millisecond,
-		"reward completion wakes the writer",
-	)
-}

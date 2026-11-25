@@ -3303,8 +3303,8 @@ forging stake adapter and `LedgerState.TachysDistribution` each read a
 snapshot's pool stake and its total through one pinned view
 (`LedgerState.NewPinnedView`), so a recapture between the two reads cannot
 pair one capture's stake with another's total. The `pool_stake_snapshot`
-table the APIs read is the IndexerDB's, which its writer fills from the
-ledger's fact rows.
+table the APIs read is the IndexerDB's, whose writer derives it at each
+epoch boundary it replays.
 The ledger-state `sync_state` keys are served from the set: the protocol parameter markers, the
 reward precompute cursors, the incomplete stake input snapshots
 (`dingo:stake-reward:stake-inputs-pending`), the pending ratification record
@@ -3968,11 +3968,15 @@ goroutines, which stay a bounded number of blocks ahead of the writer; the
 writer takes each block in order, so a decode error fails the batch at its
 block.
 
-A chain imported from a Mithril snapshot has no IndexerDB anchor: the
-IndexerDB is built by replaying every block from genesis through the same loop,
-and the only trust point is the immutable tip. `indexerdb.Store.ReadyServing`
-reports not ready until the IndexerDB tip is within its lag bound of the
-ledger's. The deriver also derives the Byron-to-Shelley reserves translation,
+For a chain imported from a Mithril snapshot the IndexerDB is built the same
+way, by replaying every block from genesis through the same loop; it records
+no anchor, and the only trust point is the immutable tip. The replay needs those blocks:
+an empty IndexerDB whose first stored block is not block 0, as after a restore
+that kept only recent block history, cannot be derived, so the writer returns
+`indexer.ErrChainNotFromGenesis`, `Writer.Run` stops instead of retrying, and
+the node stops through its fatal path. `indexerdb.Store.Ready` reports
+current-state endpoints not ready until the IndexerDB tip is within its lag
+bound of the ledger's, and history endpoints ready at any tip. The deriver also derives the Byron-to-Shelley reserves translation,
 the Allegra AVVM return and CIP-0163 delegator inactivity accounting. The two
 UTxO rules are `epochengine.Engine` methods that scan the live outputs through
 `Host.IterateLiveUtxos`, which the ledger answers from its live UTxO set and
@@ -3996,8 +4000,8 @@ after the ledger database is recovered and before the ledger starts. The writer
 starts after the ledger, wakes when `ledger.tip`
 fires, and stops before the IndexerDB closes, which precedes the ledger
 database closing the blob store.
-Failed passes retry with exponential backoff from one to thirty seconds,
-without requiring another ledger event. Wakes interrupt the retry delay and
+Other failed passes retry with exponential backoff from one to thirty
+seconds, without requiring another ledger event. Wakes interrupt the retry delay and
 successful passes return to waiting for events.
 The root package cannot import `internal/node`, so the writer is injected with
 `WithIndexerWriterFactory`. The API readers sit over the IndexerDB: the Blockfrost and
@@ -17102,8 +17106,8 @@ evaluation and admission under the selector mutex, the Genesis state machine
 step, the header-verification settle wait, and ledger batch apply/commit on
 the database worker goroutine that runs it) that let an execution trace
 attribute holder time; they record only while a trace is being captured.
-The IndexerDB writer marks its block read, fact copy, block indexing, fact
-patch and whole-batch stages there too, and a context-bound `database.Txn`,
+The IndexerDB writer marks its block read, epoch-boundary derivation
+(`dingo.indexer.copy_facts`), block indexing and whole-batch stages there too, and a context-bound `database.Txn`,
 blob-only ones included, and the sqlstore transaction mark their blob and SQL
 commits. Within sqlstore, a statement served by the hot-statement cache or a
 write transaction's row-batch statement cache, and, when Prometheus metrics
@@ -17769,11 +17773,14 @@ Mithril anchor before a completed backfill has written the rows below it, or a
 range whose non-checkpoint `block_nonce` rows were pruned
 (`database.BlockHistoryRetained`), and when a cold-credential committee vote
 list meets a vote whose hot key no retained authorization maps to a cold
-credential. A votes page releases its read transaction
+credential. Only an IndexerDB adopted from a Mithril-bootstrapped v0.94.2 API
+store holds a Mithril anchor (its `mithril_ledger_slot` `sync_state` row); one the
+writer derives from the chain's first block has none, so the anchor cases never
+arise there. A votes page releases its read transaction
 before decoding the blocks that cast its votes, since each block read takes a
-pooled read connection of its own. API storage mode
-retains `reward_stake_input`, non-checkpoint `block_nonce` rows and superseded
-`auth_committee_hot` rows without bound for these endpoints; see "Snapshot and
+pooled read connection of its own. The IndexerDB these endpoints read never
+prunes `reward_stake_input`, non-checkpoint `block_nonce` rows or superseded
+`auth_committee_hot` rows, so they grow without bound; see "Snapshot and
 Reward-State Retention" and "Committee Hot-Key Authorization Retention" in
 DATABASE.md for the storage cost.
 
@@ -21002,8 +21009,9 @@ The fold takes the acquired block's own nonce rather than searching the blob
 store by slot, which can hold a block a rollback abandoned at that slot. Epoch
 rows and `pool_opcert_sequence` rows are removed only by rollback.
 Non-checkpoint block nonce rows are pruned below the last three epochs, while
-checkpoint rows are kept; for an older point the fold recomputes the nonces
-from the stored blocks. With this, every
+checkpoint rows are kept; for an older point whose rows were pruned the fold
+decodes the stored blocks of its epoch and refolds them from the nonces the
+epoch opened with. With this, every
 implemented leaf query that reads ledger or consensus state answers at the
 acquired point. The deliberately unanswered debug epoch-state leaves return
 `ErrQueryNotAnswered`, and unsupported leaves are refused rather than answered

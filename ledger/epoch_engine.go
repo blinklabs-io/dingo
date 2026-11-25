@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -77,21 +76,6 @@ func (h engineHost) StagePoolBoundary(
 		newEpoch,
 		boundarySlot,
 	) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-}
-
-func (h engineHost) PublishRewardFacts(
-	txn ledgerdb.Txn,
-	epoch, slot uint64,
-) {
-	if h.ls.config.EventBus == nil {
-		return
-	}
-	txn.AfterCommit(func() {
-		h.ls.config.EventBus.Publish(RewardFactsEventType, event.NewEvent(
-			RewardFactsEventType,
-			RewardFactsEvent{SnapshotEpoch: epoch, CapturedSlot: slot},
-		))
-	})
 }
 
 func (h engineHost) QueueRewardCreditCompaction(ctx context.Context) {

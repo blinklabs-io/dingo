@@ -29,7 +29,7 @@ import (
 
 // IndexerService runs the split layout's writer: a DatabaseSource over the
 // ledger database, the Backfill row writer over the IndexerDB, the ledger
-// facts copy, and the genesis seed.
+// fact deriver, and the genesis seed.
 type IndexerService struct {
 	writer *indexer.Writer
 	store  *indexerdb.Store
@@ -121,7 +121,8 @@ func newIndexerWriter(
 		WithGenesisSeed(bf.SeedGenesis).
 		WithProgress(metrics.Observe).
 		WithRollbackAncestorLost(metrics.NoRollbackAncestor).
-		WithFailureReport(metrics.RepeatedFailures)
+		WithFailureReport(metrics.RepeatedFailures).
+		WithFatal(deps.Fatal)
 	return w, store, nil
 }
 

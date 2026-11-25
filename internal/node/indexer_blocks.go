@@ -445,7 +445,5 @@ func (b *Backfill) RollbackTo(
 	// resolution restarts rather than skipping their new rows.
 	b.resolveStarted = false
 	b.resolveNext = 0
-	return b.db.RollbackMetadataAfterSlot(
-		ctx, point, b.rollbackFloor, txn,
-	)
+	return b.db.RollbackMetadataAfterSlot(ctx, point, txn)
 }

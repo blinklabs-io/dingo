@@ -16,15 +16,12 @@ package ledger
 
 import (
 	"testing"
-	"time"
 
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
+func TestRewardPrecomputeCursorFollowsCommit(t *testing.T) {
 	t.Parallel()
 	for _, chunked := range []bool{false, true} {
 		for _, commit := range []bool{false, true} {
@@ -40,13 +37,6 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
-				bus := event.NewEventBus(nil, nil)
-				defer bus.Close()
-				ls.config.EventBus = bus
-				received := make(chan RewardFactsEvent, 1)
-				bus.SubscribeFunc(RewardFactsEventType, func(ev event.Event) {
-					received <- ev.Data.(RewardFactsEvent)
-				})
 				ldb := ls.ledgerDB()
 				round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 					4,
@@ -72,40 +62,17 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 					require.True(t, ok)
 					require.NoError(t, ls.engine().SaveStakeRewardPrecompute(ldb, txn, app, 4, 200, 1200))
 				}
-				testutil.RequireNoReceive(
-					t,
-					received,
-					20*time.Millisecond,
-					"uncommitted facts",
-				)
 				if !commit {
 					require.NoError(t, txn.Rollback())
 					cursor, err := epochengine.LoadRewardPrecomputeCursor(ldb, nil, 1)
 					require.NoError(t, err)
 					require.Nil(t, cursor)
-					testutil.RequireNoReceive(
-						t,
-						received,
-						20*time.Millisecond,
-						"rolled-back facts",
-					)
 					return
 				}
 				require.NoError(t, txn.Commit())
-				ev := testutil.RequireReceive(
-					t,
-					received,
-					5*time.Second,
-					"completed reward facts",
-				)
-				require.Equal(
-					t,
-					RewardFactsEvent{SnapshotEpoch: 1, CapturedSlot: 200},
-					ev,
-				)
 				cursor, err := epochengine.LoadRewardPrecomputeCursor(ldb, nil, 1)
 				require.NoError(t, err)
-				require.NotNil(t, cursor, "event readers can discover the round")
+				require.NotNil(t, cursor, "a committed round has a cursor")
 				require.True(t, cursor.Done)
 				require.Equal(t, len(round.PoolInputs), cursor.CompletedPools)
 				require.Equal(t, round.InputFingerprint, cursor.InputFingerprint)
@@ -116,7 +83,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 				require.NotEmpty(
 					t,
 					rows,
-					"event readers can see committed rewards",
+					"a committed round has reward outputs",
 				)
 			})
 		}

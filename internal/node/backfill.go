@@ -214,9 +214,6 @@ type Backfill struct {
 	// the chain position it continues from; indexBatches counts the batches
 	// written since.
 	indexPrimed bool
-	// rollbackFloor is the Mithril anchor slot RollbackTo keeps rows at or
-	// below; zero when the IndexerDB has no anchor.
-	rollbackFloor uint64
 	// indexChainStart marks that the next block indexed is the first of the
 	// chain, which the ledger records as a nonce checkpoint although no epoch
 	// boundary precedes it.

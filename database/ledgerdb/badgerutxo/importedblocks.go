@@ -23,10 +23,9 @@ import (
 )
 
 // Imported block rows are the counts a snapshot import carried for the epochs
-// below its anchor, kept as imported. RewardBlocksTag rows are pruned to a
-// window and fold the imported counts into the observed ones, so they cannot
-// be exported back as the rows the metadata store held. Every row of an epoch
-// shares the prefix Y <epoch:8 BE>:
+// below its anchor, kept as imported: RewardBlocksTag rows are pruned to a
+// window and fold the imported counts into the observed ones. Every row of an
+// epoch shares the prefix Y <epoch:8 BE>:
 //
 //	Y <epoch> 0 <pool:28>   blocks the pool minted, then the slot the import
 //	                        captured them at, 8 BE each

@@ -910,11 +910,6 @@ func (e *Engine) finishStakeRewardPrecomputeLocked(
 	if err := saveRewardPrecomputeCursor(meta, metaTxn, cursor); err != nil {
 		return err
 	}
-	e.rewardFactsAfterCommit(
-		metaTxn,
-		round.Epochs.Snapshot,
-		round.CapturedSlot,
-	)
 	e.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",

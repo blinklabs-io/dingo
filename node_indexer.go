@@ -165,6 +165,7 @@ func (n *Node) buildIndexerWriter(
 		PledgeLeverage:             n.config.pledgeLeverage,
 		FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
 		WarmGenesisStake:           n.config.leiosRuntimeEnabled(),
+		Fatal:                      n.cancelForFatal,
 	})
 	if err != nil {
 		return nil, nil, errors.Join(

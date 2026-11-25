@@ -237,8 +237,8 @@ const (
 	// KindCurrent endpoints read current state (balances, UTxOs, pool
 	// state) and need the IndexerDB close to the ledger tip.
 	KindCurrent Kind = iota
-	// KindHistory endpoints read immutable history and need only the
-	// IndexerDB to have passed the Mithril anchor.
+	// KindHistory endpoints read immutable history and answer at any
+	// IndexerDB tip.
 	KindHistory
 )
 

@@ -2760,6 +2760,9 @@ type IndexerWriterDeps struct {
 	FullPotRewardsEnabled bool
 	DelegatorInactivity   uint64
 	WarmGenesisStake      bool
+	// Fatal stops the node when the writer stops on an error no retry can
+	// clear. Nil leaves the writer stopped.
+	Fatal func(error)
 }
 
 // IndexerWriterFactory builds the writer of a split layout. It is a seam
