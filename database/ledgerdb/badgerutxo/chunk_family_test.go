@@ -253,3 +253,78 @@ func TestTiplessSnapshotDeleteStoppedLeavesRecoverableMark(t *testing.T) {
 	}
 	requireTip(t, s, tip)
 }
+
+// snapshotPuts returns n snapshot puts of epoch's mark snapshot, captured
+// at slot.
+func snapshotPuts(epoch, slot uint64, n int) []badgerutxo.SnapshotOp {
+	ops := make([]badgerutxo.SnapshotOp, 0, n)
+	for i := range n {
+		ops = append(ops, badgerutxo.SnapshotOp{
+			Kind: badgerutxo.SnapshotPut,
+			Row: badgerutxo.SnapshotRow{
+				Epoch: epoch, Type: "mark",
+				Pool:  []byte{byte(i >> 16), byte(i >> 8), byte(i)},
+				Value: []byte{1}, CapturedSlot: slot,
+			},
+		})
+	}
+	return ops
+}
+
+// An epoch-boundary batch whose snapshot puts and reward block ops together
+// exceed one Badger transaction commits whole, beside its UTxO change, epoch
+// row and rows, and a rollback before it undoes all of it.
+func TestEpochBoundaryBatchBeyondOneTransactionCommits(t *testing.T) {
+	t.Parallel()
+	s := smallTxnStore(t)
+	start := point(1, 0x01)
+	bootstrap(t, s, start)
+	tip0 := point(2, 0x02)
+	_, err := s.ApplyLedgerBatch(&tip0, badgerutxo.LedgerBatch{
+		Epochs: []badgerutxo.EpochRow{epochRow(0, 0)},
+	})
+	require.NoError(t, err)
+
+	// Reward block ops past one transaction on their own; snapshot puts
+	// few enough that the rollback below deletes them in one.
+	const n, pools = 20000, 4000
+	boundary := uint64(100)
+	pool := bytes.Repeat([]byte{0xa1}, 28)
+	ops := []badgerutxo.RewardBlockOp{{Slot: boundary, Epoch: 1, Open: true}}
+	for i := range n {
+		slot := boundary + uint64(i) //nolint:gosec // a test index
+		ops = append(ops,
+			badgerutxo.RewardBlockOp{Slot: slot, Epoch: 1, Pool: pool},
+			badgerutxo.RewardBlockOp{Slot: slot, Epoch: 1, Fee: 1},
+		)
+	}
+	tip := point(boundary+n, 0x77)
+	_, err = s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+		Changes: []badgerutxo.Change{{
+			Point: point(boundary, 0x64), Added: []badgerutxo.Output{out(2, 0)},
+		}},
+		Epochs:       []badgerutxo.EpochRow{epochRow(1, boundary)},
+		SnapshotOps:  snapshotPuts(1, boundary, pools),
+		RewardBlocks: ops,
+		Rows: []badgerutxo.RowPut{{
+			Slot: boundary, Key: []byte{0xf0, 1}, Value: []byte{1},
+		}},
+	})
+	require.NoError(t, err)
+	requireTip(t, s, tip)
+	requireLive(t, s, true, ref(2, 0))
+	rows, err := s.Snapshots(1, "mark", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, pools)
+	got := readBlockRows(t, s, 1, nil)
+	require.Equal(t, uint64(n), got.total)
+	require.Equal(t, uint64(n), got.fees)
+
+	_, err = s.Rollback(tip0)
+	require.NoError(t, err)
+	requireLive(t, s, false, ref(2, 0))
+	require.False(t, readBlockRows(t, s, 1, nil).hasTotal)
+	rows, err = s.Snapshots(1, "mark", 0)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
