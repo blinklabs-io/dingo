@@ -219,16 +219,24 @@ func (cs *ChainSelector) densityCandidatesLocked() []densityCandidate {
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if len(peerTip.observedPoints) == 0 {
+		// Staged headers are verified, so they count toward density: the
+		// latest slot and the counted headers must come from one frontier.
+		frontier := peerTip
+		staged := cs.latestPeerTipCandidateLocked(connId)
+		if staged != nil && len(staged.observedPoints) > 0 {
+			frontier = staged
+		}
+		if len(frontier.observedPoints) == 0 {
 			continue
 		}
 		candidates = append(candidates, densityCandidate{
-			connId:     connId,
-			points:     peerTip.observedPoints,
-			baseBlock:  peerTip.observedPointBaseBlock,
-			idling:     peerTip.isIdling(),
+			connId:    connId,
+			points:    frontier.observedPoints,
+			baseBlock: frontier.observedPointBaseBlock,
+			// A peer with staged headers has sent more since it idled.
+			idling:     peerTip.isIdling() && frontier == peerTip,
 			held:       peerTip.eagernessPaused > 0,
-			latestSlot: cs.latestHeaderSlotLocked(connId, peerTip),
+			latestSlot: cs.latestHeaderSlotLocked(connId, frontier.observedPoints),
 		})
 	}
 	slices.SortFunc(candidates, func(a, b densityCandidate) int {
@@ -311,20 +319,16 @@ func (cs *ChainSelector) markDensityDisconnectedLocked(
 	cs.genesisDensityDisconnected[connId] = struct{}{}
 }
 
-// latestHeaderSlotLocked returns the slot of the newest header connId has sent:
-// the delivered frontier, a staged candidate, or a header held at the ledger
-// forecast horizon.
+// latestHeaderSlotLocked returns the slot of the newest header connId has
+// sent: the head of points, the frontier the counted headers come from, or a
+// header held at the ledger forecast horizon, which is beyond that frontier.
 func (cs *ChainSelector) latestHeaderSlotLocked(
 	connId ouroboros.ConnectionId,
-	peerTip *PeerChainTip,
+	points []ocommon.Point,
 ) uint64 {
-	latest := peerTip.observedPoints[len(peerTip.observedPoints)-1].Slot
-	if candidate := cs.latestPeerTipCandidateLocked(connId); candidate != nil {
-		latest = max(latest, candidate.ObservedTip.Point.Slot)
-	}
-	if witness, ok := cs.forecastHorizonWitnesses[connId]; ok &&
-		witness.peerTip != nil {
-		latest = max(latest, witness.peerTip.ObservedTip.Point.Slot)
+	latest := points[len(points)-1].Slot
+	if held, ok := cs.forecastHeldSlots[connId]; ok {
+		latest = max(latest, held.slot)
 	}
 	return latest
 }

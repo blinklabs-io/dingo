@@ -92,7 +92,12 @@ func forecastHorizonHeader(
 	})
 	f.cs.mutex.RLock()
 	defer f.cs.mutex.RUnlock()
-	require.Contains(t, f.cs.forecastHorizonWitnesses, conn)
+	require.Contains(t, f.cs.forecastHeldSlots, conn)
+	require.Empty(
+		t,
+		f.cs.forecastHorizonWitnesses,
+		"the default configuration records no corroboration witness",
+	)
 }
 
 func TestGDDLatestSlotClosesUpperBound(t *testing.T) {
@@ -100,7 +105,6 @@ func TestGDDLatestSlotClosesUpperBound(t *testing.T) {
 
 	setup := func(t *testing.T, latest uint64) *gddFixture {
 		f := newGDDFixture(t, true)
-		f.cs.config.MinCorroboratingPeers = 1
 		dense, sparse := corrConn(1), corrConn(2)
 		denseFork(t, f, dense)
 		// One header in the window (1000, 1120]; 110 trailing slots could
@@ -127,4 +131,92 @@ func TestGDDLatestSlotClosesUpperBound(t *testing.T) {
 
 		assert.Empty(t, f.disconnected())
 	})
+}
+
+// stageFrontier appends verified headers to a peer's staged frontier, the way
+// admission stages them while the ledger has not yet applied their parents.
+func stageFrontier(
+	t *testing.T,
+	f *gddFixture,
+	conn ouroboros.ConnectionId,
+	slots ...uint64,
+) {
+	t.Helper()
+	f.cs.mutex.Lock()
+	defer f.cs.mutex.Unlock()
+	frontier := f.cs.clonePeerTipAdmissionFrontier(f.cs.peerTips[conn])
+	require.NotNil(t, frontier)
+	for _, slot := range slots {
+		prev := frontier.ObservedTip
+		f.cs.applyPeerTipAdmissionUpdateLocked(frontier, PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              genesisTip(1_000_000, "adv", prev.BlockNumber+2),
+			ObservedTip:      genesisTip(slot, fmt.Sprintf("h%d", slot), prev.BlockNumber+1),
+			ObservedPrevHash: prev.Point.Hash,
+		})
+	}
+	f.cs.pendingPeerTipFrontiers[conn] = frontier
+}
+
+// A peer whose headers sit in the staged frontier has them counted: the
+// latest header past the window closes the upper bound at the staged count,
+// not at the admitted count.
+func TestGDDStagedHeadersCountTowardWindow(t *testing.T) {
+	t.Parallel()
+
+	setup := func(t *testing.T) (*gddFixture, ouroboros.ConnectionId) {
+		f := newGDDFixture(t, true)
+		dense, honest := corrConn(1), corrConn(2)
+		denseFork(t, f, dense)
+		f.deliver(t, honest, 0, 1000)
+		// 50 headers in the window, then one past it.
+		stageFrontier(t, f, honest, append(slotRange(1001, 1050), 1200)...)
+		return f, honest
+	}
+
+	t.Run("staged window count keeps the peer", func(t *testing.T) {
+		t.Parallel()
+		f, _ := setup(t)
+
+		f.evaluate()
+
+		assert.Empty(t, f.disconnected())
+	})
+
+	t.Run("staged count below the rival still disconnects", func(t *testing.T) {
+		t.Parallel()
+		f := newGDDFixture(t, true)
+		dense, sparse := corrConn(1), corrConn(2)
+		denseFork(t, f, dense)
+		f.deliver(t, sparse, 0, 1000)
+		stageFrontier(t, f, sparse, 1010, 1200)
+
+		f.evaluate()
+
+		assert.Equal(t, []ouroboros.ConnectionId{sparse}, f.disconnected())
+	})
+}
+
+func TestForecastHeldSlotLifecycle(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	conn := corrConn(1)
+	f.deliver(t, conn, 0, 1000)
+	update := PeerTipUpdateEvent{
+		ConnectionId:     conn,
+		Tip:              genesisTip(1_000_000, "adv", 3),
+		ObservedTip:      genesisTip(1200, "h1200", 2),
+		AdmissionID:      7,
+		ObservedPrevHash: []byte("h1000"),
+	}
+	require.Empty(t, f.cs.PrepareForecastHorizonWitness(update))
+	require.Contains(t, f.cs.forecastHeldSlots, conn)
+
+	other := update
+	other.AdmissionID = 8
+	f.cs.RemoveForecastHorizonWitness(other)
+	require.Contains(t, f.cs.forecastHeldSlots, conn, "another wait's removal")
+
+	f.cs.RemoveForecastHorizonWitness(update)
+	assert.NotContains(t, f.cs.forecastHeldSlots, conn)
 }
