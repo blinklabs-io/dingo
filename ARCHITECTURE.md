@@ -21319,7 +21319,12 @@ pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
 stops acknowledging a half-ring window of delivered events is closed after a
-timeout; events a filter rejects do not count toward that window. Resuming with
+timeout; events a filter rejects do not count toward that window. Both apply to
+a client that stops reading as well: its send blocks on HTTP/2 flow control, so a
+per-stream watcher makes the lag and shutdown checks while a batch is in flight
+and expires the blocked write through `http.ResponseController` when one fires.
+There is no send timeout; a client still within the ring is never cut off.
+Resuming with
 `last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
 refused unless `barkEventPublishEnabled` is set, and an event with no
 `origin_node_id` or this node's own is rejected; an accepted event goes to the
