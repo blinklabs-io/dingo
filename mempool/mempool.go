@@ -41,6 +41,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/attribute"
@@ -196,6 +197,18 @@ type CertifiedClosureProvider interface {
 	) ([]lcommon.Transaction, error)
 }
 
+// AppliedTipProvider optionally reports the tip of the chain the ledger has
+// applied. The chain store announces a block before the ledger applies it;
+// with this interface the mempool keeps the outputs of the pool transactions
+// a block confirmed resolvable until the ledger's tip reaches that block, so
+// their descendants are not judged against a ledger that does not yet hold
+// them. A validation session opened after Tip returns must reflect at least
+// that tip. LedgerState implements this interface; a validator without it
+// releases confirmed transactions' outputs as soon as they leave the pool.
+type AppliedTipProvider interface {
+	Tip() ochainsync.Tip
+}
+
 // TxValidationSessionProvider optionally pins a batch of validations to one
 // coherent ledger snapshot. LedgerState implements this interface; lightweight
 // validators used by tests and alternate embeddings may continue to implement
@@ -265,8 +278,13 @@ type MempoolConfig struct {
 }
 
 type Mempool struct {
-	confirmedMu      sync.Mutex
-	pendingConfirmed map[string]struct{}
+	confirmedMu sync.Mutex
+	// pendingConfirmed maps each transaction an added block confirmed to the
+	// slot of that block.
+	pendingConfirmed map[string]uint64
+	// pendingUnsettled holds the transactions of rolled-back blocks whose
+	// settled outputs must leave the overlay; see settledTx.
+	pendingUnsettled map[string]struct{}
 	// Rolled-back bodies are held only until a successful chain rebuild.
 	pendingRolledBack      map[string]MempoolTransaction
 	pendingRolledBackOrder []string
@@ -351,7 +369,11 @@ type mempoolMutation struct {
 	added   *appliedTx
 	addedTx *MempoolTransaction
 	removed map[string]struct{}
-	stopped bool
+	// settled and unsettled replay a change to the overlay's settled
+	// transactions: unsettled leave it, then settled join it.
+	settled   []settledTx
+	unsettled map[string]struct{}
+	stopped   bool
 }
 
 type revalidationCandidate struct {
@@ -370,6 +392,19 @@ func newRevalidationCandidate() *revalidationCandidate {
 	}
 }
 
+// newSettledRevalidationCandidate returns a candidate whose overlay starts
+// with the live overlay's settled transactions, so revalidation resolves the
+// outputs of transactions a block confirmed before the ledger applied it.
+func newSettledRevalidationCandidate(
+	settled []settledTx,
+) *revalidationCandidate {
+	c := newRevalidationCandidate()
+	if len(settled) > 0 {
+		c.overlay.updateSettled(nil, settled, nil)
+	}
+	return c
+}
+
 // reject records a transaction that failed revalidation. Its outputs leave
 // the candidate overlay, but its descendants are still validated: a parent
 // fails because a block confirmed it as readily as because it became invalid,
@@ -383,11 +418,20 @@ func (c *revalidationCandidate) reject(
 	}
 }
 
-func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
+// removeAndSettle replays a recorded removal together with its change to the
+// settled transactions.
+func (c *revalidationCandidate) removeAndSettle(
+	hashes map[string]struct{},
+	settled []settledTx,
+	unsettled map[string]struct{},
+) {
+	if len(hashes) == 0 && len(settled) == 0 && len(unsettled) == 0 {
+		return
+	}
+	c.overlay.updateSettled(hashes, settled, unsettled)
 	if len(hashes) == 0 {
 		return
 	}
-	c.overlay.removeByHashes(hashes)
 	remaining := make([]*MempoolTransaction, 0, len(c.transactions))
 	for _, tx := range c.transactions {
 		if _, remove := hashes[tx.Hash]; remove {
@@ -454,12 +498,40 @@ func (m *Mempool) recordMutationLocked(mutation mempoolMutation) {
 	}
 }
 
+// settledTx is a pool transaction a block confirmed, kept in the overlay
+// after it leaves the pool until the ledger has applied that block.
+//
+// The chain store announces a block before the ledger applies it. Until it
+// does, the outputs of the transactions the block confirmed are neither in
+// the pool nor in the ledger, and descendants spending them would be judged
+// invalid. A settled transaction keeps those outputs resolvable and its
+// inputs spent. Only UTxO effects are kept: the transaction's CBOR and its
+// reward-account effects are not.
+type settledTx struct {
+	at appliedTx
+	// slot is the slot of the confirming block. The ledger has applied the
+	// block once its tip reaches slot.
+	slot  uint64
+	since time.Time
+	// bytes is what the transaction was charged in the pool.
+	bytes int64
+}
+
+// settledRetention bounds how long a settled transaction is kept when the
+// ledger does not reach its block, as on a rollback the mempool missed.
+const settledRetention = 2 * time.Minute
+
 // utxoOverlay tracks cumulative UTxO state changes from all pending mempool TXs.
 type utxoOverlay struct {
 	consumed map[utxoref.Key]struct{}     // all inputs consumed by pending TXs
 	created  map[utxoref.Key]lcommon.Utxo // all outputs created by pending TXs
 	accounts *utxoref.StateOverlay        // reward-account effects of pending TXs
 	applied  []appliedTx                  // ordered list for rebuild
+	// settled holds confirmed transactions, oldest first, whose block the
+	// ledger has not yet applied. Their UTxO effects precede applied's in
+	// consumed and created.
+	settled      []settledTx
+	settledBytes int64
 }
 
 func newUtxoOverlay() *utxoOverlay {
@@ -510,19 +582,180 @@ func (o *utxoOverlay) reset() {
 	o.created = make(map[utxoref.Key]lcommon.Utxo)
 	o.accounts = utxoref.NewStateOverlay()
 	o.applied = nil
+	o.settled = nil
+	o.settledBytes = 0
 }
 
 // rebuildAggregates rebuilds consumed/created maps from the applied list.
 func (o *utxoOverlay) rebuildAggregates() {
-	o.consumed, o.created, o.accounts = aggregateApplied(o.applied, o.accounts)
+	o.consumed, o.created, o.accounts = aggregateApplied(
+		o.settled, o.applied, o.accounts,
+	)
 }
 
-// aggregateApplied folds ordered applied transactions into the overlay maps.
-// applied must be a subsequence of the transactions previous was built from.
-// When none of the dropped transactions changed ledger state, previous is
-// still the right state overlay and is reused with everything it has folded.
-// A rebuilt overlay keeps previous's base generation.
+// updateSettled removes the hashes from applied, then removes the unsettled
+// hashes from settled and appends settled, replacing any entry of the same
+// hash. The caller computes settled from the live overlay so that replaying
+// the same change on a revalidation candidate leaves it with the same
+// settled transactions.
+func (o *utxoOverlay) updateSettled(
+	remove map[string]struct{},
+	settled []settledTx,
+	unsettled map[string]struct{},
+) {
+	if len(remove) > 0 {
+		remaining := make([]appliedTx, 0, len(o.applied))
+		for _, at := range o.applied {
+			if _, ok := remove[at.hash]; !ok {
+				remaining = append(remaining, at)
+			}
+		}
+		o.applied = remaining
+	}
+	if len(settled) > 0 || len(unsettled) > 0 {
+		replaced := make(map[string]struct{}, len(settled))
+		for _, st := range settled {
+			replaced[st.at.hash] = struct{}{}
+		}
+		kept := make([]settledTx, 0, len(o.settled)+len(settled))
+		o.settledBytes = 0
+		for _, st := range o.settled {
+			if _, ok := unsettled[st.at.hash]; ok {
+				continue
+			}
+			if _, ok := replaced[st.at.hash]; ok {
+				continue
+			}
+			kept = append(kept, st)
+			o.settledBytes += st.bytes
+		}
+		for _, st := range settled {
+			kept = append(kept, st)
+			o.settledBytes += st.bytes
+		}
+		o.settled = kept
+	}
+	o.rebuildAggregates()
+}
+
+// releasesSettledUnderPool reports whether release names a transaction the
+// overlay holds, settled or applied, while a transaction in applied, other
+// than those in skip, remains. A released applied transaction is one confirmed
+// ahead of the applied tip that the settled budget could not keep, so its
+// outputs leave the overlay with it. A remaining transaction may resolve a
+// released output as a spent input, a reference input or collateral, and
+// appliedTx records only the spent inputs, so any such release is treated as
+// orphaning it.
+func (o *utxoOverlay) releasesSettledUnderPool(
+	release map[string]struct{},
+	skip map[string]struct{},
+) bool {
+	if len(release) == 0 {
+		return false
+	}
+	pooled := false
+	for _, at := range o.applied {
+		if _, ok := skip[at.hash]; !ok {
+			pooled = true
+			break
+		}
+	}
+	if !pooled {
+		return false
+	}
+	for _, st := range o.settled {
+		if _, ok := release[st.at.hash]; ok {
+			return true
+		}
+	}
+	for _, at := range o.applied {
+		if _, ok := release[at.hash]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// settledChange computes the change to settled that confirming the pool
+// transactions in slots makes, and that releasing the settled transactions
+// that are no longer needed makes: those in unsettle, those whose block the
+// ledger has applied (slot at or below tipSlot), those older than
+// settledRetention, and the oldest beyond budget bytes. A pool transaction is
+// settled only when its block is ahead of tipSlot. The returned unsettled
+// includes unsettle, and the pool transactions confirmed ahead of tipSlot
+// that the budget leaves unsettled: their outputs leave the overlay before
+// the ledger holds them.
+func (o *utxoOverlay) settledChange(
+	slots map[string]uint64,
+	sizes map[string]int64,
+	unsettle map[string]struct{},
+	tipSlot uint64,
+	now time.Time,
+	budget int64,
+) ([]settledTx, map[string]struct{}) {
+	unsettled := make(map[string]struct{}, len(unsettle))
+	maps.Copy(unsettled, unsettle)
+	var settled []settledTx
+	for _, at := range o.applied {
+		slot, ok := slots[at.hash]
+		if !ok || slot <= tipSlot {
+			continue
+		}
+		st := settledTx{
+			at:    cloneAppliedTx(at),
+			slot:  slot,
+			since: now,
+			bytes: sizes[at.hash],
+		}
+		// The ledger, not the overlay, holds a confirmed transaction's
+		// reward-account effects once it applies the block.
+		st.at.stateCbor = nil
+		settled = append(settled, st)
+		// A transaction the pool settles anew replaces its old entry.
+		delete(unsettled, at.hash)
+	}
+	var total int64
+	var keep []settledTx
+	for _, st := range o.settled {
+		_, released := unsettled[st.at.hash]
+		if released || st.slot <= tipSlot ||
+			now.Sub(st.since) > settledRetention {
+			unsettled[st.at.hash] = struct{}{}
+			continue
+		}
+		keep = append(keep, st)
+		total += st.bytes
+	}
+	for _, st := range settled {
+		total += st.bytes
+	}
+	// Over budget, release the oldest first.
+	for _, st := range keep {
+		if total <= budget {
+			break
+		}
+		unsettled[st.at.hash] = struct{}{}
+		total -= st.bytes
+	}
+	for len(settled) > 0 && total > budget {
+		unsettled[settled[0].at.hash] = struct{}{}
+		total -= settled[0].bytes
+		settled = settled[1:]
+	}
+	for _, st := range settled {
+		delete(unsettled, st.at.hash)
+	}
+	return settled, unsettled
+}
+
+// aggregateApplied folds the settled transactions' UTxO effects, then ordered
+// applied transactions, into the overlay maps. applied must be a subsequence
+// of the transactions previous was built from. When none of the dropped
+// transactions changed ledger state, previous is still the right state overlay
+// and is reused with everything it has folded. A rebuilt overlay keeps
+// previous's base generation.
 func aggregateApplied(
+	settled []settledTx,
 	applied []appliedTx,
 	previous *utxoref.StateOverlay,
 ) (
@@ -532,6 +765,12 @@ func aggregateApplied(
 ) {
 	consumed := make(map[utxoref.Key]struct{})
 	created := make(map[utxoref.Key]lcommon.Utxo)
+	for _, st := range settled {
+		for _, key := range st.at.consumed {
+			consumed[key] = struct{}{}
+		}
+		maps.Copy(created, st.at.created)
+	}
 	accounts := previous.Empty()
 	stateful := 0
 	for _, at := range applied {
@@ -666,7 +905,7 @@ func (o *utxoOverlay) simulateRemoveBatch(
 			remaining = newRemaining
 		}
 	}
-	return aggregateApplied(remaining, o.accounts)
+	return aggregateApplied(o.settled, remaining, o.accounts)
 }
 
 // ErrNilValidator is returned by runtime mempool operations that require
@@ -959,7 +1198,7 @@ func (m *Mempool) Start(ctx context.Context) error {
 		}()
 		go func() {
 			defer m.workerWG.Done()
-			m.expireTransactions()
+			m.expireTransactions(workerCtx)
 		}()
 	})
 	return nil
@@ -1299,13 +1538,14 @@ func (m *Mempool) noteChainUpdateContext(ctx context.Context, evt event.Event) {
 		defer m.confirmedMu.Unlock()
 		if m.pendingConfirmed == nil {
 			m.pendingConfirmed = make(
-				map[string]struct{}, len(transactions),
+				map[string]uint64, len(transactions),
 			)
 		}
 		for _, tx := range transactions {
 			hash := tx.Hash().String()
-			m.pendingConfirmed[hash] = struct{}{}
+			m.pendingConfirmed[hash] = data.Block.Slot
 			delete(m.pendingRolledBack, hash)
+			delete(m.pendingUnsettled, hash)
 		}
 	case chain.ChainRollbackEvent:
 		var transactions []MempoolTransaction
@@ -1325,9 +1565,17 @@ func (m *Mempool) noteChainUpdateContext(ctx context.Context, evt event.Event) {
 				map[string]MempoolTransaction, len(transactions),
 			)
 		}
+		if m.pendingUnsettled == nil && len(transactions) > 0 {
+			m.pendingUnsettled = make(
+				map[string]struct{}, len(transactions),
+			)
+		}
 		newOrder := make([]string, 0, len(transactions))
 		for _, tx := range transactions {
 			delete(m.pendingConfirmed, tx.Hash)
+			// A rolled-back block no longer confirms the transaction, so
+			// its settled outputs and spent inputs must not outlive it.
+			m.pendingUnsettled[tx.Hash] = struct{}{}
 			if _, ok := m.pendingRolledBack[tx.Hash]; !ok {
 				newOrder = append(newOrder, tx.Hash)
 			}
@@ -1410,20 +1658,18 @@ func standaloneTransactionCbor(txCbor []byte) []byte {
 }
 
 // evictConfirmed removes the transactions recorded as confirmed by added
-// blocks.
+// blocks and releases the settled transactions of rolled-back blocks.
 func (m *Mempool) evictConfirmed() {
 	m.confirmedMu.Lock()
 	pending := m.pendingConfirmed
 	m.pendingConfirmed = nil
+	unsettle := m.pendingUnsettled
+	m.pendingUnsettled = nil
 	m.confirmedMu.Unlock()
-	if len(pending) == 0 {
+	if len(pending) == 0 && len(unsettle) == 0 {
 		return
 	}
-	hashes := make([]string, 0, len(pending))
-	for h := range pending {
-		hashes = append(hashes, h)
-	}
-	m.RemoveTxsByHash(hashes)
+	m.removeConfirmed(pending, unsettle)
 }
 
 // rebuildAfterChainUpdate evicts confirmed transactions, rebuilds the pool,
@@ -1559,6 +1805,15 @@ var errValidationSnapshotChanged = errors.New(
 	"mempool: ledger snapshot changed during revalidation",
 )
 
+// errSettledOutputsReleased means a mutation replayed onto a revalidation
+// candidate released settled outputs while the candidate held pending
+// transactions, which may have been validated against them. The rebuild
+// starts again from the live pool, which no longer holds them.
+var errSettledOutputsReleased = fmt.Errorf(
+	"%w: settled outputs were released under pending transactions",
+	errValidationSnapshotChanged,
+)
+
 var errRevalidationJournalOverflow = errors.New(
 	"mempool: revalidation mutation journal overflow",
 )
@@ -1653,7 +1908,31 @@ func (m *Mempool) rebuildOverlayAttempt(
 		m.mutationMutex.Unlock()
 		return nil, ErrMempoolStopped
 	}
+	// Read the applied tip before the validation session opens, so the
+	// session holds every block whose settled transactions are released.
+	if len(m.overlay.settled) > 0 {
+		if _, unsettled := m.settledChangeLocked(
+			nil, nil,
+		); len(unsettled) > 0 {
+			m.RUnlock()
+			m.Lock()
+			if !m.stopped {
+				m.overlay.updateSettled(nil, nil, unsettled)
+				m.recordMutationLocked(
+					mempoolMutation{unsettled: unsettled},
+				)
+			}
+			m.Unlock()
+			m.RLock()
+			if m.stopped {
+				m.RUnlock()
+				m.mutationMutex.Unlock()
+				return nil, ErrMempoolStopped
+			}
+		}
+	}
 	base := slices.Clone(m.overlay.applied)
+	settled := slices.Clone(m.overlay.settled)
 	baseTxs := make(map[string]*MempoolTransaction, len(m.txByHash))
 	maps.Copy(baseTxs, m.txByHash)
 	startSeq := m.mutationSeq
@@ -1682,7 +1961,9 @@ func (m *Mempool) rebuildOverlayAttempt(
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 	) error {
-		candidate := newRevalidationCandidate()
+		candidate := newSettledRevalidationCandidate(
+			m.unappliedSettled(settled),
+		)
 		for _, at := range base {
 			m.revalidateAppliedTx(candidate, at, baseTxs[at.hash], validate)
 		}
@@ -1813,9 +2094,14 @@ func (m *Mempool) rebuildOverlayAttempt(
 				if mutation.stopped {
 					return ErrMempoolStopped
 				}
-				if len(mutation.removed) > 0 {
-					candidate.remove(mutation.removed)
+				if candidate.overlay.releasesSettledUnderPool(
+					mutation.unsettled, mutation.removed,
+				) {
+					return errSettledOutputsReleased
 				}
+				candidate.removeAndSettle(
+					mutation.removed, mutation.settled, mutation.unsettled,
+				)
 				if mutation.added != nil {
 					m.revalidateAppliedTx(
 						candidate,
@@ -2022,17 +2308,37 @@ func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
 // expireTransactions periodically removes transactions that have
 // exceeded the configured TTL. It runs every cleanupInterval and
 // stops when the done channel is closed.
-func (m *Mempool) expireTransactions() {
+func (m *Mempool) expireTransactions(ctx context.Context) {
 	if m.cleanupInterval <= 0 {
 		return
 	}
 	ticker := time.NewTicker(m.cleanupInterval)
 	defer ticker.Stop()
+	// rebuildPending carries a rebuild owed for a settled release across
+	// ticks until one succeeds: the release is not repeated.
+	rebuildPending := false
 	for {
 		select {
 		case <-ticker.C:
 			m.refreshCapacity()
 			m.removeExpiredTransactions()
+			// Bound settled transactions when no chain update arrives to
+			// release them, and judge the pool again when that takes
+			// outputs pending transactions may depend on.
+			if m.releaseSettled() {
+				rebuildPending = true
+			}
+			if rebuildPending {
+				err := m.rebuildOverlay(ctx)
+				rebuildPending = err != nil
+				if err != nil && ctx.Err() == nil {
+					m.logger.Debug(
+						"mempool overlay rebuild after settled release failed",
+						"component", "mempool",
+						"error", err,
+					)
+				}
+			}
 		case <-m.done:
 			return
 		}
@@ -2398,6 +2704,9 @@ func (m *Mempool) addTransactionAttempt(
 			m.Unlock()
 			return retErr
 		}
+		// Settled outputs are read before the ledger, so those of a block
+		// this session's ledger holds would shadow a later spend of them.
+		m.releaseAppliedSettledLocked()
 		seen = m.overlay
 		validConsumed := m.overlay.consumed
 		validCreated := m.overlay.created
@@ -2966,22 +3275,162 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 }
 
 // RemoveTxsByHash removes a batch of transactions by hash without cascading to
-// descendants. Use after a block is confirmed: the block's outputs are now in
-// the ledger, so chained pending transactions remain valid and must not be
-// evicted.
+// descendants. Use after a block is confirmed: the block's outputs are on the
+// selected chain, so chained pending transactions remain valid and must not be
+// evicted. The block is taken to be at the current slot; until the ledger
+// applies it, the removed transactions stay settled (see settledTx).
 func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	if len(hashes) == 0 {
 		return
 	}
-	hashSet := make(map[string]struct{}, len(hashes))
+	var slot uint64
+	if m.config.CurrentSlotFunc != nil {
+		slot = m.config.CurrentSlotFunc()
+	}
+	slots := make(map[string]uint64, len(hashes))
 	for _, h := range hashes {
+		slots[h] = slot
+	}
+	m.removeConfirmed(slots, nil)
+}
+
+// appliedTipSlot returns the slot of the ledger's applied tip, and false when
+// the validator does not report it.
+func (m *Mempool) appliedTipSlot() (uint64, bool) {
+	provider, ok := m.validator.(AppliedTipProvider)
+	if !ok {
+		return 0, false
+	}
+	return provider.Tip().Point.Slot, true
+}
+
+// settledChangeLocked computes the change to the overlay's settled
+// transactions for confirming the pool transactions in slots and releasing
+// those in unsettle (see utxoOverlay.settledChange). Without an applied tip it
+// settles nothing and releases everything. The caller must hold
+// mutationMutex and the pool lock.
+func (m *Mempool) settledChangeLocked(
+	slots map[string]uint64,
+	unsettle map[string]struct{},
+) ([]settledTx, map[string]struct{}) {
+	tipSlot, ok := m.appliedTipSlot()
+	if !ok {
+		if len(m.overlay.settled) == 0 {
+			return nil, nil
+		}
+		unsettled := make(map[string]struct{}, len(m.overlay.settled))
+		for _, st := range m.overlay.settled {
+			unsettled[st.at.hash] = struct{}{}
+		}
+		return nil, unsettled
+	}
+	sizes := make(map[string]int64, len(slots))
+	for hash := range slots {
+		if tx, ok := m.txByHash[hash]; ok {
+			sizes[hash] = tx.retainedBytes()
+		}
+	}
+	return m.overlay.settledChange(
+		slots, sizes, unsettle, tipSlot, time.Now(), m.capacity.Load(),
+	)
+}
+
+// releaseSettled releases the settled transactions that are no longer needed.
+// It reports whether it released outputs of a block the ledger has not
+// applied while the pool holds transactions, which only a revalidation can
+// judge.
+func (m *Mempool) releaseSettled() bool {
+	m.mutationMutex.Lock()
+	defer m.mutationMutex.Unlock()
+	m.Lock()
+	defer m.Unlock()
+	if m.stopped || len(m.overlay.settled) == 0 {
+		return false
+	}
+	_, unsettled := m.settledChangeLocked(nil, nil)
+	if len(unsettled) == 0 {
+		return false
+	}
+	tipSlot, haveTip := m.appliedTipSlot()
+	unapplied := make(map[string]struct{}, len(unsettled))
+	for _, st := range m.overlay.settled {
+		if _, ok := unsettled[st.at.hash]; ok &&
+			(!haveTip || st.slot > tipSlot) {
+			unapplied[st.at.hash] = struct{}{}
+		}
+	}
+	orphans := m.overlay.releasesSettledUnderPool(unapplied, nil)
+	m.overlay.updateSettled(nil, nil, unsettled)
+	m.recordMutationLocked(mempoolMutation{unsettled: unsettled})
+	return orphans
+}
+
+// releaseAppliedSettledLocked releases the settled transactions whose block
+// the ledger has applied. Called inside a validation session, the tip it reads
+// is at or past the session's, so the overlay keeps no settled outputs that
+// the session's ledger holds, and may since have spent: LedgerView.UtxoById
+// reads overlay outputs before the ledger. A tip past the session's means the
+// session is no longer current, and its verdict is discarded. The caller must
+// hold mutationMutex and the pool write lock.
+func (m *Mempool) releaseAppliedSettledLocked() {
+	if len(m.overlay.settled) == 0 {
+		return
+	}
+	tipSlot, haveTip := m.appliedTipSlot()
+	unsettled := make(map[string]struct{})
+	for _, st := range m.overlay.settled {
+		if !haveTip || st.slot <= tipSlot {
+			unsettled[st.at.hash] = struct{}{}
+		}
+	}
+	if len(unsettled) == 0 {
+		return
+	}
+	m.overlay.updateSettled(nil, nil, unsettled)
+	m.recordMutationLocked(mempoolMutation{unsettled: unsettled})
+}
+
+// unappliedSettled returns the settled transactions in settled, a copy the
+// caller owns, whose block the ledger has not applied. A revalidation reads
+// it inside its validation session, for the reason releaseAppliedSettledLocked
+// gives: settled is copied before the session opens, and the ledger may apply
+// the confirming block and a later spend of its outputs in between.
+func (m *Mempool) unappliedSettled(settled []settledTx) []settledTx {
+	if len(settled) == 0 {
+		return settled
+	}
+	tipSlot, ok := m.appliedTipSlot()
+	if !ok {
+		return nil
+	}
+	return slices.DeleteFunc(settled, func(st settledTx) bool {
+		return st.slot <= tipSlot
+	})
+}
+
+// removeConfirmed removes the confirmed transactions in slots without
+// cascading to descendants, settles them, and releases the settled
+// transactions in unsettle.
+func (m *Mempool) removeConfirmed(
+	slots map[string]uint64,
+	unsettle map[string]struct{},
+) {
+	hashSet := make(map[string]struct{}, len(slots))
+	for h := range slots {
 		hashSet[h] = struct{}{}
 	}
 	var events []event.Event
 	m.mutationMutex.Lock()
 	m.Lock()
 	m.consumersMutex.Lock()
-	m.overlay.removeByHashes(hashSet)
+	var (
+		settled   []settledTx
+		unsettled map[string]struct{}
+	)
+	if !m.stopped {
+		settled, unsettled = m.settledChangeLocked(slots, unsettle)
+	}
+	m.overlay.updateSettled(hashSet, settled, unsettled)
 	removedHashes := make(map[string]struct{}, len(hashSet))
 	if m.dag != nil {
 		m.dag.remove(hashSet)
@@ -2995,8 +3444,12 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 			}
 		}
 	}
-	if len(removedHashes) > 0 {
-		m.recordMutationLocked(mempoolMutation{removed: removedHashes})
+	if len(removedHashes) > 0 || len(settled) > 0 || len(unsettled) > 0 {
+		m.recordMutationLocked(mempoolMutation{
+			removed:   removedHashes,
+			settled:   settled,
+			unsettled: unsettled,
+		})
 		for hash := range removedHashes {
 			m.logger.Info(
 				"confirmed transaction",

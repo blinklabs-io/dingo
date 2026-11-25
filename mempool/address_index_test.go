@@ -68,6 +68,7 @@ type indexTxSpec struct {
 	collateral       *indexTxInput
 	collateralReturn *lcommon.Address
 	invalid          bool
+	referenceInputs  []indexTxInput
 }
 
 func indexTxOutput(addr lcommon.Address, amount uint64) babbage.BabbageTransactionOutput {
@@ -113,6 +114,15 @@ func buildIndexTx(t *testing.T, spec indexTxSpec) ([]byte, gledger.Transaction) 
 			[]shelley.ShelleyTransactionInput{shelleyInput(t, *spec.collateral)},
 			false,
 		)
+	}
+	if len(spec.referenceInputs) > 0 {
+		refs := make(
+			[]shelley.ShelleyTransactionInput, 0, len(spec.referenceInputs),
+		)
+		for _, in := range spec.referenceInputs {
+			refs = append(refs, shelleyInput(t, in))
+		}
+		tx.Body.TxReferenceInputs = cbor.NewSetType(refs, false)
 	}
 	if spec.collateralReturn != nil {
 		ret := indexTxOutput(*spec.collateralReturn, 3_000_000)
@@ -614,7 +624,7 @@ func TestAddressIndexBlockInclusionAndRollbackReadmission(t *testing.T) {
 		f := newRemovalFixture(t, useDAG, nil)
 		ctx := context.Background()
 		f.m.confirmedMu.Lock()
-		f.m.pendingConfirmed = map[string]struct{}{f.loner: {}}
+		f.m.pendingConfirmed = map[string]uint64{f.loner: 0}
 		f.m.confirmedMu.Unlock()
 		require.NoError(t, f.m.rebuildAfterChainUpdate(ctx))
 		require.Empty(t, f.hashesFor(f.addrC), "included in a block")

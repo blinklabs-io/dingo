@@ -2484,6 +2484,14 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
+The chain store announces a block before the ledger applies it. A pool
+transaction the block confirms leaves the pool at once but stays in the UTxO
+overlay as a settled transaction, its outputs resolvable and its inputs spent,
+until the ledger's applied tip (the optional `mempool.AppliedTipProvider`,
+implemented by `LedgerState`) reaches the block, so its descendants are not
+judged against a ledger that does not hold them yet. A rollback of the block
+releases it, as do an age limit and a byte budget equal to the pool capacity.
+
 `Mempool.AddTransaction` refuses a current-era submission larger than the
 `MaxTxSize` ledger validation would apply before constructing the ledger
 transaction, taking `mutationMutex`, or running ledger rules. A historical

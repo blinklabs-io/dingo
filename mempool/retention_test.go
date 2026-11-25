@@ -80,7 +80,9 @@ func TestRevalidationCandidateKeepsDescendantOfRemovedRejectedParent(
 
 	// The parent was confirmed while revalidation ran; its outputs now exist
 	// in the ledger, so a child admitted afterwards is valid.
-	candidate.remove(map[string]struct{}{parentHash: {}})
+	candidate.removeAndSettle(
+		map[string]struct{}{parentHash: {}}, nil, nil,
+	)
 	m.revalidateAppliedTx(candidate, childAt, childTx, accept)
 
 	require.Contains(t, candidate.txByHash, childHash)
