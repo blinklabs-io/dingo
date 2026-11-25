@@ -31,9 +31,10 @@ import (
 )
 
 type debugPprofServer struct {
-	server *http.Server
-	errCh  <-chan error
-	addr   string
+	server   *http.Server
+	listener net.Listener
+	errCh    <-chan error
+	addr     string
 }
 
 func newDebugPprofHTTPServer(cfg *config.Config) *http.Server {
@@ -83,17 +84,23 @@ func startDebugPprofServer(
 		}
 	}()
 	return &debugPprofServer{
-		server: server,
-		errCh:  errCh,
-		addr:   actualAddr,
+		server:   server,
+		listener: listener,
+		errCh:    errCh,
+		addr:     actualAddr,
 	}, nil
 }
 
+// Shutdown stops the server and closes its listener; see
+// healthProbeServer.Shutdown for why the explicit close is needed.
 func (s *debugPprofServer) Shutdown(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	return errors.Join(
+		s.server.Shutdown(ctx),
+		closeListener(s.listener),
+	)
 }
 
 func (s *debugPprofServer) Err() <-chan error {

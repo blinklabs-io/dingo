@@ -304,8 +304,8 @@ type importBoundaryRule struct {
 }
 
 // importBoundaryRules encode reviewed package directions for critical domains.
-// When an architecture review approves a new dependency, update this list in
-// the same change as ARCHITECTURE.md and keep the reason field explicit.
+// Update this list when a dependency direction changes and keep its reason
+// explicit. Update ARCHITECTURE.md when that changes an ownership boundary.
 var importBoundaryRules = []importBoundaryRule{
 	{
 		from: "ledger",

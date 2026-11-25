@@ -619,7 +619,7 @@
 # koios-parity CLI process or second synced copy of the database required.
 # This is a one-off validation aid, not a permanent
 # subsystem; leave disabled for normal node operation. See
-# internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
+# internal/koiosparity/README.md.
 # koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
   # CLI: --koios-parity-enabled
@@ -931,8 +931,7 @@
 # Decode blocks in the chainsync replay loop with a small parallel worker
 # pool instead of one at a time (default: true in core mode, false in API mode
 # and on Musashi). Not consensus-affecting -- only changes how CBOR decode work
-# is scheduled, not validation or apply behavior. See ARCHITECTURE.md ("Block
-# Processing Pipeline").
+# is scheduled, not validation or apply behavior. See ledger/state.go.
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
@@ -943,7 +942,7 @@
 # Admission-time crypto remains authoritative because persisted chain blocks
 # are available to downstream readers before replay reaches this stage. The
 # replay check follows the serial path's historical, Mithril, and epoch-nonce
-# availability gates. See ARCHITECTURE.md ("Block Processing Pipeline").
+# availability gates. See ledger/state.go.
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED
 # environment variable

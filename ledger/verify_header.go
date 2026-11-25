@@ -3725,7 +3725,7 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 // caller's pool-snapshot prune. The prune must NOT run under the lock: it opens
 // the single sqlite write connection (SetMaxOpenConns(1)) via Transaction(true),
 // and block apply holds that connection before taking this same mutex through
-// consumeDeferredHeaderValidation. Holding the mutex across prune therefore
+// takeDeferredHeaderValidation. Holding the mutex across prune therefore
 // inverts the lock order (mutex→write-conn here vs. write-conn→mutex on apply)
 // and deadlocks the node on the single write connection. Under
 // the lock it, in order:
@@ -3770,7 +3770,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// Read BEFORE taking deferredHeaderValidationMu: both of these take
 	// ls.RWMutex (calculateStabilityWindow reads ls.currentEra under RLock),
 	// and block apply holds the ls lock before taking
-	// deferredHeaderValidationMu via consumeDeferredHeaderValidation. Taking
+	// deferredHeaderValidationMu via takeDeferredHeaderValidation. Taking
 	// the ls lock under this mutex would invert that order.
 	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
 	rollbackHorizon := ls.calculateStabilityWindow()

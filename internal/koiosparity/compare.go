@@ -1285,7 +1285,7 @@ func rewardTypeSumsRepeatedRows(rewardType string) bool {
 // Dingo was never expected to track in the first place. If Dingo's ledger
 // package ever starts tracking any of these (see
 // ledger/epochengine/reward_calculation.go/ledger/rewards/rewards.go), this map (and
-// ARCHITECTURE.md's Koios Parity Tracker section) is the first place to
+// README.md's account comparison reference) is the first place to
 // update.
 var koiosAccountRewardTypesOutOfScope = map[string]bool{
 	"treasury": true,
@@ -1342,8 +1342,7 @@ type accountRewardPoolAmount struct {
 // CompareAccountEpoch compares every Koios /account_reward_history reference
 // row against Dingo's committed reward_account_output rows for one epoch,
 // exactly — integer lovelace, no rounding/sampling/tolerance.
-// See ARCHITECTURE.md's Koios Parity Tracker
-// "Per-account exact parity" subsection for the full design.
+// See README.md's "Per-account exact parity" section for the full design.
 //
 // koiosRows/dingoRows are each scanned for internal duplicates first: the
 // same (stake_address, reward_type) key appearing more than once within one

@@ -123,8 +123,8 @@ type DingoRewardSnapshotSummary struct {
 // DingoPoolEpochData holds per-pool reward-input data assembled for one Koios
 // reporting epoch. It is built from up to three separate Dingo rows spread
 // across two different reward_pool_input epochs plus one reward_pool_output
-// epoch — see GetPoolEpochDataMap's doc comment and ARCHITECTURE.md's Koios
-// Parity Tracker "Epoch alignment" section for the full derivation of why a
+// epoch — see GetPoolEpochDataMap's doc comment and README.md's "Epoch
+// alignment" section for the full derivation of why a
 // single same-numbered row cannot supply every field.
 type DingoPoolEpochData struct {
 	// StakePresent distinguishes "no reward_pool_input row yet at the 'stake
@@ -587,8 +587,8 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 //     from evt.PreviousEpoch, not from the row's own Epoch. Only
 //     BlocksProduced is read there; Margin/FixedCost are stake-epoch fields.
 //
-// See koiosStakeEpoch/koiosParamEpoch in check.go and ARCHITECTURE.md's Koios
-// Parity Tracker "Epoch alignment" section for the full derivation.
+// See koiosStakeEpoch/koiosParamEpoch in check.go and README.md's "Epoch
+// alignment" section for the full derivation.
 //
 // A pool present in only one of the two reward_pool_input reads (e.g. a pool
 // with a stake-epoch row but whose param-epoch row hasn't been captured yet,
@@ -1327,8 +1327,7 @@ ORDER BY credential_tag, staking_key, id`, d.dialect),
 // (importing it would pull the whole Blockfrost adapter surface into
 // koiosparity) for one 12-line helper, and koios-parity must not gain an HTTP
 // client for the Dingo side of any comparison regardless of the underlying
-// address logic being identical — see this file's/ARCHITECTURE.md's "never
-// add an HTTP client for the Dingo side" invariant.
+// address logic being identical. See README.md's direct-storage invariant.
 func StakeAddressFromCredential(
 	network string,
 	stakingKey []byte,

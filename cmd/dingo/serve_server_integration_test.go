@@ -63,13 +63,18 @@ func TestServePreflightOpensTheConsensusNamespace(t *testing.T) {
 				Blob: plugin.Selection{Provider: "badger"},
 				Metadata: plugin.Selection{
 					Provider: "postgres",
-					Config:   map[string]any{"dsn": replaceDatabase(t, admin, name)},
+					Config: map[string]any{
+						"dsn": replaceDatabase(t, admin, name),
+					},
 				},
 			},
 		},
 		ServerCoreNamespace: true,
 	}
-	require.NoError(t, checkSyncState(cfg, slog.New(slog.DiscardHandler)))
+	require.NoError(
+		t,
+		checkSyncState(t.Context(), cfg, slog.New(slog.DiscardHandler)),
+	)
 	_, err = mithrilRewardRepairPending(ctx, cfg, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
@@ -77,9 +82,15 @@ func TestServePreflightOpensTheConsensusNamespace(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, host.Stop(ctx)) }()
 	indexer, err := plugin.Resolve[metadata.MetadataStore](
-		ctx, host, plugin.CapabilityStorageMetadata, "postgres",
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		"postgres",
 		cfg.Plugins.Storage.Metadata.Config,
-		metadata.ProviderDependencies{StorageMode: "api", GenesisStakingEmpty: true},
+		metadata.ProviderDependencies{
+			StorageMode:         "api",
+			GenesisStakingEmpty: true,
+		},
 	)
 	require.NoError(t, err, "the IndexerDB still opens in API mode")
 	gates, err := indexer.GetNodeSettingsGates(ctx)

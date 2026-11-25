@@ -130,10 +130,15 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   blob-store key layout, CBOR/offset encodings, storage plugins,
   pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob
   users rely on.
-- Update `ARCHITECTURE.md` for any change to component responsibilities, package
-  boundaries, startup/composition, EventBus topics/payloads, plugin interfaces,
-  lifecycle/concurrency behavior, or cross-component flows among ledger,
-  database, mempool, networking, API, and node wiring.
+- Keep `ARCHITECTURE.md` a concise architectural design document. Update it
+  when a change alters component responsibilities, dependency direction,
+  authoritative state ownership, a principal cross-component flow, or a
+  documented lifecycle or consistency guarantee.
+- Implementation changes within those boundaries do not require an
+  architecture edit. Document local algorithms, event payloads, configuration,
+  APIs and test mechanics at their nearest source of truth: package or symbol
+  comments, subsystem documentation, configuration reference or tests. Do not
+  add file trees, symbol inventories or fix histories to `ARCHITECTURE.md`.
 - In final responses, report documentation status the same way tests are
   reported: either list the docs updated or explicitly state that
   `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.

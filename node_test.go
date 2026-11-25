@@ -3820,8 +3820,8 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 // down becomes available -- so driving the real path here would mean
 // injecting a failure at a specific point inside that sequence rather than
 // calling one self-contained function. This test therefore only proves the
-// guard logic is correct given the order Run() is documented (here and in
-// ARCHITECTURE.md) to register it in; it cannot catch a future edit to Run()
+// guard logic is correct given Run()'s current registration order;
+// it cannot catch a future edit to Run()
 // that reorders the db.Close/pluginHost.Stop/ledgerState.Close registrations
 // relative to each other. Matches this file's existing convention for
 // exercising cleanupFailedStartup with a hand-built `started` (see the

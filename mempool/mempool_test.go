@@ -3684,8 +3684,7 @@ func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
 // any work is pending, the recomputed budget is strictly greater than the round
 // the loop has reached, so `round < catchupRounds` can never end the loop. The
 // terminators are an empty journal, the journal cap, or a replay error. If this
-// ever fails, the loop gained a new exit that the surrounding comments and the
-// ARCHITECTURE.md note do not describe.
+// ever fails, the loop gained a new exit beyond those terminators.
 func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
 	t.Parallel()
 	for _, deltaCap := range []int{1, 8, 64, 4096} {
