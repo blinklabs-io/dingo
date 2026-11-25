@@ -29,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -146,12 +145,13 @@ func openConsensusRewound(
 			DataDir: dir, StorageMode: "core",
 			MigrateReleased: func(
 				ctx context.Context,
-				blobStore blob.BlobStore,
+				stores database.Stores,
 				openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
 			) error {
 				_, err := nodestorage.ReleasedMigration{
 					Config:       dbConfig,
-					Blob:         blobStore,
+					Blob:         stores.Blob,
+					Immutable:    stores.Immutable,
 					OpenMetadata: openMetadata,
 					UtxoSet: nodestorage.UtxoSetConfig{
 						DataDir:             dir,

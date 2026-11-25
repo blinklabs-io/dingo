@@ -19,7 +19,6 @@ internal/test/archive-demo/tmp/
 .validation/
 .tools/
 koios-parity
-leios-db-bench
 node-parity
 *.prof
 *.test
