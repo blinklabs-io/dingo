@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -1638,7 +1639,7 @@ func verifyPendingStakeInputs(
 	txn ledgerdb.Txn,
 	r RewardInputsReader,
 ) error {
-	raw, err := ldb.GetSyncState(rewardStakeInputsPendingKey, txn)
+	raw, err := ldb.GetSyncState(epochengine.RewardStakeInputsPendingKey, txn)
 	if err != nil {
 		return err
 	}
@@ -1877,7 +1878,7 @@ func verifyDerivedEpoch(
 			len(accounts), len(gotAccounts),
 		)
 	}
-	cursor, err := ldb.GetSyncState(rewardPrecomputeCursorKey(epoch), txn)
+	cursor, err := ldb.GetSyncState(epochengine.RewardPrecomputeCursorKey(epoch), txn)
 	if err != nil {
 		return err
 	}

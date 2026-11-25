@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -628,7 +629,11 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 				err,
 			)
 		}
-		epochNonce, err = assembleEpochNonce(candidate, labNonce, extraEntropy)
+		epochNonce, err = epochengine.AssembleEpochNonce(
+			candidate,
+			labNonce,
+			extraEntropy,
+		)
 		if err != nil {
 			return nil, models.Epoch{}, false, fmt.Errorf(
 				"%w: assemble candidate epoch nonce: %w",
@@ -706,7 +711,7 @@ func (ls *LedgerState) extraEntropyForCandidateEpoch(
 		// The forecast sees the update that will enact at the requested
 		// boundary. It cannot include updates from intervening, not-yet-enacted
 		// epochs, so only the immediately following epoch is safe to forecast.
-		if eraHasExtraEntropy(epoch.EraId) &&
+		if epochengine.EraHasExtraEntropy(epoch.EraId) &&
 			epoch.EpochId-snapshot.currentEpoch.EpochId > 1 {
 			return nil, fmt.Errorf(
 				"%w: extra entropy for epoch %d is beyond the one-epoch forecast horizon",

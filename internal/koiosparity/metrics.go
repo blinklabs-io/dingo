@@ -35,6 +35,7 @@ import (
 // Status and Mismatches cover both phases, exactly as CheckedScopes says.
 type metrics struct {
 	epochResultTotal   *prometheus.CounterVec
+	notCheckedTotal    *prometheus.CounterVec
 	mismatchTotal      *prometheus.CounterVec
 	lastCheckedEpoch   *prometheus.GaugeVec
 	epochMismatchCount *prometheus.GaugeVec
@@ -59,9 +60,19 @@ func newMetrics(promRegistry prometheus.Registerer) *metrics {
 			prometheus.NewCounterVec(
 				prometheus.CounterOpts{
 					Name: "dingo_koiosparity_epoch_result_total",
-					Help: "koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)",
+					Help: "koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error/not_checked)",
 				},
 				[]string{"queue", "status"},
+			),
+		),
+		notCheckedTotal: registerCollector(
+			promRegistry,
+			prometheus.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "dingo_koiosparity_epoch_not_checked_total",
+					Help: "koios-parity epochs reported as not checked, by network (a constant label from the node's shared registry), queue and reason",
+				},
+				[]string{"queue", "reason"},
 			),
 		),
 		mismatchTotal: registerCollector(promRegistry, prometheus.NewCounterVec(
@@ -146,6 +157,15 @@ func (m *metrics) recordResult(result *EpochCompareResult) {
 		queue,
 		strings.ToLower(result.Status),
 	).Inc()
+	if result.Status == StatusNotChecked {
+		// No check completed, so the last-checked gauges stay on the last
+		// epoch that was compared.
+		m.notCheckedTotal.WithLabelValues(
+			queue,
+			result.NotCheckedReason,
+		).Inc()
+		return
+	}
 	m.lastCheckedEpoch.WithLabelValues(queue).
 		Set(float64(result.Epoch))
 	m.epochMismatchCount.WithLabelValues(queue).
