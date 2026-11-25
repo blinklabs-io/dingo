@@ -1005,7 +1005,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to resolve storage plugins: %w", err)
 	}
 
-	if err := n.migrateReleasedLedger(n.ctx, stores.Blob, deps); err != nil {
+	if err := n.migrateReleasedLedger(n.ctx, stores, deps); err != nil {
 		return fmt.Errorf("migrate the v0.94.2 ledger state: %w", err)
 	}
 	// Load database
@@ -1932,7 +1932,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			mesh.ProviderDependencies{
 				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.meshLedgerState(),
+				LedgerState:        n.ledgerState,
 				Database:           n.meshDatabase(),
 				Chain:              n.meshChain(),
 				Ready:              n.apiReadiness(),

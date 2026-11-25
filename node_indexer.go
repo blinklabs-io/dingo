@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -271,17 +270,6 @@ func (n *Node) closeIndexerDatabase() error {
 	return nil
 }
 
-// meshLedgerState is the ledger state the Mesh server reads. Its account
-// endpoints read the UTxO set from the IndexerDB, which holds it for the
-// APIs, and not from the consensus store, which keeps only what validation
-// needs.
-func (n *Node) meshLedgerState() mesh.MeshLedgerState {
-	return &indexerMeshLedger{
-		LedgerState: n.ledgerState,
-		db:          n.indexerDB,
-	}
-}
-
 // meshChain is the chain whose tip the Mesh server reports: the IndexerDB's
 // tip, since the ledger's tip is ahead of the rows the Mesh answers are built
 // from.
@@ -289,7 +277,8 @@ func (n *Node) meshChain() mesh.MeshChain {
 	return &indexerMeshChain{store: n.indexerStore}
 }
 
-// meshDatabase is the block and transaction store the Mesh server reads.
+// meshDatabase is the store the Mesh server reads blocks, transactions and
+// address UTxOs from: the IndexerDB, which holds them for the APIs.
 // Blocks above the IndexerDB's tip are hidden, since their transactions are
 // not indexed yet.
 func (n *Node) meshDatabase() mesh.MeshDatabase {
@@ -320,40 +309,6 @@ func (c *indexerMeshChain) tip() (ochainsync.Tip, error) {
 func (c *indexerMeshChain) Tip() ochainsync.Tip {
 	tip, _ := c.tip()
 	return tip
-}
-
-// indexerMeshLedger answers the Mesh UTxO reads from the IndexerDB and leaves
-// the rest to the ledger state.
-type indexerMeshLedger struct {
-	*ledger.LedgerState
-	db *database.Database
-}
-
-func (m *indexerMeshLedger) UtxosByAddress(
-	ctx context.Context,
-	addrs []lcommon.Address,
-) ([]models.Utxo, error) {
-	return m.db.UtxosByAddress(ctx, addrs, 0, nil)
-}
-
-func (m *indexerMeshLedger) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (ochainsync.Tip, error) {
-	return m.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-func (m *indexerMeshLedger) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-) (models.AddressBalance, error) {
-	txn := database.NewTxnContext(ctx, m.db, false)
-	defer txn.Release()
-	return m.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
 }
 
 // utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB.

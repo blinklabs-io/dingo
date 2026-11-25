@@ -254,7 +254,7 @@ Cardano domains:
 | :--- | :--- | :--- | :--- | :--- |
 | **Pool Performance** | *"Inspect recent performance, pledge, and rewards for pool 003A75D8..."* | `get_pool_performance` | `{"pool_id": "003A75D8...", "limit": 10}` | Reads recorded epoch reward and stake snapshots; `limit` defaults to 10 and is capped at 50 epochs. Stake and pledge amounts are lovelace. |
 | **Delegator Status** | *"What account fields are indexed for this stake key?"* | `get_account` | `{"stake_address_or_credential": "stake_test1..."}` | Decodes the Bech32 stake credential and returns its stored account row. |
-| **Epoch Randomness** | *"What are the active epoch randomness nonces for slot leader checks?"* | `get_epoch_summary` | `{}` | Returns epoch boundary summary, active epoch number, and candidate block counts. |
+| **Epoch Randomness** | *"What are the active epoch randomness nonces for slot leader checks?"* | `get_epoch_summary` | `{}` | Returns epoch boundary summary, active epoch number, and the epoch's block count: from the IndexerDB on an API node, from the ledger's retained window on a core node. |
 | **OpCert Sequences** | *"Verify pool operational certificate counter sequence numbers."* | `sqlite_query` | `{"query": "SELECT pool_key_hash, latest_op_cert_sequence FROM pool LIMIT 5"}` | Reads the IndexerDB's pool rows for each pool's latest operational certificate counter. |
 | **Node Identity** | *"How does Dingo identify itself and comply with Minor 69?"* | `get_node_info` | `{"topic": "identity"}` | Returns official markdown guide detailing pure-Go block header minting and identity. |
 
@@ -476,9 +476,12 @@ include the 61-second SSE idle-survival regression.
 
 Epoch nonce reporting reads `epoch_summary.epoch_nonce` with `epoch.nonce` as
 fallback. Recorded block counts cover the `block_nonce` rows inside the
-stored epoch slot boundaries. The IndexerDB keeps a row for every block; on a
-node without one the tool reads the ledger state, which prunes non-checkpoint
-rows below the last three epochs, so an older epoch's count can be short.
+stored epoch slot boundaries. With a SQLite IndexerDB the tool reads the
+epoch, nonce and count from it, and it keeps a row for every indexed block.
+Without one the tool reads the epoch and nonce from the ledger state; on a
+node with a PostgreSQL or MySQL IndexerDB the count is the IndexerDB's, and on
+a core node it covers the ledger's retained `block_nonce` rows only, so an
+older epoch reports fewer blocks and the output says so after the count.
 Transaction totals cover retained `utxo` rows and cannot reconstruct pruned
 outputs. Pool stake and pledge are reported in lovelace.
 

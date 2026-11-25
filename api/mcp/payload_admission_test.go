@@ -99,6 +99,7 @@ func minUtxoSession(t *testing.T, limits *readLimits) *mcp.ClientSession {
 	)
 	registerCardanoTools(
 		server, nil, nil, nil, "preview", 5*time.Second, limits,
+		indexerReads{},
 	)
 	return reviewSession(t, server)
 }

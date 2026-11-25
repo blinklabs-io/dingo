@@ -133,6 +133,11 @@ FROM utxo WHERE tx_id = ?`
 
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
+// retainedWindowNote qualifies a block count read from the block nonces the
+// ledger retains, which it prunes behind a window of recent epochs.
+const retainedWindowNote = " (blocks in the ledger's retained window; " +
+	"older blocks of the epoch are not counted)"
+
 // RegisterCardanoTools registers domain-specific Cardano and db-sync aligned tools.
 // Each call creates its own concurrency budget for get_asset_info, separate
 // from the one RegisterSQLiteTools creates; NewMCPServer shares one budget
@@ -146,9 +151,13 @@ func RegisterCardanoTools(
 	queryTimeout time.Duration,
 	addressLookups ...utxoAddressLookup,
 ) {
+	var reads indexerReads
+	if len(addressLookups) > 0 {
+		reads.addressLookup = addressLookups[0]
+	}
 	registerCardanoTools(
 		server, db, ledgerStateOf(ls), mp, network, queryTimeout,
-		newReadLimits(), addressLookups...,
+		newReadLimits(), reads,
 	)
 }
 
@@ -160,7 +169,7 @@ func registerCardanoTools(
 	network string,
 	queryTimeout time.Duration,
 	limits *readLimits,
-	addressLookups ...utxoAddressLookup,
+	reads indexerReads,
 ) {
 	if queryTimeout <= 0 {
 		queryTimeout = defaultQueryTimeout
@@ -539,10 +548,7 @@ func registerCardanoTools(
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
-		var lookup utxoAddressLookup
-		if len(addressLookups) > 0 {
-			lookup = addressLookups[0]
-		}
+		lookup := reads.addressLookup
 		if db == nil && lookup == nil && ls != nil {
 			return liveUtxoPage(qCtx, ls, limits, addr, input.Cursor, limit, offset)
 		}
@@ -969,12 +975,23 @@ func registerCardanoTools(
 
 		var epochNum, blockCount int
 		var rawNonce []byte
+		var blocksNote string
 		if db == nil {
 			read, err := epochSummaryFromLedger(qCtx, stateDB, input.Epoch)
 			if err != nil {
 				return nil, nil, err
 			}
 			epochNum, rawNonce, blockCount = read.epoch, read.nonce, read.blockCount
+			blocksNote = retainedWindowNote
+			if reads.epochBlocks != nil {
+				blockCount, err = reads.epochBlocks(
+					qCtx, read.startSlot, read.startSlot+read.length-1,
+				)
+				if err != nil {
+					return nil, nil, fmt.Errorf("count epoch blocks: %w", err)
+				}
+				blocksNote = ""
+			}
 		} else {
 			if input.Epoch != nil {
 				epochNum = *input.Epoch
@@ -1015,8 +1032,8 @@ func registerCardanoTools(
 		markdown := fmt.Sprintf("### Epoch Summary: `%d`\n\n"+
 			"- **Network**: `%s`\n"+
 			"- **Epoch Nonce**: `%s`\n"+
-			"- **Recorded Blocks**: %d\n",
-			epochNum, network, nonceHex, blockCount)
+			"- **Recorded Blocks**: %d%s\n",
+			epochNum, network, nonceHex, blockCount, blocksNote)
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{

@@ -59,9 +59,9 @@ type AdoptChunksConfig struct {
 	// else in SourceDir, such as a partial chunk that was never certified, is
 	// left alone.
 	Digests map[string]string
-	// OnChunkCommitted, when set, is called after every block of a chunk has
-	// committed and the blob store is synced, with the number of the next
-	// chunk to adopt. Every chunk below it is in the ImmutableDB.
+	// OnChunkCommitted, when set, is called once every block of a group of
+	// chunks has committed and the blob store is synced, with the number of
+	// the next chunk to adopt. Every chunk below it is in the ImmutableDB.
 	OnChunkCommitted func(firstUnadopted uint64) error
 	// OnProgress receives progress after each flushed batch.
 	OnProgress func(LoadBlobsProgress)
@@ -77,12 +77,13 @@ type AdoptChunksConfig struct {
 }
 
 // AdoptImmutableChunks takes verified Mithril chunk files into the ImmutableDB
-// instead of copying their block bodies into the blob store. For each chunk, in
-// order, it moves the chunk, primary and secondary files into the database's
-// ImmutableDB directory, re-reads them there against the certified digests,
-// syncs them, and only then commits that chunk's index entries, markers and
-// UTxO offsets and advances the recorded tip. The chunk files are in place and
-// durable before any marker that names them exists.
+// instead of copying their block bodies into the blob store. It takes chunks
+// in order, in groups of up to adoptGroupChunks: it moves each chunk's chunk,
+// primary and secondary files into the database's ImmutableDB directory and
+// syncs the group's files and the directory, then for each chunk re-reads the
+// files against the certified digests, advances the recorded tip and commits
+// the chunk's index entries, markers and UTxO offsets. The chunk files are in
+// place and durable before any marker that names them exists.
 //
 // It resumes: a chunk that is already in the ImmutableDB directory is verified
 // rather than moved again, a chain that stops inside a chunk continues from
@@ -177,10 +178,8 @@ func AdoptImmutableChunks(
 		progressTip  = (lastChunk + 1) * geom.ChunkSlots
 		adopted      = false
 	)
+	var pending []uint64
 	for _, num := range chunks {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		if st.HasTip && (num < tipChunk || (num == tipChunk &&
 			chunkCommitted(db, c, st))) {
 			// Committed by an earlier run; only a duplicate left behind by a
@@ -188,91 +187,77 @@ func AdoptImmutableChunks(
 			removeChunkFiles(cfg.SourceDir, num)
 			continue
 		}
-		// Record the chunk before any file moves: from the first rename until
-		// the tip covers the chunk, reconciliation would read its files as
-		// bytes past the recorded tip and cut them.
-		if err := db.BeginImmutableAdopt(num); err != nil {
+		pending = append(pending, num)
+	}
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := moveChunkIn(cfg.SourceDir, destDir, num, move); err != nil {
+		group := pending[:min(len(pending), adoptGroupChunks)]
+		pending = pending[len(group):]
+		// Record the group before any file moves: from the first rename until
+		// a durable tip covers a chunk, reconciliation would read its files
+		// as bytes past the recorded tip and cut them. The tip is a blob-store
+		// write, durable only once the group's blob sync returns, so the
+		// record stays until then.
+		if err := db.BeginImmutableAdopt(group[0]); err != nil {
 			return nil, err
 		}
-		// discard undoes a chunk that failed before its markers could
-		// commit. The recorded tip is read afresh: adoptChunk moves it over
-		// the chunk before the first marker commits, and from then on, as
-		// for a chunk an earlier run stopped inside, committed markers can
-		// name the chunk's local and published files, so both stay.
-		discard := func(err error) error {
-			cur, _ := db.ImmutableState()
-			if cur.HasTip && num <= cur.TipSlot/geom.ChunkSlots {
-				return err
-			}
-			if uerr := db.UnpublishImmutableChunk(num); uerr != nil {
-				return errors.Join(err, fmt.Errorf(
-					"removing published chunk %d: %w", num, uerr,
-				))
-			}
-			if errors.Is(err, immutable.ErrDigestMismatch) {
-				// Files that are not the certified ones are not worth
-				// keeping for a later run to resume with.
-				removeChunkFiles(destDir, num)
-				if cerr := db.ClearImmutableAdopt(); cerr != nil {
-					return cerr
-				}
-			}
-			return err
-		}
-		if db.ImmutableChunksPublished() {
-			// Publication uploads whatever the staged files hold, and the
-			// object store keeps it whether or not the adoption goes on. Check
-			// the files first so bytes that are not certified are not
-			// published at all; adoptChunk still verifies the bytes it parses.
-			if err := dest.VerifyChunkFiles(num); err != nil {
-				return nil, discard(
-					fmt.Errorf("verifying chunk %d: %w", num, err),
-				)
-			}
-			if err := db.PublishImmutableChunk(num); err != nil {
-				return nil, discard(
-					fmt.Errorf("publishing chunk %d: %w", num, err),
-				)
-			}
-		}
-		n, last, err := adoptChunk(
-			ctx, db, c, dest, destDir, num, geom, callback,
-			cfg.BeforeCommit,
-			func(copied int, slot uint64) {
-				reportLoadBlobsProgress(
-					cfg.OnProgress, blocksCopied+copied, slot,
-					progressTip, startTime,
-				)
-			},
-		)
-		if err != nil {
-			return nil, discard(fmt.Errorf("adopting chunk %d: %w", num, err))
-		}
-		blocksCopied += n
-		adopted = true
-		if last != nil {
-			lastSlot = last.Slot
-		}
-		blobStore := db.Blob()
-		if blobStore == nil {
-			return nil, datatypes.ErrBlobStoreUnavailable
-		}
-		if err := blobStore.Sync(); err != nil {
-			return nil, fmt.Errorf(
-				"syncing blob store after chunk %d: %w", num, err,
-			)
-		}
-		if err := db.ReleaseImmutableChunk(num); err != nil {
-			return nil, fmt.Errorf("releasing local chunk %d: %w", num, err)
-		}
-		removeChunkFiles(cfg.SourceDir, num)
-		if cfg.OnChunkCommitted != nil {
-			if err := cfg.OnChunkCommitted(num + 1); err != nil {
+		for _, num := range group {
+			if err := moveChunkFilesIn(
+				cfg.SourceDir, destDir, num, move,
+			); err != nil {
 				return nil, err
 			}
+		}
+		// Every file must be durable, under its new name, before a tip that
+		// covers it is recorded. One directory sync covers the group's
+		// renames; per-chunk directory syncs were most of the import's time.
+		for _, num := range group {
+			if err := syncChunkFileData(destDir, num); err != nil {
+				return nil, err
+			}
+		}
+		if err := syncDir(destDir); err != nil {
+			return nil, err
+		}
+		for i, num := range group {
+			n, lastBlock, err := adoptGroupChunk(
+				ctx, db, c, dest, destDir, num, geom, callback, cfg,
+				func(copied int, slot uint64) {
+					reportLoadBlobsProgress(
+						cfg.OnProgress, blocksCopied+copied, slot,
+						progressTip, startTime,
+					)
+				},
+			)
+			if err != nil {
+				// The chunks after this one were moved in under the group's
+				// record but no tip covers them. Return them to the source
+				// so the failed chunk is undone exactly as it would be alone.
+				if rerr := moveChunksBack(
+					cfg.SourceDir, destDir, group[i+1:], move,
+				); rerr != nil {
+					return nil, errors.Join(err, rerr)
+				}
+				// The chunks before it committed; finish them as a group
+				// of their own so they are synced and released. The record
+				// stays: the failed chunk's files may still sit past the tip.
+				if ferr := finishAdoptedGroup(
+					db, cfg, group[:i], false,
+				); ferr != nil {
+					return nil, errors.Join(err, ferr)
+				}
+				return nil, discardAdoptedChunk(db, destDir, num, geom, err)
+			}
+			blocksCopied += n
+			adopted = true
+			if lastBlock != nil {
+				lastSlot = lastBlock.Slot
+			}
+		}
+		if err := finishAdoptedGroup(db, cfg, group, true); err != nil {
+			return nil, err
 		}
 		st, _ = db.ImmutableState()
 	}
@@ -374,7 +359,6 @@ func adoptChunk(
 	var (
 		raws      []chain.RawBlock
 		last      *immutable.Block
-		synced    bool
 		wantIndex uint64
 	)
 	for {
@@ -384,14 +368,6 @@ func adoptChunk(
 		}
 		if b == nil {
 			break
-		}
-		if !synced {
-			// The first block read means all three files matched their
-			// digests; make them durable before any marker names them.
-			if err := syncChunkFiles(destDir, num); err != nil {
-				return 0, nil, err
-			}
-			synced = true
 		}
 		last = b
 		rb, err := rawBlockFromImmutableBlock(b)
@@ -420,13 +396,8 @@ func adoptChunk(
 			"chain tip %x is not in chunk %d", skipTo.Hash, num,
 		)
 	}
-	if !synced {
-		// A chunk with no blocks still has to be durable; the iterator has
-		// already checked its digests.
-		if err := syncChunkFiles(destDir, num); err != nil {
-			return 0, nil, err
-		}
-	}
+	// The caller made the chunk's files and their names durable before
+	// calling, so no marker below can name a file a crash would lose.
 	if beforeCommit != nil {
 		if err := beforeCommit(num); err != nil {
 			return 0, nil, err
@@ -454,12 +425,6 @@ func adoptChunk(
 		); err != nil {
 			return 0, nil, err
 		}
-	}
-	// The recorded tip now covers the chunk, so reconciliation keeps its
-	// files. A chunk with no blocks records no tip and its files hold nothing
-	// for reconciliation to cut.
-	if err := db.ClearImmutableAdopt(); err != nil {
-		return 0, nil, err
 	}
 	var added int
 	for len(raws) > 0 {
@@ -532,67 +497,39 @@ func chunkFileName(num uint64, ext string) string {
 	return immutable.ChunkName(num) + ext
 }
 
-// moveChunkIn moves chunk num's files that are not already in destDir.
-func moveChunkIn(
-	srcDir, destDir string,
-	num uint64,
-	move func(src, dst string) error,
-) error {
-	for _, ext := range chunkFileExts {
-		name := chunkFileName(num, ext)
-		dst := filepath.Join(destDir, name)
-		if _, err := os.Lstat(dst); err == nil {
-			continue
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		src := filepath.Join(srcDir, name)
-		if err := move(src, dst); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf(
-					"certified chunk file %s is missing from %s and %s: %w",
-					name, srcDir, destDir, err,
-				)
-			}
-			return fmt.Errorf("moving %s: %w", name, err)
-		}
-	}
-	return fsyncdir.Sync(destDir)
-}
-
 func removeChunkFiles(dir string, num uint64) {
 	for _, ext := range chunkFileExts {
 		_ = os.Remove(filepath.Join(dir, chunkFileName(num, ext)))
 	}
 }
 
-func syncChunkFiles(dir string, num uint64) error {
-	for _, ext := range chunkFileExts {
-		f, err := os.OpenFile(
-			filepath.Join(dir, chunkFileName(num, ext)), os.O_RDWR, 0,
-		)
-		if err != nil {
-			return err
+// Seams a test swaps to observe or force the order of durability steps.
+// A test that swaps one is not t.Parallel.
+var (
+	renameFile       = os.Rename
+	syncDir          = fsyncdir.Sync
+	syncAdoptedBlobs = func(db *database.Database) error {
+		blobStore := db.Blob()
+		if blobStore == nil {
+			return datatypes.ErrBlobStoreUnavailable
 		}
-		err = f.Sync()
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return fmt.Errorf("syncing %s: %w", chunkFileName(num, ext), err)
-		}
+		return blobStore.Sync()
 	}
-	return fsyncdir.Sync(dir)
-}
+)
 
 // moveChunkFile renames src to dst, copying through a temporary name when the
-// two are on different file systems so dst never appears partly written.
+// two are on different file systems so dst never appears partly written. A
+// copy makes dst's data and its directory entry durable before src is
+// removed, so a crash at any point leaves at least one durable copy.
 func moveChunkFile(src, dst string) error {
-	err := os.Rename(src, dst)
+	err := renameFile(src, dst)
 	if err == nil || !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
 	if err := copyChunkFile(src, dst); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(dst)); err != nil {
 		return err
 	}
 	return os.Remove(src)
@@ -633,6 +570,200 @@ func copyChunkFile(src, dst string) error {
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	return nil
+}
+
+// adoptGroupChunks bounds how many chunks share one adopt record, one
+// directory sync and one blob-store sync. A crash redoes at most this many.
+// It is a variable so a test can cross a group boundary with the few fixture
+// chunks it copies.
+var adoptGroupChunks = 64
+
+// adoptGroupChunk verifies and publishes one chunk of a group, then adopts
+// it. It leaves the adopt record in place: the tip it records is not durable
+// until finishAdoptedGroup syncs the blob store.
+func adoptGroupChunk(
+	ctx context.Context,
+	db *database.Database,
+	c *chain.Chain,
+	dest *immutable.ImmutableDb,
+	destDir string,
+	num uint64,
+	geom immutable.Geometry,
+	callback func(chain.RawBlock, *database.Txn) error,
+	cfg AdoptChunksConfig,
+	progress func(copied int, slot uint64),
+) (int, *immutable.Block, error) {
+	if db.ImmutableChunksPublished() {
+		// Publication uploads whatever the staged files hold, and the
+		// object store keeps it whether or not the adoption goes on. Check
+		// the files first so bytes that are not certified are not
+		// published at all; adoptChunk still verifies the bytes it parses.
+		if err := dest.VerifyChunkFiles(num); err != nil {
+			return 0, nil, fmt.Errorf("verifying chunk %d: %w", num, err)
+		}
+		if err := db.PublishImmutableChunk(num); err != nil {
+			return 0, nil, fmt.Errorf("publishing chunk %d: %w", num, err)
+		}
+	}
+	n, last, err := adoptChunk(
+		ctx, db, c, dest, destDir, num, geom, callback,
+		cfg.BeforeCommit, progress,
+	)
+	if err != nil {
+		return 0, nil, fmt.Errorf("adopting chunk %d: %w", num, err)
+	}
+	return n, last, nil
+}
+
+// discardAdoptedChunk undoes a chunk that failed before its markers could
+// commit, once the later chunks of its group are back in the source. The
+// recorded tip is read afresh: adoptChunk moves it over the chunk before the
+// first marker commits, and from then on, as for a chunk an earlier run
+// stopped inside, committed markers can name the chunk's local and published
+// files, so both stay. No file then sits past the tip, so once the blob
+// store is synced, making that tip durable, the adopt record is cleared.
+func discardAdoptedChunk(
+	db *database.Database,
+	destDir string,
+	num uint64,
+	geom immutable.Geometry,
+	err error,
+) error {
+	cur, _ := db.ImmutableState()
+	if cur.HasTip && num <= cur.TipSlot/geom.ChunkSlots {
+		if serr := syncAdoptedBlobs(db); serr != nil {
+			return errors.Join(err, serr)
+		}
+		if cerr := db.ClearImmutableAdopt(); cerr != nil {
+			return errors.Join(err, cerr)
+		}
+		return err
+	}
+	if uerr := db.UnpublishImmutableChunk(num); uerr != nil {
+		return errors.Join(err, fmt.Errorf(
+			"removing published chunk %d: %w", num, uerr,
+		))
+	}
+	if errors.Is(err, immutable.ErrDigestMismatch) {
+		// Files that are not the certified ones are not worth keeping for
+		// a later run to resume with.
+		removeChunkFiles(destDir, num)
+		if cerr := db.ClearImmutableAdopt(); cerr != nil {
+			return cerr
+		}
+	}
+	return err
+}
+
+// moveChunkFilesIn moves a chunk's certified files into destDir without
+// syncing the directory; the caller syncs it once for the group.
+func moveChunkFilesIn(
+	srcDir, destDir string,
+	num uint64,
+	move func(src, dst string) error,
+) error {
+	for _, ext := range chunkFileExts {
+		name := chunkFileName(num, ext)
+		dst := filepath.Join(destDir, name)
+		if _, err := os.Lstat(dst); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		src := filepath.Join(srcDir, name)
+		if err := move(src, dst); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf(
+					"certified chunk file %s is missing from %s and %s: %w",
+					name, srcDir, destDir, err,
+				)
+			}
+			return fmt.Errorf("moving %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// moveChunksBack returns chunks' files from destDir to srcDir and syncs both
+// directories, so no file of them remains past the recorded tip.
+func moveChunksBack(
+	srcDir, destDir string,
+	nums []uint64,
+	move func(src, dst string) error,
+) error {
+	if len(nums) == 0 {
+		return nil
+	}
+	for _, num := range nums {
+		for _, ext := range chunkFileExts {
+			name := chunkFileName(num, ext)
+			err := move(
+				filepath.Join(destDir, name),
+				filepath.Join(srcDir, name),
+			)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("returning %s: %w", name, err)
+			}
+		}
+	}
+	if err := syncDir(destDir); err != nil {
+		return err
+	}
+	return syncDir(srcDir)
+}
+
+// syncChunkFileData syncs a chunk's three files but not their directory.
+func syncChunkFileData(dir string, num uint64) error {
+	for _, ext := range chunkFileExts {
+		f, err := os.OpenFile(
+			filepath.Join(dir, chunkFileName(num, ext)), os.O_RDWR, 0,
+		)
+		if err != nil {
+			return err
+		}
+		err = f.Sync()
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("syncing %s: %w", chunkFileName(num, ext), err)
+		}
+	}
+	return nil
+}
+
+// finishAdoptedGroup makes committed chunks durable in the blob store, then
+// releases their local copies, removes their sources and reports them. With
+// clearRecord it also removes the adopt record, which is safe only after the
+// sync: the recorded tip that covers the group's files is a blob-store write.
+func finishAdoptedGroup(
+	db *database.Database,
+	cfg AdoptChunksConfig,
+	group []uint64,
+	clearRecord bool,
+) error {
+	if len(group) == 0 {
+		return nil
+	}
+	lastNum := group[len(group)-1]
+	if err := syncAdoptedBlobs(db); err != nil {
+		return fmt.Errorf("syncing blob store after chunk %d: %w", lastNum, err)
+	}
+	if clearRecord {
+		if err := db.ClearImmutableAdopt(); err != nil {
+			return err
+		}
+	}
+	for _, num := range group {
+		if err := db.ReleaseImmutableChunk(num); err != nil {
+			return fmt.Errorf("releasing local chunk %d: %w", num, err)
+		}
+		removeChunkFiles(cfg.SourceDir, num)
+	}
+	if cfg.OnChunkCommitted != nil {
+		return cfg.OnChunkCommitted(lastNum + 1)
 	}
 	return nil
 }

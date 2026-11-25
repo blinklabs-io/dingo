@@ -132,6 +132,14 @@ type liveNodeSeed struct {
 	livedIn bool
 	legacy  bool
 	host    *plugin.Host
+	// holdSeed runs while the seed ledger is open, between Start and Close.
+	holdSeed func()
+}
+
+// withSeedLedgerHold runs hold while the seed ledger that writes the epoch rows
+// is open, so a test can give it time to apply loaded blocks.
+func withSeedLedgerHold(hold func()) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.holdSeed = hold }
 }
 
 // withPluginHost runs the node on host instead of a fresh built-in one.
@@ -157,6 +165,7 @@ func seedLedgerEpochsForLoadedBlocks(
 	t *testing.T,
 	n *Node,
 	points []ocommon.Point,
+	hold func(),
 ) {
 	t.Helper()
 	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
@@ -166,6 +175,10 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
+	// Without this the seed ledger replays the loaded blocks from the origin
+	// between Start and Close, writing epoch rows and UTxO state up to an
+	// arbitrary slot before the fixture derives the rest.
+	cfg.ManualBlockProcessing = true
 	// The node's own set, loaded at the origin as a node's first start loads
 	// it, so its journal still reaches back to the first block.
 	tip, err := n.db.GetTip(nil)
@@ -176,6 +189,15 @@ func seedLedgerEpochsForLoadedBlocks(
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
+	if hold != nil {
+		hold()
+	}
+	// A ledger that applied any loaded block moved off the origin; the epoch
+	// row count alone would miss blocks that stay within the genesis epoch.
+	require.Equal(
+		t, uint64(0), seedLedger.Tip().Point.Slot,
+		"seed ledger applied a loaded block before Close",
+	)
 	require.NoError(t, seedLedger.Close())
 	epochs, err := set.Epochs()
 	require.NoError(t, err)
@@ -325,7 +347,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// restore/truncate is compared against identical production wiring on
 	// both sides rather than against a harness config that happens to omit
 	// the field under test.
-	seedLedgerEpochsForLoadedBlocks(t, n, points)
+	seedLedgerEpochsForLoadedBlocks(t, n, points, seed.holdSeed)
 	if storageMode == StorageModeCore && !seed.legacy {
 		seedLiveUtxoSet(t, db, tmpDir, points, finalTip, seed.livedIn,
 			uint64(n.config.cardanoNodeConfig.ShelleyGenesis().EpochLength))
