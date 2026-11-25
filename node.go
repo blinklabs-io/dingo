@@ -514,8 +514,7 @@ func New(cfg Config) (*Node, error) {
 // fields ever configured TLS for, and promoting them to a shared default
 // would silently switch Blockfrost/Kupo/Mesh from plaintext to TLS on upgrade
 // for any deployment that set them, breaking existing plaintext clients.
-// See ARCHITECTURE.md's "API security" section for this compatibility
-// decision. Returns the zero TLSPolicy (no effect on the merge) unless
+// Returns the zero TLSPolicy (no effect on the merge) unless
 // both root fields are set.
 func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
 	if cfg.tlsCertFilePath == "" || cfg.tlsKeyFilePath == "" {

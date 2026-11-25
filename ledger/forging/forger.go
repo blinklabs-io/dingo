@@ -1421,8 +1421,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	// slot early -- and leaving it uncounted is what keeps could_not_forge
 	// counting lost blocks rather than leader checks. The same condition met
 	// DURING production does reach could_not_forge, because leadership is
-	// proven by then; see errChainTipAheadOfSlot and ARCHITECTURE.md for both
-	// signatures and why they are not made to match. A scheduled leader slot
+	// proven by then; see errChainTipAheadOfSlot. A scheduled leader slot
 	// swallowed here is still attributable: logGateSkip raises the line to
 	// Warn with leader_slot.
 	//
@@ -2122,8 +2121,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		// TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork
 		// and its siblings. Reporting a fallback result there would
 		// credit or blame a path that never ran, and a refusal is not a
-		// forge this node lost; see ARCHITECTURE.md on reading the two
-		// together.
+		// forge this node lost.
 		if buildStats.fallbackResult != "" {
 			result := buildStats.fallbackResult
 			if !forgeAdopted {
@@ -2976,7 +2974,6 @@ var (
 	// increments for every failed build before asking whether the failure
 	// was a tip-gate refusal -- correct, because a build attempt runs after
 	// the leader check. The entry gate runs before it and counts nothing;
-	// ARCHITECTURE.md records what an operator sees in each case.
 	errChainTipAheadOfSlot = errors.New(
 		"chain tip is ahead of the forged slot",
 	)

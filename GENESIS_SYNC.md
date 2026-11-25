@@ -7,8 +7,8 @@ or requiring a corroboration quorum. A configured peer snapshot can supply
 additional relays. Deployments with a
 biased fast-sync source can opt into additional peer corroboration.
 
-For the internal design, see `ARCHITECTURE.md` → **Chain Selection → Ouroboros
-Genesis trust model**.
+For the internal design, see the [Ouroboros Genesis trust
+model](ARCHITECTURE.md#ouroboros-genesis-trust-model).
 
 ## When this applies
 
