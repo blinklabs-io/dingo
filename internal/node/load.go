@@ -318,27 +318,13 @@ func captureLoadGenesisSnapshot(
 }
 
 // DeferredIndexRebuilder owns the drop/rebuild pairing for a single
-// bulk-load run. The critical subset can be rebuilt before API
-// readiness; the full rebuild finishes the lazy maintenance work
-// and clears the pending marker.
+// bulk-load run: the IndexerDB writer drops the deferred indexes before it
+// replays to a Mithril anchor and rebuilds the full manifest, clearing the
+// pending marker, once the anchor is reached.
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
 	logger  *slog.Logger
 	ctx     context.Context
-}
-
-func (r *DeferredIndexRebuilder) BuildCritical() error {
-	if r == nil || r.manager == nil {
-		return nil
-	}
-	logger := r.logger
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
-	if err := ensureCriticalDeferredIndexes(r.ctx, r.manager, logger); err != nil {
-		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
-	}
-	return nil
 }
 
 func (r *DeferredIndexRebuilder) BuildAll() error {
@@ -398,95 +384,19 @@ func (r *DeferredIndexRebuilder) drop() {
 	}
 }
 
-// criticalIndexRebuildLogThreshold is how long the critical-index check
-// may take before it is reported even though nothing in the critical subset
-// was missing. A complete manifest costs one catalog lookup per entry and
+// deferredIndexCheckLogThreshold is how long the deferred-index check may
+// take before it is reported even though nothing in the manifest was
+// missing. A complete manifest costs one catalog lookup per entry and
 // stays well under it; anything slower did work an operator watching a
 // startup should see attributed.
-const criticalIndexRebuildLogThreshold = time.Second
-
-// ensureCriticalDeferredIndexes rebuilds every missing critical manifest
-// entry, whether or not a drop/rebuild cycle is outstanding.
-//
-// The pending marker records that a cycle was interrupted; it does not
-// record which indexes exist, and it is not durable across a Mithril sync:
-// mithril/sync.go rebuilds the critical subset and then calls
-// updateMithrilReadyState, which now leaves deferred.SyncStateKey untouched
-// (mithril/sync_import.go). Before that preservation, every completed
-// Mithril sync erased the marker moments after BuildCritical set it, leaving
-// the database with the critical subset built, the lazy remainder dropped,
-// and nothing recording either — the state two Mithril-bootstrapped preview
-// nodes were found in, missing the utxo child index the rollback DELETE
-// cascades through. Databases bootstrapped by any binary released so far are
-// still in it, and nothing else recreates those indexes: the schema migration
-// that created them is recorded complete, so its CREATE INDEX IF NOT EXISTS
-// never runs again, and the manifest is only consulted by a cycle that is no
-// longer pending.
-//
-// BuildCriticalDeferredIndexes skips indexes that are present, so this is a
-// catalog lookup per entry on a healthy database, and it never touches the
-// marker.
-func ensureCriticalDeferredIndexes(
-	ctx context.Context,
-	manager metadata.DeferredIndexManager,
-	logger *slog.Logger,
-) error {
-	missing, listed := missingCriticalDeferredIndexes(ctx, manager, logger)
-	if listed && len(missing) > 0 {
-		// Logged before the build: building one index on a
-		// multi-million-row table takes minutes, and the rebuild itself
-		// is silent while it runs.
-		logger.Info(
-			"rebuilding missing critical deferred metadata indexes",
-			"indexes", strings.Join(missing, ","),
-			"count", len(missing),
-		)
-	}
-	start := time.Now()
-	var err error
-	if builder, ok := manager.(metadata.ContextCriticalDeferredIndexBuilder); ok {
-		err = builder.BuildCriticalDeferredIndexesContext(ctx)
-	} else {
-		err = manager.BuildCriticalDeferredIndexes()
-	}
-	if err != nil {
-		return err
-	}
-	elapsed := time.Since(start)
-	if (listed && len(missing) > 0) ||
-		elapsed >= criticalIndexRebuildLogThreshold {
-		attrs := []any{
-			"duration", elapsed,
-			// The store runs the critical rebuild inside
-			// withDeferredIndexWrite, which restores any missing
-			// deferred.Retained index first. Both halves are inside
-			// this measurement.
-			"duration_covers",
-			"critical rebuild and retained-index restore",
-		}
-		if listed {
-			indexes := "none"
-			if len(missing) > 0 {
-				indexes = strings.Join(missing, ",")
-			}
-			attrs = append(attrs, "critical_indexes_built", indexes)
-		}
-		logger.Info(
-			"critical deferred metadata index check complete",
-			attrs...,
-		)
-	}
-	return nil
-}
+const deferredIndexCheckLogThreshold = time.Second
 
 // ensureAllDeferredIndexes rebuilds the complete manifest, naming the entries
 // it is about to build and reporting how long the build took.
 //
-// BuildDeferredIndexes is as silent as BuildCriticalDeferredIndexes and has
-// the whole manifest to get through, so without this an operator watching a
-// restored database start up sees the critical announcement, then nothing at
-// all for however long the remaining entries take on a multi-million-row
-// table.
+// BuildDeferredIndexes emits nothing while it runs and has the whole manifest
+// to get through, so without this an operator sees nothing at all for however
+// long the entries take on a multi-million-row table.
 func ensureAllDeferredIndexes(
 	ctx context.Context,
 	manager metadata.DeferredIndexManager,
@@ -512,7 +422,7 @@ func ensureAllDeferredIndexes(
 	}
 	elapsed := time.Since(start)
 	if (listed && len(missing) > 0) ||
-		elapsed >= criticalIndexRebuildLogThreshold {
+		elapsed >= deferredIndexCheckLogThreshold {
 		attrs := []any{"duration", elapsed}
 		if listed {
 			indexes := "none"
@@ -527,8 +437,9 @@ func ensureAllDeferredIndexes(
 }
 
 // missingDeferredIndexes names the manifest entries absent from the schema.
-// The second return reports whether the store could answer, on the same terms
-// as missingCriticalDeferredIndexes.
+// The second return reports whether the store could answer: stores that do
+// not implement the lister, and read errors on the catalog query, fall back to
+// logging after the rebuild rather than failing over a log line.
 func missingDeferredIndexes(
 	ctx context.Context,
 	manager metadata.DeferredIndexManager,
@@ -546,36 +457,6 @@ func missingDeferredIndexes(
 	if err != nil {
 		logger.Warn(
 			"could not list missing deferred metadata indexes; "+
-				"rebuilding without naming them",
-			"error", err,
-		)
-		return nil, false
-	}
-	return missing, true
-}
-
-// missingCriticalDeferredIndexes names the critical manifest entries absent
-// from the schema. The second return reports whether the store could answer:
-// stores that do not implement the lister, and read errors on the catalog
-// query, fall back to logging after the rebuild rather than failing a startup
-// over a log line.
-func missingCriticalDeferredIndexes(
-	ctx context.Context,
-	manager metadata.DeferredIndexManager,
-	logger *slog.Logger,
-) ([]string, bool) {
-	var missing []string
-	var err error
-	if lister, ok := manager.(metadata.ContextMissingCriticalDeferredIndexLister); ok {
-		missing, err = lister.MissingCriticalDeferredIndexesContext(ctx)
-	} else if lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister); ok {
-		missing, err = lister.MissingCriticalDeferredIndexes()
-	} else {
-		return nil, false
-	}
-	if err != nil {
-		logger.Warn(
-			"could not list missing critical deferred metadata indexes; "+
 				"rebuilding without naming them",
 			"error", err,
 		)
@@ -829,7 +710,6 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
-			// Load replays unvalidated blocks, the path this setting batches.
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,

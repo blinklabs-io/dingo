@@ -1031,22 +1031,9 @@
 # CLI: --strict-utxo-validation
 # strictUtxoValidation: true
 
-# Skip the startup consistency check between reward_live_stake and the live
-# UTxO/account set (default: false, i.e. the check runs).
-#
-# The check scans the entire live UTxO table on every startup, whether or not
-# anything actually needs repairing, so on a mainnet-scale database it costs
-# as much as a full rebuild each time the node starts. Advanced/diagnostic use
-# only: skipping is safe when the database is already known to be consistent,
-# such as repeated restarts while investigating an unrelated issue. It is
-# unsafe to leave enabled permanently, because this check is what catches a
-# stale or pre-migration reward_live_stake table.
-#
-# This does not disable the stake-snapshot provenance check that runs in the
-# same startup step. That one is a pair of indexed existence probes whose cost
-# does not scale with the UTxO set, and it fails closed on a database whose
-# consensus stake snapshots came from an older accounting version, so it
-# always runs.
+# Accepted so released configurations keep loading; it has no effect. The
+# ledger's database keeps no reward_live_stake table, so there is no startup
+# scan to skip, and the stake-snapshot provenance check always runs.
 #
 # Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
 # environment variable

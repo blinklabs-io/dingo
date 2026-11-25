@@ -652,20 +652,22 @@ func (e *Engine) rewardRollbackSeq(txn ledgerdb.Txn) (uint64, error) {
 	return e.host.RewardRollbackSeq(txn)
 }
 
+// StakeRewardApplication is one reward round's calculated result and the
+// inputs it was calculated from, applied at the boundary that pays it.
 type StakeRewardApplication struct {
 	PrecomputeCursor RewardPrecomputeCursor
 	Pparams          lcommon.ProtocolParameters
 	Params           rewards.Parameters
 	Pots             *models.RewardAdaPots
-	// replayBaseline marks a round replayed at a later boundary (see
-	// reward_late_first_block.go). The round's inputs come from pots; its
-	// deltas apply to replayBaseline, the pots at that boundary.
+	// ReplayBaseline marks a round replayed at a later boundary (see
+	// reward_late_first_block.go). The round's inputs come from Pots; its
+	// deltas apply to ReplayBaseline, the pots at that boundary.
 	ReplayBaseline        *models.RewardAdaPots
 	PoolOutputs           []*models.RewardPoolOutput
 	AccountOutputs        []*models.RewardAccountOutput
 	LikelihoodPoolInputs  []*models.RewardPoolInput
 	LikelihoodBlockCounts map[string]uint64
-	// reconstructedStakeInputs carries retention-pruned per-credential rows
+	// ReconstructedStakeInputs carries retention-pruned per-credential rows
 	// from the calculation transaction to the transaction that owns the
 	// resulting application. The async precompute calculation is read-only, so
 	// only its guarded write phase may persist these rows. The synchronous path
@@ -677,7 +679,7 @@ type StakeRewardApplication struct {
 	EffectiveRewards         uint64
 	Undistributed            uint64
 	Unspendable              uint64
-	// negativeLeaderRewards and unspendableDeficit carry the negative leader
+	// NegativeLeaderRewards and UnspendableDeficit carry the negative leader
 	// rewards of a CIP-50 round (see rewards.PoolReward.LeaderRewardDeficit).
 	// The output tables hold only non-negative amounts, so these exist only
 	// on a freshly calculated application: the precompute declines such a
@@ -686,13 +688,13 @@ type StakeRewardApplication struct {
 	UnspendableDeficit    uint64
 	Precomputed           bool
 	OutputsUpdated        bool
-	// totalsFinal marks effectiveRewards, unspendable and undistributed as
+	// TotalsFinal marks EffectiveRewards, Unspendable and Undistributed as
 	// already derived, for an application that carries no account outputs.
 	TotalsFinal bool
-	// deferCredits leaves the round's account credits to the pending-round
+	// DeferCredits leaves the round's account credits to the pending-round
 	// fold (reward_credit_pending.go) instead of the boundary transaction.
 	DeferCredits bool
-	// totalCirculation, totalBlocks and rewardEfficiency record the global
+	// TotalCirculation, TotalBlocks and RewardEfficiency record the global
 	// reward-round inputs that scale every pool's reward by the same factor,
 	// so a uniform network-wide shortfall can be attributed to the input that
 	// caused it. Each pool's reward is (beta/sigmaA) * optimalPoolReward(R,
@@ -704,12 +706,12 @@ type StakeRewardApplication struct {
 	TotalCirculation uint64
 	TotalBlocks      uint64
 	RewardEfficiency *big.Rat
-	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
+	// GuardedRewardCredentials is the CIP-0163 reward-crediting guard set,
 	// populated only at application time when the delegator-inactivity gate is
 	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
 	// StakeCredentialRef.MapKey() values for reward-account credentials that are
-	// expired as of epochs.Snapshot -- the same snapshot epoch Task 8 used to
-	// build the reward basis. An output whose credential is in this set is
+	// expired as of Epochs.Snapshot -- the same snapshot epoch the reward basis
+	// is built at. An output whose credential is in this set is
 	// neither credited (ApplyStakeRewardApplication) nor counted toward
 	// effective/unspendable (deriveStakeRewardApplicationTotals), so its amount
 	// falls through to undistributed and is refunded to reserves.
@@ -717,16 +719,16 @@ type StakeRewardApplication struct {
 	// each output's Guarded column before it is saved, so a reader of
 	// reward_account_output does not need to reconstruct this set.
 	GuardedRewardCredentials map[string]struct{}
-	// snapshotCapturedSlot and snapshotBoundarySlot record the reward_snapshot
+	// SnapshotCapturedSlot and SnapshotBoundarySlot record the reward_snapshot
 	// row's own captured/boundary slots as observed by
 	// CalculateStakeRewardApplication. Callers that compute this application
 	// in a read-only transaction and persist it later in a separate write
-	// transaction (see precomputeStakeRewardsAfterEpochTransition) use these
-	// to re-verify the snapshot has not moved (e.g. via a rollback) before
-	// writing; see StakeRewardPrecomputeSnapshotGuardOK.
+	// transaction (see LedgerState.precomputeStakeRewardsAfterEpochTransition)
+	// use these to re-verify the snapshot has not moved (e.g. via a rollback)
+	// before writing; see StakeRewardPrecomputeSnapshotGuardOK.
 	SnapshotCapturedSlot uint64
 	SnapshotBoundarySlot uint64
-	// snapshotEpochNonce and the snapshot* totals below record the rest of the
+	// SnapshotEpochNonce and the Snapshot* totals below record the rest of the
 	// reward_snapshot row's content so the deferred-persist guard can reject a
 	// same-slot snapshot whose content changed (a rollback that deletes and
 	// re-derives the snapshot keeps deterministic slots but can alter its
@@ -737,7 +739,7 @@ type StakeRewardApplication struct {
 	SnapshotTotalPoolCount   uint64
 	SnapshotTotalDelegators  uint64
 	SnapshotProtocolVersion  uint
-	// rewardInputGeneration covers every rollback-sensitive input that is read
+	// RewardInputGeneration covers every rollback-sensitive input that is read
 	// outside the eventual write transaction: performance blocks, ADA pots,
 	// protocol state, and account certificate history. A rollback brackets its
 	// mutations with generation changes, so the write guard can reject work
@@ -748,6 +750,10 @@ type StakeRewardApplication struct {
 	RewardInputRollbackActive   *atomic.Int64
 }
 
+// CalculateStakeRewardApplication calculates the reward round the boundary
+// into newEpoch applies. It reports false, with no error, when that boundary
+// applies no round or a precompute is declined.
+//
 // authoritative distinguishes boundary application from the opportunistic
 // precompute that runs the same calculation ahead of it. A precompute that
 // finds an input missing remains retryable because the boundary reads the

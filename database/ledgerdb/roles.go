@@ -423,7 +423,9 @@ type RewardStore interface {
 	DeleteRewardOutputsForEpoch(epoch uint64, txn Txn) error
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
 	// retained snapshot window, in every storage mode: it deletes both
-	// reward_stake_input and reward_account_output.
+	// reward_stake_input and reward_account_output, and the ledger's staging
+	// LedgerDB also prunes the live set's derived reward rows. See
+	// snapshot.Manager's cleanupOldSnapshots for the window.
 	DeleteRewardStateBeforeEpoch(
 		ctx context.Context,
 		epoch uint64,

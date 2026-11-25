@@ -1847,7 +1847,7 @@ func historyPending(err error) bool {
 }
 
 // transactionHistoryPoll and transactionHistoryWait bound how long a check
-// waits for the IndexerDB to index the epoch it samples. At an epoch boundary
+// waits for the IndexerDB to index the epoch it reads. At an epoch boundary
 // the IndexerDB usually trails the ledger by seconds to minutes; waiting here
 // keeps the epoch's other checks from being deferred and reported as an error
 // on every boundary. Tests shorten them.
@@ -1858,8 +1858,8 @@ var (
 
 // waitForHistory calls read, retrying while the history it reads has not
 // reached the epoch, up to transactionHistoryWait. It returns
-// ErrTransactionHistoryPending when the history is still behind after that,
-// and ctx's error when ctx ends first.
+// ErrTransactionHistoryPending or ErrRewardHistoryPending when the history is
+// still behind after that, and ctx's error when ctx ends first.
 func waitForHistory[T any](
 	ctx context.Context,
 	read func() (T, error),
