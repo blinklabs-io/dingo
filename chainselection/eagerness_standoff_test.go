@@ -418,28 +418,45 @@ func TestLimitOnEagernessIdleDenserForkIsNotRemovedByHeldPeer(t *testing.T) {
 	assert.False(t, got[0].EagernessStandoff, "removed by the provable rule")
 }
 
-// A peer that stopped at an older tip on the held peer's own chain is a prefix,
-// not a competing fork, so the density disconnector leaves it undecided.
-func TestLimitOnEagernessIdlePrefixDoesNotTriggerForkStandoff(
+// A peer idling at an older tip on the held peer's own chain has no headers
+// after the intersection. densityDisconnect passes it when it is idling, the
+// rival offers more than k headers, and the rival's window count is at least
+// its own, so the prefix peer is removed by the provable rule, not as a
+// standoff. With only k headers on offer the rival does not qualify, which
+// protects an honest peer when the node is nearly caught up.
+func TestLimitOnEagernessIdlePrefixIsRemovedWhenRivalOffersMoreThanK(
 	t *testing.T,
 ) {
 	t.Parallel()
-	f := newStandoffFixture()
-	f.cs.config.StaleTipThreshold = time.Minute
-	behind := newTestConnectionId(1)
-	held := newTestConnectionId(2)
-	feedStandoff(f.cs, behind, "c", 1, 10, sharedSlot)
-	markIdle(t, f.cs, behind)
-	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
-	feedStandoff(f.cs, held, "h", 11, 16, denseSlot)
-	hold(t, f.cs, held)
+	for _, tc := range []struct {
+		name     string
+		heldTo   uint64
+		wantGone bool
+	}{
+		{"rival offers more than k", 10 + loeTestK + 1, true},
+		{"rival offers only k", 10 + loeTestK, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newStandoffFixture()
+			behind := newTestConnectionId(1)
+			held := newTestConnectionId(2)
+			feedStandoff(f.cs, behind, "c", 1, 10, sharedSlot)
+			markIdle(t, f.cs, behind)
+			feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+			feedStandoff(f.cs, held, "h", 11, tc.heldTo, denseSlot)
+			hold(t, f.cs, held)
 
-	for range 20 {
-		f.mu.Lock()
-		f.now = f.now.Add(50 * time.Second)
-		f.mu.Unlock()
-		f.cs.TouchPeerActivity(behind)
-		assert.Empty(t, f.evaluate())
+			got := f.evaluate()
+			if !tc.wantGone {
+				assert.Empty(t, got)
+				return
+			}
+			require.Len(t, got, 1)
+			assert.Equal(t, behind, got[0].ConnectionId)
+			assert.Equal(t, held, got[0].DominatingConnectionId)
+			assert.False(t, got[0].EagernessStandoff)
+		})
 	}
 }
 
