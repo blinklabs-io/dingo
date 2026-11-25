@@ -15282,17 +15282,28 @@ its database with the network's chunk geometry
 copy is off, because adoption moves chunks out of the extracted tree. For each
 certified chunk, in order, it renames the three files into
 `<dataDir>/immutable`, reads them there through a digest-verified
-`immutable.ImmutableDb` bound to that directory, fsyncs them and the
-directory, advances `im_state` to the chunk's last block (startup
-reconciliation cuts chunk bytes beyond the recorded tip, so the tip covers the
-whole chunk before its markers commit), and only then commits the chunk's index
+`immutable.ImmutableDb` bound to that directory, advances `im_state` to the
+chunk's last block (startup reconciliation cuts chunk bytes beyond the recorded
+tip, so the tip covers the whole chunk before its markers commit), and only
+then commits the chunk's index
 entries, `DIM1` markers and API-mode UTxO offsets (the offsets come from the
 inner block CBOR, which is the chunk bytes after unwrapping `[type, cbor]`). A marker's chunk, offset, size and CRC come from the
 verified read of the moved chunk. Only chunks whose three files are all in the
 certificate's digest list are adopted; the ancillary archive's in-progress
 chunk is not, and its blocks reach the blob store through the normal copy.
-After each chunk the blob store is synced and `mithril_immutable_retired_below`
-advances to the next chunk. A resume takes a chunk already in the ImmutableDB
+Chunks are adopted in groups of up to 64. The adopt record is written before
+the group's first rename; every file in the group is fsynced and the directory
+synced once before any tip covers them. A rename that crosses file systems
+copies through a temporary name and fsyncs the copy and its directory before
+removing the source, so a crash leaves one durable copy. `im_state` and the
+block records commit to the same blob store in order, so a crash that drops
+unsynced commits drops a suffix and the tip still precedes the blocks it
+covers without a sync between them. Those commits are not durable until the
+blob store syncs, so the record is cleared only after the group's blob sync;
+then `mithril_immutable_retired_below` advances past the group. A failure
+inside a group moves the later chunks' files back to the source directory,
+finishes the chunks already committed, and, when the tip covers the failed
+chunk, syncs the blob store before clearing the record. A resume takes a chunk already in the ImmutableDB
 directory as it is, verifies it again, and continues after the chain tip when
 that lies inside the chunk, including the first one (`im_state` already covers
 the chunk, so startup reconciliation leaves its files alone); a digest mismatch after a move removes that
