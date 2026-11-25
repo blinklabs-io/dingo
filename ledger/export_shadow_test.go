@@ -174,7 +174,7 @@ func runUtxoSetScenario(
 			return res.(*utxoWholeResult).encoded, nil
 		},
 		UtxosByAddress: func(addrs []gledger.Address) ([]models.Utxo, error) {
-			return run.ls.UtxosByAddress(t.Context(), addrs)
+			return run.ls.utxosByAddress(addrs, 0, nil)
 		},
 		UtxosByAddressAt: func(p ocommon.Point, addrs []gledger.Address) ([]models.Utxo, error) {
 			res, err := run.ls.queryShelleyUtxoByAddress(
@@ -209,7 +209,7 @@ func runUtxoSetScenario(
 			return ret, nil
 		},
 		UtxoIncludingSpent: func(txID []byte, index uint32) (*models.Utxo, error) {
-			return run.ls.UtxoByRefIncludingSpent(txID, index)
+			return run.ls.utxoIncludingSpent(t.Context(), nil, txID, index)
 		},
 		ReadsForValidation: func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return run.ls.utxosByRefsForValidation(refs, nil)
