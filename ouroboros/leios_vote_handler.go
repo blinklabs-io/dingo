@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -30,6 +32,15 @@ type LeiosVoteHandler interface {
 	HandleVote(connKey string, vote lcommon.LeiosVote) error
 	HandlePrototypeVote(connKey string, vote lcommon.LeiosPrototypeVote) error
 	ObserveAnnouncement(slot uint64, rbHash, ebHash lcommon.Blake2b256)
+	// ObserveAnnouncementArrival records when a ranking-block header whose
+	// cryptography this node verified reached it on LeiosNotify, so the
+	// vote gate times L_hdr from the earliest authenticated arrival. It
+	// never arms a vote.
+	ObserveAnnouncementArrival(
+		slot uint64,
+		rbHash, ebHash lcommon.Blake2b256,
+		arrivedAt time.Time,
+	)
 	// NextVotes blocks until count votes not originating from connKey
 	// are available and returns exactly count votes. done aborts the
 	// wait (e.g. protocol shutdown).
