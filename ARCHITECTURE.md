@@ -3787,13 +3787,11 @@ run the phase between resolving the stores and `database.New`; every
 `internalplugins.OpenDatabase` caller that opens the ledger's database of a
 configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
-(`nodestorage.MigrateReleased`). `mithril sync` and `leios-db-bench` pass none
-and refuse such a block store. The phase opens the configured metadata
-provider on a plugin host of its own, opens the v0.94.2 database over it,
-the block store and the ImmutableDB provider the opener already resolved
-(creating no ImmutableDB, so blocks already promoted stay readable) as
-`database.RoleReleased` (the role storage adoption also opens it with),
-reverts it to the block `k` blocks below its tip
+(`nodestorage.MigrateReleased`). `mithril sync` and the
+`BenchmarkLeiosDBLatency` benchmark pass none and refuse such a block store. The phase opens the configured metadata
+provider on a plugin host of its own, opens the v0.94.2 database over it and
+the block store as `database.RoleReleased` (the role storage adoption also
+opens it with), reverts it to the block `k` blocks below its tip
 (`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
 (`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
 ledger-state family into the live UTxO set, checks the set holds them at the
@@ -21328,7 +21326,12 @@ pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
 stops acknowledging a half-ring window of delivered events is closed after a
-timeout; events a filter rejects do not count toward that window. Resuming with
+timeout; events a filter rejects do not count toward that window. Both apply to
+a client that stops reading as well: its send blocks on HTTP/2 flow control, so a
+per-stream watcher makes the lag and shutdown checks while a batch is in flight
+and expires the blocked write through `http.ResponseController` when one fires.
+There is no send timeout; a client still within the ring is never cut off.
+Resuming with
 `last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
 refused unless `barkEventPublishEnabled` is set, and an event with no
 `origin_node_id` or this node's own is rejected; an accepted event goes to the
