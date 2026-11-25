@@ -168,7 +168,9 @@ documentation: keep them accurate and in `// Name ...` form.
   (datums, scripts, metadata) are stored as 52-byte refs (magic `"DOFF"` +
   slot + hash + offset + length), resolved by `TieredCborCache` (hot → block
   LRU → cold extract). `"DLEB"` names an endorser block's transaction list in
-  the LeiosDB; `"DEXP"` marks a payload whose block expired with no archive.
+  the LeiosDB; `"DEXP"` marks a payload whose block expired with no archive;
+  `"DLOF"` names bytes inside a live output whose block expired before the
+  migration.
   See `database/cbor_offset.go` and `database/types/cbor_offset.go`.
 - gouroboros types embedding `DecodeStoreCbor` (blocks, tx bodies, etc.) return
   the original decoded bytes verbatim from `MarshalCBOR()` whenever `Cbor()` is

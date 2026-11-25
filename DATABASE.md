@@ -2512,8 +2512,8 @@ check per held block, not a re-scan of the chain after the first held block.
 The held blocks are saved before the cursor moves past them, and a failed save
 leaves the cursor where it was, so no block is passed without being recorded.
 Both rollback entry points drop the held blocks above the rollback point with
-the cursor; a held block that is already expired or no longer stored is dropped
-from the record.
+the cursor; a recorded block nothing uses any more is dropped from the record,
+including one that is already expired or no longer stored.
 
 `database/lifecycle/cloud_destination_credentials_test.go`
 (`dingo_extra_plugins`) exercises both real implementations end to end — upload,
@@ -4618,7 +4618,7 @@ bodies. `Database.ReleaseRolledBackBlocks` deletes them once no rollback intent
 names them, except while the IndexerDB's tip is itself one of them: its rows
 still name those blocks, so the node installs the IndexerDB's tip as the
 database's `RolledBackBlockHold` and releases the bodies again after each pass
-of the writer. Once the writer has rolled back past the abandoned blocks, its
+in which the writer moved its tip. Once the writer has rolled back past the abandoned blocks, its
 tip is a chain block and every body is released.
 
 `database/indexerdb` holds the IndexerDB's tip under the sync-state key
@@ -5793,7 +5793,7 @@ is preserved.
 | `midnight_candidate_removals` | `id`, `block_number`, `tx_hash`, `output_index`, `datum` | PK `id`; unique `(block_number, tx_hash, output_index)` | Durable rollback journal for committee-candidate UTxOs spent by a block, written in the block's transaction so a rollback after restart can restore them. `datum` is the `DOFF` offset of the candidate's datum, which lies in the block that created it. Pruned past the rollback window. |
 | `midnight_epoch_transitions` | `block_number`, `previous_epoch`, `previous_exists` | PK `block_number` | Durable rollback journal for the epoch and initialization state that preceded an epoch advance or cold start at a block, so a rollback after restart restores it. Pruned past the rollback window. |
 | `midnight_epoch_candidates` | `id`, `epoch`, `block_number`, `candidates_cbor` | PK `id`; unique `epoch`; index `block_number` | Candidate snapshots captured at epoch boundaries. `block_number` records the block application that wrote the snapshot, so rollback deletes only snapshots created by the rolled-back block. `candidates_cbor` records only `(tx_hash, output_index, datum offset)` membership per candidate: a CBOR array of maps with keys `1` (transaction hash), `2` (output index) and `4` (the datum's `DOFF` offset), which the store returns with each datum resolved under key `3` — see `midnight_committee_candidate_registrations` for per-candidate provenance. |
-| `midnight_committee_candidate_registrations` | `id`, `tx_hash`, `output_index`, `block_number`, `slot_number`, `tx_index`, `tx_inputs_cbor` | PK `id`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_committee_candidate_reg_utxo`); index `block_number` | Durable provenance for a committee-candidate UTxO, written once when it's first observed as a transaction output. `tx_inputs_cbor` is the creating transaction's inputs, CBOR-encoded as a list of `(tx_hash, index)` pairs. Exists because the in-memory candidate set is rebuilt on restart from the generic UTXO index (`GetMidnightCandidates`), which carries only `tx_hash`/`output_index`/`datum` — this table is the only durable source for `tx_inputs`/`slot_number`/`tx_index`/`block_number`, which `MidnightState.GetEpochCandidates` joins in by `tx_hash`. |
+| `midnight_committee_candidate_registrations` | `id`, `tx_hash`, `output_index`, `block_number`, `slot_number`, `tx_index`, `tx_inputs_cbor` | PK `id`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_committee_candidate_reg_utxo`); index `block_number` | Durable provenance for a committee-candidate UTxO, written once when it's first observed as a transaction output. `tx_inputs_cbor` is the creating transaction's inputs, CBOR-encoded as a list of `(tx_hash, index)` pairs. Exists because the in-memory candidate set is rebuilt on restart from the generic UTXO index (`GetMidnightCandidates`), which carries only `tx_hash`/`output_index`/`datum` and the datum's offset — this table is the only durable source for `tx_inputs`/`slot_number`/`tx_index`/`block_number`, which `MidnightState.GetEpochCandidates` joins in by `tx_hash`. |
 
 #### Midnight MetadataStore API
 
@@ -7506,7 +7506,7 @@ only the legacy `em`/`et`/`ec` keys of a database that has not yet migrated.
 | `t` + tx hash bytes | Transaction CBOR offset bytes. Current writers store 52-byte `DOFF`; readers also support 69-byte `DTXP` tx-part offsets. | Transaction CBOR lookup |
 | `dh` + `<slot>:<hash hex>` (ASCII) | A single byte; presence is the signal | Deferred-header validation in `ledger`: written by `Database.SetDeferredHeaderMarker` when blockfetch defers stateful header checks to ledger apply, before the block is added to the chain. It lives in the blob store rather than `sync_state` because the blockfetch handler writes it, and a `sync_state` write needs the single SQLite write connection that a block-apply transaction (an epoch-rollover snapshot, a hard-fork boundary transition) holds for its whole length. Apply deletes it through `Txn.AfterCommit`, so a crash between the blob and metadata commits leaves a harmless stale marker rather than an unapplied block with no marker. Repopulated into the in-memory deferred set at startup. The value may include the supplying peer address; a one-byte payload is unattributed and a malformed attributed value fails closed. |
 | `chainstate/` + name (ASCII) | The value as ASCII text | Chain state kept with the blocks it describes (`Database.GetChainState`, `SetChainState`, `DeleteChainState`). A call given a transaction with a blob handle shares it; otherwise it commits a blob transaction of its own. `chainstate/deferred_header_validation_floor` is the decimal slot below which evicted `dh` markers no longer exist (the deferred set is capped), so apply verifies such blocks in full; Mithril import completion removes it with the transient `sync_state` keys. `chainstate/history_expiry_cursor` is the decimal slot below which every block has been expired or recorded as held, and `chainstate/history_expiry_held` lists the blocks (`slot:hex hash`, separated by `;`) that history expiry skipped because a payload in use names them (see the archive and history expiry contract). `chainstate/forge_fence:<poolid>` is a block producer's last-forged-slot fence (the JSON record described under `sync_state`); it is written with `Database.SetChainStateSynced`, which returns only after `Sync` on the block store, because the fence is recorded before the header is signed and nothing on chain can restore it. `chainstate/consensus_provider_identity` is the identity of the consensus provider the chain was created under (see Storage provider ownership). `chainstate/immutable_utxo_offsets_tip` (`database.ImmutableUtxoOffsetsTipKey`) is the decimal slot up to which an immutable block copy stored produced-UTxO offset references, so a backfill over the same database's rows does not write them again; Mithril import completion removes it with the transient `sync_state` keys. It is the ledger database's mark only: an IndexerDB reads the same block store but keeps the mark for its own rows in its own `sync_state` (`immutable_utxo_offsets_tip`), so the API backfill never takes the ledger's. `chainstate/chain_rollback_high_water` is the decimal block index of the highest block the chain held before its most recent rollback; Mithril import completion removes it too (`Database.ClearImportedChainState`), since it describes the chain the import replaced. `chainstate/database_lifecycle_truncate_pending` is the JSON record of an interrupted truncate (see the interrupted truncate marker); Mithril import completion removes it as well. `chainstate/tip` (`database.LedgerTipKey`) is the point the ledger has applied the chain up to, as `<slot>:<block number>:<block hash hex>` with an empty hash at origin; a value with another field count, a non-decimal number or a hash over 32 bytes fails the read. It is written at the commit of the transaction that set it, after the metadata commit when it advances and before it when it retreats (see the cross-store durability contract), and is never cleared: an import sets it to the imported point. `chainstate/tip_revert_pending` (`database.TipRevertPendingKey`) is the tip, in the same encoding, that a metadata revert lowered `chainstate/tip` to and has not yet committed (see the cross-store durability contract); Mithril import completion removes it. `chainstate/ledger.rollback.pending` (`database.RollbackIntentKey`) is the rollback notification outbox described under `sync_state`; Mithril import completion removes it. Import progress is kept here as well: `chainstate/sync_status`, every `chainstate/mithril_*` value (`mithril_ledger_slot`, `mithril_ledger_hash`, `mithril_immutable_max`, `mithril_immutable_stream_only`, `mithril_immutable_retired_below`, `mithril_pinned_artifact`, `mithril_snapshot_restore_active`, `mithril_snapshot_import_key`, `mithril_catchup_active`, `mithril_reward_repair_pending`, `mithril_reward_repair_active`) and `chainstate/ledger.state_reimport.active` and `.swapped`, with the values described under `sync_state`. The in-progress status is flushed with `Sync` before the import's first other write. Import completion deletes every one of them and writes the boundary slot and hash in a single blob transaction (`mithril.completeImportProgress`), then flushes it, so a stop never leaves the status cleared without the boundary; `mithril_immutable_max` is written again afterwards. `chainstate/mithril_ledger_import_checkpoint` is the last phase a snapshot import wrote, as `<phase>`, a newline and the import key (usually `{digest}:{slot}`), written by `Database.SetImportCheckpoint` after each phase and read by `Database.ImportCheckpoint`, which answers only for the key recorded. It is progress the sync reports (`mithril.SnapshotRestoreProgress`): a resumed import runs every phase again, and the LedgerDB set's `mimport` mark decides what it keeps. A catch-up import has no key and writes none, and import completion leaves the value. `Database.SetImportedLedgerStateBoundary` writes the slot and hash in one transaction and refuses a hash over 32 bytes. `Database.LookupChainState` tells a value recorded empty from an absent one, which the strict boundary read needs. `chainstate/ledger_migrated` (`database.LedgerMigratedKey`, value `1`) records that the data directory's ledger state lives in the LedgerDB: the ledger's database writes and syncs it the first time it opens a block store with no identity, before the identity is minted, and the v0.94.2 ledger-state migration writes and syncs it as its last step (`database.MarkLedgerMigrated`). Nothing removes it. `database.ReadLedgerStoreState` reads it with `nodesettings/storeid` (see "Storage layout and the move from a released database"). |
-| `rb` + slot (8 bytes big-endian) + block hash | Block CBOR | The body of a block a rollback removed from the primary chain, written by `database.BlockRetireTxn` in the transaction that deletes the block's `bp`, `bi`, `bh` and metadata keys, and by `Database.RetainRolledBackBlock`. Read only by `Database.RolledBackBlock`, for the rollback notification outbox; no chain lookup or block iterator sees it. `Database.ReleaseRolledBackBlocks` deletes every such key once no outbox record is pending. |
+| `rb` + slot (8 bytes big-endian) + block hash | Block CBOR | The body of a block a rollback removed from the primary chain, written by `database.BlockRetireTxn` in the transaction that deletes the block's `bp`, `bi`, `bh` and metadata keys, and by `Database.RetainRolledBackBlock`. Read by `Database.RolledBackBlock`, for the rollback notification outbox, and by `Database.ResolvePayload`, for an IndexerDB row that still names the abandoned block; no chain lookup or block iterator sees it. `Database.ReleaseRolledBackBlocks` deletes such keys once no outbox record is pending, except those its `RolledBackBlockHold` keeps (see [Payload columns](#payload-columns)). |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Not read or written; a v0.94.2 database wrote it. |
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in the node settings (`dingo.dbinfo` for the ledger). Its presence also tells a v0.94.2 data directory from a fresh one when the ledger opens. |
 
@@ -8389,8 +8389,10 @@ older than the ledger stability window:
   IndexerDB tip, so it never expires a body the writer has not read, nor the
   tip block the writer re-reads to resume. The payload offsets of the
   IndexerDB's rows name only blocks at or below its tip, so no block a row
-  names expires before the writer has indexed it; once it has expired, those
-  payloads read back as `types.ErrHistoryExpired`.
+  names expires before the writer has indexed it. The pruner also skips, and
+  records as held, a block a payload in use still names (`Held`, see [Payload
+  columns](#payload-columns)); once a block has expired, the payloads its rows
+  name read back as `types.ErrHistoryExpired` unless a live output holds them.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on
@@ -8403,7 +8405,7 @@ older than the ledger stability window:
   history expiry before anything is replaced.
 - The pruner resumes from a durable cursor, the block-store chain state
   `chainstate/history_expiry_cursor`: the slot every earlier block has already
-  been expired through. A database that kept it in `sync_state` has the row
+  been expired through or recorded as held. A database that kept it in `sync_state` has the row
   copied into the block store and removed when it opens, and the ledger's
   database refuses that `sync_state` key afterwards. Each round scans from that slot instead of slot 0, so its cost
   follows the newly eligible blocks rather than every tombstone earlier rounds
@@ -8549,8 +8551,9 @@ and `` `transaction` `` instead of `"transaction"`.
 
 Dingo loads the base transaction, then its direct associations: UTxOs, assets,
 certificates, witnesses, scripts, redeemers, and Plutus data. The
-`transaction.metadata` column contains the raw transaction metadata bytes when
-API mode populated them, but per-label rows in `transaction_metadata_label` are
+`applied_transaction.metadata` column holds the offset of the transaction's
+metadata CBOR in its block when API mode populated it, and the read returns the
+bytes it names, but per-label rows in `transaction_metadata_label` are
 a separate index and are not loaded by `GetTransactionByHash`; fetch them
 through the metadata-label query path below when needed.
 
@@ -9234,7 +9237,7 @@ LIMIT 1;
 
 On-chain metadata (`onchain_metadata`, `onchain_metadata_standard`) is not
 stored in a dedicated table: the adapter loads only the initial mint
-transaction's `transaction.metadata` column (via
+transaction's `applied_transaction.metadata` column (via
 `GetTransactionMetadataByHash`, which resolves that column's offset without preloading
 inputs/outputs/witnesses), extracts CIP-25 metadata label `721`, and matches
 the policy/asset entry. The asset-name key format is chosen from the detected
@@ -9287,9 +9290,9 @@ reference through the transaction's stored redeemers for the execution units,
 fee and datum hash. `GetScriptReferenceUtxos` selects live `utxo` rows whose
 `id` is in `utxo_reference_script` for the hash, ordered by `utxo.id`, and
 `CountScriptReferenceUtxos` counts them. Datum and script JSON/CBOR come from
-the bytes `datum.raw_datum` and `script.content` name: a Plutus script's `cbor` is the stored
-content and its `serialised_size` is that content's length, and a datum's JSON
-is the detailed Plutus data schema of `raw_datum`.
+the bytes `datum.raw_datum` and `script.content` name: a Plutus script's `cbor` is those
+bytes and its `serialised_size` is their length, and a datum's JSON is the
+detailed Plutus data schema of the datum bytes.
 
 `GET /api/v0/addresses/{address}/total` sums every output ever paid to the
 address, spent or not, as `received_sum`, and the spent ones as `sent_sum`,

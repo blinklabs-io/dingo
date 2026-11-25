@@ -289,10 +289,12 @@ WHERE r.script_hash = ?`, true},
 // resolveOrphanedContent gives a datum or script row a defined result when
 // the block it names is not canonical or does not hold its bytes. The row is
 // re-pointed to the first canonical transaction whose block carries the
-// content, its slot following. A row no canonical transaction carries is
-// unreachable and is deleted, which is what a rollback now does to the same
-// row. A canonical transaction that must carry the bytes in a block that does
-// not hold them stops the migration instead: that row would otherwise be lost.
+// content, its slot following; when every such block expired and no live
+// output holds the bytes, it keeps an expired-payload marker naming the first.
+// A row whose indexed carriers hold none of its bytes is returned, for
+// resolveUnindexedCarriers to settle. A canonical transaction that must carry
+// the bytes in a block that does not hold them stops the migration instead:
+// that row would otherwise be lost.
 func (s *Store) resolveOrphanedContent(
 	ctx context.Context,
 	db queryer,
@@ -427,8 +429,11 @@ type unresolvedOrphan struct {
 // no indexed table names a carrier for. One scan of the canonical blocks finds
 // those a transaction still carries somewhere the store keeps no row for, such
 // as a script in auxiliary data; each is re-pointed to the first such block, as
-// for any other carrier. The rest are carried by no canonical transaction and
-// are deleted. A source that cannot read transactions finds no carrier.
+// for any other carrier. The rest are deleted when the scan read every
+// canonical block, since no canonical transaction carries them; when it could
+// not read an expired block, which might carry them, they are kept as an
+// expired-payload marker naming that block. A source that cannot read
+// transactions finds no carrier.
 func (s *Store) resolveUnindexedCarriers(
 	ctx context.Context,
 	blocks metadata.PayloadBlockSource,

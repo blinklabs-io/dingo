@@ -103,8 +103,11 @@ WHERE SUBSTR(r.previous_datum, 13, 32) = ?)`,
 // use names bytes of the block at (slot, hash): a datum or reference script
 // that a live output carries or names by hash, a protocol parameter update not
 // yet past currentEpoch, an unspent Midnight registration, the latest Midnight
-// Ariadne parameters or the current Midnight governance datum of a type. Such a
-// block must not be expired.
+// Ariadne parameters or the current Midnight governance datum of a type. It
+// also reports a block a Midnight rollback could still read: one a
+// deregistration within MidnightRollbackDepth blocks of the tip names, or one
+// a candidate-spend or Ariadne rollback journal row names. Such a block must
+// not be expired.
 //
 // A classic update proposal targets an epoch and is enacted or discarded at the
 // boundary into the next one, so it is pending while its epoch is not before

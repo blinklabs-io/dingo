@@ -123,8 +123,9 @@ func (d *Database) livePayloadFallback(
 }
 
 // BlockHoldsActivePayloads reports whether the metadata store still names
-// bytes of the block at (slot, hash) from a payload column in use, so history
-// expiry keeps the block. A database without such a store holds none.
+// bytes of the block at (slot, hash) from a payload column in use, or names
+// the block in a Midnight rollback record a rollback could still read, so
+// history expiry keeps the block. A database without such a store holds none.
 func (d *Database) BlockHoldsActivePayloads(
 	ctx context.Context,
 	slot uint64,

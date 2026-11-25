@@ -28,9 +28,14 @@ import (
 
 // MigratePayloadOffsets replaces the payload columns of an API store written
 // before they held offsets with the CBOR offsets of their bytes in the blocks
-// that carried them, in place. It resumes where an interrupted run stopped,
-// and fails, leaving what it converted converted, when a block the rows name
-// cannot be read or does not hold the payload.
+// that carried them, in place. It resumes where an interrupted run stopped.
+// A datum or script row whose block is not canonical or lacks the bytes is
+// re-pointed to a canonical carrier, or deleted when no canonical transaction
+// carries it. Any other row fails the migration, leaving what it converted
+// converted, when its block cannot be read for a reason other than expiry or
+// does not hold the payload. A payload of an expired block is named inside a
+// live output when one holds it, and otherwise kept as an expired-payload
+// marker.
 func (d *Database) MigratePayloadOffsets(ctx context.Context) error {
 	if err := d.requireStore("MigratePayloadOffsets"); err != nil {
 		return err

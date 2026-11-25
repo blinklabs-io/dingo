@@ -21629,11 +21629,11 @@ index:
   snapshots created by the rolled-back block before readers can observe stale
   `midnight_epoch_candidates` rows.
   `midnight_epoch_candidates.CandidatesCbor` records only `(tx_hash,
-  output_index, datum)` membership — it has no room for the creating
+  output_index, datum offset)` membership — it has no room for the creating
   transaction's block/slot/tx-index or the inputs it consumed, and the
   in-memory set is rebuilt on restart from the generic UTXO index
   (`GetMidnightCandidates`, which also carries only tx_hash/output_index/
-  datum), so that provenance can't be recovered after a restart if it isn't
+  datum and the datum's offset), so that provenance can't be recovered after a restart if it isn't
   persisted separately. `processOutput` therefore also writes a
   `midnight_committee_candidate_registrations` row (`block_number`,
   `slot_number`, `tx_index`, and `tx_inputs_cbor` — the creating tx's inputs,

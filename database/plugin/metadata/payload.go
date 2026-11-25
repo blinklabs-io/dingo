@@ -66,9 +66,12 @@ type PayloadColumnMigrator interface {
 	// MigratePayloadColumns replaces every payload column that holds a copy
 	// of its bytes with the CBOR offset of those bytes in the block that
 	// carried them, read from blocks. A column that already holds an offset is
-	// left as it is, so the migration resumes where it stopped. It fails when
-	// a block cannot be read or does not contain a payload, and leaves the
-	// rows it had converted converted. A payload whose block expired is kept
-	// as an expired-payload marker naming the block.
+	// left as it is, so the migration resumes where it stopped. A datum or
+	// script row whose block is not canonical or lacks its bytes is re-pointed
+	// to a canonical transaction that carries them, or deleted when none
+	// does. Otherwise it fails when a block cannot be read for a reason other
+	// than expiry or does not contain a payload, and leaves the rows it had
+	// converted converted. A payload whose block expired, and that no live
+	// output holds, is kept as an expired-payload marker naming the block.
 	MigratePayloadColumns(ctx context.Context, blocks PayloadBlockSource) error
 }
