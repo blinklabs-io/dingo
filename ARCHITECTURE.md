@@ -15329,8 +15329,10 @@ Mithril sync, `load`, and `serve` repair and resume work all receive that
 context, so cancellation reaches downloads, archive extraction, immutable
 copy, ledger-state import, and pre-startup database repair. An interrupted
 write keeps `sync_status=in_progress`, which selects the resume path on the
-next run. The same context continues into the node runtime, while remote
-lifecycle requests cancel a child of it.
+next run. A signal that cancels the pre-startup storage migration is a
+requested shutdown: the process exits 0 without logging an error, as it does
+for a signal received by a running node. The same context continues into the
+node runtime, while remote lifecycle requests cancel a child of it.
 Database cleanup uses a detached cancellation context so providers can close
 after operation cancellation. The Mithril operation attempts shutdown of each
 started metrics, health, and debug server with its own detached five-second
