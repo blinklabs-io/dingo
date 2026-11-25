@@ -91,7 +91,9 @@ an HTTP client must not substitute API responses for that committed state.
 ## Results and retries
 
 A value difference is a failure. Missing data or a failed read is an error,
-not a successful comparison. Reference-lag grace applies only to the cases
+not a successful comparison. An epoch before staking began, or before the
+node's earliest available ledger epoch, passes without a comparison; an epoch
+whose reward state was pruned is not checked. Reference-lag grace applies only to the cases
 classified as lag; it does not soften protocol-parameter mismatches.
 Aggregate and account comparisons keep separate status and retry state.
 The observer retries failed checks even when cached reference data has not
