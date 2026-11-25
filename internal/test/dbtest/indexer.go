@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -40,8 +39,9 @@ type IndexerOptions struct {
 
 // NewIndexerDatabase composes an IndexerDB over consensus for a test, as a
 // node does: its own API-mode SQLite metadata store, in a directory of its
-// own so RawSQLiteMetadata reaches it, over the indexer view of the consensus
-// database's blob store.
+// own so RawSQLiteMetadata reaches it, which also keeps its UTxO and
+// transaction CBOR entries, reading blocks from the consensus database's blob
+// store.
 //
 // Call it after consensus is built: the IndexerDB is closed during tb's
 // cleanup, which must run before the consensus database closes the blob store
@@ -78,6 +78,13 @@ func NewIndexerDatabase(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
+	// The offsets go to the provider's store itself: a wrapper that embeds
+	// metadata.MetadataStore hides the optional capability.
+	blocks, err := database.NewIndexerBlobStore(consensus.Blob(), store)
+	if err != nil {
+		_ = host.Stop(context.Background())
+		return nil, err
+	}
 	if opts.WrapMetadata != nil {
 		store = opts.WrapMetadata(store)
 	}
@@ -93,7 +100,7 @@ func NewIndexerDatabase(
 				AlonzoLovelacePerUtxoWord,
 		},
 		database.Stores{
-			Blob:      blob.NewIndexerStore(consensus.Blob()),
+			Blob:      blocks,
 			Metadata:  store,
 			LeiosPeer: consensus,
 		},

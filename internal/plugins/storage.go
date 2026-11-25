@@ -300,13 +300,13 @@ const (
 )
 
 // OpenIndexerDatabase composes the IndexerDB: its own metadata store, opened
-// in API mode on host, over the consensus database's blob store. The blob
-// view is read-only for blocks and keeps the IndexerDB's offsets under their
-// own key prefix. Its metrics carry role="indexer" and an indexer_ name prefix so they register beside
-// the consensus database's.
+// in API mode on host, which also keeps its UTxO and transaction CBOR
+// entries, reading blocks from the consensus database's block store. Its
+// metrics carry role="indexer" and an indexer_ name prefix so they register
+// beside the consensus database's.
 //
 // The caller closes the returned database before the host stops, and before
-// the consensus database closes the blob store it reads.
+// the consensus database closes the block store it reads.
 func OpenIndexerDatabase(
 	ctx context.Context,
 	host *plugin.Host,
@@ -334,8 +334,12 @@ func OpenIndexerDatabase(
 	cfg.Role = database.RoleIndexer
 	cfg.StorageMode = "api"
 	cfg.PromRegistry = deps.PromRegistry
+	blocks, err := database.NewIndexerBlobStore(consensus.Blob(), store)
+	if err != nil {
+		return nil, err
+	}
 	db, err := database.New(ctx, &cfg, database.Stores{
-		Blob:      blob.NewIndexerStore(consensus.Blob()),
+		Blob:      blocks,
 		Metadata:  store,
 		LeiosPeer: consensus,
 	})

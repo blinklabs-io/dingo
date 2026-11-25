@@ -1,11 +1,5 @@
--- History expiry asks, once per block, whether a live output names a datum or
--- carries a reference script the block holds, and whether an unspent Midnight
--- registration names the block. Each lookup needs an index to stay a point
--- read on a large utxo table.
-CREATE INDEX IF NOT EXISTS `idx_utxo_live_datum_hash`
-    ON `utxo` (`datum_hash`)
-    WHERE `datum_hash` IS NOT NULL AND `deleted_slot` = 0;
-CREATE INDEX IF NOT EXISTS `idx_script_created_slot`
-    ON `script` (`created_slot`);
-CREATE INDEX IF NOT EXISTS `idx_midnight_registrations_block_hash`
-    ON `midnight_registrations` (`block_hash`);
+-- The IndexerDB's CBOR entries for each output and transaction: a 52-byte
+-- offset into a block, or the output's raw CBOR once its block has expired.
+-- They are keyed by identity, as the rows they belong to are looked up.
+CREATE TABLE IF NOT EXISTS `utxo_offset` (`tx_id` blob NOT NULL,`output_idx` integer NOT NULL,`data` blob NOT NULL,PRIMARY KEY (`tx_id`,`output_idx`)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS `transaction_offset` (`hash` blob NOT NULL,`data` blob NOT NULL,PRIMARY KEY (`hash`)) WITHOUT ROWID;

@@ -279,7 +279,7 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // historical account list — see ResolveKoiosAccountUniverse) and Dingo's own
 // committed reward-account addresses at stakeEpoch (the koiosStakeEpoch(K-1)
 // derivation checkEpoch already uses for reward_account_output — see
-// koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
+// koiosStakeEpoch's doc comment and README.md's Epoch alignment
 // section; the exact same offset applies here since reward_account_output
 // and reward_pool_output share one Epoch stamp, both written from
 // app.epochs.snapshot in ledger/epochengine/reward_calculation.go's
@@ -371,7 +371,7 @@ func BuildAccountAddressUniverse(
 // shaping, mid-fetch resumable checkpointing across process restarts,
 // adaptive rate-limiting, and duplicate-page detection are out of scope for
 // this base chunking; see this function's own scope-boundary note in
-// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection.
+// README.md's "Per-account exact parity" section.
 // A process restart mid-fetch simply redoes the whole epoch's account fetch
 // from scratch on the next attempt — safe (idempotent, same final state) even
 // if not maximally efficient, exactly like FetchEpochWithClient's identical

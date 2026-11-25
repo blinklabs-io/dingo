@@ -617,16 +617,17 @@ func (m *splitMigration) prepareCopy(
 	return nil
 }
 
-// offsetCopyBatch is how many entries one blob transaction of the offset copy
+// offsetCopyBatch is how many entries one transaction of the offset copy
 // stages.
 const offsetCopyBatch = 1000
 
-// copyOffsetEntries gives the IndexerDB the ledger's UTxO and transaction
-// entries under its own key prefix. The IndexerDB reads an output's CBOR from
-// its own entries, and a block can only rebuild the ones it produced: the
-// entries of outputs no block produced, such as genesis outputs, exist only in
-// the ledger's namespace. The entries are keyed by identity, so copying one
-// that is already there rewrites the same value and a repeated copy is safe.
+// copyOffsetEntries copies the v0.94.2 API database's UTxO and transaction
+// entries from its blob store into the IndexerDB's metadata store. The
+// IndexerDB reads an output's CBOR from its own entries, and a block can only
+// rebuild the ones it produced: the entries of outputs no block produced, such
+// as genesis outputs, exist only in the blob store. The entries are keyed by
+// identity, so copying one that is already there rewrites the same value and
+// a repeated copy is safe.
 func (m *splitMigration) copyOffsetEntries(
 	ctx context.Context,
 	source, idx *database.Database,
@@ -639,7 +640,7 @@ func (m *splitMigration) copyOffsetEntries(
 	}
 	read := src.NewTransaction(false)
 	defer read.Rollback() //nolint:errcheck // read-only
-	write := idx.Blob().NewTransaction(true)
+	write := idx.Transaction(ctx, true)
 	staged := 0
 	commit := func() error {
 		if staged == 0 {
@@ -648,7 +649,7 @@ func (m *splitMigration) copyOffsetEntries(
 		if err := write.Commit(); err != nil {
 			return fmt.Errorf("commit the copied offset entries: %w", err)
 		}
-		write = idx.Blob().NewTransaction(true)
+		write = idx.Transaction(ctx, true)
 		staged = 0
 		return nil
 	}
@@ -657,21 +658,21 @@ func (m *splitMigration) copyOffsetEntries(
 	for _, kind := range []struct {
 		prefix string
 		size   int
-		set    func(txn types.Txn, key, val []byte) error
+		set    func(txn *database.Txn, key, val []byte) error
 	}{
 		{
 			types.UtxoBlobKeyPrefix, len(types.UtxoBlobKey(make([]byte, 32), 0)),
-			func(txn types.Txn, key, val []byte) error {
-				return idx.Blob().SetUtxo(
-					txn, key[1:33],
+			func(txn *database.Txn, key, val []byte) error {
+				return txn.BlobStore().SetUtxo(
+					txn.Blob(), key[1:33],
 					binary.BigEndian.Uint32(key[33:]), val,
 				)
 			},
 		},
 		{
 			types.TxBlobKeyPrefix, len(types.TxBlobKey(make([]byte, 32))),
-			func(txn types.Txn, key, val []byte) error {
-				return idx.Blob().SetTx(txn, key[1:], val)
+			func(txn *database.Txn, key, val []byte) error {
+				return txn.BlobStore().SetTx(txn.Blob(), key[1:], val)
 			},
 		},
 	} {
