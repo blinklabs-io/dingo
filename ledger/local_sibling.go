@@ -102,8 +102,9 @@ func (ls *LedgerState) compareConsensusTips(
 // This is the local counterpart of what a peer-delivered competing block does
 // today. When a peer sends a header that does not fit our tip, chainsync's
 // tryResolveFork compares it against the local tip with
-// praos.ComparePraosTips, and if it wins, rolls the chain and ledger back to
-// the common ancestor and adopts the peer's chain from there. A block this
+// praos.ComparePraosTips, and if it wins, fetches and validates the peer's
+// suffix, then rolls the chain and ledger back to the common ancestor and
+// adopts the peer's chain from there (finishForkCandidate). A block this
 // node forges itself at a slot a rival already occupies is the same situation
 // with the same arbitration, but it arrives through the forger rather than
 // through a connection, so it cannot enter that path: tryResolveFork is keyed
@@ -116,11 +117,11 @@ func (ls *LedgerState) compareConsensusTips(
 //     views, the same comparison tryResolveFork makes, with no preference for
 //     the local block. A candidate that does not strictly win is dropped.
 //   - The mutation is rollbackChainAndStateDeferred to the common parent
-//     followed by the adoption of the winner, the same sequence tryResolveFork
-//     performs. It runs under chainsyncMutex, which is the lock that path
-//     holds, so a rollback driven from the forge loop is serialized against
-//     concurrent chainsync header handling exactly as one driven from a peer
-//     is.
+//     followed by the adoption of the winner, the same sequence
+//     finishForkCandidate performs. It runs under chainsyncMutex, which is the
+//     lock that path holds, so a rollback driven from the forge loop is
+//     serialized against concurrent chainsync header handling exactly as one
+//     driven from a peer is.
 //
 // The rollback is always exactly one block deep, to the block both candidates
 // name as parent, and it is only reached after the candidate has been checked

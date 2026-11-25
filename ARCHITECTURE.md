@@ -286,6 +286,14 @@ branch even when chain selection has already replaced the primary sequence.
 Reading the new primary chain at the old slots cannot reconstruct the old
 branch's effects.
 
+A competing suffix does not replace the primary chain on header evidence
+alone. Its bodies are fetched into an isolated candidate and validated from
+the common ancestor in a ledger transaction that is always rolled back, while
+the primary chain and ledger tip stay unchanged. The switch proceeds only if
+the primary tip and consensus generation still match those used for
+selection and validation; an incomplete, stale or invalid candidate is
+discarded.
+
 Rollback below an imported Mithril trust boundary is refused. The node does
 not possess the earlier state needed to justify such a rewind. Recovery must
 respect that boundary instead of truncating until a local inconsistency

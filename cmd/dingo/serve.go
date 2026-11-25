@@ -44,24 +44,8 @@ func serveRun(
 	}
 	applyDebugProfilingRates(logger, os.Stderr, cfg)
 
-	// Check for an in-progress sync. If the "sync_status" key in
-	// the sync_state table holds a non-empty value, a previous sync
-	// did not complete. The user must finish (or re-run) the sync
-	// before starting the node.
-	if err := checkSyncState(cfg, logger); err != nil {
-		return err
-	}
-	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
-	// delegator-inactivity gate enabled. This closes the "run 'mithril sync'
-	// with the gate off, then restart with it on" path that Guard 1 in the
-	// sync command cannot see; a bootstrapped node cannot reproduce a
-	// genesis-synced node's expiration state.
-	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
-		return err
-	}
-	if err := repairPendingMithrilRewardState(
-		cmd.Context(), cfg, logger,
-	); err != nil {
+	probe := bindServeHealthProbe(cfg, logger)
+	if err := runServePreflight(cmd.Context(), cfg, logger, probe); err != nil {
 		return err
 	}
 
@@ -77,6 +61,82 @@ func serveRun(
 	return nil
 }
 
+// bindServeHealthProbe binds the health listener for the preflight. A held
+// port loses the probe, not the node: node.Run treats every auxiliary listener
+// as non-essential, so the preflight does too and returns a nil probe.
+func bindServeHealthProbe(
+	cfg *config.Config,
+	logger *slog.Logger,
+) *boundHealthProbe {
+	probe, err := bindHealthProbe(cfg)
+	if err != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "startup",
+			"port", cfg.HealthPort,
+			"error", err,
+		)
+		return nil
+	}
+	return probe
+}
+
+func runServePreflight(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	probe *boundHealthProbe,
+) error {
+	server := serveHealthProbe(logger, "startup", probe)
+	var debugServer *debugPprofServer
+	// Release both listeners before the node binds its runtime listeners.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if err := errors.Join(
+			debugServer.Shutdown(shutdownCtx),
+			server.Shutdown(shutdownCtx),
+		); err != nil {
+			logger.Warn("stopping preflight listeners", "error", err)
+		}
+	}()
+	var err error
+	debugServer, err = startDebugPprofServer(logger, cfg, "startup")
+	if err != nil {
+		logger.Warn(
+			"failed to start pprof debug server; continuing",
+			"component", "startup",
+			"port", cfg.DebugPort,
+			"error", err,
+		)
+	}
+	// Check for an in-progress sync. If the "sync_status" key in
+	// the sync_state table holds a non-empty value, a previous sync
+	// did not complete. The user must finish (or re-run) the sync
+	// before starting the node.
+	if err := checkSyncState(ctx, cfg, logger); err != nil {
+		return err
+	}
+	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
+	// delegator-inactivity gate enabled. This closes the "run 'mithril sync'
+	// with the gate off, then restart with it on" path that Guard 1 in the
+	// sync command cannot see; a bootstrapped node cannot reproduce a
+	// genesis-synced node's expiration state.
+	if err := checkMithrilInactivityCompat(ctx, cfg, logger); err != nil {
+		return err
+	}
+	if err := repairPendingMithrilRewardState(
+		ctx, cfg, logger,
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // checkSyncState refuses to serve a database a manual sync left incomplete.
 // An empty sync_status passes in every mode, an empty database included:
 // with mithril.enabled the node then syncs it from Mithril or Ouroboros
@@ -89,11 +149,12 @@ func serveRun(
 // other value is an interrupted `dingo sync` or `dingo mithril sync`, which
 // only that command can finish, so it refuses whatever mithril.enabled says.
 func checkSyncState(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -102,7 +163,7 @@ func checkSyncState(
 	if runtimeErr != nil {
 		return runtimeErr
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 
 	val, err := db.GetChainState(database.SyncStatusKey, nil)
 	if err != nil {
@@ -225,7 +286,8 @@ func mithrilRewardRepairConfig(cfg *config.Config) (*config.Config, error) {
 		cfg.Mithril.Backend != mithril.BackendV2 {
 		return nil, fmt.Errorf(
 			"mithril reward-state repair requires backend %q; configured backend is %q",
-			mithril.BackendV2, cfg.Mithril.Backend,
+			mithril.BackendV2,
+			cfg.Mithril.Backend,
 		)
 	}
 	repairCfg := *cfg
@@ -309,6 +371,7 @@ func mithrilRewardRepairPending(
 // serving such a database would diverge from a genesis-synced node. A no-op
 // when the gate is off or the database was not Mithril-bootstrapped.
 func checkMithrilInactivityCompat(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
@@ -316,7 +379,7 @@ func checkMithrilInactivityCompat(
 		return nil
 	}
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -325,7 +388,7 @@ func checkMithrilInactivityCompat(
 	if runtimeErr != nil {
 		return runtimeErr
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 
 	bootstrapped, err := mithril.WasBootstrapped(db)
 	if err != nil {
@@ -381,7 +444,12 @@ func openConfiguredDatabase(
 			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
-			MigrateReleased: nodestorage.MigrateReleased(cfg, dbConfig, nil, logger),
+			MigrateReleased: nodestorage.MigrateReleased(
+				cfg,
+				dbConfig,
+				nil,
+				logger,
+			),
 		},
 	)
 }

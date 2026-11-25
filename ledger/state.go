@@ -1849,11 +1849,11 @@ type LedgerState struct {
 	// applied.
 	//
 	// Only the locally forged sibling adoption bumps it. The chainsync
-	// rollback paths (handleEventChainsyncRollback, tryResolveFork) re-queue
-	// the winning fork's headers and restart blockfetch under
-	// chainsyncBlockfetchMutex, which supersedes the in-flight batch by
-	// itself; AdoptLocalForgedSibling does neither -- it rolls back and
-	// adopts from the forge loop, holding only chainsyncMutex.
+	// rollback paths (handleEventChainsyncRollback, finishForkCandidate)
+	// re-queue the winning fork's headers and restart blockfetch or insert the
+	// validated fork's bodies under chainsyncBlockfetchMutex, which supersedes
+	// the in-flight batch by itself; AdoptLocalForgedSibling does neither -- it
+	// rolls back and adopts from the forge loop, holding only chainsyncMutex.
 	//
 	// Atomic because the bump happens under chainsyncMutex while the read
 	// happens under chainsyncBlockfetchMutex.
@@ -1925,6 +1925,7 @@ type LedgerState struct {
 	blockfetchContinuationPending bool
 	blockfetchContinuationMu      sync.Mutex
 	blockfetchContinuationWG      sync.WaitGroup
+	forkCandidate                 *forkCandidate
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
@@ -2008,7 +2009,7 @@ type LedgerState struct {
 	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
 	// its delete): those can open the single SQLite write connection, and block
 	// apply holds that connection before taking this mutex via
-	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// takeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node. The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
 	// cleanup pass (the floor is a lower-watermark recomputed each pass). Each
@@ -3606,6 +3607,9 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.closed.Store(true)
 	ls.closeMu.Unlock()
 	ls.stopQueuedBlockfetchFlush()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.discardForkCandidateLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
 	defer func() {
 		ls.closeMu.Lock()
 		ls.closeErr = retErr
@@ -5372,7 +5376,8 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 // pipeline's only submitter -- runs on its own goroutine, entirely
 // decoupled from the goroutine that decides a rollback. rollbackChainAndStateDeferred
 // in particular is reached from chainsync per-connection handling
-// (handleEventChainsyncRollback, tryResolveFork), never from
+// (handleEventChainsyncRollback), the validated fork switch
+// (finishForkCandidate) and local forged-sibling adoption, never from
 // ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
 // while the reader goroutine has already gathered and submitted a batch of
 // blocks -- from that very fork -- to the persisted decoder and is blocked
@@ -5450,12 +5455,13 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // rollbackChainAndStateDeferred rewinds the primary chain and ledger state,
 // deferring the chain.update events the rewind produces rather than letting the
 // chain publish them inline. This method is reached from chainsync event
-// handling (handleEventChainsyncRollback, tryResolveFork) while chainsyncMutex
+// handling (handleEventChainsyncRollback), the validated fork switch
+// (finishForkCandidate) and local forged-sibling adoption while chainsyncMutex
 // is held; an inline, back-pressured chain.update publish under that mutex is
-// the drain deadlock (see pendingPublishes). RollbackDeferred enqueues those
-// events on the chain's shared sequencer under c.mutex, so they are ordered
-// against concurrent blockfetch adds in true chain-mutation order (the
-// rollback-before-add guarantee is now chain-wide, not merely within this
+// the drain deadlock (see pendingPublishes). RollbackDeferredWithPreflight
+// enqueues those events on the chain's shared sequencer under c.mutex, so they
+// are ordered against concurrent blockfetch adds in true chain-mutation order
+// (the rollback-before-add guarantee is now chain-wide, not merely within this
 // handler's queue); registering the chain on pubs.chainDrains drains that
 // sequencer after the mutex is released. A nil pubs drains immediately
 // (unlocked / test path).
@@ -5463,19 +5469,46 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
-	_, err := ls.rollbackChainAndStateDeferredDepth(ctx, point, pubs)
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, nil,
+	)
 	return err
 }
 
 // rollbackChainAndStateDeferredDepth is rollbackChainAndStateDeferred that also
 // returns the number of blocks the chain rollback removed. The count is taken
-// from the blocks chain.RollbackDeferred removed under the chain's own mutex,
-// so a concurrent blockfetch add cannot skew it the way a before/after
-// comparison of two tip samples can. It is zero when the rollback failed before
-// truncating the chain or removed only queued headers.
+// from the blocks chain.RollbackDeferredWithPreflight removed under the chain's
+// own mutex, so a concurrent blockfetch add cannot skew it the way a
+// before/after comparison of two tip samples can. It is zero when the rollback
+// failed before truncating the chain or removed only queued headers.
 func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
+) (uint64, error) {
+	return ls.rollbackChainAndStateDeferredDepthIf(ctx, point, pubs, nil)
+}
+
+// rollbackChainAndStateDeferredIf is rollbackChainAndStateDeferred with a
+// preflight run under the chain's mutation barrier immediately before the undo
+// emit and truncation, so no concurrent chain change can land between them. A
+// preflight error leaves the chain and the ledger untouched.
+func (ls *LedgerState) rollbackChainAndStateDeferredIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
+) error {
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, preflight,
+	)
+	return err
+}
+
+func (ls *LedgerState) rollbackChainAndStateDeferredDepthIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
 ) (uint64, error) {
 	var removed uint64
 	ls.rollbackMutex.Lock()
@@ -5579,7 +5612,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	//
 	// No ctx is threaded through the chainsync event-handling call chain
 	// that reaches this method (handleEventChainsyncRollback,
-	// tryResolveFork), so drainBlockPipelineBeforeRollback deliberately
+	// finishForkCandidate), so drainBlockPipelineBeforeRollback deliberately
 	// uses ctx, identical to decodeReadChainBatch's own
 	// Submit calls and for the same reason: this wait, like that
 	// submission, must not be cut short by an unrelated per-attempt
@@ -5599,24 +5632,32 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		if err := ls.validateAndEmitRollbackUndo(ctx, point); err != nil {
-			// Validation refused the point before the chain was touched --
-			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
-			// all of which handleEventChainsyncRollback treats as
-			// recoverable. Restore the generation so an in-flight batch is
-			// not discarded for a rollback that never happened: a discard
-			// leaves batchBlocksApplied at zero, and
+		events, rbErr := ls.chain.RollbackDeferredWithPreflight(
+			ctx,
+			point,
+			func() error {
+				if preflight != nil {
+					if err := preflight(); err != nil {
+						return err
+					}
+				}
+				return ls.validateAndEmitRollbackUndo(ctx, point)
+			},
+		)
+		if rbErr != nil {
+			// The preflight or validation refused the point before the chain
+			// was touched -- a stale fork candidate, over-K,
+			// ErrRollbackPointNotOnChain, or models.ErrBlockNotFound, all of
+			// which leave nothing to undo. Restore the generation so an
+			// in-flight batch is not discarded for a rollback that never
+			// happened: a discard leaves batchBlocksApplied at zero, and
 			// handleEventBlockfetchBatchDone feeds that into the same-range
-			// failure streak, so blockfetchMaxSameRangeFailures refusals
-			// would drop a perfectly good header range. Both the bump and
-			// this restore run under chainsyncBlockfetchMutex, which every
+			// failure streak, so blockfetchMaxSameRangeFailures refusals would
+			// drop a perfectly good header range. Both the bump and this
+			// restore run under chainsyncBlockfetchMutex, which every
 			// blockfetchBatchStillCurrent reader also holds, so no reader can
 			// observe the intermediate value.
 			ls.chainRollbackGeneration.Store(priorGeneration)
-			return err
-		}
-		events, rbErr := ls.chain.RollbackDeferred(ctx, point)
-		if rbErr != nil {
 			return rbErr
 		}
 		for _, evt := range events {
@@ -5631,12 +5672,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	}
 	// Publish the rollback's chain.update after chainsyncMutex is released.
 	// Under the mutex an inline back-pressured publish deadlocks the drain.
-	// RollbackDeferred has already enqueued these events on the chain's shared
-	// sequencer under c.mutex, so they are ordered against concurrent
-	// blockfetch adds in true chain-mutation order (rollback-before-add is no
-	// longer merely a within-handler property); registering the chain drains
-	// that sequencer once the mutex is released (a nil pubs drains
-	// immediately on the unlocked path). See
+	// RollbackDeferredWithPreflight has already enqueued these events on the
+	// chain's shared sequencer under c.mutex, so they are ordered against
+	// concurrent blockfetch adds in true chain-mutation order
+	// (rollback-before-add is no longer merely a within-handler property);
+	// registering the chain drains that sequencer once the mutex is released (a
+	// nil pubs drains immediately on the unlocked path). See
 	// chain.Chain.PublishPendingChainUpdates.
 	// Drained unconditionally: rollbackLocked queues this rollback's header
 	// invalidation on the sequencer even when no block was removed (the
@@ -5701,13 +5742,14 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 // Mithril bootstrap can raise while this rollback waits on
 // blockPipelineGatherMutex and drainBlockPipelineBeforeRollback), or with
 // anything the metadata/blob truncation sweep returns. The first two are
-// exactly the identities handleEventChainsyncRollback and tryResolveFork treat
-// as "the rollback was refused, no state changed, re-intersect and carry on" --
+// exactly the identities handleEventChainsyncRollback treats as "the rollback
+// was refused, no state changed, re-intersect and carry on" --
 // a recovery that here resumes from a ledger tip naming a block the chain has
 // deleted. The cause is kept in the message but deliberately kept out of the
 // errors.Is chain so it cannot be classified that way;
-// ErrChainTruncatedLedgerRollbackFailed falls through to those callers'
-// hard-failure paths instead.
+// ErrChainTruncatedLedgerRollbackFailed falls through to
+// handleEventChainsyncRollback's hard-failure path instead; finishForkCandidate
+// logs any rollback error and drops its candidate.
 func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
@@ -10446,17 +10488,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// independently of the fetch-path write: a certified endorser
 				// block is part of the chain. A block that a later check
 				// rejects leaves a volatile record the collector removes.
-				if err := ls.persistCertifiedEndorserBlock(
-					ebHash.Bytes(),
-					ebSlot,
-					ebManifest,
-					ebTxs,
-				); err != nil {
-					return nil, &leiosEndorserBlockStorageError{
-						err: fmt.Errorf(
-							"persist certified endorser block: %w",
-							err,
-						),
+				if !forkCandidateValidationFrom(ctx) {
+					if err := ls.persistCertifiedEndorserBlock(
+						ebHash.Bytes(),
+						ebSlot,
+						ebManifest,
+						ebTxs,
+					); err != nil {
+						return nil, &leiosEndorserBlockStorageError{
+							err: fmt.Errorf(
+								"persist certified endorser block: %w",
+								err,
+							),
+						}
 					}
 				}
 				ls.logLeiosEndorserBlockApplyResult(
@@ -10560,6 +10604,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
@@ -10848,6 +10893,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 		}
 		if err := delta.donate(blockDonation); err != nil {
 			delta.Release()
@@ -11802,6 +11848,19 @@ func (ls *LedgerState) computePParams(
 	lcommon.ProtocolParameters,
 	error,
 ) {
+	return ls.computePParamsIn(epoch, era, epochCache, nil)
+}
+
+func (ls *LedgerState) computePParamsIn(
+	epoch models.Epoch,
+	era eras.EraDesc,
+	epochCache []models.Epoch,
+	txn ledgerdb.Txn,
+) (
+	lcommon.ProtocolParameters,
+	lcommon.ProtocolParameters,
+	error,
+) {
 	// Only query stored pparams when the era has a decode function.
 	// Byron has nil DecodePParamsFunc and never stores pparams, so
 	// we skip straight to the genesis fallback for Byron.
@@ -11811,7 +11870,7 @@ func (ls *LedgerState) computePParams(
 		pparams, err = ls.loadPersistedProtocolParameters(
 			epoch.EpochId,
 			era,
-			nil,
+			txn,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
@@ -11848,7 +11907,7 @@ func (ls *LedgerState) computePParams(
 				prevPP, prevErr := ls.loadPersistedProtocolParameters(
 					ep.EpochId,
 					*prevEra,
-					nil,
+					txn,
 				)
 				if prevErr != nil {
 					// Historical block validation falls back to the
