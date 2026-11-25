@@ -44,10 +44,7 @@ func serveRun(
 	}
 	applyDebugProfilingRates(logger, os.Stderr, cfg)
 
-	probe, err := bindHealthProbe(cfg)
-	if err != nil {
-		return err
-	}
+	probe := bindServeHealthProbe(cfg, logger)
 	if err := runServePreflight(cmd.Context(), cfg, logger, probe); err != nil {
 		return err
 	}
@@ -62,6 +59,26 @@ func serveRun(
 		return err
 	}
 	return nil
+}
+
+// bindServeHealthProbe binds the health listener for the preflight. A held
+// port loses the probe, not the node: node.Run treats every auxiliary listener
+// as non-essential, so the preflight does too and returns a nil probe.
+func bindServeHealthProbe(
+	cfg *config.Config,
+	logger *slog.Logger,
+) *boundHealthProbe {
+	probe, err := bindHealthProbe(cfg)
+	if err != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "startup",
+			"port", cfg.HealthPort,
+			"error", err,
+		)
+		return nil
+	}
+	return probe
 }
 
 func runServePreflight(
@@ -79,14 +96,22 @@ func runServePreflight(
 			5*time.Second,
 		)
 		defer cancel()
-		if err := errors.Join(debugServer.Shutdown(shutdownCtx), server.Shutdown(shutdownCtx)); err != nil {
+		if err := errors.Join(
+			debugServer.Shutdown(shutdownCtx),
+			server.Shutdown(shutdownCtx),
+		); err != nil {
 			logger.Warn("stopping preflight listeners", "error", err)
 		}
 	}()
 	var err error
 	debugServer, err = startDebugPprofServer(logger, cfg, "startup")
 	if err != nil {
-		return err
+		logger.Warn(
+			"failed to start pprof debug server; continuing",
+			"component", "startup",
+			"port", cfg.DebugPort,
+			"error", err,
+		)
 	}
 	// Check for an in-progress sync. If the "sync_status" key in
 	// the sync_state table holds a non-empty value, a previous sync

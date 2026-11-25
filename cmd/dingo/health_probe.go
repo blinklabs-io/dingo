@@ -37,9 +37,10 @@ import (
 // its retries -- long before the snapshot has finished downloading, and again
 // on every replacement.
 type healthProbeServer struct {
-	server *http.Server
-	errCh  <-chan error
-	addr   string
+	server   *http.Server
+	listener net.Listener
+	errCh    <-chan error
+	addr     string
 }
 
 // boundHealthProbe is a health probe whose socket is already bound: the
@@ -109,17 +110,36 @@ func serveHealthProbe(
 		}
 	}()
 	return &healthProbeServer{
-		server: server,
-		errCh:  errCh,
-		addr:   actualAddr,
+		server:   server,
+		listener: probe.listener,
+		errCh:    errCh,
+		addr:     actualAddr,
 	}
 }
 
+// Shutdown stops the server and closes its listener. http.Server.Shutdown
+// only closes listeners that Serve has already registered, so a Shutdown that
+// beats the Serve goroutine would otherwise leave the port bound until that
+// goroutine ran.
 func (s *healthProbeServer) Shutdown(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	return errors.Join(
+		s.server.Shutdown(ctx),
+		closeListener(s.listener),
+	)
+}
+
+// closeListener closes l, treating an already-closed listener as success.
+func closeListener(l net.Listener) error {
+	if l == nil {
+		return nil
+	}
+	if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *healthProbeServer) Err() <-chan error {

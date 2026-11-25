@@ -283,3 +283,124 @@ func TestServePreflightStartsAndReleasesHealthProbe(t *testing.T) {
 		"preflight must release the listener for node startup",
 	)
 }
+
+// A held health port must not abort serve: node.Run runs without the probe in
+// the same situation.
+func TestBindServeHealthProbeContinuesWhenPortHeld(t *testing.T) {
+	t.Parallel()
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = occupied.Close() })
+	_, port, err := net.SplitHostPort(occupied.Addr().String())
+	require.NoError(t, err)
+	parsed, err := strconv.ParseUint(port, 10, 16)
+	require.NoError(t, err)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	probe := bindServeHealthProbe(
+		&config.Config{BindAddr: "127.0.0.1", HealthPort: uint(parsed)},
+		logger,
+	)
+	require.Nil(t, probe)
+	require.Contains(t, logs.String(), "failed to start health probe server")
+}
+
+// A held pprof port must not abort the preflight, and the remaining checks
+// still run.
+func TestServePreflightContinuesWhenDebugPortHeld(t *testing.T) {
+	t.Parallel()
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = occupied.Close() })
+	_, port, err := net.SplitHostPort(occupied.Addr().String())
+	require.NoError(t, err)
+	parsed, err := strconv.ParseUint(port, 10, 16)
+	require.NoError(t, err)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := &config.Config{
+		DebugBindAddr: "127.0.0.1",
+		DebugPort:     uint(parsed),
+		Network:       "preview",
+		DatabasePath:  t.TempDir(),
+	}
+	cfg.Plugins.Storage.Blob.Provider = "missing-provider"
+
+	err = runServePreflight(t.Context(), cfg, logger, nil)
+	require.ErrorContains(t, err, "resolve blob storage")
+	require.Contains(t, logs.String(), "failed to start pprof debug server")
+}
+
+// The preflight pprof listener must bind while the checks run and release its
+// address afterwards.
+func TestServePreflightStartsAndReleasesDebugListener(t *testing.T) {
+	t.Parallel()
+	var addr string
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	var cfg *config.Config
+	for range 10 {
+		probe, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr = probe.Addr().String()
+		require.NoError(t, probe.Close())
+		_, port, err := net.SplitHostPort(addr)
+		require.NoError(t, err)
+		parsed, err := strconv.ParseUint(port, 10, 16)
+		require.NoError(t, err)
+		cfg = &config.Config{
+			DebugBindAddr: "127.0.0.1",
+			DebugPort:     uint(parsed),
+			Network:       "preview",
+			DatabasePath:  t.TempDir(),
+		}
+		cfg.Plugins.Storage.Blob.Provider = "missing-provider"
+		logs.Reset()
+		err = runServePreflight(t.Context(), cfg, logger, nil)
+		require.ErrorContains(t, err, "resolve blob storage")
+		if !bytes.Contains(logs.Bytes(), []byte("failed to start pprof")) {
+			break
+		}
+		// The picked port was taken before the bind; pick another.
+	}
+	require.Contains(
+		t, logs.String(), "serving pprof debug endpoints on "+addr,
+	)
+	ln, err := net.Listen("tcp", addr)
+	require.NoError(t, err, "preflight must release the debug listener")
+	require.NoError(t, ln.Close())
+}
+
+// http.Server.Shutdown closes only listeners Serve has registered; a Shutdown
+// that runs before the Serve goroutine does must still release the socket.
+func TestListenerServersCloseListenerOnImmediateShutdown(t *testing.T) {
+	t.Parallel()
+	newListener := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ln.Close() })
+		return ln
+	}
+	assertClosed := func(t *testing.T, ln net.Listener) {
+		t.Helper()
+		err := ln.(*net.TCPListener).SetDeadline(time.Now())
+		require.ErrorIs(t, err, net.ErrClosed)
+	}
+
+	t.Run("health", func(t *testing.T) {
+		t.Parallel()
+		ln := newListener()
+		s := &healthProbeServer{server: &http.Server{}, listener: ln}
+		require.NoError(t, s.Shutdown(t.Context()))
+		assertClosed(t, ln)
+		require.NoError(t, s.Shutdown(t.Context()), "second Shutdown")
+	})
+	t.Run("debug", func(t *testing.T) {
+		t.Parallel()
+		ln := newListener()
+		s := &debugPprofServer{server: &http.Server{}, listener: ln}
+		require.NoError(t, s.Shutdown(t.Context()))
+		assertClosed(t, ln)
+	})
+}
