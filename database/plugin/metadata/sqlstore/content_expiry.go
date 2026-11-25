@@ -116,6 +116,10 @@ func (s *Store) rollbackContentRows(
 	db queryer,
 	slot uint64,
 ) error {
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
 	for _, c := range slotPayloadColumns {
 		if !contentColumn(c) {
 			continue
@@ -123,7 +127,7 @@ func (s *Store) rollbackContentRows(
 		rows, err := readPayloadRows(ctx, db, fmt.Sprintf(
 			"SELECT %[2]s, %[3]s, %[4]s FROM %[1]s WHERE %[4]s > ?",
 			c.table, c.key, c.column, c.slot,
-		), int64(slot)) // #nosec G115 -- a slot read from the chain
+		), sqlSlot)
 		if err != nil {
 			return err
 		}
@@ -178,10 +182,14 @@ func (s *Store) survivingCarrierMarker(
 		if !carrier.required || carrier.slot >= row.slot {
 			continue
 		}
+		carrierSlot, err := checkedInt64(carrier.slot)
+		if err != nil {
+			return nil, err
+		}
 		var hash []byte
-		err := db.QueryRowContext(ctx,
+		err = db.QueryRowContext(ctx,
 			"SELECT block_hash FROM applied_transaction WHERE slot = ? LIMIT 1",
-			int64(carrier.slot), // #nosec G115 -- a slot read from the chain
+			carrierSlot,
 		).Scan(&hash)
 		if err != nil {
 			return nil, fmt.Errorf("find the block at slot %d: %w", carrier.slot, err)

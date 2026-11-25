@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 
@@ -339,4 +340,16 @@ func testRollbackPastARepointedRowKeepsItsSurvivingCarrier(t *testing.T, c *expi
 	_, err = c.store.GetScript(script.Hash(), nil)
 	require.ErrorAs(t, err, &expired, "the script is known and expired")
 	require.EqualValues(t, 300, expired.Slot)
+}
+
+// A rollback slot that does not fit a signed SQL integer must be refused: the
+// narrowing conversion would wrap it negative and the settle query would then
+// match every content row instead of none.
+func TestRollbackContentRowsRefusesASlotAboveInt64(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	err := store.rollbackContentRows(
+		context.Background(), store.writeDB, uint64(math.MaxInt64)+1,
+	)
+	require.Error(t, err)
 }
