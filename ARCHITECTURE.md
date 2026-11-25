@@ -17127,6 +17127,13 @@ image; remote scraping requires setting `metricsBindAddr`; `metricsPort` `0` dis
 and in `dingo mithril sync`), pprof on `debugPort` when enabled, and the health
 listener on `healthPort` (default `12799`, `0` disables).
 
+`dingo serve` also binds the health and pprof listeners for its preflight, so
+the health probe answers live and not ready, and pprof is reachable, while
+database checks and ledger-state migrations run. A bind failure on either is
+logged and the preflight continues without that listener, as in `node.Run`.
+Both listeners, sockets included, are closed before `node.Run` binds the same
+addresses.
+
 The pprof mutex and block profiles stay empty unless `debugMutexProfileFraction`
 or `debugBlockProfileRate` is non-zero. Only the commands that start the
 listener, `dingo serve` and `dingo mithril sync`, apply them, before any node
