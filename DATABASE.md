@@ -3061,11 +3061,23 @@ A batch whose `Rows`, `Accounts` and `RewardRecords` together are too many for
 one transaction writes them in transactions of their own (accounts, then rows,
 then records) ahead of the transaction that carries the other writes and the
 tip, under the failure mark, which takes the slot of the first
-UTxO change, else the tip's, else the first row's. A rollback the batch carries
+UTxO change, else the tip's, else the lowest slot a row or reward block op
+carries. A batch with none of those writes no mark. A rollback the batch carries
 is applied in the first of them. A set that stopped between those transactions
 starts with the mark, and a batch that writes the epoch again wipes the
 epoch's prefix first, so rows the stopped attempt wrote and the new one does
 not are gone.
+
+Snapshot and reward block ops that do not fit beside the batch's other rows
+follow, in order, in transactions of their own before the last. The batch's
+accounts, rows and reward records then go ahead of them in transactions of
+their own too, so a reward block op reads the rows the batch wrote, as it
+does in one transaction. Each op is weighed by its writes; a snapshot delete or reward block prune by the rows it
+finds, and it deletes them in as many transactions as they need. Neither
+delete is journaled, so a stopped attempt leaves it part done and the next
+application finishes it. The other ops write state journal entries at their
+slots, which the startup rewind to the tip undoes, except snapshot puts: a
+put is not journaled, and the next application writes the same rows again.
 
 The live set computes account transitions rather than copying `account` rows.
 The store keeps
@@ -4015,8 +4027,10 @@ A ledger commit larger than one Badger transaction is applied in several by
 `Store.ApplyLedgerBatch` (`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
-transaction but the last writes UTxO changes with one journal record per
-point and leaves the tip, the nonces and the other state rows alone; the last writes the remaining changes, those rows and the
+transaction but the last leaves the tip and the nonces alone: the leading ones
+write the rows, accounts, reward records and snapshot and reward block ops too
+many for the last, and the rest write UTxO changes with one journal record per
+point; the last writes the remaining changes, the other state rows and the
 tip. The first transaction also writes the `mfailed` marker at the batch's
 first slot and the last removes it (or restores a lower mark already there),
 so a batch that stopped between transactions, by error or by crash, starts
@@ -4030,7 +4044,11 @@ At startup `Reconcile` first rewinds a set that carries the marker, from its
 journal, to the tip before its oldest journaled commit at or after the marked
 slot, since a failed commit can leave rows its tip does not account for (a
 reward write chunk that landed after the commit's first chunk, or the outputs
-of a chunked batch that never reached its last transaction). Whatever the
+of a chunked batch that never reached its last transaction). A chunked batch
+that stopped before its first journal record leaves only state journal
+entries past the tip, which no committed batch writes, and the rewind goes to
+the tip, undoing them: a reward block fee is additive, so applying the batch
+again over them would add it twice. Whatever the
 set's tip is then, the ordinary checks apply: a set behind the ledger has the
 ledger rolled back to the set's tip (`ResumeUtxoSetFrom`) and the blocks after
 it applied again, and the marker is cleared once the set and ledger agree.
